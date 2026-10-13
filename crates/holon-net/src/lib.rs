@@ -31,6 +31,7 @@ pub mod exec;
 pub mod guards;
 pub mod marking;
 pub mod net;
+pub mod uft;
 pub mod view;
 
 pub use analysis::ConflictReport;

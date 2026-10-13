@@ -2344,6 +2344,7 @@ impl BroadcastOp {
             ),
         };
         OperationDescriptor {
+            offer: None,
             entity_name: "*".into(),
             entity_short_name: "all".to_string(),
             id_column: String::new(),
@@ -2904,6 +2905,7 @@ mod tests {
 
     fn create_test_operation(entity_name: &str, op_name: &str) -> OperationDescriptor {
         OperationDescriptor {
+            offer: None,
             entity_name: entity_name.into(),
             entity_short_name: entity_name.to_string(),
             id_column: "id".to_string(),

@@ -84,6 +84,7 @@ impl GuardWorld for MemoryGuardWorld {
 
 fn descriptor(op: &str, guard: OpGuard) -> OperationDescriptor {
     OperationDescriptor {
+        offer: None,
         entity_name: ENTITY.into(),
         entity_short_name: ENTITY.to_string(),
         id_column: "id".to_string(),

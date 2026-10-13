@@ -555,6 +555,7 @@ mod tests {
         OperationWiring {
             modified_param: String::new(),
             descriptor: OperationDescriptor {
+                offer: None,
                 entity_name: EntityName::new("block"),
                 entity_short_name: "block".into(),
                 name: name.into(),
@@ -765,6 +766,7 @@ mod tests {
         let convert = OperationWiring {
             modified_param: String::new(),
             descriptor: OperationDescriptor {
+                offer: None,
                 entity_name: EntityName::new("block"),
                 entity_short_name: "block".into(),
                 name: "convert_block_to_page".into(),

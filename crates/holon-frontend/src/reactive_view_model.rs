@@ -2441,6 +2441,7 @@ mod tests {
         node.operations.push(OperationWiring {
             modified_param: String::new(),
             descriptor: OperationDescriptor {
+                offer: None,
                 entity_name: holon_api::EntityName::new("navigation"),
                 name: "focus".into(),
                 trigger: Some(Trigger::Click {
@@ -2485,6 +2486,7 @@ mod tests {
         node.operations.push(OperationWiring {
             modified_param: String::new(),
             descriptor: OperationDescriptor {
+                offer: None,
                 entity_name: holon_api::EntityName::new("navigation"),
                 name: "focus".into(),
                 trigger: Some(Trigger::Click {
@@ -2512,6 +2514,7 @@ mod tests {
         node.operations.push(OperationWiring {
             modified_param: String::new(),
             descriptor: OperationDescriptor {
+                offer: None,
                 entity_name: holon_api::EntityName::new("navigation"),
                 name: "focus_pin".into(),
                 trigger: Some(Trigger::Click {
@@ -2561,6 +2564,7 @@ mod tests {
         node.operations.push(OperationWiring {
             modified_param: String::new(),
             descriptor: OperationDescriptor {
+                offer: None,
                 entity_name: holon_api::EntityName::new("block"),
                 name: "cycle_task_state".into(),
                 trigger: Some(Trigger::KeyChord {

@@ -185,6 +185,7 @@ pub const DECLARE_TYPE_OP: &str = "declare_type";
 /// follow-ups).
 pub fn declare_type_descriptor() -> OperationDescriptor {
     OperationDescriptor {
+        offer: None,
         entity_name: TYPE_ENTITY.into(),
         entity_short_name: TYPE_ENTITY.to_string(),
         id_column: String::new(),

@@ -79,6 +79,9 @@ impl<P: OperationProvider> GenericProviderState<P> {
                 TypeHint::RowKey => true,
                 TypeHint::OneOf { .. } | TypeHint::Object { .. } => true,
                 TypeHint::Expr | TypeHint::Collection => true,
+                TypeHint::Enum { variants, .. } => !variants.is_empty(),
+                // A newtype needs its registered parser; a place id needs the place.
+                TypeHint::Newtype { .. } | TypeHint::PlaceId { .. } => false,
             }
         })
     }
@@ -148,6 +151,12 @@ impl<P: OperationProvider> GenericProviderState<P> {
                     TypeHint::Expr | TypeHint::Collection => {
                         // Expr/Collection params are template references, not data values
                         Just(Value::Null).boxed()
+                    }
+                    TypeHint::Enum { variants, .. } => prop::sample::select(variants.clone())
+                        .prop_map(Value::String)
+                        .boxed(),
+                    TypeHint::Newtype { .. } | TypeHint::PlaceId { .. } => {
+                        unreachable!("can_satisfy_params refuses {:?}", param.type_hint)
                     }
                 };
 
@@ -316,6 +325,7 @@ mod tests {
     fn mock_project_task_ops() -> Vec<OperationDescriptor> {
         vec![
             OperationDescriptor {
+                offer: None,
                 entity_name: "project".into(),
                 entity_short_name: "project".to_string(),
                 id_column: "id".to_string(),
@@ -342,6 +352,7 @@ mod tests {
                 arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
+                offer: None,
                 entity_name: "task".into(),
                 entity_short_name: "task".to_string(),
                 id_column: "id".to_string(),

@@ -9074,6 +9074,7 @@ mod peer_interference {
     impl OperationProvider for PeerWriteThenFail {
         fn operations(&self) -> Vec<OperationDescriptor> {
             vec![OperationDescriptor {
+                offer: None,
                 entity_name: EntityName::new("block"),
                 name: "move_block".to_string(),
                 entity_short_name: String::new(),

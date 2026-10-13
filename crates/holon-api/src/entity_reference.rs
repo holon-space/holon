@@ -305,6 +305,7 @@ mod tests {
 
     fn descriptor(entity: &str, op: &str, params: Vec<OperationParam>) -> OperationDescriptor {
         OperationDescriptor {
+            offer: None,
             entity_name: entity.into(),
             entity_short_name: entity.to_string(),
             id_column: "id".to_string(),

@@ -188,6 +188,9 @@ fn type_hint_label(hint: &TypeHint) -> &'static str {
         TypeHint::Expr => "expression",
         TypeHint::Collection => "collection",
         TypeHint::FieldValue { .. } => "value of the named field",
+        TypeHint::Enum { .. } => "choice",
+        TypeHint::Newtype { .. } => "parsed text",
+        TypeHint::PlaceId { .. } => "id in a place",
     }
 }
 
@@ -205,6 +208,7 @@ mod tests {
 
     fn descriptor(entity: &str, name: &str, params: Vec<OperationParam>) -> OperationDescriptor {
         OperationDescriptor {
+            offer: None,
             entity_name: holon_api::EntityName::new(entity),
             entity_short_name: entity.into(),
             name: name.into(),

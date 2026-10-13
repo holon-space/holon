@@ -52,6 +52,7 @@ fn region_param() -> OperationParam {
 pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
     let manual_ops = vec![
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
@@ -83,6 +84,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
@@ -115,6 +117,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
@@ -143,6 +146,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
@@ -176,6 +180,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
@@ -209,6 +214,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
@@ -242,6 +248,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
@@ -276,6 +283,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),
@@ -311,6 +319,7 @@ pub fn navigation_operation_descriptors() -> Vec<OperationDescriptor> {
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "region".to_string(),

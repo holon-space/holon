@@ -434,6 +434,7 @@ impl IdentityProvider {
         required: Vec<OperationParam>,
     ) -> OperationDescriptor {
         OperationDescriptor {
+            offer: None,
             entity_name: ENTITY_NAME.into(),
             entity_short_name: SHORT_NAME.to_string(),
             id_column: "id".to_string(),

@@ -57,6 +57,7 @@ fn answer_wiring(
     OperationWiring {
         modified_param: String::new(),
         descriptor: OperationDescriptor {
+            offer: None,
             entity_name: EntityName::new(entity_name.to_string()),
             name: op_name.to_string(),
             trigger: Some(Trigger::Click {

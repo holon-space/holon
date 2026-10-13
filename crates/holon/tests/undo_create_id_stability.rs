@@ -59,6 +59,7 @@ impl OperationProvider for MintingProvider {
         ["create", "delete"]
             .into_iter()
             .map(|name| OperationDescriptor {
+                offer: None,
                 entity_name: EntityName::new("block"),
                 name: name.to_string(),
                 entity_short_name: String::new(),

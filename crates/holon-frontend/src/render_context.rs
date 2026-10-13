@@ -709,6 +709,7 @@ mod tests {
         OperationWiring {
             modified_param: String::new(),
             descriptor: holon_api::OperationDescriptor {
+                offer: None,
                 entity_name: entity_name.into(),
                 entity_short_name: entity_name.to_string(),
                 id_column: "id".to_string(),

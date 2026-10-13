@@ -25,6 +25,7 @@ const OP: OpId = OpId::DropRefusedTypeTable;
 
 pub fn drop_refused_table_descriptor() -> OperationDescriptor {
     OperationDescriptor {
+        offer: None,
         entity_name: OP.entity().into(),
         entity_short_name: OP.entity().to_string(),
         id_column: String::new(),

@@ -491,6 +491,7 @@ mod tests {
     #[test]
     fn a_bool_bound_toggle_dispatches_a_boolean() {
         let ops = [OperationDescriptor {
+            offer: None,
             entity_name: EntityName::Named("integration".to_string()),
             entity_short_name: "integration".to_string(),
             id_column: "id".to_string(),

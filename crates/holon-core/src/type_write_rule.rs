@@ -255,6 +255,7 @@ pub fn crud_descriptors(
 
     let mut ops = vec![
         OperationDescriptor {
+            offer: None,
             entity_name: entity_name.clone(),
             entity_short_name: entity_short_name.to_string(),
             name: "set_field".to_string(),
@@ -287,6 +288,7 @@ pub fn crud_descriptors(
             arcs: set_field_arcs,
         },
         OperationDescriptor {
+            offer: None,
             entity_name: entity_name.clone(),
             entity_short_name: entity_short_name.to_string(),
             name: "create".to_string(),
@@ -313,6 +315,7 @@ pub fn crud_descriptors(
             schema.update_references.clone(),
         ),
         OperationDescriptor {
+            offer: None,
             entity_name: entity_name.clone(),
             entity_short_name: entity_short_name.to_string(),
             name: "delete".to_string(),
@@ -341,6 +344,7 @@ pub fn crud_descriptors(
 
     if schema.tombstone_column().is_some() {
         ops.push(OperationDescriptor {
+            offer: None,
             entity_name: entity_name.clone(),
             entity_short_name: entity_short_name.to_string(),
             name: "purge".to_string(),

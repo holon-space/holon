@@ -1323,6 +1323,9 @@
                 "name": "ui_watcher.rs"
               },
               {
+                "name": "user_transition.rs"
+              },
+              {
                 "name": "vault_shape.rs"
               },
               {
@@ -1381,6 +1384,9 @@
               },
               {
                 "name": "typed_computed_field_declaration.rs"
+              },
+              {
+                "name": "user_transition_contract.rs"
               },
               {
                 "name": "vault_ingest_failed_detail.rs"
@@ -7309,6 +7315,9 @@
                 "name": "net.rs"
               },
               {
+                "name": "uft.rs"
+              },
+              {
                 "name": "view.rs"
               }
             ]
@@ -7321,14 +7330,17 @@
                 "name": "exec_support",
                 "path": "holon-net/tests/exec_support",
                 "c4_level": "unknown",
-                "description": "Shared driver of the executor PBTs: it plays the effect runner and the clock, and picks the naive twin named by `HOLON_NET_TWIN`.",
+                "description": "Shared driver of the executor PBTs: it plays the effect runner and the clock, runs every operation on the executor and on the reference model, and fails on the first divergence. It picks the naive twin named by `HOLON_NET_TWIN`.",
                 "pattern_status": "planned",
-                "content": "Shared driver of the executor PBTs: it plays the effect runner and the\nclock, and picks the naive twin named by `HOLON_NET_TWIN`.",
+                "content": "Shared driver of the executor PBTs: it plays the effect runner and the\nclock, runs every operation on the executor and on the reference model,\nand fails on the first divergence. It picks the naive twin named by\n`HOLON_NET_TWIN`.",
                 "source_file": "holon-net/tests/exec_support/mod.rs",
                 "parent": "holon-net",
                 "files": [
                   {
                     "name": "mod.rs"
+                  },
+                  {
+                    "name": "model.rs"
                   }
                 ]
               }

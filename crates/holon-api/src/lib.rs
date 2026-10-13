@@ -91,6 +91,7 @@ pub mod theme_token;
 pub mod type_services;
 pub mod types;
 pub mod ui_watcher;
+pub mod user_transition;
 pub mod vault_shape;
 pub mod widget_meta;
 pub mod widget_spec;

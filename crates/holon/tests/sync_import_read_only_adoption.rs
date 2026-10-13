@@ -159,6 +159,7 @@ impl OperationProvider for MustNotRun {
 
 fn descriptor(op_name: &str) -> OperationDescriptor {
     OperationDescriptor {
+        offer: None,
         entity_name: "block".into(),
         entity_short_name: "block".to_string(),
         id_column: "id".to_string(),

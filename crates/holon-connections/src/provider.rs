@@ -84,6 +84,7 @@ impl OperationProvider for RemoteListOperations {
     fn operations(&self) -> Vec<OperationDescriptor> {
         let entity = &self.compiled.spec().entity;
         vec![OperationDescriptor {
+            offer: None,
             entity_name: EntityName::new(entity),
             entity_short_name: entity.clone(),
             name: REMOTE_LIST_SYNC.to_string(),
