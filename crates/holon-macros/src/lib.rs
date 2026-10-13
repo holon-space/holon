@@ -25,6 +25,7 @@ mod capmap;
 mod entity;
 mod operations_trait;
 mod step_vocabulary;
+mod transition;
 mod widget_builder;
 
 /// Derive the Gherkin step vocabulary of an annotated struct from one
@@ -509,4 +510,95 @@ pub fn builder_registry(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn widget_builder(input: TokenStream) -> TokenStream {
     widget_builder::widget_builder_impl(input)
+}
+
+/// Declares a user-facing transition (#167) as a plain function. Each
+/// parameter names its arc: `#[take]` consumes, `#[read]` reads, `#[input]`
+/// is the one user input. `Result<O, Cause>` gives the outputs (a tuple puts
+/// several). The function stays as written; a module of the same name holds
+/// `descriptor()` (the HL IR), `bind`, `body`, `preview` and `native_parts()`.
+///
+/// Keys: `manual` | `auto`, `irreversible`, `preview = <fn>`, `persist`,
+/// `inhibit = <Place>` (repeatable), `occurrence` (the occurrence id is the
+/// last parameter), and the timers `retry(after_ms = N, max_attempts = M)`,
+/// `run(after_ms = N)`, `abandon(after_ms = N)`, `delay(after_ms = N)`.
+/// The preview takes the `#[take]`/`#[read]` tokens by reference and returns
+/// `String`; the compiler checks it against that signature. The function must
+/// be a module-level item: the generated module reaches it through `super`.
+///
+/// Example 1, a value-less manual transition:
+/// ```
+/// use holon_macros::{place, transition};
+/// use holon_net::exec::Cause;
+///
+/// #[place] pub struct Refused { pub path: String }
+/// #[place] pub struct Base { pub text: String }
+/// #[place] pub struct OnDisk { pub text: String }
+///
+/// fn accept_removal_preview(refused: &Refused, _: &Base, _: &OnDisk) -> String {
+///     format!("remove {}", refused.path)
+/// }
+///
+/// #[transition(manual, irreversible, preview = accept_removal_preview)]
+/// fn accept_removal(#[take] refused: Refused, #[take] base: Base, #[read] on_disk: OnDisk)
+///     -> Result<Base, Cause> {
+///     let _ = (refused, base);
+///     Ok(Base { text: on_disk.text })
+/// }
+///
+/// fn main() {
+///     let d = accept_removal::descriptor();
+///     assert!(d.irreversible && d.manual());
+///     assert_eq!(d.arcs.len(), 4);
+/// }
+/// ```
+///
+/// Example 2, a typed input:
+/// ```
+/// use holon_macros::{input_type, place, transition};
+/// use holon_api::TypeHint;
+/// use holon_net::exec::Cause;
+///
+/// #[place] pub struct Conflict { pub ours: String, pub theirs: String }
+/// #[place] pub struct Merged { pub text: String }
+/// #[input_type] pub enum Pick { Ours, Theirs, Both }
+///
+/// #[transition(manual)]
+/// fn resolve_conflict(#[take] c: Conflict, #[input] pick: Pick) -> Result<Merged, Cause> {
+///     Ok(Merged { text: match pick {
+///         Pick::Ours => c.ours,
+///         Pick::Theirs => c.theirs,
+///         Pick::Both => format!("{}{}", c.ours, c.theirs),
+///     } })
+/// }
+///
+/// fn main() {
+///     let ask = resolve_conflict::descriptor().ask.expect("manual");
+///     assert!(matches!(ask.input, Some(TypeHint::Enum { ref variants, .. }) if variants.len() == 3));
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn transition(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as ItemFn);
+    transition::expand(attr.into(), item)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Marks a struct (named fields or unit) as the token type of the place of
+/// the same name, for `#[transition]` parameters and outputs.
+#[proc_macro_attribute]
+pub fn place(_: TokenStream, item: TokenStream) -> TokenStream {
+    transition::expand_place(parse_macro_input!(item as DeriveInput))
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Marks an enum of unit variants as a `#[transition]` user input: a choice
+/// among its labels (`TypeHint::Enum`).
+#[proc_macro_attribute]
+pub fn input_type(_: TokenStream, item: TokenStream) -> TokenStream {
+    transition::expand_input_type(parse_macro_input!(item as DeriveInput))
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }

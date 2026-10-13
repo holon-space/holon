@@ -22,4 +22,9 @@ async-trait.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+holon-net.workspace = true
+proptest.workspace = true
 serde_json.workspace = true
+
+[features]
+naive-twins = ["holon-macros/naive-twins"]

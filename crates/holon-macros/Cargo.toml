@@ -23,6 +23,13 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 [dev-dependencies]
 holon-core.workspace = true
 holon-api.workspace = true
+holon-net.workspace = true
+proptest.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "test-util"] }
+
+[features]
+# The naive twin emits a `#[read]` parameter as a take arc, so the adapter
+# property test shows red for the read rule.
+naive-twins = []
