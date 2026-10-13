@@ -88,23 +88,11 @@ pub struct EnumSpec {
 #[serde(deny_unknown_fields)]
 pub struct EffectSpec {
     pub tool: String,
-    /// Tool argument → its value.
+    /// Tool argument → `input` (the answer value) or `{ literal: v }`. Kept
+    /// raw so a malformed value gets a named error in [`tool_call`], not
+    /// serde's untagged-enum message.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub map: BTreeMap<String, ArgSpec>,
-}
-
-/// One `effect.map` value: `input` (the answer value) or `{ literal: v }`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum ArgSpec {
-    Bound(String),
-    Literal(LiteralSpec),
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LiteralSpec {
-    pub literal: serde_json::Value,
+    pub map: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -190,6 +178,10 @@ fn load_transition(
             "`input` and `persist` need `manual: true`"
         );
     }
+    ensure!(
+        !spec.persist || spec.input.is_some(),
+        "`persist: true` needs an `input:`"
+    );
 
     let arcs = [
         (ArcKind::Take, &spec.take),
@@ -345,12 +337,7 @@ fn tool_call(effect: &EffectSpec, answers: bool) -> anyhow::Result<BodyDecl> {
         .iter()
         .map(|(arg, value)| {
             let value = match value {
-                ArgSpec::Bound(name) => {
-                    ensure!(
-                        name == MAP_INPUT,
-                        "effect argument `{arg}: {name}`: only `{MAP_INPUT}` (the answer value) \
-                         can be bound in increment 1; token fields come with #166"
-                    );
+                serde_json::Value::String(name) if name == MAP_INPUT => {
                     ensure!(
                         answers,
                         "effect argument `{arg}` binds the answer value, but the transition asks \
@@ -358,17 +345,34 @@ fn tool_call(effect: &EffectSpec, answers: bool) -> anyhow::Result<BodyDecl> {
                     );
                     ToolArg::Answer
                 }
-                ArgSpec::Literal(LiteralSpec { literal }) => {
-                    ToolArg::Literal(Value::from_json_value(literal.clone()))
+                serde_json::Value::Object(fields) if fields.len() == 1 => {
+                    match fields.get("literal") {
+                        Some(literal) => ToolArg::Literal(Value::from_json_value(literal.clone())),
+                        None => bail!(malformed_arg(arg, value)),
+                    }
                 }
+                _ => bail!(malformed_arg(arg, value)),
             };
             Ok((arg.clone(), value))
         })
-        .collect::<anyhow::Result<_>>()?;
+        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+    // ponytail: #166 relaxes this once a guard can read the answer.
+    ensure!(
+        !answers || args.values().any(|arg| matches!(arg, ToolArg::Answer)),
+        "the transition asks for an `input:`, but no `effect.map` argument binds it \
+         (`<arg>: {MAP_INPUT}`)"
+    );
     Ok(BodyDecl::Tool {
         tool: effect.tool.clone(),
         args,
     })
+}
+
+fn malformed_arg(arg: &str, value: &serde_json::Value) -> String {
+    format!(
+        "effect argument `{arg}`: write `{MAP_INPUT}` (the answer value) or \
+         `{{ literal: <value> }}`, not `{value}`; token fields come with #166"
+    )
 }
 
 fn timer(spec: &TimerSpec) -> anyhow::Result<TimerDecl> {

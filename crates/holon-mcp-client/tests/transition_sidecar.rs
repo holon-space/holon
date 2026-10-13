@@ -212,7 +212,51 @@ fn a_bad_sidecar_transition_is_a_named_load_error() {
                 t["effect"] = json!({ "tool": "update_task", "map": { "project_id": "subject" } });
                 t
             },
-            "transition `t`: effect argument `project_id: subject`",
+            "transition `t`: effect argument `project_id`: write `input` (the answer value) or \
+             `{ literal: <value> }`, not `\"subject\"`",
+        ),
+        (
+            {
+                let mut t = with("input", json!({ "type_hint": "bool" }));
+                t["effect"] = json!({ "tool": "update_task",
+                    "map": { "project_id": { "place": "unfiled", "field": "id" } } });
+                t
+            },
+            "transition `t`: effect argument `project_id`: write `input` (the answer value) or \
+             `{ literal: <value> }`, not `{",
+        ),
+        (
+            with(
+                "effect",
+                json!({ "tool": "update_task", "map": { "project_id": { "literal": 1, "extra": 2 } } }),
+            ),
+            "transition `t`: effect argument `project_id`: write `input` (the answer value) or \
+             `{ literal: <value> }`, not `{",
+        ),
+        (
+            with(
+                "effect",
+                json!({ "tool": "update_task", "map": { "project_id": { "literall": 1 } } }),
+            ),
+            "transition `t`: effect argument `project_id`: write `input` (the answer value) or \
+             `{ literal: <value> }`, not `{\"literall\":1}`",
+        ),
+        (
+            with(
+                "effect",
+                json!({ "tool": "update_task", "map": { "project_id": 5 } }),
+            ),
+            "transition `t`: effect argument `project_id`: write `input` (the answer value) or \
+             `{ literal: <value> }`, not `5`",
+        ),
+        (
+            with("input", json!({ "type_hint": "bool" })),
+            "transition `t`: the transition asks for an `input:`, but no `effect.map` argument \
+             binds it",
+        ),
+        (
+            with("persist", json!(true)),
+            "transition `t`: `persist: true` needs an `input:`",
         ),
         (
             {
@@ -259,7 +303,33 @@ fn a_bad_sidecar_transition_is_a_named_load_error() {
 #[derive(Debug, Clone)]
 struct Case {
     yaml: serde_json::Value,
-    ir: TransitionDescriptor,
+    expected: Result<TransitionDescriptor, String>,
+}
+
+/// How a generated `effect.map` argument is written.
+#[derive(Debug, Clone)]
+enum Arg {
+    /// `input` when the transition asks for one, else a literal of its name.
+    Answer,
+    Literal(serde_json::Value),
+    /// A shape the loader must refuse by name.
+    Malformed(serde_json::Value),
+}
+
+fn arg() -> impl Strategy<Value = Arg> {
+    prop_oneof![
+        Just(Arg::Answer),
+        literal().prop_map(Arg::Literal),
+        prop_oneof![
+            literal().prop_filter("`input` binds", |v| v != "input"),
+            Just(json!(null)),
+            Just(json!([1])),
+            place().prop_map(|p| json!({ "place": p, "field": "id" })),
+            literal().prop_map(|v| json!({ "literal": v, "extra": 1 })),
+            literal().prop_map(|v| json!({ "literall": v })),
+        ]
+        .prop_map(Arg::Malformed),
+    ]
 }
 
 const PLACES: [&str; 3] = ["unfiled", "project", "inbox"];
@@ -339,7 +409,7 @@ fn case() -> impl Strategy<Value = Case> {
     );
     let effect = (
         prop_oneof![Just(("update_task", false)), Just(("delete_task", true))],
-        prop::collection::btree_map("[a-z_]{1,8}", prop::option::of(literal()), 0..3),
+        prop::collection::btree_map("[a-z_]{1,8}", arg(), 0..3),
         any::<bool>(),
     );
     let ask = prop::option::of((prop::option::of(input()), any::<bool>()));
@@ -360,18 +430,25 @@ fn case() -> impl Strategy<Value = Case> {
             )| {
                 let irreversible = irreversible_tool || said;
                 let answers = matches!(ask, Some((Some(_), _)));
-                // `None` binds the answer value; without one it is a literal too.
-                let args: BTreeMap<String, serde_json::Value> = args
+                let args: BTreeMap<String, Arg> = args
                     .into_iter()
-                    .map(|(arg, literal)| {
-                        let value = match literal {
-                            None if answers => json!("input"),
-                            None => json!({ "literal": arg }),
-                            Some(literal) => json!({ "literal": literal }),
-                        };
-                        (arg, value)
+                    .map(|(name, arg)| match arg {
+                        Arg::Answer if !answers => (name.clone(), Arg::Literal(json!(name))),
+                        arg => (name, arg),
                     })
                     .collect();
+                let refusal = if matches!(ask, Some((None, true))) {
+                    Some("`persist: true` needs an `input:`".to_owned())
+                } else if let Some(name) = args
+                    .iter()
+                    .find_map(|(name, arg)| matches!(arg, Arg::Malformed(_)).then_some(name))
+                {
+                    Some(format!("effect argument `{name}`: write `input`"))
+                } else if answers && !args.values().any(|arg| matches!(arg, Arg::Answer)) {
+                    Some("the transition asks for an `input:`, but no `effect.map` argument binds it".to_owned())
+                } else {
+                    None
+                };
                 let mut yaml = json!({
                     "irreversible": irreversible,
                     "take": take,
@@ -379,7 +456,11 @@ fn case() -> impl Strategy<Value = Case> {
                     "inhibit": inhibit,
                     "effect": {
                         "tool": tool,
-                        "map": args,
+                        "map": args.iter().map(|(name, arg)| (name.clone(), match arg {
+                            Arg::Answer => json!("input"),
+                            Arg::Literal(v) => json!({ "literal": v }),
+                            Arg::Malformed(v) => v.clone(),
+                        })).collect::<serde_json::Map<_, _>>(),
                     },
                     "timers": timers.iter().map(|(y, _)| y.clone()).collect::<Vec<_>>(),
                 });
@@ -398,29 +479,33 @@ fn case() -> impl Strategy<Value = Case> {
                 .into_iter()
                 .flat_map(|(kind, places)| places.iter().map(move |p| arc(kind, p)))
                 .collect();
-                let tool_args = args.iter().map(|(arg, value)| {
-                    let value = match value.get("literal") {
-                        Some(literal) => ToolArg::Literal(Value::from_json_value(literal.clone())),
-                        None => ToolArg::Answer,
+                let tool_args = args.iter().map(|(name, arg)| {
+                    let value = match arg {
+                        Arg::Answer => ToolArg::Answer,
+                        Arg::Literal(v) => ToolArg::Literal(Value::from_json_value(v.clone())),
+                        Arg::Malformed(_) => unreachable!("a malformed argument is refused"),
                     };
-                    (arg.clone(), value)
+                    (name.clone(), value)
                 });
-                let ir = TransitionDescriptor {
-                    name: TransitionName(name.clone()),
-                    arcs,
-                    body: call(tool, tool_args),
-                    irreversible,
-                    timers: timers.into_iter().map(|(_, t)| t).collect(),
-                    guard: None,
-                    ask: ask.map(|(input, persist)| AskDecl {
-                        input: input.map(|(_, hint)| hint),
-                        preview: None,
-                        persist,
+                let expected = match refusal {
+                    Some(refusal) => Err(format!("transition `{name}`: {refusal}")),
+                    None => Ok(TransitionDescriptor {
+                        name: TransitionName(name.clone()),
+                        arcs,
+                        body: call(tool, tool_args),
+                        irreversible,
+                        timers: timers.into_iter().map(|(_, t)| t).collect(),
+                        guard: None,
+                        ask: ask.map(|(input, persist)| AskDecl {
+                            input: input.map(|(_, hint)| hint),
+                            preview: None,
+                            persist,
+                        }),
                     }),
                 };
                 Case {
                     yaml: json!({ name: yaml }),
-                    ir,
+                    expected,
                 }
             },
         )
@@ -429,14 +514,21 @@ fn case() -> impl Strategy<Value = Case> {
 proptest! {
     #[test]
     fn a_generated_transition_round_trips_through_sidecar_yaml(case in case()) {
-        let yaml = sidecar_with(case.yaml.clone());
-        prop_assert_eq!(transitions_from_sidecar(&yaml).unwrap(), vec![case.ir]);
+        let loaded = transitions_from_sidecar(&sidecar_with(case.yaml.clone()));
+        match case.expected {
+            Ok(ir) => prop_assert_eq!(loaded.unwrap(), vec![ir]),
+            Err(refusal) => {
+                let error = format!("{:#}", loaded.expect_err("an illegal transition must not load"));
+                prop_assert!(error.contains(&refusal), "expected {:?}, got {:?}", refusal, error);
+            }
+        }
     }
 
     /// The sidecar re-serialized (as `IntegrationFileConfig` does) loads the
     /// same IR.
     #[test]
     fn a_reserialized_sidecar_loads_the_same_transitions(case in case()) {
+        prop_assume!(case.expected.is_ok());
         let sidecar = McpSidecar::from_yaml(&sidecar_with(case.yaml)).unwrap();
         let again = McpSidecar::from_yaml(&serde_yaml::to_string(&sidecar).unwrap()).unwrap();
         prop_assert_eq!(

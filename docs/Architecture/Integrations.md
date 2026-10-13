@@ -430,7 +430,7 @@ transitions:
     input: { type_hint: "entity_id:project" }
     effect: { tool: update_task, map: { project_id: input, source: { literal: sidecar } } }
     # irreversible: true         # required when the effect tool is `undo: { reversible: false }`
-    # persist: true              # parsed; the lowering refuses it in increment 1
+    # persist: true              # needs `input:`; the lowering refuses it in increment 1
     # timers: [{ kind: retry, after: 30s, max_attempts: 3 }]   # kinds: retry, run, abandon, delay
 ```
 
@@ -446,7 +446,10 @@ transitions:
 - `effect.tool` is a key of `tools:` whose `effect:` writes. The body is
   `BodyDecl::Tool { tool, args }` with typed `ToolArg`s: a `map` value `input`
   is the answer value (only when the transition declares `input:`), and
-  `{ literal: <value> }` is a literal. Token fields wait for #166.
+  `{ literal: <value> }` is a literal. Any other value is a load error that
+  names the argument. Token fields wait for #166.
+- A declared `input:` must be bound by some `map` argument, until #166 lets a
+  guard read the answer instead.
 - `guard` (waits for #166) and `preview` are load errors for now.
 
 The top-level file is `IntegrationFileConfig`; the `entities` and `tools` maps
