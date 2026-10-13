@@ -35,7 +35,7 @@
 1 frontends/gpui/src/render/builders/drop_zone.rs entry
 1 frontends/gpui/src/render/builders/expand_toggle.rs entry
 1 frontends/gpui/src/render/builders/input_box.rs entry
-1 frontends/gpui/src/render/builders/op_button.rs entry
+2 frontends/gpui/src/render/builders/op_button.rs entry
 1 frontends/gpui/src/render/builders/pie_menu.rs entry
 1 frontends/gpui/src/render/builders/pref_field.rs entry
 1 frontends/gpui/src/render/builders/rendered_text.rs entry
@@ -52,6 +52,6 @@
 1 frontends/gpui/src/views/rich_text_editor.rs entry
 4 frontends/holon-worker/src/lib.rs entry
 1 frontends/holon-worker/src/seed.rs entry
-5 frontends/mcp/src/tools.rs entry
+6 frontends/mcp/src/tools.rs entry
 6 frontends/tui/src/app_main.rs entry
 1 frontends/tui/src/user_driver.rs entry

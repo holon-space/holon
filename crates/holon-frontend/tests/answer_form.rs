@@ -19,6 +19,7 @@ use holon_api::user_transition::ExpireReason;
 use holon_api::user_transition::InputContext;
 use holon_api::user_transition::InputParseError;
 use holon_api::user_transition::NotImplemented;
+use holon_api::user_transition::OccurrenceId;
 use holon_api::user_transition::Offer;
 use holon_api::user_transition::Offered;
 use holon_api::user_transition::PlaceName;
@@ -26,7 +27,6 @@ use holon_api::user_transition::SubjectName;
 use holon_api::user_transition::TransitionName;
 use holon_api::user_transition::UftError;
 use holon_api::user_transition::UserTransitions;
-use holon_api::user_transition::WorkOccurrenceId;
 use holon_frontend::answer::AnswerForm;
 use holon_frontend::answer::AnswerOutcome;
 use holon_frontend::answer::FormPhase;
@@ -331,7 +331,7 @@ fn enum_variants_are_choices() {
 // ── Hook: fire-and-await closes only on a settled Done ──────────────────
 
 fn settlement(terminal: u8) -> Result<AnswerSettlement, UftError> {
-    let work = WorkOccurrenceId("w1".into());
+    let work = OccurrenceId::caller("w1");
     match terminal {
         0 => Ok(AnswerSettlement::Done { work }),
         1 => Ok(AnswerSettlement::Failed {
@@ -344,6 +344,7 @@ fn settlement(terminal: u8) -> Result<AnswerSettlement, UftError> {
         3 => Ok(AnswerSettlement::Expired {
             reason: ExpireReason::SituationChanged,
         }),
+        4 => Ok(AnswerSettlement::Undone),
         _ => Err(UftError::UnknownAnswer(AnswerId("x".into()))),
     }
 }
@@ -356,6 +357,7 @@ fn expected(terminal: u8) -> AnswerOutcome {
         },
         2 => AnswerOutcome::Expired(ExpireReason::AskGone),
         3 => AnswerOutcome::Expired(ExpireReason::SituationChanged),
+        4 => AnswerOutcome::Undone,
         _ => AnswerOutcome::Refused(UftError::UnknownAnswer(AnswerId("x".into()))),
     }
 }
@@ -364,13 +366,13 @@ proptest! {
     #[test]
     fn form_stays_open_until_the_answer_settles(
         pending in prop::collection::vec(any::<bool>(), 0..5),
-        terminal in 0u8..5,
+        terminal in 0u8..6,
     ) {
         let mut script: Vec<_> = pending
             .iter()
             .map(|working| {
                 Ok(if *working {
-                    AnswerSettlement::Working { work: WorkOccurrenceId("w1".into()) }
+                    AnswerSettlement::Working { work: OccurrenceId::caller("w1") }
                 } else {
                     AnswerSettlement::Waiting
                 })

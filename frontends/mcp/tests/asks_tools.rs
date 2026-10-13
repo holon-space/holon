@@ -19,11 +19,11 @@ use holon_api::user_transition::AskRow;
 use holon_api::user_transition::ExpireReason;
 use holon_api::user_transition::InputContext;
 use holon_api::user_transition::NotImplemented;
+use holon_api::user_transition::OccurrenceId;
 use holon_api::user_transition::SubjectName;
 use holon_api::user_transition::TransitionName;
 use holon_api::user_transition::UftError;
 use holon_api::user_transition::UserTransitions;
-use holon_api::user_transition::WorkOccurrenceId;
 use holon_core::storage::types::StorageEntity;
 use holon_frontend::answer::Answering;
 use holon_mcp::tools::AnswerSettledParams;
@@ -199,7 +199,7 @@ async fn answer_settled_reports_pending_then_the_outcome() {
     let (_, answering) = rig(vec![
         AnswerSettlement::Waiting,
         AnswerSettlement::Done {
-            work: WorkOccurrenceId("w1".into()),
+            work: OccurrenceId::caller("w1"),
         },
         AnswerSettlement::Expired {
             reason: ExpireReason::AskGone,

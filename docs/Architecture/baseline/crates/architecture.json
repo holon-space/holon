@@ -2877,6 +2877,9 @@
                 "name": "advice_weaver.rs"
               },
               {
+                "name": "answer.rs"
+              },
+              {
                 "name": "bridge_thread.rs"
               },
               {
@@ -3075,6 +3078,9 @@
             "files": [
               {
                 "name": "accordion.rs"
+              },
+              {
+                "name": "answer_form.rs"
               },
               {
                 "name": "authored_builder_input_draws_error.rs"
@@ -6999,6 +7005,9 @@
                 "name": "sync_freshness.rs"
               },
               {
+                "name": "transition_sidecar.rs"
+              },
+              {
                 "name": "utcp_manual.rs"
               },
               {
@@ -7016,6 +7025,9 @@
                 "files": [
                   {
                     "name": "that-shopping-list.utcp.json"
+                  },
+                  {
+                    "name": "transition_sidecar.yaml"
                   }
                 ]
               }
@@ -7107,6 +7119,9 @@
               },
               {
                 "name": "subscribe_bounds.rs"
+              },
+              {
+                "name": "transition_sidecar.rs"
               },
               {
                 "name": "unconfigured_is_a_gate.rs"
@@ -7286,6 +7301,17 @@
           {
             "name": "src",
             "path": "holon-net/src",
+            "dirs": [
+              {
+                "name": "uft",
+                "path": "holon-net/src/uft",
+                "files": [
+                  {
+                    "name": "lower.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "analysis.rs"
@@ -7343,6 +7369,21 @@
                     "name": "model.rs"
                   }
                 ]
+              },
+              {
+                "name": "uft_lower_support",
+                "path": "holon-net/tests/uft_lower_support",
+                "c4_level": "unknown",
+                "description": "The reference model of the lowered `AcceptRemoval` (#167): per subject the situation, the waiting answer, the work in flight, the failure port, the failure mark and the disclosed expiries. It knows nothing of hashes: an ask is identified by the situation content it shows.",
+                "pattern_status": "planned",
+                "content": "The reference model of the lowered `AcceptRemoval` (#167): per subject the\nsituation, the waiting answer, the work in flight, the failure port, the\nfailure mark and the disclosed expiries. It knows nothing of hashes: an\nask is identified by the situation content it shows.",
+                "source_file": "holon-net/tests/uft_lower_support/mod.rs",
+                "parent": "holon-net",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
               }
             ],
             "files": [
@@ -7362,6 +7403,9 @@
                 "name": "enabledness.rs"
               },
               {
+                "name": "exec_answer.rs"
+              },
+              {
                 "name": "exec_cas.rs"
               },
               {
@@ -7375,6 +7419,9 @@
               },
               {
                 "name": "exec_timers.rs"
+              },
+              {
+                "name": "exec_undo.rs"
               },
               {
                 "name": "exec_unknown.rs"
@@ -7393,6 +7440,9 @@
               },
               {
                 "name": "transition_key.rs"
+              },
+              {
+                "name": "uft_lower.rs"
               }
             ]
           }

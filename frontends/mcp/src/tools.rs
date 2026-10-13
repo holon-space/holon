@@ -140,6 +140,7 @@ pub async fn answer_settled_text(
         AnswerOutcome::Done => "done",
         AnswerOutcome::Failed { .. } => "failed",
         AnswerOutcome::Expired(_) => "expired",
+        AnswerOutcome::Undone => "undone",
         AnswerOutcome::Refused(_) => "refused",
     };
     serde_json::json!({ "state": "settled", "outcome": kind, "text": outcome.text() }).to_string()

@@ -363,6 +363,9 @@
                         "name": "accordion.rs"
                       },
                       {
+                        "name": "answer_form.rs"
+                      },
+                      {
                         "name": "badge.rs"
                       },
                       {
@@ -709,6 +712,9 @@
               },
               {
                 "name": "android_soft_return_contract.rs"
+              },
+              {
+                "name": "answer_form_windowed.rs"
               },
               {
                 "name": "arrow_nav_windowed.rs"
@@ -1245,6 +1251,9 @@
             "name": "tests",
             "path": "mcp/tests",
             "files": [
+              {
+                "name": "asks_tools.rs"
+              },
               {
                 "name": "dense_patch_entity_links.rs"
               },

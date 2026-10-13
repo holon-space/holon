@@ -210,6 +210,8 @@ pub enum AnswerOutcome {
         cause: String,
     },
     Expired(ExpireReason),
+    /// The user undid the answer.
+    Undone,
     /// The port refused the call or the settlement lookup.
     Refused(UftError),
 }
@@ -226,6 +228,7 @@ impl AnswerOutcome {
             AnswerOutcome::Expired(ExpireReason::SituationChanged) => {
                 "The question no longer applies: the situation changed".to_string()
             }
+            AnswerOutcome::Undone => "Undone".to_string(),
             AnswerOutcome::Refused(e) => format!("Not answered: {e}"),
         }
     }
@@ -259,6 +262,7 @@ pub fn poll(port: &dyn UserTransitions, id: &AnswerId) -> Progress {
         Ok(AnswerSettlement::Expired { reason }) => {
             Progress::Settled(AnswerOutcome::Expired(reason))
         }
+        Ok(AnswerSettlement::Undone) => Progress::Settled(AnswerOutcome::Undone),
         Err(e) => Progress::Settled(AnswerOutcome::Refused(e)),
     }
 }

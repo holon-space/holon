@@ -183,6 +183,9 @@ fn lower_as(
             | BodyDecl::Expr(_),
             NativeBody::Effectful(r),
         ) => Body::Effectful(r),
+        (BodyDecl::Tool { .. }, _) => {
+            return Err(refuse("a sidecar tool body does not lower yet"));
+        }
         (BodyDecl::Native { effectful, .. }, _) => {
             return Err(refuse(&format!(
                 "the body is declared effectful={effectful}, the native parts disagree"
