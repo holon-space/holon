@@ -55,10 +55,11 @@ impl Subj {
         Some((self.refused?, self.base, self.ondisk))
     }
 
-    /// The situation the ask shows: none while the failure port holds a
-    /// token, so no offered ask has a dead `Answer` (D151.a).
+    /// The situation the ask shows: only while the subject is idle, so no
+    /// offered ask has a dead `Answer` (D151.a).
     pub fn offered(&self) -> Option<Sit> {
-        self.sit().filter(|_| !self.failed_port)
+        let idle = self.answered.is_none() && self.flight.is_none() && !self.failed_port;
+        self.sit().filter(|_| idle)
     }
 
     fn seen_now(&mut self) {
@@ -78,6 +79,9 @@ pub enum Refusal {
 
 #[derive(Clone, Debug)]
 pub struct Model {
+    /// The work reads `Refused` instead of taking it, so the situation stays
+    /// while the work runs.
+    pub read_only: bool,
     pub subj: Vec<Subj>,
     pub next: u32,
     /// answer id → the disclosed `why` of its expiry.
@@ -157,7 +161,9 @@ impl Model {
                     at: cur,
                     changed: false,
                 });
-                sj.refused = None;
+                if !self.read_only {
+                    sj.refused = None;
+                }
                 sj.answered = None;
                 sj.last_failed = false;
                 started.push(ans.id);
@@ -184,7 +190,9 @@ impl Model {
             sj.mark = None;
             sj.removed |= !f.changed;
         } else {
-            sj.refused = Some(f.at.0);
+            if !self.read_only {
+                sj.refused = Some(f.at.0);
+            }
             sj.mark = Some((f.at, f.ans.clone()));
             sj.answered = Some(f.ans);
             sj.failed_port = true;
@@ -215,12 +223,14 @@ impl ReferenceStateMachine for Ref {
             sj.refused = Some(0);
             sj.seen_now();
         }
-        Just(Model {
-            subj,
-            next: 1,
-            expired: BTreeMap::new(),
-        })
-        .boxed()
+        any::<bool>()
+            .prop_map(move |read_only| Model {
+                read_only,
+                subj: subj.clone(),
+                next: 1,
+                expired: BTreeMap::new(),
+            })
+            .boxed()
     }
 
     fn transitions(_: &Model) -> BoxedStrategy<Op> {
@@ -267,7 +277,12 @@ impl ReferenceStateMachine for Ref {
                     f.changed = true;
                 }
             }
-            Op::Saved(s) => m.subj[s].refused = None,
+            Op::Saved(s) => {
+                let fired = m.subj[s].refused.take().is_some();
+                if let Some(f) = m.subj[s].flight.as_mut().filter(|_| fired) {
+                    f.changed = true;
+                }
+            }
             Op::Reappear(s) => m.subj[s].refused = Some(tick),
             Op::Answer { s, value, seen } => {
                 if m.answer_result(s).is_ok() {

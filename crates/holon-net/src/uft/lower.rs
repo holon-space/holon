@@ -8,15 +8,15 @@
 //!
 //! | Generated | Kind | Arcs | Fires when |
 //! |---|---|---|---|
-//! | `Asks.<T>` | derived place | — | the work's arcs hold except `Answered.<T>`, `<T>.Running` and `WorkFailed.<T>` are empty and the binding holds; row `hash` (ask hash over the trace of exactly this check) and `preview` |
-//! | `Answer.<T>` | manual | inhibits `Answered.<T>`, `<T>.Running`, `WorkFailed.<T>` | an `Asks.<T>` row exists; the guard never sees the value; puts `Answered.<T>{answer, seen, value}` |
+//! | `Asks.<T>` | derived place | — | (T, s) is idle (`Answered.<T>`, `<T>.Running`, `WorkFailed.<T>` empty), the declared arcs hold and the binding holds; row `hash` (ask hash over the trace of the declared arcs and the binding) and `preview` |
+//! | `Answer.<T>` | manual | inhibits exactly the idle set of `Asks.<T>` | an `Asks.<T>` row exists; the guard never sees the value; puts `Answered.<T>{answer, seen, value}` |
 //! | `<T>` | auto | takes `Answered.<T>` + the declared arcs; failure port `WorkFailed.<T>` | the situation's ask hash equals `Answered.seen` |
 //! | `ExpireAnswer.<T>` | auto | takes `Answered.<T>`; inhibits `WorkFailed.<T>` | the ask is gone or its hash differs; puts `Expired.<T>` keyed by the answer id |
 //! | `ReleaseFailed.<T>` | auto | takes `Answered.<T>` + `WorkFailed.<T>` | always, so a re-answer after a failure is not "already answered" |
 //! | `ClearFailed.<T>` | auto | takes `WorkFailed.<T>`; inhibits `Answered.<T>` | always: a dropped outcome-unknown consumed its `Answered`, and its `WorkFailed` must not pair with a later answer |
 //!
-//! The work and the ask derive their hash from one function, so "ask present
-//! and `Answered` present with an equal hash" implies "work enabled".
+//! The work and the ask derive their hash from one function, so an `Answered`
+//! whose `seen` equals the current situation's hash enables the work.
 //! `Put` arcs have no executor arc: the body's outputs are the puts.
 
 use std::sync::Arc;
@@ -125,7 +125,11 @@ pub enum LowerTwin {
     NoAnswerInhibitor,
     /// No `ExpireAnswer`.
     NoExpire,
-    /// `Asks` offers the ask while `WorkFailed` inhibits its `Answer`.
+    /// `Asks` offers the ask while an `Answered` is pending.
+    AskWhileAnswered,
+    /// `Asks` offers the ask while the work is in flight.
+    AskWhileInFlight,
+    /// `Asks` offers the ask while `WorkFailed` holds the subject.
     AskDuringFailure,
 }
 
@@ -234,18 +238,27 @@ fn lower_as(
             .filter(|a| a.kind == ArcKind::Inhibit)
             .map(|a| a.place.0.clone())
             .collect(),
-        running: running.to_string(),
         bind: parts.bind,
     };
     let situation = Arc::new(situation);
 
+    // (T, s) is idle iff none of these holds a token: an ask exists only then,
+    // and `Answer` is inhibited by exactly these, so an offered ask always
+    // has an enabled `Answer` (D151.a).
+    let busy = [
+        (answered.clone(), LowerTwin::AskWhileAnswered),
+        (running.to_string(), LowerTwin::AskWhileInFlight),
+        (failed.clone(), LowerTwin::AskDuringFailure),
+    ];
     let derive: BindFn = {
         let (sit, preview) = (situation.clone(), parts.preview.clone());
-        let failed = (twin != Some(LowerTwin::AskDuringFailure)).then(|| failed.clone());
+        let busy: Vec<String> = busy
+            .iter()
+            .filter(|(_, skip)| twin != Some(*skip))
+            .map(|(p, _)| p.clone())
+            .collect();
         Arc::new(move |r: &mut Reader<'_>, s: &Subject| {
-            // `Answer` inhibits `WorkFailed`: an ask offered then is a dead affordance
-            // (D151.a).
-            if failed.as_ref().is_some_and(|f| r.present(f, s)) {
+            if busy.iter().any(|p| r.present(p, s)) {
                 return None;
             }
             let (content, hash) = sit.eval(r, s)?;
@@ -274,10 +287,9 @@ fn lower_as(
         Body::Pure(answer_body),
     );
     if twin != Some(LowerTwin::NoAnswerInhibitor) {
-        answer = answer
-            .inhibits(&answered)
-            .inhibits(&running)
-            .inhibits(&failed);
+        for (p, _) in &busy {
+            answer = answer.inhibits(p);
+        }
     }
 
     let work_bind: BindFn = {
@@ -412,7 +424,6 @@ struct Situation {
     transition: Arc<str>,
     needs: Vec<String>,
     inhibits: Vec<String>,
-    running: String,
     bind: BindFn,
 }
 
@@ -420,8 +431,7 @@ impl Situation {
     /// The bound situation and the hex ask hash over the trace of this check.
     fn eval(&self, r: &mut Reader<'_>, s: &Subject) -> Option<(Content, String)> {
         let (content, trace) = r.traced(|r| {
-            if r.present(&self.running, s)
-                || !self.needs.iter().all(|p| r.present(p, s))
+            if !self.needs.iter().all(|p| r.present(p, s))
                 || self.inhibits.iter().any(|p| r.present(p, s))
             {
                 return None;

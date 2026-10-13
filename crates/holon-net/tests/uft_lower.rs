@@ -3,7 +3,7 @@
 //!
 //! Twins (`--features naive-twins`, `UFT_LOWER_TWIN=<name>`), each drops one
 //! lowering rule: `no-ask-hash`, `no-answer-inhibitor`, `no-expire`,
-//! `ask-during-failure`.
+//! `ask-while-answered`, `ask-while-in-flight`, `ask-during-failure`.
 
 mod uft_lower_support;
 
@@ -160,28 +160,48 @@ fn base_net() -> NetDef {
         )
 }
 
+/// `d` with its takes turned into reads: the work leaves its situation intact.
+fn read_only(mut d: TransitionDescriptor) -> TransitionDescriptor {
+    for a in &mut d.arcs {
+        if a.kind == ArcKind::Take {
+            a.kind = ArcKind::Read;
+        }
+    }
+    d
+}
+
+fn pbt_descriptor(m: &Model) -> TransitionDescriptor {
+    if m.read_only {
+        read_only(descriptor())
+    } else {
+        descriptor()
+    }
+}
+
 #[cfg(feature = "naive-twins")]
-fn lowered() -> NetDef {
+fn lowered(d: &TransitionDescriptor) -> NetDef {
     use holon_net::uft::LowerTwin;
     use holon_net::uft::lower_twin;
     let twin = match std::env::var("UFT_LOWER_TWIN").ok().as_deref() {
-        None => return lower(base_net(), &descriptor(), Some(parts())).expect("lowers"),
+        None => return lower(base_net(), d, Some(parts())).expect("lowers"),
         Some("no-ask-hash") => LowerTwin::NoAskHash,
         Some("no-answer-inhibitor") => LowerTwin::NoAnswerInhibitor,
         Some("no-expire") => LowerTwin::NoExpire,
+        Some("ask-while-answered") => LowerTwin::AskWhileAnswered,
+        Some("ask-while-in-flight") => LowerTwin::AskWhileInFlight,
         Some("ask-during-failure") => LowerTwin::AskDuringFailure,
         Some(other) => panic!("UFT_LOWER_TWIN={other} names no twin"),
     };
-    lower_twin(base_net(), &descriptor(), Some(parts()), twin).expect("lowers")
+    lower_twin(base_net(), d, Some(parts()), twin).expect("lowers")
 }
 
 #[cfg(not(feature = "naive-twins"))]
-fn lowered() -> NetDef {
+fn lowered(d: &TransitionDescriptor) -> NetDef {
     assert!(
         std::env::var("UFT_LOWER_TWIN").is_err(),
         "UFT_LOWER_TWIN needs --features naive-twins"
     );
-    lower(base_net(), &descriptor(), Some(parts())).expect("lowers")
+    lower(base_net(), d, Some(parts())).expect("lowers")
 }
 
 // --------------------------------------------------------------- the SUT
@@ -218,7 +238,7 @@ impl StateMachineTest for Test {
     type Reference = Ref;
 
     fn init_test(m: &Model) -> Sut {
-        let mut exec = Executor::new(lowered()).expect("the lowered net loads");
+        let mut exec = Executor::new(lowered(&pbt_descriptor(m))).expect("the lowered net loads");
         for s in SUBJECTS {
             exec.write("Refused", s, Content::from([("why".to_owned(), text("0"))]));
             exec.write("Base", s, counter(0));
@@ -417,18 +437,16 @@ fn step(sut: &mut Sut, pre: &Model, m: &Model, now: Duration) {
     }
     assert_eq!(started, want, "model divergence: started work");
     for s in SUBJECTS {
-        let Some(answered) = sut.exec.tokens().token(&answered_place(T), s) else {
+        if sut.exec.tokens().token(&answered_place(T), s).is_none() {
             continue;
-        };
-        let ask = sut.exec.derive(&asks_place(T), &Subject::new(s));
-        assert_eq!(
-            ask.map(|a| get(&a, HASH_FIELD)),
-            Some(get(&answered.content, SEEN_FIELD)),
-            "P2 an Answered on {s} outlives its ask"
+        }
+        let why = sut.exec.why_not(T, s);
+        assert!(
+            !matches!(why, Some(WhyNot::Guard | WhyNot::Needs { .. })),
+            "P2 an Answered on {s} outlives its ask: {why:?}"
         );
         panic!(
-            "P-enabled: ask and Answered present on {s} at quiescence, but the work is not enabled: {:?}",
-            sut.exec.why_not(T, s)
+            "P-enabled: an Answered on {s} matches its situation at quiescence, but the work is not enabled: {why:?}"
         );
     }
 }
@@ -464,9 +482,7 @@ fn compare(sut: &mut Sut, m: &Model) {
             sj.mark.is_some(),
         );
         let ask = sut.exec.derive(&asks_place(T), &Subject::new(s));
-        // A pending Answered refuses a second answer by design (P3); it is no dead
-        // affordance.
-        if ask.is_some() && answered.is_none() {
+        if ask.is_some() {
             let why = sut.exec.why_not(&answer_transition(T), s);
             assert!(
                 why.is_none(),
@@ -535,7 +551,7 @@ prop_state_machine! {
 
 #[test]
 fn ask_row_carries_the_declared_input_type() {
-    let mut exec = Executor::new(lowered()).expect("loads");
+    let mut exec = Executor::new(lowered(&descriptor())).expect("loads");
     exec.write(
         "Refused",
         "a",
@@ -786,13 +802,7 @@ fn a_failed_answer_does_not_expire() {
 /// runs; the ask must still hide until the run ends.
 #[test]
 fn a_read_only_work_in_flight_hides_its_ask() {
-    let mut d = descriptor();
-    for a in &mut d.arcs {
-        if a.kind == ArcKind::Take {
-            a.kind = ArcKind::Read;
-        }
-    }
-    let mut exec = asking(&d);
+    let mut exec = asking(&read_only(descriptor()));
     let req = answer_and_start(&mut exec, "1");
     assert_eq!(
         exec.derive(&asks_place(T), &Subject::new("a")),
@@ -804,5 +814,41 @@ fn a_read_only_work_in_flight_hides_its_ask() {
     assert!(
         exec.derive(&asks_place(T), &Subject::new("a")).is_some(),
         "the ask returns once the run ends"
+    );
+}
+
+/// An answer that expires during a retry backoff leaves no busy token, but
+/// (T, s) is not idle while the retry is pending: the ask must stay hidden.
+#[test]
+#[ignore = "RetryPending is not a place yet; #192"]
+fn an_ask_hides_while_a_retry_is_pending() {
+    let mut d = descriptor();
+    d.timers.push(TimerDecl {
+        kind: TimerKind::Retry { max_attempts: 3 },
+        after: Duration::from_secs(10),
+    });
+    let mut exec = asking(&d);
+    let req = answer_and_start(&mut exec, "1");
+    exec.complete(
+        req.attempt,
+        EffectResult::Failed(Cause::retryable("busy")),
+        Duration::ZERO,
+    )
+    .expect("the attempt is known");
+    exec.write("OnDisk", "a", counter(1));
+    assert!(exec.step(Duration::ZERO).expect("steps").is_empty());
+    assert!(
+        exec.tokens().token(&expired_place(T), "1").is_some(),
+        "answer 1 did not expire during the backoff"
+    );
+    assert!(
+        matches!(exec.why_not(T, "a"), Some(WhyNot::RetryPending { .. })),
+        "the retry is not pending: {:?}",
+        exec.why_not(T, "a")
+    );
+    assert_eq!(
+        exec.derive(&asks_place(T), &Subject::new("a")),
+        None,
+        "the ask shows while a retry is pending"
     );
 }
