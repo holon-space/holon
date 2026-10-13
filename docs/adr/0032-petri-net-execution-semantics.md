@@ -636,6 +636,9 @@ since it was read"), cleared by the next success. `OutcomeUnknown` and failure
 conditions aggregate per transition, so a full disk or a dead remote shows one
 condition per transition, not one per attempt. Every condition text is derived
 from the marking, so it is never stale.
+For an answer (`Answer.T`), the awaited outcome is that of its work occurrence,
+whose id is derived from the answer id; an expired answer settles
+`Failed(NoLongerApplies)`.
 
 #### 9.3 Retry, failure and undo marks (NET-mark.a)
 

@@ -105,6 +105,7 @@ macro_rules! bind {
         bind!(|r, s| $f(r, s))
     };
 }
+#[allow(unused_imports)]
 pub(crate) use bind;
 
 #[derive(Clone)]
@@ -772,7 +773,8 @@ pub fn answer_spec() -> Spec {
                 Trigger::Auto,
                 bind!(|r, s| {
                     assert!(
-                        r.field("Answered.Accept", s, "value").is_none(),
+                        r.field("Answered.Accept", s, holon_net::exec::VALUE_FIELD)
+                            .is_none(),
                         "guard read the value"
                     );
                     let n = item_n(r, s)?;
@@ -791,7 +793,7 @@ pub fn answer_spec() -> Spec {
                 "ExpireAnswer.Accept",
                 Trigger::Auto,
                 bind!(|r, s| {
-                    let answer = r.text("Answered.Accept", s, "answer")?;
+                    let answer = r.text("Answered.Accept", s, holon_net::exec::ANSWER_FIELD)?;
                     let reason = match r.text("Asks.Accept", s, "hash") {
                         None => "ask_gone",
                         Some(hash) if r.text("Answered.Accept", s, "seen")? != hash => {
@@ -838,4 +840,20 @@ fn ask_row(r: &mut dyn Reads, s: &Subject) -> Option<Content> {
     let n = item_n(r, s)?;
     let hash = blake3::hash(format!("Accept\0{s}\0{n}").as_bytes()).to_hex();
     (n >= 0).then(|| content(&[("hash", text(&hash))]))
+}
+
+/// An answer of `Accept` for `s`; `stale` or a missing ask gives a seen
+/// hash that matches no ask.
+pub fn answer_call(d: &Driver, s: &str, id: &str, stale: bool, value: Option<&str>) -> AnswerCall {
+    let hash = match d.exec().derive("Asks.Accept", &Subject::new(s)) {
+        Some(row) if !stale => string(&row, "hash"),
+        _ => blake3::hash(b"a stale ask").to_hex().to_string(),
+    };
+    AnswerCall {
+        transition: holon_api::user_transition::TransitionName("Accept".to_string()),
+        subject: holon_api::user_transition::SubjectName(s.to_string()),
+        seen: holon_net::exec::hash_from_text(&hash),
+        answer: AnswerId(id.to_string()),
+        value: value.map(text),
+    }
 }

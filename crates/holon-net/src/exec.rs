@@ -8,6 +8,15 @@
 //!
 //! The executor implements no special case for producer order, run state or
 //! failure ports. Those are places and arcs of the net (§9 intro, NET-run.a).
+//!
+//! Answers (UFT-adopt.a): [`Executor::answer`] fires the manual `Answer.T`
+//! with the user value. The value joins the input of the work `T` after its
+//! bind, so no guard reads it. The answer id is in the read trace of `T`, so a
+//! new answer is a new failure mark key. [`Executor::settled`] of an answer
+//! follows its work occurrence ([`work_occurrence`]), and [`Executor::undo`]
+//! withdraws the answer and reverses its work's process-class delta in one
+//! step. [`Executor::derive`], [`Executor::asks`] and [`ask_hash`] read the
+//! derived places outside a firing.
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
@@ -128,12 +137,12 @@ pub fn expired_place(work: &str) -> String {
 
 /// `Answered.T`: the answer id. `T` keys its failure mark by it, so a new
 /// answer is a new mark key.
-pub const ANSWER_FIELD: &str = "answer";
+pub const ANSWER_FIELD: &str = "@occurrence";
 /// `Answered.T`: the [`hash_text`] of the ask the user saw.
 pub const SEEN_FIELD: &str = "seen";
 /// `Answered.T`: the user value. No reader sees it; the executor adds it to
 /// the bound input of `T` under this name.
-pub const VALUE_FIELD: &str = "value";
+pub const VALUE_FIELD: &str = "@input";
 /// `Expired.T`: the [`expire_reason_text`].
 pub const REASON_FIELD: &str = "reason";
 /// `Asks.T`: the [`hash_text`] of the ask.
@@ -1076,9 +1085,7 @@ pub struct Executor {
     /// Answer id → (work transition, subject).
     answers: BTreeMap<Arc<str>, (Arc<str>, Subject)>,
     undone: BTreeSet<Arc<str>>,
-    /// What the commit of a work occurrence of an ask changed: the content
-    /// before it and the version after it, per (place, subject).
-    deltas: BTreeMap<OccurrenceId, BTreeMap<(Place, Subject), (Option<Content>, u64)>>,
+    deltas: BTreeMap<OccurrenceId, Delta>,
     requests: Vec<EffectRequest>,
     now: Duration,
     next_attempt: u64,
@@ -1086,6 +1093,10 @@ pub struct Executor {
     #[cfg(feature = "naive-twins")]
     twin: Option<Twin>,
 }
+
+/// What the commit of a work occurrence of an ask changed: the content before
+/// it and the version after it, per (place, subject).
+type Delta = BTreeMap<(Place, Subject), (Option<Content>, u64)>;
 
 /// The work occurrence of an answer (ruling 3.b): derived from the answer
 /// id, so a Keyed receiver dedups it and the settled chain finds it.

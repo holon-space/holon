@@ -334,8 +334,13 @@ fn running_net() -> Spec {
         .place("Sent", Class::Process)
         .place("Archived", Class::Process)
         .transition(
-            Transition::new("Send", Trigger::Auto, n.clone(), Body::Effectful(Receiver::None))
-                .consumes("Intent"),
+            Transition::new(
+                "Send",
+                Trigger::Auto,
+                n.clone(),
+                Body::Effectful(Receiver::None),
+            )
+            .consumes("Intent"),
         )
         .transition(
             Transition::new(
