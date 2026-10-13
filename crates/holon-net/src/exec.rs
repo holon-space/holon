@@ -1049,6 +1049,8 @@ pub enum Twin {
     SettledFromAnswer,
     /// An external call returns without firing the auto transitions it enabled.
     NoQuiescence,
+    /// Quiescing skips the auto transitions that consume a failure port token.
+    KeepWorkFailed,
 }
 
 /// What is known about one effect attempt of an occurrence.
@@ -1534,6 +1536,14 @@ impl Executor {
         Ok(Quiesced { value, requests })
     }
 
+    fn takes_failure_port(&self, t: &TransitionDef) -> bool {
+        self.net
+            .transitions
+            .iter()
+            .filter_map(|d| d.on_failure.as_ref())
+            .any(|port| t.consumes.contains(port))
+    }
+
     /// Fires every enabled auto transition until none is enabled, and takes
     /// the effect requests; `Err` holds the rounds run. It fires no timer.
     fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
@@ -1544,7 +1554,9 @@ impl Executor {
             let mut started = Vec::new();
             for i in 0..self.net.transitions.len() {
                 let t = &self.net.transitions[i];
-                if t.trigger != Trigger::Auto {
+                if t.trigger != Trigger::Auto
+                    || self.twin(Twin::KeepWorkFailed) && self.takes_failure_port(t)
+                {
                     continue;
                 }
                 let name = t.name.clone();

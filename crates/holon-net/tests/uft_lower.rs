@@ -3,8 +3,8 @@
 //!
 //! Twins (`--features naive-twins`, `UFT_LOWER_TWIN=<name>`), each drops one
 //! lowering rule: `no-ask-hash`, `no-answer-inhibitor`, `no-expire`,
-//! `ask-while-in-flight`, `ask-while-retry-pending`; `no-quiescence` drops
-//! the executor's quiesce.
+//! `ask-while-in-flight`, `ask-while-retry-pending`; executor twins:
+//! `no-quiescence`, `keep-work-failed`.
 
 mod uft_lower_support;
 
@@ -191,7 +191,9 @@ fn lowered(d: &TransitionDescriptor) -> NetDef {
         Some("no-answer-inhibitor") => LowerTwin::NoAnswerInhibitor,
         Some("no-expire") => LowerTwin::NoExpire,
         Some("ask-while-in-flight") => LowerTwin::AskWhileInFlight,
-        Some("no-quiescence") => return lower(base_net(), d, Some(parts())).expect("lowers"),
+        Some("no-quiescence" | "keep-work-failed") => {
+            return lower(base_net(), d, Some(parts())).expect("lowers");
+        }
         Some("ask-while-retry-pending") => LowerTwin::AskWhileRetryPending,
         Some(other) => panic!("UFT_LOWER_TWIN={other} names no twin"),
     };
@@ -208,12 +210,17 @@ fn lowered(d: &TransitionDescriptor) -> NetDef {
 }
 
 /// The executor of the net lowered from `d`; `UFT_LOWER_TWIN=no-quiescence`
-/// selects the executor twin that returns without quiescing.
+/// and `keep-work-failed` select executor twins.
 fn executor(d: &TransitionDescriptor) -> Executor {
     let exec = Executor::new(lowered(d)).expect("the lowered net loads");
     #[cfg(feature = "naive-twins")]
-    if std::env::var("UFT_LOWER_TWIN").as_deref() == Ok("no-quiescence") {
-        return exec.with_twin(holon_net::exec::Twin::NoQuiescence);
+    {
+        use holon_net::exec::Twin;
+        match std::env::var("UFT_LOWER_TWIN").as_deref() {
+            Ok("no-quiescence") => return exec.with_twin(Twin::NoQuiescence),
+            Ok("keep-work-failed") => return exec.with_twin(Twin::KeepWorkFailed),
+            _ => {}
+        }
     }
     exec
 }
@@ -358,7 +365,8 @@ impl StateMachineTest for Test {
                 requests
             }
         };
-        no_answered_or_work_failed_stands(&sut, &op_text);
+        no_work_failed_stands(&sut, &op_text);
+        no_answered_stands(&sut, &op_text);
         started(&mut sut, &mid, m, requests);
         compare(&mut sut, m);
         sut.model = m.clone();
@@ -366,16 +374,23 @@ impl StateMachineTest for Test {
     }
 }
 
-/// At quiescence the work or the expiry has taken every `Answered`, and
-/// `ReleaseFailed` or `ClearFailed` every `WorkFailed`.
-fn no_answered_or_work_failed_stands(sut: &Sut, op: &str) {
+/// P-quiescent, `Answered` clause: the work or the expiry has taken it.
+fn no_answered_stands(sut: &Sut, op: &str) {
+    stands_nowhere(sut, &answered_place(T).to_string(), op);
+}
+
+/// P-quiescent, `WorkFailed` clause: `ReleaseFailed` or `ClearFailed` has
+/// taken it.
+fn no_work_failed_stands(sut: &Sut, op: &str) {
+    stands_nowhere(sut, &Generated::WorkFailed.name(T), op);
+}
+
+fn stands_nowhere(sut: &Sut, place: &str, op: &str) {
     for s in SUBJECTS {
-        for place in [answered_place(T).to_string(), Generated::WorkFailed.name(T)] {
-            assert!(
-                !present(sut, &place, s),
-                "P-quiescent: {place} stands on {s} after {op}"
-            );
-        }
+        assert!(
+            !present(sut, place, s),
+            "P-quiescent: {place} stands on {s} after {op}"
+        );
     }
 }
 
@@ -600,6 +615,10 @@ prop_state_machine! {
 
     #[test]
     fn lowered_manual_transition(sequential 1..40 => Test);
+
+    /// P-quiescent runs in `apply`; this name carries it.
+    #[test]
+    fn p_quiescent_no_answered_or_work_failed_stands(sequential 1..40 => Test);
 }
 
 // ------------------------------------------------- structural checks
