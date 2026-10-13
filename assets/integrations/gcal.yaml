@@ -14,9 +14,13 @@ default_view: gcal-view
 #
 # WHY DIRECT HTTP (not an MCP server): this path is pure in-app HTTP with no
 # subprocess, so this exact sidecar runs unchanged on desktop AND on Android/iOS
-# (Martin's ruling). Google Calendar has no MCP server; it is a plain JSON API,
-# reached directly via the UTCP manual below and authenticated with the generic
-# `oauth2` arm (refresh-token grant — nothing Google-named in the engine).
+# (Martin's ruling). Google's Workspace MCP servers (Developer Preview) lack
+# incremental sync (Gmail historyId, Calendar syncToken), Gmail send, and
+# client-minted ids for exactly-once writes (Calendar `events.insert` with a client id gives a keyed
+# receiver; the MCP `create_event` takes no client id or request id), so REST stays the sync
+# and write path. It is reached directly via the UTCP manual below and
+# authenticated with the generic `oauth2` arm (refresh-token grant — nothing
+# Google-named in the engine).
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # ONE-TIME SETUP
