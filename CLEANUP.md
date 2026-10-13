@@ -85,7 +85,7 @@ Happy paths are well tested, hard cases are not.
 - [x] **P0** ~~Delete 3 truly dead functions from `lib.rs`~~ DONE
 - [x] **P1** ~~Add tests for `#[affects]` attribute~~ DONE: 3 tests (single, multiple, empty). Also FIXED BUG: `extract_affected_fields()` only handled `#[operation(affects=[...])]` format, not standalone `#[affects(...)]`. Added parsing for both forms
 - [x] **P1** ~~Add tests for `#[triggered_by]` attribute~~ DONE: 3 tests (identity mode, transform mode, multiple triggers on same method)
-- [x] **P1** ~~Add tests for `#[enum_from]` attribute~~ DONE: 1 test verifying resolver populates TypeHint::OneOf with correct values
+- [x] **P1** ~~Add tests for `#[enum_from]` attribute~~ DONE: 1 test verifying resolver populates TypeHint::Enum with the state labels
 - [x] **P1** ~~Add dispatch function tests~~ DONE: 11 tests (metadata listing, type hints, String/bool/i64/Optional/Value/HashMap dispatch, missing param error, unknown op error, doc comment extraction)
 - [x] **P2** ~~Replace brittle string-based attribute parsing with `syn` AST matching~~ DONE: Created `attr_parser.rs` module with proper `syn::Parse` implementations (KeyValue, AttrArgs, Punctuated<LitStr>). Replaced 4 string-based parsers: `extract_entity_attribute` (lib.rs), `extract_param_mappings` (operations_trait.rs), `extract_enum_from` (operations_trait.rs), `extract_affected_fields` (both files). All downstream crates compile and produce identical output
 - [x] **P2** ~~Fix type inference to use `syn::Type::Path` matching~~ DONE: Rewrote `infer_type()` to use `syn::Type::Path`, `Type::Reference`, and AST segment matching

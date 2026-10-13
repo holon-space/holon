@@ -240,8 +240,16 @@ fn enum_from_resolver() {
         .find(|p| p.name == "state")
         .unwrap();
     match &param.type_hint {
-        holon_api::TypeHint::Enum { variants, .. } => {
-            assert_eq!(variants.len(), 2);
+        holon_api::TypeHint::Enum {
+            type_name,
+            variants,
+        } => {
+            assert_eq!(type_name, "state");
+            assert_eq!(
+                variants,
+                &["TODO", "DONE"],
+                "the state labels, in get_states order"
+            );
         }
         other => panic!("Expected TypeHint::Enum, got {:?}", other),
     }

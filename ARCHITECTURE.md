@@ -1485,7 +1485,7 @@ MCP Server (e.g. ai.todoist.net/mcp)
 | `McpOperationProvider` | `mcp_provider.rs` | Connects to MCP server, caches `OperationDescriptor`s from tool schemas, executes tools via `call_tool`. Holds `McpRunningService` to keep the connection alive. |
 | `McpSidecar` | `mcp_sidecar.rs` | YAML config that patches UI affordances onto MCP tools: entity mapping, `affected_fields`, `triggered_by`, `param_overrides`, and the DEPRECATED `precondition` (see below). |
 | `RhaiPrecondition` | `mcp_sidecar.rs` | **Deprecated, ignored.** Parse-don't-validate wrapper: the Rhai expression is still syntax-checked at YAML deserialization time, so a malformed one fails loudly at load. Nothing reads it beyond that — it reaches no descriptor and gates no operation. |
-| `mcp_schema_mapping` | `mcp_schema_mapping.rs` | Converts JSON Schema types to `TypeHint` (String, Bool, Number, OneOf, EntityId via overrides). Walks `inputSchema.properties` to build `Vec<OperationParam>`. |
+| `mcp_schema_mapping` | `mcp_schema_mapping.rs` | Converts JSON Schema types to `TypeHint` (String, Bool, Number, Enum, EntityId via overrides). Walks `inputSchema.properties` to build `Vec<OperationParam>`. |
 | `connect_mcp()` | `mcp_provider.rs` | Establishes Streamable HTTP connection to an MCP server, returns `Peer<RoleClient>` + `McpRunningService`. |
 
 #### YAML Sidecar
