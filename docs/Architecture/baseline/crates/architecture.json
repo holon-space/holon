@@ -488,6 +488,9 @@
                     "name": "IMPLEMENTATION_SUMMARY.md"
                   },
                   {
+                    "name": "clock_guard.rs"
+                  },
+                  {
                     "name": "database_stuck_guard.rs"
                   },
                   {
@@ -1066,6 +1069,15 @@
             "layer": "Engine",
             "dirs": [
               {
+                "name": "bin",
+                "path": "holon-api/src/bin",
+                "files": [
+                  {
+                    "name": "panic_unwind_probe.rs"
+                  }
+                ]
+              },
+              {
                 "name": "live_data",
                 "path": "holon-api/src/live_data",
                 "files": [
@@ -1359,6 +1371,9 @@
                 "name": "person_profile_display_name_seat_a.rs"
               },
               {
+                "name": "release_build_unwinds.rs"
+              },
+              {
                 "name": "render_dsl_colour_refusal.rs"
               },
               {
@@ -1587,6 +1602,9 @@
                 "name": "computed_persisted_boot_column.rs"
               },
               {
+                "name": "core_schema_failure_boots_degraded.rs"
+              },
+              {
                 "name": "database_open_disclosure.rs"
               },
               {
@@ -1740,6 +1758,9 @@
                 "name": "shutdown_writes_back_every_edit.rs"
               },
               {
+                "name": "sidecar_type_admission.rs"
+              },
+              {
                 "name": "slashmenu_correspondence.rs"
               },
               {
@@ -1771,6 +1792,9 @@
               },
               {
                 "name": "vault_file_delete_after_ingest.rs"
+              },
+              {
+                "name": "vault_home_type_profile.rs"
               },
               {
                 "name": "vault_lock.rs"
@@ -2273,6 +2297,9 @@
                 "name": "traits.rs"
               },
               {
+                "name": "type_write_rule.rs"
+              },
+              {
                 "name": "undo.rs"
               },
               {
@@ -2486,6 +2513,9 @@
             "name": "src",
             "path": "holon-filesystem/src",
             "files": [
+              {
+                "name": "base_sidecar.rs"
+              },
               {
                 "name": "change_source.rs"
               },
@@ -3615,6 +3645,9 @@
                             "name": "two_writer_peer_writes_land.rs"
                           },
                           {
+                            "name": "typed_loro_matches_ref.rs"
+                          },
+                          {
                             "name": "typed_matview_matches_ref.rs"
                           },
                           {
@@ -4058,6 +4091,9 @@
                             "name": "two_writer_peer_writes_land.rs"
                           },
                           {
+                            "name": "typed_loro_matches_ref.rs"
+                          },
+                          {
                             "name": "typed_matview_matches_ref.rs"
                           },
                           {
@@ -4312,6 +4348,9 @@
                         "name": "arm_write_churn.rs"
                       },
                       {
+                        "name": "arm_write_failure.rs"
+                      },
+                      {
                         "name": "arrow_navigate.rs"
                       },
                       {
@@ -4340,6 +4379,9 @@
                       },
                       {
                         "name": "concurrent_schema_init.rs"
+                      },
+                      {
+                        "name": "crash_restart.rs"
                       },
                       {
                         "name": "create_block_under_focus.rs"
@@ -4385,6 +4427,9 @@
                       },
                       {
                         "name": "delete_refused_recipe.rs"
+                      },
+                      {
+                        "name": "delete_typed_entity.rs"
                       },
                       {
                         "name": "deliver_block_content.rs"
@@ -4579,6 +4624,9 @@
                         "name": "set_edge_field.rs"
                       },
                       {
+                        "name": "set_typed_entity_field.rs"
+                      },
+                      {
                         "name": "setup_watch.rs"
                       },
                       {
@@ -4718,6 +4766,12 @@
                     "name": "invariant_mode_override.rs"
                   },
                   {
+                    "name": "known_reds.rs"
+                  },
+                  {
+                    "name": "layered_field.rs"
+                  },
+                  {
                     "name": "layout_bridge.rs"
                   },
                   {
@@ -4800,6 +4854,9 @@
                   },
                   {
                     "name": "typed_entity_schemas.rs"
+                  },
+                  {
+                    "name": "typed_entity_sut.rs"
                   },
                   {
                     "name": "types.rs"
@@ -5280,6 +5337,9 @@
                     "name": "loro_sync_controller_pbt.rs"
                   },
                   {
+                    "name": "loro_typed_writer_census.rs"
+                  },
+                  {
                     "name": "loro_unseeded_vault_split.rs"
                   },
                   {
@@ -5497,6 +5557,9 @@
                 "name": "latency_slo_gate.rs"
               },
               {
+                "name": "layered_field_model_pbt.rs"
+              },
+              {
                 "name": "logseq_db_import_store.rs"
               },
               {
@@ -5531,6 +5594,9 @@
               },
               {
                 "name": "refdoc1_remap_totality_replay.rs"
+              },
+              {
+                "name": "remote_list_under_lag.rs"
               },
               {
                 "name": "shape_profile_shrink.rs"
@@ -6081,6 +6147,9 @@
                 "name": "loro_document_store.rs"
               },
               {
+                "name": "loro_entity_operations.rs"
+              },
+              {
                 "name": "loro_meta_cell_backing.rs"
               },
               {
@@ -6231,6 +6300,9 @@
               },
               {
                 "name": "typed_entity_convergence_pbt.rs"
+              },
+              {
+                "name": "typed_entity_purge_recreate.rs"
               },
               {
                 "name": "typed_entity_scale.rs"
@@ -6476,6 +6548,9 @@
               },
               {
                 "name": "pbt_infrastructure.rs"
+              },
+              {
+                "name": "typed_entity_sink.rs"
               }
             ]
           }
@@ -7167,13 +7242,18 @@
         "description": "The derived Petri-net projection (ADR 0032 §2): rule blocks and operation descriptors compiled into one read-only net, plus the conflict and cycle analyses that run over it.",
         "pattern": "Projection",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Engine\nPattern: Projection\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n\nThe derived Petri-net projection (ADR 0032 §2): rule blocks and operation\ndescriptors compiled into one read-only net, plus the conflict and cycle\nanalyses that run over it.\n\nEverything here is a pure function of its sources, which is what makes the\nnet a derived artifact and never a second authority (ADR 0032 §2, ADR 0024\nP1a). It carries no state beyond the current derivation, so it cannot go\nstale whether a caller pulls it on demand or holds it as a reactive var\nrecomputed on source change — this crate stays pure under either delivery.\n\nPetri-net vocabulary — transition, place, arc, marking — lives in this\ncrate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one\nplace the two vocabularies meet (ADR 0032 §8).",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Projection\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-net-layout \"viewer geometry & wire contract\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n\nThe derived Petri-net projection (ADR 0032 §2): rule blocks and operation\ndescriptors compiled into one read-only net, plus the conflict and cycle\nanalyses that run over it.\n\nEverything here is a pure function of its sources, which is what makes the\nnet a derived artifact and never a second authority (ADR 0032 §2, ADR 0024\nP1a). It carries no state beyond the current derivation, so it cannot go\nstale whether a caller pulls it on demand or holds it as a reactive var\nrecomputed on source change — this crate stays pure under either delivery.\n\nPetri-net vocabulary — transition, place, arc, marking — lives in this\ncrate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one\nplace the two vocabularies meet (ADR 0032 §8).",
         "source_file": "holon-net/src/lib.rs",
         "layer": "Engine",
         "relationships": [
           {
             "target": "holon-api",
             "label": "shared value & operation types",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-net-layout",
+            "label": "viewer geometry & wire contract",
             "protocol": "Rust"
           },
           {
@@ -7188,6 +7268,15 @@
           }
         ],
         "dirs": [
+          {
+            "name": "examples",
+            "path": "holon-net/examples",
+            "files": [
+              {
+                "name": "net_svg_dump.rs"
+              }
+            ]
+          },
           {
             "name": "src",
             "path": "holon-net/src",
@@ -7215,6 +7304,9 @@
               },
               {
                 "name": "net.rs"
+              },
+              {
+                "name": "view.rs"
               }
             ]
           },
@@ -7244,10 +7336,78 @@
                 "name": "hop_predicate_agreement.rs"
               },
               {
+                "name": "net_view.rs"
+              },
+              {
                 "name": "refinement_agreement.rs"
               },
               {
                 "name": "transition_key.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-net-layout",
+        "path": "holon-net-layout",
+        "c4_level": "component",
+        "description": "Petri-net viewer geometry: the layered layout of a net's structure, the serde contract a net executor publishes to a viewer, and a standalone SVG dump.",
+        "pattern": "Adapter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Adapter\n\nPetri-net viewer geometry: the layered layout of a net's structure, the\nserde contract a net executor publishes to a viewer, and a standalone SVG\ndump.\n\nThree rules hold the crate together:\n- The layout input is STRUCTURE only ([`NetView`]). A marking cannot move a\n  node, because [`layout`] cannot see one.\n- Frontends get geometry, not graph semantics ([`NetLayout`]): both the GPUI\n  and the Dioxus-Web renderer only draw.\n- Nothing of `dugong`, the pinned dagre port underneath, is public here.\n\nwasm-clean: `serde` and `thiserror` beside `dugong`, nothing else, so the\nbrowser frontend links the same layout code as the desktop one. Pinned by\n`just check-net-layout-wasm`.",
+        "source_file": "holon-net-layout/src/lib.rs",
+        "layer": "Core",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-net-layout/src",
+            "files": [
+              {
+                "name": "contract.rs"
+              },
+              {
+                "name": "layout.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "net_view.rs"
+              },
+              {
+                "name": "svg.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-net-layout/tests",
+            "dirs": [
+              {
+                "name": "golden",
+                "path": "holon-net-layout/tests/golden",
+                "files": [
+                  {
+                    "name": "chain_net.json"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "contract.rs"
+              },
+              {
+                "name": "layout.rs"
+              },
+              {
+                "name": "svg.rs"
               }
             ]
           }
@@ -7930,6 +8090,9 @@
             "path": "holon-pbt-core/tests",
             "files": [
               {
+                "name": "capmap_forwards_provided.rs"
+              },
+              {
                 "name": "editor_pure_h4_spike.rs"
               },
               {
@@ -8155,6 +8318,9 @@
             "path": "holon-profiles/src",
             "files": [
               {
+                "name": "invariants.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
@@ -8171,12 +8337,26 @@
               },
               {
                 "name": "type_registry.rs"
+              },
+              {
+                "name": "vault_profiles.rs"
               }
             ]
           },
           {
             "name": "tests",
             "path": "holon-profiles/tests",
+            "dirs": [
+              {
+                "name": "common",
+                "path": "holon-profiles/tests/common",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "computed_null_round_trip.rs"
@@ -8186,6 +8366,9 @@
               },
               {
                 "name": "decision_profile_conditions.rs"
+              },
+              {
+                "name": "declared_invariant_policy.rs"
               },
               {
                 "name": "malformed_type_profile_refusal.rs"
@@ -8200,7 +8383,13 @@
                 "name": "profile_write_target_refusal.rs"
               },
               {
+                "name": "type_home_file_and_block_conflict.rs"
+              },
+              {
                 "name": "type_services_declaration.rs"
+              },
+              {
+                "name": "vault_profile_admission_is_history_free.rs"
               }
             ]
           }
