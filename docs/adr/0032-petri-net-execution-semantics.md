@@ -1,6 +1,7 @@
 # ADR 0032 — Petri-net execution semantics: one net, derived projection, dispatcher-enforced firing
 
-**Status:** Accepted (ratified by Martin, 2026-08-25)
+**Status:** Accepted (ratified by Martin, 2026-08-25). Amended in place 2026-10-13:
+net semantics revisions 1 and 1.1 (§9; changes to §1, §3, §5, §7), #171.
 **Date:** 2026-08-24
 **Deciders:** Martin (design discussion "PN execution architecture", 2026-08-24)
 **Relates to:**
@@ -76,7 +77,10 @@ the motivating case — configuration, authored outside the net, read by guards
 (the destination-capability check in §3) and written by no transition.
 
 The exception is narrow and stays policed: **the moment a transition writes a
-place, that place owes durable state.** Read-only is a property of the whole
+data-class place, that place owes durable state.** Process-class and
+device-class places (§9.4) are not synced and have one writer, so a resync
+cannot re-emit them as phantom events; they owe nothing durable beyond their
+class. Read-only is a property of the whole
 transition catalog rather than a promise one declaration makes about itself, so
 giving a config-backed place its first writer is a change that must move the
 place onto durable state first, not a declaration that can be added in passing.
@@ -179,6 +183,9 @@ cross-rule priority, fairness, or quiescence detection ever demand one, the
 net guard's **arbitrate** slot (deferred item 5) is where central scheduling
 grows, consulting the same derived projection — a future ADR's decision,
 neither made nor precluded here.
+
+The target is one executor for all token classes (§9.4). The semantics it
+runs are §9; they are net constructions, not scheduler special cases.
 
 What centralizes is **firing-time enforcement**. `OperationDispatcher` gains a
 third seam, the **net guard**, consulted for every dispatched operation:
@@ -306,54 +313,69 @@ beside the marking delta on the descriptor, is the **claim discipline** of the
 transition's consuming arcs — *when* its consumption takes effect.
 
 **Optimistic consumption is the default and the local-first position.** The
-consume takes effect at commit; concurrent consumers all fire; the merge
-algebra adjudicates after the fact — the tree's one-parent invariant for
-structure, last-writer-wins for plain values, deterministic identity for
-idempotence. Nothing coordinates, nothing blocks, an offline replica fires
-freely.
+consume takes effect at commit; concurrent consumers all fire; nothing
+coordinates, nothing blocks, an offline replica fires freely. Optimism decides
+only that no consumer is excluded. It does not change what a data-class
+consumption records: every consumption of a data-class token adds an entry to
+the token's claims set (REV11-consume.a, below). The transition's declared
+`contest` decides what the concurrent entries mean after the merge:
+`idempotent` (the derived `owner` is the deterministic minimum and nobody is
+asked) or `conflict` (both devices show `contested` and a user decides). The
+merge algebra adjudicates the content after the fact — the tree's one-parent
+invariant for structure, last-writer-wins for plain values, deterministic
+identity for idempotence.
 
 **Leased consumption is the opt-in coordination discipline**, and the only one
 that gives exclusion across processes or replicas:
 
-- **begin-T** consumes the input tokens into a durable **in-flight** state —
-  ADR 0024's `in-transition` attribute shape, which exists for exactly this
-  residue.
+- **begin-T** moves the input tokens into the in-flight place `<T>.Running`
+  (§9.2) — ADR 0024's `in-transition` attribute shape, which exists for exactly
+  this residue.
 - **end-T** completes it, in one of three arms: **commit** (produce the
   outputs), **abort** (fire the derived inverse of the partial delta, §7), or
   **expire** (the lease ran out). All three are transitions; all three appear
   in the occurrence journal.
-- The in-flight state is **marking like any other** (§1): durable rows, so
-  crash recovery and resync need no special case, and "consumed and
-  unavailable" is plain enabledness — the token simply is not there.
+- The in-flight state is **marking like any other** (§1): a token in a place,
+  so crash recovery and resync need no special case, and "consumed and
+  unavailable" is plain enabledness — the token simply is not in its input
+  place.
 
-**Mechanically, the in-flight state is a row in a dedicated claims
-collection** — there is no token row to remove, because tokens were never
-stored things (§1). `begin-T` fires through the dispatcher like any operation
-and writes a claim row `{entity_uri, aspect, occurrence_id, holder,
-expires_at}` with **deterministic identity** (keyed by entity and aspect, so
-two racing begins target the same row). The collection is deliberately
-**separate from the entities it claims**, for three reasons: it works for
-arbitrary entity kinds — blocks, integrations, twins — through the one
-universal entity-URI reference; it is **holon-native regardless of the claimed
-entity's home** (a claim on a Todoist-homed task must not ask Todoist to store
-our lease); and it never round-trips through org files, because a lease is
-runtime coordination state, not authored content. It holds *claim* marking
-specifically — the rest of the marking stays what §1 says it is, the entity
-rows themselves. Enabledness is then an ordinary place-predicate over two
-entities: the token "exists" iff the entity does and no unexpired claim row
-covers the aspect. The existing machinery covers each hard case for free:
-crash — the holder stops heartbeating, `expires_at` passes, the guard treats
-an expired claim as absent *lazily* (no janitor needed for correctness) and an
-explicit `expire` transition fires when first observed; resync — claim rows
-re-emit as-is, no phantoms; cross-replica — the deterministic row identity
-makes the claim write **the** CRDT-winner operation, and the losing replica's
-overridden claim surfaces as the §3 environment event. A claim row inherits
-the claimed entity's container for sharing scope; a deleted entity leaves its
-claims inert (expiry retires them). Renewals update `expires_at` and are not
-occurrences; begin, end, abort, and expire are. The occurrence journal records
-`begin`, so in-flight work is also queryable as open occurrences — but
-enabledness authority is the claims collection, never the journal (journal
-sync is optional per container; enabledness must work locally regardless).
+**Mechanically, a consumption is an entry in a claims collection.** There is
+no token row to remove, because tokens were never stored things (§1). The
+in-flight state of a leased or effectful firing is a token in the place
+`<T>.Running` (§9.2, REV11-running.a); the claims collection holds the
+cross-replica half. Rule (REV11-consume.a, NET-class.a): consuming a data-class
+token **adds** one entry `(device, occurrence_id, read_version)` to a **grow-only
+claims set** on that token. It never overwrites a single "claimed_by" field,
+because a CRDT merge of two overwrites silently loses one claim. Two derived
+places are computed from the set, identically on every device: `owner` (the
+deterministic minimum entry) and `contested` (more than one entry survives).
+Each transition declares `contest: idempotent | conflict`. Under `conflict`,
+both devices show "contested" after sync and a user decides. A lease adds
+`expires_at` to its entry; a retraction (§7) adds a `retract` entry, and
+`owner` ignores retracted claims. A multi-token consume adds entries to every
+consumed token in one commit (REV11-binding.b).
+
+The collection is deliberately **separate from the entities it claims**, for
+three reasons: it works for arbitrary entity kinds — blocks, integrations,
+twins — through the one universal entity-URI reference; it is
+**holon-native regardless of the claimed entity's home** (a claim on a
+Todoist-homed task must not ask Todoist to store our lease); and it never
+round-trips through org files, because a claim is runtime coordination state,
+not authored content. Enabledness is an ordinary place-predicate over two
+entities: the token "exists" for this device iff the entity does and the
+derived `owner` is this device or no unexpired claim covers the aspect. Crash:
+the holder stops heartbeating, `expires_at` passes, the guard treats an expired
+entry as absent *lazily* and an explicit `expire` transition fires when first
+observed. Resync: claim entries re-emit as-is, no phantoms. Cross-replica: the
+set merges by union, so a losing claim stays visible as `contested` or as the
+§3 environment event, never as silent drift. A claim entry inherits the claimed
+entity's container for sharing scope; a deleted entity leaves its claims
+inert. Renewals update `expires_at` and are not occurrences; begin, end,
+abort, and expire are. The occurrence journal records `begin`, so in-flight
+work is also queryable as open occurrences — but enabledness authority is the
+claims collection, never the journal (journal sync is optional per container;
+enabledness must work locally regardless).
 
 **A leased transition's claim is a lease tied to session liveness**, renewed
 by a heartbeat while the holding process lives — *not* by user activity. Tying
@@ -395,11 +417,12 @@ which is what lets the expiry window be short.
 **Lease release and expiry are themselves transitions**, so both appear in the
 occurrence journal. A lease that vanished is a visible event, not an absence.
 
-Cross-replica claims resolve per mode: in Full mode by a CRDT-winner operation
-or by the lease itself; in SqlOnly mode by a store transaction.
+Cross-replica claims resolve per mode: in Full mode by the claims set's derived
+`owner` and `contested` places or by the lease itself; in SqlOnly mode by a
+store transaction.
 
-**Consuming reads and consuming claims are not in the first version.** They
-arrive with **integrations** — beside editing and field-sessions, the third
+**Consuming reads and leased claims across integrations are not in the first
+version.** They arrive with **integrations** — beside editing and field-sessions, the third
 leased instance: multi-step transitions with external effects, where a claim
 is what makes promotion to an external system (Todoist and its kin)
 exactly-once — merge can reconcile a store, it cannot un-send an effect. This is also where the humans-and-agents unification
@@ -434,10 +457,19 @@ what lets Martin later choose which logs are shared with whom and with which
 device. Syncing the journal is therefore optional per container, and
 **cross-device undo must not be precluded** by anything decided here.
 
-**Undo of occurrence *k* fires a derived inverse transition** built from *k*'s
-declared marking delta. It is enabled **only while that inverse delta still
-is** — undoing a creation requires the created token to still be there. When it
-is not, the refusal is **loud**; undo never approximates.
+**Occurrence ids are carried per delta** (per field write), not per entity
+row: a delta of *k* names *k*'s occurrence id, so a field written by several
+firings still names each writer (NET-mark.a, §9.3).
+
+**Undo of occurrence *k* is a manual transition that declares `undoes`**, built
+from *k*'s declared marking delta. It finds the firing through the occurrence id
+its delta carries. It is enabled **only while that inverse delta still is** —
+undoing a creation requires the created token to still be there. When it is
+not, the refusal is **loud**: a stale undo is an error to the caller, never a
+panic or a silent no-op; undo never approximates. Firing it sets an **undo
+mark** (§9.3) so the automation that produced *k* does not redo it. The loader
+refuses an `auto` transition that also declares `undoes`. Undoing a claim adds
+a `retract` entry to the claims set (§5), because that set only grows.
 
 **External-effect transitions have no derived inverse.** No marking delta
 un-sends a message. Such a transition offers either an **authored
@@ -449,8 +481,8 @@ write set touches an external place is non-undoable *by inspection*, before it
 ever fires.
 
 **Undo stays meta-level.** Derived inverses never join the user-facing
-transition alphabet — they are not rules a user can bind, name, or trigger
-directly.
+transition alphabet — they are not rules a user can bind or name; the undo
+command fires them.
 
 The existing undo engine (`crates/holon-core/src/undo.rs`) remains the
 mechanism, re-founded on declared deltas rather than on field fingerprints
@@ -481,11 +513,239 @@ compiler-checked rather than documentary. A wholesale rename
 (`OperationDescriptor` → `Transition` and its family) is revisited only after
 the projection exists and the two vocabularies have been lived with.
 
+### 9. Net semantics: runs, firings, marks, classes, watched sources
+
+Revisions 1 and 1.1 of the net (#171). Every rule here is a **net
+construction** or a rule of the record step; the executor implements no
+special case for producer order, run state, failure or undo. Worked examples
+and the experiment evidence are in the design note
+`plans/PlacesTransitionsExpressions.md` (holon-work).
+
+#### 9.1 Producers and runs (NET-run.a, NET-cand.a)
+
+**NET-run.a.**
+
+- **Producers share a verb form.** Producers of one place produce the same
+  kind of token, so they share one verb form (`MakeTursoReady`,
+  `MakeLoroReady` for `Storage`). Inner steps keep their own verbs
+  (`OpenTurso`, `Recover`).
+- **Every producer is a workflow net with ports** (a subnet when it is a
+  chain). Producers of one place are **ordered**. Producer *k* is enabled when
+  the earlier producers' last run failed or timed out and no retry is pending.
+  The failure cause is the derived "why not" of the output port. Inner
+  evidence survives a failed run; outer writes go only through declared fusion
+  places.
+- **One timer per run** (inner ≤ enclosing). A pending backoff counts as
+  running. An abandon timer orphans a hung attempt. Timers are process-class,
+  monotonic, and carry a count bound beside the time bound.
+- **Run state is a complement place pair per output**: `<Out>.Open` (one token
+  while the run is unsettled) and `<Out>.Settled`. Every producer of `<Out>`
+  has a read (test) arc on `<Out>.Open`. The firing that fills the output port
+  consumes `<Out>.Open` and produces `<Out>.Settled`.
+- **A new run is a transition `Settled → Open`** (manual Reopen, an accepted
+  upgrade, a declared input change). So "a new run starts only by a declared
+  trigger" is structural.
+- **Not an inhibitor arc on `<Out>`.** Settled is a property of the run, not of
+  the current marking. Once a consumer takes the `<Out>` token, an inhibitor
+  would re-enable the earlier producer with no trigger. Inhibitors also leave
+  plain P/T analysis.
+- **Late results need no special case.** A slow producer read `<Out>.Open` at
+  its enabledness check. That token is gone by its record, so its inputs are
+  stale, and the stale-record rule (9.2) sends its output to the candidate
+  place.
+- **Run-state places are process or device class**, never data class. A
+  data-class place with alternative producers follows NET-alt-class.a (9.4),
+  not producer order.
+- **Order is a net construction too**: producer *k* takes an input from the
+  failure/timeout port of producer *k−1* and a "no retry pending" place. The
+  why-not chain follows from the marking.
+- **Example.** `MakeTursoReady` fails: the failure mark is
+  `(Storage, h)` for `MakeTursoReady`, where `h` is the hash of its read trace
+  (§9.3). `MakeLoroReady` has no mark and is unaffected.
+
+**NET-cand.a.** A **candidate** place holds a late or upgrading result. A
+candidate carries its **base**, its **output** and the **read trace** of its
+inputs. The **apply transition** is declared per place. The default for value
+places is a **3-way merge** (base, current, candidate), with conflicts as
+conflict places (CONFLICT-places.a). A **storage switch** is a projection
+catch-up (STORE-cap.a), not a value merge. An apply with conflicts is offered,
+never automatic.
+
+#### 9.2 Pure and effectful firings (NET-fire.a, REV11-running.a, NET-manual.a)
+
+**NET-fire.a.**
+
+- **Pure** means a transition reads and writes only net places. Anything that
+  touches the file system, the network, the OS or a remote is **effectful**
+  (for example `Recover`, or acquiring the writer lock).
+- A transition decides only on its bound tokens. It never reads outside its
+  binding during the firing.
+- **Pure firings stage and commit once.** On data places the record IS the Loro
+  commit; there is no rollback vocabulary on Loro. A record over several
+  consumed tokens is atomic (REV11-binding.b).
+- **Effectful firings run lease → effect (with an occurrence id) → record.**
+  The **receiver kind** is declared:
+  - `Keyed`: the receiver dedups by occurrence id, so an unknown outcome
+    auto-retries.
+  - `StateProbe`: the transition checks that the goal holds, so an unknown
+    outcome auto-verifies. It records "goal holds", not "I did it".
+  - `None`: an unknown outcome parks the token in `OutcomeUnknown`, a dead
+    letter that is disclosed. The user resolves it with Verify, Retry or Drop.
+- A **definite failure** returns the input to its place. **Verify** takes a
+  result, or the transition declares outputs derived from its inputs.
+- **A record never clobbers.** It has two parts. **Facts** about the outside
+  world (what the file now holds = the persisted base; the occurrence is done)
+  commit unconditionally. **Writes to authority rows** are a compare-and-set
+  against the rows in the firing's read trace. On a mismatch a pure step rolls
+  back and re-fires against the new rows. An effectful step's row outputs
+  follow the stale-record rule.
+- **An effect's record is never refused.** Stale inputs at record: on a place
+  that declares an apply transition, the outputs become a candidate
+  (NET-cand.a). On data class, the outputs commit (Loro merges) and a condition
+  "applied over changed inputs" is disclosed. Elsewhere the record is a
+  disclosed definite failure: the input returns and the failure mark is set.
+
+**REV11-running.a.** A take moves the token into `<T>.Running`, a place whose
+class is the input's class, at most device. The move changes no content and no
+version. Consequences:
+
+- Guards see the token's absence honestly; why-not says "in Running of T".
+- Crash recovery reads tokens in `<T>.Running` with no live attempt. They become
+  Unknown, and the receiver kind decides.
+- A rollback moves the token back, again without a version change. A version
+  changes only when a record commits changed content.
+- **Inhibitor and read arcs read the marking like every other arc.** A token in
+  `<B>.Running` is not in `B`. A transition that `B` inhibits may therefore
+  fire while another firing holds `B`'s token, and a later rollback does not
+  undo that firing. A modeller who means "no X, in flight included" adds an
+  inhibitor arc on `<B>.Running` too: a net construction, not an engine rule.
+
+**NET-manual.a.** Manual transitions over MCP take a caller-supplied occurrence
+id. A manual fire answers `ACCEPTED(occurrence id)` at bind, never a bare
+`Ok(())`. The caller can await the outcome `Done | Failed(cause) |
+OutcomeUnknown` by that id. A definite failure of a manual effect also raises a
+disclosed condition on the entity (for example "rewrite not done: a.org changed
+since it was read"), cleared by the next success. `OutcomeUnknown` and failure
+conditions aggregate per transition, so a full disk or a dead remote shows one
+condition per transition, not one per attempt. Every condition text is derived
+from the marking, so it is never stale.
+
+#### 9.3 Retry, failure and undo marks (NET-mark.a)
+
+**NET-mark.a.**
+
+- **An attempt re-fires only on a committed input change or a declared retry
+  timer.**
+- **The binding and the guard's read trace are captured once**, at the
+  enabledness check that decided to fire. A guard is never replayed at a later
+  marking. A derived place is transparent in the read trace: the content of its
+  source tokens is captured (a derived place has no identity or version).
+- **One mark kind**, keyed by (subject, content hash of the captured read
+  trace), at most one per (transition, subject). Every transition has exactly
+  one subject (ARC-subjects.a); for a producer of a singleton place the subject
+  is that place. Two producers of one place therefore never share or clobber a
+  mark:
+  - Reason `Failed`: process class. Cleared by a content change in the read
+    trace or by a declared retry timer.
+  - Reason `Undone`: data class, so it syncs. Set only by a manual `undoes`
+    transition (the loader refuses auto + `undoes`). Addressed by the occurrence
+    id that the undone delta carries. A stale undo is an error to the caller.
+    Undo of a claim adds a retract entry; `owner` ignores retracted claims.
+- **Static check at net derivation**: a transition's write-set closure must not
+  feed its own read-set, unless the transition declares a fixpoint measure. Run
+  triggers and retry inputs are declared places.
+
+#### 9.4 Token classes and stores (NET-class.a, REV11-consume.a, REV11-devstore.a, NET-alt-class.a)
+
+**NET-class.a.**
+
+- **Classes** are process ⊂ device ⊂ data. Process class lives in one process
+  only. Device class survives a restart and stays on this device. Data class is
+  synced by a CRDT, which merges and never refuses a write.
+- **One class per delta.** Local reads only in guards.
+- **Process and device consumption** is a compare-and-set at the record. A lost
+  race is a disclosed, normal outcome, never an assertion under a lock.
+- **Data consumption** adds a claim entry (§5, REV11-consume.a, REV11-binding.b).
+- **Parked tokens** carry a schema version and a stable transition id. Unknown
+  shapes load as a disclosed condition with Drop.
+- **Derived places are evaluated in process**, never only as Turso matviews.
+
+**REV11-devstore.a.** Device-class tokens live in a device-local, never-synced
+Loro document, written only under the vault writer lock. This is modelled as
+places: `AcquireWriterLock` (effectful, retry timer) → `WriterLock` token →
+`OpenDeviceStore` → `Store<Device>` token. Without a `Store<Device>` token
+device class is unavailable, disclosed from the empty place.
+
+**NET-alt-class.a.** A place whose content is recomputed per device (a view, a
+ranking, a cache) and whose alternatives, chosen by a local fact, can give
+different values is device class. Equivalent alternatives may stay data. A
+recorded result (an agent's web research, a summary the user keeps) is data:
+produced once under a lease with an occurrence id, replicated, never recomputed
+on other devices.
+
+#### 9.5 Watched sources (NET-watch.a, REV11-lockless.a, REV11-xfile.a, ARC-subjects.a)
+
+**NET-watch.a.**
+
+- **`Behind` is derived.** For a projection it is computed from the
+  projection's persisted base against the current state, and the record of a
+  write updates the base. An echo then ingests as theirs == base (no delta). A
+  watcher event that arrives before the record merges as ours == theirs (no
+  change). No echo rule exists.
+- **The watcher is a lossy hint.** Correctness never depends on one event. Its
+  feed emits only a contentless `DiskChanged`. Other sources of `DiskChanged`:
+  every write the content compare-and-set rejects (it proves the disk moved),
+  boot, and a slow stat sweep (mtime + size).
+- **`ReadDisk` reads the file once** and puts `OnDisk{hash, text}`. A read with
+  an unchanged hash changes nothing. The hash is a stable content hash, the one
+  the merge-base row stores.
+- **Whole-content removal is refused.** An ingest whose merge would remove ALL
+  content of a file (the file ingests to zero blocks, whitespace-only included)
+  never auto-applies. The file token goes to `Refused`, disclosed. This covers
+  truncate-then-write editors and accidental deletes. `Refused.seen` is the hash
+  of the bound `OnDisk` text the decision was made on.
+- **`Refused` is a sink.** It is left only by different file content
+  (`OnDisk.hash != Refused.seen`, then Resume), by manual `AcceptRemoval`, or by
+  manual `RewriteFromStore`. `CatchUp` is not enabled from it.
+  - `AcceptRemoval` accepts what the file says: the base merge with the removal
+    applied. Blocks the file never held stay.
+  - `RewriteFromStore` is a file write like any other: it advances the
+    persisted base.
+  - A row edit in Holon after the refusal is newer intent than the file's
+    emptiness. The store content goes back to the file through the
+    compare-and-set write, and a failed `AcceptRemoval` is disclosed.
+- **The store holds every block the user can make**, empty and whitespace-only
+  blocks included. A file format either represents a block, or its write-back
+  omits it with a disclosed per-block condition (for example "not in a.cook: an
+  empty step cannot be written"). The base merge keeps an omitted block (base
+  and file both lack it), so an omission never comes back as a deletion.
+- **`Writing` is a place.** Crash recovery: a token in `Writing` with no live
+  attempt becomes Unknown, and a `StateProbe` checks "file content hash ==
+  intended".
+
+**REV11-lockless.a.** A process without the vault writer lock is read-only for
+stored state: no ingest, no write-back, no bases, no device tokens. It is
+disclosed as "read-only: another Holon process holds the vault".
+
+**REV11-xfile.a.** Org ingest is batched per watcher burst (one transaction). An
+id that leaves one file and appears in another within a batch is a move. An id
+in two files outside a batch is a conflict place.
+
+**ARC-subjects.a.** One subject per transition. Sort keys are minted at the
+ingest boundary. A remaining key collision is a derived place
+`NeedsRekey(parent)` with its own `Rekey` transition. Multi-block operations
+(`delete_keep_children`, `delete_subtree`, `restore_split`) are subnets of
+single-subject transitions, staged and committed once, and undone as one unit.
+
+**Out of scope:** a data-class token type change across a mixed-version fleet
+(a CRDT schema migration).
+
 ## Deferred — open, not decided
 
-1. **Full-mode claim protocol.** Details wait on measuring whether the Turso
-   fork's SELECT-then-INSERT is serializable under concurrent claimers.
-   Measurement first.
+1. **Full-mode claim protocol.** The data-class half is ruled (REV11-consume.a,
+   §5). What still waits is the SqlOnly / Turso-side half: measuring whether
+   the Turso fork's SELECT-then-INSERT is serializable under concurrent
+   claimers. Measurement first.
 2. **Journal sync and privacy semantics** — which containers' occurrence
    journals travel to which devices and people.
 3. **Compensation authoring UX** — how a user or rule author writes the
@@ -506,6 +766,17 @@ the projection exists and the two vocabularies have been lived with.
    changes are modelled as transitions, what their marking deltas are over the
    places they introduce and retire, and how their housekeeping on the delta is
    declared rather than hard-coded. Foreseen, not designed.
+
+8. **The general cross-process feed.** In the process that loses a race for a
+   process or device token, the winner's output is not in the loser's local
+   marking. Options: (a) a declared feed place that carries the winner's
+   record to the other process; (b) the loser reads the shared store after a
+   lost compare-and-set and builds its marking from it; (c) accept the
+   disclosed "lost race" as the whole answer. Not ruled.
+9. **A document whose blocks are all unwritable by its format** survives an
+   emptied file plus `AcceptRemoval` (§9.5). Options: (a) accept as ruled — each
+   block carries its own `NotWritten` condition; (b) add a document-level
+   condition "this file cannot hold any of its blocks". Not ruled.
 
 ## Consequences
 
