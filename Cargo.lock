@@ -6051,12 +6051,14 @@ dependencies = [
 name = "holon-net"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "holon-api",
  "holon-core",
  "holon-net-layout",
  "holon-pattern",
  "holon-rules",
  "proptest 1.11.0",
+ "proptest-state-machine",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

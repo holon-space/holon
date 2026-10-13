@@ -3134,6 +3134,7 @@ dependencies = [
 name = "holon-net"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "holon-api",
  "holon-net-layout",
  "holon-pattern",

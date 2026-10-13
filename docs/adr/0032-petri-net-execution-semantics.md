@@ -591,19 +591,25 @@ never automatic.
     outcome auto-verifies. It records "goal holds", not "I did it".
   - `None`: an unknown outcome parks the token in `OutcomeUnknown`, a dead
     letter that is disclosed. The user resolves it with Verify, Retry or Drop.
-- A **definite failure** returns the input to its place. **Verify** takes a
+- An occurrence's outcome derives from all its attempts. It is Done when any
+  attempt is Done, and Failed only when every attempt is definitely Failed.
+  Else it stays parked. A late result closes only its own attempt.
+- A **definite failure** of the occurrence returns the input to its place. **Verify** takes a
   result, or the transition declares outputs derived from its inputs.
 - **A record never clobbers.** It has two parts. **Facts** about the outside
   world (what the file now holds = the persisted base; the occurrence is done)
   commit unconditionally. **Writes to authority rows** are a compare-and-set
-  against the rows in the firing's read trace. On a mismatch a pure step rolls
+  of each (place, subject) version in the firing's read trace. On a mismatch a pure step rolls
   back and re-fires against the new rows. An effectful step's row outputs
   follow the stale-record rule.
 - **An effect's record is never refused.** Stale inputs at record: on a place
   that declares an apply transition, the outputs become a candidate
   (NET-cand.a). On data class, the outputs commit (Loro merges) and a condition
-  "applied over changed inputs" is disclosed. Elsewhere the record is a
-  disclosed definite failure: the input returns and the failure mark is set.
+  "applied over changed inputs" is disclosed. Elsewhere the outputs are
+  withheld and the condition "done over changed inputs" is disclosed. An
+  effect that happened is a fact, so its occurrence and its input consumption
+  commit even over stale inputs; only an effect that did not happen (a
+  definite failure) returns the input and sets the failure mark.
 
 **REV11-running.a.** A take moves the token into `<T>.Running`, a place whose
 class is the input's class, at most device. The move changes no content and no
@@ -621,7 +627,8 @@ version. Consequences:
   inhibitor arc on `<B>.Running` too: a net construction, not an engine rule.
 
 **NET-manual.a.** Manual transitions over MCP take a caller-supplied occurrence
-id. A manual fire answers `ACCEPTED(occurrence id)` at bind, never a bare
+id. Caller-supplied and executor-minted ids are disjoint by type, so they never
+collide; a duplicate caller id is an error to the caller. A manual fire answers `ACCEPTED(occurrence id)` at bind, never a bare
 `Ok(())`. The caller can await the outcome `Done | Failed(cause) |
 OutcomeUnknown` by that id. A definite failure of a manual effect also raises a
 disclosed condition on the entity (for example "rewrite not done: a.org changed
@@ -647,6 +654,8 @@ from the marking, so it is never stale.
   mark:
   - Reason `Failed`: process class. Cleared by a content change in the read
     trace or by a declared retry timer.
+  - The mark is lazy: it blocks while the current read trace hashes (blake3) to
+    its key, so an edit A→B→A with no firing on B blocks again.
   - Reason `Undone`: data class, so it syncs. Set only by a manual `undoes`
     transition (the loader refuses auto + `undoes`). Addressed by the occurrence
     id that the undone delta carries. A stale undo is an error to the caller.

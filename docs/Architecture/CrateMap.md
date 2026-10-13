@@ -34,7 +34,7 @@ Library + binary crates under `crates/` (C4 components of the Holon system).
 | `holon-markdown` | component | Adapters | Adapter | `holon-markdown` — read-only (Tier R/O) ingest adapters for foreign vaults: Obsidian-flavored and LogSeq-flavored Markdown, parsed into the SAME `Block` + `MarkSpan` substrate as org (see `docs/Proposals/ForeignVaultCompat-2026-07-12.md`). |
 | `holon-mcp-client` | component | Adapters | Adapter | Reusable MCP client: connects to MCP servers and exposes their tools as `OperationProvider`s. |
 | `holon-mcp-mock` | component | Testing | Test Harness | A configurable mock MCP server that reproduces the challenging behaviours seen in real MCP servers, for E2E-testing holon's generic MCP connector. |
-| `holon-net` | — | — | — | The derived Petri-net projection (ADR 0032 §2): rule blocks and operation descriptors compiled into one read-only net, plus the conflict and cycle analyses that run over it. |
+| `holon-net` | — | — | — | The derived Petri-net projection (ADR 0032 §2): rule blocks and operation descriptors compiled into one read-only net, plus the conflict and cycle analyses that run over it. These projection modules stay pure. The one stateful module, `exec`, is the sans-IO executor of runtime nets (ADR 0032 §9): an owned process-class marking, Running places, record compare-and-set, failure marks and timers. |
 | `holon-oracles` | component | Core | Monitor | Live oracles — keystone PBT invariants shipped into debug builds. |
 | `holon-org-format` | component | Adapters | Adapter | Org-mode format: pure parsing and rendering. |
 | `holon-orgmode` | component | Adapters | Adapter | Org-mode disk I/O and sync layer. |

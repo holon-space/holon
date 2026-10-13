@@ -7242,7 +7242,7 @@
         "description": "The derived Petri-net projection (ADR 0032 §2): rule blocks and operation descriptors compiled into one read-only net, plus the conflict and cycle analyses that run over it.",
         "pattern": "Projection",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Engine\nPattern: Projection\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-net-layout \"viewer geometry & wire contract\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n\nThe derived Petri-net projection (ADR 0032 §2): rule blocks and operation\ndescriptors compiled into one read-only net, plus the conflict and cycle\nanalyses that run over it.\n\nEverything here is a pure function of its sources, which is what makes the\nnet a derived artifact and never a second authority (ADR 0032 §2, ADR 0024\nP1a). It carries no state beyond the current derivation, so it cannot go\nstale whether a caller pulls it on demand or holds it as a reactive var\nrecomputed on source change — this crate stays pure under either delivery.\n\nPetri-net vocabulary — transition, place, arc, marking — lives in this\ncrate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one\nplace the two vocabularies meet (ADR 0032 §8).",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Projection\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-net-layout \"viewer geometry & wire contract\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n\nThe derived Petri-net projection (ADR 0032 §2): rule blocks and operation\ndescriptors compiled into one read-only net, plus the conflict and cycle\nanalyses that run over it.\n\nThe projection modules are pure functions of their sources, which is what\nmakes the net a derived artifact and never a second authority (ADR 0032 §2,\nADR 0024 P1a). They carry no state beyond the current derivation, so they\ncannot go stale whether a caller pulls them on demand or holds them as a\nreactive var recomputed on source change.\n\n[`exec`] is the one module with runtime state: the executor of runtime nets\n(ADR 0032 §9), which owns a marking of process-class tokens.\n\nPetri-net vocabulary — transition, place, arc, marking — lives in this\ncrate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one\nplace the two vocabularies meet (ADR 0032 §8).",
         "source_file": "holon-net/src/lib.rs",
         "layer": "Engine",
         "relationships": [
@@ -7294,6 +7294,9 @@
                 "name": "enabledness.rs"
               },
               {
+                "name": "exec.rs"
+              },
+              {
                 "name": "guards.rs"
               },
               {
@@ -7313,6 +7316,23 @@
           {
             "name": "tests",
             "path": "holon-net/tests",
+            "dirs": [
+              {
+                "name": "exec_support",
+                "path": "holon-net/tests/exec_support",
+                "c4_level": "unknown",
+                "description": "Shared driver of the executor PBTs: it plays the effect runner and the clock, and picks the naive twin named by `HOLON_NET_TWIN`.",
+                "pattern_status": "planned",
+                "content": "Shared driver of the executor PBTs: it plays the effect runner and the\nclock, and picks the naive twin named by `HOLON_NET_TWIN`.",
+                "source_file": "holon-net/tests/exec_support/mod.rs",
+                "parent": "holon-net",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "analysis_pbt.rs"
@@ -7328,6 +7348,24 @@
               },
               {
                 "name": "enabledness.rs"
+              },
+              {
+                "name": "exec_cas.rs"
+              },
+              {
+                "name": "exec_marks.rs"
+              },
+              {
+                "name": "exec_order.rs"
+              },
+              {
+                "name": "exec_receivers.rs"
+              },
+              {
+                "name": "exec_timers.rs"
+              },
+              {
+                "name": "exec_unknown.rs"
               },
               {
                 "name": "guard_classifier_pbt.rs"

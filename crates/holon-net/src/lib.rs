@@ -10,11 +10,14 @@
 //! descriptors compiled into one read-only net, plus the conflict and cycle
 //! analyses that run over it.
 //!
-//! Everything here is a pure function of its sources, which is what makes the
-//! net a derived artifact and never a second authority (ADR 0032 §2, ADR 0024
-//! P1a). It carries no state beyond the current derivation, so it cannot go
-//! stale whether a caller pulls it on demand or holds it as a reactive var
-//! recomputed on source change — this crate stays pure under either delivery.
+//! The projection modules are pure functions of their sources, which is what
+//! makes the net a derived artifact and never a second authority (ADR 0032 §2,
+//! ADR 0024 P1a). They carry no state beyond the current derivation, so they
+//! cannot go stale whether a caller pulls them on demand or holds them as a
+//! reactive var recomputed on source change.
+//!
+//! [`exec`] is the one module with runtime state: the executor of runtime nets
+//! (ADR 0032 §9), which owns a marking of process-class tokens.
 //!
 //! Petri-net vocabulary — transition, place, arc, marking — lives in this
 //! crate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one
@@ -24,6 +27,7 @@ pub mod analysis;
 pub mod bridge;
 pub mod compile;
 pub mod enabledness;
+pub mod exec;
 pub mod guards;
 pub mod marking;
 pub mod net;

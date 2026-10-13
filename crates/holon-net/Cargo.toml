@@ -11,6 +11,7 @@ publish = false
 ignored = ["workspace-hack"]
 
 [dependencies]
+blake3.workspace = true
 holon-api.workspace = true
 holon-net-layout.workspace = true
 holon-pattern.workspace = true
@@ -22,4 +23,9 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 [dev-dependencies]
 holon-core.workspace = true
 proptest.workspace = true
+proptest-state-machine.workspace = true
 serde_json.workspace = true
+
+[features]
+# Each twin breaks one executor rule, so a property test shows red for that rule.
+naive-twins = []
