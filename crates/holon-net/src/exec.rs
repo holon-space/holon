@@ -1047,6 +1047,8 @@ pub enum Twin {
     UndoRestoresAnswered,
     /// `settled(answer)` is the outcome of the `Answer` firing itself.
     SettledFromAnswer,
+    /// An external call returns without firing the auto transitions it enabled.
+    NoQuiescence,
 }
 
 /// What is known about one effect attempt of an occurrence.
@@ -1535,6 +1537,9 @@ impl Executor {
     /// Fires every enabled auto transition until none is enabled, and takes
     /// the effect requests; `Err` holds the rounds run. It fires no timer.
     fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
+        if self.twin(Twin::NoQuiescence) {
+            return Ok(std::mem::take(&mut self.requests));
+        }
         for _ in 0..MAX_ROUNDS {
             let mut started = Vec::new();
             for i in 0..self.net.transitions.len() {

@@ -3,7 +3,8 @@
 //!
 //! Twins (`--features naive-twins`, `UFT_LOWER_TWIN=<name>`), each drops one
 //! lowering rule: `no-ask-hash`, `no-answer-inhibitor`, `no-expire`,
-//! `ask-while-answered`, `ask-while-in-flight`, `ask-during-failure`.
+//! `ask-while-in-flight`, `ask-while-retry-pending`; `no-quiescence` drops
+//! the executor's quiesce.
 
 mod uft_lower_support;
 
@@ -189,9 +190,8 @@ fn lowered(d: &TransitionDescriptor) -> NetDef {
         Some("no-ask-hash") => LowerTwin::NoAskHash,
         Some("no-answer-inhibitor") => LowerTwin::NoAnswerInhibitor,
         Some("no-expire") => LowerTwin::NoExpire,
-        Some("ask-while-answered") => LowerTwin::AskWhileAnswered,
         Some("ask-while-in-flight") => LowerTwin::AskWhileInFlight,
-        Some("ask-during-failure") => LowerTwin::AskDuringFailure,
+        Some("no-quiescence") => return lower(base_net(), d, Some(parts())).expect("lowers"),
         Some("ask-while-retry-pending") => LowerTwin::AskWhileRetryPending,
         Some(other) => panic!("UFT_LOWER_TWIN={other} names no twin"),
     };
@@ -205,6 +205,17 @@ fn lowered(d: &TransitionDescriptor) -> NetDef {
         "UFT_LOWER_TWIN needs --features naive-twins"
     );
     lower(base_net(), d, Some(parts())).expect("lowers")
+}
+
+/// The executor of the net lowered from `d`; `UFT_LOWER_TWIN=no-quiescence`
+/// selects the executor twin that returns without quiescing.
+fn executor(d: &TransitionDescriptor) -> Executor {
+    let exec = Executor::new(lowered(d)).expect("the lowered net loads");
+    #[cfg(feature = "naive-twins")]
+    if std::env::var("UFT_LOWER_TWIN").as_deref() == Ok("no-quiescence") {
+        return exec.with_twin(holon_net::exec::Twin::NoQuiescence);
+    }
+    exec
 }
 
 // --------------------------------------------------------------- the SUT
@@ -241,7 +252,7 @@ impl StateMachineTest for Test {
     type Reference = Ref;
 
     fn init_test(m: &Model) -> Sut {
-        let mut exec = Executor::new(lowered(&pbt_descriptor(m))).expect("the lowered net loads");
+        let mut exec = executor(&pbt_descriptor(m));
         for s in SUBJECTS {
             for (place, content) in [
                 ("Refused", Content::from([("why".to_owned(), text("0"))])),
@@ -273,6 +284,7 @@ impl StateMachineTest for Test {
         let mut mid = pre.clone();
         mid.apply_op(&op);
         let tick = pre.next;
+        let op_text = format!("{op:?}");
         let quiesced =
             |q: Result<Quiesced<()>, ExecError>| q.expect("the lowered net quiesces").requests;
         let requests = match op {
@@ -346,10 +358,24 @@ impl StateMachineTest for Test {
                 requests
             }
         };
+        no_answered_or_work_failed_stands(&sut, &op_text);
         started(&mut sut, &mid, m, requests);
         compare(&mut sut, m);
         sut.model = m.clone();
         sut
+    }
+}
+
+/// At quiescence the work or the expiry has taken every `Answered`, and
+/// `ReleaseFailed` or `ClearFailed` every `WorkFailed`.
+fn no_answered_or_work_failed_stands(sut: &Sut, op: &str) {
+    for s in SUBJECTS {
+        for place in [answered_place(T).to_string(), Generated::WorkFailed.name(T)] {
+            assert!(
+                !present(sut, &place, s),
+                "P-quiescent: {place} stands on {s} after {op}"
+            );
+        }
     }
 }
 
@@ -580,7 +606,7 @@ prop_state_machine! {
 
 #[test]
 fn ask_row_carries_the_declared_input_type() {
-    let mut exec = Executor::new(lowered(&descriptor())).expect("loads");
+    let mut exec = executor(&descriptor());
     assert!(situation(&mut exec).is_empty(), "no answer, so no work");
     let rows = exec.asks();
     assert_eq!(rows.len(), 1, "{rows:?}");
@@ -714,7 +740,7 @@ fn answer_as(exec: &mut Executor, id: &str, seen: &str) -> Vec<EffectRequest> {
 
 /// Subject `a` asked for `AcceptRemoval` lowered from `d`.
 fn asking(d: &TransitionDescriptor) -> Executor {
-    let mut exec = Executor::new(lowered(d)).expect("loads");
+    let mut exec = executor(d);
     assert!(situation(&mut exec).is_empty(), "no answer, so no work");
     exec
 }

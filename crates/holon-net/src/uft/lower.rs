@@ -125,12 +125,8 @@ pub enum LowerTwin {
     NoAnswerInhibitor,
     /// No `ExpireAnswer`.
     NoExpire,
-    /// `Asks` offers the ask while an `Answered` is pending.
-    AskWhileAnswered,
     /// `Asks` offers the ask while the work is in flight.
     AskWhileInFlight,
-    /// `Asks` offers the ask while `WorkFailed` holds the subject.
-    AskDuringFailure,
     /// `Asks` offers the ask while a retry backoff is pending.
     AskWhileRetryPending,
 }
@@ -248,19 +244,21 @@ fn lower_as(
     // and `Answer` is inhibited by exactly these, so an offered ask always
     // has an enabled `Answer` (D151.a).
     let busy = [
-        (answered.clone(), LowerTwin::AskWhileAnswered),
-        (running.to_string(), LowerTwin::AskWhileInFlight),
+        // No twin: no `Answered` stands at quiescence (P-quiescent).
+        (answered.clone(), None),
+        (running.to_string(), Some(LowerTwin::AskWhileInFlight)),
         (
             Place::retry_pending(t).to_string(),
-            LowerTwin::AskWhileRetryPending,
+            Some(LowerTwin::AskWhileRetryPending),
         ),
-        (failed.clone(), LowerTwin::AskDuringFailure),
+        // No twin: no `WorkFailed` stands at quiescence (P-quiescent).
+        (failed.clone(), None),
     ];
     let derive: BindFn = {
         let (sit, preview) = (situation.clone(), parts.preview.clone());
         let busy: Vec<String> = busy
             .iter()
-            .filter(|(_, skip)| twin != Some(*skip))
+            .filter(|(_, skip)| skip.is_none() || twin != *skip)
             .map(|(p, _)| p.clone())
             .collect();
         Arc::new(move |r: &mut Reader<'_>, s: &Subject| {
