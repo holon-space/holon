@@ -94,7 +94,14 @@ pub fn broken_shape(
     // id, so a step anywhere shifts the sequence VALUES of every subtree. Only
     // sibling ORDER reaches the decision adapter, so the comparison normalizes
     // the values away — otherwise an unrelated step is read as a change to a
-    // decision prod's gate never even looks at.
+    // decision prod's gate never even looks at. Timestamps are cleared for the
+    // same reason, and because `set_sequence` stamps the wall clock.
+    let normalized = |mut b: holon_api::block::Block, rank: usize| {
+        b.set_sequence(rank as i64);
+        b.created_at = 0;
+        b.updated_at = 0;
+        b
+    };
     let subtree = |state: &crate::pbt::block_state::BlockState, root: &holon_api::EntityUri| {
         let mut children: Vec<holon_api::block::Block> = state
             .blocks
@@ -103,13 +110,12 @@ pub fn broken_shape(
             .cloned()
             .collect();
         children.sort_by_key(|b| (b.sequence(), b.id.clone()));
-        for (rank, child) in children.iter_mut().enumerate() {
-            child.set_sequence(rank as i64);
-        }
-        let decision = state.blocks.get(root).cloned().map(|mut d| {
-            d.set_sequence(0);
-            d
-        });
+        let children: Vec<holon_api::block::Block> = children
+            .into_iter()
+            .enumerate()
+            .map(|(rank, child)| normalized(child, rank))
+            .collect();
+        let decision = state.blocks.get(root).cloned().map(|d| normalized(d, 0));
         (decision, children)
     };
     after
