@@ -1019,13 +1019,13 @@ components:
   requires_sut_caps:
   - SutErrorLog
   slips-if-removed:
-  - a DDL/sync race that logs a publish error during initial document sync ships silent data-loss on boot;
-    the UI may look fine while a document failed to sync and nothing else asserts on it
+  - any op dispatch failure during the run ships silently; the UI may look fine while a write never landed
+    and nothing else asserts on it
   oracle:
   - internal-consistency
   covers:
-  - app-error-log-empty — no Flutter/event publish error logged since startup (the app-level counter,
-    distinct from widget-tree errors)
+  - app-error-log-empty — nothing recorded on the session's publish-error tracker since boot (the app-level
+    counter, distinct from widget-tree errors)
 - file: crates/holon-integration-tests/src/pbt/invariants/bodies/no_orphan_blocks.rs
   kind: invariant
   invariant_ids:

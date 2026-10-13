@@ -6126,9 +6126,8 @@ impl holon_pbt_core::capabilities::SutFixtureFs for HeadlessFrontendComponent {
 
 #[async_trait::async_trait(?Send)]
 impl SutErrorLog for HeadlessFrontendComponent {
-    /// Flutter/event publish errors logged during the initial document sync —
-    /// the SAME production `FrontendSession` publish-error tracker `E2ESut`
-    /// read.
+    /// Failed op dispatches on the SAME production `FrontendSession`
+    /// publish-error tracker `E2ESut` read.
     async fn app_error_count(&self) -> usize {
         self.session().app_error_count()
     }

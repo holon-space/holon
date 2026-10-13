@@ -6,8 +6,8 @@ use std::sync::atomic::Ordering;
 
 /// Tracks publish errors from event adapters.
 ///
-/// Every `record_error` call site is a mid-run op failure, so a non-zero count
-/// never indicates a boot-time race.
+/// Every `record_error` call site is a failed op dispatch, so a non-zero count
+/// names an operation that did not land — never a scraped log line.
 ///
 /// Register this in DI and share it across adapters to track errors
 /// without relying on log scraping.

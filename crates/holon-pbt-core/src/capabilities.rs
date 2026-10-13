@@ -1525,10 +1525,10 @@ pub trait SutLoro {
 /// App-runtime error log — the SUT's general "did anything error during the
 /// run" surface, distinct from the component-specific error checks (the Loro
 /// log in [`SutLoroLog`], the ViewModel/frontend error widgets in
-/// [`SutViewSelection`]/[`SutLayout`]). Today this is the Flutter/event publish
-/// errors logged during the initial document sync; `inv-no-errors` asserts the
-/// count is zero. This is the home for any future non-component-specific error
-/// source.
+/// [`SutViewSelection`]/[`SutLayout`]). Today this is the session's
+/// publish-error tracker, which counts failed op dispatches; `inv-no-errors`
+/// asserts the count is zero. This is the home for any future
+/// non-component-specific error source.
 #[holon_macros::capmap_adapter]
 pub trait SutErrorLog {
     /// Number of app-level error events logged since startup.

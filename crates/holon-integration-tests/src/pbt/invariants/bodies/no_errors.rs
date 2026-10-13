@@ -13,11 +13,12 @@
 //! `inv-viewmodel-no-error-widgets`, `inv-frontend-no-error-widgets`,
 //! `inv-frontend-root-not-error`). Its source is the session's
 //! `PublishErrorTracker` via the [`SutErrorLog`] component cap. Every one of
-//! that tracker's `record_error` call sites is a mid-run op failure
-//! (`disclose_op_failure`, the fire-and-forget op dispatch, the
-//! `preferences.set` persist), so a non-zero count never means boot. The
-//! counter holds no message, so the failing ERROR text comes from
-//! `inv-no-observed-errors`.
+//! that tracker's `record_error` call sites is a FAILED OP DISPATCH
+//! (`disclose_op_failure`, the fire-and-forget rule op, the `preferences.set`
+//! persist) — never a scraped log line — so the count names an operation that
+//! did not land. A rule-originated op can still be in flight while boot runs,
+//! so the count alone does not say mid-run. The counter holds no message, so
+//! the failing ERROR text comes from `inv-no-observed-errors`.
 
 use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::invariant::Invariant;

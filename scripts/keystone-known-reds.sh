@@ -26,8 +26,8 @@
 #           signature at all, or a keystone run's sample is below the floor /
 #           undisclosed. All are regressions to triage, NOT rows to add.
 #           Also a CROSS-FAMILY match: a row's wording fired from a site the
-#           row does not assert from, which is a new failure wearing a known
-#           red's words, never a re-attribution to that row.
+#           row does not list, which is a new failure wearing a known red's
+#           words until a log proves the same root cause is re-raised there.
 # Exit 3  — at least one log admits no verdict: INDETERMINATE (empty, or
 #           truncated before the run said anything) or UNREADABLE (no such
 #           file). Never silently a pass — the input is broken, so nothing can
@@ -55,11 +55,14 @@ fi
 # rows classify. A cell cannot hold a literal `|` (the table separator), so a
 # pattern writes alternation as `&#124;`, decoded here after the split.
 #
-# `site` is the panic location the row's family asserts from, as an ERE over
-# `<file>:<line>:<col>`. `—` means the row is not pinned yet (no evidence log on
-# this machine to measure it from) and is not site-checked. A pinned row whose
-# wording matches a signature from ANOTHER site is a cross-family match: the
-# run fails loudly rather than re-attributing the signature (Martin, 2026-10-13).
+# `site` is an ERE over `<file>:<line>:<col>` listing every MEASURED site that
+# reports the row's root cause — one row per root cause, so the ERE alternates
+# over the asserting site and each harness that re-raises its verdict (the
+# windowed GPUI loop re-reports the composed keystone's verdict at its own
+# site). `—` means the row is not pinned yet (no evidence log on this machine to
+# measure it from) and is not site-checked. A pinned row whose wording matches a
+# signature from ANOTHER site is a cross-family match: the run fails loudly
+# rather than re-attributing the signature (Martin, 2026-10-13).
 keys=()
 patterns=()
 sites=()
@@ -449,7 +452,9 @@ for log in "$@"; do
                 echo "[known-reds] FAIL: cross-family match: ${keys[$hit]} at $loc"
                 echo "             The row's wording matched, but it asserts from"
                 echo "             ${sites[$hit]} — so this signature belongs to another family."
-                echo "             Triage it (bug-gap-triage); do NOT widen the row's site."
+                echo "             Triage it (bug-gap-triage). Add this site to the row ONLY if"
+                echo "             the log shows the SAME root cause re-raised there (an outer"
+                echo "             harness re-reporting the inner verdict); never to silence it."
                 class="cross-family:${keys[$hit]}"
                 cross=$((cross + 1))
             elif [ "$hit" -ge 0 ]; then
@@ -515,9 +520,9 @@ if [ "$no_verdict" -ne 0 ]; then
 fi
 if [ "$cross" -ne 0 ]; then
     echo "[known-reds] FAIL: $cross cross-family match(es) — see above."
-    echo "             A row's wording fired from a site the row does not assert"
-    echo "             from. That is a new failure wearing a known red's words,"
-    echo "             never a re-attribution."
+    echo "             A row's wording fired from a site the row does not list."
+    echo "             That is a new failure wearing a known red's words until a"
+    echo "             log proves the same root cause is re-raised there."
     exit 1
 fi
 if [ "$novel" -ne 0 ]; then
