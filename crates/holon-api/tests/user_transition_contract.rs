@@ -19,8 +19,16 @@ impl InputContext for Cx {
         Ok(Value::String(text.into()))
     }
 
-    fn place_holds(&self, place: &str, subject: &str) -> bool {
-        place == "Project" && subject == "p1"
+    fn place_holds(&self, place: &str, subject: &str) -> Result<bool, NotImplemented> {
+        Ok(place == "Project" && subject == "p1")
+    }
+
+    fn entity_exists(&self, _: &holon_api::EntityName, _: &str) -> Result<bool, NotImplemented> {
+        unreachable!("the contract test asks for no entity id")
+    }
+
+    fn row_key_exists(&self, _: &str) -> Result<bool, NotImplemented> {
+        unreachable!("the contract test asks for no row key")
     }
 }
 

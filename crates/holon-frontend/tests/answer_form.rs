@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+use holon_api::EntityName;
+use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::render_types::TypeHint;
 use holon_api::user_transition::AnswerCall;
@@ -16,6 +18,7 @@ use holon_api::user_transition::AskRow;
 use holon_api::user_transition::ExpireReason;
 use holon_api::user_transition::InputContext;
 use holon_api::user_transition::InputParseError;
+use holon_api::user_transition::NotImplemented;
 use holon_api::user_transition::Offer;
 use holon_api::user_transition::Offered;
 use holon_api::user_transition::PlaceName;
@@ -43,7 +46,12 @@ const EVEN: &str = "Even";
 const INBOX: &str = "Inbox";
 const INBOX_TOKENS: [&str; 2] = ["a.org", "b.org"];
 
-/// Newtype `Even` parses even integers; place `Inbox` holds two subjects.
+const DOC: &str = "doc";
+const DOC_IDS: [&str; 2] = ["d1", "d2"];
+const ROW_KEYS: [&str; 1] = ["r1"];
+
+/// Newtype `Even` parses even integers; place `Inbox` holds two subjects;
+/// entity `doc` has two ids; the provider's table has one row key.
 struct FakeInput;
 
 impl InputContext for FakeInput {
@@ -55,8 +63,17 @@ impl InputContext for FakeInput {
         }
     }
 
-    fn place_holds(&self, place: &str, subject: &str) -> bool {
-        place == INBOX && INBOX_TOKENS.contains(&subject)
+    fn place_holds(&self, place: &str, subject: &str) -> Result<bool, NotImplemented> {
+        Ok(place == INBOX && INBOX_TOKENS.contains(&subject))
+    }
+
+    fn entity_exists(&self, entity: &EntityName, id: &str) -> Result<bool, NotImplemented> {
+        assert_eq!(entity.as_str(), DOC);
+        Ok(DOC_IDS.contains(&id))
+    }
+
+    fn row_key_exists(&self, key: &str) -> Result<bool, NotImplemented> {
+        Ok(ROW_KEYS.contains(&key))
     }
 }
 
@@ -139,7 +156,11 @@ fn model_parse(hint: &TypeHint, raw: &Value) -> Option<Value> {
         (TypeHint::PlaceId { .. }, Value::String(s)) => {
             INBOX_TOKENS.contains(&s.as_str()).then(|| raw.clone())
         }
-        (TypeHint::EntityId { .. } | TypeHint::RowKey, Value::String(_)) => Some(raw.clone()),
+        (TypeHint::EntityIdOrRoot { .. }, Value::String(s)) if *s == root() => Some(raw.clone()),
+        (TypeHint::EntityId { .. } | TypeHint::EntityIdOrRoot { .. }, Value::String(s)) => {
+            DOC_IDS.contains(&s.as_str()).then(|| raw.clone())
+        }
+        (TypeHint::RowKey, Value::String(s)) => ROW_KEYS.contains(&s.as_str()).then(|| raw.clone()),
         _ => None,
     }
 }
@@ -160,10 +181,17 @@ fn hints() -> impl Strategy<Value = TypeHint> {
             place: PlaceName(INBOX.into()),
         }),
         Just(TypeHint::EntityId {
-            entity_name: "doc".into(),
+            entity_name: DOC.into(),
+        }),
+        Just(TypeHint::EntityIdOrRoot {
+            entity_name: DOC.into(),
         }),
         Just(TypeHint::RowKey),
     ]
+}
+
+fn root() -> String {
+    EntityUri::no_parent().as_str().to_string()
 }
 
 fn raws() -> impl Strategy<Value = Value> {
@@ -171,10 +199,42 @@ fn raws() -> impl Strategy<Value = Value> {
         any::<bool>().prop_map(Value::Boolean),
         (-4i64..5).prop_map(Value::Integer),
         prop::sample::select(vec![
-            "", "red", "blue", "S", "M", "L", "4", " 7 ", "x", "a.org", "c.org",
+            "", "red", "blue", "S", "M", "L", "4", " 7 ", "x", "a.org", "c.org", "d1", "ghost",
+            "r1",
         ])
         .prop_map(|s| Value::String(s.to_string())),
+        Just(Value::String(root())),
     ]
+}
+
+#[test]
+fn a_nonexistent_id_is_refused_at_the_parse() {
+    for hint in [
+        TypeHint::EntityId {
+            entity_name: DOC.into(),
+        },
+        TypeHint::EntityIdOrRoot {
+            entity_name: DOC.into(),
+        },
+        TypeHint::RowKey,
+    ] {
+        let ask = ask(Some(hint.clone()), false, false);
+        let port = FakePort::new(Ok(()), vec![]);
+        let mut form = AnswerForm::open(ask, &port);
+        form.enter(&Value::String("ghost".into()), &port, &FakeInput);
+        assert_eq!(
+            port.answered(),
+            0,
+            "{hint:?}: a nonexistent id fired an answer"
+        );
+        let FormPhase::Editing { error: Some(error) } = form.phase() else {
+            panic!("{hint:?}: the refusal is not shown: {:?}", form.phase());
+        };
+        assert!(
+            error.contains("ghost"),
+            "{hint:?}: the refusal does not name the input: {error}"
+        );
+    }
 }
 
 proptest! {

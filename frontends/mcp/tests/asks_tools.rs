@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use holon_api::EntityName;
 use holon_api::Value;
 use holon_api::render_types::TypeHint;
 use holon_api::user_transition::AnswerCall;
@@ -17,6 +18,7 @@ use holon_api::user_transition::AskHash;
 use holon_api::user_transition::AskRow;
 use holon_api::user_transition::ExpireReason;
 use holon_api::user_transition::InputContext;
+use holon_api::user_transition::NotImplemented;
 use holon_api::user_transition::SubjectName;
 use holon_api::user_transition::TransitionName;
 use holon_api::user_transition::UftError;
@@ -57,14 +59,22 @@ impl UserTransitions for FakePort {
     }
 }
 
-struct NoNewtypes;
+/// Entity `doc` has the one id `d1`; no newtypes, places or row keys.
+struct DocIds;
 
-impl InputContext for NoNewtypes {
+impl InputContext for DocIds {
     fn parse_newtype(&self, type_name: &str, _: &str) -> Result<Value, String> {
         panic!("no newtype '{type_name}' here")
     }
-    fn place_holds(&self, _: &str, _: &str) -> bool {
+    fn place_holds(&self, _: &str, _: &str) -> Result<bool, NotImplemented> {
         panic!("no place here")
+    }
+    fn entity_exists(&self, entity: &EntityName, id: &str) -> Result<bool, NotImplemented> {
+        assert_eq!(entity.as_str(), "doc");
+        Ok(id == "d1")
+    }
+    fn row_key_exists(&self, _: &str) -> Result<bool, NotImplemented> {
+        panic!("no row key here")
     }
 }
 
@@ -86,13 +96,22 @@ fn ask(transition: &str, irreversible: bool) -> AskRow {
 
 fn rig(script: Vec<AnswerSettlement>) -> (Arc<FakePort>, Answering) {
     let port = Arc::new(FakePort {
-        asks: vec![ask("pick", false), ask("archive", true)],
+        asks: vec![
+            ask("pick", false),
+            ask("archive", true),
+            AskRow {
+                input: Some(TypeHint::EntityId {
+                    entity_name: "doc".into(),
+                }),
+                ..ask("assign", false)
+            },
+        ],
         answered: Mutex::new(Vec::new()),
         script: Mutex::new(script.into()),
     });
     let answering = Answering {
         transitions: port.clone(),
-        input: Arc::new(NoNewtypes),
+        input: Arc::new(DocIds),
     };
     (port, answering)
 }
@@ -145,6 +164,22 @@ fn a_value_outside_the_ask_is_refused_before_the_port() {
     let err = answer_ask(&answering, params("pick", Some("green"))).unwrap_err();
     assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     assert!(port.answered.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_agent_answer_with_a_nonexistent_id_is_refused_at_the_parse() {
+    let (port, answering) = rig(vec![]);
+    let err = answer_ask(&answering, params("assign", Some("ghost"))).unwrap_err();
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        err.message.contains("ghost") && err.message.contains("doc"),
+        "the refusal does not name the input and the entity: {}",
+        err.message
+    );
+    assert!(port.answered.lock().unwrap().is_empty());
+
+    answer_ask(&answering, params("assign", Some("d1"))).expect("an existing id is accepted");
+    assert_eq!(port.answered.lock().unwrap().len(), 1);
 }
 
 #[test]

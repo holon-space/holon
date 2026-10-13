@@ -15,6 +15,7 @@ use gpui::TestAppContext;
 use gpui::VisualTestContext;
 use gpui::prelude::*;
 use gpui::px;
+use holon_api::EntityName;
 use holon_api::Value;
 use holon_api::render_types::TypeHint;
 use holon_api::user_transition::AnswerCall;
@@ -23,6 +24,7 @@ use holon_api::user_transition::AnswerSettlement;
 use holon_api::user_transition::AskHash;
 use holon_api::user_transition::AskRow;
 use holon_api::user_transition::InputContext;
+use holon_api::user_transition::NotImplemented;
 use holon_api::user_transition::SubjectName;
 use holon_api::user_transition::TransitionName;
 use holon_api::user_transition::UftError;
@@ -72,8 +74,14 @@ impl InputContext for NoNewtypes {
     fn parse_newtype(&self, type_name: &str, _: &str) -> Result<Value, String> {
         panic!("no newtype '{type_name}' in this rung")
     }
-    fn place_holds(&self, _: &str, _: &str) -> bool {
+    fn place_holds(&self, _: &str, _: &str) -> Result<bool, NotImplemented> {
         panic!("no place in this rung")
+    }
+    fn entity_exists(&self, _: &EntityName, _: &str) -> Result<bool, NotImplemented> {
+        panic!("no entity id in this rung")
+    }
+    fn row_key_exists(&self, _: &str) -> Result<bool, NotImplemented> {
+        panic!("no row key in this rung")
     }
 }
 

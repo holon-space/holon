@@ -12,6 +12,7 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
+use holon_api::EntityName;
 use holon_api::Value;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationParam;
@@ -77,9 +78,25 @@ impl InputContext for UnwiredInput {
         Err(format!("{missing} (cannot parse '{type_name}')"))
     }
 
-    // ponytail: refuses every place id until lane I wires place membership.
-    fn place_holds(&self, _: &str, _: &str) -> bool {
-        false
+    fn place_holds(&self, _: &str, _: &str) -> Result<bool, NotImplemented> {
+        Err(NotImplemented {
+            lane: Lane::Integration,
+            what: "place membership",
+        })
+    }
+
+    fn entity_exists(&self, _: &EntityName, _: &str) -> Result<bool, NotImplemented> {
+        Err(NotImplemented {
+            lane: Lane::Integration,
+            what: "entity id existence",
+        })
+    }
+
+    fn row_key_exists(&self, _: &str) -> Result<bool, NotImplemented> {
+        Err(NotImplemented {
+            lane: Lane::Integration,
+            what: "row key existence",
+        })
     }
 }
 

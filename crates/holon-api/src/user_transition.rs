@@ -18,9 +18,11 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::EntityUri;
 use crate::Value;
 use crate::render_types::OperationDescriptor;
 use crate::render_types::TypeHint;
+use crate::types::EntityName;
 
 /// The name of a transition, unique in its net.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -414,11 +416,14 @@ pub enum InputParseError {
 }
 
 /// What [`parse_input`] needs from outside the type: newtype parsers (lane M
-/// registers them) and place membership (lane I).
+/// registers them), place membership and id existence (lane I).
 pub trait InputContext {
     /// Parses the text of the newtype `type_name`; `Err` is the refusal reason.
     fn parse_newtype(&self, type_name: &str, text: &str) -> Result<Value, String>;
-    fn place_holds(&self, place: &str, subject: &str) -> bool;
+    fn place_holds(&self, place: &str, subject: &str) -> Result<bool, NotImplemented>;
+    fn entity_exists(&self, entity: &EntityName, id: &str) -> Result<bool, NotImplemented>;
+    /// Whether the asking provider's own table has the row key `key`.
+    fn row_key_exists(&self, key: &str) -> Result<bool, NotImplemented>;
 }
 
 /// Parses a raw answer value against the ask's input type at the UI/MCP
@@ -456,7 +461,7 @@ pub fn parse_input(
             .parse_newtype(type_name, text)
             .map_err(|reason| refused(type_name, &reason)),
         (TypeHint::PlaceId { place }, Value::String(id)) => {
-            if cx.place_holds(&place.0, id) {
+            if cx.place_holds(&place.0, id)? {
                 Ok(raw.clone())
             } else {
                 Err(refused(
@@ -476,13 +481,34 @@ pub fn parse_input(
             .parse::<i64>()
             .map(Value::Integer)
             .map_err(|_| refused("number", "expected an integer")),
+        (TypeHint::EntityIdOrRoot { .. }, Value::String(id))
+            if id == EntityUri::no_parent().as_str() =>
+        {
+            Ok(raw.clone())
+        }
+        (
+            TypeHint::EntityId { entity_name } | TypeHint::EntityIdOrRoot { entity_name },
+            Value::String(id),
+        ) => {
+            if cx.entity_exists(entity_name, id)? {
+                Ok(raw.clone())
+            } else {
+                Err(refused(
+                    &format!("id of {}", entity_name.as_str()),
+                    "no such id",
+                ))
+            }
+        }
+        (TypeHint::RowKey, Value::String(key)) => {
+            if cx.row_key_exists(key)? {
+                Ok(raw.clone())
+            } else {
+                Err(refused("row key", "no such row"))
+            }
+        }
         (TypeHint::Bool, Value::Boolean(_))
         | (TypeHint::String, Value::String(_))
-        | (TypeHint::Number, Value::Integer(_))
-        | (
-            TypeHint::EntityId { .. } | TypeHint::EntityIdOrRoot { .. } | TypeHint::RowKey,
-            Value::String(_),
-        ) => Ok(raw.clone()),
+        | (TypeHint::Number, Value::Integer(_)) => Ok(raw.clone()),
         (TypeHint::Bool, _) => Err(refused("bool", "expected true or false")),
         (TypeHint::String, _) => Err(refused("string", "expected text")),
         (TypeHint::Number, _) => Err(refused("number", "expected an integer")),
