@@ -3002,6 +3002,8 @@ dependencies = [
  "holon-api",
  "holon-core",
  "holon-macros",
+ "holon-net",
+ "holon-net-shell",
  "ignore",
  "notify 8.2.0",
  "percent-encoding",
@@ -3151,6 +3153,15 @@ dependencies = [
  "dugong",
  "serde",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "holon-net-shell"
+version = "0.1.0"
+dependencies = [
+ "holon-net",
+ "tokio",
+ "workspace-hack 0.1.0",
 ]
 
 [[package]]

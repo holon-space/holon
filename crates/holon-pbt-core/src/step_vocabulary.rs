@@ -704,6 +704,10 @@ step_field_via_json!(
             disk_text: "gone".to_string(),
         },
         crate::types::ExternalFileEdit::StripDocId,
+        crate::types::ExternalFileEdit::Empty { whitespace: true },
+        crate::types::ExternalFileEdit::AddIdlessHeadline {
+            title: "added".to_string(),
+        },
     ]
 );
 step_field_via_json!(

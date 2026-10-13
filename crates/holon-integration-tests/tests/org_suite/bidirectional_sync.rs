@@ -603,7 +603,7 @@ fn stability_no_duplicate_blocks_after_ui_mutation() {
         env.wait_for_block("block-2", SYNC_TIMEOUT).await;
 
         // UI update — this triggers FileSyncController → org file write → file watcher
-        // last_projection echo suppression prevents re-processing the file
+        // ReadDisk does not parse the echo: its hash equals the file's Base
         env.update_block_content("block-1", "Updated A")
             .await
             .expect("update failed");

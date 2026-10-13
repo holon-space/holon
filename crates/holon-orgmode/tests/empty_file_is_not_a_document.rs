@@ -201,21 +201,6 @@ fn full_content() -> String {
     )
 }
 
-/// A clock the test advances by hand, so the grace period that separates a
-/// save in flight from an emptied file is exercised without sleeping through
-/// it.
-#[derive(Debug, Default)]
-struct ManualClock(std::sync::atomic::AtomicI64);
-
-impl holon_api::Clock for ManualClock {
-    fn now_millis(&self) -> i64 {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
-    }
-    fn utc_offset_seconds_at(&self, _: i64) -> i32 {
-        0
-    }
-}
-
 /// Records the disclosure seam's calls, so a test asserts on the signal the
 /// frontend's banner is built from rather than on a log line.
 #[derive(Default)]
@@ -243,7 +228,7 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
             .unwrap()
             .push(format!("recovered {}", path.display()));
     }
-    fn vault_file_emptied(&self, path: &std::path::Path) {
+    fn vault_file_emptied(&self, path: &std::path::Path, _: &str) {
         self.0
             .lock()
             .unwrap()
@@ -316,7 +301,6 @@ struct Vault {
     store: Store,
     docs: PageStore,
     path: std::path::PathBuf,
-    clock: Arc<ManualClock>,
     disclosures: Arc<Disclosures>,
     _tmp: tempfile::TempDir,
 }
@@ -352,7 +336,6 @@ fn vault() -> Vault {
     let path = root.join("Notes.org");
     std::fs::write(&path, full_content()).unwrap();
 
-    let clock = Arc::new(ManualClock::default());
     let disclosures = Arc::new(Disclosures::default());
     let controller = new_org_sync_controller(
         Arc::new(StoreReader(store.clone())),
@@ -361,14 +344,12 @@ fn vault() -> Vault {
         Arc::new(ordering),
         Arc::new(RealFileSystem),
     )
-    .with_clock(clock.clone())
     .with_writeback_disclosure(disclosures.clone());
     Vault {
         controller,
         store,
         docs,
         path,
-        clock,
         disclosures,
         _tmp: tmp,
     }
@@ -474,11 +455,10 @@ async fn a_whitespace_only_file_is_still_ingested() {
     );
 }
 
-/// A file that is still empty long after any save would have finished is a file
-/// a user emptied. Holon keeps the document it last read — an empty file names
-/// no document, so nothing in it can authorize deleting one — which leaves the
-/// app showing content the file no longer has. That divergence must reach the
-/// user, not just the log.
+/// An empty file is a file a user emptied. Holon keeps the document it last
+/// read — an empty file names no document, so nothing in it can authorize
+/// deleting one — which leaves the app showing content the file no longer has.
+/// That divergence must reach the user, not just the log.
 #[tokio::test]
 async fn a_file_that_stays_empty_is_disclosed_as_degraded() {
     let mut v = vault();
@@ -490,20 +470,6 @@ async fn a_file_that_stays_empty_is_disclosed_as_degraded() {
     std::fs::write(&path, "").unwrap();
     let _ = v.controller.on_file_changed(&path).await.unwrap();
 
-    // Still inside the window an atomic save lives in: nothing to say yet.
-    v.controller.poll_new_files().await.unwrap();
-    assert!(
-        !v.disclosures
-            .calls()
-            .iter()
-            .any(|c| c.starts_with("emptied")),
-        "a save in flight was reported as an emptied file: {:?}",
-        v.disclosures.calls(),
-    );
-
-    v.clock
-        .0
-        .store(60_000, std::sync::atomic::Ordering::Relaxed);
     v.controller.poll_new_files().await.unwrap();
     v.controller.poll_new_files().await.unwrap();
 

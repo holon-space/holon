@@ -315,7 +315,9 @@ async fn wait_for_writeback(
         WRITEBACK_QUIET_FLOOR,
     )
     .await;
-    let refused = idle.refused_writebacks().documents();
+    let refused = idle
+        .writeback_net()
+        .read(holon_filesystem::writeback_net::failed_writebacks);
     if refused.is_empty() {
         return settled;
     }

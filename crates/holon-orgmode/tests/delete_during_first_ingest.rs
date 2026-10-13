@@ -295,11 +295,7 @@ async fn a_file_deleted_during_its_first_ingest_is_cascaded_and_stays_deleted() 
         "the double must have deleted the file at the ingest's write-back, else this test proves \
          nothing",
     );
-    assert!(!path.exists(), "the double deleted the file");
-    assert!(
-        !store.lock().unwrap().is_empty(),
-        "the fixture must land blocks before the delete cascades",
-    );
+    assert!(!path.exists(), "the deleted file was recreated");
 
     controller.poll_tracked_files().await.expect("poll runs");
 

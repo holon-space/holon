@@ -304,7 +304,7 @@ pub struct OrgSyncIdleSignal {
     /// the tick nor `in_pass` sees a request still in the channel, and a
     /// shutdown must name what it would leave unwritten.
     queued_renders: Arc<QueuedRenders>,
-    refused_writebacks: Arc<holon_filesystem::RefusedWritebacks>,
+    writeback_net: holon_net_shell::Shell,
 }
 
 /// Re-render requests in the write-back channel, counted per document.
@@ -363,7 +363,8 @@ impl OrgSyncIdleSignal {
             bulk_pending: std::sync::atomic::AtomicBool::new(false),
             writeback_fold: std::sync::OnceLock::new(),
             queued_renders: Arc::new(QueuedRenders::default()),
-            refused_writebacks: Arc::new(holon_filesystem::RefusedWritebacks::default()),
+            writeback_net: holon_net_shell::Shell::new(holon_filesystem::writeback_net::net())
+                .expect("the write-back net loads"),
         })
     }
 
@@ -371,9 +372,9 @@ impl OrgSyncIdleSignal {
         &self.queued_renders
     }
 
-    /// The documents whose file the write-back could not write.
-    pub fn refused_writebacks(&self) -> &holon_filesystem::RefusedWritebacks {
-        &self.refused_writebacks
+    /// The per-file write-back net the controller drives.
+    pub fn writeback_net(&self) -> &holon_net_shell::Shell {
+        &self.writeback_net
     }
 
     /// What the write-back is still doing, empty when it has written every
@@ -392,6 +393,13 @@ impl OrgSyncIdleSignal {
         }
         if !self.queued_renders.documents().is_empty() {
             busy.push("document re-renders are queued");
+        }
+        if !self
+            .writeback_net
+            .read(holon_filesystem::writeback_net::unsettled)
+            .is_empty()
+        {
+            busy.push("a file is behind its store");
         }
         busy
     }
@@ -919,8 +927,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 if let Some(disclosure) = writeback_disclosure.clone() {
                     controller = controller.with_writeback_disclosure(disclosure);
                 }
-                controller =
-                    controller.with_refused_writebacks(idle_signal.refused_writebacks.clone());
+                controller = controller.with_writeback_net(idle_signal.writeback_net.clone());
 
                 // Image bytes for `[[file:…]]` blocks, so an image synced from a
                 // peer materializes on disk. Absent in every container today →
@@ -1978,6 +1985,13 @@ async fn run_file_sync_controller(
                 // wait_for_change_seq timing out.
                 idle_signal_for_task.advance_change_seq(change_seq);
             }
+            () = idle_signal_for_task.writeback_net.fired() => {
+                let _pass = idle_signal_for_task.enter_pass();
+                if let Err(e) = controller.drive_writeback_net().await {
+                    error!("[OrgMode] write-back net error: {:#}", e);
+                }
+                idle_signal_for_task.mark_progress();
+            }
             _ = poll_tick.tick() => {
                 match controller.poll_tracked_files().await {
                     Ok(n) if n > 0 => {
@@ -2067,7 +2081,6 @@ async fn run_file_sync_controller(
                         {
                             match verdict {
                                 Ok(BlockChangeVerdict::Handled) => { note_doc_written_from_holder(); }
-                                Ok(BlockChangeVerdict::FileChanged) => {}
                                 // ALLOW(fallback): doc resolved to no tracked file → full re-render
                                 Ok(BlockChangeVerdict::NeedsBulkPass) => {
                                     pending_full_rerender = true;
@@ -2202,7 +2215,7 @@ mod writeback_panic_tests {
         fn writeback_faithful(&self, _: &std::path::Path) {}
         fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
         fn ingest_recovered(&self, _: &std::path::Path) {}
-        fn vault_file_emptied(&self, _: &std::path::Path) {}
+        fn vault_file_emptied(&self, _: &std::path::Path, _: &str) {}
         fn block_in_two_files(
             &self,
             _: &holon_api::EntityUri,

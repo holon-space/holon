@@ -3,7 +3,7 @@ id: 2026-10-12-an-abandoned-id-stamp-leaves-an-id-less-org-file-whose-blocks-los
 date: 2026-10-12
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   A stalled `:ID:` write-back is never retried, so the file stays id-less and
   every later parse of it mints fresh ids: the blocks lose their identity.
@@ -76,13 +76,16 @@ An `AddIdlessLine` variant would narrow the repro; this lane did not build it.
 
 ## Remedy
 
+FIXED by the per-file write-back subnet (ADR 0032 §9,
+holon-space/holon-work#175): the id stamp is an owed write that `CatchUp`
+retries until it lands, so it is never abandoned. The case below is now in
+`keystone.jsonl` and green.
+
 - Red-for-the-right-reason keystone case
   `hm4-an-abandoned-id-stamp-leaves-an-id-less-file-whose-blocks-lose-identity`
   in
-  `crates/holon-integration-tests/hand-authored-regressions/known-red-hm4-restart.jsonl`
-  (kept out of `keystone.jsonl` so the landing gate stays green; registered in
-  `docs/Testing/KeystoneKnownReds.md` as
-  `hm4-abandoned-id-stamp-loses-block-identity`). The red:
+  `crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`.
+  The red before the fix:
   `inv-blocks-match-ref/org` reports the two rows replaced by two fresh uuids
   with 0 field deltas, `inv-org-render-fixed-point` stays divergent for 5s
   (disk 38 bytes, rendered 100), and the `writeback-degraded` condition on

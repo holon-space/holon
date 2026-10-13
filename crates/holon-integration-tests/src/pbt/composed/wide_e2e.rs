@@ -726,7 +726,8 @@ pub fn seed_folder_companion(state: &mut ReferenceState) {
 // and (b) DE-INLINE the heading from `Journals.org` (the `get_blocks` CTE
 // excludes the `Page`-tagged child). The ADR-0025 sibling-grounded union guard
 // admits the de-inline (the child survives in its own now-materialized file),
-// and the B2 boot sweep does the materialization + `last_projection` echo-seed.
+// and the B2 boot sweep does the materialization and records the file's
+// write-back `Base`.
 //
 // The date `2026-07-11` is chosen to NOT collide with the fixed keystone boot
 // clock (`keystone_boot_journal_date`) so the auto-create rule's

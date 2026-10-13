@@ -659,29 +659,33 @@ async fn a_long_file_name_still_gets_its_conflict_copy() {
     );
 }
 
-/// The write-back that overrules the file fails, so the next ingest
-/// overrules the same text again: it saves no second copy of that text, and
-/// still names the copy.
+/// The write-back that overrules the file fails and is retried: the retry
+/// saves no second copy of that text, and the condition still names the copy.
 #[tokio::test]
 async fn the_same_overruled_text_is_saved_once() {
     let (_tmp, path, bus, edited, mut controller) =
         edited_too_far_apart("Notes.org", Arc::new(FirstWriteBackFails::default())).await;
 
-    let failed = controller.on_file_changed(&path).await;
-    assert!(
-        failed.is_err(),
-        "premise: the first write-back fails: {failed:?}"
-    );
+    let outcome = controller
+        .on_file_changed(&path)
+        .await
+        .expect("the ingest runs; the failed write-back is retried");
+    assert_eq!(outcome, IngestOutcome::Ingested);
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         edited,
         "premise: the first write-back writes nothing"
     );
-    let outcome = controller
-        .on_file_changed(&path)
+    tokio::time::sleep(holon_filesystem::writeback_net::CATCH_UP_BACKOFF).await;
+    controller
+        .drive_writeback_net()
         .await
-        .expect("the ingest of the same text again");
-    assert_eq!(outcome, IngestOutcome::Ingested);
+        .expect("the write-back net runs");
+    assert_ne!(
+        std::fs::read_to_string(&path).unwrap(),
+        edited,
+        "the retry never wrote the file"
+    );
 
     let copies = conflict_copies(path.parent().unwrap());
     let [(copy, copy_text)] = copies.as_slice() else {

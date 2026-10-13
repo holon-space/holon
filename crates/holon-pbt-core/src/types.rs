@@ -263,6 +263,19 @@ pub enum ExternalFileEdit {
     /// Drop the document's own `:ID:` from the file header. The step does not
     /// wait for the ingest, so the next step can run before Holon reads it.
     StripDocId,
+    /// Truncate the file to zero bytes, or to [`WHITESPACE_ONLY`].
+    Empty { whitespace: bool },
+    /// Append a top-level headline `title` without an `:ID:` drawer.
+    AddIdlessHeadline { title: String },
+}
+
+/// What [`ExternalFileEdit::Empty`] with `whitespace` leaves in the file.
+pub const WHITESPACE_ONLY: &str = " \t\n  \n";
+
+impl ExternalFileEdit {
+    pub fn emptied_text(whitespace: bool) -> &'static str {
+        if whitespace { WHITESPACE_ONLY } else { "" }
+    }
 }
 
 /// Parse-don't-validate target state for `ToggleState`: clicking the

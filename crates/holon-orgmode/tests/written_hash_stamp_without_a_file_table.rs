@@ -147,7 +147,7 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
     fn writeback_resumed(&self, _: &Path) {}
     fn ingest_refused(&self, _: &Path, _: &str, _: &str) {}
     fn ingest_recovered(&self, _: &Path) {}
-    fn vault_file_emptied(&self, _: &Path) {}
+    fn vault_file_emptied(&self, _: &Path, _: &str) {}
     fn writeback_lossy(&self, _: &Path, _: &str) {}
     fn writeback_faithful(&self, _: &Path) {}
     fn block_in_two_files(

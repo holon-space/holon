@@ -417,11 +417,6 @@ impl BlockReader for CacheBlockReader {
                 Some(holon_api::Value::String(s)) => s.clone(),
                 _ => String::new(),
             };
-            if hash.is_empty() {
-                // Skip rows the legacy writer left without a hash — they'd
-                // false-match an empty stored value and incorrectly fast-path.
-                continue;
-            }
             let uri = holon_api::EntityUri::parse(&id).map_err(|e| {
                 anyhow::anyhow!("[CacheBlockReader] file.id={id:?} not a valid EntityUri: {e}")
             })?;
@@ -1214,6 +1209,13 @@ impl Module for OrgModeModule {
         injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
             |resolver| async move {
                 Arc::new(crate::type_table_remedy::TypeTableRemedyProvider::new(
+                    resolver,
+                )) as Arc<dyn OperationProvider>
+            },
+        ));
+        injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
+            |resolver| async move {
+                Arc::new(crate::writeback_remedy::WritebackRemedyProvider::new(
                     resolver,
                 )) as Arc<dyn OperationProvider>
             },

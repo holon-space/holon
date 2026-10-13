@@ -1073,7 +1073,7 @@ impl holon_filesystem::WritebackDisclosure for DisclosureLog {
             .push(format!("recovered {}", path.display()));
     }
 
-    fn vault_file_emptied(&self, path: &Path) {
+    fn vault_file_emptied(&self, path: &Path, _: &str) {
         self.entries
             .lock()
             .unwrap()

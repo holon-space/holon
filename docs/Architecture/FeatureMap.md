@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 122 transitions; the repo declares 99 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 125 transitions; the repo declares 99 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -244,6 +244,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 
 ### Transitions
 
+- `AcceptRemoval` — an accepted removal deletes the blocks only when the store did not change after the refusal; otherwise the store content goes back to the file
 - `ApplyMutation` — org vs Loro ingress the shrinker can localize
 - `ArmWriteChurn` — churn only delays a write-back; the end state after `DisarmWriteChurn` is the one without churn
 - `ArmWriteFailure` — a refused write only leaves the file BEHIND its store (the same end state a churn delays), never ahead of it
@@ -264,6 +265,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `DeleteTypedEntity` — a deleted entity leaves the matview.
 - `DisarmWriteChurn` — once no file churns, every owed write-back has landed and no stall is disclosed any more
 - `DispatchUnschemedBlockId` — the id form that let the write leg and the read legs key on different strings
+- `DropNextWatcherEvent` — a watcher event is only a hint; the file still converges without it
 - `EditBlockCopy` — a copy edited on disk while Holon edits the same block: the later release merges both, or refuses and discloses when both changed the keyword apart (D229.b)
 - `EditDecisionPairHeld` — a judged write holds the decision subtree it judged until it has written, so a second write on that subtree is judged against the first one's result, never beside it
 - `EditDecisionSubtree` — a Holon-side write whose result the decision block adapter refuses must be refused before it lands, and a write whose result it accepts must land, even when only the whole gesture is legal
@@ -288,6 +290,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `ReleaseHeld` — see `HoldDispatch`
 - `RemoteListSync` — the round drives the REAL [`holon_connections::sync_once`] over a fixture peer and the real mirror table; the invariant then asserts the mirror equals the peer's list.
 - `RenameRefusedRecipe` — a renamed refused file leaves its format's group under the old path and stays in it under the new one, whether or not it has a document (D71.b)
+- `RewriteFromStore` — the file gets the store's content back and the store keeps every block
 - `SaveRefusedRecipe` — every refused file of one format is ONE `vault-ingest-failed` condition that counts them and names the first few (D71.b)
 - `Search` — the hit set equals the reference model's literal substring match over block content and the searchable fields of every type declaring search, folded by Unicode simple case folding, with pattern metacharacters matching themselves and an empty query returning nothing. Each hit shows its title's first line, and under it the other lines of the matched field that contain the query.
 - `SecondWriterRefused` — a second session on a held vault is refused by the writer lock, names the holder and writes nothing
@@ -354,8 +357,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `fs-watcher-arm-no-event-agent-session`
 - `fs-watcher-no-events-agent-session`
 - `fs-watcher-rename-unpaired-agent-session`
-- `hm4-abandoned-id-stamp-loses-block-identity`
-- `hm4-external-edit-after-a-refused-write-reverts-the-stores-edit`
 - `integration-toggle-load`
 - `iroh-accept-drain-recv-stream`
 - `iroh-nat-traversal-address-set`
@@ -391,8 +392,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `vault-scale-main-panel-delivery`
 - `wb-d6-stall-resurrects-deleted-line`
 - `wb-d7-stall-splits-edited-line`
-- `wb-d8-stalled-edit-never-reaches-disk`
-- `wb-i7-stall-disclosure-keeps-old-path`
 - `windowed-splitblock-no-editable-surface`
 - `writeorgfile-sql-reads-budget`
 

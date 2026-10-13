@@ -36,6 +36,8 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 # the port traits + sync base store only (see lib.rs cfg gates).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["fs", "process", "rt", "sync", "time"] }
+holon-net.workspace = true
+holon-net-shell.workspace = true
 ignore.workspace = true
 notify = "8.0"
 

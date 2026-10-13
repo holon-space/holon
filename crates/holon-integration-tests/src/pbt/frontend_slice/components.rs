@@ -627,8 +627,8 @@ impl HeadlessFrontendComponent {
     /// by the same touch-then-restore dance `simulate_restart` uses for
     /// tracked files: append a space, settle, restore, then wait for the
     /// `block_raw` id-set to stabilize. Used to prove that re-ingesting a
-    /// B2-materialized page file is idempotent (the `last_projection` seed
-    /// suppresses the echo — no re-mint, no re-write).
+    /// B2-materialized page file is idempotent (the echo's hash equals the
+    /// file's write-back `Base` — no re-mint, no re-write).
     pub async fn pump_watcher_over_disk_path(&self, path: &Path) {
         use holon_filesystem::FileSystem;
         let content = FileSystem::read_to_string(self.org_fs().as_ref(), path)
@@ -5295,6 +5295,42 @@ impl HeadlessFrontendComponent {
         self.await_ingest(path, seam).await;
     }
 
+    /// Dispatches `op` for `doc` as the user, asserts the write-back net
+    /// accepted it, and awaits its outcome.
+    async fn resolve_emptied_file(&self, doc: &EntityUri, op: holon_api::condition_profile::OpId) {
+        let seam = op.op();
+        let result = self
+            .engine()
+            .execute_operation(
+                &holon_api::EntityName::new(op.entity()),
+                op.op(),
+                HashMap::from([("doc".into(), holon_api::Value::String(doc.to_string()))]),
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("[{seam}] dispatch for {doc}: {e:#}"));
+        let occurrence = result
+            .response
+            .as_ref()
+            .and_then(|r| r.as_object())
+            .and_then(|r| r.get("accepted"))
+            .and_then(|o| o.as_string())
+            .unwrap_or_else(|| panic!("[{seam}] {doc}: not ACCEPTED, response {result:?}"))
+            .to_string();
+        let idle = self
+            .org_idle_signal()
+            .unwrap_or_else(|| panic!("[{seam}] this draw wires no org file-sync"));
+        let settled = tokio::time::timeout(
+            Duration::from_secs(10),
+            idle.writeback_net()
+                .settled(&holon_net::exec::OccurrenceId::caller(&occurrence)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("[{seam}] {doc}: occurrence {occurrence} never settled"))
+        .unwrap_or_else(|e| panic!("[{seam}] {doc}: occurrence {occurrence}: {e:?}"));
+        tracing::info!("[{seam}] {doc}: occurrence {occurrence} settled {settled:?}");
+    }
+
     /// Wait until the file-sync controller has processed every change up to
     /// the latest one, `path`'s.
     async fn await_ingest(&self, path: &Path, seam: &str) {
@@ -5326,6 +5362,24 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
     async fn disarm_write_churn(&self, doc: &EntityUri) {
         let path = self.doc_file(doc, "disarm_write_churn").await;
         self.org_fs().clear_write_faults(&path);
+        let net = self
+            .org_idle_signal()
+            .expect("[disarm_write_churn] this draw wires no org file-sync")
+            .writeback_net()
+            .clone();
+        let subject = doc.to_string();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while net
+            .read(holon_filesystem::writeback_net::unsettled)
+            .contains(&subject)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[disarm_write_churn] {doc} still behind its store 10s after the faults cleared: {:?}",
+                net.read(holon_filesystem::writeback_net::failed_writebacks)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     async fn touch_file(&self, doc: &EntityUri) {
@@ -5335,6 +5389,21 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
             .touch_file(&path)
             .unwrap_or_else(|e| panic!("[{SEAM}] touch {path:?}: {e}"));
         self.await_ingest(&path, SEAM).await;
+    }
+
+    async fn accept_removal(&self, doc: &EntityUri) {
+        self.resolve_emptied_file(doc, holon_api::condition_profile::OpId::AcceptRemoval)
+            .await;
+    }
+
+    async fn rewrite_from_store(&self, doc: &EntityUri) {
+        self.resolve_emptied_file(doc, holon_api::condition_profile::OpId::RewriteFromStore)
+            .await;
+    }
+
+    async fn drop_next_watcher_event(&self, doc: &EntityUri) {
+        let path = self.doc_file(doc, "drop_next_watcher_event").await;
+        self.org_fs().lose_next_change(&path);
     }
 
     async fn external_file_edit(
@@ -5358,9 +5427,31 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
             self.settle_block_ids_stable(Duration::from_secs(5)).await;
             return;
         }
+        if let ExternalFileEdit::Empty { whitespace } = edit {
+            self.write_org_file_and_await_ingest(
+                &path,
+                ExternalFileEdit::emptied_text(*whitespace),
+                SEAM,
+            )
+            .await;
+            return;
+        }
+        if let ExternalFileEdit::AddIdlessHeadline { title } = edit {
+            let mut edited = disk.clone();
+            if !edited.is_empty() && !edited.ends_with('\n') {
+                edited.push('\n');
+            }
+            edited.push_str(&format!("* {title}\n"));
+            self.write_org_file_and_await_ingest(&path, &edited, SEAM)
+                .await;
+            self.settle_block_ids_stable(Duration::from_secs(5)).await;
+            return;
+        }
         let mut lines: Vec<&str> = disk.lines().collect();
         match edit {
-            ExternalFileEdit::EditLine { .. } => unreachable!("handled above"),
+            ExternalFileEdit::EditLine { .. }
+            | ExternalFileEdit::Empty { .. }
+            | ExternalFileEdit::AddIdlessHeadline { .. } => unreachable!("handled above"),
             ExternalFileEdit::DeleteLine { block, disk_text } => {
                 let at = headline_of(&lines, &self.resolve_id(block), disk_text, &disk);
                 let level = headline_level(lines[at]);
@@ -8728,6 +8819,7 @@ impl holon_pbt_core::capabilities::SutConditions for HeadlessFrontendComponent {
                     | holon_api::ConditionKind::TaskPanicked { message, .. } => {
                         Some(message.clone())
                     }
+                    holon_api::ConditionKind::VaultFileEmptied { seen } => Some(seen.clone()),
                     _ => None,
                 },
                 subject: c.subject,

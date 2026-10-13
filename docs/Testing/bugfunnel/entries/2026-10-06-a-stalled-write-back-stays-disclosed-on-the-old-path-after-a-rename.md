@@ -2,7 +2,7 @@
 id: 2026-10-06-a-stalled-write-back-stays-disclosed-on-the-old-path-after-a-rename
 date: 2026-10-06
 gap: COVERAGE
-status: OPEN
+status: FIXED
 summary: >-
   A store edit whose write-back stalled stays disclosed on the file's old path
   after the user renames the file, and the owed edit does not reach the
@@ -41,7 +41,9 @@ ever combined with a rename. The new transitions `ArmWriteChurn` and
 `DisarmWriteChurn` reach it.
 
 ## Remedy
-OPEN. Registered known red `wb-i7-stall-disclosure-keeps-old-path`
-(docs/Testing/KeystoneKnownReds.md). Red log lane-logs/a4-red-wb-i7.log
-(wb-states lane). In the write-back state machine plan the disclosure is
-derived from the per-file record (invariant I7), and that plan owns the fix.
+FIXED by the per-file write-back subnet (ADR 0032 §9,
+holon-space/holon-work#175). A rename re-points the owed record's home and
+re-reads a refused file, so the disclosure follows the file and the owed edit
+lands in the renamed file. Pinned by keystone case
+`wb-i7-stalled-files-disclosure-follows-a-rename` in
+`crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`.

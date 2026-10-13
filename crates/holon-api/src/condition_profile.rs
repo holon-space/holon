@@ -69,6 +69,10 @@ pub enum OpId {
     PairRetryReimport,
     /// Takes the refused type's name as `type`.
     DropRefusedTypeTable,
+    /// Takes the emptied file's document as `doc`.
+    AcceptRemoval,
+    /// Takes the document as `doc`.
+    RewriteFromStore,
 }
 
 impl OpId {
@@ -76,6 +80,7 @@ impl OpId {
         match self {
             Self::PairRetryReimport => "device",
             Self::DropRefusedTypeTable => "type_table",
+            Self::AcceptRemoval | Self::RewriteFromStore => "writeback",
         }
     }
 
@@ -83,6 +88,8 @@ impl OpId {
         match self {
             Self::PairRetryReimport => "pair_retry_reimport",
             Self::DropRefusedTypeTable => "drop_refused_table",
+            Self::AcceptRemoval => "accept_removal",
+            Self::RewriteFromStore => "rewrite_from_store",
         }
     }
 }
@@ -124,6 +131,8 @@ pub enum ClearingEvent {
     ProfileLoad,
     WrittenHashRecord,
     DerivedFieldEval,
+    AcceptRemoval,
+    RewriteFromStore,
 }
 
 /// The named moment that clears a condition.
@@ -371,6 +380,24 @@ const VAULT_FILE_EMPTIED: ConditionProfile = ConditionProfile::new(
     icons::WARN,
     ConditionPlacement::Toast,
     AllClear::NextCleanIngest,
+    &[],
+);
+
+const REMOVAL_NOT_ACCEPTED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Removal not accepted",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::NextSuccessOf(ClearingEvent::AcceptRemoval),
+    &[],
+);
+
+const REWRITE_FROM_STORE_FAILED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "File not rewritten from Holon",
+    icons::BLOCKED,
+    ConditionPlacement::Toast,
+    AllClear::NextSuccessOf(ClearingEvent::RewriteFromStore),
     &[],
 );
 
@@ -973,7 +1000,9 @@ impl ConditionKind {
             Self::SqlProjectionFailed(_) => SQL_PROJECTION_FAILED,
             Self::ForeignIdCollision(_) => FOREIGN_ID_COLLISION,
             Self::VaultIngestFailed(_) => VAULT_INGEST_FAILED,
-            Self::VaultFileEmptied => VAULT_FILE_EMPTIED,
+            Self::VaultFileEmptied { .. } => VAULT_FILE_EMPTIED,
+            Self::RemovalNotAccepted { .. } => REMOVAL_NOT_ACCEPTED,
+            Self::RewriteFromStoreFailed { .. } => REWRITE_FROM_STORE_FAILED,
             Self::SharedSubtreeNotMaterialized { .. } => SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::EditRefusedReadOnlyFormat { .. } => EDIT_REFUSED_READ_ONLY_FORMAT,
             Self::EditRefusedByShape { .. } => EDIT_REFUSED_BY_SHAPE,

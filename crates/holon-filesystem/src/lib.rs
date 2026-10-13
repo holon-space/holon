@@ -42,6 +42,8 @@ pub mod undone_deletions_file;
 pub mod vault_filter;
 pub mod vault_path;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod writeback_net;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod writeback_render;
 
 use std::path::Path;
@@ -78,7 +80,6 @@ pub use file_sync_controller::IngestOutcome;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::RENDERER_VERSION;
 #[cfg(not(target_arch = "wasm32"))]
-pub use file_sync_controller::RefusedWritebacks;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::already_disclosed;
 #[cfg(not(target_arch = "wasm32"))]

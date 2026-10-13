@@ -3941,6 +3941,14 @@ pub trait SutWriteFaults {
     async fn arm_write_failure(&self, doc: &holon_api::EntityUri);
     /// A new stamp over the same bytes; the ingest of it completes.
     async fn touch_file(&self, doc: &holon_api::EntityUri);
+    /// The user's `writeback.accept_removal` of `doc`'s emptied file, through
+    /// the production operation dispatch; returns once its outcome settles.
+    async fn accept_removal(&self, doc: &holon_api::EntityUri);
+    /// The user's `writeback.rewrite_from_store` of `doc`'s emptied file, like
+    /// [`SutWriteFaults::accept_removal`].
+    async fn rewrite_from_store(&self, doc: &holon_api::EntityUri);
+    /// The file watcher loses the next change of `doc`'s file.
+    async fn drop_next_watcher_event(&self, doc: &holon_api::EntityUri);
     async fn external_file_edit(
         &self,
         doc: &holon_api::EntityUri,

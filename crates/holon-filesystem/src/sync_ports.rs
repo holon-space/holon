@@ -635,16 +635,31 @@ pub trait WritebackDisclosure: Send + Sync {
     /// condition broadcasts nothing.
     fn ingest_recovered(&self, path: &Path);
 
-    /// Signal that `path` is STILL 0 bytes long after the grace period that
-    /// covers an atomic save's zero-length intermediate — so this is a file a
-    /// user really emptied, not a save in flight. The document previously
-    /// ingested from it is KEPT (an empty file cannot identify the document at
-    /// its path, so nothing may be deleted on its word), which means the store
-    /// and the disk disagree until the file has content again.
+    /// Signal that `path` holds no content (sha256 `seen`) while Holon holds
+    /// its document. The document is KEPT (an empty file cannot identify the
+    /// document at its path, so nothing may be deleted on its word) until the
+    /// file has content again or the user resolves it.
     ///
-    /// Sticky, keyed by `path`, and raised at most once per emptiness episode.
-    /// Lifted by [`ingest_recovered`](Self::ingest_recovered).
-    fn vault_file_emptied(&self, path: &Path);
+    /// Sticky, keyed by `path`. Lifted by
+    /// [`ingest_recovered`](Self::ingest_recovered) and
+    /// [`file_condition_cleared`](Self::file_condition_cleared).
+    fn vault_file_emptied(&self, path: &Path, seen: &str);
+
+    /// Signal that an accepted removal of `path`'s blocks did not apply.
+    /// Sticky, keyed by `path`. Lifted by
+    /// [`file_condition_cleared`](Self::file_condition_cleared).
+    // ALLOW(unused_param): trait default; the names document the override's contract.
+    fn removal_not_accepted(&self, _path: &Path, _cause: &str) {}
+
+    /// Signal that a rewrite of `path` from the store did not land. Sticky,
+    /// keyed by `path`. Lifted by
+    /// [`file_condition_cleared`](Self::file_condition_cleared).
+    // ALLOW(unused_param): trait default; the names document the override's contract.
+    fn rewrite_from_store_failed(&self, _path: &Path, _cause: &str) {}
+
+    /// All-clear for the condition `kind` of `path`.
+    // ALLOW(unused_param): trait default; the names document the override's contract.
+    fn file_condition_cleared(&self, _path: &Path, _kind: &'static str) {}
 
     /// Signal that write-back of `path` refused the file, or wrote it without
     /// some stored values. `detail` names each block and what of it the file

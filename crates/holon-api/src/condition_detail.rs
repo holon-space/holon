@@ -93,10 +93,19 @@ impl ConditionKind {
                 ConditionDetail::with_body(headline, body)
             }
 
-            Self::VaultFileEmptied => ConditionDetail::prose(format!(
-                "{subject} is empty on disk — Holon kept the document it last read from it, so \
-                 what you see is no longer in the file"
+            Self::VaultFileEmptied { seen } => ConditionDetail::prose(format!(
+                "{subject} is empty on disk (content sha256 {seen}) — Holon kept the document it \
+                 last read from it, so what you see is no longer in the file. Accept the \
+                 removal, rewrite the file from Holon, or save new content into it"
             )),
+
+            Self::RemovalNotAccepted { cause } => {
+                ConditionDetail::prose(format!("removal of {subject} not accepted: {cause}"))
+            }
+
+            Self::RewriteFromStoreFailed { cause } => {
+                ConditionDetail::prose(format!("{subject} not rewritten from Holon: {cause}"))
+            }
 
             // The file the shared content was inlined into — what the user
             // opens to see the stale projection.

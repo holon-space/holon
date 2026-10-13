@@ -333,7 +333,9 @@ async fn readonly_writeback_logs_once_then_skips_no_per_cdc_retry() {
         edited.content = format!("First heading edit {i}");
         reader.set_block(&edited);
         let r = write_back(&mut controller, &reader, &doc.id, &edited).await;
-        all_ok &= r.is_ok();
+        all_ok &= r
+            .as_ref()
+            .map_or_else(holon_filesystem::already_disclosed, |_| true);
     }
 
     assert_eq!(
@@ -348,7 +350,7 @@ async fn readonly_writeback_logs_once_then_skips_no_per_cdc_retry() {
     assert!(
         all_ok,
         "a CDC event propagated the EROFS error instead of the disclosed \
-         skip — that would kill the sync loop for every other document",
+         stall — that would kill the sync loop for every other document",
     );
 }
 
@@ -386,9 +388,13 @@ async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
     let mut edited = reader.blocks.lock().unwrap()[0].clone();
     edited.content = "First heading edit A".to_string();
     reader.set_block(&edited);
-    write_back(&mut controller, &reader, &doc.id, &edited)
-        .await
-        .unwrap();
+    let stalled = write_back(&mut controller, &reader, &doc.id, &edited).await;
+    assert!(
+        stalled
+            .as_ref()
+            .map_or_else(holon_filesystem::already_disclosed, |_| true),
+        "the read-only stall is disclosed, not a fresh error: {stalled:?}",
+    );
     assert_eq!(
         fs.write_attempts(),
         1,
@@ -407,7 +413,9 @@ async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
         .await
         .expect("re-ingest of a writable-backed file must not error");
 
-    // (4) The next CDC edit must issue a REAL write that reaches disk.
+    // (4) The next CDC edit, once the stalled write's retry is due, must issue
+    //     a REAL write that reaches disk.
+    tokio::time::sleep(holon_filesystem::writeback_net::CATCH_UP_BACKOFF).await;
     let base_attempts = fs.write_attempts();
     let mut edited2 = reader.blocks.lock().unwrap()[0].clone();
     edited2.content = "RESUMED-MARKER-XYZ".to_string();

@@ -84,19 +84,29 @@ pub enum ConditionKind {
     /// All-clear: the last refused file of that format ingests fully or is
     /// gone ([`ConditionBus::vault_ingest_recovered`]).
     VaultIngestFailed(IngestRefusals),
-    /// One vault file is 0 bytes and stayed that way past the grace period that
-    /// covers an atomic save's zero-length intermediate — a file someone really
-    /// emptied. Nothing of it is ingested, because an empty file cannot
-    /// identify the document that lives at its path, so the document Holon
-    /// already holds is KEPT: the store shows content the file no longer has.
-    /// Disclosed rather than converged either way — deleting on an empty file's
-    /// word loses content, and writing the document back would undo the user's
-    /// own edit. `subject` is the file.
+    /// One vault file holds no content (0 bytes, or whitespace only) while
+    /// Holon holds a document for it. The removal of all its blocks is not
+    /// applied, so the store shows content the file no longer has. Deleting on
+    /// an empty file's word loses content, and writing the document back would
+    /// undo the user's own edit, so the file waits for the user. `seen` is the
+    /// sha256 of the file content the refusal was made on. `subject` is the
+    /// file.
     ///
-    /// All-clear: the next successful ingest of that same file, i.e. the moment
-    /// it has content again (or is deleted, which the watcher handles as a
-    /// deletion).
-    VaultFileEmptied,
+    /// All-clear: new content in the file, or the success of
+    /// [`OpId::AcceptRemoval`](crate::condition_profile::OpId::AcceptRemoval)
+    /// or [`OpId::RewriteFromStore`](crate::condition_profile::OpId::RewriteFromStore).
+    VaultFileEmptied { seen: String },
+    /// An `AcceptRemoval` of an emptied file did not remove the document's
+    /// blocks. `cause` says why; when the store changed after the refusal, the
+    /// store content went back to the file. `subject` is the file.
+    ///
+    /// All-clear: the next `AcceptRemoval` of that file that succeeds.
+    RemovalNotAccepted { cause: String },
+    /// A `RewriteFromStore` did not write the file. `cause` says why.
+    /// `subject` is the file.
+    ///
+    /// All-clear: the next `RewriteFromStore` of that file that succeeds.
+    RewriteFromStoreFailed { cause: String },
     /// A block inside a shared subtree was edited, but its content could NOT be
     /// materialized to a dedicated on-disk org file (the mount is not yet a
     /// page-file, so the write-back layer cannot resolve a path). The edit is
@@ -749,6 +759,8 @@ impl ConditionKind {
     pub const SQL_PROJECTION_FAILED: &'static str = "sql-projection-failed";
     pub const VAULT_INGEST_FAILED: &'static str = "vault-ingest-failed";
     pub const VAULT_FILE_EMPTIED: &'static str = "vault-file-emptied";
+    pub const REMOVAL_NOT_ACCEPTED: &'static str = "removal-not-accepted";
+    pub const REWRITE_FROM_STORE_FAILED: &'static str = "rewrite-from-store-failed";
     pub const WRITEBACK_DEGRADED: &'static str = "writeback-degraded";
     pub const WRITEBACK_LOSSY: &'static str = "writeback-lossy";
     pub const EDIT_REFUSED_READ_ONLY_FORMAT: &'static str = "edit-refused-read-only-format";
@@ -830,7 +842,9 @@ impl ConditionKind {
             Self::SqlProjectionFailed(_) => Self::SQL_PROJECTION_FAILED,
             Self::ForeignIdCollision(_) => Self::FOREIGN_ID_COLLISION,
             Self::VaultIngestFailed(_) => Self::VAULT_INGEST_FAILED,
-            Self::VaultFileEmptied => Self::VAULT_FILE_EMPTIED,
+            Self::VaultFileEmptied { .. } => Self::VAULT_FILE_EMPTIED,
+            Self::RemovalNotAccepted { .. } => Self::REMOVAL_NOT_ACCEPTED,
+            Self::RewriteFromStoreFailed { .. } => Self::REWRITE_FROM_STORE_FAILED,
             Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
             Self::WritebackLossy { .. } => Self::WRITEBACK_LOSSY,
@@ -1500,7 +1514,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn every_degradation_reaches_a_subscriber_that_arrives_after_it_was_raised() {
         let raised_before_anyone_listens = vec![
-            ConditionKind::VaultFileEmptied,
+            ConditionKind::VaultFileEmptied { seen: "0".into() },
             ConditionKind::SnapshotSaveFailed("disk full".into()),
             ConditionKind::SnapshotLoadFailed("/v/s.loro.corrupt-1".into()),
             ConditionKind::RehydrationFailed("advertiser: port in use".into()),

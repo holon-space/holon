@@ -5547,6 +5547,8 @@ dependencies = [
  "holon-api",
  "holon-core",
  "holon-macros",
+ "holon-net",
+ "holon-net-shell",
  "ignore",
  "notify 8.2.0",
  "percent-encoding",
@@ -6080,6 +6082,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-net-shell"
+version = "0.1.0"
+dependencies = [
+ "holon-net",
+ "holon-pattern",
+ "tokio",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-oracles"
 version = "0.1.0"
 dependencies = [
@@ -6127,6 +6139,7 @@ dependencies = [
  "holon-core",
  "holon-filesystem",
  "holon-markdown",
+ "holon-net-shell",
  "holon-org-format",
  "proptest 1.11.0",
  "proptest-state-machine",

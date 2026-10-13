@@ -2,7 +2,7 @@
 id: 2026-10-06-pre-ingest-stall-loses-a-store-edit
 date: 2026-10-06
 gap: COVERAGE
-status: OPEN
+status: FIXED
 summary: >-
   A store edit whose block-driven write-back first re-ingests a changed file
   is reverted in the store by that pre-ingest; when the writes then stall, the
@@ -44,9 +44,12 @@ stall with a user edit on disk or a pre-ingest. No keystone transition makes
 a file's stamp churn, so the keystone cannot reach it.
 
 ## Remedy
-OPEN. Pinned by the ignored test `a_block_edit_whose_pre_ingest_stalls_stays_in_the_store` in
-crates/holon-orgmode/tests/writeback_compare_and_rename.rs (red for its
-reason: lane-logs/d70d-r5-green.log, "ignored only" run). No increment of the per-file write-back state machine plan
-(`write-back-state-machine.md`, ruling D97.a) covers the store reversion yet;
-its Inc 4 covers the disclosure part. Main b2a19917 has no stall, but has the
-store reversion.
+FIXED by the per-file write-back subnet (ADR 0032 §9,
+holon-space/holon-work#175). The owed render is held in the `Owed` record, and
+`CatchUp` retries the write until it lands; a partial pre-ingest is retried and
+does not take the file's text over the store. Pinned by:
+- keystone case `wb-d8-store-edit-whose-pre-ingest-stalls-stays-in-the-store`
+  in `crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`
+- `a_block_edit_whose_pre_ingest_stalls_stays_in_the_store` in
+  `crates/holon-orgmode/tests/writeback_compare_and_rename.rs` (no longer
+  ignored)

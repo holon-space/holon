@@ -1199,8 +1199,8 @@ pub fn chat_mode_expr() -> RenderExpr {
                  operations\n2. Applies them to the local Loro document\n3. Diffs the resulting \
                  block tree against the SQL cache\n4. Emits block.created / block.updated / \
                  block.deleted events\n5. The CacheEventSubscriber picks these up and updates \
-                 QueryableCache\n\nThe echo suppression (last_projection) prevents file re-writes \
-                 when the change originated from an org file edit on this machine.",
+                 QueryableCache\n\nThe write-back net does not parse a file again while its \
+                 hash equals the file's Base, so an own write is not re-ingested.",
             ),
             chat_msg(
                 "user",

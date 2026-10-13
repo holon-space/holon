@@ -1262,10 +1262,10 @@ mod teeth {
     /// **Fork B B2 echo gate (RULED DONE criterion).** After the B2 boot sweep
     /// materializes the fileless `child-note` into `child-note.org`,
     /// re-triggering the production watcher over that own-written file must
-    /// be IDEMPOTENT: the `last_projection` seed suppresses the echo, so
+    /// be IDEMPOTENT: the echo's hash equals the file's write-back `Base`, so
     /// the file stays written EXACTLY ONCE (no duplicate `child-note` file)
     /// and the page is NOT re-minted under a new id (the `block_raw` id-set
-    /// is unchanged across the pump). A missing `last_projection` seed
+    /// is unchanged across the pump). A missing `Base`
     /// would re-ingest our own write and could mint a second page / rewrite
     /// the file in a loop — this test locks that closed.
     #[tokio::test(flavor = "multi_thread")]

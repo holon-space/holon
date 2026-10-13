@@ -1,6 +1,7 @@
 //! A user edit or delete that lands while Holon writes a vault file back
 //! survives: every write-back compares the file with what it read, and on a
-//! mismatch drops the write and re-ingests the file instead.
+//! mismatch reads the file again and merges the user's edit into the next
+//! write.
 //!
 //! The FileSystem double edits or deletes the target as the controller hands
 //! it the bytes to write — after the read the write is based on, before the
@@ -32,7 +33,6 @@ use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::FileSyncController;
 use holon_filesystem::RealFileSystem;
-use holon_filesystem::RefusedWritebacks;
 use holon_filesystem::WritebackDisclosure;
 use holon_filesystem::fs_port::FileMeta;
 use holon_filesystem::fs_port::FileStamp;
@@ -405,7 +405,7 @@ impl WritebackDisclosure for Disclosures {
         self.record("ingest_refused", path);
     }
     fn ingest_recovered(&self, _: &Path) {}
-    fn vault_file_emptied(&self, _: &Path) {}
+    fn vault_file_emptied(&self, _: &Path, _: &str) {}
     fn writeback_lossy(&self, _: &Path, _: &str) {}
     fn writeback_faithful(&self, _: &Path) {}
     fn block_in_two_files(
@@ -491,7 +491,7 @@ struct Harness {
     world: World,
     fs: Arc<InterferesBeforeWrite>,
     disclosed: Arc<Disclosures>,
-    refused: Arc<RefusedWritebacks>,
+    refused: holon_net_shell::Shell,
     controller: FileSyncController,
 }
 
@@ -502,7 +502,8 @@ impl Harness {
         let path = root.join("Notes.org");
         let fs = Arc::new(InterferesBeforeWrite::new(path.clone()));
         let disclosed = Arc::new(Disclosures::default());
-        let refused = Arc::new(RefusedWritebacks::default());
+        let refused = holon_net_shell::Shell::new(holon_filesystem::writeback_net::net())
+            .expect("the write-back net loads");
         let controller = new_org_sync_controller(
             Arc::new(world.clone()),
             Arc::new(world.clone()),
@@ -511,7 +512,7 @@ impl Harness {
             fs.clone(),
         )
         .with_writeback_disclosure(disclosed.clone())
-        .with_refused_writebacks(refused.clone());
+        .with_writeback_net(refused.clone());
         Self {
             _tmp: tmp,
             path,
@@ -570,7 +571,38 @@ impl Harness {
                 },
             )
             .await
-            .expect("the block-driven write-back runs");
+            .map_or_else(
+                |e| {
+                    assert!(
+                        holon_filesystem::already_disclosed(&e),
+                        "the block-driven write-back failed: {e:#}"
+                    )
+                },
+                |_| (),
+            );
+    }
+
+    /// Runs the write-back net's retries until every file is settled.
+    async fn settle(&mut self) {
+        for _ in 0..50 {
+            if self
+                .refused
+                .read(holon_filesystem::writeback_net::unsettled)
+                .is_empty()
+            {
+                return;
+            }
+            tokio::time::sleep(holon_filesystem::writeback_net::CATCH_UP_BACKOFF).await;
+            self.controller
+                .drive_writeback_net()
+                .await
+                .expect("the write-back net runs");
+        }
+        panic!(
+            "the write-back net did not settle: {:?}",
+            self.refused
+                .read(holon_filesystem::writeback_net::unsettled)
+        );
     }
 
     /// One poll tick: the tracked-file backstop, then new-file discovery.
@@ -596,8 +628,7 @@ impl Harness {
 async fn ingest_normalization_keeps_an_edit_made_during_the_write() {
     let mut h = Harness::new(World::with_page("Notes"));
     std::fs::write(&h.path, CONTENT).unwrap();
-    let edit = format!("{CONTENT}* Call mom\n");
-    h.fs.arm(Interference::Edit(edit.clone()));
+    h.fs.arm(Interference::Edit(format!("{CONTENT}* Call mom\n")));
 
     let _ = h
         .controller
@@ -605,16 +636,15 @@ async fn ingest_normalization_keeps_an_edit_made_during_the_write() {
         .await
         .expect("the ingest completes");
     h.fs.assert_fired();
-    assert_eq!(
-        h.disk(),
-        edit,
-        "the normalization write-back overwrote the user's edit"
+    h.settle().await;
+    let disk = h.disk();
+    assert!(
+        disk.contains("Call mom") && disk.contains("Buy milk"),
+        "the normalization write-back overwrote the user's edit: {disk:?}"
     );
-
-    h.poll().await;
     assert!(
         h.world.block_with_text("Call mom").is_some(),
-        "the edit was never re-ingested: {:?}",
+        "the edit was never ingested: {:?}",
         h.world.texts(),
     );
 }
@@ -648,21 +678,20 @@ async fn ingest_normalization_keeps_a_delete_made_during_the_write() {
 async fn block_write_back_keeps_an_edit_made_during_the_write() {
     let mut h = Harness::ingested().await;
     let edit = format!("{}* Call mom\n", h.disk());
-    h.fs.arm(Interference::Edit(edit.clone()));
+    h.fs.arm(Interference::Edit(edit));
 
     let block = h.edit_store();
     h.block_changed(&block).await;
     h.fs.assert_fired();
-    assert_eq!(
-        h.disk(),
-        edit,
-        "the block write-back overwrote the user's edit"
+    h.settle().await;
+    let disk = h.disk();
+    assert!(
+        disk.contains("Call mom") && disk.contains("Buy oat milk"),
+        "the block write-back did not keep both edits: {disk:?}"
     );
-
-    h.poll().await;
     assert!(
         h.world.block_with_text("Call mom").is_some(),
-        "the edit was never re-ingested: {:?}",
+        "the edit was never ingested: {:?}",
         h.world.texts(),
     );
 }
@@ -692,7 +721,7 @@ async fn block_write_back_keeps_a_delete_made_during_the_write() {
 async fn re_render_keeps_an_edit_made_during_the_write() {
     let mut h = Harness::ingested().await;
     let edit = format!("{}* Call mom\n", h.disk());
-    h.fs.arm(Interference::Edit(edit.clone()));
+    h.fs.arm(Interference::Edit(edit));
 
     h.edit_store();
     h.controller
@@ -700,12 +729,15 @@ async fn re_render_keeps_an_edit_made_during_the_write() {
         .await
         .expect("the re-render runs");
     h.fs.assert_fired();
-    assert_eq!(h.disk(), edit, "the re-render overwrote the user's edit");
-
-    h.poll().await;
+    h.settle().await;
+    let disk = h.disk();
+    assert!(
+        disk.contains("Call mom") && disk.contains("Buy oat milk"),
+        "the re-render did not keep both edits: {disk:?}"
+    );
     assert!(
         h.world.block_with_text("Call mom").is_some(),
-        "the edit was never re-ingested: {:?}",
+        "the edit was never ingested: {:?}",
         h.world.texts(),
     );
 }
@@ -764,6 +796,7 @@ async fn ingest_normalization_lands_over_a_rewrite_of_the_same_bytes() {
         .await
         .expect("the ingest completes");
     h.fs.assert_fired();
+    h.settle().await;
     assert_ne!(
         h.disk(),
         CONTENT,
@@ -780,6 +813,7 @@ async fn block_write_back_lands_over_a_rewrite_of_the_same_bytes() {
     let block = h.edit_store();
     h.block_changed(&block).await;
     h.fs.assert_fired();
+    h.settle().await;
     assert!(
         h.disk().contains("Buy oat milk"),
         "the block write-back was dropped although the file kept the bytes it was rendered \
@@ -814,7 +848,7 @@ async fn block_write_back_discloses_a_file_that_keeps_rewriting_its_own_bytes() 
         .expect_err("a write-back that can never land is an error, not a silent drop");
     h.fs.assert_fired();
     assert!(
-        format!("{err:#}").contains("kept changing"),
+        format!("{err:#}").contains("keeps changing"),
         "the error does not name the condition: {err:#}"
     );
     assert_eq!(
@@ -830,8 +864,7 @@ async fn block_write_back_discloses_a_file_that_keeps_rewriting_its_own_bytes() 
     assert_eq!(h.disk(), before, "the file is not touched");
 }
 
-/// A stalled write-back is disclosed for its file and waits: the poll does not
-/// retry it, the next block edit writes it.
+/// A stalled write-back is disclosed for its file and retried until it lands.
 #[tokio::test]
 async fn ingest_normalization_discloses_a_file_that_keeps_rewriting_its_own_bytes() {
     let warnings = Warnings::default();
@@ -862,10 +895,13 @@ async fn ingest_normalization_discloses_a_file_that_keeps_rewriting_its_own_byte
         "the stalled write-back raises no write-back condition"
     );
     assert_eq!(
-        h.refused.documents().len(),
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
+            .len(),
         1,
         "the shutdown guard does not learn of the stalled write-back: {:?}",
-        h.refused.documents()
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
     );
     assert!(
         warnings.naming(&h.path) > 0,
@@ -873,30 +909,29 @@ async fn ingest_normalization_discloses_a_file_that_keeps_rewriting_its_own_byte
         warnings.0.lock().unwrap()
     );
 
-    h.fs.disarm();
-    h.poll().await;
-    h.poll().await;
-    assert_eq!(
-        h.disk(),
-        CONTENT,
-        "the poll retried the stalled write-back; only the next event writes it"
-    );
     assert_eq!(
         h.disclosed.of("resumed", &h.path),
         0,
         "the condition was lifted although nothing was written"
     );
-    assert_eq!(h.refused.documents().len(), 1);
+
+    h.fs.disarm();
+    h.settle().await;
+    assert_ne!(h.disk(), CONTENT, "the retry never wrote the stalled file");
+    assert_eq!(h.disclosed.of("resumed", &h.path), 1);
+    assert!(
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
+            .is_empty()
+    );
 
     let block = h.edit_store();
     h.block_changed(&block).await;
     assert!(
         h.disk().contains("Buy oat milk"),
-        "the stall quarantined the file, so the next block edit never reached it: {:?}",
+        "the next block edit never reached the file: {:?}",
         h.disk()
     );
-    assert_eq!(h.disclosed.of("resumed", &h.path), 1);
-    assert!(h.refused.documents().is_empty());
 }
 
 /// `CONTENT` plus a second id-less headline.
@@ -945,8 +980,8 @@ async fn ingest_of(h: &mut Harness, content: &str) -> EntityUri {
         .id
 }
 
-/// The poll neither retries the stalled write nor re-ingests the unchanged
-/// file over the store edit.
+/// Neither the poll nor the retry of the stalled write re-ingests the file
+/// over the store edit.
 #[tokio::test]
 async fn a_store_edit_made_during_an_ingest_stall_survives_and_reaches_disk() {
     let mut h = Harness::new(World::with_page("Notes"));
@@ -955,9 +990,8 @@ async fn a_store_edit_made_during_an_ingest_stall_survives_and_reaches_disk() {
 
     h.poll().await;
     h.fs.disarm();
+    h.settle().await;
     h.poll().await;
-    h.poll().await;
-    assert_eq!(h.disk(), CONTENT, "a poll wrote the unchanged file");
     assert_eq!(
         h.world.block_with_text("Buy oat milk").map(|b| b.id),
         Some(id.clone()),
@@ -977,7 +1011,11 @@ async fn a_store_edit_made_during_an_ingest_stall_survives_and_reaches_disk() {
         Some(id)
     );
     assert_eq!(h.disclosed.of("resumed", &h.path), 1);
-    assert!(h.refused.documents().is_empty());
+    assert!(
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -989,6 +1027,8 @@ async fn an_edit_on_disk_during_an_ingest_stall_ingests_over_the_parsed_base() {
     std::fs::write(&h.path, &edit).unwrap();
 
     h.poll().await;
+    h.fs.disarm();
+    h.settle().await;
     assert!(
         h.world.block_with_text("Call mom").is_some(),
         "the edit on disk was not ingested: {:?}",
@@ -1001,7 +1041,6 @@ async fn an_edit_on_disk_during_an_ingest_stall_ingests_over_the_parsed_base() {
         h.world.texts(),
     );
 
-    h.fs.disarm();
     let block = h.world.block_with_text("Buy oat milk").unwrap();
     h.block_changed(&block).await;
     let disk = h.disk();
@@ -1009,7 +1048,11 @@ async fn an_edit_on_disk_during_an_ingest_stall_ingests_over_the_parsed_base() {
         disk.contains("Buy oat milk") && disk.contains("Call mom"),
         "the next block edit never reached disk: {disk:?}"
     );
-    assert!(h.refused.documents().is_empty());
+    assert!(
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
+            .is_empty()
+    );
 }
 
 /// Without a stall, a line the user deletes on disk leaves the store.
@@ -1135,7 +1178,12 @@ async fn pre_ingest_stall(h: &mut Harness) -> Block {
     let (_, verdict) = verdicts.into_iter().next().expect("one document");
     assert!(verdict.is_err(), "the stalled write-back was not reported");
     h.fs.assert_fired();
-    assert_eq!(h.refused.documents().len(), 1);
+    assert_eq!(
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
+            .len(),
+        1
+    );
     h.fs.disarm();
     h.poll().await;
     h.poll().await;
@@ -1148,18 +1196,26 @@ async fn a_block_edit_whose_pre_ingest_stalls_stays_disclosed_until_it_reaches_d
     let mut h = Harness::ingested().await;
     let block = pre_ingest_stall(&mut h).await;
     assert!(
-        h.disk().contains("Buy oat milk") || h.refused.documents().len() == 1,
+        h.disk().contains("Buy oat milk")
+            || h.refused
+                .read(holon_filesystem::writeback_net::failed_writebacks)
+                .len()
+                == 1,
         "the stall was retracted although the edit is not on disk: {:?}",
         h.disk()
     );
 
     h.block_changed(&block).await;
+    h.settle().await;
     assert!(h.disk().contains("Buy oat milk"), "{:?}", h.disk());
-    assert!(h.refused.documents().is_empty());
+    assert!(
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
+            .is_empty()
+    );
 }
 
 #[tokio::test]
-#[ignore = "D97 state machine, no increment yet: the pre-ingest takes the file's text over the store edit, also without a stall and on main b2a19917"]
 async fn a_block_edit_whose_pre_ingest_stalls_stays_in_the_store() {
     let mut h = Harness::ingested().await;
     pre_ingest_stall(&mut h).await;
@@ -1177,6 +1233,7 @@ async fn a_file_deleted_during_an_ingest_stall_leaves_no_refused_write_back() {
     std::fs::remove_file(&h.path).unwrap();
 
     h.poll().await;
+    h.settle().await;
     h.poll().await;
     assert!(!h.path.exists(), "a poll recreated the deleted file");
     assert!(
@@ -1185,9 +1242,12 @@ async fn a_file_deleted_during_an_ingest_stall_leaves_no_refused_write_back() {
         h.world.texts()
     );
     assert!(
-        h.refused.documents().is_empty(),
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
+            .is_empty(),
         "the shutdown guard still reports the deleted file: {:?}",
-        h.refused.documents()
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
     );
     assert_eq!(h.disclosed.of("resumed", &h.path), 1);
 }
@@ -1200,6 +1260,7 @@ async fn a_block_edit_after_an_ingest_stall_reaches_disk() {
 
     let block = h.edit_store();
     h.block_changed(&block).await;
+    h.settle().await;
     assert!(
         h.disk().contains("Buy oat milk"),
         "the block edit after the stall never reached disk: {:?}",
@@ -1211,11 +1272,15 @@ async fn a_block_edit_after_an_ingest_stall_reaches_disk() {
         "the block edit re-ingested the stale file: {:?}",
         h.world.texts(),
     );
-    assert!(h.refused.documents().is_empty());
+    assert!(
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
+            .is_empty()
+    );
 }
 
-/// The holder carries an edit the store render does not, so the block-driven
-/// render differs from what the pre-ingest's normalization wrote.
+/// A block edit whose file changed on disk lands after the ingest of that
+/// change normalizes the file.
 #[tokio::test]
 async fn a_block_edit_lands_after_a_pre_ingest_that_normalizes_the_file() {
     let mut h = Harness::ingested().await;
@@ -1224,11 +1289,7 @@ async fn a_block_edit_lands_after_a_pre_ingest_that_normalizes_the_file() {
         .seed_holder_from_authority(&doc)
         .await
         .expect("seed the holder");
-    let mut block = h
-        .world
-        .block_with_text("Buy milk")
-        .expect("the fixture block");
-    block.content = "Buy oat milk".to_string();
+    let block = h.edit_store();
     // A file without its document id makes the pre-ingest stamp it, i.e. write.
     let without_doc_id = h
         .disk()
@@ -1310,10 +1371,13 @@ async fn re_render_writes_the_other_files_while_one_file_keeps_rewriting_its_own
             "round {round}: the churning file's stalled write-back is not disclosed"
         );
         assert_eq!(
-            h.refused.documents().len(),
+            h.refused
+                .read(holon_filesystem::writeback_net::failed_writebacks)
+                .len(),
             1,
             "round {round}: {:?}",
-            h.refused.documents()
+            h.refused
+                .read(holon_filesystem::writeback_net::failed_writebacks)
         );
     }
 }

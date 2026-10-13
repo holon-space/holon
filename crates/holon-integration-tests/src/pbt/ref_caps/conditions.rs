@@ -41,7 +41,11 @@ impl holon_pbt_core::capabilities::RefCopies for ReferenceState {
     }
 
     fn write_held(&self) -> holon_pbt_core::capabilities::WriteHeld {
-        let docs: BTreeSet<&EntityUri> = self.files.churning_docs().collect();
+        let docs: BTreeSet<&EntityUri> = self
+            .files
+            .churning_docs()
+            .chain(self.files.refused_docs())
+            .collect();
         holon_pbt_core::capabilities::WriteHeld {
             files: docs
                 .iter()
@@ -60,9 +64,21 @@ impl holon_pbt_core::capabilities::RefCopies for ReferenceState {
 }
 
 impl ReferenceState {
+    /// The blocks the file of `doc` homes, its page included.
+    pub fn doc_rows(&self, doc: &EntityUri) -> Vec<holon_api::block::Block> {
+        let docs = BTreeSet::from([doc]);
+        self.domain
+            .block_state
+            .blocks
+            .values()
+            .filter(|b| self.homed_in(&b.id, &docs))
+            .cloned()
+            .collect()
+    }
+
     /// Whether block `id` lives in the file of one of `docs`. A page has a
     /// file of its own.
-    fn homed_in(&self, id: &EntityUri, docs: &BTreeSet<&EntityUri>) -> bool {
+    pub fn homed_in(&self, id: &EntityUri, docs: &BTreeSet<&EntityUri>) -> bool {
         let mut at = id;
         loop {
             if docs.contains(at) {

@@ -56,6 +56,8 @@ const EXPECTED_ANALYZABLE: &[&str] = &[
     "op:block.split_block",
     "op:type-table.drop_refused_table",
     "op:type.declare_type",
+    "op:writeback.accept_removal",
+    "op:writeback.rewrite_from_store",
     "rule:block:journals::action::0",
 ];
 

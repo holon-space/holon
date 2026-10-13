@@ -730,10 +730,37 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         });
     }
 
-    fn vault_file_emptied(&self, path: &Path) {
+    fn vault_file_emptied(&self, path: &Path, seen: &str) {
         self.bus.emit(holon_api::Condition {
             subject: file_subject(path),
-            reason: holon_api::ConditionKind::VaultFileEmptied,
+            reason: holon_api::ConditionKind::VaultFileEmptied {
+                seen: seen.to_string(),
+            },
+        });
+    }
+
+    fn removal_not_accepted(&self, path: &Path, cause: &str) {
+        self.bus.emit(holon_api::Condition {
+            subject: file_subject(path),
+            reason: holon_api::ConditionKind::RemovalNotAccepted {
+                cause: cause.to_string(),
+            },
+        });
+    }
+
+    fn rewrite_from_store_failed(&self, path: &Path, cause: &str) {
+        self.bus.emit(holon_api::Condition {
+            subject: file_subject(path),
+            reason: holon_api::ConditionKind::RewriteFromStoreFailed {
+                cause: cause.to_string(),
+            },
+        });
+    }
+
+    fn file_condition_cleared(&self, path: &Path, kind: &'static str) {
+        self.bus.clear(&holon_api::ConditionKey {
+            subject: file_subject(path),
+            kind,
         });
     }
 

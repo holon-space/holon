@@ -1576,6 +1576,15 @@ proptest! {
             tokio::fs::write(&fixture.file_path(), &initial_org)
                 .await
                 .unwrap();
+            // The watcher reports the new file before any edit renders over it.
+            assert_eq!(
+                fixture
+                    .controller
+                    .on_file_changed(&fixture.file_path())
+                    .await
+                    .unwrap(),
+                holon_filesystem::IngestOutcome::Ingested
+            );
 
             // Apply mutation to a clone and seed into store
             let mut mutated = baseline.clone();
@@ -1706,6 +1715,10 @@ proptest! {
                 return Ok::<(), TestCaseError>(());
             }
 
+            let ingested_org = tokio::fs::read_to_string(&fixture.file_path())
+                .await
+                .unwrap();
+
             // Apply text mutation to org file
             let mutated_org = match apply_text_mutation(&initial_org, &mutation) {
                 Some(text) => text,
@@ -1727,9 +1740,16 @@ proptest! {
             let final_org = tokio::fs::read_to_string(&fixture.file_path())
                 .await
                 .unwrap();
+            // A whitespace-only file is refused until the user accepts the
+            // removal, so the store keeps what it ingested before.
+            let expected_org = if final_org.trim().is_empty() {
+                &ingested_org
+            } else {
+                &final_org
+            };
             let expected_parse = parse_org_file(
                 &fixture.file_path(),
-                &final_org,
+                expected_org,
                 &EntityUri::no_parent(),
                 &fixture.root_dir,
             )
@@ -3952,7 +3972,7 @@ mod intermediate_ancestor_writeback_hole {
             fn writeback_resumed(&self, _: &std::path::Path) {}
             fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
             fn ingest_recovered(&self, _: &std::path::Path) {}
-            fn vault_file_emptied(&self, _: &std::path::Path) {}
+            fn vault_file_emptied(&self, _: &std::path::Path, _: &str) {}
             fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
             fn writeback_faithful(&self, _: &std::path::Path) {}
             fn block_in_two_files(
@@ -4079,7 +4099,7 @@ mod intermediate_ancestor_writeback_hole {
             }
             fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
             fn ingest_recovered(&self, _: &std::path::Path) {}
-            fn vault_file_emptied(&self, _: &std::path::Path) {}
+            fn vault_file_emptied(&self, _: &std::path::Path, _: &str) {}
             fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
             fn writeback_faithful(&self, _: &std::path::Path) {}
             fn block_in_two_files(
@@ -4229,7 +4249,7 @@ mod intermediate_ancestor_writeback_hole {
             fn writeback_resumed(&self, _: &std::path::Path) {}
             fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
             fn ingest_recovered(&self, _: &std::path::Path) {}
-            fn vault_file_emptied(&self, _: &std::path::Path) {}
+            fn vault_file_emptied(&self, _: &std::path::Path, _: &str) {}
             fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
             fn writeback_faithful(&self, _: &std::path::Path) {}
             fn block_in_two_files(
@@ -4507,7 +4527,7 @@ impl holon_filesystem::WritebackDisclosure for RefusalLog {
     fn ingest_recovered(&self, path: &std::path::Path) {
         self.1.lock().unwrap().push(path.to_path_buf());
     }
-    fn vault_file_emptied(&self, _: &std::path::Path) {}
+    fn vault_file_emptied(&self, _: &std::path::Path, _: &str) {}
     fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
     fn writeback_faithful(&self, _: &std::path::Path) {}
     fn block_in_two_files(

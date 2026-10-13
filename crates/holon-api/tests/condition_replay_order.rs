@@ -23,7 +23,7 @@ use holon_api::condition_bus::RefusedFile;
 fn emptied_file(subject: &str) -> Condition {
     Condition {
         subject: subject.to_string(),
-        reason: ConditionKind::VaultFileEmptied,
+        reason: ConditionKind::VaultFileEmptied { seen: "0".into() },
     }
 }
 

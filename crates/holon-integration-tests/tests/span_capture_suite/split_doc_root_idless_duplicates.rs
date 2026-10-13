@@ -241,11 +241,13 @@ async fn split_root_env(rt: Arc<tokio::runtime::Runtime>) -> TestEnvironment {
 }
 
 /// Write the page-file with an ID-less headline under `Fix bugs`, let it
-/// ingest, settle. Returns the exact bytes written, so the caller can assert
-/// the write-back was skipped.
+/// ingest, settle. `label` is `Fix bugs`' body text, so each label is new file
+/// content: a byte-identical rewrite is no disk change and is not re-ingested.
+/// Returns the exact bytes written, so the caller can assert the write-back was
+/// skipped.
 async fn write_idless(env: &TestEnvironment, label: &str) -> String {
     let page_path = env.org_file_path(PAGE_PATH);
-    let body = page_org(&format!("** {PROBE}\n"));
+    let body = page_org(&format!("{label}\n** {PROBE}\n"));
     FileSystem::write(env.org_fs.as_ref(), &page_path, body.as_bytes())
         .await
         .unwrap_or_else(|e| panic!("write page file [{label}]: {e}"));

@@ -3,14 +3,18 @@
 //! Unified bidirectional sync: a single component
 //! that uses the **projection + diff-ingestion** pattern:
 //!
-//! - `last_projection`: what we last wrote to (or confirmed on) disk, per file.
-//! - Echo suppression: `disk_content == last_projection[file]` (no timing
-//!   window).
-//! - External edits: detected by diffing against `last_projection`.
+//! - The write-back net ([`crate::writeback_net`], ADR 0032 §9.5) owns each
+//!   document's write-back state: `Base`, `OnDisk`, `Authority`, `Refused`. The
+//!   controller runs its effects (`writeback` module): `ReadDisk` and
+//!   `CatchUp`'s ingest or compare-and-set write.
+//! - `last_projection`: the text of each file's `Base`, the merge base of the
+//!   next ingest. No ingest is skipped because the bytes equal it: Holon's own
+//!   write leaves `OnDisk` at `Base`, so it enables nothing. A registered mount
+//!   file is outside the net; `mount_skipped` is its echo record.
 //!
 //! The controller runs on a single task via `tokio::select!`, so
-//! `on_file_changed` and `on_block_changed` are serialized — no concurrent
-//! access to `last_projection`.
+//! `on_file_changed`, `on_block_changed` and the net's effects are
+//! serialized.
 //!
 //! **Decoupled from Loro/Turso**: uses `BlockReader` and `DocumentManager`
 //! traits.
@@ -75,6 +79,8 @@ use crate::sync_ports::WritebackDisclosure;
 use crate::vault_path::PathCollisionKey;
 use crate::vault_path::VaultPath;
 use crate::vault_path::why_two_files_name_one_page;
+
+mod writeback;
 
 /// Bump when the org renderer changes in a way that alters the canonical
 /// projection bytes (formatting, property ordering, directive layout, …), OR
@@ -460,22 +466,6 @@ struct IngestSkip {
     /// file, and it changes nothing about this file for a signature to catch.
     claimed_id: Option<ClaimedId>,
 }
-
-/// One file's run of zero-length observations, held until it has content
-/// again. See [`empty_since`](FileSyncController::empty_since).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EmptyFileWatch {
-    /// Clock reading at the first 0-byte observation of this run.
-    first_seen_millis: i64,
-    /// The degraded condition has been raised for this run. Sticky conditions
-    /// are idempotent, but re-raising would also re-log every discovery tick.
-    disclosed: bool,
-}
-
-/// How long a file may be 0 bytes before Holon stops calling it a save in
-/// flight. Atomic saves are zero-length for milliseconds; the margin is for a
-/// loaded machine, and it is only ever spent on a file nothing can ingest.
-const EMPTY_FILE_GRACE_MILLIS: i64 = 5_000;
 
 /// Why a caller is resolving an id to a page-file path.
 ///
@@ -941,8 +931,8 @@ pub struct FileSyncController {
     /// `Remove` per descendant, and only the last of them renders).
     pending_removals: HashMap<EntityUri, HashSet<String>>,
 
-    /// Files whose ingest normalization stalled ([`StampChurn`]), while they
-    /// still hold the bytes that ingest parsed.
+    /// Files whose ingest normalization the write-back net has not written
+    /// yet, while they still hold the bytes that ingest parsed.
     unstamped: HashMap<CanonicalPath, UnstampedFile>,
 
     /// 3-way text-content merger for the no-store conflict path. Present only
@@ -1038,6 +1028,8 @@ pub struct FileSyncController {
     /// the authority, and the whole map is dropped on a supervisor `Reset`
     /// (the holder it describes is gone, so its skip run means nothing).
     gate_skips: HashMap<EntityUri, GateSkipState>,
+    /// The documents whose fold stall is disclosed; their next write lifts it.
+    fold_stalls: HashSet<EntityUri>,
 
     /// Disclosure seam for write-back being degraded. The gate uses it to
     /// escalate a document whose holder has permanently stopped converging;
@@ -1049,8 +1041,8 @@ pub struct FileSyncController {
     /// quarantine episode, not an ERROR flood on every subsequent write-back
     /// attempt (real-vault boot 2026-07-12: hundreds of identical lines).
     /// Cleared alongside `quarantined` when a clean re-ingest lifts the
-    /// quarantine. Interior mutability because `is_quarantined` is a `&self`
-    /// read used from immutable contexts.
+    /// quarantine. Interior mutability because `note_quarantine_skip` is a
+    /// `&self` read used from immutable contexts.
     quarantine_skip_logged: std::sync::Mutex<HashSet<CanonicalPath>>,
 
     /// `(entity, site)` pairs already disclosed loudly, so a condition that is
@@ -1099,7 +1091,27 @@ pub struct FileSyncController {
     /// writable file to resume write-back to.
     writeback_readonly: HashSet<CanonicalPath>,
 
-    refused_writebacks: Arc<RefusedWritebacks>,
+    /// The per-file write-back net: it owns each file's write-back state and
+    /// decides when to read the disk and when to write it.
+    net: holon_net_shell::Shell,
+    /// Renders the next `CatchUp` of a document writes.
+    owed: HashMap<EntityUri, writeback::Owed>,
+    /// Documents whose ingest owes a normalization write: their next `Base`
+    /// records the `INGESTED` authority.
+    write_owed: HashSet<EntityUri>,
+    /// The text the mount guard last skipped per registered mount file. Such a
+    /// file is outside the write-back net, so this is its only echo record.
+    mount_skipped: HashMap<CanonicalPath, String>,
+    /// The outcome of the last net ingest of each document, for the
+    /// [`on_file_changed`](Self::on_file_changed) that asked for it.
+    ingest_results: HashMap<EntityUri, Result<IngestOutcome>>,
+    /// The write-back stall shown for each document: its path and cause.
+    stall_disclosed: HashMap<EntityUri, (PathBuf, String)>,
+    /// The `vault-file-emptied` condition shown for each document: its path
+    /// and the hash of the empty text.
+    refused_disclosed: HashMap<EntityUri, (PathBuf, String)>,
+    /// The file an `AcceptRemoval` is ingesting: its emptiness is read.
+    accepting_removal: Option<CanonicalPath>,
 
     /// Ingest quarantine for NEW-file discovery (`poll_new_files`, Inc 3b). A
     /// freshly-discovered file whose ingest FAILED — or that was REFUSED for a
@@ -1112,12 +1124,6 @@ pub struct FileSyncController {
     /// leaves disk. This is the disk->DB (ingest-side) counterpart
     /// of the DB->disk write-back [`quarantined`](Self::quarantined) set.
     ingest_quarantine: HashMap<CanonicalPath, IngestSkip>,
-    /// Files observed at 0 bytes and not yet seen with content again, with the
-    /// instant of the FIRST such observation and whether their emptiness has
-    /// been disclosed. An atomic save is zero-length for milliseconds; a file a
-    /// user emptied stays that way, and nothing else in the controller can tell
-    /// those apart, because both arrive as one identical refusal.
-    empty_since: HashMap<CanonicalPath, EmptyFileWatch>,
     /// Files already reported once for an identity problem, keyed by
     /// `(path, condition)`. By path, not by id: two strays can collide with the
     /// same owner, and each is its own thing for the user to fix. By condition
@@ -1278,15 +1284,23 @@ impl FileSyncController {
             quarantined: HashMap::new(),
             readonly_rerender_skipped: HashSet::new(),
             gate_skips: HashMap::new(),
+            fold_stalls: HashSet::new(),
             writeback_disclosure: None,
             quarantine_skip_logged: std::sync::Mutex::new(HashSet::new()),
             failure_disclosed: std::sync::Mutex::new(HashSet::new()),
             boot_seeding: true,
             seed_pristine: HashMap::new(),
             writeback_readonly: HashSet::new(),
-            refused_writebacks: Arc::new(RefusedWritebacks::default()),
+            net: holon_net_shell::Shell::new(crate::writeback_net::net())
+                .expect("the write-back net loads"),
+            owed: HashMap::new(),
+            write_owed: HashSet::new(),
+            mount_skipped: HashMap::new(),
+            ingest_results: HashMap::new(),
+            stall_disclosed: HashMap::new(),
+            refused_disclosed: HashMap::new(),
+            accepting_removal: None,
             ingest_quarantine: HashMap::new(),
-            empty_since: HashMap::new(),
             duplicate_id_disclosed: HashSet::new(),
             block_home: HashMap::new(),
             copies: HashMap::new(),
@@ -1732,10 +1746,10 @@ impl FileSyncController {
         self
     }
 
-    /// Share the record of refused write-backs with whoever must answer for
-    /// them at shutdown.
-    pub fn with_refused_writebacks(mut self, refused: Arc<RefusedWritebacks>) -> Self {
-        self.refused_writebacks = refused;
+    /// Share the write-back net with whoever must read its marking (idle
+    /// probe, shutdown).
+    pub fn with_writeback_net(mut self, net: holon_net_shell::Shell) -> Self {
+        self.net = net;
         self
     }
 
@@ -1804,16 +1818,21 @@ impl FileSyncController {
                     // it (its file re-ingests) and disclose why.
                     match self.file_uri_to_canonical_path(&uri) {
                         Ok(Some(canonical)) => {
+                            if !projection.base_hash.is_empty() {
+                                self.booted_base_hash
+                                    .insert(canonical.clone(), projection.base_hash);
+                            }
+                            // A file behind its store holds the empty hash: only
+                            // its base is known, nothing a boot may skip on.
+                            if projection.content_hash.is_empty() {
+                                continue;
+                            }
                             if let Some(document) = projection.document_id {
                                 self.last_projection_doc.insert(canonical.clone(), document);
                             }
                             if !projection.read_only_blocks.is_empty() {
                                 self.persisted_read_only_blocks
                                     .insert(canonical.clone(), projection.read_only_blocks);
-                            }
-                            if !projection.base_hash.is_empty() {
-                                self.booted_base_hash
-                                    .insert(canonical.clone(), projection.base_hash);
                             }
                             self.last_projection_hash
                                 .insert(canonical, projection.content_hash);
@@ -1902,10 +1921,9 @@ impl FileSyncController {
         self.persisted_undone = records;
 
         // last_projection (full rendered string) is intentionally NOT eagerly
-        // populated by walking every block — it's a session-only cache used
-        // for echo suppression, populated lazily on first miss by
-        // `on_file_changed`. Walking iter_documents_with_blocks here would
-        // pay parse+render cost for every doc on every boot.
+        // populated by walking every block — it is the session's merge base,
+        // populated lazily by `on_file_changed`. Walking iter_documents_with_blocks
+        // here would pay parse+render cost for every doc on every boot.
         info!("[FileSyncController] Initialize complete");
         Ok(())
     }
@@ -2523,8 +2541,10 @@ impl FileSyncController {
         self.flush_downstream("after delete").await?;
 
         // The document is gone, so a write-back it still owed is moot.
-        self.refused_writebacks.written(&document_uri);
-        if let Some(disclosure) = &self.writeback_disclosure {
+        if let (Some(_), Some(disclosure)) = (
+            self.stall_disclosed.remove(&document_uri),
+            &self.writeback_disclosure,
+        ) {
             disclosure.writeback_resumed(path);
         }
         self.forget_file_state(canonical).await;
@@ -3136,6 +3156,30 @@ impl FileSyncController {
         self.last_projection_doc.remove(canonical);
         self.unstamped.remove(canonical);
         let gone = self.doc_home.remove_at(canonical);
+        for doc in &gone {
+            self.owed.remove(doc);
+            let authority = self
+                .net
+                .read(|exec| {
+                    exec.tokens()
+                        .token(crate::writeback_net::AUTHORITY, doc.as_str())
+                        .map(|t| crate::writeback_net::field(&t.content, "hash").to_string())
+                })
+                .unwrap_or_else(|| crate::writeback_net::SEED.to_string());
+            self.net.write(
+                crate::writeback_net::BASE,
+                doc.as_str(),
+                crate::writeback_net::content([
+                    ("hash", crate::writeback_net::ABSENT),
+                    ("authority", &authority),
+                ]),
+            );
+            self.net.write(
+                crate::writeback_net::ON_DISK,
+                doc.as_str(),
+                crate::writeback_net::content([("hash", crate::writeback_net::ABSENT)]),
+            );
+        }
         if let Some(docs) = &self.read_only_docs {
             for doc_id in &gone {
                 docs.forget(doc_id);
@@ -3185,7 +3229,6 @@ impl FileSyncController {
             .lock()
             .expect("quarantine_skip_logged poisoned")
             .remove(canonical);
-        self.empty_since.remove(canonical);
         self.duplicate_id_disclosed.retain(|(p, _)| p != canonical);
         // A file that is gone is neither refused nor empty any more.
         if let Some(disclosure) = &self.writeback_disclosure {
@@ -3213,6 +3256,11 @@ impl FileSyncController {
                 *home = to.clone();
             }
         }
+        for owed in self.owed.values_mut() {
+            if &owed.home == from {
+                owed.home = to.clone();
+            }
+        }
         if let Some(v) = self.last_projection.remove(from) {
             self.last_projection.insert(to.clone(), v);
         }
@@ -3232,9 +3280,6 @@ impl FileSyncController {
         }
         if let Some(v) = self.ingest_quarantine.remove(from) {
             self.ingest_quarantine.insert(to.clone(), v);
-        }
-        if let Some(v) = self.empty_since.remove(from) {
-            self.empty_since.insert(to.clone(), v);
         }
         let moved: Vec<&'static str> = self
             .duplicate_id_disclosed
@@ -3333,7 +3378,7 @@ impl FileSyncController {
             document_uri,
         );
 
-        // Migrate per-file tracking state (echo-suppression, hashes, base
+        // Migrate per-file tracking state (merge base text, hashes, base
         // source, quarantine) from the old path to the new one.
         self.migrate_file_state(&from_canon, &to_canon)?;
 
@@ -3343,10 +3388,11 @@ impl FileSyncController {
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, to).await;
         }
+        self.reread_if_refused(&document_uri, &to_canon);
 
         // Reconcile the destination bytes into the store (children edits,
         // header) and stamp `last_projection[to]`. The bytes are unchanged by a
-        // pure move, so echo-suppression usually short-circuits this — the doc
+        // pure move, so this ingest usually has no delta — the doc
         // stays alive throughout, never passing through a deleted state. Done
         // BEFORE the retitle so the retitle is the LAST write and always wins,
         // even when a rename coincides with a content edit that re-ingests.
@@ -3418,16 +3464,36 @@ impl FileSyncController {
     ///
     /// A failure to persist the undone deletions is the returned error, and
     /// names the ingest's own error when both fail.
+    ///
+    /// A file the write-back net owns is only marked changed: the net reads it
+    /// and ingests it when its bytes left the base.
     pub async fn on_file_changed(&mut self, path: &Path) -> Result<IngestOutcome> {
+        let canonical = CanonicalPath::new(path);
+        if let Some(doc) = self.net_owns(&canonical) {
+            self.ingest_results.remove(&doc);
+            self.net.write(
+                crate::writeback_net::DISK_CHANGED,
+                doc.as_str(),
+                holon_net::exec::Content::new(),
+            );
+            self.drive_writeback_net().await?;
+            return self
+                .ingest_results
+                .remove(&doc)
+                .unwrap_or(Ok(IngestOutcome::Ingested));
+        }
         let outcome = self.on_file_changed_unpersisted(path).await;
-        match (outcome, self.persist_undone_deletions().await) {
+        let outcome = match (outcome, self.persist_undone_deletions().await) {
             (outcome, Ok(())) => outcome,
             (Ok(_), Err(persist)) => Err(persist),
             (Err(ingest), Err(persist)) => Err(persist.context(format!(
                 "persist the undone deletions after {} was not ingested: {ingest:#}",
                 path.display()
             ))),
-        }
+        };
+        self.sync_base_at(&canonical);
+        self.drive_writeback_net().await?;
+        outcome
     }
 
     /// The undone-deletions record could not be read: it is moved aside for
@@ -3690,30 +3756,23 @@ impl FileSyncController {
         // and `ingest_file` carries the same mount guard for that path.
         if !self.in_initial_scan() {
             if let Some(disk_content) = self.read_if_present(path).await? {
-                // An ECHO — the watcher re-reporting bytes we ourselves just
-                // projected — changes nothing on disk, so neither step below has
-                // anything to decide: deciding anyway re-discloses the mount skip
-                // on every echo and re-parses content that by definition did not
-                // change. `ingest_file` short-circuits the echo itself (and
-                // clears any write-back quarantine), so this only skips the
-                // pre-ingest steps.
-                let is_echo = self.last_projection.get(&canonical) == Some(&disk_content);
-                if !is_echo {
-                    // Model.md invariant 11 BEFORE the heal: a registered mount's
-                    // truth is the shared Loro doc, so the file must trigger
-                    // NEITHER the heal nor ingest — healing re-derives the
-                    // doc-root's content from the file PATH, i.e. from the
-                    // projection sink, exactly the direction the invariant
-                    // forbids.
-                    if self.skip_registered_mount(path, &disk_content).await? {
-                        return Ok(IngestOutcome::Ingested);
-                    }
-                    // Store-health seam (BugFunnel row 295): a runtime file-watch
-                    // reingest of a title-less doc-root heals it through the SAME
-                    // single implementation the boot sweep uses. Never in the
-                    // ingest fast-path, which certifies byte-identity only.
-                    self.heal_title_less_doc_root(path, &disk_content).await?;
+                if self.mount_skipped.get(&canonical) == Some(&disk_content) {
+                    return Ok(IngestOutcome::Ingested);
                 }
+                // Model.md invariant 11 BEFORE the heal: a registered mount's
+                // truth is the shared Loro doc, so the file must trigger
+                // NEITHER the heal nor ingest — healing re-derives the
+                // doc-root's content from the file PATH, i.e. from the
+                // projection sink, exactly the direction the invariant
+                // forbids.
+                if self.skip_registered_mount(path, &disk_content).await? {
+                    return Ok(IngestOutcome::Ingested);
+                }
+                // Store-health seam (BugFunnel row 295): a runtime file-watch
+                // reingest of a title-less doc-root heals it through the SAME
+                // single implementation the boot sweep uses. Never in the
+                // ingest fast-path, which certifies byte-identity only.
+                self.heal_title_less_doc_root(path, &disk_content).await?;
             }
         }
         match self.ingest_file(path).await {
@@ -3727,7 +3786,6 @@ impl FileSyncController {
                     // All-clear for a prior refusal of this file. Unconditional:
                     // clearing a condition that was never raised broadcasts
                     // nothing.
-                    self.empty_since.remove(&canonical);
                     if let Some(disclosure) = &self.writeback_disclosure {
                         disclosure.ingest_recovered(path);
                     }
@@ -3798,32 +3856,9 @@ impl FileSyncController {
         }
     }
 
-    /// True when `path` is quarantined from write-back. Any write-back path
-    /// must SKIP it (disclosed) rather than render the DB's view over the
-    /// on-disk file. See [`quarantined`](Self::quarantined).
-    fn is_quarantined(&self, path: &Path) -> bool {
-        let canonical = CanonicalPath::new(path);
-        if self.quarantined.contains_key(&canonical) {
-            self.note_quarantine_skip(path);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// The last read of `canonical` was refused. Its next read is owed even
-    /// when the bytes equal the last projection: an undo back to them leaves
-    /// nothing that differs, and only a read lifts the refusal.
-    fn read_was_refused(&self, canonical: &CanonicalPath) -> bool {
-        self.quarantined.get(canonical) == Some(&QuarantineCause::Refused)
-    }
-
     /// Disclose one write-back skip of an already-quarantined file: loud the
     /// first time per episode (WARN for a refusal, which is already disclosed
-    /// as a condition; ERROR otherwise), `debug` afterwards. Separate from
-    /// [`is_quarantined`](Self::is_quarantined) because the cause-aware trigger
-    /// path decides whether to skip by probing the guard, and still owes the
-    /// reader the same one-loud-line-per-episode disclosure when it does.
+    /// as a condition; ERROR otherwise), `debug` afterwards.
     fn note_quarantine_skip(&self, path: &Path) {
         let first_skip = self
             .quarantine_skip_logged
@@ -4354,7 +4389,7 @@ impl FileSyncController {
             for adopter in adopters {
                 let adopter_path = adopter.as_path_buf().clone();
                 match Box::pin(self.ingest_file(&adopter_path)).await {
-                    Ok(IngestOutcome::Ingested) => {}
+                    Ok(IngestOutcome::Ingested) => self.sync_base_at(&adopter),
                     Ok(outcome) => tracing::warn!(
                         adopter = %adopter_path.display(),
                         released_by = %released_by.display(),
@@ -5227,9 +5262,7 @@ impl FileSyncController {
                      (converges over iroh); the org file is a one-way projection sink, so \
                      re-ingesting it would duplicate the shared blocks into the global doc."
                 );
-                // Stamp last_projection so in-session echo-suppression treats the
-                // file as up to date (it IS our own projection output).
-                self.last_projection
+                self.mount_skipped
                     .insert(CanonicalPath::new(path), disk_content.to_string());
                 Ok(true)
             }
@@ -5279,13 +5312,12 @@ impl FileSyncController {
         // 0-byte file is not an intermediate at all: it is what an empty
         // title-less page RENDERS to, so refusing it would make that page
         // uncreatable from disk and unrecoverable after a restart.
-        if disk_content.is_empty() && self.holds_content_for(&canonical) {
-            self.empty_since
-                .entry(canonical.clone())
-                .or_insert(EmptyFileWatch {
-                    first_seen_millis: self.clock.now_millis(),
-                    disclosed: false,
-                });
+        //
+        // An `AcceptRemoval` reads the emptiness: the user said the blocks go.
+        if disk_content.trim().is_empty()
+            && self.holds_content_for(&canonical)
+            && self.accepting_removal.as_ref() != Some(&canonical)
+        {
             info!(
                 "[FileSyncController] {} is 0 bytes — skipping ingest until it has content (a \
                  save in flight, or an empty file); the document at this path is untouched",
@@ -5303,21 +5335,6 @@ impl FileSyncController {
             self.last_projection.get(&canonical) == Some(&disk_content),
         );
 
-        // Echo suppression: skip if we have a prior projection and content matches.
-        // An absent entry means "first time seeing this file" — always process it
-        // to create the document entity (needed for block→file sync).
-        // A file holding a second copy of a block is re-read whatever its
-        // bytes: the owner's file may have released the block since.
-        if self.last_projection.get(&canonical) == Some(&disk_content)
-            && !self.holds_copy(&canonical)
-        {
-            debug!(
-                "[FileSyncController] Skipping {} — matches last_projection",
-                path.display()
-            );
-            return Ok(IngestOutcome::Ingested);
-        }
-
         // Model.md invariant 11 (see `skip_registered_mount`). Reached on the
         // paths that do not run the pre-ingest steps — the initial scan, and
         // `ingest_file`'s other callers.
@@ -5331,7 +5348,7 @@ impl FileSyncController {
         // bytes hashed with the same renderer-version-prefixed sha256, the
         // ingest path is a guaranteed no-op (we wrote this content last time
         // and nothing changed on disk). Skip ingest entirely; stamp
-        // `last_projection` so subsequent in-session echo-suppression hits.
+        // `last_projection` as this file's merge base.
         //
         // Approach A (disk-bytes hash, not projection hash): the false-miss
         // case (user externally edited in a benign way — trailing newline,
@@ -5490,7 +5507,7 @@ impl FileSyncController {
         );
 
         // Boot-ingest instrumentation (holon_latency target, Option 0). Marks the
-        // start of the real ingest path (past echo-suppression + the cold-boot
+        // start of the real ingest path (past the mount skip + the cold-boot
         // fast-path skip). `boot_parse` / `boot_write` / `boot_place_wait` /
         // `boot_feed_wait` split this file's cost; `boot_file` (per-file total) is
         // emitted by the scan driver in `run_file_sync_controller`.
@@ -5792,6 +5809,10 @@ impl FileSyncController {
             .get(&canonical)
             .map(String::as_str)
             .unwrap_or("");
+        // A boot row with a real hash says the store was at these bytes, so a
+        // block the store lacks was lost, not deleted.
+        let store_may_be_ahead =
+            !last.is_empty() || !self.last_projection_hash.contains_key(&canonical);
         let base_fresh = self.base_source.get(&canonical).map(String::as_str) == Some(last);
         let old_blocks: HashMap<EntityUri, Block> = if base_fresh
             && self.base_store.is_base_seeded(&base_key)
@@ -5950,6 +5971,7 @@ impl FileSyncController {
                             path.display(),
                         )
                     })?;
+                self.sync_base_at(&holder);
                 if !matches!(outcome, IngestOutcome::Ingested) {
                     tracing::warn!(
                         holder = %holder.as_path_buf().display(),
@@ -6481,7 +6503,20 @@ impl FileSyncController {
         // goes with it.
         let mut reseed: HashSet<EntityUri> = HashSet::new();
         let mut overruled: HashMap<EntityUri, HolonChange> = HashMap::new();
-        if matches!(self.ordering.consolidator(), Consolidator::Upstream) {
+        let upstream = matches!(self.ordering.consolidator(), Consolidator::Upstream);
+        // Without upstream history, a base block the store no longer holds
+        // under this document is one Holon deleted or moved since the base.
+        let in_store: HashSet<EntityUri> = if upstream || !store_may_be_ahead {
+            HashSet::new()
+        } else {
+            self.block_reader
+                .get_blocks(&document_uri)
+                .await?
+                .into_iter()
+                .map(|b| b.id)
+                .collect()
+        };
+        {
             let mut base_children: HashMap<EntityUri, Vec<EntityUri>> = HashMap::new();
             for block in &new_blocks_vec {
                 if block.id == new_parse.document.id
@@ -6493,6 +6528,15 @@ impl FileSyncController {
                 let old_block = old_blocks.get(&block.id);
                 let change = if overruled.get(&block.parent_id) == Some(&HolonChange::Deleted) {
                     HolonChange::Deleted
+                } else if !upstream {
+                    if !store_may_be_ahead || old_block.is_none() || in_store.contains(&block.id) {
+                        continue;
+                    }
+                    match self.resolve_authoritative_doc(&block.id).await? {
+                        None => HolonChange::Deleted,
+                        Some(doc) if doc != document_uri => HolonChange::Moved,
+                        Some(_) => continue,
+                    }
                 } else if let Some(old_block) = old_block {
                     match self
                         .ordering
@@ -6614,17 +6658,16 @@ impl FileSyncController {
         let mut created_ids: Vec<String> = Vec::new();
         let mut updated_via_conflict_ids: Vec<String> = Vec::new();
 
-        // Current store content, keyed by id — the "mine" side of the 3-way text
-        // merge (the live UI/store edit). Fetched once, only when the no-store
-        // conflict path is active: a merger is wired AND this session's
-        // consolidator owns the store directly (SqlOnly / `Store`). In Loro
-        // (`Upstream`) mode the live CRDT already merges, so we skip entirely and
-        // never pay the read. Per Replication invariant 1 the merge BASE comes
-        // from the BaseStore (`old_blocks`), never from this cache read — this
-        // read supplies only "mine", the current store value.
+        // Current store content, keyed by id: the text an update keeps where
+        // the file did not change it since the base, and the "mine" side of
+        // the 3-way text merge. The merge runs only when a merger is wired
+        // AND this session's consolidator owns the store directly (SqlOnly /
+        // `Store`); in Loro (`Upstream`) mode the live CRDT already merges.
+        // Per Replication invariant 1 the merge BASE comes from the BaseStore
+        // (`old_blocks`), never from this read.
         let text_merge_active = self.text_merge.is_some()
             && matches!(self.ordering.consolidator(), Consolidator::Store);
-        let store_content: HashMap<EntityUri, String> = if text_merge_active {
+        let store_content: HashMap<EntityUri, String> = if !old_blocks.is_empty() {
             self.block_reader
                 .get_blocks(&document_uri)
                 .await
@@ -7016,6 +7059,13 @@ impl FileSyncController {
                     // sets. Idempotent re-ingests of an unchanged vault stop
                     // churning ~2,400 statements per startup.
                     strip_unchanged_edge_fields(&mut params, old_block, effective);
+                    // Text the file did not change since the base is the
+                    // store's to keep: a store edit made meanwhile stands.
+                    if effective.content == old_block.content {
+                        if let Some(mine) = store_content.get(id) {
+                            params.insert("content".into(), Value::String(mine.clone()));
+                        }
+                    }
                     operations.push(("update".to_string(), params));
                 }
             }
@@ -7454,7 +7504,9 @@ impl FileSyncController {
                     // Foreign page subtree: owned by its own page-file — exclude
                     // from this companion's per-parent order (a `place_all` here
                     // would re-key it under the companion's parents).
-                    if foreign_subtree_ids.contains(&new_block.id) {
+                    if foreign_subtree_ids.contains(&new_block.id)
+                        || overruled.contains_key(&new_block.id)
+                    {
                         continue;
                     }
                     if !matches!(new_block.content_type, holon_api::ContentType::Text) {
@@ -7795,61 +7847,36 @@ impl FileSyncController {
         }
 
         if rendered != disk_content {
-            // The normalization write-back re-renders org bytes over the
-            // ingested file. `on_file_changed` is `pub`, so containment is
-            // proven here rather than inherited from the watcher's provenance.
-            let target = VaultPath::inside(&self.root_dir, path.to_path_buf())
-                .context("ingest normalization write-back")?;
-            if let Some(parent) = target.as_path().parent() {
-                self.fs.create_dir_all(parent).await?;
-            }
-            let written =
-                match write_over_basis(&self.fs, target.as_path(), &basis, rendered.as_bytes())
-                    .await
-                {
-                    Err(e) if e.is::<StampChurn>() => {
-                        // The store holds the whole file, so this is a stalled
-                        // write-back, not a failed ingest. The store holds what
-                        // was parsed, so that is the base a later re-ingest
-                        // diffs against.
-                        self.disclose_stalled_writeback(&document_uri, path, &format!("{e:#}"));
-                        self.unstamped.insert(
-                            canonical.clone(),
-                            UnstampedFile {
-                                bytes: disk_content.clone(),
-                                stamped: rendered,
-                            },
-                        );
-                        self.last_projection
-                            .insert(canonical.clone(), disk_content.clone());
-                        return Ok(IngestOutcome::Ingested);
-                    }
-                    other => other?,
-                };
-            match written {
-                WriteBack::Written => {
-                    self.unstamped.remove(&canonical);
-                    self.refused_writebacks.written(&document_uri);
-                    if let Some(disclosure) = &self.writeback_disclosure {
-                        disclosure.writeback_resumed(path);
-                    }
-                    self.run_post_write_hook(path);
-                    #[cfg(feature = "crash-injection")]
-                    crate::crash_injection::reached("after_ingest_write_back");
-                    info!(
-                        "[FileSyncController] Wrote merged content to {}",
-                        path.display()
-                    );
-                }
-                WriteBack::Changed => {
-                    // The store holds what was parsed, so that is the base the
-                    // re-ingest diffs the user's change against.
-                    self.last_projection
-                        .insert(canonical.clone(), disk_content.clone());
-                    self.schedule_reingest(&canonical, path, Some(&disk_content));
-                    return Ok(IngestOutcome::Ingested);
-                }
-            }
+            // The write-back net writes the normalized render. Until it lands
+            // the store holds what was parsed, so the disk text is the base.
+            self.unstamped.insert(
+                canonical.clone(),
+                UnstampedFile {
+                    bytes: disk_content.clone(),
+                    stamped: rendered.clone(),
+                },
+            );
+            self.owed.insert(
+                document_uri.clone(),
+                writeback::Owed {
+                    rendered,
+                    images: false,
+                    home: canonical.clone(),
+                },
+            );
+            self.write_owed.insert(document_uri.clone());
+            let disk_hash = self.projection_hash(&disk_content);
+            self.persist_disk_hash_for(
+                &canonical,
+                rel_path,
+                &disk_hash,
+                &disk_content,
+                &document_uri,
+                &read_only_members,
+            )
+            .await?;
+            self.last_projection.insert(canonical.clone(), disk_content);
+            return Ok(IngestOutcome::Ingested);
         }
 
         // Phase 1: stamp file.content_hash for the bytes that are NOW on
@@ -7948,9 +7975,6 @@ impl FileSyncController {
         }
     }
 
-    /// Write the `file` row of `canonical`. A row this session already wrote
-    /// with the empty hash, the same document and no members is not written
-    /// again.
     /// The base the previous run left for `canonical`, read from
     /// `.holon/bases/` only now, because this file's bytes no longer hash to
     /// what its row recorded. Empty when there is none to TRUST — no row hash,
@@ -7991,6 +8015,9 @@ impl FileSyncController {
             .unwrap_or_default()
     }
 
+    /// Write the `file` row of `canonical`. A row this session already wrote
+    /// with the empty hash, the same document and base and no members is not
+    /// written again.
     async fn write_file_row(
         &mut self,
         canonical: &CanonicalPath,
@@ -8005,7 +8032,7 @@ impl FileSyncController {
             && self
                 .empty_hash_rows
                 .get(canonical)
-                .is_some_and(|row| row.document_id == *document_id)
+                .is_some_and(|row| row.document_id == *document_id && row.base_hash == base_hash)
         {
             return Ok(());
         }
@@ -8053,6 +8080,7 @@ impl FileSyncController {
                 EmptyHashRow {
                     rel_path: rel_path.to_path_buf(),
                     document_id: document_id.clone(),
+                    base_hash: base_hash.to_string(),
                 },
             );
         }
@@ -8061,23 +8089,28 @@ impl FileSyncController {
 
     /// The files whose row holds the empty hash while Holon knows the hash of
     /// the bytes it wrote last, each with those bytes (the merge base the next
-    /// boot needs). A file holding a copy keeps the empty hash.
+    /// boot needs). A file holding a copy keeps the empty hash and is owed
+    /// only the base of bytes written after its row was.
     fn owed_hash_stamps(&self) -> Vec<(CanonicalPath, EmptyHashRow, String, String)> {
         self.empty_hash_rows
             .iter()
-            .filter(|(canonical, _)| !self.holds_copy(canonical))
             .filter_map(|(canonical, row)| {
-                self.last_projection_hash.get(canonical).map(|hash| {
-                    (
-                        canonical.clone(),
-                        row.clone(),
-                        hash.clone(),
-                        self.last_projection
-                            .get(canonical)
-                            .cloned()
-                            .unwrap_or_default(),
-                    )
-                })
+                let projection = self
+                    .last_projection
+                    .get(canonical)
+                    .cloned()
+                    .unwrap_or_default();
+                let hash = if self.holds_copy(canonical) {
+                    if projection.is_empty()
+                        || crate::base_sidecar::BaseSidecars::hash(&projection) == row.base_hash
+                    {
+                        return None;
+                    }
+                    String::new()
+                } else {
+                    self.last_projection_hash.get(canonical)?.clone()
+                };
+                Some((canonical.clone(), row.clone(), hash, projection))
             })
             .collect()
     }
@@ -8361,6 +8394,7 @@ impl FileSyncController {
                                     path.display()
                                 )
                             })?;
+                        self.sync_base_at(&file);
                         if !matches!(outcome, IngestOutcome::Ingested) {
                             tracing::warn!(
                                 file = %path.display(),
@@ -8464,23 +8498,6 @@ impl FileSyncController {
             return Ok(BlockChangeVerdict::Handled);
         }
 
-        // If disk content differs from last_projection, there's a pending external
-        // change that the file watcher hasn't delivered yet. Ingest it first so
-        // the re-render below includes both the block event and the external edit.
-        //
-        // Only treat this as a pending external change when we have a baseline
-        // (`last_projection` already holds the file). Without a baseline,
-        // `last == ""` would always differ from any non-empty disk content and
-        // we'd incorrectly re-ingest the on-disk file — which can revert the
-        // user's just-issued UPDATE if the file watcher hasn't yet delivered the
-        // initial WriteOrgFile event. The watcher will catch up on its own.
-        let mut basis = read_basis(&self.fs, &path).await?;
-        let mut disk_content = basis.content.clone().unwrap_or_default();
-        let last = self
-            .last_projection
-            .get(&canonical)
-            .map(|s| s.as_str())
-            .unwrap_or("");
         // Holon moved a block this file holds a copy of into this file's own
         // page: the ingest adopts the copy, merged, before any render.
         let adopts_own_copy = self.holder.get(doc_id).is_some_and(|held| {
@@ -8488,26 +8505,22 @@ impl FileSyncController {
                 .iter()
                 .any(|id| held.blocks.contains_key(id))
         });
-        if self.last_projection.contains_key(&canonical)
-            && (disk_content != last || adopts_own_copy || self.read_was_refused(&canonical))
-        {
+        if adopts_own_copy && self.last_projection.contains_key(&canonical) {
             info!(
-                "[FileSyncController] Processing pending external change for {} before re-render",
+                "[FileSyncController] {} adopts its own copy before re-render",
                 path.display()
             );
-            let _ = self.on_file_changed(&path).await?;
+            let _ = self.on_file_changed_unpersisted(&path).await?;
+            self.persist_undone_deletions().await?;
+            self.sync_base_at(&canonical);
             // The one write inside this fold, and so the memo's one
             // invalidation edge: rows read before it may name a parentage the
             // ingest has just replaced.
             rows.clear();
-            // The ingest may have written the file, and the write-back and its
-            // removal guard must compare against the bytes it would replace.
-            basis = read_basis(&self.fs, &path).await?;
-            disk_content = basis.content.clone().unwrap_or_default();
         }
 
-        // Fold-completeness gate. Deliberately AFTER the pending-external-change
-        // ingest above: that ingest writes blocks into the authority which the
+        // Fold-completeness gate. Deliberately AFTER the adopting ingest
+        // above: that ingest writes blocks into the authority which the
         // CDC-fed holder cannot know yet, so a gate reading the authority before
         // it would compare the holder against a pre-ingest snapshot and wave
         // through exactly the render that drops the just-ingested blocks.
@@ -8522,126 +8535,15 @@ impl FileSyncController {
             FoldVerdict::Stalled => return Ok(BlockChangeVerdict::NeedsBulkPass),
         }
 
+        let disk_content = self.read_if_present(&path).await?.unwrap_or_default();
         let rendered = self.render_doc_from_holder(doc_id, &path).await?;
         let rendered = self.keep_copies(&path, &canonical, rendered, &disk_content)?;
-
-        let current_last = self
-            .last_projection
-            .get(&canonical)
-            .map(|s| s.as_str())
-            .unwrap_or("");
-
-        if rendered == current_last {
-            return Ok(BlockChangeVerdict::Handled);
-        }
-
-        // Copy-on-write: keep a VIRTUAL seed layout doc (`block:__default__`)
-        // off disk while its render still matches the pristine shipped asset.
-        // A diverged render (a real user edit routed to the seed doc) falls
-        // through and materializes the file — copy-on-write — after which the
-        // on-disk file wins (`disk_content` non-empty ⇒ not gated). Race-free:
-        // a late boot-seed delta renders == pristine and is never written.
-        if self.gate_virtual_seed_write(doc_id, &canonical, &rendered, !disk_content.is_empty()) {
-            return Ok(BlockChangeVerdict::Handled);
-        }
-
-        // ADR 0025 removal guard on the block-driven path — UNCONDITIONAL.
-        //
-        // The holder is a fold of a feed that lags its authority, so ANY render
-        // can under-report a document, not only a structural one: there is no
-        // longer a class of write whose id set is provably preserved. That proof
-        // belonged to the deleted content-only cache path, which re-read the one
-        // block it was about to write and left the rest of the set untouched by
-        // construction. Grounding = the ids the holder RETRACTED for this
-        // document since its last successful write, UNION the sibling files a
-        // de-inlined child page moved into; anything else the render drops is
-        // loss and vetoes. On veto the file is quarantined and the Err
-        // propagates to `on_block_feed` (di.rs), which logs it.
-        let sanctioned_removals = self
-            .pending_removals
-            .get(doc_id)
-            .cloned()
-            .unwrap_or_default();
-
-        // Quarantine, cause-aware — and deliberately AFTER the guard is
-        // reachable rather than before it. An ingest- or refusal-caused entry
-        // is opaque to write-back: only a read of the file retires it, so it
-        // still short-circuits. A veto-caused entry is
-        // a claim the guard itself made about one render, so probe the guard
-        // and let a fully-grounded render retire it. The old unconditional
-        // early-return here is what made auto-clear unreachable: a file
-        // quarantined by a transient partial fold never got to prove itself
-        // again, so one bad render killed its write-back for the session.
-        match self.quarantined.get(&canonical).copied() {
-            Some(QuarantineCause::Ingest | QuarantineCause::Refused) => {
-                self.note_quarantine_skip(&path);
-                return Ok(BlockChangeVerdict::Handled);
-            }
-            Some(QuarantineCause::WritebackVeto) => {
-                if !self
-                    .writeback_render_is_grounded(
-                        &path,
-                        &disk_content,
-                        &rendered,
-                        &sanctioned_removals,
-                    )
-                    .await?
-                {
-                    self.note_quarantine_skip(&path);
-                    return Ok(BlockChangeVerdict::Handled);
-                }
-                self.clear_writeback_quarantine(&canonical, &path);
-            }
-            None => {
-                self.veto_ungrounded_removals(
-                    &path,
-                    &disk_content,
-                    &rendered,
-                    &sanctioned_removals,
-                )
-                .await?;
-            }
-        }
-
-        // A skip does NOT stamp `last_projection`, so a later-writable path
-        // re-attempts.
-        match self
-            .write_back_or_skip_readonly(doc_id, &vault_path, &basis, &rendered)
-            .await?
-        {
-            ProjectionWrite::Written => {}
-            ProjectionWrite::Changed => return Ok(BlockChangeVerdict::FileChanged),
-            ProjectionWrite::SkippedReadOnly => return Ok(BlockChangeVerdict::Handled),
-            ProjectionWrite::Stalled => {
-                return Err(StampChurn {
-                    path: path.to_path_buf(),
-                })
-                .context(AlreadyDisclosed(format!(
-                    "org write-back to {} stalled",
-                    path.display()
-                )));
-            }
-        }
-        self.run_post_write_hook(&path);
-        // H2 image-gate: `materialize_images` re-reads the whole doc (a 2nd
-        // recursive-CTE `get_blocks`). Content-only keystrokes never add images,
-        // so only pay it when THIS delta upserts an image block. Image edits are
-        // rare and can afford the full read.
-        if let BlockDelta::Upsert { block: b, .. } = delta {
-            if b.is_image_block() {
-                self.materialize_images(doc_id).await?;
-            }
-        }
-        self.last_projection.insert(canonical, rendered);
-        // The retractions this write accounted for are spent. Anything the
-        // holder drops from here on must ground itself again.
-        self.pending_removals.remove(doc_id);
-
-        info!(
-            "[FileSyncController] Wrote block changes to {}",
-            path.display()
-        );
-
+        // Only an image block's upsert pays for the second full read that
+        // `materialize_images` makes.
+        let images = matches!(delta, BlockDelta::Upsert { block, .. } if block.is_image_block());
+        self.owe_render(doc_id, &canonical, rendered, images);
+        self.drive_writeback_net().await?;
+        self.catch_up_failure(doc_id)?;
         Ok(BlockChangeVerdict::Handled)
     }
 
@@ -8889,6 +8791,7 @@ impl FileSyncController {
             if let Some(disclosure) = &self.writeback_disclosure {
                 disclosure.writeback_stalled(path, &detail);
             }
+            self.fold_stalls.insert(doc.clone());
         }
 
         // The fold has stopped moving. Every event since the difference last
@@ -8938,8 +8841,8 @@ impl FileSyncController {
     }
 
     /// Phase A: re-check every path we already track for modifications or
-    /// deletions. Echo-suppressed by `last_projection`; further short-circuited
-    /// by a `(mtime, size)` signature so unchanged files don't cost a read.
+    /// deletions. A `(mtime, size)` signature skips unchanged files without a
+    /// read; the write-back net skips a changed stamp over unchanged bytes.
     #[tracing::instrument(skip(self), name = "org.poll_tracked_files")]
     pub async fn poll_tracked_files(&mut self) -> Result<usize> {
         let mut ingested = 0;
@@ -8976,110 +8879,20 @@ impl FileSyncController {
                 continue;
             }
 
-            let disk_content = match self.fs.read_to_string(&path).await {
-                Ok(c) => c,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Deleted between the stat above and this read (TOCTOU) —
-                    // same external-deletion handling as the stat arm.
-                    self.on_file_deleted(&path, &canonical).await?;
-                    ingested += 1;
-                    continue;
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!("[poll_external_changes] Cannot read {}", path.display())
-                    });
-                }
-            };
-            // Stamp signature *before* the diff so the next poll skips this
-            // path even if the content matches last_projection (echo) — only
-            // a fresh mtime/size change re-enters the read path.
+            // Stamp signature *before* the read so the next poll skips this
+            // path; the net reads it and ingests only bytes that left the base.
             self.disk_signatures.insert(canonical.clone(), sig);
-
-            let last = self
-                .last_projection
-                .get(&canonical)
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            if disk_content != last || self.read_was_refused(&canonical) {
-                info!(
-                    "[FileSyncController] poll_external_changes: ingesting {} (disk != \
-                     last_projection, or its last read was refused)",
-                    path.display()
-                );
-                match self.on_file_changed(&path).await {
-                    Ok(_) => {}
-                    // Disclosed by the ingest; the rest of the pass still runs.
-                    Err(e) if e.downcast_ref::<AdapterRefusal>().is_some() => {}
-                    Err(e) => return Err(e),
-                }
-                ingested += 1;
+            match self.on_file_changed(&path).await {
+                Ok(_) => {}
+                // Disclosed by the ingest; the rest of the pass still runs.
+                Err(e) if e.downcast_ref::<AdapterRefusal>().is_some() => {}
+                Err(e) => return Err(e),
             }
+            ingested += 1;
         }
+        // A `CatchUp` waiting out its retry backoff runs on this tick.
+        self.drive_writeback_net().await?;
         Ok(ingested)
-    }
-
-    /// Raise the degraded condition for a file that is STILL 0 bytes after the
-    /// grace period — the ending in which a user really emptied it, as opposed
-    /// to the save-in-flight ending the refusal was written for.
-    ///
-    /// The previously ingested document is deliberately KEPT: an empty file
-    /// names no document, so nothing in it can authorize deleting one. That
-    /// leaves the store showing content the file no longer has, which is
-    /// exactly the divergence this discloses.
-    async fn disclose_persistent_emptiness(
-        &mut self,
-        path: &Path,
-        canonical: &CanonicalPath,
-    ) -> Result<()> {
-        let Some(watch) = self.empty_since.get(canonical).copied() else {
-            return Ok(());
-        };
-        if watch.disclosed
-            || self.clock.now_millis() - watch.first_seen_millis < EMPTY_FILE_GRACE_MILLIS
-        {
-            return Ok(());
-        }
-        let len = match self.fs.metadata(path).await {
-            Ok(m) => m.len,
-            // Gone: an emptied file that was then deleted is a deletion, which
-            // the watcher and `forget_file_state` own.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.empty_since.remove(canonical);
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!(
-                        "[disclose_persistent_emptiness] Cannot stat {}",
-                        path.display()
-                    )
-                });
-            }
-        };
-        if len != 0 {
-            // The save's bytes landed; the ingest of them clears the rest.
-            self.empty_since.remove(canonical);
-            return Ok(());
-        }
-        self.empty_since.insert(
-            canonical.clone(),
-            EmptyFileWatch {
-                disclosed: true,
-                ..watch
-            },
-        );
-        tracing::warn!(
-            path = %path.display(),
-            "[FileSyncController] this file has been 0 bytes for longer than a save takes, so \
-             it was emptied rather than being written — nothing of it can be ingested, and the \
-             document Holon last read from it is KEPT, so what the app shows is no longer what \
-             the file holds",
-        );
-        if let Some(disclosure) = &self.writeback_disclosure {
-            disclosure.vault_file_emptied(path);
-        }
-        Ok(())
     }
 
     /// Phase B: walk the tree and discover NEW files (paths not yet in
@@ -9103,11 +8916,6 @@ impl FileSyncController {
         scanned.files.retain(|p| self.formats.handles(p));
         for path in scanned.files {
             let canonical = CanonicalPath::new(&path);
-            // Before the tracked-file skip: an emptied file a user is waiting
-            // on is USUALLY tracked (its document is the one being kept), and
-            // this walk is the only periodic re-look at it.
-            self.disclose_persistent_emptiness(&path, &canonical)
-                .await?;
             // A backlog file is the watch loop's to ingest, one per pass.
             if self.last_projection.contains_key(&canonical)
                 || self.backlog_pending.contains(&canonical)
@@ -9285,7 +9093,7 @@ impl FileSyncController {
                 .get(&canonical)
                 .map(|s| s.as_str())
                 .unwrap_or("");
-            if disk_content != last || self.read_was_refused(&canonical) {
+            if disk_content != last {
                 info!(
                     "[FileSyncController] Processing pending external change for {} before \
                      re-render",
@@ -9326,13 +9134,6 @@ impl FileSyncController {
                 }
                 continue;
             }
-
-            // This tracked path is the write-back target below, and
-            // `write_back_or_skip_readonly` accepts only a proven one — so the
-            // containment claim is established HERE, at the boundary where a
-            // disk-discovered path enters the write path, rather than assumed.
-            let vault_path = VaultPath::inside(&self.root_dir, path.clone())
-                .context("[re_render_all_tracked] tracked path")?;
 
             // Resolve path → doc_id
             let rel_path = path.strip_prefix(&self.root_dir).with_context(|| {
@@ -9415,56 +9216,13 @@ impl FileSyncController {
             };
             let rendered = self.keep_copies(&path, &canonical, rendered, &disk_content)?;
 
-            let current_last = self
-                .last_projection
-                .get(&canonical)
-                .map(|s| s.as_str())
-                .unwrap_or("");
-
-            if rendered == current_last {
-                continue;
-            }
-
-            if self.is_quarantined(&path) {
-                continue;
-            }
-
-            // ADR 0025 removal guard. `sanctioned_removals` is empty from the
-            // production caller (see this method's doc), so absences here are
-            // grounded by the sibling-file union alone and anything else
-            // vetoes+quarantines that one file. A parse/IO defect propagates
-            // (loud); a veto skips just this file and the batch continues.
-            if let Err(e) = self
-                .veto_ungrounded_removals(&path, &disk_content, &rendered, sanctioned_removals)
-                .await
-            {
-                if self.is_quarantined(&path) {
-                    // Guard vetoed (already quarantined + logged): skip this file.
-                    continue;
-                }
-                // A real parse/IO defect — surface it loudly.
-                return Err(e).with_context(|| {
-                    format!(
-                        "[re_render_all_tracked] write-back guard failed for {}",
-                        path.display()
-                    )
-                });
-            }
-
-            if self
-                .write_back_or_skip_readonly(&doc.id, &vault_path, &basis, &rendered)
-                .await?
-                != ProjectionWrite::Written
-            {
-                continue;
-            }
-            self.run_post_write_hook(&path);
-            self.materialize_images(&doc.id).await?;
-            self.last_projection.insert(canonical, rendered);
-
-            info!("[FileSyncController] Re-rendered {}", path.display());
+            self.pending_removals
+                .entry(doc.id.clone())
+                .or_default()
+                .extend(sanctioned_removals.iter().cloned());
+            self.owe_render(&doc.id, &canonical, rendered, true);
         }
-        Ok(())
+        self.drive_writeback_net().await
     }
 
     /// Build a page's `/`-joined title chain reading ONLY the authoritative
@@ -9651,7 +9409,7 @@ impl FileSyncController {
         // A skip returns early WITHOUT registering the alias — a path that
         // could not be written does not own a file to advertise.
         if self
-            .write_back_or_skip_readonly(page_id, &vault_path, &basis, &rendered)
+            .write_back_or_skip_readonly(page_id, &vault_path, &basis, &rendered, true)
             .await?
             != ProjectionWrite::Written
         {
@@ -9712,7 +9470,8 @@ impl FileSyncController {
                 }
             }
         }
-        self.last_projection.insert(canonical, rendered);
+        self.last_projection.insert(canonical.clone(), rendered);
+        self.sync_base_at(&canonical);
         tracing::info!(
             "[FileSyncController] Materialized identity file for runtime-created page {} -> {}",
             page_id,
@@ -9848,9 +9607,8 @@ impl FileSyncController {
     /// Runs after the initial scan so migration converges without waiting for a
     /// per-page CDC edit (OQ4 RULED: the boot sweep is the migration
     /// mechanism). Idempotent: a page already owning a file (tracked or
-    /// present on disk) is skipped. New-file writes seed `last_projection`
-    /// (echo suppression) so the watcher event for our own write is not
-    /// re-ingested.
+    /// present on disk) is skipped. New-file writes seed `last_projection`,
+    /// the merge base the watcher event for our own write diffs against.
     pub async fn materialize_missing_page_files(&mut self) -> Result<()> {
         let docs = self.block_reader.iter_documents_with_blocks().await?;
         for (doc_id, blocks) in docs {
@@ -9920,14 +9678,15 @@ impl FileSyncController {
                 continue;
             }
             if self
-                .write_back_or_skip_readonly(&doc_id, &vault_path, &basis, &rendered)
+                .write_back_or_skip_readonly(&doc_id, &vault_path, &basis, &rendered, true)
                 .await?
                 != ProjectionWrite::Written
             {
                 continue;
             }
             self.run_post_write_hook(&path);
-            self.last_projection.insert(canonical, rendered);
+            self.last_projection.insert(canonical.clone(), rendered);
+            self.sync_base_at(&canonical);
             info!(
                 "[FileSyncController] Materialized fileless page {} -> {}",
                 doc_id,
@@ -10647,12 +10406,8 @@ impl FileSyncController {
     /// the render was based on ([`FileSystem::write_if_unchanged`]).
     ///
     /// - `Written` — the write succeeded (caller runs its post-write steps).
-    /// - `Changed` — the file's bytes changed (or it was deleted) since `basis`
+    /// - `Changed` — the file's stamp changed (or it was deleted) since `basis`
     ///   was read; nothing was written and the file is scheduled for re-ingest.
-    ///   A new stamp over the same bytes is retried.
-    /// - `Stalled` — the stamp never settled ([`StampChurn`]); nothing was
-    ///   written, and the stall is disclosed for this file only, so a bulk pass
-    ///   goes on with the next one.
     /// - `SkippedReadOnly` — SKIPPED because this path is on a read-only
     ///   filesystem (EROFS). The FIRST such failure logs a loud ERROR and marks
     ///   the path; every later CDC event for it returns `Ok(false)` WITHOUT
@@ -10668,15 +10423,17 @@ impl FileSyncController {
     /// PROJECTION write-back reaches the filesystem, so requiring the
     /// containment proof HERE is what makes an out-of-vault projection write
     /// unrepresentable rather than merely unreached. A caller holding an
-    /// unproven path must run it through a checked constructor first — as the
-    /// ingest normalization write-back does, which is the other route org bytes
-    /// take to disk.
+    /// unproven path must run it through a checked constructor first.
+    ///
+    /// `store_edit` is false for an ingest's normalization: it writes back what
+    /// the file already held, so a share inlined there is not disclosed.
     async fn write_back_or_skip_readonly(
         &mut self,
         doc_id: &EntityUri,
         vault_path: &VaultPath,
         basis: &StampedRead,
         rendered: &str,
+        store_edit: bool,
     ) -> Result<ProjectionWrite> {
         let path = vault_path.as_path();
         let canonical = CanonicalPath::new(path);
@@ -10733,7 +10490,6 @@ impl FileSyncController {
                     return Ok(ProjectionWrite::SkippedReadOnly);
                 }
                 Err(e) => {
-                    self.refused_writebacks.refused(doc_id, path, &e);
                     return Err(e).with_context(|| {
                         format!("create parent dir for org write-back to {}", path.display())
                     });
@@ -10747,29 +10503,21 @@ impl FileSyncController {
         // holds, and clearing it would make a crash after a write that never
         // landed diff the disk against the store again.
         let base = self.base_hash_for(&canonical);
-        if let Err(e) = self
-            .write_file_row(&canonical, rel_path, "", &base, doc_id, &[])
+        self.write_file_row(&canonical, rel_path, "", &base, doc_id, &[])
             .await
-        {
-            let cause = format!("{e:#}");
-            if let Some(disclosure) = &self.writeback_disclosure {
-                disclosure.writeback_stalled(
-                    path,
-                    &format!(
-                        "Holon did not write this file: it cannot record in the file row \
-                         which bytes it would write ({cause})"
-                    ),
-                );
-            }
-            self.refused_writebacks.refused(doc_id, path, &cause);
-            return Err(e).with_context(|| {
+            .with_context(|| {
                 format!(
-                    "org write-back to {} not written: its file row cannot be recorded",
+                    "Holon did not write {}: it cannot record in the file row which bytes it \
+                     would write",
                     path.display()
                 )
-            });
-        }
-        match write_over_basis(&self.fs, path, basis, rendered.as_bytes()).await {
+            })?;
+        match self
+            .fs
+            .write_if_unchanged(path, &basis.stamp, rendered.as_bytes())
+            .await
+            .map_err(anyhow::Error::from)
+        {
             Ok(WriteBack::Changed) => {
                 self.schedule_reingest(&canonical, path, basis.content.as_deref());
                 Ok(ProjectionWrite::Changed)
@@ -10780,20 +10528,23 @@ impl FileSyncController {
                 self.unstamped.remove(&canonical);
                 let hash = self.projection_hash(rendered);
                 self.note_projection_hash(&canonical, &hash);
-                self.refused_writebacks.written(doc_id);
-                if let Some(disclosure) = &self.writeback_disclosure {
-                    disclosure.writeback_resumed(path);
-                }
                 // A stall after this write is a new one and is disclosed again.
                 if let Some(skips) = self.gate_skips.get_mut(doc_id) {
                     skips.escalated = false;
+                }
+                if self.fold_stalls.remove(doc_id) {
+                    if let Some(disclosure) = &self.writeback_disclosure {
+                        disclosure.writeback_resumed(path);
+                    }
                 }
                 // Unreachable for a read-only home: the tier gate above
                 // returned before this write, so this only ever records a
                 // writable home (which drops any membership).
                 self.note_doc_home(doc_id, path, HomeMembership::Untouched)?;
-                self.disclose_share_inlined_into(doc_id, path, rendered.as_bytes())
-                    .await;
+                if store_edit {
+                    self.disclose_share_inlined_into(doc_id, path, rendered.as_bytes())
+                        .await;
+                }
                 Ok(ProjectionWrite::Written)
             }
             Err(e)
@@ -10806,30 +10557,10 @@ impl FileSyncController {
                 self.mark_readonly_writeback(doc_id, path, &e, canonical);
                 Ok(ProjectionWrite::SkippedReadOnly)
             }
-            Err(e) if e.is::<StampChurn>() => {
-                self.disclose_stalled_writeback(doc_id, path, &format!("{e:#}"));
-                Ok(ProjectionWrite::Stalled)
-            }
             Err(e) => {
-                self.refused_writebacks
-                    .refused(doc_id, path, &format!("{e:#}"));
                 Err(e).with_context(|| format!("org write-back to {} failed", path.display()))
             }
         }
-    }
-
-    /// A write-back of `doc_id` to `path` that cannot land is skipped: the file
-    /// shows the write-back condition and the shutdown guard reports the
-    /// document until the next write to it lands.
-    fn disclose_stalled_writeback(&mut self, doc_id: &EntityUri, path: &Path, cause: &str) {
-        warn!(
-            path = %path.display(),
-            "[FileSyncController] write-back skipped: {cause}"
-        );
-        if let Some(disclosure) = &self.writeback_disclosure {
-            disclosure.writeback_stalled(path, cause);
-        }
-        self.refused_writebacks.refused(doc_id, path, &cause);
     }
 
     /// The file contents the removal guard reads `path`'s blocks from. An
@@ -11041,7 +10772,6 @@ impl FileSyncController {
         err: &std::io::Error,
         canonical: CanonicalPath,
     ) {
-        self.refused_writebacks.refused(doc_id, path, err);
         if self.writeback_readonly.insert(canonical) {
             tracing::error!(
                 doc_id = %doc_id,
@@ -11053,44 +10783,13 @@ impl FileSyncController {
     }
 }
 
-/// A `file` row holding the empty hash, the document it names and no members.
+/// A `file` row holding the empty hash, the document and base it names and no
+/// members.
 #[derive(Debug, Clone)]
 struct EmptyHashRow {
     rel_path: PathBuf,
     document_id: EntityUri,
-}
-
-/// Documents whose last write-back the file system refused, or that Holon did
-/// not write because it could not record the bytes in the `file` row, so their
-/// file is behind the store. A document leaves the record when a write of it
-/// succeeds.
-#[derive(Debug, Default)]
-pub struct RefusedWritebacks(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
-
-impl RefusedWritebacks {
-    fn refused(&self, doc_id: &EntityUri, path: &Path, err: &dyn std::fmt::Display) {
-        self.0
-            .lock()
-            .expect("refused write-backs poisoned")
-            .insert(doc_id.to_string(), format!("{}: {err}", path.display()));
-    }
-
-    fn written(&self, doc_id: &EntityUri) {
-        self.0
-            .lock()
-            .expect("refused write-backs poisoned")
-            .remove(&doc_id.to_string());
-    }
-
-    /// Each refused document as `<doc> (<path>: <error>)`.
-    pub fn documents(&self) -> Vec<String> {
-        self.0
-            .lock()
-            .expect("refused write-backs poisoned")
-            .iter()
-            .map(|(doc, why)| format!("{doc} ({why})"))
-            .collect()
-    }
+    base_hash: String,
 }
 
 /// The key a per-file batch disclosure is recorded under.
@@ -11101,11 +10800,8 @@ fn batch_file_key(path: &Path) -> EntityUri {
 /// What a block-driven write-back did with one document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockChangeVerdict {
-    /// Rendered and written, or held back by a guard that disclosed it.
+    /// Handed to the write-back net, or held back by a guard that disclosed it.
     Handled,
-    /// The file changed since it was read; nothing was written and the file
-    /// is re-ingested instead.
-    FileChanged,
     /// The document needs the bulk re-render pass.
     NeedsBulkPass,
 }
@@ -11118,9 +10814,6 @@ enum ProjectionWrite {
     Changed,
     /// The path is read-only (a read-only format or filesystem).
     SkippedReadOnly,
-    /// The file's stamp kept changing over the basis bytes ([`StampChurn`]);
-    /// nothing was written and the stall is disclosed.
-    Stalled,
 }
 
 /// True when an IO error is a persistent read-only-filesystem condition
@@ -11142,58 +10835,6 @@ async fn read_disk_or_empty(fs: &Arc<dyn FileSystem>, path: &Path) -> Result<Str
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(e).with_context(|| format!("reading {} for org sync", path.display())),
     }
-}
-
-/// How often a write-back over a file whose bytes still match its basis is
-/// retried against the file's new stamp.
-const STAMP_CHANGE_RETRIES: usize = 3;
-
-/// A file kept getting a new stamp without new bytes, so no write-back over
-/// it could land.
-#[derive(Debug)]
-struct StampChurn {
-    path: PathBuf,
-}
-
-impl std::fmt::Display for StampChurn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Holon did not write {}: its stamp kept changing while its bytes did not \
-             ({STAMP_CHANGE_RETRIES} attempts); some process keeps rewriting it",
-            self.path.display()
-        )
-    }
-}
-
-impl std::error::Error for StampChurn {}
-
-/// [`FileSystem::write_if_unchanged`] over the file `basis` was read from.
-/// A file that got a new stamp but kept the basis bytes (a touch, a no-op
-/// save, a sync client's rewrite) still holds what the render was computed
-/// from, so the write is retried against its new stamp. `Changed` therefore
-/// means the bytes changed or the file was deleted.
-async fn write_over_basis(
-    fs: &Arc<dyn FileSystem>,
-    path: &Path,
-    basis: &StampedRead,
-    contents: &[u8],
-) -> Result<WriteBack> {
-    let mut stamp = basis.stamp.clone();
-    for _ in 0..STAMP_CHANGE_RETRIES {
-        if fs.write_if_unchanged(path, &stamp, contents).await? == WriteBack::Written {
-            return Ok(WriteBack::Written);
-        }
-        let now = fs.read_stamped(path).await?;
-        if now.content != basis.content {
-            return Ok(WriteBack::Changed);
-        }
-        stamp = now.stamp;
-    }
-    Err(StampChurn {
-        path: path.to_path_buf(),
-    }
-    .into())
 }
 
 /// The read a write-back over `path` is based on.

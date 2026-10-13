@@ -703,12 +703,14 @@ on other devices.
   projection's persisted base against the current state, and the record of a
   write updates the base. An echo then ingests as theirs == base (no delta). A
   watcher event that arrives before the record merges as ours == theirs (no
-  change). No echo rule exists.
+  change). No rule skips an ingest because the bytes equal what Holon wrote;
+  the controller keeps those bytes (`last_projection`) only as the text of
+  the base.
 - **The watcher is a lossy hint.** Correctness never depends on one event. Its
   feed emits only a contentless `DiskChanged`. Other sources of `DiskChanged`:
   every write the content compare-and-set rejects (it proves the disk moved),
   boot, and a slow stat sweep (mtime + size).
-- **`ReadDisk` reads the file once** and puts `OnDisk{hash, text}`. A read with
+- **`ReadDisk` reads the file once** and puts `OnDisk{hash}`. A read with
   an unchanged hash changes nothing. The hash is a stable content hash, the one
   the merge-base row stores.
 - **Whole-content removal is refused.** An ingest whose merge would remove ALL
@@ -731,9 +733,35 @@ on other devices.
   omits it with a disclosed per-block condition (for example "not in a.cook: an
   empty step cannot be written"). The base merge keeps an omitted block (base
   and file both lack it), so an omission never comes back as a deletion.
-- **`Writing` is a place.** Crash recovery: a token in `Writing` with no live
-  attempt becomes Unknown, and a `StateProbe` checks "file content hash ==
-  intended".
+- **`Base` and `Writing` are process class (Q4.a).** Durability is the merge-base
+  sidecar and the file row, not the marking. Boot emits `DiskChanged` for every
+  tracked file, so a write the crash cut off is a file that is Behind again: the
+  next `CatchUp` ingests or writes it. No `StateProbe` exists for it.
+- **Disk at the base, store ahead: the store wins (WB-restore.a).** Known
+  limit: the crash window between a write and the stamp of its hash. A user
+  restore of the exact pre-edit bytes inside that window equals the base, so
+  the boot overwrites it with the store's edit. Pinned by
+  `a_restore_inside_the_crash_window_between_write_and_stamp_keeps_the_stores_edit`
+  and bugfunnel entry
+  `2026-10-14-a-restore-inside-the-write-stamp-crash-window-is-overwritten`.
+- **The production subnet (WB-net.a).** One net per vault, subject = document
+  (`crates/holon-filesystem/src/writeback_net.rs`). Places: `DiskChanged`,
+  `OnDisk{hash}`, `Base{hash, authority}`, `Authority{hash}` (the hash
+  of the store's render of the document), `Refused{seen, authority}`. `Behind`
+  and `InSync` are derived. `ReadDisk` and `Resume` are auto; `CatchUp` is auto
+  and effectful, one ingest XOR one compare-and-set write per firing, with a
+  retry timer and a count bound, and `Refused` inhibits it. `AcceptRemoval` and
+  `RewriteFromStore` are manual with `()` input and answer
+  `ACCEPTED(occurrence)` (ops `writeback.accept_removal`, `writeback.rewrite_from_store`).
+  The hash is `BaseSidecars::hash`.
+- **Authority is written on every store change (Q3.a).** The compare-and-set
+  and the row write of a record are not atomic: a store edit that lands in that
+  window is applied over changed inputs and caught up by the next `CatchUp`.
+  The record's own row write is not foreign: its render hashes to the recorded
+  `Base.authority`, so it enables nothing.
+- **A write the disk refuses is a `CatchUp` failure mark (Q6.a)** with the retry
+  timer, disclosed as a stalled write-back. No poisoned place exists; the mark
+  clears when its read trace changes or a retry lands.
 
 **REV11-lockless.a.** A process without the vault writer lock is read-only for
 stored state: no ingest, no write-back, no bases, no device tokens. It is

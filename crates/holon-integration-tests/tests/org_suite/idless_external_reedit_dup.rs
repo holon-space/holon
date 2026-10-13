@@ -303,7 +303,7 @@ fn shifted_identical_twins_preserve_identity() {
         wait_for_disk(
             &env,
             &path,
-            |c| c.contains("Sprint kickoff"),
+            |c| c.matches(":ID:").count() == 3,
             "second writeback",
         )
         .await;
@@ -430,7 +430,7 @@ fn genuinely_new_block_still_mints() {
         wait_for_disk(
             &env,
             &path,
-            |c| c.contains("Brand new item"),
+            |c| c.matches(":ID:").count() == 2,
             "second writeback",
         )
         .await;

@@ -94,7 +94,17 @@ impl ConditionsRefState {
     /// `subject_name` is the FILE NAME the raise site's subject will carry as
     /// its final path component — not a string suffix.
     pub fn raise(&mut self, subject_name: impl Into<String>, kind: &'static str) {
-        self.raise_expecting(subject_name.into(), kind, None, None);
+        self.raise_expecting(subject_name.into(), kind, None, None, None);
+    }
+
+    /// [`raise`](Self::raise) for a condition that carries `message`.
+    pub fn raise_with_message(
+        &mut self,
+        subject_name: impl Into<String>,
+        kind: &'static str,
+        message: String,
+    ) {
+        self.raise_expecting(subject_name.into(), kind, None, None, Some(message));
     }
 
     /// [`raise`](Self::raise) for a condition that names files: `files` are
@@ -105,7 +115,7 @@ impl ConditionsRefState {
         kind: &'static str,
         files: Vec<String>,
     ) {
-        self.raise_expecting(subject_name.into(), kind, Some(files), None);
+        self.raise_expecting(subject_name.into(), kind, Some(files), None, None);
     }
 
     /// [`raise_naming_files`](Self::raise_naming_files) for a condition that
@@ -117,7 +127,7 @@ impl ConditionsRefState {
         count: usize,
         files: Vec<String>,
     ) {
-        self.raise_expecting(subject_name.into(), kind, Some(files), Some(count));
+        self.raise_expecting(subject_name.into(), kind, Some(files), Some(count), None);
     }
 
     fn raise_expecting(
@@ -126,6 +136,7 @@ impl ConditionsRefState {
         kind: &'static str,
         files: Option<Vec<String>>,
         count: Option<usize>,
+        message: Option<String>,
     ) {
         self.governed.insert(kind);
         self.expected
@@ -135,7 +146,7 @@ impl ConditionsRefState {
             kind,
             files,
             count,
-            message: None,
+            message,
         });
     }
 

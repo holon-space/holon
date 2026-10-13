@@ -106,6 +106,7 @@ pub fn pending_buffer<
     }
 }
 
+mod accept_removal;
 mod advance_day;
 pub mod apply_mutation;
 pub mod arm_write_churn;
@@ -141,6 +142,7 @@ mod dense_projection_edit;
 mod disarm_write_churn;
 mod dispatch_unschemed_block_id;
 mod drag_drop_block;
+mod drop_next_watcher_event;
 mod edit_block_copy;
 mod edit_decision_pair_held;
 pub mod edit_decision_subtree;
@@ -194,6 +196,7 @@ mod remove_watch;
 mod rename_document;
 pub(crate) mod rename_page;
 mod rename_refused_recipe;
+mod rewrite_from_store;
 mod save_refused_recipe;
 mod search;
 mod second_writer_refused;
@@ -227,6 +230,7 @@ mod deliver_block_content;
 mod switch_view_mode;
 mod toggle_drawer;
 
+pub use accept_removal::AcceptRemoval;
 pub use advance_day::AdvanceDay;
 pub use apply_mutation::ApplyMutation;
 pub use arm_write_churn::ArmWriteChurn;
@@ -263,6 +267,7 @@ pub use dense_projection_edit::DenseProjectionEdit;
 pub use disarm_write_churn::DisarmWriteChurn;
 pub use dispatch_unschemed_block_id::DispatchUnschemedBlockId;
 pub use drag_drop_block::DragDropBlock;
+pub use drop_next_watcher_event::DropNextWatcherEvent;
 pub use edit_block_copy::EditBlockCopy;
 pub use edit_decision_pair_held::EditDecisionPairHeld;
 pub use edit_decision_subtree::EditDecisionSubtree;
@@ -326,6 +331,7 @@ pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
 pub use rename_page::RenamePage;
 pub use rename_refused_recipe::RenameRefusedRecipe;
+pub use rewrite_from_store::RewriteFromStore;
 pub use save_refused_recipe::SaveRefusedRecipe;
 pub use search::Search;
 pub use second_writer_refused::SecondWriterRefused;
@@ -484,6 +490,9 @@ crate::declare_e2e_transitions! {
         DisarmWriteChurn(DisarmWriteChurn),
         ExternalLineEdit(ExternalLineEdit),
         TouchFile(TouchFile),
+        AcceptRemoval(AcceptRemoval),
+        RewriteFromStore(RewriteFromStore),
+        DropNextWatcherEvent(DropNextWatcherEvent),
     }
 }
 

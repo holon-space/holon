@@ -78,12 +78,23 @@ pub struct FileAdapterState {
 
     /// A churn was armed in this run.
     pub write_churn_ran: bool,
+
+    /// Documents whose file an editor emptied, which Holon refuses to
+    /// ingest until the user accepts the removal or rewrites the file from
+    /// the store, with the document's blocks at the refusal.
+    pub refused: BTreeMap<EntityUri, Vec<Block>>,
 }
 
 impl FileAdapterState {
     pub fn churning_docs(&self) -> impl Iterator<Item = &EntityUri> {
         self.write_churn
             .iter()
+            .filter(|doc| self.documents.contains_key(*doc))
+    }
+
+    pub fn refused_docs(&self) -> impl Iterator<Item = &EntityUri> {
+        self.refused
+            .keys()
             .filter(|doc| self.documents.contains_key(*doc))
     }
 

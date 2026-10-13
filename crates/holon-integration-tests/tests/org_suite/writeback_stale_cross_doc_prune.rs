@@ -2449,11 +2449,12 @@ fn a_restore_of_earlier_bytes_while_closed_is_read_at_boot() {
     });
 }
 
-/// Holon dies after it wrote an edit to Notes.org and before it recorded what
-/// it wrote; the user restores the bytes Holon read before the edit. The next
-/// boot reads the restore.
+/// Holon dies between the write of an edit to Notes.org and the stamp of what
+/// it wrote; the user restores the bytes Holon read before the edit. The disk
+/// then equals the recorded base, which is also what a write that never landed
+/// leaves, so the boot keeps the store's edit and writes it again.
 #[test]
-fn a_restore_after_a_crash_before_the_written_hash_is_recorded_is_read_at_boot() {
+fn a_restore_inside_the_crash_window_between_write_and_stamp_keeps_the_stores_edit() {
     let rt = runtime();
     rt.clone().block_on(async move {
         let mut env = started_with_day_page(rt, DAY_PAGE_WITH_KEEPER).await;
@@ -2480,14 +2481,10 @@ fn a_restore_after_a_crash_before_the_written_hash_is_recorded_is_read_at_boot()
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert_eq!(
             column_of(&env, "block:notes-1", "content").await,
-            "Note one",
-            "the boot did not read the restore"
+            "Note edited in Holon",
+            "the boot reverted the store's edit"
         );
-        assert_eq!(
-            read_file(&env, "Notes.org").await,
-            read_before_the_edit,
-            "the boot wrote over the restore"
-        );
+        eventually_on_disk(&env, "Notes.org", "Note edited in Holon").await;
         env.stop_app().await.expect("stop_app");
     });
 }

@@ -69,6 +69,8 @@ struct State {
     /// Armed by [`InMemoryFileSystem::arm_write_failure`]: every write to
     /// these paths fails at the commit boundary until it is cleared.
     failing: BTreeSet<PathBuf>,
+    /// Armed by [`InMemoryFileSystem::lose_next_change`].
+    losing: BTreeSet<PathBuf>,
     case: PathCase,
     /// [`PathCase::Insensitive`] only: every file and directory, keyed by its
     /// parent's stored spelling and the [`holon_api::caseless_fold`] of its
@@ -176,6 +178,7 @@ impl InMemoryFileSystem {
                 fail_next_write_commit: false,
                 churning: BTreeSet::new(),
                 failing: BTreeSet::new(),
+                losing: BTreeSet::new(),
                 case,
                 folded: HashMap::new(),
             }),
@@ -279,6 +282,24 @@ impl InMemoryFileSystem {
         );
     }
 
+    /// The watcher loses the next change of `path`, as a real watcher's
+    /// dropped event: it reaches subscribers under a path no vault format
+    /// matches, so the change seq still advances.
+    pub fn lose_next_change(&self, path: &Path) {
+        let mut st = self.lock();
+        let path = st.spelled(&normalize(path));
+        st.losing.insert(path);
+    }
+
+    fn send(&self, mut change: FileChange) {
+        if self.lock().losing.remove(&change.path) {
+            change.path = change.path.with_extension("lost-change");
+            change.kind = FileChangeKind::Create;
+        }
+        // send only errors when there are no subscribers.
+        let _ = self.tx.send(change);
+    }
+
     /// Give `path` a new stamp over the same bytes, as a no-op save does.
     pub fn touch_file(&self, path: &Path) -> std::io::Result<()> {
         let (path, seq) = {
@@ -287,7 +308,7 @@ impl InMemoryFileSystem {
             let seq = Self::retick(&mut st, &path)?;
             (path, seq)
         };
-        let _ = self.tx.send(FileChange {
+        self.send(FileChange {
             path,
             kind: FileChangeKind::Create,
             seq,
@@ -358,7 +379,7 @@ impl InMemoryFileSystem {
             st.clock += 1;
             (path, st.clock)
         };
-        let _ = self.tx.send(FileChange {
+        self.send(FileChange {
             path,
             kind: FileChangeKind::Remove,
             seq,
@@ -417,7 +438,7 @@ impl InMemoryFileSystem {
             );
             (from, to, tick)
         };
-        let _ = self.tx.send(FileChange {
+        self.send(FileChange {
             path: to,
             kind: FileChangeKind::Rename { from },
             seq,
@@ -456,7 +477,7 @@ impl InMemoryFileSystem {
             if expected.is_some() && st.churning.contains(&path) {
                 let seq = Self::retick(&mut st, &path)?;
                 drop(st);
-                let _ = self.tx.send(FileChange {
+                self.send(FileChange {
                     path,
                     kind: FileChangeKind::Create,
                     seq,
@@ -507,7 +528,7 @@ impl InMemoryFileSystem {
         };
         // The "close" hook: the full content is committed before anyone is
         // notified. send only errors when there are no subscribers — fine.
-        let _ = self.tx.send(FileChange {
+        self.send(FileChange {
             path,
             kind,
             seq: tick,

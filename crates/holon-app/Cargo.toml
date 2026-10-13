@@ -25,6 +25,7 @@ holon-kitchen.workspace = true
 holon-plugin-host.workspace = true
 holon-orgmode.workspace = true
 holon-filesystem.workspace = true
+holon-net.workspace = true
 holon-loro.workspace = true
 holon-loro-wiring.workspace = true
 holon-turso.workspace = true

@@ -3,7 +3,7 @@ id: 2026-10-12-restart-while-an-org-file-is-behind-reverts-the-stores-edit
 date: 2026-10-12
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   A reboot taken while an org file still holds pre-edit bytes diffs that behind
   file against the STORE and reverts the store's own edit.
@@ -71,15 +71,20 @@ unwritten edit while taking the user's.
 
 ## Remedy
 
+FIXED by the per-file write-back subnet (ADR 0032 §9, ruling Q4.a,
+holon-space/holon-work#175). The file row carries the merge base
+(`file.base_hash`, bytes in the `.holon/bases/` sidecar) also while the row
+holds the empty hash of a file behind its store. The boot loads that base for
+such a row, and the sweep keeps its sidecar, so the cold-boot diff merges the
+disk against what Holon last read or wrote, not against the store. All seven
+hm4 cases, and `wbs-an-empty-org-block-survives-write-back-and-a-crash-restart`,
+are now in `keystone.jsonl` and green.
+
 - Red-for-the-right-reason keystone case
   `hm4-a-crash-over-a-behind-file-the-user-then-edits-reverts-the-stores-edit`
   in
-  `crates/holon-integration-tests/hand-authored-regressions/known-red-hm4-restart.jsonl`
-  (kept out of `keystone.jsonl`, like `known-red-writeback-state-machine.jsonl`,
-  so the landing gate stays green; registered in
-  `docs/Testing/KeystoneKnownReds.md` as
-  `hm4-crash-over-a-behind-file-the-user-edits-reverts-the-stores-edit`). The
-  red: `inv-blocks-match-ref/{org,loro,block_raw,matview}` and
+  `crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`.
+  The red before the fix: `inv-blocks-match-ref/{org,loro,block_raw,matview}` and
   `inv-block-content/{block_raw,sql}` report `block:hm4r-a: content: sut="Buy
   milk" ref="Buy milk oat"` with `first-divergent-layer: store/CRDT`. Log
   `target/hm4-hm4-a-crash-over-a-behind-file-the-user-then-edits-reverts-the-stores-edit.log`

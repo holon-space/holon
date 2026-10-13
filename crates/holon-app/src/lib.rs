@@ -58,6 +58,7 @@ pub mod type_table_remedy;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod vault_lock;
 pub mod wiring;
+pub mod writeback_remedy;
 
 pub use boot_error::BootComponent;
 pub use boot_error::BootError;

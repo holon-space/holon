@@ -1350,6 +1350,9 @@
                 "name": "condition_replay_order.rs"
               },
               {
+                "name": "contract_forward_references.rs"
+              },
+              {
                 "name": "decision_core_pbt.rs"
               },
               {
@@ -1559,6 +1562,9 @@
               },
               {
                 "name": "wiring.rs"
+              },
+              {
+                "name": "writeback_remedy.rs"
               }
             ]
           },
@@ -1603,6 +1609,12 @@
               },
               {
                 "name": "cell_leg_delta_delivery.rs"
+              },
+              {
+                "name": "clock_out_of_range_boots_degraded.rs"
+              },
+              {
+                "name": "clock_seed_failure_boots_degraded.rs"
               },
               {
                 "name": "computed_persisted_boot_column.rs"
@@ -2518,6 +2530,17 @@
           {
             "name": "src",
             "path": "holon-filesystem/src",
+            "dirs": [
+              {
+                "name": "file_sync_controller",
+                "path": "holon-filesystem/src/file_sync_controller",
+                "files": [
+                  {
+                    "name": "writeback.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "base_sidecar.rs"
@@ -2575,6 +2598,9 @@
               },
               {
                 "name": "vault_path.rs"
+              },
+              {
+                "name": "writeback_net.rs"
               },
               {
                 "name": "writeback_render.rs"
@@ -4351,6 +4377,9 @@
                     "parent": "holon-integration-tests/src/pbt",
                     "files": [
                       {
+                        "name": "accept_removal.rs"
+                      },
+                      {
                         "name": "advance_day.rs"
                       },
                       {
@@ -4457,6 +4486,9 @@
                       },
                       {
                         "name": "drag_drop_block.rs"
+                      },
+                      {
+                        "name": "drop_next_watcher_event.rs"
                       },
                       {
                         "name": "edit_block_copy.rs"
@@ -4619,6 +4651,9 @@
                       },
                       {
                         "name": "rename_refused_recipe.rs"
+                      },
+                      {
+                        "name": "rewrite_from_store.rs"
                       },
                       {
                         "name": "save_refused_recipe.rs"
@@ -5537,6 +5572,9 @@
               },
               {
                 "name": "catalog_analyzability_census.rs"
+              },
+              {
+                "name": "composed_cap_set_table_matches_compose_sut.rs"
               },
               {
                 "name": "cook_vault_ingest.rs"
@@ -6620,6 +6658,9 @@
                 "name": "step_vocabulary.rs"
               },
               {
+                "name": "transition.rs"
+              },
+              {
                 "name": "widget_builder.rs"
               }
             ]
@@ -6674,6 +6715,15 @@
             "files": [
               {
                 "name": "lib.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-macros-test/tests",
+            "files": [
+              {
+                "name": "transition_macro.rs"
               }
             ]
           }
@@ -7508,6 +7558,31 @@
               },
               {
                 "name": "svg.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-net-shell",
+        "path": "holon-net-shell",
+        "c4_level": "unknown",
+        "description": "A tokio shell over the sans-IO [`holon_net::exec::Executor`]: a monotonic clock, the effect loop, manual fires from other tasks and waiting for an occurrence to settle.",
+        "pattern_status": "planned",
+        "content": "A tokio shell over the sans-IO [`holon_net::exec::Executor`]: a\nmonotonic clock, the effect loop, manual fires from other tasks and\nwaiting for an occurrence to settle.\n\nThe executor sits behind a lock that is never held across an effect, so a\nfire or a marking read from another task waits only for one step.",
+        "source_file": "holon-net-shell/src/lib.rs",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-net-shell/src",
+            "files": [
+              {
+                "name": "lib.rs"
               }
             ]
           }

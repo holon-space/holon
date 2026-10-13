@@ -10,6 +10,7 @@ members = [
   "crates/holon-expr",
   "crates/holon-net",
   "crates/holon-net-layout",
+  "crates/holon-net-shell",
   "crates/holon-pattern",
   "crates/holon-rules",
   "crates/holon-loro-wiring",
@@ -282,6 +283,7 @@ holon-engine = { path = "crates/holon-engine" }
 holon-expr = { path = "crates/holon-expr" }
 holon-net = { path = "crates/holon-net" }
 holon-net-layout = { path = "crates/holon-net-layout" }
+holon-net-shell = { path = "crates/holon-net-shell" }
 holon-pattern = { path = "crates/holon-pattern" }
 holon-petri = { path = "crates/holon-petri" }
 holon-rules = { path = "crates/holon-rules" }
