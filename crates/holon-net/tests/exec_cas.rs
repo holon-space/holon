@@ -23,6 +23,7 @@ use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
 use holon_net::exec::Output;
 use holon_net::exec::Receiver;
+use holon_net::exec::Route;
 use holon_net::exec::Settled;
 use holon_net::exec::Trigger;
 use proptest::prelude::*;
@@ -157,12 +158,65 @@ fn a_stale_effect_on_a_data_place_applies_and_discloses() {
         "title",
     );
     assert_eq!(stored, "foo", "the effect happened, so its output applies");
-    let applied = d
+    assert_eq!(
+        stale_routes(&d),
+        vec![("DocC", Route::Applied)],
+        "the apply over the edit is disclosed"
+    );
+}
+
+/// The routes of the one occurrence that settled over changed inputs.
+fn stale_routes(d: &Driver) -> Vec<(&'static str, Route)> {
+    let routes: Vec<_> = d
         .exec()
         .occurrences()
-        .filter(|(_, s)| matches!(s, Some(Settled::AppliedOverChangedInputs(_))))
-        .count();
-    assert_eq!(applied, 1, "the apply over the edit is disclosed");
+        .filter_map(|(_, s)| match s {
+            Some(Settled::OverChangedInputs { routes, .. }) => Some(routes.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(routes.len(), 1, "one stale settle: {routes:?}");
+    routes[0]
+        .iter()
+        .map(|r| {
+            let place = DOCS
+                .into_iter()
+                .find(|p| r.place.as_str() == *p)
+                .expect("a doc place");
+            (place, r.route.clone())
+        })
+        .collect()
+}
+
+/// One stale effect writes a data place and a process place with no
+/// candidate: the settle discloses both the apply and the withhold.
+#[test]
+fn a_mixed_route_stale_effect_discloses_every_route() {
+    let mut d = Driver::new(net());
+    d.write("DocC", DOC, content(&[("title", text("Foo"))]));
+    d.step().expect("the net quiesces");
+    d.write("DocC", DOC, content(&[("title", text("Bar"))]));
+    d.complete_oldest(|req| {
+        let EffectResult::Done(mut outputs) = lowered(req) else {
+            unreachable!("lowered is Done")
+        };
+        outputs.push(Output::new(
+            "DocB",
+            &req.subject,
+            content(&[("title", text("x"))]),
+        ));
+        EffectResult::Done(outputs)
+    })
+    .expect("the net quiesces");
+
+    assert_eq!(
+        stale_routes(&d),
+        vec![("DocC", Route::Applied), ("DocB", Route::Withheld)]
+    );
+    assert!(
+        d.exec().tokens().token("DocB", DOC).is_none(),
+        "the withheld row is not written"
+    );
 }
 
 fn n_of(r: &mut dyn Reads, place: &str, s: &str) -> Option<i64> {

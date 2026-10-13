@@ -33,6 +33,8 @@ use holon_net::exec::Output;
 use holon_net::exec::Place;
 use holon_net::exec::Receiver;
 use holon_net::exec::Resolution;
+use holon_net::exec::Route;
+use holon_net::exec::Routed;
 use holon_net::exec::Settled;
 use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
@@ -522,6 +524,15 @@ impl Model {
         if self.occs.get(occurrence).is_none_or(|o| o.parked.is_none()) {
             return Err(ExecError::NotParked(occurrence.clone()));
         }
+        let o = &self.occs[occurrence];
+        if matches!(resolution, Resolution::Retry)
+            && self.running().contains_key(&key(&o.transition, &o.subject))
+        {
+            return Err(ExecError::RetryWhileRunning {
+                transition: o.transition.clone(),
+                subject: Subject::new(&o.subject),
+            });
+        }
         self.occ_mut(occurrence).parked = None;
         match resolution {
             Resolution::Verify(outputs) => self.record(occurrence, outputs),
@@ -679,12 +690,7 @@ impl Model {
         }
         if matches!(
             o.settled,
-            Some(
-                Settled::Done
-                    | Settled::DoneOverChangedInputs(_)
-                    | Settled::AppliedOverChangedInputs(_)
-                    | Settled::Failed(_)
-            )
+            Some(Settled::Done | Settled::OverChangedInputs { .. } | Settled::Failed(_))
         ) {
             return Completion::DroppedLate;
         }
@@ -795,9 +801,9 @@ impl Model {
             return;
         }
         let trace = &self.occs[occ].trace;
-        let (mut kept, mut applied, mut withheld) = (Vec::new(), false, false);
+        let (mut kept, mut routes) = (Vec::new(), Vec::new());
         for out in &rows {
-            match *self.place(&out.place) {
+            let route = match *self.place(&out.place) {
                 PlaceSpec::Stored {
                     candidate: Some(c), ..
                 } => {
@@ -817,25 +823,24 @@ impl Model {
                             ("trace".to_string(), trace.as_value()),
                         ]),
                     ));
+                    Route::Candidate(Place::new(c))
                 }
                 PlaceSpec::Stored {
                     class: Class::Data, ..
                 } => {
-                    applied = true;
                     kept.push(out.clone());
+                    Route::Applied
                 }
-                _ => withheld = true,
-            }
+                _ => Route::Withheld,
+            };
+            routes.push(Routed {
+                place: out.place.clone(),
+                subject: out.subject.clone(),
+                route,
+            });
         }
         self.commit(occ, kept);
-        let settled = if withheld || rows.is_empty() {
-            Settled::DoneOverChangedInputs(cause)
-        } else if applied {
-            Settled::AppliedOverChangedInputs(cause)
-        } else {
-            Settled::Done
-        };
-        self.occ_mut(occ).settled = Some(settled);
+        self.occ_mut(occ).settled = Some(Settled::OverChangedInputs { cause, routes });
     }
 
     fn commit(&mut self, occ: &OccurrenceId, rows: Vec<Output>) {

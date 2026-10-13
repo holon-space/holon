@@ -22,11 +22,13 @@ use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
 use holon_net::exec::EffectResult;
+use holon_net::exec::ExecError;
 use holon_net::exec::FireError;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Receiver;
 use holon_net::exec::Resolution;
+use holon_net::exec::Route;
 use holon_net::exec::Settled;
 use holon_net::exec::Trigger;
 use holon_net::exec::UnknownOccurrence;
@@ -224,9 +226,10 @@ impl StateMachineTest for Test {
                         Res::Retry => Resolution::Retry,
                         Res::Drop => Resolution::Drop,
                     };
-                    sut.d
-                        .resolve(&occ, resolution)
-                        .expect("the occurrence is parked");
+                    match sut.d.resolve(&occ, resolution) {
+                        Ok(()) | Err(ExecError::RetryWhileRunning { .. }) => {}
+                        Err(e) => panic!("the occurrence is parked: {e}"),
+                    }
                     sut.d.step().expect("the net quiesces");
                 }
             }
@@ -273,7 +276,8 @@ fn a_stale_done_send_is_a_fact() {
     assert!(
         matches!(
             d.exec().settled(&first),
-            Ok(Some(Settled::DoneOverChangedInputs(_)))
+            Ok(Some(Settled::OverChangedInputs { routes, .. }))
+                if routes.iter().map(|r| &r.route).eq([&Route::Withheld])
         ),
         "stale_done_is_disclosed: send#1 settled {:?}",
         d.exec().settled(&first)
@@ -324,7 +328,7 @@ fn a_stale_done_without_outputs_is_disclosed() {
     assert!(
         matches!(
             d.exec().settled(&first),
-            Ok(Some(Settled::DoneOverChangedInputs(_)))
+            Ok(Some(Settled::OverChangedInputs { routes, .. })) if routes.is_empty()
         ),
         "stale_done_is_disclosed: send#1 without outputs settled {:?}",
         d.exec().settled(&first)

@@ -679,15 +679,32 @@ pub struct Mark {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Settled {
     Done,
-    /// The effect happened over stale inputs: its input is consumed and a
-    /// row output to a process place without a candidate is withheld, or it
-    /// had no row outputs.
-    DoneOverChangedInputs(Cause),
-    /// The effect happened over stale inputs: its input is consumed and its
-    /// outputs to data-class places are applied anyway.
-    AppliedOverChangedInputs(Cause),
+    /// The effect happened over stale inputs: its input is consumed and each
+    /// row output took the route listed with it.
+    OverChangedInputs {
+        cause: Cause,
+        routes: Vec<Routed>,
+    },
     Failed(Cause),
     OutcomeUnknown(Cause),
+}
+
+/// Where one row output of a stale effect went.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Routed {
+    pub place: Place,
+    pub subject: Subject,
+    pub route: Route,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Route {
+    /// Written to a data-class place over the changed inputs.
+    Applied,
+    /// Kept in this candidate place for an apply transition.
+    Candidate(Place),
+    /// Not written: a process place with no candidate.
+    Withheld,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -752,6 +769,11 @@ pub enum ExecError {
     UnknownAttempt(AttemptId),
     #[error("occurrence '{0}' is not parked in OutcomeUnknown")]
     NotParked(OccurrenceId),
+    #[error("a newer firing of {transition} for {subject} is in flight")]
+    RetryWhileRunning {
+        transition: String,
+        subject: Subject,
+    },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -1082,10 +1104,7 @@ impl Executor {
         if matches!(
             self.occurrences.get(occurrence),
             Some(Some(
-                Settled::Done
-                    | Settled::DoneOverChangedInputs(_)
-                    | Settled::AppliedOverChangedInputs(_)
-                    | Settled::Failed(_)
+                Settled::Done | Settled::OverChangedInputs { .. } | Settled::Failed(_)
             ))
         ) {
             if let Some(a) = live {
@@ -1205,6 +1224,17 @@ impl Executor {
         now: Duration,
     ) -> Result<(), ExecError> {
         self.advance(now);
+        if let (Resolution::Retry, Some(a)) = (&resolution, self.parked.get(occurrence))
+            && self
+                .tokens
+                .token(&Place::running(&a.transition), &a.subject)
+                .is_some()
+        {
+            return Err(ExecError::RetryWhileRunning {
+                transition: a.transition.to_string(),
+                subject: a.subject.clone(),
+            });
+        }
         let a = self.unpark(occurrence)?;
         match resolution {
             Resolution::Verify(outputs) => {
@@ -1513,9 +1543,9 @@ impl Executor {
             return;
         }
         let trace = a.trace.as_value();
-        let (mut kept, mut applied, mut withheld) = (Vec::new(), false, false);
+        let (mut kept, mut routes) = (Vec::new(), Vec::new());
         for o in &rows {
-            if let Some(c) = self.net.candidate_of(&o.place) {
+            let route = if let Some(c) = self.net.candidate_of(&o.place) {
                 let base = a
                     .trace
                     .rows
@@ -1530,26 +1560,30 @@ impl Executor {
                     ("trace".to_string(), trace.clone()),
                 ]);
                 kept.push(Output::new(c, &o.subject, content));
+                Route::Candidate(c.clone())
             } else if self.net.places[&o.place].class == Class::Data {
-                applied = true;
                 kept.push(o.clone());
+                Route::Applied
             } else {
-                withheld = true;
-            }
+                Route::Withheld
+            };
+            routes.push(Routed {
+                place: o.place.clone(),
+                subject: o.subject.clone(),
+                route,
+            });
         }
-        let disclosed = withheld || rows.is_empty();
-        if disclosed && self.twin(Twin::StaleDoneReturnsInput) {
+        if (rows.is_empty() || routes.iter().any(|r| r.route == Route::Withheld))
+            && self.twin(Twin::StaleDoneReturnsInput)
+        {
             return self.fail(a, cause, now);
         }
         let occurrence = a.occurrence.clone();
         self.commit(a, kept);
-        if disclosed {
-            self.occurrences
-                .insert(occurrence, Some(Settled::DoneOverChangedInputs(cause)));
-        } else if applied {
-            self.occurrences
-                .insert(occurrence, Some(Settled::AppliedOverChangedInputs(cause)));
-        }
+        self.occurrences.insert(
+            occurrence,
+            Some(Settled::OverChangedInputs { cause, routes }),
+        );
     }
 
     fn commit(&mut self, a: Attempt, rows: Vec<Output>) {

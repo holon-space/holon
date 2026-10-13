@@ -187,9 +187,10 @@ impl Sut {
 
     fn resolve(&mut self, resolution: Resolution) {
         let occ = self.parked().expect("checked by the caller");
-        self.d
-            .resolve(&occ, resolution)
-            .expect("the occurrence is parked");
+        match self.d.resolve(&occ, resolution) {
+            Ok(()) | Err(ExecError::RetryWhileRunning { .. }) => {}
+            Err(e) => panic!("the occurrence is parked: {e}"),
+        }
         self.d.step().expect("the net quiesces");
     }
 
@@ -430,6 +431,28 @@ fn parked_send() -> (Driver, EffectRequest) {
     );
     d.tick(1).expect("the net quiesces");
     (d, req)
+}
+
+/// One subject, one effect in flight: Retry of a parked `Send` waits while a
+/// newer `Send` runs, and is offered again once that one settles.
+#[test]
+fn retry_waits_for_a_newer_firing_in_flight() {
+    let (mut d, first) = parked_send();
+    d.write("Msg", APP, content(&[("n", Value::Integer(2))]));
+    d.fire("Send", APP, OccurrenceId::caller("send#2"))
+        .expect("Msg holds a newer message");
+    d.step().expect("the net quiesces");
+    let newer = d.pending.back().expect("the newer Send runs").clone();
+    assert_eq!(
+        d.resolve(&first.occurrence, Resolution::Retry),
+        Err(ExecError::RetryWhileRunning {
+            transition: "Send".to_string(),
+            subject: Subject::new(APP),
+        })
+    );
+    answer_attempt(&mut d, &newer, sent(&newer));
+    d.resolve(&first.occurrence, Resolution::Retry)
+        .expect("the newer firing settled");
 }
 
 /// A late Failed is evidence that the effect did not happen: the input
