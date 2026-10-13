@@ -107,8 +107,8 @@ impl StateMachineTest for Test {
 
     fn init_test(_: &()) -> Driver {
         let mut d = Driver::new(net());
-        d.write("Want", APP, content(&[("url", text("libsql://local"))]));
-        d.step().expect("the net quiesces");
+        d.write("Want", APP, content(&[("url", text("libsql://local"))]))
+            .expect("the net quiesces");
         d
     }
 
@@ -165,13 +165,13 @@ fn a_firing_in_an_unsettled_run_shares_its_timer() {
             .on_timeout("TimedOut"),
         );
     let mut d = Driver::new(net);
-    d.write("Doc", APP, content(&[("title", text("v1"))]));
-    d.step().expect("the net quiesces");
+    d.write("Doc", APP, content(&[("title", text("v1"))]))
+        .expect("the net quiesces");
     d.complete_oldest(|_| EffectResult::Unknown(Cause::definite("connection reset")))
         .expect("the net quiesces");
     d.tick(10).expect("the net quiesces");
-    d.write("Doc", APP, content(&[("title", text("v2"))]));
-    d.step().expect("the net quiesces");
+    d.write("Doc", APP, content(&[("title", text("v2"))]))
+        .expect("the net quiesces");
     assert_eq!(
         d.requests_of("Publish").count(),
         2,
@@ -182,5 +182,44 @@ fn a_firing_in_an_unsettled_run_shares_its_timer() {
     assert!(
         d.exec().tokens().token("TimedOut", APP).is_some(),
         "run_spans_its_attempts: the run timer of the first firing did not fire at 21 s"
+    );
+}
+
+/// An external call quiesces only its own consequences: a due timer waits
+/// for `step` (#192).
+#[test]
+fn an_external_call_never_fires_a_due_timer() {
+    let net = Spec::default()
+        .place("Doc", Class::Process)
+        .place("Other", Class::Process)
+        .place("TimedOut", Class::Process)
+        .transition(
+            Transition::new(
+                "Publish",
+                Trigger::Auto,
+                bind!(|r, s| {
+                    let title = r.text("Doc", s, "title")?;
+                    Some(content(&[("title", text(&title))]))
+                }),
+                Body::Effectful(Receiver::None),
+            )
+            .reads("Doc")
+            .run_timer(Duration::from_secs(20))
+            .on_timeout("TimedOut"),
+        );
+    let mut d = Driver::new(net);
+    d.write("Doc", APP, content(&[("title", text("v1"))]))
+        .expect("the net quiesces");
+    d.now += Duration::from_secs(21);
+    d.write("Other", APP, content(&[]))
+        .expect("the net quiesces");
+    assert!(
+        d.exec().tokens().token("TimedOut", APP).is_none(),
+        "the write fired the due run timer"
+    );
+    d.step().expect("the net quiesces");
+    assert!(
+        d.exec().tokens().token("TimedOut", APP).is_some(),
+        "step fires the due run timer"
     );
 }

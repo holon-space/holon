@@ -34,6 +34,7 @@ use holon_net::exec::OUTCOME_UNKNOWN;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Place;
+use holon_net::exec::Quiesced;
 use holon_net::exec::Reader;
 use holon_net::exec::Receiver;
 use holon_net::exec::Resolution;
@@ -356,7 +357,7 @@ pub struct Driver {
     model: Model,
     spec: Spec,
     pub now: Duration,
-    /// Effects returned by `step` and not yet completed, oldest first.
+    /// Effect requests returned and not yet completed, oldest first.
     pub pending: VecDeque<EffectRequest>,
     /// Every effect request ever returned.
     pub requests: Vec<EffectRequest>,
@@ -392,13 +393,33 @@ impl Driver {
         &self.exec
     }
 
-    /// An outside commit, without a step.
-    pub fn write(&mut self, place: &str, subject: &str, content: Content) {
-        self.exec.write(place, subject, content.clone());
-        self.model.write(place, subject, content.clone());
-        self.check(&format!("write {place}/{subject} {content:?}"));
+    /// Compares the answers of one external call, then queues the effect
+    /// requests it returned.
+    fn quiesced<T: Debug + PartialEq, E: Debug + PartialEq>(
+        &mut self,
+        op: &str,
+        sut: Result<Quiesced<T>, E>,
+        model: Result<Quiesced<T>, E>,
+    ) -> Result<T, E> {
+        self.properties(op);
+        let r = agree(op, "answer", sut, model);
+        self.check(op);
+        r.map(|q| {
+            self.requests.extend(q.requests.iter().cloned());
+            self.pending.extend(q.requests);
+            q.value
+        })
     }
 
+    /// An outside commit.
+    pub fn write(&mut self, place: &str, subject: &str, content: Content) -> Result<(), ExecError> {
+        let op = format!("write {place}/{subject} {content:?}");
+        let sut = self.exec.write(place, subject, content.clone(), self.now);
+        let model = self.model.write(place, subject, content, self.now);
+        self.quiesced(&op, sut, model)
+    }
+
+    /// Fires the timers due at `now`, then quiesces.
     pub fn step(&mut self) -> Result<(), ExecError> {
         let op = format!("step at {:?}", self.now);
         let sut = self.exec.step(self.now);
@@ -417,7 +438,6 @@ impl Driver {
         self.step()
     }
 
-    /// A manual fire, without a step.
     pub fn fire(
         &mut self,
         transition: &str,
@@ -425,71 +445,44 @@ impl Driver {
         occurrence: OccurrenceId,
     ) -> Result<Accepted, FireError> {
         let op = format!("fire {transition}/{subject} as {occurrence}");
-        let r = agree(
-            &op,
-            "answer",
-            self.exec.fire(
-                transition,
-                subject,
-                occurrence.clone(),
-                Content::new(),
-                self.now,
-            ),
-            self.model
-                .fire(transition, subject, occurrence, Content::new(), self.now),
+        let sut = self.exec.fire(
+            transition,
+            subject,
+            occurrence.clone(),
+            Content::new(),
+            self.now,
         );
-        self.check(&op);
-        r
+        let model = self
+            .model
+            .fire(transition, subject, occurrence, Content::new(), self.now);
+        self.quiesced(&op, sut, model)
     }
 
-    /// An answer, without a step.
     pub fn answer(&mut self, call: AnswerCall) -> Result<AnswerId, UftError> {
         let op = format!("answer {call:?}");
-        let r = agree(
-            &op,
-            "answer",
-            self.exec.answer(call.clone(), self.now),
-            self.model.answer(call, self.now),
-        );
-        self.check(&op);
-        r
+        let sut = self.exec.answer(call.clone(), self.now);
+        let model = self.model.answer(call, self.now);
+        self.quiesced(&op, sut, model)
     }
 
-    /// An undo, then a step: a re-fire after an undo shows in that step.
     pub fn undo(&mut self, occurrence: &OccurrenceId) -> Result<Undone, UndoError> {
         let op = format!("undo {occurrence}");
         let sut = self.exec.undo(occurrence, self.now);
         let model = self.model.undo(occurrence, self.now);
-        let sut_new = self.exec.step(self.now);
-        let model_new = self.model.step(self.now);
-        self.properties(&op);
-        let r = agree(&op, "answer", sut, model);
-        let new = agree(&op, "effect requests", sut_new, model_new)
-            .expect("a step after an undo quiesces");
-        self.check(&op);
-        self.requests.extend(new.iter().cloned());
-        self.pending.extend(new);
-        r
+        self.quiesced(&op, sut, model)
     }
 
-    /// Hands back one result, without a step.
     pub fn complete(
         &mut self,
         attempt: AttemptId,
         result: EffectResult,
     ) -> Result<Completion, ExecError> {
         let op = format!("complete {attempt:?} with {result:?}");
-        let r = agree(
-            &op,
-            "answer",
-            self.exec.complete(attempt, result.clone(), self.now),
-            self.model.complete(attempt, result, self.now),
-        );
-        self.check(&op);
-        r
+        let sut = self.exec.complete(attempt, result.clone(), self.now);
+        let model = self.model.complete(attempt, result, self.now);
+        self.quiesced(&op, sut, model)
     }
 
-    /// Resolves a parked occurrence, without a step.
     pub fn resolve(
         &mut self,
         occurrence: &OccurrenceId,
@@ -501,18 +494,13 @@ impl Driver {
             Resolution::Drop => ("Drop", Resolution::Drop),
         };
         let op = format!("resolve {occurrence} by {op}");
-        let r = agree(
-            &op,
-            "answer",
-            self.exec.resolve(occurrence, resolution, self.now),
-            self.model.resolve(occurrence, copy, self.now),
-        );
-        self.check(&op);
-        r
+        let sut = self.exec.resolve(occurrence, resolution, self.now);
+        let model = self.model.resolve(occurrence, copy, self.now);
+        self.quiesced(&op, sut, model)
     }
 
-    /// Completes the oldest pending effect with `result(request)`, then
-    /// steps; no-op when none is pending.
+    /// Completes the oldest pending effect with `result(request)`; no-op
+    /// when none is pending.
     pub fn complete_oldest(
         &mut self,
         result: impl FnOnce(&EffectRequest) -> EffectResult,
@@ -521,8 +509,7 @@ impl Driver {
             return Ok(());
         };
         let r = result(&req);
-        self.complete(req.attempt, r)?;
-        self.step()
+        self.complete(req.attempt, r).map(|_| ())
     }
 
     pub fn requests_of(&self, transition: &str) -> impl Iterator<Item = &EffectRequest> {

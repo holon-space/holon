@@ -4,6 +4,7 @@
 mod exec_support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use exec_support::Driver;
 use exec_support::Transition;
@@ -48,11 +49,9 @@ fn n(v: i64) -> Content {
 /// `Item/x` with `n = 1`, answered by `a0`; its work runs.
 fn answered() -> Driver {
     let mut d = Driver::new(answer_spec());
-    d.write("Item", "x", n(1));
-    d.step().expect("the net quiesces");
+    d.write("Item", "x", n(1)).expect("the net quiesces");
     d.answer(answer_call(&d, "x", "a0", false, Some("Theirs")))
         .expect("the ask applies");
-    d.step().expect("the net quiesces");
     d
 }
 
@@ -66,6 +65,23 @@ fn done() -> Driver {
         ])
     })
     .expect("the net quiesces");
+    d
+}
+
+/// `answer_spec` whose work also reads `Gate`: with no `Gate` token an
+/// answer of `x` waits in `Answered.Accept`.
+fn waiting() -> Driver {
+    let mut spec = answer_spec().place("Gate", Class::Process);
+    spec.transitions
+        .iter_mut()
+        .find(|t| t.name == "Accept")
+        .expect("answer_spec has the work Accept")
+        .reads
+        .push("Gate".to_string());
+    let mut d = Driver::new(spec);
+    d.write("Item", "x", n(1)).expect("the net quiesces");
+    d.answer(answer_call(&d, "x", "a0", false, None))
+        .expect("the ask applies");
     d
 }
 
@@ -119,7 +135,7 @@ fn undo_reverses_the_work_and_discloses_each_row() {
 #[test]
 fn undo_leaves_a_row_changed_since_the_work() {
     let mut d = done();
-    d.write("Accepted", "x", n(9));
+    d.write("Accepted", "x", n(9)).expect("the net quiesces");
     let undone = d.undo(&a0()).expect("a done answer undoes");
     assert_eq!(
         undone.reversed[0],
@@ -136,11 +152,7 @@ fn undo_leaves_a_row_changed_since_the_work() {
 
 #[test]
 fn undo_before_the_work_withdraws_the_answer() {
-    let mut d = Driver::new(answer_spec());
-    d.write("Item", "x", n(1));
-    d.step().expect("the net quiesces");
-    d.answer(answer_call(&d, "x", "a0", false, None))
-        .expect("the ask applies");
+    let mut d = waiting();
     let undone = d.undo(&a0()).expect("a waiting answer undoes");
     assert_eq!(
         undone,
@@ -192,13 +204,8 @@ fn settled_follows_the_work() {
 
 #[test]
 fn an_expired_answer_no_longer_applies() {
-    let mut d = Driver::new(answer_spec());
-    d.write("Item", "x", n(1));
-    d.step().expect("the net quiesces");
-    d.answer(answer_call(&d, "x", "a0", false, None))
-        .expect("the ask applies");
-    d.write("Item", "x", n(2));
-    d.step().expect("the net quiesces");
+    let mut d = waiting();
+    d.write("Item", "x", n(2)).expect("the net quiesces");
     assert_eq!(d.requests_of("Accept").count(), 0);
     assert_eq!(
         d.exec().settled(&a0()),
@@ -222,11 +229,7 @@ fn an_expired_answer_no_longer_applies() {
 
 #[test]
 fn a_second_answer_while_one_waits_is_refused() {
-    let mut d = Driver::new(answer_spec());
-    d.write("Item", "x", n(1));
-    d.step().expect("the net quiesces");
-    d.answer(answer_call(&d, "x", "a0", false, None))
-        .expect("the ask applies");
+    let mut d = waiting();
     assert_eq!(
         d.answer(answer_call(&d, "x", "a1", false, None)),
         Err(UftError::AlreadyAnswered)
@@ -258,12 +261,20 @@ fn hashing_executor() -> Executor {
 fn ask_hash_covers_content_subject_and_transition_not_version() {
     let mut e = hashing_executor();
     let hash = |e: &Executor, s: &str| e.derive("H", &Subject::new(s)).expect("Item holds a token");
-    e.write("Item", "x", n(1));
-    e.write("Item", "y", n(1));
+    let _ = e
+        .write("Item", "x", n(1), Duration::ZERO)
+        .expect("the net quiesces");
+    let _ = e
+        .write("Item", "y", n(1), Duration::ZERO)
+        .expect("the net quiesces");
     let first = hash(&e, "x");
-    e.write("Item", "x", n(2));
+    let _ = e
+        .write("Item", "x", n(2), Duration::ZERO)
+        .expect("the net quiesces");
     let changed = hash(&e, "x");
-    e.write("Item", "x", n(1));
+    let _ = e
+        .write("Item", "x", n(1), Duration::ZERO)
+        .expect("the net quiesces");
     let back = hash(&e, "x");
     assert_eq!(first, back, "a new version with the same content");
     assert_ne!(string(&first, "accept"), string(&changed, "accept"));
@@ -285,11 +296,9 @@ fn downstream() -> Driver {
         .consumes("Accepted"),
     );
     let mut d = Driver::new(spec);
-    d.write("Item", "x", n(1));
-    d.step().expect("the net quiesces");
+    d.write("Item", "x", n(1)).expect("the net quiesces");
     d.answer(answer_call(&d, "x", "a0", false, None))
         .expect("the ask applies");
-    d.step().expect("the net quiesces");
     d.complete_oldest(|req| {
         EffectResult::Done(vec![
             Output::new("Accepted", &req.subject, n(1)),
@@ -338,13 +347,8 @@ fn settled_stays_done_after_an_undo() {
 
 #[test]
 fn undo_of_an_expired_answer_keeps_no_longer_applies() {
-    let mut d = Driver::new(answer_spec());
-    d.write("Item", "x", n(1));
-    d.step().expect("the net quiesces");
-    d.answer(answer_call(&d, "x", "a0", false, None))
-        .expect("the ask applies");
-    d.write("Item", "x", n(2));
-    d.step().expect("the net quiesces");
+    let mut d = waiting();
+    d.write("Item", "x", n(2)).expect("the net quiesces");
     let undone = d.undo(&a0()).expect("an expired answer undoes");
     assert_eq!(
         undone,

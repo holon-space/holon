@@ -228,7 +228,6 @@ impl StorageSut {
             Ok(_) | Err(FireError::NotEnabled { .. }) => {}
             Err(e) => panic!("fire {transition}: {e}"),
         }
-        self.d.step().expect("the net quiesces");
     }
 }
 
@@ -249,8 +248,8 @@ impl StateMachineTest for StorageTest {
         } else {
             "Storage.Open"
         };
-        d.write(opener, APP, content(&[("gen", Value::Integer(0))]));
-        d.step().expect("the net quiesces");
+        d.write(opener, APP, content(&[("gen", Value::Integer(0))]))
+            .expect("the net quiesces");
         StorageSut {
             d,
             fires: 0,
@@ -410,8 +409,8 @@ impl StateMachineTest for IntentTest {
             IntentOp::Write(s) => {
                 sut.next_n += 1;
                 sut.d
-                    .write("Intent", s, content(&[("n", Value::Integer(sut.next_n))]));
-                sut.d.step().expect("the net quiesces");
+                    .write("Intent", s, content(&[("n", Value::Integer(sut.next_n))]))
+                    .expect("the net quiesces");
             }
             IntentOp::SendSucceeds => sut
                 .d

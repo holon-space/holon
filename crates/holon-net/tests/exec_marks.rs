@@ -113,11 +113,10 @@ impl StateMachineTest for Test {
             Op::SetNote(n) => sut.note = n,
         }
         let task = content(&[("title", text(sut.title)), ("note", text(sut.note))]);
-        sut.d.write("Task", TASK, task);
-        let stepped = sut.d.step();
+        let written = sut.d.write("Task", TASK, task);
         assert!(
-            stepped.is_ok(),
-            "step_reaches_quiescence: a failing firing re-fired without bound: {stepped:?}"
+            written.is_ok(),
+            "step_reaches_quiescence: a failing firing re-fired without bound: {written:?}"
         );
         sut
     }

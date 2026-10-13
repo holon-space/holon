@@ -191,7 +191,6 @@ impl Sut {
             Ok(()) | Err(ExecError::RetryWhileRunning { .. }) => {}
             Err(e) => panic!("the occurrence is parked: {e}"),
         }
-        self.d.step().expect("the net quiesces");
     }
 
     /// Every attempt of `occ` was answered Failed: none can still have
@@ -221,8 +220,8 @@ impl<const CANDIDATE: bool> StateMachineTest for Test<CANDIDATE> {
 
     fn init_test(_: &()) -> Sut {
         let mut d = Driver::new(net(CANDIDATE));
-        d.write("Storage.Open", APP, content(&[("gen", Value::Integer(0))]));
-        d.step().expect("the net quiesces");
+        d.write("Storage.Open", APP, content(&[("gen", Value::Integer(0))]))
+            .expect("the net quiesces");
         Sut {
             d,
             released: false,
@@ -346,8 +345,8 @@ prop_state_machine! {
 #[test]
 fn a_late_done_resolves_the_parked_occurrence() {
     let mut d = Driver::new(net(false));
-    d.write("Storage.Open", APP, content(&[("gen", Value::Integer(0))]));
-    d.step().expect("the net quiesces");
+    d.write("Storage.Open", APP, content(&[("gen", Value::Integer(0))]))
+        .expect("the net quiesces");
     let occ = d
         .pending
         .front()
@@ -410,10 +409,10 @@ fn fired_send(receiver: Receiver) -> (Driver, EffectRequest) {
         .place("Sent", Class::Process)
         .transition(send);
     let mut d = Driver::new(net);
-    d.write("Msg", APP, content(&[("n", Value::Integer(1))]));
+    d.write("Msg", APP, content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
     d.fire("Send", APP, OccurrenceId::caller("send#1"))
         .expect("Msg holds a message");
-    d.step().expect("the net quiesces");
     let req = d.pending.front().expect("Send runs").clone();
     (d, req)
 }
@@ -438,10 +437,10 @@ fn parked_send() -> (Driver, EffectRequest) {
 #[test]
 fn retry_waits_for_a_newer_firing_in_flight() {
     let (mut d, first) = parked_send();
-    d.write("Msg", APP, content(&[("n", Value::Integer(2))]));
+    d.write("Msg", APP, content(&[("n", Value::Integer(2))]))
+        .expect("the net quiesces");
     d.fire("Send", APP, OccurrenceId::caller("send#2"))
         .expect("Msg holds a newer message");
-    d.step().expect("the net quiesces");
     let newer = d.pending.back().expect("the newer Send runs").clone();
     assert_eq!(
         d.resolve(&first.occurrence, Resolution::Retry),
@@ -523,9 +522,7 @@ fn a_late_unknown_keeps_the_occurrence_parked() {
 }
 
 fn answer_attempt(d: &mut Driver, req: &EffectRequest, result: EffectResult) -> Completion {
-    let completion = d.complete(req.attempt, result).expect("the attempt ran");
-    d.step().expect("the net quiesces");
-    completion
+    d.complete(req.attempt, result).expect("the attempt ran")
 }
 
 /// A parked `Send` the user retried: the abandoned first attempt and the
@@ -534,7 +531,6 @@ fn retried_send() -> (Driver, EffectRequest, EffectRequest) {
     let (mut d, first) = parked_send();
     d.resolve(&first.occurrence, Resolution::Retry)
         .expect("the occurrence is parked");
-    d.step().expect("the net quiesces");
     let second = d.pending.back().expect("the retry runs").clone();
     assert_ne!(first.attempt, second.attempt);
     (d, first, second)

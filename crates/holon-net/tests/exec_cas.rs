@@ -125,8 +125,8 @@ impl StateMachineTest for Test {
     fn apply(mut d: Driver, _: &(), op: Op) -> Driver {
         match op {
             Op::Edit(place, title) => {
-                d.write(place, DOC, content(&[("title", text(title))]));
-                d.step().expect("the net quiesces");
+                d.write(place, DOC, content(&[("title", text(title))]))
+                    .expect("the net quiesces");
             }
             Op::EffectDone => d.complete_oldest(lowered).expect("the net quiesces"),
         }
@@ -144,9 +144,10 @@ prop_state_machine! {
 #[test]
 fn a_stale_effect_on_a_data_place_applies_and_discloses() {
     let mut d = Driver::new(net());
-    d.write("DocC", DOC, content(&[("title", text("Foo"))]));
-    d.step().expect("the net quiesces");
-    d.write("DocC", DOC, content(&[("title", text("Bar"))]));
+    d.write("DocC", DOC, content(&[("title", text("Foo"))]))
+        .expect("the net quiesces");
+    d.write("DocC", DOC, content(&[("title", text("Bar"))]))
+        .expect("the net quiesces");
     d.complete_oldest(lowered).expect("the net quiesces");
 
     let stored = string(
@@ -193,9 +194,10 @@ fn stale_routes(d: &Driver) -> Vec<(&'static str, Route)> {
 #[test]
 fn a_mixed_route_stale_effect_discloses_every_route() {
     let mut d = Driver::new(net());
-    d.write("DocC", DOC, content(&[("title", text("Foo"))]));
-    d.step().expect("the net quiesces");
-    d.write("DocC", DOC, content(&[("title", text("Bar"))]));
+    d.write("DocC", DOC, content(&[("title", text("Foo"))]))
+        .expect("the net quiesces");
+    d.write("DocC", DOC, content(&[("title", text("Bar"))]))
+        .expect("the net quiesces");
     d.complete_oldest(|req| {
         let EffectResult::Done(mut outputs) = lowered(req) else {
             unreachable!("lowered is Done")
@@ -252,20 +254,18 @@ fn a_stale_pure_firing_rolls_back_and_refires() {
                 "Double",
                 Trigger::Auto,
                 bind!(|r, s| {
-                    let doubled = 2 * n_of(r, "Mid", s)?;
-                    (n_of(r, "Out", s) != Some(doubled))
-                        .then(|| content(&[("n", Value::Integer(doubled))]))
+                    let src = Value::Integer(n_of(r, "Src", s)?);
+                    let doubled = Value::Integer(2 * n_of(r, "Mid", s)?);
+                    (r.field("Out", s, "src") != Some(src.clone()))
+                        .then(|| content(&[("n", doubled), ("src", src)]))
                 }),
                 Body::pure(|s, input| Ok(vec![Output::new("Out", s, input.clone())])),
             )
             .reads("Src"),
         );
     let mut d = Driver::new(net);
-    d.write("Src", "x", n(1));
-    d.step().expect("the net quiesces");
-    d.write("Src", "x", n(2));
-    d.write("Out", "x", n(99));
-    d.step().expect("the net quiesces");
+    d.write("Src", "x", n(1)).expect("the net quiesces");
+    d.write("Src", "x", n(2)).expect("the net quiesces");
 
     let out = int(
         &d.exec()

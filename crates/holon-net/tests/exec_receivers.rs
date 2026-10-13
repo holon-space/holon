@@ -179,12 +179,13 @@ impl StateMachineTest for Test {
         match op {
             Op::Write(kind) => {
                 sut.next_n += 1;
-                sut.d.write(
-                    kind.place(),
-                    MSG,
-                    content(&[("n", Value::Integer(sut.next_n))]),
-                );
-                sut.d.step().expect("the net quiesces");
+                sut.d
+                    .write(
+                        kind.place(),
+                        MSG,
+                        content(&[("n", Value::Integer(sut.next_n))]),
+                    )
+                    .expect("the net quiesces");
             }
             Op::Fire(kind) => {
                 sut.fires += 1;
@@ -197,7 +198,6 @@ impl StateMachineTest for Test {
                     Err(FireError::NotEnabled { .. }) => {}
                     Err(e) => panic!("fire {kind:?}: {e}"),
                 }
-                sut.d.step().expect("the net quiesces");
             }
             Op::Done => sut
                 .d
@@ -230,7 +230,6 @@ impl StateMachineTest for Test {
                         Ok(()) | Err(ExecError::RetryWhileRunning { .. }) => {}
                         Err(e) => panic!("the occurrence is parked: {e}"),
                     }
-                    sut.d.step().expect("the net quiesces");
                 }
             }
         }
@@ -267,7 +266,6 @@ fn a_stale_done_send_is_a_fact() {
         .expect("the net quiesces");
 
     let again = d.fire("Send", MSG, OccurrenceId::caller("send#2"));
-    d.step().expect("the net quiesces");
     assert_eq!(
         d.requests_of("Send").count(),
         1,
@@ -307,14 +305,12 @@ fn send_over_changed_config() -> (Driver, OccurrenceId) {
         );
     let mut d = Driver::new(net);
     let n = |v: i64| content(&[("n", Value::Integer(v))]);
-    d.write("Msg", MSG, n(1));
-    d.write("Config", MSG, n(1));
-    d.step().expect("the net quiesces");
+    d.write("Msg", MSG, n(1)).expect("the net quiesces");
+    d.write("Config", MSG, n(1)).expect("the net quiesces");
     let first = OccurrenceId::caller("send#1");
     d.fire("Send", MSG, first.clone())
         .expect("Msg holds a message");
-    d.step().expect("the net quiesces");
-    d.write("Config", MSG, n(2));
+    d.write("Config", MSG, n(2)).expect("the net quiesces");
     (d, first)
 }
 
@@ -341,6 +337,7 @@ fn a_stale_done_without_outputs_is_disclosed() {
 fn caller_and_minted_occurrence_ids_never_collide() {
     let net = Spec::default()
         .place("In", Class::Process)
+        .place("Go", Class::Process)
         .place("Seen", Class::Process)
         .place("Out", Class::Process)
         .transition(
@@ -356,17 +353,18 @@ fn caller_and_minted_occurrence_ids_never_collide() {
             Transition::new(
                 "A",
                 Trigger::Auto,
-                bind!(|r, s| n_of(r, "In", s)),
+                bind!(|r, s| r.present("Go", s).then(|| n_of(r, "In", s)).flatten()),
                 Body::pure(|s, input| Ok(vec![Output::new("Out", s, input.clone())])),
             )
+            .reads("Go")
             .consumes("In"),
         );
     let mut d = Driver::new(net);
     let n = |v: i64| content(&[("n", Value::Integer(v))]);
-    d.write("In", MSG, n(1));
+    d.write("In", MSG, n(1)).expect("the net quiesces");
     let manual = OccurrenceId::caller("A#1");
     d.fire("M", MSG, manual.clone()).expect("In holds a token");
-    d.step().expect("the net quiesces");
+    d.write("Go", MSG, n(1)).expect("the net quiesces");
     assert_eq!(d.exec().settled(&manual), Ok(Some(Settled::Done)));
     assert_eq!(
         d.exec().occurrences().count(),
@@ -378,7 +376,7 @@ fn caller_and_minted_occurrence_ids_never_collide() {
         "the auto firing of A recorded"
     );
 
-    d.write("In", MSG, n(2));
+    d.write("In", MSG, n(2)).expect("the net quiesces");
     assert_eq!(
         d.fire("M", MSG, manual.clone()),
         Err(FireError::DuplicateOccurrence(manual)),

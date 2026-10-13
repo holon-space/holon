@@ -2,9 +2,11 @@
 //! process-class and data-class tokens, enabledness, pure and effectful
 //! firings, the record's compare-and-set, failure marks and timers.
 //!
-//! Sans-IO: [`Executor::step`] returns the effects to run, the caller runs
-//! them and hands each result back through [`Executor::complete`]. The clock
-//! is injected: every call that can move time takes `now`, a monotonic offset.
+//! Sans-IO: every external call runs the auto transitions it caused to
+//! quiescence and returns the effects to run in a [`Quiesced`]. The caller
+//! runs them and hands each result back through [`Executor::complete`]. The
+//! clock is injected: every call that can move time takes `now`, a monotonic
+//! offset. Only [`Executor::step`] fires the timers due at `now`.
 //!
 //! The executor implements no special case for producer order, run state or
 //! failure ports. Those are places and arcs of the net (§9 intro, NET-run.a).
@@ -42,7 +44,7 @@ use holon_api::user_transition::UftError;
 use holon_pattern::Value;
 
 /// A round fires every transition its marking enables. A net still enabled
-/// after this many rounds of one step does not terminate.
+/// after this many rounds of one call does not terminate.
 pub const MAX_ROUNDS: usize = 1000;
 
 /// The place where an effect with an unknown outcome parks its inputs
@@ -908,6 +910,15 @@ pub enum Resolution {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Accepted(pub OccurrenceId);
 
+/// The answer of an external call and the effect requests of the auto
+/// transitions it caused, run to quiescence.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use = "the effect requests must run"]
+pub struct Quiesced<T> {
+    pub value: T,
+    pub requests: Vec<EffectRequest>,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FireError {
     #[error("'{0}' is not a manual transition")]
@@ -920,11 +931,13 @@ pub enum FireError {
         subject: Subject,
         why: WhyNot,
     },
+    #[error("the net is still enabled after {0} rounds of one call")]
+    NoQuiescence(usize),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ExecError {
-    #[error("the net is still enabled after {0} rounds of one step")]
+    #[error("the net is still enabled after {0} rounds of one call")]
     NoQuiescence(usize),
     #[error("no attempt {0:?} is running")]
     UnknownAttempt(AttemptId),
@@ -981,6 +994,8 @@ pub enum UndoError {
     WorkUnsettled(OccurrenceId),
     #[error("'{0}' is already undone")]
     AlreadyUndone(OccurrenceId),
+    #[error("the net is still enabled after {0} rounds of one call")]
+    NoQuiescence(usize),
 }
 
 /// A variant of the executor that breaks exactly one rule, so a property
@@ -1234,7 +1249,12 @@ impl Executor {
     }
 
     /// Fires `Answer.T` with the user value; the answer id is the occurrence.
-    pub fn answer(&mut self, call: AnswerCall, now: Duration) -> Result<AnswerId, UftError> {
+    /// A net that does not quiesce is a broken net and panics here.
+    pub fn answer(
+        &mut self,
+        call: AnswerCall,
+        now: Duration,
+    ) -> Result<Quiesced<AnswerId>, UftError> {
         let work = call.transition.0.as_str();
         if !self.net.asks.contains_key(work) {
             return Err(UftError::UnknownTransition(call.transition));
@@ -1255,7 +1275,10 @@ impl Executor {
             value,
             now,
         ) {
-            Ok(_) => Ok(call.answer),
+            Ok(fired) => Ok(Quiesced {
+                value: call.answer,
+                requests: fired.requests,
+            }),
             Err(
                 FireError::DuplicateOccurrence(_)
                 | FireError::NotEnabled {
@@ -1360,7 +1383,11 @@ impl Executor {
     /// committed. It never puts `Answered` back, so the work never fires
     /// again from an undo. A row changed since the work, or held by a later
     /// firing, is left as it is.
-    pub fn undo(&mut self, answer: &OccurrenceId, now: Duration) -> Result<Undone, UndoError> {
+    pub fn undo(
+        &mut self,
+        answer: &OccurrenceId,
+        now: Duration,
+    ) -> Result<Quiesced<Undone>, UndoError> {
         self.advance(now);
         if !self.occurrences.contains_key(answer) {
             return Err(UndoError::UnknownOccurrence(answer.clone()));
@@ -1410,21 +1437,33 @@ impl Executor {
             });
         }
         self.undone.insert(id.clone());
-        Ok(Undone {
-            withdrawn,
-            reversed,
+        let requests = self.quiesce(now).map_err(UndoError::NoQuiescence)?;
+        Ok(Quiesced {
+            value: Undone {
+                withdrawn,
+                reversed,
+            },
+            requests,
         })
     }
 
     /// An outside commit (a user edit, an ingest): a new version when the
     /// content changes.
-    pub fn write(&mut self, place: &str, subject: &str, content: Content) {
+    pub fn write(
+        &mut self,
+        place: &str,
+        subject: &str,
+        content: Content,
+        now: Duration,
+    ) -> Result<Quiesced<()>, ExecError> {
         assert!(
             matches!(self.net.place_def(place).kind, PlaceKind::Stored { .. }),
             "an outside write to the derived place '{place}'"
         );
+        self.advance(now);
         self.tokens
             .put(&Place::new(place), &Subject::new(subject), content);
+        self.quiesced((), now)
     }
 
     pub fn why_not(&self, transition: &str, subject: &str) -> Option<WhyNot> {
@@ -1432,11 +1471,22 @@ impl Executor {
         self.decide(t, &Subject::new(subject)).err()
     }
 
-    /// Runs timers due at `now`, then fires every enabled auto transition
-    /// until none is enabled. Returns the effects to run.
+    /// Runs timers due at `now`, then the auto transitions to quiescence.
+    /// Returns the effects to run.
     pub fn step(&mut self, now: Duration) -> Result<Vec<EffectRequest>, ExecError> {
         self.advance(now);
         self.timers(now);
+        self.quiesce(now).map_err(ExecError::NoQuiescence)
+    }
+
+    fn quiesced<T>(&mut self, value: T, now: Duration) -> Result<Quiesced<T>, ExecError> {
+        let requests = self.quiesce(now).map_err(ExecError::NoQuiescence)?;
+        Ok(Quiesced { value, requests })
+    }
+
+    /// Fires every enabled auto transition until none is enabled, and takes
+    /// the effect requests; `Err` holds the rounds run. It fires no timer.
+    fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
         for _ in 0..MAX_ROUNDS {
             let mut started = Vec::new();
             for i in 0..self.net.transitions.len() {
@@ -1466,18 +1516,16 @@ impl Executor {
                 self.run_body(id, now);
             }
         }
-        Err(ExecError::NoQuiescence(MAX_ROUNDS))
+        Err(MAX_ROUNDS)
     }
 
     /// A manual fire: `ACCEPTED(occurrence)` at bind (NET-manual.a). A pure
-    /// body runs at once; an effect is returned by the next [`step`].
+    /// body runs at once; an effect is a request in the result.
     ///
     /// `value` is the user input (UFT-adopt.a; empty for none). It joins the
     /// bound input after the bind, so no guard reads it; a field the bind
     /// also produces is an impossible state and panics. A fire of `Answer.T`
     /// takes a [`OccurrenceId::Caller`] id equal to its [`ANSWER_ID_KEY`].
-    ///
-    /// [`step`]: Executor::step
     pub fn fire(
         &mut self,
         transition: &str,
@@ -1485,7 +1533,7 @@ impl Executor {
         occurrence: OccurrenceId,
         value: Content,
         now: Duration,
-    ) -> Result<Accepted, FireError> {
+    ) -> Result<Quiesced<Accepted>, FireError> {
         self.advance(now);
         let t = self.net.transition_def(transition);
         if t.trigger != Trigger::Manual {
@@ -1519,21 +1567,23 @@ impl Executor {
         }
         let id = self.start(&name, subject, occurrence.clone(), trace, input, now);
         self.run_body(id, now);
-        Ok(Accepted(occurrence))
+        let requests = self.quiesce(now).map_err(FireError::NoQuiescence)?;
+        Ok(Quiesced {
+            value: Accepted(occurrence),
+            requests,
+        })
     }
 
-    /// Hands back the result of an effect [`step`] returned. The result
+    /// Hands back the result of an effect request. The result
     /// closes only its own attempt; the occurrence settles by [`outcome`] over
     /// all its attempts. A late result of an abandoned attempt counts the same
     /// way, and a late `Unknown` keeps that attempt open.
-    ///
-    /// [`step`]: Executor::step
     pub fn complete(
         &mut self,
         attempt: AttemptId,
         result: EffectResult,
         now: Duration,
-    ) -> Result<Completion, ExecError> {
+    ) -> Result<Quiesced<Completion>, ExecError> {
         self.advance(now);
         let live = self.in_flight.remove(&attempt);
         let occurrence = match &live {
@@ -1551,7 +1601,8 @@ impl Executor {
             (EffectResult::Unknown(_), Some(_)) => Seen::Unknown,
             (EffectResult::Unknown(_), None) => Seen::Open,
         };
-        Ok(self.observe(&occurrence, attempt, seen, live, result, now))
+        let completion = self.observe(&occurrence, attempt, seen, live, result, now);
+        self.quiesced(completion, now)
     }
 
     /// Records what one attempt showed, then settles its occurrence by
@@ -1714,7 +1765,7 @@ impl Executor {
         occurrence: &OccurrenceId,
         resolution: Resolution,
         now: Duration,
-    ) -> Result<(), ExecError> {
+    ) -> Result<Quiesced<()>, ExecError> {
         self.advance(now);
         if let (Resolution::Retry, Some(a)) = (&resolution, self.parked.get(occurrence))
             && self
@@ -1748,7 +1799,7 @@ impl Executor {
                 self.run_failed(&a.transition, &a.subject, &cause, now);
             }
         }
-        Ok(())
+        self.quiesced((), now)
     }
 
     fn advance(&mut self, now: Duration) {

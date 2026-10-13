@@ -20,6 +20,8 @@ use holon_net::exec::Cause;
 use holon_net::exec::EffectResult;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
+use holon_net::exec::WhyNot;
+use holon_net::exec::answer_transition;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
@@ -92,6 +94,26 @@ struct Sut {
     values: BTreeMap<String, Value>,
 }
 
+/// An offered ask has its Answer enabled, or its answer waits for a running
+/// work: an external call returns only after the auto transitions it caused,
+/// so no answer waits for a `step` (D151.a, #192).
+fn offered_asks_have_their_answer_enabled(d: &Driver, op: &str) {
+    for row in d.exec().asks() {
+        let (work, s) = (&row.transition.0, &row.subject.0);
+        let answer = answer_transition(work);
+        let why = d.exec().why_not(&answer, s);
+        let work_why = d.exec().why_not(work, s);
+        assert!(
+            why.is_none()
+                || matches!(
+                    work_why,
+                    Some(WhyNot::InFlight | WhyNot::RetryPending { .. })
+                ),
+            "ask offered but its Answer is not enabled: '{answer}' for {s} after {op}: {why:?}, work: {work_why:?}"
+        );
+    }
+}
+
 /// Each answer fires its work at most once, with its own value.
 fn work_fired_once_with_its_value(sut: &Sut) {
     let mut seen = BTreeMap::new();
@@ -127,10 +149,11 @@ impl StateMachineTest for Test {
 
     fn apply(mut sut: Sut, _: &(), op: Op) -> Sut {
         let d = &mut sut.d;
+        let op_text = format!("{op:?}");
         match op {
             Op::WriteItem { s, n } => {
-                d.write("Item", s, content(&[("n", Value::Integer(n))]));
-                d.step().expect("the net quiesces");
+                d.write("Item", s, content(&[("n", Value::Integer(n))]))
+                    .expect("the net quiesces");
             }
             Op::Answer {
                 s,
@@ -143,7 +166,6 @@ impl StateMachineTest for Test {
                     sut.values
                         .insert(id.to_string(), value.map_or(Value::Null, text));
                 }
-                d.step().expect("the net quiesces");
             }
             Op::Undo(id) => {
                 let _disclosed_or_refused = d.undo(&OccurrenceId::caller(id));
@@ -164,6 +186,7 @@ impl StateMachineTest for Test {
                 .complete_oldest(|_| EffectResult::Unknown(Cause::definite("reset")))
                 .expect("the net quiesces"),
         }
+        offered_asks_have_their_answer_enabled(&sut.d, &op_text);
         work_fired_once_with_its_value(&sut);
         sut
     }
@@ -179,14 +202,13 @@ prop_state_machine! {
     fn answers_follow_the_model(sequential 1..30 => Test);
 }
 
-/// Main's ruling: an external call returns only after the auto transitions
-/// are quiescent. `exec.rs` does not do this yet: only `step` fires them.
+/// An external call returns only after the auto transitions it caused are
+/// quiescent (#192).
 #[test]
-#[ignore = "known red: external calls do not run the auto transitions (#167 round 2)"]
 fn an_answer_returns_after_quiescence() {
     let mut d = Driver::new(answer_spec());
-    d.write("Item", "x", content(&[("n", Value::Integer(1))]));
-    d.step().expect("the net quiesces");
+    d.write("Item", "x", content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
     let c = answer_call(&d, "x", "a0", false, None);
     d.answer(c).expect("the ask applies");
     assert!(
@@ -195,21 +217,41 @@ fn an_answer_returns_after_quiescence() {
     );
 }
 
+/// An offered ask has its Answer enabled after every call, with no `step`
+/// between the calls: a failed work is released at once.
+#[test]
+fn an_offered_ask_has_its_answer_enabled() {
+    let mut d = Driver::new(answer_spec());
+    d.write("Item", "x", content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
+    let c = answer_call(&d, "x", "a0", false, None);
+    d.answer(c).expect("the ask applies");
+    offered_asks_have_their_answer_enabled(&d, "the answer a0");
+    let attempt = d.pending.front().expect("the work is running").attempt;
+    d.complete(attempt, EffectResult::Failed(Cause::definite("rejected")))
+        .expect("the attempt is in flight");
+    let offered = d.exec().asks();
+    assert_eq!(
+        offered.len(),
+        1,
+        "the ask of x is offered again: {offered:?}"
+    );
+    assert_eq!(d.exec().why_not(&answer_transition("Accept"), "x"), None);
+}
+
 /// A fixed path through the red of each twin: answer, the work fails, the
 /// user answers again, the work runs and is done, the user undoes it.
 #[test]
 fn answer_fail_reanswer_done_undo() {
     let mut d = Driver::new(answer_spec());
-    d.write("Item", "x", content(&[("n", Value::Integer(1))]));
-    d.step().expect("the net quiesces");
+    d.write("Item", "x", content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
     let c = answer_call(&d, "x", "a0", false, Some("Theirs"));
     d.answer(c).expect("the ask applies");
-    d.step().expect("the net quiesces");
     d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
         .expect("the net quiesces");
     let c = answer_call(&d, "x", "a1", false, None);
     d.answer(c).expect("a failed answer was released");
-    d.step().expect("the net quiesces");
     d.complete_oldest(|req| {
         EffectResult::Done(vec![Output::new(
             "Accepted",

@@ -42,6 +42,7 @@ use holon_net::exec::MAX_ROUNDS;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Place;
+use holon_net::exec::Quiesced;
 use holon_net::exec::REASON_FIELD;
 use holon_net::exec::Receiver;
 use holon_net::exec::Resolution;
@@ -334,8 +335,16 @@ impl Model {
         }
     }
 
-    pub fn write(&mut self, place: &str, subject: &str, content: Content) {
+    pub fn write(
+        &mut self,
+        place: &str,
+        subject: &str,
+        content: Content,
+        now: Duration,
+    ) -> Result<Quiesced<()>, ExecError> {
+        self.advance(now);
         self.put(place, subject, content);
+        self.quiesced((), now)
     }
 
     // --- observable state ---
@@ -459,7 +468,11 @@ impl Model {
         Ok(None)
     }
 
-    pub fn answer(&mut self, call: AnswerCall, now: Duration) -> Result<AnswerId, UftError> {
+    pub fn answer(
+        &mut self,
+        call: AnswerCall,
+        now: Duration,
+    ) -> Result<Quiesced<AnswerId>, UftError> {
         let work = call.transition.0.clone();
         if !self.spec.asks.contains_key(&work) {
             return Err(UftError::UnknownTransition(call.transition));
@@ -480,7 +493,10 @@ impl Model {
             value,
             now,
         ) {
-            Ok(_) => Ok(call.answer),
+            Ok(fired) => Ok(Quiesced {
+                value: call.answer,
+                requests: fired.requests,
+            }),
             Err(
                 FireError::DuplicateOccurrence(_)
                 | FireError::NotEnabled {
@@ -585,7 +601,11 @@ impl Model {
             .collect()
     }
 
-    pub fn undo(&mut self, answer: &OccurrenceId, now: Duration) -> Result<Undone, UndoError> {
+    pub fn undo(
+        &mut self,
+        answer: &OccurrenceId,
+        now: Duration,
+    ) -> Result<Quiesced<Undone>, UndoError> {
         self.advance(now);
         if !self.occs.contains_key(answer) {
             return Err(UndoError::UnknownOccurrence(answer.clone()));
@@ -643,9 +663,13 @@ impl Model {
             });
         }
         self.undone.insert(id.to_string());
-        Ok(Undone {
-            withdrawn,
-            reversed,
+        let requests = self.quiesce(now).map_err(UndoError::NoQuiescence)?;
+        Ok(Quiesced {
+            value: Undone {
+                withdrawn,
+                reversed,
+            },
+            requests,
         })
     }
 
@@ -736,6 +760,16 @@ impl Model {
     pub fn step(&mut self, now: Duration) -> Result<Vec<EffectRequest>, ExecError> {
         self.advance(now);
         self.timers(now);
+        self.quiesce(now).map_err(ExecError::NoQuiescence)
+    }
+
+    fn quiesced<T>(&mut self, value: T, now: Duration) -> Result<Quiesced<T>, ExecError> {
+        let requests = self.quiesce(now).map_err(ExecError::NoQuiescence)?;
+        Ok(Quiesced { value, requests })
+    }
+
+    /// The auto transitions to quiescence, no timer.
+    fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
         for _ in 0..MAX_ROUNDS {
             let mut started = Vec::new();
             for t in self.spec.transitions.clone() {
@@ -776,7 +810,7 @@ impl Model {
                 self.run_body(id, now);
             }
         }
-        Err(ExecError::NoQuiescence(MAX_ROUNDS))
+        Err(MAX_ROUNDS)
     }
 
     pub fn fire(
@@ -786,7 +820,7 @@ impl Model {
         occurrence: OccurrenceId,
         value: Content,
         now: Duration,
-    ) -> Result<Accepted, FireError> {
+    ) -> Result<Quiesced<Accepted>, FireError> {
         self.advance(now);
         let t = self.transition(transition);
         if t.trigger != Trigger::Manual {
@@ -819,7 +853,11 @@ impl Model {
         }
         let id = self.start(&t, subject, occurrence.clone(), trace, input, now);
         self.run_body(id, now);
-        Ok(Accepted(occurrence))
+        let requests = self.quiesce(now).map_err(FireError::NoQuiescence)?;
+        Ok(Quiesced {
+            value: Accepted(occurrence),
+            requests,
+        })
     }
 
     pub fn complete(
@@ -827,7 +865,7 @@ impl Model {
         attempt: AttemptId,
         result: EffectResult,
         now: Duration,
-    ) -> Result<Completion, ExecError> {
+    ) -> Result<Quiesced<Completion>, ExecError> {
         self.advance(now);
         let live = self.in_flight.remove(&attempt);
         let occ = match &live {
@@ -845,7 +883,8 @@ impl Model {
             (EffectResult::Unknown(_), Some(_)) => Answer::Unknown,
             (EffectResult::Unknown(_), None) => Answer::Open,
         };
-        Ok(self.observe(&occ, attempt, answer, live, result, now))
+        let completion = self.observe(&occ, attempt, answer, live, result, now);
+        self.quiesced(completion, now)
     }
 
     pub fn resolve(
@@ -853,7 +892,7 @@ impl Model {
         occurrence: &OccurrenceId,
         resolution: Resolution,
         now: Duration,
-    ) -> Result<(), ExecError> {
+    ) -> Result<Quiesced<()>, ExecError> {
         self.advance(now);
         if self.occs.get(occurrence).is_none_or(|o| o.parked.is_none()) {
             return Err(ExecError::NotParked(occurrence.clone()));
@@ -881,7 +920,7 @@ impl Model {
                 self.run_failed(occurrence, &cause, now);
             }
         }
-        Ok(())
+        self.quiesced((), now)
     }
 
     // --- firing ---
