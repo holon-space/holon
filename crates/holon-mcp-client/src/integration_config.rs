@@ -307,6 +307,8 @@ pub struct IntegrationFileConfig {
     /// [`crate::mcp_sidecar::McpSidecar::views`]).
     #[serde(default)]
     pub views: Vec<crate::mcp_sidecar::ViewConfig>,
+    #[serde(default)]
+    pub transitions: std::collections::BTreeMap<String, crate::transition_sidecar::TransitionSpec>,
 }
 
 /// Build the direct-HTTP transport from a manual plus its `holon:` section.
@@ -578,6 +580,7 @@ impl IntegrationFileConfig {
             once_only: self.once_only,
             tools: self.tools.clone(),
             views: self.views.clone(),
+            transitions: self.transitions.clone(),
         };
         serde_yaml::to_string(&sidecar).expect("McpSidecar must be serializable")
     }

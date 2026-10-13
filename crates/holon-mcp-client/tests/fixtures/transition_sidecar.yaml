@@ -1,0 +1,30 @@
+# A sidecar that declares user-facing transitions (#167). Test fixture only;
+# no bundled sidecar declares a transition yet.
+entities:
+  unfiled: {}
+  project: {}
+  inbox: {}
+tools:
+  update_task:
+    effect: idempotent
+    affected_fields: [project_id]
+  delete_task:
+    effect: idempotent
+    undo: { reversible: false }
+  find_tasks:
+    effect: read
+transitions:
+  assign_project:
+    manual: true
+    take: [unfiled]
+    input: { type_hint: "entity_id:project" }
+    effect: { tool: update_task, map: { project_id: input } }
+  drop_task:
+    manual: true
+    irreversible: true
+    take: [inbox]
+    read: [project]
+    effect: { tool: delete_task }
+    timers:
+      - { kind: retry, after: 30s, max_attempts: 3 }
+      - { kind: delay, after: 1h }

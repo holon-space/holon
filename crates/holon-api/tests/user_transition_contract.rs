@@ -97,10 +97,6 @@ fn stubs_name_their_lane() {
             what: "UserTransitions::asks",
         }))
     );
-    assert_eq!(
-        transitions_from_sidecar("").unwrap_err().lane,
-        Lane::YamlLoader
-    );
 }
 
 fn name() -> impl Strategy<Value = String> {

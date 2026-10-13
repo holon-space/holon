@@ -414,6 +414,35 @@ tools:
       reversible: false
 ```
 
+##### `transitions:` (user-facing transitions, #167)
+
+A sidecar may declare transitions. The loader (`transition_sidecar.rs`) reads
+each into the same `TransitionDescriptor` the `#[transition]` macro emits; the
+lowering generates the asking plumbing, so a sidecar never names `Asks`,
+`Answer` or `ExpireAnswer`. Every mistake is a load error that names the
+transition.
+
+```yaml
+transitions:
+  assign_project:
+    manual: true                 # waits for an answer (an ask)
+    take: [unfiled]              # also read: [...], inhibit: [...]
+    input: { type_hint: "entity_id:project" }
+    effect: { tool: update_task, map: { project_id: input } }
+    # irreversible: true         # required when the effect tool is `undo: { reversible: false }`
+    # persist: true              # parsed; the lowering refuses it in increment 1
+    # timers: [{ kind: retry, after: 30s, max_attempts: 3 }]   # kinds: retry, run, abandon, delay
+```
+
+- Places (`take`, `read`, `inhibit`, `input: { place: … }`) are keys of this
+  sidecar's `entities:`.
+- `input` is one of `{ type_hint: bool | string | number | entity_id:<entity> }`,
+  `{ enum: { name, variants } }`, `{ newtype: <Type> }` or `{ place: <place> }`.
+  It needs `manual: true`.
+- `effect.tool` is a key of `tools:` whose `effect:` writes. In `map`, only the
+  value `input` (the answer value) can be bound for now.
+- `guard` (waits for #166) and `preview` are load errors for now.
+
 The top-level file is `IntegrationFileConfig`; the `entities` and `tools` maps
 are deserialized into `McpSidecar` (in `holon-mcp-client`).  Tools without sidecar
 entries still appear as operations, but with no gesture bindings (affected_fields,

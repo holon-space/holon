@@ -261,6 +261,7 @@ impl PbtMcpIntegration {
             once_only: Default::default(),
             tools: HashMap::new(),
             views: vec![],
+            transitions: Default::default(),
         };
 
         // Create cache table in Turso (same pattern as finish_integration)

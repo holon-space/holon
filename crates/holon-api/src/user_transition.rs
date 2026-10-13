@@ -301,7 +301,6 @@ pub struct Offered {
 pub enum Lane {
     Lowering,
     Executor,
-    YamlLoader,
     Integration,
 }
 
@@ -310,7 +309,6 @@ impl fmt::Display for Lane {
         f.write_str(match self {
             Lane::Lowering => "L (lowering)",
             Lane::Executor => "X (executor)",
-            Lane::YamlLoader => "Y (YAML loader)",
             Lane::Integration => "I (integration)",
         })
     }
@@ -392,14 +390,6 @@ fn unwired(what: &'static str) -> NotImplemented {
         lane: Lane::Integration,
         what,
     }
-}
-
-/// Reads YAML sidecar transitions into the HL-IR. Lane Y fills it.
-pub fn transitions_from_sidecar(_: &str) -> Result<Vec<TransitionDescriptor>, NotImplemented> {
-    Err(NotImplemented {
-        lane: Lane::YamlLoader,
-        what: "transitions_from_sidecar",
-    })
 }
 
 /// A form or MCP input the boundary refused. Names the type and the input.

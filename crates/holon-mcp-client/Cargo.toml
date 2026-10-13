@@ -16,6 +16,11 @@ ignored = ["workspace-hack"]
 name = "holon-connection"
 path = "src/bin/holon_connection.rs"
 
+[features]
+# Test-only naive twin: an unknown `type_hint` in a sidecar transition loads as
+# `String` instead of failing the load.
+naive-twins = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true

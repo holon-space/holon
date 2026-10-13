@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -50,6 +51,10 @@ pub struct McpSidecar {
     /// A view that fails to create is a hard, loud config error at connect.
     #[serde(default)]
     pub views: Vec<ViewConfig>,
+    /// User-facing transitions (#167), loaded into the HL-IR by
+    /// [`McpSidecar::transition_descriptors`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub transitions: BTreeMap<String, crate::transition_sidecar::TransitionSpec>,
 }
 
 /// A sidecar-declared derived view: `CREATE MATERIALIZED VIEW {prefix}{name} AS
@@ -863,7 +868,15 @@ impl McpSidecar {
         sidecar.validate_write_policy()?;
         sidecar.parse_entity_schemas()?;
         sidecar.validate_view_clocks()?;
+        sidecar.transition_descriptors()?;
         Ok(sidecar)
+    }
+
+    /// The `transitions:` section as HL-IR, in name order.
+    pub fn transition_descriptors(
+        &self,
+    ) -> anyhow::Result<Vec<holon_api::user_transition::TransitionDescriptor>> {
+        crate::transition_sidecar::load_transitions(self)
     }
 
     /// The clock grains the views read, each once.

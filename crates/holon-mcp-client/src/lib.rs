@@ -43,6 +43,7 @@ pub mod roster;
 pub mod secret_ref;
 mod secure_client;
 pub mod sync_freshness;
+pub mod transition_sidecar;
 pub mod utcp_manual;
 pub mod write_authorization;
 
