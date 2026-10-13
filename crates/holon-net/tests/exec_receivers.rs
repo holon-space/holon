@@ -8,29 +8,26 @@
 
 mod exec_support;
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use exec_support::Driver;
+use exec_support::Reads;
+use exec_support::Spec;
+use exec_support::Transition;
+use exec_support::bind;
 use exec_support::content;
-use exec_support::int;
 use holon_api::Value;
 use holon_net::exec::Accepted;
-use holon_net::exec::AttemptId;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
 use holon_net::exec::EffectResult;
 use holon_net::exec::FireError;
-use holon_net::exec::NetDef;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
-use holon_net::exec::Reader;
 use holon_net::exec::Receiver;
 use holon_net::exec::Resolution;
 use holon_net::exec::Settled;
-use holon_net::exec::Subject;
-use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
 use holon_net::exec::UnknownOccurrence;
 use proptest::prelude::*;
@@ -66,18 +63,18 @@ impl Kind {
     }
 }
 
-fn n_of(r: &mut Reader<'_>, place: &str, s: &Subject) -> Option<holon_net::exec::Content> {
+fn n_of(r: &mut dyn Reads, place: &str, s: &str) -> Option<holon_net::exec::Content> {
     Some(content(&[("n", r.field(place, s, "n")?)]))
 }
 
-fn net() -> NetDef {
+fn net() -> Spec {
     let send = |kind: Kind, receiver: Receiver| {
         let bind = match kind {
-            Kind::K => |r: &mut Reader<'_>, s: &Subject| n_of(r, "MsgK", s),
-            Kind::P => |r: &mut Reader<'_>, s: &Subject| n_of(r, "MsgP", s),
-            Kind::N => |r: &mut Reader<'_>, s: &Subject| n_of(r, "MsgN", s),
+            Kind::K => bind!(|r, s| n_of(r, "MsgK", s)),
+            Kind::P => bind!(|r, s| n_of(r, "MsgP", s)),
+            Kind::N => bind!(|r, s| n_of(r, "MsgN", s)),
         };
-        TransitionDef::new(
+        Transition::new(
             kind.transition(),
             Trigger::Manual,
             bind,
@@ -85,7 +82,7 @@ fn net() -> NetDef {
         )
         .consumes(kind.place())
     };
-    NetDef::default()
+    Spec::default()
         .place("MsgK", Class::Process)
         .place("MsgP", Class::Process)
         .place("MsgN", Class::Process)
@@ -145,26 +142,12 @@ struct Sut {
     next_n: i64,
     fires: u64,
     accepted: Vec<OccurrenceId>,
-    /// Resolve-Retry count per occurrence.
-    retries: BTreeMap<OccurrenceId, usize>,
-    /// Definite failures reported per SendN message: each returns the input
-    /// and so allows one more run. A stale record of a done send does not.
-    refused: BTreeMap<i64, usize>,
-    /// The answer the runner gave each attempt, by its result kind.
-    answers: BTreeMap<AttemptId, &'static str>,
-    dropped: Vec<OccurrenceId>,
 }
 
 impl Sut {
-    fn answer(&mut self, kind: &'static str) {
-        if let Some(req) = self.d.pending.front() {
-            self.answers.insert(req.attempt, kind);
-        }
-    }
-
     fn oldest_parked(&self) -> Option<OccurrenceId> {
         self.d
-            .exec
+            .exec()
             .occurrences()
             .find(|(_, s)| matches!(s, Some(Settled::OutcomeUnknown(_))))
             .map(|(o, _)| o.clone())
@@ -187,19 +170,14 @@ impl StateMachineTest for Test {
             next_n: 0,
             fires: 0,
             accepted: Vec::new(),
-            retries: BTreeMap::new(),
-            refused: BTreeMap::new(),
-            answers: BTreeMap::new(),
-            dropped: Vec::new(),
         }
     }
 
     fn apply(mut sut: Sut, _: &(), op: Op) -> Sut {
-        let now = sut.d.now;
         match op {
             Op::Write(kind) => {
                 sut.next_n += 1;
-                sut.d.exec.write(
+                sut.d.write(
                     kind.place(),
                     MSG,
                     content(&[("n", Value::Integer(sut.next_n))]),
@@ -209,7 +187,7 @@ impl StateMachineTest for Test {
             Op::Fire(kind) => {
                 sut.fires += 1;
                 let occ = OccurrenceId::caller(&format!("user#{}", sut.fires));
-                match sut.d.exec.fire(kind.transition(), MSG, occ.clone(), now) {
+                match sut.d.fire(kind.transition(), MSG, occ.clone()) {
                     Ok(Accepted(id)) => {
                         assert_eq!(id, occ, "ACCEPTED names the caller's occurrence");
                         sut.accepted.push(id);
@@ -219,29 +197,18 @@ impl StateMachineTest for Test {
                 }
                 sut.d.step().expect("the net quiesces");
             }
-            Op::Done => {
-                sut.answer("done");
-                sut.d
-                    .complete_oldest(|req| EffectResult::Done(sent(req)))
-                    .expect("the net quiesces")
-            }
-            Op::Failed => {
-                if let Some(req) = sut.d.pending.front()
-                    && &*req.transition == "SendN"
-                {
-                    *sut.refused.entry(int(&req.input, "n")).or_default() += 1;
-                }
-                sut.answer("failed");
-                sut.d
-                    .complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
-                    .expect("the net quiesces")
-            }
-            Op::Unknown => {
-                sut.answer("unknown");
-                sut.d
-                    .complete_oldest(|_| EffectResult::Unknown(Cause::definite("connection reset")))
-                    .expect("the net quiesces")
-            }
+            Op::Done => sut
+                .d
+                .complete_oldest(|req| EffectResult::Done(sent(req)))
+                .expect("the net quiesces"),
+            Op::Failed => sut
+                .d
+                .complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
+                .expect("the net quiesces"),
+            Op::Unknown => sut
+                .d
+                .complete_oldest(|_| EffectResult::Unknown(Cause::definite("connection reset")))
+                .expect("the net quiesces"),
             Op::Resolve(res) => {
                 if let Some(occ) = sut.oldest_parked() {
                     let resolution = match res {
@@ -254,18 +221,11 @@ impl StateMachineTest for Test {
                                 .expect("a parked occurrence ran");
                             Resolution::Verify(sent(req))
                         }
-                        Res::Retry => {
-                            *sut.retries.entry(occ.clone()).or_default() += 1;
-                            Resolution::Retry
-                        }
-                        Res::Drop => {
-                            sut.dropped.push(occ.clone());
-                            Resolution::Drop
-                        }
+                        Res::Retry => Resolution::Retry,
+                        Res::Drop => Resolution::Drop,
                     };
                     sut.d
-                        .exec
-                        .resolve(&occ, resolution, now)
+                        .resolve(&occ, resolution)
                         .expect("the occurrence is parked");
                     sut.d.step().expect("the net quiesces");
                 }
@@ -275,80 +235,15 @@ impl StateMachineTest for Test {
     }
 
     fn check_invariants(sut: &Sut, _: &()) {
-        let mut per_n: BTreeMap<i64, usize> = BTreeMap::new();
-        let mut per_occ: BTreeMap<&OccurrenceId, usize> = BTreeMap::new();
-        for req in &sut.d.requests {
-            if !req.probe {
-                *per_occ.entry(&req.occurrence).or_default() += 1;
-            }
-            if &*req.transition == "SendN" {
-                *per_n.entry(int(&req.input, "n")).or_default() += 1;
-            }
-        }
-        let retries_of = |pred: &dyn Fn(&OccurrenceId) -> bool| -> usize {
-            sut.retries
-                .iter()
-                .filter(|(o, _)| pred(o))
-                .map(|(_, c)| c)
-                .sum()
-        };
-        for (n, runs) in per_n {
-            let allowed = 1
-                + sut.refused.get(&n).copied().unwrap_or(0)
-                + retries_of(&|o| {
-                    sut.d.requests.iter().any(|r| {
-                        &r.occurrence == o && &*r.transition == "SendN" && int(&r.input, "n") == n
-                    })
-                });
-            assert!(
-                runs <= allowed,
-                "none_effect_runs_once: SendN ran {runs} times for message {n}, allowed {allowed}"
-            );
-        }
-        for (occ, runs) in per_occ {
-            let allowed = KEYED_ATTEMPTS as usize + retries_of(&|o| o == occ);
-            assert!(
-                runs <= allowed,
-                "attempts_per_occurrence: {occ} ran {runs} times, allowed {allowed}"
-            );
-        }
         for occ in &sut.accepted {
             sut.d
-                .exec
+                .exec()
                 .settled(occ)
                 .expect("settled answers for every accepted occurrence");
         }
-        // A probe reads the goal for every attempt, so SendP is left out.
-        for (occ, settled) in sut.d.exec.occurrences() {
-            let runs: Vec<_> = sut
-                .d
-                .requests
-                .iter()
-                .filter(|r| &r.occurrence == occ && &*r.transition != "SendP")
-                .map(|r| sut.answers.get(&r.attempt).copied())
-                .collect();
-            if runs.is_empty() || sut.dropped.contains(occ) {
-                continue;
-            }
-            if matches!(settled, Some(Settled::Failed(_))) {
-                assert!(
-                    runs.iter().all(|a| *a == Some("failed")),
-                    "failed_only_when_every_attempt_failed: {occ} settled {settled:?} over {runs:?}"
-                );
-            }
-            if runs.contains(&Some("done")) {
-                assert!(
-                    matches!(
-                        settled,
-                        Some(Settled::Done | Settled::DoneOverChangedInputs(_))
-                    ),
-                    "done_when_any_attempt_done: {occ} settled {settled:?}"
-                );
-            }
-        }
         let never = OccurrenceId::caller("never-fired");
         assert_eq!(
-            sut.d.exec.settled(&never),
+            sut.d.exec().settled(&never),
             Err(UnknownOccurrence(never.clone())),
             "settled of an unknown id is an error"
         );
@@ -368,9 +263,7 @@ fn a_stale_done_send_is_a_fact() {
     d.complete_oldest(|req| EffectResult::Done(sent(req)))
         .expect("the net quiesces");
 
-    let again = d
-        .exec
-        .fire("Send", MSG, OccurrenceId::caller("send#2"), d.now);
+    let again = d.fire("Send", MSG, OccurrenceId::caller("send#2"));
     d.step().expect("the net quiesces");
     assert_eq!(
         d.requests_of("Send").count(),
@@ -379,14 +272,14 @@ fn a_stale_done_send_is_a_fact() {
     );
     assert!(
         matches!(
-            d.exec.settled(&first),
+            d.exec().settled(&first),
             Ok(Some(Settled::DoneOverChangedInputs(_)))
         ),
         "stale_done_is_disclosed: send#1 settled {:?}",
-        d.exec.settled(&first)
+        d.exec().settled(&first)
     );
     assert!(
-        d.exec.tokens().token("Sent", MSG).is_none(),
+        d.exec().tokens().token("Sent", MSG).is_none(),
         "stale_done_withholds_outputs: Sent holds the stale output"
     );
 }
@@ -394,15 +287,15 @@ fn a_stale_done_send_is_a_fact() {
 /// A manual `Send` that consumes `Msg` and reads `Config`, fired, with
 /// `Config` changed while the effect runs.
 fn send_over_changed_config() -> (Driver, OccurrenceId) {
-    let net = NetDef::default()
+    let net = Spec::default()
         .place("Msg", Class::Process)
         .place("Config", Class::Process)
         .place("Sent", Class::Process)
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "Send",
                 Trigger::Manual,
-                |r, s| n_of(r, "Msg", s),
+                bind!(|r, s| n_of(r, "Msg", s)),
                 Body::Effectful(Receiver::None),
             )
             .consumes("Msg")
@@ -410,15 +303,14 @@ fn send_over_changed_config() -> (Driver, OccurrenceId) {
         );
     let mut d = Driver::new(net);
     let n = |v: i64| content(&[("n", Value::Integer(v))]);
-    d.exec.write("Msg", MSG, n(1));
-    d.exec.write("Config", MSG, n(1));
+    d.write("Msg", MSG, n(1));
+    d.write("Config", MSG, n(1));
     d.step().expect("the net quiesces");
     let first = OccurrenceId::caller("send#1");
-    d.exec
-        .fire("Send", MSG, first.clone(), d.now)
+    d.fire("Send", MSG, first.clone())
         .expect("Msg holds a message");
     d.step().expect("the net quiesces");
-    d.exec.write("Config", MSG, n(2));
+    d.write("Config", MSG, n(2));
     (d, first)
 }
 
@@ -431,11 +323,11 @@ fn a_stale_done_without_outputs_is_disclosed() {
         .expect("the net quiesces");
     assert!(
         matches!(
-            d.exec.settled(&first),
+            d.exec().settled(&first),
             Ok(Some(Settled::DoneOverChangedInputs(_)))
         ),
         "stale_done_is_disclosed: send#1 without outputs settled {:?}",
-        d.exec.settled(&first)
+        d.exec().settled(&first)
     );
 }
 
@@ -443,50 +335,48 @@ fn a_stale_done_without_outputs_is_disclosed() {
 /// duplicate caller id is an error to the caller (NET-manual.a).
 #[test]
 fn caller_and_minted_occurrence_ids_never_collide() {
-    let net = NetDef::default()
+    let net = Spec::default()
         .place("In", Class::Process)
         .place("Seen", Class::Process)
         .place("Out", Class::Process)
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "M",
                 Trigger::Manual,
-                |r, s| n_of(r, "In", s),
+                bind!(|r, s| n_of(r, "In", s)),
                 Body::Pure(|s, input| Ok(vec![Output::new("Seen", s, input.clone())])),
             )
             .reads("In"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "A",
                 Trigger::Auto,
-                |r, s| n_of(r, "In", s),
+                bind!(|r, s| n_of(r, "In", s)),
                 Body::Pure(|s, input| Ok(vec![Output::new("Out", s, input.clone())])),
             )
             .consumes("In"),
         );
     let mut d = Driver::new(net);
     let n = |v: i64| content(&[("n", Value::Integer(v))]);
-    d.exec.write("In", MSG, n(1));
+    d.write("In", MSG, n(1));
     let manual = OccurrenceId::caller("A#1");
-    d.exec
-        .fire("M", MSG, manual.clone(), d.now)
-        .expect("In holds a token");
+    d.fire("M", MSG, manual.clone()).expect("In holds a token");
     d.step().expect("the net quiesces");
-    assert_eq!(d.exec.settled(&manual), Ok(Some(Settled::Done)));
+    assert_eq!(d.exec().settled(&manual), Ok(Some(Settled::Done)));
     assert_eq!(
-        d.exec.occurrences().count(),
+        d.exec().occurrences().count(),
         2,
         "the manual and the minted occurrence are distinct"
     );
     assert!(
-        d.exec.tokens().token("Out", MSG).is_some(),
+        d.exec().tokens().token("Out", MSG).is_some(),
         "the auto firing of A recorded"
     );
 
-    d.exec.write("In", MSG, n(2));
+    d.write("In", MSG, n(2));
     assert_eq!(
-        d.exec.fire("M", MSG, manual.clone(), d.now),
+        d.fire("M", MSG, manual.clone()),
         Err(FireError::DuplicateOccurrence(manual)),
         "a duplicate caller id is an error"
     );

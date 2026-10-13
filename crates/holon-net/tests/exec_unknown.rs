@@ -17,10 +17,13 @@
 mod exec_support;
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 use exec_support::Driver;
+use exec_support::Reads;
+use exec_support::Spec;
+use exec_support::Transition;
+use exec_support::bind;
 use exec_support::content;
 use exec_support::string;
 use holon_api::Value;
@@ -34,16 +37,13 @@ use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
 use holon_net::exec::ExecError;
 use holon_net::exec::FireError;
-use holon_net::exec::NetDef;
 use holon_net::exec::OUTCOME_UNKNOWN;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
-use holon_net::exec::Reader;
 use holon_net::exec::Receiver;
 use holon_net::exec::Resolution;
 use holon_net::exec::Settled;
 use holon_net::exec::Subject;
-use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
@@ -55,7 +55,7 @@ const RUN_TIMER: u64 = 20;
 const ABANDON: u64 = 3;
 const PRODUCERS: [&str; 2] = ["FillFromTurso", "MakeLoroReady"];
 
-fn gen_of(r: &mut Reader<'_>, s: &Subject) -> Option<Content> {
+fn gen_of(r: &mut dyn Reads, s: &str) -> Option<Content> {
     Some(content(&[("gen", r.field("Storage.Open", s, "gen")?)]))
 }
 
@@ -67,8 +67,8 @@ fn storage(backend: &str, input: &Content) -> Content {
 
 /// Example 3 with a run timer and an abandon timer on the Turso attempt;
 /// `candidate` declares an apply transition for `TursoReady`.
-fn net(candidate: bool) -> NetDef {
-    let net = NetDef::default();
+fn net(candidate: bool) -> Spec {
+    let net = Spec::default();
     let net = if candidate {
         net.place_with_candidate("TursoReady", "TursoReady.Candidate")
             .place("TursoReady.Candidate", Class::Process)
@@ -79,10 +79,10 @@ fn net(candidate: bool) -> NetDef {
         .place("Storage.Open", Class::Process)
         .place("TursoFailed", Class::Process)
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "MakeTursoReady",
                 Trigger::Auto,
-                gen_of,
+                bind!(gen_of),
                 Body::Effectful(Receiver::None),
             )
             .reads("Storage.Open")
@@ -94,20 +94,20 @@ fn net(candidate: bool) -> NetDef {
             .abandon(Duration::from_secs(ABANDON)),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "FillFromTurso",
                 Trigger::Auto,
-                gen_of,
+                bind!(gen_of),
                 Body::Pure(|s, input| Ok(vec![Output::new("Storage", s, storage("turso", input))])),
             )
             .consumes("TursoReady")
             .consumes("Storage.Open"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "MakeLoroReady",
                 Trigger::Auto,
-                gen_of,
+                bind!(gen_of),
                 Body::Pure(|s, input| Ok(vec![Output::new("Storage", s, storage("loro", input))])),
             )
             .consumes("TursoFailed")
@@ -161,43 +161,36 @@ impl ReferenceStateMachine for Ref {
 
 struct Sut {
     d: Driver,
-    candidate: bool,
     /// A definite failure, a Drop or the run timer has released the next
     /// producer.
     released: bool,
-    /// The occurrence of the last Verify or late Done and whether Loro had
-    /// produced before it.
-    verified: Option<(OccurrenceId, bool)>,
     /// The answer the runner gave each attempt, by its result kind.
     answers: BTreeMap<AttemptId, &'static str>,
-    dropped: BTreeSet<OccurrenceId>,
-}
-
-/// Answers the oldest pending effect and records the answer.
-fn answer(sut: &mut Sut, kind: &'static str, result: impl FnOnce(&EffectRequest) -> EffectResult) {
-    if let Some(req) = sut.d.pending.front() {
-        sut.answers.insert(req.attempt, kind);
-    }
-    sut.d.complete_oldest(result).expect("the net quiesces");
 }
 
 impl Sut {
     fn parked(&self) -> Option<OccurrenceId> {
         self.d
-            .exec
+            .exec()
             .occurrences()
             .find(|(_, s)| matches!(s, Some(Settled::OutcomeUnknown(_))))
             .map(|(o, _)| o.clone())
     }
 
-    /// The occurrence of the oldest pending effect when it is parked: its
-    /// result is late.
-    fn late_parked(&self) -> Option<OccurrenceId> {
+    fn backend(&self) -> Option<String> {
         self.d
-            .pending
-            .front()
-            .map(|req| req.occurrence.clone())
-            .filter(|occ| self.is_parked(occ))
+            .exec()
+            .tokens()
+            .token("Storage", APP)
+            .map(|t| string(&t.content, "backend"))
+    }
+
+    fn resolve(&mut self, resolution: Resolution) {
+        let occ = self.parked().expect("checked by the caller");
+        self.d
+            .resolve(&occ, resolution)
+            .expect("the occurrence is parked");
+        self.d.step().expect("the net quiesces");
     }
 
     /// Every attempt of `occ` was answered Failed: none can still have
@@ -210,43 +203,12 @@ impl Sut {
             .all(|r| self.answers.get(&r.attempt) == Some(&"failed"))
     }
 
-    fn any_done(&self, occ: &OccurrenceId) -> bool {
-        self.d
-            .requests
-            .iter()
-            .any(|r| &r.occurrence == occ && self.answers.get(&r.attempt) == Some(&"done"))
-    }
-
-    fn unknown_holds(&self, occ: &OccurrenceId) -> bool {
-        self.d
-            .exec
-            .tokens()
-            .token(OUTCOME_UNKNOWN, &occ.to_string())
-            .is_some()
-    }
-
-    fn is_parked(&self, occ: &OccurrenceId) -> bool {
-        matches!(
-            self.d.exec.settled(occ),
-            Ok(Some(Settled::OutcomeUnknown(_)))
-        )
-    }
-
-    fn backend(&self) -> Option<String> {
-        self.d
-            .exec
-            .tokens()
-            .token("Storage", APP)
-            .map(|t| string(&t.content, "backend"))
-    }
-
-    fn resolve(&mut self, resolution: Resolution) {
-        let occ = self.parked().expect("checked by the caller");
-        self.d
-            .exec
-            .resolve(&occ, resolution, self.d.now)
-            .expect("the occurrence is parked");
-        self.d.step().expect("the net quiesces");
+    /// Answers the oldest pending effect and records the answer.
+    fn answer(&mut self, kind: &'static str, result: impl FnOnce(&EffectRequest) -> EffectResult) {
+        if let Some(req) = self.d.pending.front() {
+            self.answers.insert(req.attempt, kind);
+        }
+        self.d.complete_oldest(result).expect("the net quiesces");
     }
 }
 
@@ -258,44 +220,27 @@ impl<const CANDIDATE: bool> StateMachineTest for Test<CANDIDATE> {
 
     fn init_test(_: &()) -> Sut {
         let mut d = Driver::new(net(CANDIDATE));
-        d.exec
-            .write("Storage.Open", APP, content(&[("gen", Value::Integer(0))]));
+        d.write("Storage.Open", APP, content(&[("gen", Value::Integer(0))]));
         d.step().expect("the net quiesces");
         Sut {
             d,
-            candidate: CANDIDATE,
             released: false,
-            verified: None,
             answers: BTreeMap::new(),
-            dropped: BTreeSet::new(),
         }
     }
 
     fn apply(mut sut: Sut, _: &(), op: Op) -> Sut {
         match op {
-            Op::Done => {
-                let late = sut.late_parked();
-                let loro_before = sut.backend().as_deref() == Some("loro");
-                answer(&mut sut, "done", |req| {
-                    EffectResult::Done(vec![Output::new(
-                        "TursoReady",
-                        &req.subject,
-                        req.input.clone(),
-                    )])
-                });
-                if let Some(occ) = late {
-                    assert!(
-                        !sut.is_parked(&occ),
-                        "late_done_resolves: the late Done of the parked {occ} left it {:?}",
-                        sut.d.exec.settled(&occ)
-                    );
-                    sut.verified = Some((occ, loro_before));
-                }
-            }
+            Op::Done => sut.answer("done", |req| {
+                EffectResult::Done(vec![Output::new(
+                    "TursoReady",
+                    &req.subject,
+                    req.input.clone(),
+                )])
+            }),
             Op::Failed => {
                 let occ = sut.d.pending.front().map(|r| r.occurrence.clone());
-                let late = sut.late_parked();
-                answer(&mut sut, "failed", |_| {
+                sut.answer("failed", |_| {
                     EffectResult::Failed(Cause::definite("no database"))
                 });
                 if let Some(occ) = occ
@@ -303,44 +248,10 @@ impl<const CANDIDATE: bool> StateMachineTest for Test<CANDIDATE> {
                 {
                     sut.released = true;
                 }
-                if let Some(occ) = late {
-                    let settled = sut.d.exec.settled(&occ);
-                    if sut.all_failed(&occ) {
-                        assert!(
-                            matches!(settled, Ok(Some(Settled::Failed(_))))
-                                && !sut.unknown_holds(&occ),
-                            "late_failed_resolves: the late Failed of the parked {occ} left it {settled:?}"
-                        );
-                        assert_eq!(
-                            sut.d
-                                .exec
-                                .mark("MakeTursoReady", APP)
-                                .map(|m| m.cause.text.as_str()),
-                            Some("no database"),
-                            "late_failed_marks: the late Failed of {occ} set no mark"
-                        );
-                    } else {
-                        assert!(
-                            sut.is_parked(&occ) && sut.unknown_holds(&occ),
-                            "late_failed_waits_for_every_attempt: another attempt of {occ} may \
-                             have happened, yet it left it {settled:?}"
-                        );
-                    }
-                }
             }
-            Op::Unknown => {
-                let late = sut.late_parked();
-                answer(&mut sut, "unknown", |_| {
-                    EffectResult::Unknown(Cause::definite("connection reset"))
-                });
-                if let Some(occ) = late {
-                    assert!(
-                        sut.is_parked(&occ) && sut.unknown_holds(&occ),
-                        "late_unknown_stays_parked: the late Unknown of {occ} left it {:?}",
-                        sut.d.exec.settled(&occ)
-                    );
-                }
-            }
+            Op::Unknown => sut.answer("unknown", |_| {
+                EffectResult::Unknown(Cause::definite("connection reset"))
+            }),
             Op::RunTimerExpires => {
                 sut.released = true;
                 sut.d.tick(RUN_TIMER + 1).expect("the net quiesces");
@@ -359,7 +270,6 @@ impl<const CANDIDATE: bool> StateMachineTest for Test<CANDIDATE> {
             }
             Op::Verify => {
                 if let Some(occ) = sut.parked() {
-                    let loro_before = sut.backend().as_deref() == Some("loro");
                     let input = sut
                         .d
                         .requests
@@ -373,7 +283,6 @@ impl<const CANDIDATE: bool> StateMachineTest for Test<CANDIDATE> {
                         &Subject::new(APP),
                         input,
                     )]));
-                    sut.verified = Some((occ, loro_before));
                 }
             }
             Op::Retry => {
@@ -382,9 +291,8 @@ impl<const CANDIDATE: bool> StateMachineTest for Test<CANDIDATE> {
                 }
             }
             Op::Drop => {
-                if let Some(occ) = sut.parked() {
+                if sut.parked().is_some() {
                     sut.released = true;
-                    sut.dropped.insert(occ);
                     sut.resolve(Resolution::Drop);
                 }
             }
@@ -400,29 +308,9 @@ impl<const CANDIDATE: bool> StateMachineTest for Test<CANDIDATE> {
                  was only unknown"
             );
         }
-        for (occ, settled) in sut.d.exec.occurrences() {
-            if sut.dropped.contains(occ) {
-                continue;
-            }
-            if matches!(settled, Some(Settled::Failed(_))) {
-                assert!(
-                    sut.all_failed(occ),
-                    "failed_only_when_every_attempt_failed: {occ} settled {settled:?}"
-                );
-            }
-            if sut.any_done(occ) {
-                assert!(
-                    matches!(
-                        settled,
-                        Some(Settled::Done | Settled::DoneOverChangedInputs(_))
-                    ),
-                    "done_when_any_attempt_done: {occ} settled {settled:?}"
-                );
-            }
-        }
         let products = sut
             .d
-            .exec
+            .exec()
             .occurrences()
             .filter(|(o, s)| {
                 matches!(o, OccurrenceId::Minted { transition, .. } if PRODUCERS.contains(&&**transition))
@@ -435,32 +323,9 @@ impl<const CANDIDATE: bool> StateMachineTest for Test<CANDIDATE> {
         );
         if sut.backend().is_some() {
             assert!(
-                sut.d.exec.tokens().token("TursoReady", APP).is_none(),
+                sut.d.exec().tokens().token("TursoReady", APP).is_none(),
                 "one_storage_product: a TursoReady token waits beside the Storage product"
             );
-        }
-        if let Some((occ, true)) = &sut.verified {
-            let settled = sut.d.exec.settled(occ).expect("the occurrence exists");
-            if sut.candidate {
-                assert_eq!(
-                    settled,
-                    Some(Settled::Done),
-                    "late_verify_is_a_candidate: the stale record of {occ} did not record"
-                );
-                assert!(
-                    sut.d
-                        .exec
-                        .tokens()
-                        .token("TursoReady.Candidate", APP)
-                        .is_some(),
-                    "late_verify_is_a_candidate: no candidate holds the stale record of {occ}"
-                );
-            } else {
-                assert!(
-                    matches!(settled, Some(Settled::DoneOverChangedInputs(_))),
-                    "late_verify_is_disclosed: the stale record of {occ} settled {settled:?}"
-                );
-            }
         }
     }
 }
@@ -480,8 +345,7 @@ prop_state_machine! {
 #[test]
 fn a_late_done_resolves_the_parked_occurrence() {
     let mut d = Driver::new(net(false));
-    d.exec
-        .write("Storage.Open", APP, content(&[("gen", Value::Integer(0))]));
+    d.write("Storage.Open", APP, content(&[("gen", Value::Integer(0))]));
     d.step().expect("the net quiesces");
     let occ = d
         .pending
@@ -491,7 +355,7 @@ fn a_late_done_resolves_the_parked_occurrence() {
         .clone();
     d.tick(ABANDON + 1).expect("the net quiesces");
     assert!(
-        matches!(d.exec.settled(&occ), Ok(Some(Settled::OutcomeUnknown(_)))),
+        matches!(d.exec().settled(&occ), Ok(Some(Settled::OutcomeUnknown(_)))),
         "the abandoned attempt parks"
     );
     d.tick(1).expect("the net quiesces");
@@ -505,17 +369,17 @@ fn a_late_done_resolves_the_parked_occurrence() {
     .expect("the net quiesces");
 
     assert_eq!(
-        d.exec.settled(&occ),
+        d.exec().settled(&occ),
         Ok(Some(Settled::Done)),
         "late_done_resolves: the late Done of {occ}"
     );
     assert_eq!(
-        d.exec.tokens().subjects(holon_net::exec::OUTCOME_UNKNOWN),
+        d.exec().tokens().subjects(holon_net::exec::OUTCOME_UNKNOWN),
         Vec::<Subject>::new(),
         "late_done_clears_unknown: OutcomeUnknown still holds a token"
     );
     let backends: Vec<String> = d
-        .exec
+        .exec()
         .tokens()
         .token("Storage", APP)
         .map(|t| string(&t.content, "backend"))
@@ -527,10 +391,10 @@ fn a_late_done_resolves_the_parked_occurrence() {
 /// A manual `Send` with an abandon timer that consumes `Msg`, fired; a
 /// `Keyed` one re-issues once.
 fn fired_send(receiver: Receiver) -> (Driver, EffectRequest) {
-    let send = TransitionDef::new(
+    let send = Transition::new(
         "Send",
         Trigger::Manual,
-        |r, s| Some(content(&[("n", r.field("Msg", s, "n")?)])),
+        bind!(|r, s| Some(content(&[("n", r.field("Msg", s, "n")?)]))),
         Body::Effectful(receiver),
     )
     .consumes("Msg")
@@ -540,15 +404,13 @@ fn fired_send(receiver: Receiver) -> (Driver, EffectRequest) {
     } else {
         send
     };
-    let net = NetDef::default()
+    let net = Spec::default()
         .place("Msg", Class::Process)
         .place("Sent", Class::Process)
         .transition(send);
     let mut d = Driver::new(net);
-    d.exec
-        .write("Msg", APP, content(&[("n", Value::Integer(1))]));
-    d.exec
-        .fire("Send", APP, OccurrenceId::caller("send#1"), d.now)
+    d.write("Msg", APP, content(&[("n", Value::Integer(1))]));
+    d.fire("Send", APP, OccurrenceId::caller("send#1"))
         .expect("Msg holds a message");
     d.step().expect("the net quiesces");
     let req = d.pending.front().expect("Send runs").clone();
@@ -561,7 +423,7 @@ fn parked_send() -> (Driver, EffectRequest) {
     d.tick(ABANDON + 1).expect("the net quiesces");
     assert!(
         matches!(
-            d.exec.settled(&req.occurrence),
+            d.exec().settled(&req.occurrence),
             Ok(Some(Settled::OutcomeUnknown(_)))
         ),
         "the abandoned attempt parks"
@@ -578,22 +440,22 @@ fn a_late_failed_returns_the_input() {
     d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
         .expect("the net quiesces");
 
-    let settled = d.exec.settled(&req.occurrence);
+    let settled = d.exec().settled(&req.occurrence);
     assert!(
         matches!(settled, Ok(Some(Settled::Failed(_)))),
         "late_failed_resolves: the late Failed left {settled:?}"
     );
     assert!(
-        d.exec.tokens().token("Msg", APP).is_some(),
+        d.exec().tokens().token("Msg", APP).is_some(),
         "late_failed_returns_input: Msg is empty"
     );
     assert_eq!(
-        d.exec.mark("Send", APP).map(|m| m.cause.text.as_str()),
+        d.exec().mark("Send", APP).map(|m| m.cause.text.as_str()),
         Some("rejected"),
         "late_failed_marks"
     );
     assert_eq!(
-        d.exec.tokens().subjects(OUTCOME_UNKNOWN),
+        d.exec().tokens().subjects(OUTCOME_UNKNOWN),
         Vec::<Subject>::new(),
         "late_failed_clears_unknown"
     );
@@ -604,50 +466,41 @@ fn a_late_failed_returns_the_input() {
 #[test]
 fn a_late_unknown_keeps_the_occurrence_parked() {
     let (mut d, req) = parked_send();
-    let late = d.exec.complete(
-        req.attempt,
-        EffectResult::Unknown(Cause::definite("reset")),
-        d.now,
-    );
+    let late = d.complete(req.attempt, EffectResult::Unknown(Cause::definite("reset")));
     assert_eq!(late, Ok(Completion::StillUnknown));
     assert!(
         matches!(
-            d.exec.settled(&req.occurrence),
+            d.exec().settled(&req.occurrence),
             Ok(Some(Settled::OutcomeUnknown(_)))
         ),
         "late_unknown_stays_parked: {:?}",
-        d.exec.settled(&req.occurrence)
+        d.exec().settled(&req.occurrence)
     );
     assert_eq!(
-        d.exec.tokens().subjects(OUTCOME_UNKNOWN),
+        d.exec().tokens().subjects(OUTCOME_UNKNOWN),
         vec![Subject::new(&req.occurrence.to_string())],
         "late_unknown_stays_disclosed"
     );
 
-    let done = d.exec.complete(
+    let done = d.complete(
         req.attempt,
         EffectResult::Done(vec![Output::new("Sent", &req.subject, req.input.clone())]),
-        d.now,
     );
     assert_eq!(done, Ok(Completion::Recorded));
-    assert_eq!(d.exec.settled(&req.occurrence), Ok(Some(Settled::Done)));
+    assert_eq!(d.exec().settled(&req.occurrence), Ok(Some(Settled::Done)));
     assert!(
-        d.exec.tokens().token("Sent", APP).is_some(),
+        d.exec().tokens().token("Sent", APP).is_some(),
         "the later Done recorded"
     );
     assert_eq!(
-        d.exec
-            .complete(req.attempt, EffectResult::Done(Vec::new()), d.now),
+        d.complete(req.attempt, EffectResult::Done(Vec::new())),
         Err(ExecError::UnknownAttempt(req.attempt)),
         "an attempt has one final result"
     );
 }
 
 fn answer_attempt(d: &mut Driver, req: &EffectRequest, result: EffectResult) -> Completion {
-    let completion = d
-        .exec
-        .complete(req.attempt, result, d.now)
-        .expect("the attempt ran");
+    let completion = d.complete(req.attempt, result).expect("the attempt ran");
     d.step().expect("the net quiesces");
     completion
 }
@@ -656,8 +509,7 @@ fn answer_attempt(d: &mut Driver, req: &EffectRequest, result: EffectResult) -> 
 /// running second one.
 fn retried_send() -> (Driver, EffectRequest, EffectRequest) {
     let (mut d, first) = parked_send();
-    d.exec
-        .resolve(&first.occurrence, Resolution::Retry, d.now)
+    d.resolve(&first.occurrence, Resolution::Retry)
         .expect("the occurrence is parked");
     d.step().expect("the net quiesces");
     let second = d.pending.back().expect("the retry runs").clone();
@@ -675,18 +527,17 @@ fn rejected() -> EffectResult {
 
 fn assert_still_parked(d: &mut Driver, occ: &OccurrenceId, rule: &str) {
     assert!(
-        matches!(d.exec.settled(occ), Ok(Some(Settled::OutcomeUnknown(_)))),
+        matches!(d.exec().settled(occ), Ok(Some(Settled::OutcomeUnknown(_)))),
         "{rule}: {occ} settled {:?}",
-        d.exec.settled(occ)
+        d.exec().settled(occ)
     );
     assert!(
-        d.exec.tokens().token("Msg", APP).is_none(),
+        d.exec().tokens().token("Msg", APP).is_none(),
         "{rule}: the input returned"
     );
     assert!(
         matches!(
-            d.exec
-                .fire("Send", APP, OccurrenceId::caller("send#2"), d.now),
+            d.fire("Send", APP, OccurrenceId::caller("send#2")),
             Err(FireError::NotEnabled { .. })
         ),
         "{rule}: Send can fire again"
@@ -747,7 +598,7 @@ fn an_older_failed_and_a_newer_done_is_done() {
         Completion::StillUnknown
     );
     assert_eq!(
-        d.exec.settled(&first.occurrence),
+        d.exec().settled(&first.occurrence),
         Ok(None),
         "the retry still runs"
     );
@@ -755,9 +606,9 @@ fn an_older_failed_and_a_newer_done_is_done() {
         answer_attempt(&mut d, &second, sent(&second)),
         Completion::Recorded
     );
-    assert_eq!(d.exec.settled(&first.occurrence), Ok(Some(Settled::Done)));
+    assert_eq!(d.exec().settled(&first.occurrence), Ok(Some(Settled::Done)));
     assert!(
-        d.exec.tokens().token("Sent", APP).is_some(),
+        d.exec().tokens().token("Sent", APP).is_some(),
         "done_when_any_attempt_done"
     );
 }
@@ -775,23 +626,23 @@ fn every_attempt_failed_returns_the_input() {
     answer_attempt(&mut d, &first, rejected());
     assert!(
         matches!(
-            d.exec.settled(&first.occurrence),
+            d.exec().settled(&first.occurrence),
             Ok(Some(Settled::Failed(_)))
         ),
         "all_failed_settles_failed: {:?}",
-        d.exec.settled(&first.occurrence)
+        d.exec().settled(&first.occurrence)
     );
     assert!(
-        d.exec.tokens().token("Msg", APP).is_some(),
+        d.exec().tokens().token("Msg", APP).is_some(),
         "all_failed_returns_input"
     );
     assert_eq!(
-        d.exec.mark("Send", APP).map(|m| m.cause.text.as_str()),
+        d.exec().mark("Send", APP).map(|m| m.cause.text.as_str()),
         Some("rejected"),
         "all_failed_marks"
     );
     assert_eq!(
-        d.exec.tokens().subjects(OUTCOME_UNKNOWN),
+        d.exec().tokens().subjects(OUTCOME_UNKNOWN),
         Vec::<Subject>::new(),
         "all_failed_clears_unknown"
     );

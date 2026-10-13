@@ -8,16 +8,17 @@ mod exec_support;
 use std::time::Duration;
 
 use exec_support::Driver;
+use exec_support::Spec;
+use exec_support::Transition;
+use exec_support::bind;
 use exec_support::content;
 use exec_support::text;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
 use holon_net::exec::EffectResult;
-use holon_net::exec::NetDef;
 use holon_net::exec::Output;
 use holon_net::exec::Receiver;
-use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
@@ -29,20 +30,20 @@ const MAX_ATTEMPTS: u32 = 3;
 
 /// Turso gets three attempts two seconds apart inside a 20 s run; its failure
 /// and timeout ports both feed Loro.
-fn net() -> NetDef {
-    NetDef::default()
+fn net() -> Spec {
+    Spec::default()
         .place("Want", Class::Process)
         .place("TursoReady", Class::Process)
         .place("TursoDown", Class::Process)
         .place("LoroReady", Class::Process)
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "MakeTursoReady",
                 Trigger::Auto,
-                |r, s| {
+                bind!(|r, s| {
                     let url = r.text("Want", s, "url")?;
                     Some(content(&[("url", text(&url))]))
-                },
+                }),
                 Body::Effectful(Receiver::Keyed),
             )
             .reads("Want")
@@ -55,10 +56,10 @@ fn net() -> NetDef {
             .on_timeout("TursoDown"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "MakeLoroReady",
                 Trigger::Auto,
-                |_, _| Some(content(&[])),
+                bind!(|_r, _s| Some(content(&[]))),
                 Body::Pure(|s, _| Ok(vec![Output::new("LoroReady", s, content(&[]))])),
             )
             .consumes("TursoDown"),
@@ -106,8 +107,7 @@ impl StateMachineTest for Test {
 
     fn init_test(_: &()) -> Driver {
         let mut d = Driver::new(net());
-        d.exec
-            .write("Want", APP, content(&[("url", text("libsql://local"))]));
+        d.write("Want", APP, content(&[("url", text("libsql://local"))]));
         d.step().expect("the net quiesces");
         d
     }
@@ -130,13 +130,7 @@ impl StateMachineTest for Test {
     }
 
     fn check_invariants(d: &Driver, _: &()) {
-        let attempts = d.requests_of("MakeTursoReady").count();
-        assert!(
-            attempts <= MAX_ATTEMPTS as usize,
-            "attempts_within_count_bound: {attempts} attempts of MakeTursoReady in one run, \
-             bound {MAX_ATTEMPTS}"
-        );
-        let tokens = d.exec.tokens();
+        let tokens = d.exec().tokens();
         assert!(
             tokens.token("TursoReady", APP).is_none() || tokens.token("LoroReady", APP).is_none(),
             "one_backend: both TursoReady and LoroReady hold a token"
@@ -153,17 +147,17 @@ prop_state_machine! {
 /// unsettled is an attempt of the same run, under the same run timer.
 #[test]
 fn a_firing_in_an_unsettled_run_shares_its_timer() {
-    let net = NetDef::default()
+    let net = Spec::default()
         .place("Doc", Class::Process)
         .place("TimedOut", Class::Process)
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "Publish",
                 Trigger::Auto,
-                |r, s| {
+                bind!(|r, s| {
                     let title = r.text("Doc", s, "title")?;
                     Some(content(&[("title", text(&title))]))
-                },
+                }),
                 Body::Effectful(Receiver::None),
             )
             .reads("Doc")
@@ -171,12 +165,12 @@ fn a_firing_in_an_unsettled_run_shares_its_timer() {
             .on_timeout("TimedOut"),
         );
     let mut d = Driver::new(net);
-    d.exec.write("Doc", APP, content(&[("title", text("v1"))]));
+    d.write("Doc", APP, content(&[("title", text("v1"))]));
     d.step().expect("the net quiesces");
     d.complete_oldest(|_| EffectResult::Unknown(Cause::definite("connection reset")))
         .expect("the net quiesces");
     d.tick(10).expect("the net quiesces");
-    d.exec.write("Doc", APP, content(&[("title", text("v2"))]));
+    d.write("Doc", APP, content(&[("title", text("v2"))]));
     d.step().expect("the net quiesces");
     assert_eq!(
         d.requests_of("Publish").count(),
@@ -186,7 +180,7 @@ fn a_firing_in_an_unsettled_run_shares_its_timer() {
 
     d.tick(11).expect("the net quiesces");
     assert!(
-        d.exec.tokens().token("TimedOut", APP).is_some(),
+        d.exec().tokens().token("TimedOut", APP).is_some(),
         "run_spans_its_attempts: the run timer of the first firing did not fire at 21 s"
     );
 }

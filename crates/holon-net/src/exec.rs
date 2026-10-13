@@ -1,6 +1,6 @@
 //! The executor of runtime nets (ADR 0032 §9): an owned marking of
-//! process-class tokens, enabledness, pure and effectful firings, the record's
-//! compare-and-set, failure marks and timers.
+//! process-class and data-class tokens, enabledness, pure and effectful
+//! firings, the record's compare-and-set, failure marks and timers.
 //!
 //! Sans-IO: [`Executor::step`] returns the effects to run, the caller runs
 //! them and hands each result back through [`Executor::complete`]. The clock
@@ -106,7 +106,8 @@ pub struct AttemptId(pub u64);
 
 pub type Content = BTreeMap<String, Value>;
 
-/// The token classes of NET-class.a. This executor holds process class only.
+/// The token classes of NET-class.a. This executor holds process class and
+/// an in-memory stand-in for data class: whole-content slots, no claims.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
     Process,
@@ -399,7 +400,7 @@ impl NetDef {
             },
         );
         for (name, def) in &self.places {
-            if def.class != Class::Process {
+            if def.class == Class::Device {
                 return Err(LoadError::ClassNotSupported {
                     place: name.clone(),
                     class: def.class,
@@ -424,6 +425,16 @@ impl NetDef {
                         place: p.clone(),
                     });
                 }
+            }
+            if let Some(p) = t
+                .consumes
+                .iter()
+                .find(|p| self.places[*p].class == Class::Data)
+            {
+                return Err(LoadError::ConsumesData {
+                    transition: t.name.to_string(),
+                    place: p.clone(),
+                });
             }
             for p in arcs {
                 if matches!(self.places[p].kind, PlaceKind::Derived(_)) {
@@ -452,8 +463,12 @@ pub enum LoadError {
     ReservedPlace(Place),
     #[error("'{user}' names place '{place}', which the net does not declare")]
     UndeclaredPlace { user: String, place: Place },
-    #[error("place '{place}' is {class:?} class; this executor holds process class only")]
+    #[error("place '{place}' is {class:?} class; this executor holds process and data class only")]
     ClassNotSupported { place: Place, class: Class },
+    #[error(
+        "transition '{transition}' consumes the data-class place '{place}'; data class has no claims yet (#168)"
+    )]
+    ConsumesData { transition: String, place: Place },
     #[error("transition '{transition}' has an arc on the derived place '{place}'")]
     ArcOnDerived { transition: String, place: Place },
     #[error("auto transition '{0}' has no consume or read arc to find its subjects by")]
@@ -664,10 +679,13 @@ pub struct Mark {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Settled {
     Done,
-    /// The effect happened over stale inputs: its input is consumed and its
-    /// row outputs, if any, are withheld (no place declares a candidate for
-    /// them).
+    /// The effect happened over stale inputs: its input is consumed and a
+    /// row output to a process place without a candidate is withheld, or it
+    /// had no row outputs.
     DoneOverChangedInputs(Cause),
+    /// The effect happened over stale inputs: its input is consumed and its
+    /// outputs to data-class places are applied anyway.
+    AppliedOverChangedInputs(Cause),
     Failed(Cause),
     OutcomeUnknown(Cause),
 }
@@ -1064,7 +1082,10 @@ impl Executor {
         if matches!(
             self.occurrences.get(occurrence),
             Some(Some(
-                Settled::Done | Settled::DoneOverChangedInputs(_) | Settled::Failed(_)
+                Settled::Done
+                    | Settled::DoneOverChangedInputs(_)
+                    | Settled::AppliedOverChangedInputs(_)
+                    | Settled::Failed(_)
             ))
         ) {
             if let Some(a) = live {
@@ -1461,7 +1482,8 @@ impl Executor {
     }
 
     /// The record never clobbers: facts commit, rows compare-and-set against
-    /// the read trace (NET-fire.a).
+    /// the read trace (NET-fire.a). A stale effect happened, so each row goes
+    /// to its place's candidate, applies on a data-class place, or is withheld.
     fn record(&mut self, a: Attempt, outputs: Vec<Output>, now: Duration) {
         let t = self.net.transition_def(&a.transition);
         let pure = matches!(t.body, Body::Pure(_));
@@ -1490,46 +1512,43 @@ impl Executor {
                 .insert(a.occurrence.clone(), Some(Settled::Failed(cause)));
             return;
         }
-        let candidates: Option<Vec<Place>> = rows
-            .iter()
-            .map(|o| self.net.candidate_of(&o.place).cloned())
-            .collect();
-        match candidates {
-            Some(candidates) if !rows.is_empty() => {
-                let trace = a.trace.as_value();
-                let cands = rows
-                    .into_iter()
-                    .zip(candidates)
-                    .map(|(o, c)| {
-                        let base = a
-                            .trace
-                            .rows
-                            .get(&(o.place.clone(), o.subject.clone()))
-                            .map_or(Value::Null, |r| fields_value(&r.fields));
-                        let content = Content::from([
-                            ("base".to_string(), base),
-                            (
-                                "output".to_string(),
-                                Value::Object(o.content.into_iter().collect()),
-                            ),
-                            ("trace".to_string(), trace.clone()),
-                        ]);
-                        Output {
-                            place: c,
-                            subject: o.subject,
-                            content,
-                        }
-                    })
-                    .collect();
-                self.commit(a, cands);
+        let trace = a.trace.as_value();
+        let (mut kept, mut applied, mut withheld) = (Vec::new(), false, false);
+        for o in &rows {
+            if let Some(c) = self.net.candidate_of(&o.place) {
+                let base = a
+                    .trace
+                    .rows
+                    .get(&(o.place.clone(), o.subject.clone()))
+                    .map_or(Value::Null, |r| fields_value(&r.fields));
+                let content = Content::from([
+                    ("base".to_string(), base),
+                    (
+                        "output".to_string(),
+                        Value::Object(o.content.clone().into_iter().collect()),
+                    ),
+                    ("trace".to_string(), trace.clone()),
+                ]);
+                kept.push(Output::new(c, &o.subject, content));
+            } else if self.net.places[&o.place].class == Class::Data {
+                applied = true;
+                kept.push(o.clone());
+            } else {
+                withheld = true;
             }
-            _ if self.twin(Twin::StaleDoneReturnsInput) => self.fail(a, cause, now),
-            _ => {
-                let occurrence = a.occurrence.clone();
-                self.commit(a, Vec::new());
-                self.occurrences
-                    .insert(occurrence, Some(Settled::DoneOverChangedInputs(cause)));
-            }
+        }
+        let disclosed = withheld || rows.is_empty();
+        if disclosed && self.twin(Twin::StaleDoneReturnsInput) {
+            return self.fail(a, cause, now);
+        }
+        let occurrence = a.occurrence.clone();
+        self.commit(a, kept);
+        if disclosed {
+            self.occurrences
+                .insert(occurrence, Some(Settled::DoneOverChangedInputs(cause)));
+        } else if applied {
+            self.occurrences
+                .insert(occurrence, Some(Settled::AppliedOverChangedInputs(cause)));
         }
     }
 

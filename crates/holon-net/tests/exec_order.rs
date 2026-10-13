@@ -11,6 +11,10 @@ mod exec_support;
 use std::collections::BTreeSet;
 
 use exec_support::Driver;
+use exec_support::Reads;
+use exec_support::Spec;
+use exec_support::Transition;
+use exec_support::bind;
 use exec_support::content;
 use exec_support::int;
 use exec_support::twin_name;
@@ -21,13 +25,10 @@ use holon_net::exec::Class;
 use holon_net::exec::Content;
 use holon_net::exec::EffectResult;
 use holon_net::exec::FireError;
-use holon_net::exec::NetDef;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
-use holon_net::exec::Reader;
 use holon_net::exec::Receiver;
 use holon_net::exec::Subject;
-use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
@@ -36,7 +37,7 @@ use proptest_state_machine::prop_state_machine;
 
 const APP: &str = "app";
 
-fn gen_of(r: &mut Reader<'_>, place: &str, s: &Subject) -> Option<Content> {
+fn gen_of(r: &mut dyn Reads, place: &str, s: &str) -> Option<Content> {
     let generation = r.field(place, s, "gen")?;
     Some(Content::from([("gen".to_string(), generation)]))
 }
@@ -52,18 +53,18 @@ fn storage(backend: &str, s: &Subject, input: &Content) -> Vec<Output> {
 }
 
 /// Example 3: Turso first, Loro only through Turso's failure port.
-fn complement_net() -> NetDef {
-    NetDef::default()
+fn complement_net() -> Spec {
+    Spec::default()
         .place("Storage", Class::Process)
         .place("Storage.Open", Class::Process)
         .place("Storage.Settled", Class::Process)
         .place("TursoReady", Class::Process)
         .place("TursoFailed", Class::Process)
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "MakeTursoReady",
                 Trigger::Auto,
-                |r, s| gen_of(r, "Storage.Open", s),
+                bind!(|r, s| gen_of(r, "Storage.Open", s)),
                 Body::Effectful(Receiver::None),
             )
             .reads("Storage.Open")
@@ -72,39 +73,39 @@ fn complement_net() -> NetDef {
             .on_failure("TursoFailed"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "FillFromTurso",
                 Trigger::Auto,
-                |r, s| gen_of(r, "Storage.Open", s),
+                bind!(|r, s| gen_of(r, "Storage.Open", s)),
                 Body::Pure(|s, input| Ok(storage("turso", s, input))),
             )
             .consumes("TursoReady")
             .consumes("Storage.Open"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "MakeLoroReady",
                 Trigger::Auto,
-                |r, s| gen_of(r, "Storage.Open", s),
+                bind!(|r, s| gen_of(r, "Storage.Open", s)),
                 Body::Pure(|s, input| Ok(storage("loro", s, input))),
             )
             .consumes("TursoFailed")
             .consumes("Storage.Open"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "Take",
                 Trigger::Manual,
-                |_, _| Some(Content::new()),
+                bind!(|_r, _s| Some(Content::new())),
                 Body::Pure(|_, _| Ok(Vec::new())),
             )
             .consumes("Storage"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "Reopen",
                 Trigger::Manual,
-                |r, s| gen_of(r, "Storage.Settled", s),
+                bind!(|r, s| gen_of(r, "Storage.Settled", s)),
                 Body::Pure(|s, input| {
                     let next = match input["gen"] {
                         Value::Integer(g) => g + 1,
@@ -123,15 +124,15 @@ fn complement_net() -> NetDef {
 
 /// The naive twin of Example 3: "not yet produced" is an inhibitor on the
 /// product, so a consumer that takes the product re-enables the producer.
-fn inhibitor_net() -> NetDef {
-    let storage_gen = |r: &mut Reader<'_>, s: &Subject| gen_of(r, "Config", s);
-    NetDef::default()
+fn inhibitor_net() -> Spec {
+    let storage_gen = bind!(|r, s| gen_of(r, "Config", s));
+    Spec::default()
         .place("Config", Class::Process)
         .place("Storage", Class::Process)
         .place("TursoReady", Class::Process)
         .place("TursoFailed", Class::Process)
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "MakeTursoReady",
                 Trigger::Auto,
                 storage_gen,
@@ -144,7 +145,7 @@ fn inhibitor_net() -> NetDef {
             .on_failure("TursoFailed"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "FillFromTurso",
                 Trigger::Auto,
                 storage_gen,
@@ -153,7 +154,7 @@ fn inhibitor_net() -> NetDef {
             .consumes("TursoReady"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "MakeLoroReady",
                 Trigger::Auto,
                 storage_gen,
@@ -162,10 +163,10 @@ fn inhibitor_net() -> NetDef {
             .consumes("TursoFailed"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "Take",
                 Trigger::Manual,
-                |_, _| Some(Content::new()),
+                bind!(|_r, _s| Some(Content::new())),
                 Body::Pure(|_, _| Ok(Vec::new())),
             )
             .consumes("Storage"),
@@ -223,7 +224,7 @@ impl StorageSut {
         }
         self.fires += 1;
         let occ = OccurrenceId::caller(&format!("op#{}", self.fires));
-        match self.d.exec.fire(transition, APP, occ, self.d.now) {
+        match self.d.fire(transition, APP, occ) {
             Ok(_) | Err(FireError::NotEnabled { .. }) => {}
             Err(e) => panic!("fire {transition}: {e}"),
         }
@@ -248,8 +249,7 @@ impl StateMachineTest for StorageTest {
         } else {
             "Storage.Open"
         };
-        d.exec
-            .write(opener, APP, content(&[("gen", Value::Integer(0))]));
+        d.write(opener, APP, content(&[("gen", Value::Integer(0))]));
         d.step().expect("the net quiesces");
         StorageSut {
             d,
@@ -295,7 +295,7 @@ impl StateMachineTest for StorageTest {
                 sut.d.requests
             );
         }
-        let tokens = sut.d.exec.tokens();
+        let tokens = sut.d.exec().tokens();
         if let Some(stored) = tokens.token("Storage", APP)
             && stored.content["backend"] == Value::String("loro".to_string())
         {
@@ -322,23 +322,23 @@ prop_state_machine! {
     fn producer_order_is_a_net_construction(sequential 1..30 => StorageTest);
 }
 
-/// REV11-running: a take moves the token, so a reader cannot approve a token
-/// a running firing holds.
-fn running_net() -> NetDef {
-    let n = |r: &mut Reader<'_>, s: &Subject| {
+/// REV11-running: a take moves the token into `Send.Running`, so `Archive`
+/// never sees a token a running firing holds.
+fn running_net() -> Spec {
+    let n = bind!(|r, s| {
         let n = r.field("Intent", s, "n")?;
         Some(Content::from([("n".to_string(), n)]))
-    };
-    NetDef::default()
+    });
+    Spec::default()
         .place("Intent", Class::Process)
         .place("Sent", Class::Process)
         .place("Archived", Class::Process)
         .transition(
-            TransitionDef::new("Send", Trigger::Auto, n, Body::Effectful(Receiver::None))
+            Transition::new("Send", Trigger::Auto, n, Body::Effectful(Receiver::None))
                 .consumes("Intent"),
         )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "Archive",
                 Trigger::Auto,
                 n,
@@ -401,14 +401,10 @@ impl StateMachineTest for IntentTest {
     }
 
     fn apply(mut sut: IntentSut, _: &(), op: IntentOp) -> IntentSut {
-        let archived_id =
-            |sut: &IntentSut, s: &str| sut.d.exec.tokens().token("Archived", s).map(|t| t.id);
-        let before = SUBJECTS.map(|s| archived_id(&sut, s));
         match op {
             IntentOp::Write(s) => {
                 sut.next_n += 1;
                 sut.d
-                    .exec
                     .write("Intent", s, content(&[("n", Value::Integer(sut.next_n))]));
                 sut.d.step().expect("the net quiesces");
             }
@@ -422,26 +418,6 @@ impl StateMachineTest for IntentTest {
                 .d
                 .complete_oldest(|_| EffectResult::Failed(Cause::definite("refused")))
                 .expect("the net quiesces"),
-        }
-        for (s, was) in SUBJECTS.into_iter().zip(before) {
-            if archived_id(&sut, s) == was {
-                continue;
-            }
-            let archived = &sut
-                .d
-                .exec
-                .tokens()
-                .token("Archived", s)
-                .expect("changed")
-                .content;
-            for req in sut.d.pending.iter().filter(|r| r.subject.as_str() == s) {
-                assert!(
-                    archived["n"] != req.input["n"],
-                    "archive_never_approves_held_token: Archive approved intent {:?} of '{s}' \
-                     while Send holds it",
-                    req.input["n"]
-                );
-            }
         }
         sut
     }

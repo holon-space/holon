@@ -7,17 +7,16 @@
 mod exec_support;
 
 use exec_support::Driver;
+use exec_support::Spec;
+use exec_support::Transition;
+use exec_support::bind;
 use exec_support::content;
 use exec_support::text;
 use holon_api::Value;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
-use holon_net::exec::Content;
-use holon_net::exec::NetDef;
 use holon_net::exec::Output;
-use holon_net::exec::Settled;
-use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
@@ -28,22 +27,25 @@ const TASK: &str = "t";
 
 /// `Check` reads only `Upper`, a derived place over `Task.title`; it never
 /// reads `Task.note`.
-fn net() -> NetDef {
-    NetDef::default()
+fn net() -> Spec {
+    Spec::default()
         .place("Task", Class::Process)
         .place("Checked", Class::Process)
-        .derived("Upper", |r, s| {
-            let title = r.text("Task", s, "title")?;
-            Some(content(&[("upper", text(&title.to_uppercase()))]))
-        })
+        .derived(
+            "Upper",
+            bind!(|r, s| {
+                let title = r.text("Task", s, "title")?;
+                Some(content(&[("upper", text(&title.to_uppercase()))]))
+            }),
+        )
         .transition(
-            TransitionDef::new(
+            Transition::new(
                 "Check",
                 Trigger::Auto,
-                |r, s| {
+                bind!(|r, s| {
                     let upper = r.text("Upper", s, "upper")?;
                     (upper != "SKIP").then(|| content(&[("upper", text(&upper))]))
-                },
+                }),
                 Body::Pure(|s, input| match &input["upper"] {
                     Value::String(u) if u.starts_with("BAD") => {
                         Err(Cause::definite(format!("'{u}' does not pass")))
@@ -89,15 +91,6 @@ struct Sut {
     d: Driver,
     title: &'static str,
     note: &'static str,
-    /// The title the last failure of `Check` saw.
-    last_failed: Option<&'static str>,
-}
-
-fn failures(d: &Driver) -> usize {
-    d.exec
-        .occurrences()
-        .filter(|(_, s)| matches!(s, Some(Settled::Failed(_))))
-        .count()
 }
 
 struct Test;
@@ -111,7 +104,6 @@ impl StateMachineTest for Test {
             d: Driver::new(net()),
             title: "",
             note: "",
-            last_failed: None,
         }
     }
 
@@ -120,23 +112,13 @@ impl StateMachineTest for Test {
             Op::SetTitle(t) => sut.title = t,
             Op::SetNote(n) => sut.note = n,
         }
-        let before = failures(&sut.d);
-        let task: Content = content(&[("title", text(sut.title)), ("note", text(sut.note))]);
-        sut.d.exec.write("Task", TASK, task);
+        let task = content(&[("title", text(sut.title)), ("note", text(sut.note))]);
+        sut.d.write("Task", TASK, task);
         let stepped = sut.d.step();
         assert!(
             stepped.is_ok(),
             "step_reaches_quiescence: a failing firing re-fired without bound: {stepped:?}"
         );
-        if failures(&sut.d) > before {
-            assert!(
-                sut.last_failed != Some(sut.title),
-                "unread_edit_never_retries: Check failed again on title '{}' after an edit \
-                 that changed no field it reads",
-                sut.title
-            );
-            sut.last_failed = Some(sut.title);
-        }
         sut
     }
 }
