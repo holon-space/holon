@@ -32,6 +32,7 @@ use holon_net::exec::MAX_ROUNDS;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Place;
+use holon_net::exec::Resolution;
 use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
 use holon_net::exec::answer_transition;
@@ -387,26 +388,24 @@ fn no_ask_is_offered_while_an_answer_is_pending() {
     assert!(d.exec().tokens().token("Answered.Accept", "x").is_none());
 }
 
-/// A failed work makes its subject busy until `ReleaseFailed.Accept` clears
-/// it; here a `Hold` keeps it from firing.
+/// A failed work makes its subject busy on its own: a dropped unknown
+/// outcome consumes `Answered.Accept` and leaves `WorkFailed.Accept`.
 #[test]
 fn no_ask_is_offered_while_its_work_failed() {
-    let mut spec = answer_spec().place("Hold", Class::Process);
-    spec.transitions
-        .iter_mut()
-        .find(|t| t.name == "ReleaseFailed.Accept")
-        .expect("answer_spec releases failed answers")
-        .inhibits
-        .push("Hold".to_string());
-    let mut d = Driver::new(spec);
-    d.write("Hold", "x", Content::new())
-        .expect("the net quiesces");
+    let mut d = Driver::new(answer_spec());
     d.write("Item", "x", content(&[("n", Value::Integer(1))]))
         .expect("the net quiesces");
     let c = answer_call(&d, "x", "a0", false, None);
     d.answer(c).expect("the ask applies");
-    d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
+    let (_, _, _, occurrence) = d.exec().in_flight().next().expect("the answered work runs");
+    let occurrence = occurrence.clone();
+    d.complete_oldest(|_| EffectResult::Unknown(Cause::definite("reset")))
+        .expect("the net quiesces");
+    d.resolve(&occurrence, Resolution::Drop)
+        .expect("the net quiesces");
+    d.write("Item", "x", content(&[("n", Value::Integer(2))]))
         .expect("the net quiesces");
     assert!(d.exec().tokens().token("WorkFailed.Accept", "x").is_some());
-    offered_asks_have_their_answer_enabled(&d, "the failure of a0");
+    assert!(d.exec().tokens().token("Answered.Accept", "x").is_none());
+    offered_asks_have_their_answer_enabled(&d, "the drop of a0");
 }

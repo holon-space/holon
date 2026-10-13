@@ -623,6 +623,25 @@ impl Driver {
             }
         }
 
+        let mut sut_retry = BTreeMap::new();
+        for t in &self.spec.transitions {
+            let place = Place::retry_pending(&t.name);
+            for s in tokens.subjects(&place) {
+                let content = &tokens.token(&place, &s).expect("listed").content;
+                let Some(Value::Integer(nanos)) = content.get("due") else {
+                    panic!("{place} of {s} has no integer due: {content:?}");
+                };
+                let due = Duration::from_nanos(u64::try_from(*nanos).expect("not negative"));
+                sut_retry.insert((t.name.clone(), s.to_string()), due);
+            }
+        }
+        agree(
+            op,
+            "RetryPending places (transition, subject) → due",
+            sut_retry,
+            self.model.retry_pending(),
+        );
+
         let sut_unknown: BTreeMap<String, Content> = tokens
             .subjects(OUTCOME_UNKNOWN)
             .into_iter()
@@ -744,7 +763,16 @@ pub fn answer_spec() -> Spec {
         .place("WorkFailed.Accept", Class::Process)
         .place("Expired.Accept", Class::Process)
         .derived("Situation.Accept", bind!(ask_row))
-        .derived("Asks.Accept", bind!(ask_row))
+        .derived(
+            "Asks.Accept",
+            bind!(|r, s| {
+                let busy = ["Answered.Accept", "Accept.Running", "WorkFailed.Accept"];
+                if busy.iter().any(|p| r.present(p, s)) {
+                    return None;
+                }
+                ask_row(r, s)
+            }),
+        )
         .ask(
             "Accept",
             AskMeta {

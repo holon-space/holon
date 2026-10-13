@@ -32,6 +32,7 @@ use holon_net::exec::Class;
 use holon_net::exec::Content;
 use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
+use holon_net::exec::ExecError;
 use holon_net::exec::Executor;
 use holon_net::exec::FireError;
 use holon_net::exec::HASH_FIELD;
@@ -39,6 +40,7 @@ use holon_net::exec::NetDef;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Place;
+use holon_net::exec::Quiesced;
 use holon_net::exec::REASON_FIELD;
 use holon_net::exec::Reader;
 use holon_net::exec::Receiver;
@@ -190,6 +192,7 @@ fn lowered(d: &TransitionDescriptor) -> NetDef {
         Some("ask-while-answered") => LowerTwin::AskWhileAnswered,
         Some("ask-while-in-flight") => LowerTwin::AskWhileInFlight,
         Some("ask-during-failure") => LowerTwin::AskDuringFailure,
+        Some("ask-while-retry-pending") => LowerTwin::AskWhileRetryPending,
         Some(other) => panic!("UFT_LOWER_TWIN={other} names no twin"),
     };
     lower_twin(base_net(), d, Some(parts()), twin).expect("lowers")
@@ -240,9 +243,16 @@ impl StateMachineTest for Test {
     fn init_test(m: &Model) -> Sut {
         let mut exec = Executor::new(lowered(&pbt_descriptor(m))).expect("the lowered net loads");
         for s in SUBJECTS {
-            exec.write("Refused", s, Content::from([("why".to_owned(), text("0"))]));
-            exec.write("Base", s, counter(0));
-            exec.write("OnDisk", s, counter(0));
+            for (place, content) in [
+                ("Refused", Content::from([("why".to_owned(), text("0"))])),
+                ("Base", counter(0)),
+                ("OnDisk", counter(0)),
+            ] {
+                let q = exec
+                    .write(place, s, content, Duration::ZERO)
+                    .expect("the lowered net quiesces");
+                assert!(q.requests.is_empty(), "no answer, so no work");
+            }
         }
         let mut sut = Sut {
             exec,
@@ -260,15 +270,22 @@ impl StateMachineTest for Test {
         sut.now += Duration::from_millis(1);
         let now = sut.now;
         let pre = sut.model.clone();
+        let mut mid = pre.clone();
+        mid.apply_op(&op);
         let tick = pre.next;
-        match op {
-            Op::ChangeBase(s) => sut.exec.write("Base", SUBJECTS[s], counter(tick)),
-            Op::ChangeOnDisk(s) => sut.exec.write("OnDisk", SUBJECTS[s], counter(tick)),
-            Op::Reappear(s) => sut.exec.write(
+        let quiesced =
+            |q: Result<Quiesced<()>, ExecError>| q.expect("the lowered net quiesces").requests;
+        let requests = match op {
+            Op::ChangeBase(s) => quiesced(sut.exec.write("Base", SUBJECTS[s], counter(tick), now)),
+            Op::ChangeOnDisk(s) => {
+                quiesced(sut.exec.write("OnDisk", SUBJECTS[s], counter(tick), now))
+            }
+            Op::Reappear(s) => quiesced(sut.exec.write(
                 "Refused",
                 SUBJECTS[s],
                 Content::from([("why".to_owned(), text(&tick.to_string()))]),
-            ),
+                now,
+            )),
             Op::Saved(s) => {
                 let got = sut.exec.fire(
                     "Saved",
@@ -283,9 +300,10 @@ impl StateMachineTest for Test {
                     "model divergence: Saved on {} gave {got:?}",
                     SUBJECTS[s]
                 );
+                got.map_or_else(|_| Vec::new(), |q| q.requests)
             }
             Op::Answer { s, value, seen } => answer(&mut sut, &pre, s, value, seen, tick, now),
-            Op::Step => step(&mut sut, &pre, m, now),
+            Op::Step => sut.exec.step(now).expect("the lowered net quiesces"),
             Op::Complete { s, ok } => {
                 let req = sut
                     .requests
@@ -302,25 +320,33 @@ impl StateMachineTest for Test {
                 };
                 sut.exec
                     .complete(req.attempt, result, now)
-                    .expect("the attempt is known");
+                    .expect("the attempt is known")
+                    .requests
             }
             Op::Lost(s) => {
                 let req = sut
                     .requests
                     .remove(&s)
                     .expect("precondition: a work request is in flight");
-                sut.exec
+                let mut requests = sut
+                    .exec
                     .complete(
                         req.attempt,
                         EffectResult::Unknown(Cause::definite("lost")),
                         now,
                     )
-                    .expect("the attempt is known");
-                sut.exec
-                    .resolve(&req.occurrence, Resolution::Drop, now)
-                    .expect("the occurrence is parked");
+                    .expect("the attempt is known")
+                    .requests;
+                requests.extend(
+                    sut.exec
+                        .resolve(&req.occurrence, Resolution::Drop, now)
+                        .expect("the occurrence is parked")
+                        .requests,
+                );
+                requests
             }
-        }
+        };
+        started(&mut sut, &mid, m, requests);
         compare(&mut sut, m);
         sut.model = m.clone();
         sut
@@ -335,7 +361,7 @@ fn answer(
     seen: uft_lower_support::Seen,
     tick: u32,
     now: Duration,
-) {
+) -> Vec<EffectRequest> {
     let subject = SUBJECTS[s];
     let seen_sit = pre.seen_sit(s, seen).expect("precondition");
     let seen = sut.hashes[&(s, seen_sit)].clone();
@@ -351,7 +377,7 @@ fn answer(
         input,
         now,
     ) {
-        Ok(_) => Ok(()),
+        Ok(q) => Ok(q.requests),
         Err(FireError::NotEnabled {
             why: WhyNot::Inhibited(p),
             ..
@@ -365,7 +391,8 @@ fn answer(
         }) => Err(Refusal::NoLongerApplies),
         Err(e) => panic!("Answer refused for an unplanned reason: {e}"),
     };
-    match (got, pre.answer_result(s)) {
+    let requests = got.as_ref().map_or_else(|_| Vec::new(), Clone::clone);
+    match (got.map(|_| ()), pre.answer_result(s)) {
         (Ok(()), Err(Refusal::AlreadyAnswered)) => {
             panic!("P3 a second answer on {subject} was accepted: two Answered for one ask")
         }
@@ -377,10 +404,12 @@ fn answer(
             "the answer on {subject} (value {value:?}) got the wrong reply"
         ),
     }
+    requests
 }
 
-fn step(sut: &mut Sut, pre: &Model, m: &Model, now: Duration) {
-    let requests = sut.exec.step(now).expect("the lowered net quiesces");
+/// The work requests an op returned against the model's quiesce after the
+/// op (`pre`: the model after the op alone).
+fn started(sut: &mut Sut, pre: &Model, m: &Model, requests: Vec<EffectRequest>) {
     let mut started = Vec::new();
     for req in requests {
         assert_eq!(&*req.transition, T, "only the work has an effect");
@@ -552,13 +581,7 @@ prop_state_machine! {
 #[test]
 fn ask_row_carries_the_declared_input_type() {
     let mut exec = Executor::new(lowered(&descriptor())).expect("loads");
-    exec.write(
-        "Refused",
-        "a",
-        Content::from([("why".to_owned(), text("0"))]),
-    );
-    exec.write("Base", "a", counter(0));
-    exec.write("OnDisk", "a", counter(0));
+    assert!(situation(&mut exec).is_empty(), "no answer, so no work");
     let rows = exec.asks();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].transition.0, T);
@@ -586,14 +609,7 @@ fn an_auto_descriptor_lowers_one_to_one() {
     let mut p = parts();
     p.preview = None;
     let mut exec = Executor::new(lower(base_net(), &d, Some(p)).expect("lowers")).expect("loads");
-    exec.write(
-        "Refused",
-        "a",
-        Content::from([("why".to_owned(), text("0"))]),
-    );
-    exec.write("Base", "a", counter(0));
-    exec.write("OnDisk", "a", counter(0));
-    let requests = exec.step(Duration::ZERO).expect("quiesces");
+    let requests = situation(&mut exec);
     assert_eq!(requests.len(), 1);
     assert_eq!(&*requests[0].transition, T);
     assert_eq!(
@@ -644,29 +660,24 @@ fn a_pure_work_body_reads_the_answer_value_and_id_under_the_adapter_keys() {
         Ok(vec![Output::new("Removed", s, input.clone())])
     }));
     let mut exec = Executor::new(lower(base_net(), &d, Some(p)).expect("lowers")).expect("loads");
-    exec.write(
-        "Refused",
-        "a",
-        Content::from([("why".to_owned(), text("0"))]),
-    );
-    exec.write("Base", "a", counter(0));
-    exec.write("OnDisk", "a", counter(0));
+    assert!(situation(&mut exec).is_empty(), "no answer, so no work");
     let ask = exec
         .derive(&asks_place(T), &Subject::new("a"))
         .expect("asks");
-    exec.fire(
-        &answer_transition(T),
-        "a",
-        OccurrenceId::caller("1"),
-        Content::from([
-            (ANSWER_ID_KEY.to_owned(), text("1")),
-            (SEEN_FIELD.to_owned(), text(&get(&ask, HASH_FIELD))),
-            (ANSWER_INPUT_KEY.to_owned(), text("Remove")),
-        ]),
-        Duration::ZERO,
-    )
-    .expect("answered");
-    exec.step(Duration::ZERO).expect("quiesces");
+    let pure = exec
+        .fire(
+            &answer_transition(T),
+            "a",
+            OccurrenceId::caller("1"),
+            Content::from([
+                (ANSWER_ID_KEY.to_owned(), text("1")),
+                (SEEN_FIELD.to_owned(), text(&get(&ask, HASH_FIELD))),
+                (ANSWER_INPUT_KEY.to_owned(), text("Remove")),
+            ]),
+            Duration::ZERO,
+        )
+        .expect("answered");
+    assert!(pure.requests.is_empty(), "a pure work makes no request");
     let removed = &exec
         .tokens()
         .token("Removed", "a")
@@ -685,7 +696,7 @@ fn asked(exec: &Executor) -> String {
     )
 }
 
-fn answer_as(exec: &mut Executor, id: &str, seen: &str) {
+fn answer_as(exec: &mut Executor, id: &str, seen: &str) -> Vec<EffectRequest> {
     exec.fire(
         &answer_transition(T),
         "a",
@@ -697,35 +708,52 @@ fn answer_as(exec: &mut Executor, id: &str, seen: &str) {
         ]),
         Duration::ZERO,
     )
-    .unwrap_or_else(|e| panic!("answer {id} refused: {e:?}"));
+    .unwrap_or_else(|e| panic!("answer {id} refused: {e:?}"))
+    .requests
 }
 
 /// Subject `a` asked for `AcceptRemoval` lowered from `d`.
 fn asking(d: &TransitionDescriptor) -> Executor {
-    let mut exec =
-        Executor::new(lower(base_net(), d, Some(parts())).expect("lowers")).expect("loads");
-    exec.write(
-        "Refused",
-        "a",
-        Content::from([("why".to_owned(), text("0"))]),
-    );
-    exec.write("Base", "a", counter(0));
-    exec.write("OnDisk", "a", counter(0));
+    let mut exec = Executor::new(lowered(d)).expect("loads");
+    assert!(situation(&mut exec).is_empty(), "no answer, so no work");
     exec
+}
+
+/// Writes the situation of subject `a`; returns the work requests of the
+/// last write.
+fn situation(exec: &mut Executor) -> Vec<EffectRequest> {
+    let mut requests = Vec::new();
+    for (place, content) in [
+        ("Refused", Content::from([("why".to_owned(), text("0"))])),
+        ("Base", counter(0)),
+        ("OnDisk", counter(0)),
+    ] {
+        requests = exec
+            .write(place, "a", content, Duration::ZERO)
+            .expect("quiesces")
+            .requests;
+    }
+    requests
 }
 
 /// Answers `id` on the current ask and returns the one work request.
 fn answer_and_start(exec: &mut Executor, id: &str) -> EffectRequest {
     let seen = asked(exec);
-    answer_as(exec, id, &seen);
-    let [req] = <[_; 1]>::try_from(exec.step(Duration::ZERO).expect("steps"))
+    let [req] = <[_; 1]>::try_from(answer_as(exec, id, &seen))
         .unwrap_or_else(|reqs| panic!("the work fires once on answer {id}: {reqs:?}"));
     req
 }
 
-fn work_answers(exec: &mut Executor) -> Vec<String> {
-    exec.step(Duration::ZERO)
-        .expect("steps")
+/// `OnDisk` of `a` changes; no work starts.
+fn on_disk_changes(exec: &mut Executor) {
+    let q = exec
+        .write("OnDisk", "a", counter(1), Duration::ZERO)
+        .expect("quiesces");
+    assert!(q.requests.is_empty(), "{:?}", q.requests);
+}
+
+fn work_answers(requests: &[EffectRequest]) -> Vec<String> {
+    requests
         .iter()
         .map(|r| get(&r.input, ANSWER_ID_KEY))
         .collect()
@@ -737,25 +765,31 @@ fn work_answers(exec: &mut Executor) -> Vec<String> {
 fn a_dropped_failure_swallows_no_later_answer() {
     let mut exec = asking(&descriptor());
     let req = answer_and_start(&mut exec, "1");
-    exec.complete(
-        req.attempt,
-        EffectResult::Unknown(Cause::definite("lost")),
-        Duration::ZERO,
-    )
-    .expect("the attempt is known");
-    exec.resolve(&req.occurrence, Resolution::Drop, Duration::ZERO)
+    let lost = exec
+        .complete(
+            req.attempt,
+            EffectResult::Unknown(Cause::definite("lost")),
+            Duration::ZERO,
+        )
+        .expect("the attempt is known");
+    assert!(lost.requests.is_empty());
+    let dropped = exec
+        .resolve(&req.occurrence, Resolution::Drop, Duration::ZERO)
         .expect("parked");
-    assert!(exec.step(Duration::ZERO).expect("steps").is_empty());
+    assert!(dropped.requests.is_empty());
 
-    exec.write(
-        "Refused",
-        "a",
-        Content::from([("why".to_owned(), text("0"))]),
-    );
+    let reappeared = exec
+        .write(
+            "Refused",
+            "a",
+            Content::from([("why".to_owned(), text("0"))]),
+            Duration::ZERO,
+        )
+        .expect("quiesces");
+    assert!(reappeared.requests.is_empty());
     let stale = asked(&exec);
-    exec.write("OnDisk", "a", counter(1));
-    answer_as(&mut exec, "2", &stale);
-    assert!(exec.step(Duration::ZERO).expect("steps").is_empty());
+    on_disk_changes(&mut exec);
+    assert!(answer_as(&mut exec, "2", &stale).is_empty());
     assert!(
         exec.tokens().token(&expired_place(T), "2").is_some(),
         "WorkFailed of the dropped answer 1 swallowed the stale answer 2: no Expired; WorkFailed: {:?}",
@@ -763,9 +797,8 @@ fn a_dropped_failure_swallows_no_later_answer() {
     );
 
     let fresh = asked(&exec);
-    answer_as(&mut exec, "3", &fresh);
     assert_eq!(
-        work_answers(&mut exec),
+        work_answers(&answer_as(&mut exec, "3", &fresh)),
         ["3"],
         "answer 3 did not reach the work"
     );
@@ -777,22 +810,22 @@ fn a_dropped_failure_swallows_no_later_answer() {
 fn a_failed_answer_does_not_expire() {
     let mut exec = asking(&descriptor());
     let req = answer_and_start(&mut exec, "1");
-    exec.complete(
-        req.attempt,
-        EffectResult::Failed(Cause::definite("disk full")),
-        Duration::ZERO,
-    )
-    .expect("the attempt is known");
-    exec.write("OnDisk", "a", counter(1));
-    assert!(exec.step(Duration::ZERO).expect("steps").is_empty());
+    let failed = exec
+        .complete(
+            req.attempt,
+            EffectResult::Failed(Cause::definite("disk full")),
+            Duration::ZERO,
+        )
+        .expect("the attempt is known");
+    assert!(failed.requests.is_empty());
+    on_disk_changes(&mut exec);
     assert!(
         exec.tokens().token(&expired_place(T), "1").is_none(),
         "the failed answer 1 expired instead of being released"
     );
     let fresh = asked(&exec);
-    answer_as(&mut exec, "2", &fresh);
     assert_eq!(
-        work_answers(&mut exec),
+        work_answers(&answer_as(&mut exec, "2", &fresh)),
         ["2"],
         "answer 2 did not reach the work"
     );
@@ -809,8 +842,10 @@ fn a_read_only_work_in_flight_hides_its_ask() {
         None,
         "the ask shows while answer 1 runs"
     );
-    exec.complete(req.attempt, EffectResult::Done(vec![]), Duration::ZERO)
+    let done = exec
+        .complete(req.attempt, EffectResult::Done(vec![]), Duration::ZERO)
         .expect("the attempt is known");
+    assert!(done.requests.is_empty());
     assert!(
         exec.derive(&asks_place(T), &Subject::new("a")).is_some(),
         "the ask returns once the run ends"
@@ -820,7 +855,6 @@ fn a_read_only_work_in_flight_hides_its_ask() {
 /// An answer that expires during a retry backoff leaves no busy token, but
 /// (T, s) is not idle while the retry is pending: the ask must stay hidden.
 #[test]
-#[ignore = "RetryPending is not a place yet; #192"]
 fn an_ask_hides_while_a_retry_is_pending() {
     let mut d = descriptor();
     d.timers.push(TimerDecl {
@@ -829,14 +863,15 @@ fn an_ask_hides_while_a_retry_is_pending() {
     });
     let mut exec = asking(&d);
     let req = answer_and_start(&mut exec, "1");
-    exec.complete(
-        req.attempt,
-        EffectResult::Failed(Cause::retryable("busy")),
-        Duration::ZERO,
-    )
-    .expect("the attempt is known");
-    exec.write("OnDisk", "a", counter(1));
-    assert!(exec.step(Duration::ZERO).expect("steps").is_empty());
+    let failed = exec
+        .complete(
+            req.attempt,
+            EffectResult::Failed(Cause::retryable("busy")),
+            Duration::ZERO,
+        )
+        .expect("the attempt is known");
+    assert!(failed.requests.is_empty());
+    on_disk_changes(&mut exec);
     assert!(
         exec.tokens().token(&expired_place(T), "1").is_some(),
         "answer 1 did not expire during the backoff"

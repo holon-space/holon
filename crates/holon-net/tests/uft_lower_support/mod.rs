@@ -262,7 +262,23 @@ impl ReferenceStateMachine for Ref {
         }
     }
 
+    /// Every executor call quiesces before it returns (#192): an op, then a
+    /// step.
     fn apply(mut m: Model, op: &Op) -> Model {
+        m.apply_op(op);
+        m.step();
+        m.next += 1;
+        for sj in &mut m.subj {
+            sj.seen_now();
+        }
+        m
+    }
+}
+
+impl Model {
+    /// The op alone, before the automatic transitions it causes.
+    pub fn apply_op(&mut self, op: &Op) {
+        let m = self;
         let tick = m.next;
         match *op {
             Op::ChangeBase(s) => {
@@ -294,16 +310,9 @@ impl ReferenceStateMachine for Ref {
                     });
                 }
             }
-            Op::Step => {
-                m.step();
-            }
+            Op::Step => {}
             Op::Complete { s, ok } => m.complete(s, ok),
             Op::Lost(s) => m.drop_lost(s),
         }
-        m.next += 1;
-        for sj in &mut m.subj {
-            sj.seen_now();
-        }
-        m
     }
 }

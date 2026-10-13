@@ -225,6 +225,11 @@ impl Reads for Reader<'_> {
 
     fn present(&mut self, place: &str, subject: &str) -> bool {
         let model = self.model;
+        if let Some(t) = place.strip_suffix(".Running")
+            && model.spec.transitions.iter().any(|d| d.name == t)
+        {
+            return model.running().contains_key(&key(t, subject));
+        }
         match model.place(place) {
             PlaceSpec::Derived(_) => model.derived(self, place, subject).is_some(),
             PlaceSpec::Stored { .. } => model.row(self.trace, place, subject).present,
@@ -375,6 +380,14 @@ impl Model {
                 .insert(live.occ.to_string());
         }
         running
+    }
+
+    /// `<T>.RetryPending`: the due time of each pending retry backoff.
+    pub fn retry_pending(&self) -> BTreeMap<Key, Duration> {
+        self.runs
+            .iter()
+            .filter_map(|(k, r)| Some((k.clone(), r.retry_due?)))
+            .collect()
     }
 
     pub fn unknown(&self) -> BTreeMap<String, Content> {
@@ -605,31 +618,10 @@ impl Model {
         self.derived(&mut reader, place, subject)
     }
 
-    /// `Asks.T` offers a subject only while `T` is idle for it (#167 idle
-    /// rule).
     fn derived(&self, reader: &mut Reader<'_>, place: &str, s: &str) -> Option<Content> {
         let PlaceSpec::Derived(b) = self.place(place) else {
             panic!("'{place}' is no derived place");
         };
-        let busy = self.spec.asks.keys().any(|w| {
-            let failed = &self.transition(w).on_failure;
-            asks_place(w) == place
-                && (self.content(&answered_place(w), s).is_some()
-                    || failed
-                        .as_ref()
-                        .is_some_and(|p| self.content(p, s).is_some())
-                    || self.in_flight.values().any(|l| {
-                        let o = &self.occs[&l.occ];
-                        o.transition == *w && o.subject == s
-                    })
-                    || self
-                        .runs
-                        .get(&key(w, s))
-                        .is_some_and(|r| r.retry_due.is_some()))
-        });
-        if busy {
-            return None;
-        }
         (b.model)(reader, &Subject::new(s))
     }
 
@@ -1213,6 +1205,8 @@ impl Model {
             self.put(&f.place, &f.subject, f.content);
         }
         let Some((place, subject)) = self.stale(&self.occs[occ].trace) else {
+            let run_key = self.run_key(occ);
+            self.marks.remove(&run_key);
             return self.commit(occ, rows);
         };
         let cause = Cause::definite(format!(
@@ -1267,6 +1261,10 @@ impl Model {
                 route,
             });
         }
+        let (run_key, seen) = (self.run_key(occ), self.occs[occ].trace.seen());
+        if self.marks.get(&run_key).is_some_and(|(s, _)| *s != seen) {
+            self.marks.remove(&run_key);
+        }
         self.commit(occ, kept);
         self.occ_mut(occ).settled = Some(Settled::OverChangedInputs { cause, routes });
     }
@@ -1302,7 +1300,6 @@ impl Model {
             self.deltas.insert(occ.clone(), delta);
         }
         let run_key = self.run_key(occ);
-        self.marks.remove(&run_key);
         self.runs.remove(&run_key);
         self.occ_mut(occ).settled = Some(Settled::Done);
     }

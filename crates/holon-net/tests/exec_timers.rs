@@ -13,12 +13,15 @@ use exec_support::Transition;
 use exec_support::bind;
 use exec_support::content;
 use exec_support::text;
+use holon_api::Value;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
 use holon_net::exec::EffectResult;
 use holon_net::exec::Output;
+use holon_net::exec::Place;
 use holon_net::exec::Receiver;
+use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
@@ -221,5 +224,39 @@ fn an_external_call_never_fires_a_due_timer() {
     assert!(
         d.exec().tokens().token("TimedOut", APP).is_some(),
         "step fires the due run timer"
+    );
+}
+
+/// A pending retry backoff is the one token of `<T>.RetryPending`, due at the
+/// retry; the place empties when the retry fires (#192).
+#[test]
+fn a_backoff_holds_one_retry_pending_token() {
+    let mut d = Driver::new(net());
+    d.write("Want", APP, content(&[("url", text("libsql://local"))]))
+        .expect("the net quiesces");
+    d.complete_oldest(|_| EffectResult::Failed(Cause::retryable("connection refused")))
+        .expect("the net quiesces");
+    let place = Place::retry_pending("MakeTursoReady");
+    let tokens = d.exec().tokens();
+    assert_eq!(
+        tokens.subjects(&place),
+        [Subject::new(APP)],
+        "one RetryPending token during the backoff"
+    );
+    assert_eq!(
+        tokens.token(&place, APP).expect("listed").content["due"],
+        Value::Integer(2_000_000_000),
+        "due when the backoff ends"
+    );
+    d.tick(2).expect("the net quiesces");
+    assert_eq!(
+        d.exec().tokens().subjects(&place),
+        Vec::<Subject>::new(),
+        "RetryPending empties when the retry fires"
+    );
+    assert_eq!(
+        d.requests_of("MakeTursoReady").count(),
+        2,
+        "the retry fired"
     );
 }

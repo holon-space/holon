@@ -96,6 +96,12 @@ impl Place {
     pub fn running(transition: &str) -> Self {
         Self::new(&format!("{transition}.Running"))
     }
+
+    /// `<T>.RetryPending`: a token while a retry backoff of `T` is pending;
+    /// its `due` field is the time the retry fires.
+    pub fn retry_pending(transition: &str) -> Self {
+        Self::new(&format!("{transition}.RetryPending"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -462,17 +468,18 @@ impl NetDef {
             }
         }
         for t in &self.transitions {
-            let running = t.running();
-            if self.places.contains_key(&running) {
-                return Err(LoadError::ReservedPlace(running));
+            for reserved in [t.running(), Place::retry_pending(&t.name)] {
+                if self.places.contains_key(&reserved) {
+                    return Err(LoadError::ReservedPlace(reserved));
+                }
+                self.places.insert(
+                    reserved,
+                    PlaceDef {
+                        class: Class::Process,
+                        kind: PlaceKind::Stored { candidate: None },
+                    },
+                );
             }
-            self.places.insert(
-                running,
-                PlaceDef {
-                    class: Class::Process,
-                    kind: PlaceKind::Stored { candidate: None },
-                },
-            );
         }
         let unknown = Place::new(OUTCOME_UNKNOWN);
         if self.places.contains_key(&unknown) {
@@ -736,7 +743,6 @@ fn fields_value(fields: &BTreeMap<String, Option<Value>>) -> Value {
 pub struct Reader<'a> {
     net: &'a NetDef,
     tokens: &'a Tokens,
-    runs: &'a BTreeMap<(Arc<str>, Subject), Run>,
     trace: &'a mut Trace,
     /// The [`ANSWER_INPUT_KEY`] of an `Answered` token reads as absent.
     hide_value: bool,
@@ -774,29 +780,10 @@ impl Reader<'_> {
         }
     }
 
-    /// The row of the derived `place`. `Asks.T` offers a subject only while
-    /// `T` is idle for it: no `Answered.T`, no work in flight or waiting for
-    /// a retry, no token on the failure port of `T` (#167 idle rule).
     fn derived(&mut self, place: &str, s: &Subject) -> Option<Content> {
         let PlaceKind::Derived(derive) = &self.net.place_def(place).kind else {
             panic!("'{place}' is no derived place");
         };
-        let busy = self.net.asks.keys().any(|w| {
-            let failed = &self.net.transition_def(w).on_failure;
-            asks_place(w) == place
-                && (self.tokens.token(&answered_place(w), s).is_some()
-                    || self.tokens.token(&Place::running(w), s).is_some()
-                    || self
-                        .runs
-                        .get(&(w.clone(), s.clone()))
-                        .is_some_and(|r| r.retry_due.is_some())
-                    || failed
-                        .as_ref()
-                        .is_some_and(|p| self.tokens.token(p, s).is_some()))
-        });
-        if busy {
-            return None;
-        }
         derive(self, s)
     }
 
@@ -807,7 +794,6 @@ impl Reader<'_> {
         let r = f(&mut Reader {
             net: self.net,
             tokens: self.tokens,
-            runs: self.runs,
             trace: &mut sub,
             hide_value: self.hide_value,
         });
@@ -1100,7 +1086,6 @@ fn outcome(attempts: &BTreeMap<AttemptId, Seen>) -> Outcome {
 struct Run {
     started: Duration,
     attempts: u32,
-    retry_due: Option<Duration>,
 }
 
 /// A condition the net discloses for a subject (NET-rev1 termination):
@@ -1913,11 +1898,7 @@ impl Executor {
         if self.tokens.token(&t.running(), s).is_some() {
             return Err(WhyNot::InFlight);
         }
-        if let Some(due) = self
-            .runs
-            .get(&(t.name.clone(), s.clone()))
-            .and_then(|r| r.retry_due)
-        {
+        if let Some(due) = self.retry_due(&t.name, s) {
             return Err(WhyNot::RetryPending { due });
         }
         let present = |p: &Place| self.tokens.token(p, s).is_some();
@@ -1979,7 +1960,6 @@ impl Executor {
         Reader {
             net: &self.net,
             tokens: &self.tokens,
-            runs: &self.runs,
             trace,
             hide_value: !self.twin(Twin::ValueBeforeBind),
         }
@@ -2023,7 +2003,6 @@ impl Executor {
             .or_insert(Run {
                 started: now,
                 attempts: 0,
-                retry_due: None,
             })
             .attempts += 1;
         self.occurrences.insert(occurrence.clone(), None);
@@ -2039,6 +2018,32 @@ impl Executor {
         };
         self.occupy_running(&a);
         self.insert_attempt(a)
+    }
+
+    fn retry_due(&self, transition: &str, subject: &Subject) -> Option<Duration> {
+        let token = self
+            .tokens
+            .token(&Place::retry_pending(transition), subject)?;
+        let Some(Value::Integer(nanos)) = token.content.get("due") else {
+            panic!("'{transition}.RetryPending' of {subject} has no integer due");
+        };
+        Some(Duration::from_nanos(
+            u64::try_from(*nanos).expect("a due time is not negative"),
+        ))
+    }
+
+    fn set_retry_due(&mut self, key: &(Arc<str>, Subject), due: Option<Duration>) {
+        let content = due.map(|due| {
+            let nanos = i64::try_from(due.as_nanos()).expect("a due time fits i64 nanoseconds");
+            Content::from([("due".to_string(), Value::Integer(nanos))])
+        });
+        self.tokens
+            .mark_slot(&Place::retry_pending(&key.0), &key.1, content);
+    }
+
+    fn end_run(&mut self, key: &(Arc<str>, Subject)) {
+        self.runs.remove(key);
+        self.set_retry_due(key, None);
     }
 
     fn occupy_running(&mut self, a: &Attempt) {
@@ -2131,7 +2136,8 @@ impl Executor {
 
     /// The record never clobbers: facts commit, rows compare-and-set against
     /// the read trace (NET-fire.a). A stale effect happened, so each row goes
-    /// to its place's candidate, applies on a data-class place, or is withheld.
+    /// to its place's candidate, applies on a data-class place, or is withheld,
+    /// and a mark on its input stays: the effect never runs twice on it.
     fn record(&mut self, a: Attempt, outputs: Vec<Output>, now: Duration) {
         let t = self.net.transition_def(&a.transition);
         let pure = matches!(t.body, Body::Pure(_));
@@ -2142,6 +2148,8 @@ impl Executor {
             self.tokens.put(&f.place, &f.subject, f.content);
         }
         let Some((place, subject)) = self.stale(&a.trace) else {
+            self.marks
+                .remove(&(a.transition.clone(), a.subject.clone()));
             return self.commit(a, rows);
         };
         let cause = Cause::definite(format!(
@@ -2196,6 +2204,14 @@ impl Executor {
         {
             return self.fail(a, cause, now);
         }
+        let run_key = (a.transition.clone(), a.subject.clone());
+        if self
+            .marks
+            .get(&run_key)
+            .is_some_and(|m| m.key != self.key(&a.trace))
+        {
+            self.marks.remove(&run_key);
+        }
         let occurrence = a.occurrence.clone();
         self.commit(a, kept);
         self.occurrences.insert(
@@ -2245,9 +2261,7 @@ impl Executor {
             self.deltas.insert(a.occurrence.clone(), delta);
         }
         self.release_running(&a.transition, &a.subject);
-        let key = (a.transition.clone(), a.subject.clone());
-        self.marks.remove(&key);
-        self.runs.remove(&key);
+        self.end_run(&(a.transition.clone(), a.subject.clone()));
         self.occurrences.insert(a.occurrence, Some(Settled::Done));
     }
 
@@ -2310,20 +2324,21 @@ impl Executor {
         now: Duration,
     ) {
         let t = self.net.transition_def(transition);
+        let (retry, on_failure) = (t.retry, t.on_failure.clone());
         let key = (transition.clone(), subject.clone());
         let unbounded = self.twin(Twin::NoCountBound);
-        let Some(run) = self.runs.get_mut(&key) else {
+        let Some(run) = self.runs.get(&key) else {
             return;
         };
         if cause.retryable
-            && let Some(retry) = t.retry
+            && let Some(retry) = retry
             && (unbounded || run.attempts < retry.max_attempts)
         {
-            run.retry_due = Some(now + retry.backoff);
+            self.set_retry_due(&key, Some(now + retry.backoff));
             return;
         }
-        self.runs.remove(&key);
-        if let Some(port) = t.on_failure.clone() {
+        self.end_run(&key);
+        if let Some(port) = on_failure {
             self.tokens.put(&port, subject, cause_content(cause));
         }
     }
@@ -2386,13 +2401,13 @@ impl Executor {
             let (on_timeout, run_timer) = (t.on_timeout.clone(), t.run_timer);
             let run = &self.runs[&key];
             if run_timer.is_some_and(|d| run.started + d <= now) {
-                self.runs.remove(&key);
+                self.end_run(&key);
                 if let Some(port) = on_timeout {
                     let cause = Cause::definite(format!("run timer of '{}' expired", key.0));
                     self.tokens.put(&port, &key.1, cause_content(&cause));
                 }
-            } else if run.retry_due.is_some_and(|due| due <= now) {
-                self.runs.get_mut(&key).expect("listed above").retry_due = None;
+            } else if self.retry_due(&key.0, &key.1).is_some_and(|due| due <= now) {
+                self.set_retry_due(&key, None);
                 self.marks.remove(&key);
             }
         }
