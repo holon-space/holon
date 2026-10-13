@@ -8,20 +8,34 @@
 mod exec_support;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use exec_support::Driver;
+use exec_support::Transition;
 use exec_support::answer_call;
 use exec_support::answer_spec;
+use exec_support::bind;
 use exec_support::content;
 use exec_support::int;
 use exec_support::text;
 use holon_api::Value;
+use holon_api::user_transition::SubjectName;
+use holon_api::user_transition::TransitionName;
+use holon_api::user_transition::UftError;
+use holon_net::exec::Body;
 use holon_net::exec::Cause;
+use holon_net::exec::Class;
+use holon_net::exec::Condition;
+use holon_net::exec::Content;
 use holon_net::exec::EffectResult;
+use holon_net::exec::MAX_ROUNDS;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
-use holon_net::exec::WhyNot;
+use holon_net::exec::Place;
+use holon_net::exec::Subject;
+use holon_net::exec::Trigger;
 use holon_net::exec::answer_transition;
+use holon_net::exec::answered_place;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
@@ -94,22 +108,30 @@ struct Sut {
     values: BTreeMap<String, Value>,
 }
 
-/// An offered ask has its Answer enabled, or its answer waits for a running
-/// work: an external call returns only after the auto transitions it caused,
-/// so no answer waits for a `step` (D151.a, #192).
+/// An ask for (T, s) is offered only while (T, s) is idle: no `Answered.T`,
+/// no work in flight, no `WorkFailed.T` (`answer_spec` has no retry). An
+/// offered ask has its Answer enabled: an external call returns only after
+/// the auto transitions it caused, so no answer waits for a `step` (D151.a,
+/// #167 idle rule, #192).
 fn offered_asks_have_their_answer_enabled(d: &Driver, op: &str) {
     for row in d.exec().asks() {
         let (work, s) = (&row.transition.0, &row.subject.0);
+        let tokens = d.exec().tokens();
+        for busy in [
+            answered_place(work),
+            Place::running(work).to_string(),
+            format!("WorkFailed.{work}"),
+        ] {
+            assert!(
+                tokens.token(&busy, s).is_none(),
+                "ask of '{work}' offered for {s} while {busy} holds, after {op}"
+            );
+        }
         let answer = answer_transition(work);
         let why = d.exec().why_not(&answer, s);
-        let work_why = d.exec().why_not(work, s);
         assert!(
-            why.is_none()
-                || matches!(
-                    work_why,
-                    Some(WhyNot::InFlight | WhyNot::RetryPending { .. })
-                ),
-            "ask offered but its Answer is not enabled: '{answer}' for {s} after {op}: {why:?}, work: {work_why:?}"
+            why.is_none(),
+            "ask offered but its Answer is not enabled: '{answer}' for {s} after {op}: {why:?}"
         );
     }
 }
@@ -263,4 +285,128 @@ fn answer_fail_reanswer_done_undo() {
     d.undo(&OccurrenceId::caller("a1"))
         .expect("a done answer undoes");
     assert_eq!(d.requests_of("Accept").count(), 2);
+}
+
+/// The PBT trace that offered an ask while the work of its subject ran: the
+/// ask of `y` comes back only when the work of `a1` settles.
+#[test]
+fn no_ask_is_offered_while_its_work_runs() {
+    let mut d = Driver::new(answer_spec());
+    let item = || content(&[("n", Value::Integer(0))]);
+    d.write("Item", "y", item()).expect("the net quiesces");
+    let c = answer_call(&d, "y", "a1", false, None);
+    d.answer(c).expect("the ask applies");
+    d.write("Item", "y", item()).expect("the net quiesces");
+    assert_eq!(d.exec().asks(), Vec::new(), "an ask of y while a1 works");
+    let c = answer_call(&d, "y", "a0", false, None);
+    assert_eq!(d.answer(c), Err(UftError::NoLongerApplies));
+    d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
+        .expect("the net quiesces");
+    offered_asks_have_their_answer_enabled(&d, "the failure of a1");
+    assert_eq!(d.exec().asks().len(), 1, "the ask of y is back");
+}
+
+/// `answer_spec` whose work also reads the absent `Gate`, and whose auto
+/// `Loop` fires on every round while an answer waits: no answer quiesces.
+fn spinning() -> Driver {
+    let mut spec = answer_spec()
+        .place("Gate", Class::Process)
+        .place("Spin", Class::Process)
+        .transition(
+            Transition::new(
+                "Loop",
+                Trigger::Auto,
+                bind!(|r, s| r.present("Answered.Accept", s).then(Content::new)),
+                Body::pure(|s, input| Ok(vec![Output::new("Spin", s, input.clone())])),
+            )
+            .reads("Answered.Accept"),
+        );
+    spec.transitions
+        .iter_mut()
+        .find(|t| t.name == "Accept")
+        .expect("answer_spec has the work Accept")
+        .reads
+        .push("Gate".to_string());
+    let mut d = Driver::new(spec);
+    d.write("Item", "x", content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
+    d
+}
+
+/// NET-rev1 termination: an answer that never quiesces is a typed error to
+/// the caller, never a panic.
+#[test]
+fn an_answer_that_never_quiesces_is_a_typed_error() {
+    let mut d = spinning();
+    let c = answer_call(&d, "x", "a0", false, None);
+    assert_eq!(
+        d.answer(c),
+        Err(UftError::NoQuiescence {
+            transition: TransitionName("Accept".to_string()),
+            subject: SubjectName("x".to_string()),
+            steps: MAX_ROUNDS,
+        })
+    );
+    assert_eq!(
+        d.exec().conditions(),
+        [Condition::NoQuiescence {
+            work: Arc::from("Accept"),
+            subject: Subject::new("x"),
+            steps: MAX_ROUNDS,
+        }],
+        "the subject discloses the condition"
+    );
+}
+
+/// `answer_spec` whose work also reads the absent `Gate`, so an answer stays
+/// pending in `Answered.Accept`.
+fn gated() -> Driver {
+    let mut spec = answer_spec().place("Gate", Class::Process);
+    spec.transitions
+        .iter_mut()
+        .find(|t| t.name == "Accept")
+        .expect("answer_spec has the work Accept")
+        .reads
+        .push("Gate".to_string());
+    let mut d = Driver::new(spec);
+    d.write("Item", "x", content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
+    d
+}
+
+/// A pending answer makes its subject busy: no ask until the work takes it.
+#[test]
+fn no_ask_is_offered_while_an_answer_is_pending() {
+    let mut d = gated();
+    let c = answer_call(&d, "x", "a0", false, None);
+    d.answer(c).expect("the ask applies");
+    assert!(d.exec().tokens().token("Answered.Accept", "x").is_some());
+    offered_asks_have_their_answer_enabled(&d, "the answer a0");
+    d.write("Gate", "x", Content::new())
+        .expect("the net quiesces");
+    assert!(d.exec().tokens().token("Answered.Accept", "x").is_none());
+}
+
+/// A failed work makes its subject busy until `ReleaseFailed.Accept` clears
+/// it; here a `Hold` keeps it from firing.
+#[test]
+fn no_ask_is_offered_while_its_work_failed() {
+    let mut spec = answer_spec().place("Hold", Class::Process);
+    spec.transitions
+        .iter_mut()
+        .find(|t| t.name == "ReleaseFailed.Accept")
+        .expect("answer_spec releases failed answers")
+        .inhibits
+        .push("Hold".to_string());
+    let mut d = Driver::new(spec);
+    d.write("Hold", "x", Content::new())
+        .expect("the net quiesces");
+    d.write("Item", "x", content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
+    let c = answer_call(&d, "x", "a0", false, None);
+    d.answer(c).expect("the ask applies");
+    d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
+        .expect("the net quiesces");
+    assert!(d.exec().tokens().token("WorkFailed.Accept", "x").is_some());
+    offered_asks_have_their_answer_enabled(&d, "the failure of a0");
 }

@@ -31,6 +31,7 @@ use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
 use holon_net::exec::Completion;
+use holon_net::exec::Condition;
 use holon_net::exec::Content;
 use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
@@ -190,6 +191,7 @@ pub struct Model {
     /// Answer id → (work, subject).
     answers: BTreeMap<String, (String, String)>,
     undone: BTreeSet<String>,
+    conditions: Vec<Condition>,
     /// Per work occurrence: the content before its commit and the version
     /// after it.
     deltas: BTreeMap<OccurrenceId, BTreeMap<Key, (Option<Content>, u64)>>,
@@ -204,7 +206,7 @@ impl Reads for Reader<'_> {
     fn field(&mut self, place: &str, subject: &str, field: &str) -> Option<Value> {
         let model = self.model;
         match model.place(place) {
-            PlaceSpec::Derived(b) => (b.model)(self, &Subject::new(subject))?.remove(field),
+            PlaceSpec::Derived(_) => model.derived(self, place, subject)?.remove(field),
             PlaceSpec::Stored { .. } if field == ANSWER_INPUT_KEY && model.is_answered(place) => {
                 None
             }
@@ -224,7 +226,7 @@ impl Reads for Reader<'_> {
     fn present(&mut self, place: &str, subject: &str) -> bool {
         let model = self.model;
         match model.place(place) {
-            PlaceSpec::Derived(b) => (b.model)(self, &Subject::new(subject)).is_some(),
+            PlaceSpec::Derived(_) => model.derived(self, place, subject).is_some(),
             PlaceSpec::Stored { .. } => model.row(self.trace, place, subject).present,
         }
     }
@@ -258,6 +260,7 @@ impl Model {
             next_minted: 0,
             answers: BTreeMap::new(),
             undone: BTreeSet::new(),
+            conditions: Vec::new(),
             deltas: BTreeMap::new(),
         }
     }
@@ -508,8 +511,31 @@ impl Model {
                 why: WhyNot::Guard | WhyNot::Needs { .. },
                 ..
             }) => Err(UftError::NoLongerApplies),
-            Err(e) => panic!("the Answer of '{work}' cannot fail with: {e}"),
+            Err(FireError::NoQuiescence(steps)) => {
+                self.conditions.push(Condition::NoQuiescence {
+                    work: Arc::from(work.as_str()),
+                    subject: Subject::new(&call.subject.0),
+                    steps,
+                });
+                Err(UftError::NoQuiescence {
+                    transition: call.transition,
+                    subject: call.subject,
+                    steps,
+                })
+            }
+            Err(
+                e @ (FireError::NotManual(_)
+                | FireError::NotEnabled {
+                    why:
+                        WhyNot::InFlight | WhyNot::RetryPending { .. } | WhyNot::FailedOnThisInput(_),
+                    ..
+                }),
+            ) => unreachable!("'{work}' has a manual pure Answer: {e}"),
         }
+    }
+
+    pub fn conditions(&self) -> &[Condition] {
+        &self.conditions
     }
 
     pub fn answer_settlement(&self, answer: &AnswerId) -> Result<AnswerSettlement, UftError> {
@@ -571,15 +597,40 @@ impl Model {
     }
 
     pub fn derive(&self, place: &str, subject: &str) -> Option<Content> {
-        let PlaceSpec::Derived(b) = self.place(place) else {
-            panic!("'{place}' is no derived place");
-        };
         let mut trace = Trace::default();
         let mut reader = Reader {
             model: self,
             trace: &mut trace,
         };
-        (b.model)(&mut reader, &Subject::new(subject))
+        self.derived(&mut reader, place, subject)
+    }
+
+    /// `Asks.T` offers a subject only while `T` is idle for it (#167 idle
+    /// rule).
+    fn derived(&self, reader: &mut Reader<'_>, place: &str, s: &str) -> Option<Content> {
+        let PlaceSpec::Derived(b) = self.place(place) else {
+            panic!("'{place}' is no derived place");
+        };
+        let busy = self.spec.asks.keys().any(|w| {
+            let failed = &self.transition(w).on_failure;
+            asks_place(w) == place
+                && (self.content(&answered_place(w), s).is_some()
+                    || failed
+                        .as_ref()
+                        .is_some_and(|p| self.content(p, s).is_some())
+                    || self.in_flight.values().any(|l| {
+                        let o = &self.occs[&l.occ];
+                        o.transition == *w && o.subject == s
+                    })
+                    || self
+                        .runs
+                        .get(&key(w, s))
+                        .is_some_and(|r| r.retry_due.is_some()))
+        });
+        if busy {
+            return None;
+        }
+        (b.model)(reader, &Subject::new(s))
     }
 
     /// Every subject a stored place holds or a running attempt names.

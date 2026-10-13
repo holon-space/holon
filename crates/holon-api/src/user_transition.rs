@@ -335,6 +335,18 @@ pub enum UftError {
     UnknownAnswer(AnswerId),
     #[error("no user-facing transition '{}'", .0.0)]
     UnknownTransition(TransitionName),
+    /// The answer applied, but the automatic transitions it caused were
+    /// still enabled after `steps` rounds; the net discloses a condition.
+    #[error(
+        "the answer of '{}' for '{}' did not quiesce after {steps} rounds",
+        transition.0,
+        subject.0
+    )]
+    NoQuiescence {
+        transition: TransitionName,
+        subject: SubjectName,
+        steps: usize,
+    },
     #[error(transparent)]
     NotImplemented(#[from] NotImplemented),
 }

@@ -736,6 +736,7 @@ fn fields_value(fields: &BTreeMap<String, Option<Value>>) -> Value {
 pub struct Reader<'a> {
     net: &'a NetDef,
     tokens: &'a Tokens,
+    runs: &'a BTreeMap<(Arc<str>, Subject), Run>,
     trace: &'a mut Trace,
     /// The [`ANSWER_INPUT_KEY`] of an `Answered` token reads as absent.
     hide_value: bool,
@@ -745,7 +746,7 @@ impl Reader<'_> {
     pub fn field(&mut self, place: &str, subject: &str, field: &str) -> Option<Value> {
         let net = self.net;
         match &net.place_def(place).kind {
-            PlaceKind::Derived(derive) => derive(self, &Subject::new(subject))?.remove(field),
+            PlaceKind::Derived(_) => self.derived(place, &Subject::new(subject))?.remove(field),
             PlaceKind::Stored { .. }
                 if self.hide_value && field == ANSWER_INPUT_KEY && net.is_answered(place) =>
             {
@@ -768,9 +769,35 @@ impl Reader<'_> {
     pub fn present(&mut self, place: &str, subject: &str) -> bool {
         let net = self.net;
         match &net.place_def(place).kind {
-            PlaceKind::Derived(derive) => derive(self, &Subject::new(subject)).is_some(),
+            PlaceKind::Derived(_) => self.derived(place, &Subject::new(subject)).is_some(),
             PlaceKind::Stored { .. } => self.trace.row(self.tokens, place, subject).present,
         }
+    }
+
+    /// The row of the derived `place`. `Asks.T` offers a subject only while
+    /// `T` is idle for it: no `Answered.T`, no work in flight or waiting for
+    /// a retry, no token on the failure port of `T` (#167 idle rule).
+    fn derived(&mut self, place: &str, s: &Subject) -> Option<Content> {
+        let PlaceKind::Derived(derive) = &self.net.place_def(place).kind else {
+            panic!("'{place}' is no derived place");
+        };
+        let busy = self.net.asks.keys().any(|w| {
+            let failed = &self.net.transition_def(w).on_failure;
+            asks_place(w) == place
+                && (self.tokens.token(&answered_place(w), s).is_some()
+                    || self.tokens.token(&Place::running(w), s).is_some()
+                    || self
+                        .runs
+                        .get(&(w.clone(), s.clone()))
+                        .is_some_and(|r| r.retry_due.is_some())
+                    || failed
+                        .as_ref()
+                        .is_some_and(|p| self.tokens.token(p, s).is_some()))
+        });
+        if busy {
+            return None;
+        }
+        derive(self, s)
     }
 
     /// Runs `f` and returns, besides its result, the trace of what `f` read,
@@ -780,6 +807,7 @@ impl Reader<'_> {
         let r = f(&mut Reader {
             net: self.net,
             tokens: self.tokens,
+            runs: self.runs,
             trace: &mut sub,
             hide_value: self.hide_value,
         });
@@ -1075,6 +1103,19 @@ struct Run {
     retry_due: Option<Duration>,
 }
 
+/// A condition the net discloses for a subject (NET-rev1 termination):
+/// blocked and visible, never a panic.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Condition {
+    /// The answer of `work` for `subject` applied, but the automatic
+    /// transitions it caused were still enabled after `steps` rounds.
+    NoQuiescence {
+        work: Arc<str>,
+        subject: Subject,
+        steps: usize,
+    },
+}
+
 #[derive(Clone)]
 struct Attempt {
     occurrence: OccurrenceId,
@@ -1102,6 +1143,7 @@ pub struct Executor {
     answers: BTreeMap<Arc<str>, (Arc<str>, Subject)>,
     undone: BTreeSet<Arc<str>>,
     deltas: BTreeMap<OccurrenceId, Delta>,
+    conditions: Vec<Condition>,
     requests: Vec<EffectRequest>,
     now: Duration,
     next_attempt: u64,
@@ -1160,6 +1202,7 @@ impl Executor {
             answers: BTreeMap::new(),
             undone: BTreeSet::new(),
             deltas: BTreeMap::new(),
+            conditions: Vec::new(),
             requests: Vec::new(),
             now: Duration::ZERO,
             next_attempt: 0,
@@ -1290,8 +1333,31 @@ impl Executor {
                 why: WhyNot::Guard | WhyNot::Needs { .. },
                 ..
             }) => Err(UftError::NoLongerApplies),
-            Err(e) => panic!("the Answer of '{work}' cannot fail with: {e}"),
+            Err(FireError::NoQuiescence(steps)) => {
+                self.conditions.push(Condition::NoQuiescence {
+                    work: Arc::from(work),
+                    subject: Subject::new(&call.subject.0),
+                    steps,
+                });
+                Err(UftError::NoQuiescence {
+                    transition: call.transition,
+                    subject: call.subject,
+                    steps,
+                })
+            }
+            Err(
+                e @ (FireError::NotManual(_)
+                | FireError::NotEnabled {
+                    why:
+                        WhyNot::InFlight | WhyNot::RetryPending { .. } | WhyNot::FailedOnThisInput(_),
+                    ..
+                }),
+            ) => unreachable!("the load checks that '{work}' has a manual pure Answer: {e}"),
         }
+    }
+
+    pub fn conditions(&self) -> &[Condition] {
+        &self.conditions
     }
 
     /// The state of an answer for the UI and MCP (UFT-adopt.a).
@@ -1355,10 +1421,7 @@ impl Executor {
 
     /// Evaluates the derived `place` for one subject, outside any firing.
     pub fn derive(&self, place: &str, subject: &Subject) -> Option<Content> {
-        let PlaceKind::Derived(derive) = &self.net.place_def(place).kind else {
-            panic!("'{place}' is no derived place");
-        };
-        derive(&mut self.reader(&mut Trace::default()), subject)
+        self.reader(&mut Trace::default()).derived(place, subject)
     }
 
     /// Evaluates the derived `place` for every subject a stored place holds.
@@ -1916,6 +1979,7 @@ impl Executor {
         Reader {
             net: &self.net,
             tokens: &self.tokens,
+            runs: &self.runs,
             trace,
             hide_value: !self.twin(Twin::ValueBeforeBind),
         }

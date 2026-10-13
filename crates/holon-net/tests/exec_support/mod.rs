@@ -554,6 +554,11 @@ impl Driver {
                 "settled Done before the work ran: answer {id} after {op}: model {model:?}"
             );
         }
+        assert_eq!(
+            self.exec.conditions(),
+            self.model.conditions(),
+            "disclosed conditions after {op}"
+        );
     }
 
     fn check(&self, op: &str) {
@@ -722,8 +727,10 @@ pub fn subject(s: &str) -> Subject {
     Subject::new(s)
 }
 
-/// An ask net for the work `Accept` on `Item.n`. `Asks.Accept` holds while
-/// `n >= 0`; its hash covers the subject and `n`. The work writes the
+/// An ask net for the work `Accept` on `Item.n`. `Situation.Accept` holds
+/// while `n >= 0`; its hash covers the subject and `n`. `Asks.Accept` is the
+/// same row, offered only while `Accept` is idle for the subject, so the work
+/// and the expiry read the situation. The work writes the
 /// process place `Accepted` and the data place `Out` from its effect.
 /// `ExpireAnswer.Accept` expires an answer whose ask is gone or changed;
 /// `ReleaseFailed.Accept` clears a failed answer, so the user can answer
@@ -736,6 +743,7 @@ pub fn answer_spec() -> Spec {
         .place("Answered.Accept", Class::Process)
         .place("WorkFailed.Accept", Class::Process)
         .place("Expired.Accept", Class::Process)
+        .derived("Situation.Accept", bind!(ask_row))
         .derived("Asks.Accept", bind!(ask_row))
         .ask(
             "Accept",
@@ -770,7 +778,7 @@ pub fn answer_spec() -> Spec {
                     );
                     let n = item_n(r, s)?;
                     let seen = r.text("Answered.Accept", s, "seen")?;
-                    let hash = r.text("Asks.Accept", s, "hash")?;
+                    let hash = r.text("Situation.Accept", s, "hash")?;
                     (n >= 0 && seen == hash).then(|| content(&[("n", Value::Integer(n))]))
                 }),
                 Body::Effectful(Receiver::None),
@@ -789,7 +797,7 @@ pub fn answer_spec() -> Spec {
                         s,
                         holon_api::user_transition::ANSWER_ID_KEY,
                     )?;
-                    let reason = match r.text("Asks.Accept", s, "hash") {
+                    let reason = match r.text("Situation.Accept", s, "hash") {
                         None => "ask_gone",
                         Some(hash) if r.text("Answered.Accept", s, "seen")? != hash => {
                             "situation_changed"
