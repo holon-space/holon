@@ -1,16 +1,20 @@
-//! Stubs of the user-facing-transitions contract (#167) on the executor
-//! side. The shared types live in [`holon_api::user_transition`]; each stub
-//! returns [`NotImplemented`] naming the lane that fills it.
+//! The executor side of the user-facing-transitions contract (#167): the
+//! Rust half of a transition ([`NativeParts`]) and its lowering into a net
+//! ([`lower`]). The shared types live in [`holon_api::user_transition`].
 
 use std::sync::Arc;
 
-use holon_api::user_transition::Lane;
-use holon_api::user_transition::NotImplemented;
-use holon_api::user_transition::TransitionDescriptor;
+mod lower;
+
+pub use lower::Generated;
+pub use lower::LowerError;
+pub use lower::LowerTwin;
+pub use lower::lower;
+#[cfg(feature = "naive-twins")]
+pub use lower::lower_twin;
 
 use crate::exec::Cause;
 use crate::exec::Content;
-use crate::exec::NetDef;
 use crate::exec::Output;
 use crate::exec::Reader;
 use crate::exec::Receiver;
@@ -40,17 +44,4 @@ pub struct NativeParts {
     pub bind: BindFn,
     pub body: NativeBody,
     pub preview: Option<PreviewFn>,
-}
-
-/// Lowers one high-level transition into `net`: the work transition and, for
-/// a `manual` one, its `Asks`, `Answer` and `ExpireAnswer`. Lane L fills it.
-pub fn lower(
-    _: NetDef,
-    _: &TransitionDescriptor,
-    _: Option<NativeParts>,
-) -> Result<NetDef, NotImplemented> {
-    Err(NotImplemented {
-        lane: Lane::Lowering,
-        what: "uft::lower",
-    })
 }
