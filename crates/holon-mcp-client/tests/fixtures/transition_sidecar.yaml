@@ -18,7 +18,7 @@ transitions:
     manual: true
     take: [unfiled]
     input: { type_hint: "entity_id:project" }
-    effect: { tool: update_task, map: { project_id: input } }
+    effect: { tool: update_task, map: { project_id: input, source: { literal: sidecar } } }
   drop_task:
     manual: true
     irreversible: true

@@ -420,7 +420,7 @@ A sidecar may declare transitions. The loader (`transition_sidecar.rs`) reads
 each into the same `TransitionDescriptor` the `#[transition]` macro emits; the
 lowering generates the asking plumbing, so a sidecar never names `Asks`,
 `Answer` or `ExpireAnswer`. Every mistake is a load error that names the
-transition.
+transition. Transition names are unique: a key declared twice is a load error.
 
 ```yaml
 transitions:
@@ -428,7 +428,7 @@ transitions:
     manual: true                 # waits for an answer (an ask)
     take: [unfiled]              # also read: [...], inhibit: [...]
     input: { type_hint: "entity_id:project" }
-    effect: { tool: update_task, map: { project_id: input } }
+    effect: { tool: update_task, map: { project_id: input, source: { literal: sidecar } } }
     # irreversible: true         # required when the effect tool is `undo: { reversible: false }`
     # persist: true              # parsed; the lowering refuses it in increment 1
     # timers: [{ kind: retry, after: 30s, max_attempts: 3 }]   # kinds: retry, run, abandon, delay
@@ -439,8 +439,14 @@ transitions:
 - `input` is one of `{ type_hint: bool | string | number | entity_id:<entity> }`,
   `{ enum: { name, variants } }`, `{ newtype: <Type> }` or `{ place: <place> }`.
   It needs `manual: true`.
-- `effect.tool` is a key of `tools:` whose `effect:` writes. In `map`, only the
-  value `input` (the answer value) can be bound for now.
+- `entity_id:<entity>` names an entity type the system knows. Today the loader
+  resolves only this sidecar's own `entities:` keys (to their canonical
+  `EntityName`); another integration's type is refused with a typed
+  `NotImplemented` until a system-wide entity registry is reachable at load time.
+- `effect.tool` is a key of `tools:` whose `effect:` writes. The body is
+  `BodyDecl::Tool { tool, args }` with typed `ToolArg`s: a `map` value `input`
+  is the answer value (only when the transition declares `input:`), and
+  `{ literal: <value> }` is a literal. Token fields wait for #166.
 - `guard` (waits for #166) and `preview` are load errors for now.
 
 The top-level file is `IntegrationFileConfig`; the `entities` and `tools` maps

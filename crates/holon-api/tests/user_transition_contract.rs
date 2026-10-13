@@ -152,6 +152,18 @@ fn timer() -> impl Strategy<Value = TimerDecl> {
         })
 }
 
+fn tool_arg() -> impl Strategy<Value = ToolArg> {
+    prop_oneof![
+        Just(ToolArg::Answer),
+        name().prop_map(|t| ToolArg::Literal(s(&t))),
+        any::<i64>().prop_map(|n| ToolArg::Literal(Value::Integer(n))),
+        (name(), name()).prop_map(|(place, field)| ToolArg::TokenField {
+            place: PlaceName(place),
+            field,
+        }),
+    ]
+}
+
 fn descriptor() -> impl Strategy<Value = TransitionDescriptor> {
     let ask = prop::option::of(
         (type_hint(), prop::option::of(name()), any::<bool>()).prop_map(
@@ -168,6 +180,11 @@ fn descriptor() -> impl Strategy<Value = TransitionDescriptor> {
             effectful,
         }),
         name().prop_map(|e| BodyDecl::Expr(ExprSlot::new(e))),
+        (
+            name(),
+            prop::collection::btree_map(name(), tool_arg(), 0..3)
+        )
+            .prop_map(|(tool, args)| BodyDecl::Tool { tool, args }),
     ];
     (
         name(),

@@ -7,21 +7,26 @@ use std::collections::BTreeMap;
 use anyhow::Context;
 use anyhow::bail;
 use anyhow::ensure;
-use holon_api::EntityName;
+use holon_api::Value;
 use holon_api::render_types::TypeHint;
-use holon_api::user_transition::ANSWER_INPUT_KEY;
 use holon_api::user_transition::ArcKind;
 use holon_api::user_transition::AskDecl;
 use holon_api::user_transition::BodyDecl;
-use holon_api::user_transition::ExprSlot;
 use holon_api::user_transition::HlArc;
+use holon_api::user_transition::Lane;
+use holon_api::user_transition::NotImplemented;
 use holon_api::user_transition::PlaceName;
 use holon_api::user_transition::TimerDecl;
 use holon_api::user_transition::TimerKind;
+use holon_api::user_transition::ToolArg;
 use holon_api::user_transition::TransitionDescriptor;
 use holon_api::user_transition::TransitionName;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
+use serde::de::Error as _;
+use serde::de::MapAccess;
+use serde::de::Visitor;
 
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::SyncInterval;
@@ -83,9 +88,23 @@ pub struct EnumSpec {
 #[serde(deny_unknown_fields)]
 pub struct EffectSpec {
     pub tool: String,
-    /// Tool argument → bound value. `input` is the answer value.
+    /// Tool argument → its value.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub map: BTreeMap<String, String>,
+    pub map: BTreeMap<String, ArgSpec>,
+}
+
+/// One `effect.map` value: `input` (the answer value) or `{ literal: v }`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ArgSpec {
+    Bound(String),
+    Literal(LiteralSpec),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiteralSpec {
+    pub literal: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -108,6 +127,35 @@ pub enum TimerKindSpec {
 
 /// The value a sidecar writes in `effect.map` for the answer value.
 const MAP_INPUT: &str = "input";
+
+/// Deserializes `transitions:`, refusing a name declared twice (a plain map
+/// keeps the last one silently).
+pub(crate) fn unique_transitions<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, TransitionSpec>, D::Error> {
+    struct Unique;
+    impl<'de> Visitor<'de> for Unique {
+        type Value = BTreeMap<String, TransitionSpec>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of transition names to transitions")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut transitions = BTreeMap::new();
+            while let Some((name, spec)) = map.next_entry::<String, TransitionSpec>()? {
+                if transitions.contains_key(&name) {
+                    return Err(A::Error::custom(format!(
+                        "transition `{name}` is declared twice"
+                    )));
+                }
+                transitions.insert(name, spec);
+            }
+            Ok(transitions)
+        }
+    }
+    deserializer.deserialize_map(Unique)
+}
 
 /// Reads the `transitions:` of a sidecar YAML into the HL-IR.
 pub fn transitions_from_sidecar(yaml: &str) -> anyhow::Result<Vec<TransitionDescriptor>> {
@@ -197,7 +245,7 @@ fn load_transition(
     Ok(TransitionDescriptor {
         name: TransitionName(name.to_owned()),
         arcs,
-        body: BodyDecl::Expr(tool_call(&spec.effect)?),
+        body: tool_call(&spec.effect, spec.input.is_some())?,
         irreversible: spec.irreversible,
         timers: spec
             .timers
@@ -225,7 +273,7 @@ fn input_type(sidecar: &McpSidecar, input: &InputSpec) -> anyhow::Result<TypeHin
             enum_: None,
             newtype: None,
             place: None,
-        } => parse_type_hint(hint)?,
+        } => parse_type_hint(sidecar, hint)?,
         InputSpec {
             type_hint: None,
             enum_: Some(EnumSpec { name, variants }),
@@ -260,16 +308,26 @@ fn input_type(sidecar: &McpSidecar, input: &InputSpec) -> anyhow::Result<TypeHin
 
 /// The `type_hint` grammar of `param_overrides`, minus its default to
 /// `String`: an answer type the loader cannot read is a load error.
-fn parse_type_hint(hint: &str) -> anyhow::Result<TypeHint> {
+fn parse_type_hint(sidecar: &McpSidecar, hint: &str) -> anyhow::Result<TypeHint> {
     Ok(match hint {
         "bool" | "boolean" => TypeHint::Bool,
         "string" | "str" => TypeHint::String,
         "number" | "integer" | "int" | "i64" | "i32" => TypeHint::Number,
         _ => match hint.strip_prefix("entity_id:") {
             Some("") => bail!("type hint `{hint}` names no entity"),
-            Some(entity) => TypeHint::EntityId {
-                entity_name: EntityName::new(entity),
+            Some(entity) if sidecar.entities.contains_key(entity) => TypeHint::EntityId {
+                entity_name: sidecar.prefixed_name(entity),
             },
+            Some(_) => {
+                return Err(anyhow::Error::new(NotImplemented {
+                    lane: Lane::Integration,
+                    what: "resolving an entity type of another integration (a system-wide entity \
+                           registry)",
+                })
+                .context(format!(
+                    "input type `{hint}` names no entity of this sidecar"
+                )));
+            }
             #[cfg(feature = "naive-twins")]
             None => TypeHint::String,
             #[cfg(not(feature = "naive-twins"))]
@@ -280,26 +338,37 @@ fn parse_type_hint(hint: &str) -> anyhow::Result<TypeHint> {
     })
 }
 
-/// The tool call as an expression slot: `tool(arg: value, …)`, arguments in
-/// name order, the answer value spelled [`ANSWER_INPUT_KEY`].
-fn tool_call(effect: &EffectSpec) -> anyhow::Result<ExprSlot> {
+/// `answers`: the transition has an answer value to bind.
+fn tool_call(effect: &EffectSpec, answers: bool) -> anyhow::Result<BodyDecl> {
     let args = effect
         .map
         .iter()
         .map(|(arg, value)| {
-            ensure!(
-                value == MAP_INPUT,
-                "effect argument `{arg}: {value}`: only `{MAP_INPUT}` (the answer value) can be \
-                 bound in increment 1; token fields come with #166"
-            );
-            Ok(format!("{arg}: {ANSWER_INPUT_KEY}"))
+            let value = match value {
+                ArgSpec::Bound(name) => {
+                    ensure!(
+                        name == MAP_INPUT,
+                        "effect argument `{arg}: {name}`: only `{MAP_INPUT}` (the answer value) \
+                         can be bound in increment 1; token fields come with #166"
+                    );
+                    ensure!(
+                        answers,
+                        "effect argument `{arg}` binds the answer value, but the transition asks \
+                         for no `input:`"
+                    );
+                    ToolArg::Answer
+                }
+                ArgSpec::Literal(LiteralSpec { literal }) => {
+                    ToolArg::Literal(Value::from_json_value(literal.clone()))
+                }
+            };
+            Ok((arg.clone(), value))
         })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(ExprSlot::new(format!(
-        "{}({})",
-        effect.tool,
-        args.join(", ")
-    )))
+        .collect::<anyhow::Result<_>>()?;
+    Ok(BodyDecl::Tool {
+        tool: effect.tool.clone(),
+        args,
+    })
 }
 
 fn timer(spec: &TimerSpec) -> anyhow::Result<TimerDecl> {

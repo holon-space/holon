@@ -307,7 +307,10 @@ pub struct IntegrationFileConfig {
     /// [`crate::mcp_sidecar::McpSidecar::views`]).
     #[serde(default)]
     pub views: Vec<crate::mcp_sidecar::ViewConfig>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::transition_sidecar::unique_transitions"
+    )]
     pub transitions: std::collections::BTreeMap<String, crate::transition_sidecar::TransitionSpec>,
 }
 

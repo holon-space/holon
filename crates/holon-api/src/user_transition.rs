@@ -11,6 +11,7 @@
 //! YAML loader, UI, MCP) already depends on `holon-api`, and the frontends do
 //! not depend on `holon-net`.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -110,8 +111,32 @@ pub enum ArcKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BodyDecl {
-    Native { symbol: NativeRef, effectful: bool },
+    Native {
+        symbol: NativeRef,
+        effectful: bool,
+    },
     Expr(ExprSlot),
+    /// A call of a sidecar tool, arguments by name.
+    Tool {
+        tool: String,
+        args: BTreeMap<String, ToolArg>,
+    },
+}
+
+/// The value a [`BodyDecl::Tool`] passes for one argument.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolArg {
+    /// The answer value of the ask; the lowered `Content` carries it under
+    /// [`ANSWER_INPUT_KEY`].
+    Answer,
+    Literal(Value),
+    /// A field of the token taken from `place`. No declaration binds one
+    /// until #166.
+    TokenField {
+        place: PlaceName,
+        field: String,
+    },
 }
 
 /// What a `manual` transition asks.

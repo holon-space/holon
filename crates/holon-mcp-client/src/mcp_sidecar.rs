@@ -53,7 +53,11 @@ pub struct McpSidecar {
     pub views: Vec<ViewConfig>,
     /// User-facing transitions (#167), loaded into the HL-IR by
     /// [`McpSidecar::transition_descriptors`].
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "crate::transition_sidecar::unique_transitions"
+    )]
     pub transitions: BTreeMap<String, crate::transition_sidecar::TransitionSpec>,
 }
 

@@ -1,9 +1,11 @@
 //! Sidecar `transitions:` load into the same HL-IR the `#[transition]` macro
 //! emits (#167), and a bad sidecar fails the load with a named error.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use holon_api::EntityName;
+use holon_api::Value;
 use holon_api::render_types::TypeHint;
 use holon_api::user_transition::*;
 use holon_mcp_client::McpSidecar;
@@ -38,8 +40,11 @@ fn arc(kind: ArcKind, place: &str) -> HlArc {
     }
 }
 
-fn call(text: &str) -> BodyDecl {
-    BodyDecl::Expr(ExprSlot::new(text))
+fn call(tool: &str, args: impl IntoIterator<Item = (String, ToolArg)>) -> BodyDecl {
+    BodyDecl::Tool {
+        tool: tool.into(),
+        args: args.into_iter().collect(),
+    }
 }
 
 /// Example 1 and 2 of the lane brief, built by hand as the macro would emit
@@ -50,7 +55,16 @@ fn sidecar_transitions_equal_the_hand_built_ir() {
         TransitionDescriptor {
             name: TransitionName("assign_project".into()),
             arcs: vec![arc(ArcKind::Take, "unfiled")],
-            body: call(&format!("update_task(project_id: {ANSWER_INPUT_KEY})")),
+            body: call(
+                "update_task",
+                [
+                    ("project_id".into(), ToolArg::Answer),
+                    (
+                        "source".into(),
+                        ToolArg::Literal(Value::String("sidecar".into())),
+                    ),
+                ],
+            ),
             irreversible: false,
             timers: vec![],
             guard: None,
@@ -65,7 +79,7 @@ fn sidecar_transitions_equal_the_hand_built_ir() {
         TransitionDescriptor {
             name: TransitionName("drop_task".into()),
             arcs: vec![arc(ArcKind::Take, "inbox"), arc(ArcKind::Read, "project")],
-            body: call("delete_task()"),
+            body: call("delete_task", []),
             irreversible: true,
             timers: vec![
                 TimerDecl {
@@ -89,6 +103,45 @@ fn sidecar_transitions_equal_the_hand_built_ir() {
 }
 
 #[test]
+fn a_duplicate_transition_key_is_a_load_error() {
+    let yaml = format!(
+        "{FIXTURE}  assign_project:\n    take: [inbox]\n    effect: {{ tool: update_task }}\n"
+    );
+    let error = format!(
+        "{:#}",
+        McpSidecar::from_yaml(&yaml).expect_err("a duplicate transition must not load")
+    );
+    assert!(
+        error.contains("transition `assign_project` is declared twice"),
+        "{error}"
+    );
+}
+
+fn answer_to_project() -> serde_json::Value {
+    json!({ "tool": "update_task", "map": { "project_id": "input" } })
+}
+
+/// A foreign entity type is refused, typed, until a system-wide entity
+/// registry is reachable at load time.
+#[test]
+fn a_foreign_entity_type_is_not_implemented_yet() {
+    let yaml = sidecar_with(json!({ "t": {
+        "manual": true,
+        "input": { "type_hint": "entity_id:todoist_project" },
+        "effect": { "tool": "update_task" },
+    }}));
+    let error = McpSidecar::from_yaml(&yaml).expect_err("a foreign entity type must not load");
+    assert_eq!(
+        error.downcast_ref::<NotImplemented>(),
+        Some(&NotImplemented {
+            lane: Lane::Integration,
+            what: "resolving an entity type of another integration (a system-wide entity registry)",
+        }),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn a_bad_sidecar_transition_is_a_named_load_error() {
     let ok = || json!({ "manual": true, "take": ["unfiled"], "effect": { "tool": "update_task" } });
     let with = |key: &str, value: serde_json::Value| {
@@ -100,6 +153,25 @@ fn a_bad_sidecar_transition_is_a_named_load_error() {
         (
             with("input", json!({ "type_hint": "entity_id:" })),
             "transition `t`: type hint `entity_id:` names no entity",
+        ),
+        (
+            with("input", json!({ "type_hint": "entity_id:todoist_project" })),
+            "transition `t`: input type `entity_id:todoist_project` names no entity of this \
+             sidecar: resolving an entity type of another integration",
+        ),
+        (
+            with("effect", answer_to_project()),
+            "transition `t`: effect argument `project_id` binds the answer value, but the \
+             transition asks for no `input:`",
+        ),
+        (
+            {
+                let mut t = with("manual", json!(false));
+                t["effect"] = answer_to_project();
+                t
+            },
+            "transition `t`: effect argument `project_id` binds the answer value, but the \
+             transition asks for no `input:`",
         ),
         (
             with("input", json!({ "type_hint": "colour" })),
@@ -135,10 +207,11 @@ fn a_bad_sidecar_transition_is_a_named_load_error() {
             "transition `t`: effect tool `delete_task` is irreversible",
         ),
         (
-            with(
-                "effect",
-                json!({ "tool": "update_task", "map": { "project_id": "subject" } }),
-            ),
+            {
+                let mut t = with("input", json!({ "type_hint": "bool" }));
+                t["effect"] = json!({ "tool": "update_task", "map": { "project_id": "subject" } });
+                t
+            },
             "transition `t`: effect argument `project_id: subject`",
         ),
         (
@@ -200,7 +273,7 @@ fn input() -> impl Strategy<Value = (serde_json::Value, TypeHint)> {
         Just((json!({ "type_hint": "bool" }), TypeHint::Bool)),
         Just((json!({ "type_hint": "string" }), TypeHint::String)),
         Just((json!({ "type_hint": "number" }), TypeHint::Number)),
-        "[a-z]{1,6}".prop_map(|e| (
+        place().prop_map(|e| (
             json!({ "type_hint": format!("entity_id:{e}") }),
             TypeHint::EntityId {
                 entity_name: EntityName::new(e)
@@ -250,6 +323,14 @@ fn timer() -> impl Strategy<Value = (serde_json::Value, TimerDecl)> {
     })
 }
 
+fn literal() -> impl Strategy<Value = serde_json::Value> {
+    prop_oneof![
+        "[a-z ]{0,6}".prop_map(|s| json!(s)),
+        any::<i64>().prop_map(|n| json!(n)),
+        any::<bool>().prop_map(|b| json!(b)),
+    ]
+}
+
 fn case() -> impl Strategy<Value = Case> {
     let arcs = (
         prop::collection::vec(place(), 0..3),
@@ -258,7 +339,7 @@ fn case() -> impl Strategy<Value = Case> {
     );
     let effect = (
         prop_oneof![Just(("update_task", false)), Just(("delete_task", true))],
-        prop::collection::btree_set("[a-z_]{1,8}", 0..3),
+        prop::collection::btree_map("[a-z_]{1,8}", prop::option::of(literal()), 0..3),
         any::<bool>(),
     );
     let ask = prop::option::of((prop::option::of(input()), any::<bool>()));
@@ -270,8 +351,27 @@ fn case() -> impl Strategy<Value = Case> {
         ask,
     )
         .prop_map(
-            |(name, (take, read, inhibit), ((tool, irreversible_tool), args, said), timers, ask)| {
+            |(
+                name,
+                (take, read, inhibit),
+                ((tool, irreversible_tool), args, said),
+                timers,
+                ask,
+            )| {
                 let irreversible = irreversible_tool || said;
+                let answers = matches!(ask, Some((Some(_), _)));
+                // `None` binds the answer value; without one it is a literal too.
+                let args: BTreeMap<String, serde_json::Value> = args
+                    .into_iter()
+                    .map(|(arg, literal)| {
+                        let value = match literal {
+                            None if answers => json!("input"),
+                            None => json!({ "literal": arg }),
+                            Some(literal) => json!({ "literal": literal }),
+                        };
+                        (arg, value)
+                    })
+                    .collect();
                 let mut yaml = json!({
                     "irreversible": irreversible,
                     "take": take,
@@ -279,7 +379,7 @@ fn case() -> impl Strategy<Value = Case> {
                     "inhibit": inhibit,
                     "effect": {
                         "tool": tool,
-                        "map": args.iter().map(|a| (a.clone(), json!("input"))).collect::<serde_json::Map<_, _>>(),
+                        "map": args,
                     },
                     "timers": timers.iter().map(|(y, _)| y.clone()).collect::<Vec<_>>(),
                 });
@@ -298,14 +398,17 @@ fn case() -> impl Strategy<Value = Case> {
                 .into_iter()
                 .flat_map(|(kind, places)| places.iter().map(move |p| arc(kind, p)))
                 .collect();
-                let args: Vec<String> = args
-                    .iter()
-                    .map(|a| format!("{a}: {ANSWER_INPUT_KEY}"))
-                    .collect();
+                let tool_args = args.iter().map(|(arg, value)| {
+                    let value = match value.get("literal") {
+                        Some(literal) => ToolArg::Literal(Value::from_json_value(literal.clone())),
+                        None => ToolArg::Answer,
+                    };
+                    (arg.clone(), value)
+                });
                 let ir = TransitionDescriptor {
                     name: TransitionName(name.clone()),
                     arcs,
-                    body: call(&format!("{tool}({})", args.join(", "))),
+                    body: call(tool, tool_args),
                     irreversible,
                     timers: timers.into_iter().map(|(_, t)| t).collect(),
                     guard: None,
