@@ -73,18 +73,11 @@ pub fn model_chord_click_focus<
 ) {
     use holon_pbt_core::capabilities::CapCursor;
     use holon_pbt_core::capabilities::CapRegion;
-    use holon_pbt_core::capabilities::commit_active_editor_if_dirty;
     if state.global_focused_block().as_ref() == Some(block_id)
         || state.active_editor_block().as_ref() == Some(block_id)
     {
         return;
     }
-    // Click-away BLURS the previously focused editor; in SqlOnly prod's
-    // on_blur commits its user-authored pending text. Dirty-gated: a clean
-    // mirror that merely diverged from block.content is stale against an
-    // external change and must NOT be committed (prod's editor would have
-    // been refreshed by the data subscription).
-    commit_active_editor_if_dirty(state);
     // A click mounts the editor on the block's SOURCE PROJECTION — vault
     // syntax, keyword included — so end-of-text is end of that surface.
     let content = state.editor_surface_text(block_id);

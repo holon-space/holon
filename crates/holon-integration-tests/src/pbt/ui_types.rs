@@ -30,14 +30,6 @@ pub struct ActiveEditor {
     pub in_memory_content: String,
     /// Byte offset of the caret within `in_memory_content`.
     pub cursor_byte: usize,
-    /// True once modeled typing/deleting touched `in_memory_content` since
-    /// the editor opened (or since the last commit). Mirrors what prod's
-    /// commit paths observe: a DIRTY editor's text is user-authored and
-    /// commits on blur / at a structural commit point; a clean editor whose
-    /// text merely diverged from `block.content` is STALE against an
-    /// external change (prod's data subscription refreshes idle editors) —
-    /// committing it would write old text into the ref.
-    pub dirty: bool,
 }
 
 impl ActiveEditor {
@@ -49,7 +41,6 @@ impl ActiveEditor {
         debug_assert!(self.cursor_byte <= self.in_memory_content.len());
         self.cursor_byte =
             editor_caret::insert_at(&mut self.in_memory_content, self.cursor_byte, text);
-        self.dirty = true;
     }
 
     /// Delete `count` chars before the cursor (Backspace ×count). Stops at
@@ -60,7 +51,6 @@ impl ActiveEditor {
         }
         self.cursor_byte =
             editor_caret::delete_back(&mut self.in_memory_content, self.cursor_byte, count);
-        self.dirty = true;
     }
 
     /// Move the caret to a clamped byte position. Snaps to the nearest char

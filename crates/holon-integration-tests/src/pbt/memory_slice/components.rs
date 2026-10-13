@@ -335,8 +335,8 @@ struct EditorCell {
     /// Caret position as a **byte** offset into `text`, matching production's
     /// `headless_editor_mirror.rs` cursor arithmetic.
     caret: usize,
-    /// Set by typing/deleting; cleared on commit. Mirrors
-    /// `RefEditorMirror::active_editor_dirty`.
+    /// Set by typing/deleting; cleared on commit. Local to this slice: the
+    /// composed reference has no pending-editor state (ADR 0012 §5.2).
     dirty: bool,
 }
 

@@ -27,7 +27,6 @@ use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutDriver;
 use holon_pbt_core::capabilities::SutLayout;
-use holon_pbt_core::capabilities::commit_active_editor_if_dirty;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
@@ -188,19 +187,11 @@ pub fn split_block_preconditions<R: RefBlockTree + RefEditorMirror + RefLifecycl
     let content = state.block_content(block_id);
     checks.push(check(content.is_some(), Reason::FocusedBlockMissing));
     checks.push(check(state.is_text_block(block_id), Reason::FocusedNotText));
-    // `apply` COMMITS the active editor's pending text BEFORE it splits, so the
-    // content column read here is not the surface the split will cut. Validate
-    // against the buffer instead when it is dirty on this block — the model's
-    // own rule that the editor buffer IS the block's source projection
-    // (`commit_active_editor_if_changed`). The commit can still shorten that
-    // buffer by a task keyword the source channel strips;
-    // `split_block_apply_to_ref` refuses the residual the way prod's
-    // `BlockOperations::split_block` does.
-    let pending = (state.active_editor_dirty()
-        && state.active_editor_block().as_ref() == Some(block_id))
-    .then(|| state.active_editor_text())
-    .flatten();
-    if let Some(text) = pending.or(content) {
+    // Every keystroke transition commits, so the content column read here IS
+    // the surface the split will cut — an open editor's buffer never narrows
+    // the position, and a buffer that diverges from it (the own-trailing-
+    // whitespace echo) is never committed.
+    if let Some(text) = content {
         checks.push(check(position <= text.len(), Reason::PreconditionFailed));
         // Positions are byte offsets that MUST sit on a char boundary: prod
         // positions come from an editor caret (always boundary-aligned), and
@@ -263,17 +254,6 @@ pub fn split_block_apply_to_ref<
     position: usize,
     state: &mut R,
 ) {
-    // Structural ops are commit points (docs/Architecture/UI.md). Two prod
-    // paths collapse here: (1) splitting the focused editor flushes its
-    // pending text before the split (`dispatch_structural_as_commit_point`);
-    // (2) the SUT pipeline's click-to-focus on a DIFFERENT block blurs the
-    // previously focused editor, and SqlOnly's on_blur commits its pending
-    // text. Both are dirty-gated: only user-authored text commits — a clean
-    // mirror that merely diverged from `block.content` is stale against an
-    // external change and must NOT be committed (prod's data subscription
-    // refreshes idle editors; an unconditional commit here produced the
-    // Full/Loro divergence of 2026-06-11).
-    commit_active_editor_if_dirty(state);
     // Prod REFUSES a position the post-commit content cannot carry:
     // `BlockOperations::split_block` returns Err on out-of-range and on a
     // mid-codepoint byte, leaving the tree untouched (crates/holon-core/src/
@@ -394,49 +374,12 @@ mod tests {
         (id, stored)
     }
 
-    /// HALF 1. `apply` COMMITS the active editor's pending text before it
-    /// splits, so a position validated against the content column is validated
-    /// against a surface the split never sees. The end-of-content position is
-    /// legal on the stored text and illegal on the shorter buffer that will
-    /// replace it, so opening that buffer must flip the verdict — nothing else
-    /// about the state changes between the two calls.
+    /// An open editor is NOT committed by `apply` — every keystroke transition
+    /// already committed, and a buffer that still diverges from the stored
+    /// surface is the own-trailing-whitespace echo prod deliberately keeps — so
+    /// its text must not narrow the position: the content column governs.
     #[test]
-    fn split_position_is_validated_against_the_dirty_editor_buffer() {
-        let mut state = wide_e2e_ref();
-        let (id, stored) = seeded_target(&state);
-
-        assert!(
-            split_block_preconditions(&id, stored.len(), &state).is_good(),
-            "baseline: end-of-content is a legal split with no editor open"
-        );
-
-        // What a mid-line Backspace leaves behind: one char shorter, DIRTY and
-        // UNCOMMITTED (`press_key.rs`'s cursor>0 arm does not commit).
-        let mut shorter = stored.clone();
-        shorter.pop();
-        state.ui.tab.active_editor = Some(ActiveEditor {
-            block_id: id.clone(),
-            in_memory_content: shorter.clone(),
-            cursor_byte: shorter.len(),
-            dirty: true,
-        });
-
-        assert!(
-            split_block_preconditions(&id, shorter.len(), &state).is_good(),
-            "end of the PENDING buffer stays legal"
-        );
-        assert!(
-            split_block_preconditions(&id, stored.len(), &state).is_fail(),
-            "byte {} is past the {}-byte buffer `apply` is about to commit",
-            stored.len(),
-            shorter.len()
-        );
-    }
-
-    /// A clean editor is NOT committed by `apply` (prod's data subscription
-    /// refreshes idle editors), so its text must not narrow the position.
-    #[test]
-    fn a_clean_editor_buffer_does_not_narrow_the_split_position() {
+    fn an_open_editor_buffer_does_not_narrow_the_split_position() {
         let mut state = wide_e2e_ref();
         let (id, stored) = seeded_target(&state);
         let mut shorter = stored.clone();
@@ -445,7 +388,6 @@ mod tests {
             block_id: id.clone(),
             in_memory_content: shorter,
             cursor_byte: 0,
-            dirty: false,
         });
 
         assert!(

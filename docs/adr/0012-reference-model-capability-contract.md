@@ -235,27 +235,29 @@ section makes them citable.
 
 #### 5.2 Commit-point and settle semantics
 
-- **Structural ops are commit points.** From
-  `docs/Architecture/UI.md` §"Field authority and intent capture" (L67):
-  pending editor state flushes through the normal merge path *before* the op
-  executes, in one ordered dispatch. Canonical violation: "`Split position 8
-  exceeds content length 3`" — split computed against backend content using a
-  cursor byte into the editor's pending text. The reference encodes this as
-  `commit_active_editor_if_dirty` called at the top of every structural
-  `apply_to_ref` (`split_block_apply_to_ref` L211-226, `model_chord_click_focus`
-  L70).
-- **Blur is a flush *hint*, not the commit mechanism** (UI.md L69). SqlOnly
-  prod still commits on blur today; the ref models the blur-commit on
-  click-away — but **dirty-gated**.
-- **Dirty-gating is load-bearing.** `RefEditorMirror::active_editor_dirty`
-  (capabilities.rs:203-213): only text authored by *modeled* typing/deleting
-  commits. A clean mirror that merely diverged from `block.content` is stale
-  against an external change (prod's data subscription refreshes idle
-  editors); committing it writes old text into the ref. An unconditional
-  commit here produced the Full/Loro divergence of 2026-06-11
-  (`split_block.rs:218-221`). Helpers: `commit_active_editor_if_changed`
-  (capabilities.rs:1443) and the dirty-gated wrapper
-  `commit_active_editor_if_dirty` (capabilities.rs:1472).
+- **Every keystroke is its own commit point.** Prod routes each keystroke —
+  `TypeChars`, `DeleteBackward`, and a mid-line `PressKey(Backspace)` alike —
+  through `MutableText` → Loro → SQL, so the block's content column has already
+  moved by the time the next transition reads it. Each keystroke transition's
+  `apply_to_ref` therefore ends in `commit_active_editor_if_changed`
+  (`type_chars.rs`, `delete_backward.rs`, `press_key.rs`'s `cursor > 0`
+  Backspace arm). Structural ops stay commit points too (UI.md L67: pending
+  editor state flushes *before* the op executes), but after the keystroke
+  commits there is nothing left for them to flush — `PressKey(Enter)` commits
+  before it crosses the surface→content seam, and `split_block_apply_to_ref`
+  splits the content column the precondition measured. Canonical violation it
+  prevents: "`Split position 8 exceeds content length 3`".
+- **There is no pending-editor state at a transition boundary.** The model
+  therefore carries no dirty flag: `RefEditorMirror::active_editor_dirty` and
+  the gated `commit_active_editor_if_dirty` wrapper are **removed**, and
+  `commit_active_editor_if_changed` (capabilities.rs) is the one commit helper.
+  A buffer that still diverges from the stored surface is prod's own
+  trailing-whitespace echo, which prod deliberately keeps
+  (`refresh_clean_active_editor`), and which must NOT be committed — so blur
+  and the authority-move sites commit nothing. An unconditional commit at those
+  sites produced the Full/Loro divergence of 2026-06-11; dropping the call
+  instead of ungating it is what keeps that fixed.
+- **Blur is a flush *hint*, not the commit mechanism** (UI.md L69).
 - **Invariants read only quiesced state.** `SutQuiesce::quiesce`
   (capabilities.rs:371-373) is the uniform barrier (pure slice: no-op; wide
   PBT: drain CDC + flush reactive engine + await Loro sync). All of

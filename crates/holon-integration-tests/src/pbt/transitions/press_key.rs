@@ -257,12 +257,12 @@ impl<
             }
         }
         // Backspace at cursor > 0: production's `InputState` removes one
-        // character before the cursor. No structural change. Mirror that
-        // on the active editor's in-memory content so `inv-displayed-text`'s
-        // expected (= in_memory_content while editor is active) tracks
-        // what's actually on screen.
+        // character before the cursor and COMMITS it at once (same per-keystroke
+        // write-through as `TypeChars`/`DeleteBackward`: MutableText -> Loro ->
+        // SQL, settled by the next invariant check). No structural change.
         else if matches!(single, Some(Key::Backspace)) && !has_modifier && cursor_byte > 0 {
             state.delete_backward(1);
+            commit_active_editor_if_changed(state);
         }
         // Other chords (Tab, etc.): no structural change modeled in v1.
         // Pending edits remain in InputState.
@@ -287,5 +287,54 @@ crate::cap_transition! {
             ddl: 0,
             tolerance: update.tolerance + create.tolerance,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_api::Key;
+    use holon_api::entity_uri::EntityUri;
+
+    use super::*;
+    use crate::pbt::composed::wide_e2e::wide_e2e_ref;
+    use crate::pbt::ui_types::ActiveEditor;
+
+    /// Prod routes a mid-line Backspace straight through `MutableText` -> Loro
+    /// -> SQL, so the block's content column has already shrunk by the time the
+    /// next transition looks at it. The reference must land in the same place:
+    /// a buffer still pending here is a divergence only the ref holds, and the
+    /// keystone's oracles read the ref, so nothing else can see it.
+    #[test]
+    fn a_mid_line_backspace_commits_like_prod() {
+        let mut state = wide_e2e_ref();
+        let id = EntityUri::block("parent");
+        let surface = state.editor_surface_text(&id);
+        assert!(
+            surface.chars().count() >= 2,
+            "fixture must carry text a mid-line Backspace can bite into, got {surface:?}"
+        );
+        let mut shorter = surface.clone();
+        shorter.pop();
+
+        state.ui.tab.active_editor = Some(ActiveEditor {
+            block_id: id.clone(),
+            in_memory_content: surface.clone(),
+            cursor_byte: surface.len(),
+        });
+
+        PressKey {
+            chord: KeyChord([Key::Backspace].into_iter().collect()),
+        }
+        .apply_to_ref(&mut state);
+
+        let committed = state.editor_surface_text(&id);
+        assert_eq!(
+            committed,
+            shorter,
+            "the reference holds a dirty, uncommitted buffer ({:?}) that prod has \
+             already committed: prod's mid-line Backspace writes through to the \
+             block, the ref left the block's surface at {committed:?}",
+            state.active_editor_text(),
+        );
     }
 }

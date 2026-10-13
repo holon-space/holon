@@ -11,11 +11,6 @@
 //! trims. `pending_buffer` (`transitions/mod.rs`) compares the buffer with the
 //! source projection the editor was mounted on, which is what the commit path
 //! compares too.
-//! The reference's `active_editor_dirty` flag is NOT that window: the only ref
-//! path that leaves it set is mid-line Backspace
-//! (`transitions/press_key.rs:264`), which prod and the headless SUT both
-//! commit (`holon-frontend/src/headless_editor_mirror.rs:775`), so gating on it
-//! made this class unreachable in any state prod can hold.
 //!
 //! @pbt rung external
 //!   `external_write_while_focused` writes a sibling block into the focused
@@ -28,11 +23,10 @@
 //!
 //! Oracle wiring (both already in the composed catalog):
 //!  * `inv-editor-text/mirror` (`active_editor_text`): the reference keeps the
-//!    dirty editor's `in_memory_content` (bulk-add does NOT touch the active
-//!    editor -- the ruled "dirty editor keeps pending user text; only clean
-//!    editors refresh from an external change" policy). If prod's converge
-//!    overwrites the dirty buffer with the re-ingested cell, the SUT's
-//!    `editor_live_text` diverges from the preserved pending text -> RED = the
+//!    open editor's `in_memory_content` (bulk-add adds SIBLINGS and does NOT
+//!    touch the focused block's cell, so there is nothing to converge onto). If
+//!    prod's re-ingest overwrites the open buffer anyway, the SUT's
+//!    `editor_live_text` diverges from the preserved text -> RED = the
 //!    data-loss bug.
 //!  * `inv-live-children-match-ref`: no duplicate rows from the re-ingest.
 //!
@@ -70,7 +64,8 @@ use crate::pbt::transition_budgets::READS_PER_WATCH;
 use crate::pbt::transition_budgets::cdc_tolerance;
 use crate::pbt::transitions::pending_buffer;
 
-/// Land an external sibling-block write while an editor is dirty-focused.
+/// Land an external sibling-block write while the focused editor's buffer is
+/// pending.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
 #[step_template("an external write of {blocks} lands on document {doc_uri} while focused")]
 pub struct ExternalWriteWhileFocused {
@@ -163,10 +158,10 @@ impl<
 
     fn apply_to_ref(&self, state: &mut R) {
         // Same external bulk-add effect as `BulkExternalAdd`. Crucially,
-        // `bulk_add_blocks` does NOT touch `ui.tab.active_editor`, so the
-        // editor's pending `in_memory_content` is PRESERVED -- the ruled
-        // "external change refreshes clean editors only" policy. The SUT must
-        // match: dirty buffer survives the re-ingest.
+        // `bulk_add_blocks` does NOT touch `ui.tab.active_editor`, and it writes
+        // SIBLINGS rather than the focused block's own cell, so the editor's
+        // pending `in_memory_content` is PRESERVED. The SUT must match: the
+        // pending buffer survives the re-ingest.
         state.bulk_add_blocks(&self.doc_uri, &self.blocks);
     }
 }
@@ -232,14 +227,13 @@ mod tests {
     }
 
     /// The admission predicate is the DIVERGENCE between the focused buffer and
-    /// the committed projection, not a ref-only dirty flag: prod commits every
+    /// the committed projection: prod commits every
     /// keystroke synchronously (`editor_view.rs`'s `InputEvent::Change` arm),
     /// so the only window in which a focused buffer is ahead of its
     /// projection is what the store canonicalizes away. A buffer equal to
     /// the projection must REFUSE the class -- otherwise it races a state
     /// prod never holds; a buffer carrying the trailing space the store
-    /// trims must ADMIT it. Both halves set `dirty` the WRONG way round, so
-    /// only the new predicate can pass.
+    /// trims must ADMIT it.
     #[test]
     fn admission_tracks_the_buffer_projection_divergence() {
         let (mut state, id, doc_uri) = seeded_text_block();
@@ -252,11 +246,10 @@ mod tests {
             block_id: id.clone(),
             in_memory_content: stored.clone(),
             cursor_byte: stored.len(),
-            dirty: true,
         });
         assert!(
             probe(&doc_uri).preconditions(&state).is_fail(),
-            "a committed buffer is not the mid-edit window, whatever `dirty` says"
+            "a committed buffer is not the mid-edit window"
         );
 
         let pending = format!("{stored} ");
@@ -264,19 +257,17 @@ mod tests {
             block_id: id.clone(),
             in_memory_content: pending.clone(),
             cursor_byte: pending.len(),
-            dirty: false,
         });
         assert!(
             probe(&doc_uri).preconditions(&state).is_good(),
-            "the trailing space the store trims IS the window, whatever `dirty` says"
+            "the trailing space the store trims IS the window"
         );
     }
 
     /// A CLEAN, just-focused editor on a KEYWORD-HEADED block: nothing was
     /// typed, so the class must refuse. The editor is mounted on the source
     /// projection (`TODO x`) while `block_content` is `x`, so comparing
-    /// against the content admits this state forever -- the very failure mode
-    /// gating on `active_editor_dirty` had.
+    /// against the content admits this state forever.
     #[test]
     fn clean_focus_on_a_keyword_headed_block_is_refused() {
         use holon_pbt_core::capabilities::RefBlockTreeMut;

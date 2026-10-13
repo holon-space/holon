@@ -565,17 +565,6 @@ pub trait RefEditorMirror {
 
     /// Cursor byte offset within `active_editor_text`.
     fn active_editor_cursor(&self) -> Option<usize>;
-
-    /// True iff modeled typing/deleting touched the active editor's text
-    /// since it opened (or since the last commit). Distinguishes
-    /// user-authored pending text (commits on blur / at structural commit
-    /// points) from a mirror that merely went stale against an external
-    /// change (prod's data subscription refreshes idle editors; committing
-    /// a stale mirror writes old text into the ref). Default `false` keeps
-    /// lean slice models, which never type, on the never-commits path.
-    fn active_editor_dirty(&self) -> bool {
-        false
-    }
 }
 
 /// Editor-mirror mutations. Apply to whichever editor is active.
@@ -590,10 +579,6 @@ pub trait RefEditorMirrorMut: RefEditorMirror {
     /// Required, not defaulted: a silent no-op here would leave the mirror
     /// holding text prod no longer shows.
     fn reseed_active_editor(&mut self, text: &str, cursor: usize);
-
-    /// Clear the dirty flag after a commit. Default no-op for models
-    /// without dirty tracking.
-    fn mark_active_editor_committed(&mut self) {}
 
     /// Record how many block MERGES the backspace run just performed — a
     /// backspace at caret 0 joins into the predecessor instead of deleting a
@@ -3833,7 +3818,6 @@ where
     // derived from.
     let surface = state.editor_surface_text(&block_id);
     if surface == text {
-        state.mark_active_editor_committed();
         return false;
     }
     if ref_commits_through_source_channel(state, &block_id, &surface, &text) {
@@ -3841,31 +3825,12 @@ where
     } else {
         state.set_block_content(&block_id, &text);
     }
-    state.mark_active_editor_committed();
     // The store canonicalizes what it stored (`TODO  milk` is the task `milk`),
     // and the editor converges onto that canonical surface — except for the one
     // shape its echo discriminator recognises as its own (trailing whitespace).
     // The reference applies the SAME discriminator.
     state.refresh_clean_editor_surface(&block_id);
     true
-}
-
-/// Commit the active editor's pending text only if it is DIRTY — i.e. the
-/// text was authored by modeled typing/deleting, not merely divergent from
-/// `block.content` via an external change (a stale mirror; prod's data
-/// subscription would have refreshed it, so committing it would write old
-/// text into the ref). This models prod's blur / structural-commit-point
-/// behavior: "structural ops are commit points" (docs/Architecture/UI.md),
-/// and a click-away blur commits the previously focused editor's
-/// user-authored text.
-pub fn commit_active_editor_if_dirty<R>(state: &mut R) -> bool
-where
-    R: RefEditorMirrorMut + RefBlockTreeMut + RefFocus,
-{
-    if !state.active_editor_dirty() {
-        return false;
-    }
-    commit_active_editor_if_changed(state)
 }
 
 // ── Formerly integration-test-local SUT caps (Phase 1a Step 2 / B1) ─────────

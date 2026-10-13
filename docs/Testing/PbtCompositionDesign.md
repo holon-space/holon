@@ -158,7 +158,7 @@ So the migration is dominated by "add `#[async_trait]` to the read-cap traits" �
 Audited all 40 invariant bodies (see git history / the analysis that produced this doc). **No body computes a Ref-expected value that branches on the capability set.** Config-variance is handled entirely by (a) selection and (b) SUT-internal coherence checks that self-skip. Specifically:
 
 - **Degraded query rendering** (GPUI shows a query block's *source* when no query engine is wired — real prod path: `loro_ui_watcher.rs` `source_editor_expr` via `holon-app/no_turso.rs`) is **not** a branching projection. The Ref doesn't model query results at all (`viewmodel_decompiled_rows_match_query` is SUT-internal: `root_content_comparison` returns *both* sides). It decomposes into **complementary invariants selected by the query cap's presence/absence** — which is exactly what negative selection (`sut_absent`) provides.
-- **Windowing** (blur/commit bimodality, `EngineFocus`) produces **no** Ref-value-variance: `focus_matches_ref`/`editor_text_matches_ref`/`editor_caret_matches_ref` compute the expected value as an unconditional `ref_.*` read. The bimodality lives in the transition (`commit_active_editor_if_dirty`, dirty-gated) and SUT-side settle, plus selection.
+- **Windowing** (blur/commit bimodality, `EngineFocus`) produces **no** Ref-value-variance: `focus_matches_ref`/`editor_text_matches_ref`/`editor_caret_matches_ref` compute the expected value as an unconditional `ref_.*` read. The bimodality lives in the transition (`commit_active_editor_if_changed`, run at the end of every keystroke transition) and SUT-side settle, plus selection.
 
 **Soundness rule:** whenever the SUT degrades on capability-absence, the Ref must degrade through the *same* `CapSet`, or you manufacture a false divergence. γ gives this for free (one `Config` drives both) — provided degraded behaviour is routed through capabilities, not hard-coded on either side.
 
@@ -487,10 +487,9 @@ capability, = `wiring.has_actor(UI)`). Consequently:
   removed (trait method + all impls + the env static + `enable_atomic_editor_if_unset`
   and its callers). The capability *is* the gate.
 - `PBT_REAL_EDITOR` / `ReferenceState::real_editor_enabled()` had one live effect —
-  commit-on-blur in `blur_active_editor` — now a `ReferenceState.real_editor: bool`
-  field set by the real-editor driver harness (`phased.rs`), which builds the ref
-  state directly. No process-global env; deterministic and capture/replay-faithful
-  via the construction path. `fixture::CAPTURE_ENV_FLAGS` shrinks to
+  commit-on-blur in `blur_active_editor` — and that effect is **gone**: every
+  keystroke transition commits, so blur commits nothing (ADR 0012 §5.2) and the
+  `HarnessEnv.real_editor` knob that gated it is removed with it. `fixture::CAPTURE_ENV_FLAGS` shrinks to
   `["PBT_MUTABLE_TEXT"]` — plus `"HOLON_FOLDER_COMPANION_SEED"` (2026-07-26),
   which `wide_e2e_ref_for` consults to seed extra blocks into the reference
   state, so a capture and a replay disagreeing on it start from different states.

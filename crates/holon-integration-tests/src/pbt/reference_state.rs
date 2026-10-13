@@ -33,7 +33,6 @@ use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
 use holon_loro_testing::ref_ext::LoroRefExt;
 use holon_pbt_core::Wiring;
-use holon_pbt_core::capabilities::commit_active_editor_if_dirty;
 
 use super::action_actor_state::ActionActorState;
 use super::block_state::BlockState;
@@ -350,13 +349,13 @@ pub static VALID_PROFILE_YAMLS: std::sync::LazyLock<Vec<String>> = std::sync::La
 /// Harness-environment residue of the reference model (RefStateSplit Inc 3).
 ///
 /// These fields are **not model state** — they are the async runtime, the
-/// wiring manifest, the composed cap set, the real-editor driver flag, and the
-/// shadow interpreter that the *harness* threads through the reference.
+/// wiring manifest, the composed cap set, and the shadow interpreter that the
+/// *harness* threads through the reference.
 /// Gathering them here (rather than leaving them loose on [`ReferenceState`])
 /// puts their `Clone` semantics in one visible place: proptest clones the
 /// reference per step and per case, so `runtime`/`interpreter` are `Arc`-shared
-/// (cheap clone, shared cell) while `wiring`/`cap_set`/`real_editor` are plain
-/// values that clone by copy.
+/// (cheap clone, shared cell) while `wiring`/`cap_set` are plain values that
+/// clone by copy.
 ///
 /// `clock_feed` is NOT here: it moved with the Loro extension into
 /// [`LoroRefExt`] (RefStateSplit Inc 5), where its `Clone`-SHARES-the-cell seam
@@ -381,18 +380,6 @@ pub struct HarnessEnv {
     /// the alphabet — the cap-analog of
     /// [`wiring`](Self::wiring)/`RequiredWiring` (PCG-2).
     pub cap_set: Option<holon_pbt_core::composition::CapSet>,
-
-    /// Whether a **real editor** (a live `InputState` driven by the GPUI/TUI
-    /// `UserDriver`) — not the headless `HeadlessEditorMirror` — drives the
-    /// SUT. Set by the real-editor driver harness, which builds the
-    /// reference state directly. When true,
-    /// [`ReferenceState::blur_active_editor`] commits the editor's dirty
-    /// buffer to block content on blur, mirroring prod's `on_blur` →
-    /// `set_field("content")`. Replaces the former process-global
-    /// `PBT_REAL_EDITOR` env gate — the property now lives on the state the
-    /// driver constructs, so it is deterministic and capture/replay-faithful
-    /// without an env-var side channel. Headless slices leave it `false`.
-    pub real_editor: bool,
 
     /// Shadow interpreter resolved from FluxDI — source of truth for widget
     /// names and render DSL parsing. `Arc`-shared across clones.
@@ -1400,7 +1387,6 @@ impl ReferenceState {
                 runtime: Arc::new(tokio::runtime::Runtime::new().unwrap()),
                 wiring,
                 cap_set: None,
-                real_editor: false,
                 interpreter,
                 profile_engine: ProfileEngineCache::default(),
                 link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
@@ -1500,20 +1486,12 @@ impl ReferenceState {
             .unwrap_or(false)
     }
 
-    /// Close the active editor, committing its pending text first when a real
-    /// editor is driving (see [`Self::real_editor`]). The commit is idempotent
-    /// under Loro (per-keystroke writes already committed it) and a no-op when
-    /// no editor is active, so call sites can swap a bare `active_editor =
-    /// None` for this unconditionally.
+    /// Close the active editor. It commits NOTHING: every keystroke transition
+    /// already committed, and a buffer that still diverges from the stored
+    /// surface is prod's own trailing-whitespace echo, which prod deliberately
+    /// keeps (ADR 0012 §5.2). A no-op when no editor is active, so call sites
+    /// can swap a bare `active_editor = None` for this unconditionally.
     pub fn blur_active_editor(&mut self) {
-        // Dirty-gated: only user-authored pending text commits on an
-        // authority move (prod commits via the focus-binding's
-        // authority-left arm — deterministic, window-activation-independent).
-        // A clean mirror that merely diverged from block.content is stale
-        // against an external change and must not be committed.
-        if self.harness.real_editor && self.ui.tab.active_editor.as_ref().is_some_and(|e| e.dirty) {
-            self.commit_active_editor_if_changed();
-        }
         self.ui.tab.active_editor = None;
     }
 
@@ -1548,9 +1526,6 @@ impl ReferenceState {
             self.editor_surface_text(&id)
         };
         if surface == in_memory {
-            if let Some(e) = self.ui.tab.active_editor.as_mut() {
-                e.dirty = false;
-            }
             return false;
         }
         {
@@ -1562,9 +1537,6 @@ impl ReferenceState {
             } else {
                 self.set_block_content(&id, &in_memory);
             }
-        }
-        if let Some(e) = self.ui.tab.active_editor.as_mut() {
-            e.dirty = false;
         }
         true
     }
@@ -1625,7 +1597,6 @@ impl ReferenceState {
         };
         if let Some(editor) = self.ui.tab.active_editor.as_mut()
             && &editor.block_id == block_id
-            && !editor.dirty
         {
             // Seq/trim-discriminator-aware echo model (Inc 4, EditorBufferOwnership
             // plan). A clean editor is normally re-seeded to the block's stored
@@ -2619,11 +2590,6 @@ impl ReferenceState {
         // `inv-focus-matches-ref` compares the pre-gesture focus root against
         // the SUT's newborn.
         self.ui.tab.focused_block = Some(new_id.clone());
-        // The focus authority moves to the newborn, so any editor open over
-        // ANOTHER block is blurred — prod's on_blur commits its user-authored
-        // pending text, exactly as at the other two authority-move sites
-        // (`transitions::model_chord_click_focus`, `FocusEditableText`).
-        commit_active_editor_if_dirty(self);
         // The editor must then be CLOSED, not left standing. The birth mounts
         // no ref editor over the newborn (see below), so a surviving
         // `active_editor` names a block prod is no longer editing, and every

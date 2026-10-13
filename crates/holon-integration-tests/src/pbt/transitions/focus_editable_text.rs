@@ -30,7 +30,6 @@ use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::SutDriver;
 use holon_pbt_core::capabilities::SutFocusWrite;
 use holon_pbt_core::capabilities::SutLayout;
-use holon_pbt_core::capabilities::commit_active_editor_if_dirty;
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::check;
 use proptest::prelude::*;
@@ -195,10 +194,6 @@ impl<
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        // Clicking into another editable moves the focus authority away
-        // from any currently active editor; prod commits its user-authored
-        // pending text on that authority move (focus-binding arm).
-        commit_active_editor_if_dirty(state);
         // The editor opens on the block's SOURCE PROJECTION, not its content
         // column: a task shows `TODO milk`, and the caret lands after it.
         let saved = state.editor_surface_text(&self.block_id);

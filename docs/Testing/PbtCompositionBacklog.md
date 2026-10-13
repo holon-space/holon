@@ -2807,12 +2807,13 @@ done against an already-proven composed core).
   `inv-editor-caret-matches-ref` with real multi-byte typed text (transitions fire +
   differential bites). **Env→capability cleanup landed in the same change:** editor
   gating is now purely `has_editor_buffer()`, so `PBT_ATOMIC_EDITOR`
-  (`atomic_editor_enabled`) was dead and removed; `PBT_REAL_EDITOR`'s commit-on-blur
-  effect became a `ReferenceState.real_editor` field set by the driver harness.
+  (`atomic_editor_enabled`) was dead and removed. There is no commit-on-blur and no
+  `real_editor` field: blur commits nothing, because every keystroke transition is its
+  own commit point (ADR 0012 §5.2).
 
   **Deferred / next (dependency-ordered):**
-  1. **Committed-content parity** — the deferred half of mirror-only: per-keystroke
-     (Loro) / on-blur (SQL, via the new `real_editor` field) commit on both sides, the
+  1. **Committed-content parity** — the deferred half of mirror-only: a per-keystroke
+     commit on both sides (Loro and SQL; blur commits nothing — ADR 0012 §5.2), the
      `block_raw` editor invariant, matched `normalize_content_for_org_roundtrip`.
   2. **Structural transitions** (Split/Join/Indent/Outdent/Move) — now viable since
      `ReferenceState` carries a real tree + honest `apply_to_ref`.

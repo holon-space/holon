@@ -95,7 +95,6 @@ impl RefFocusMut for ReferenceState {
             block_id: id,
             in_memory_content: content,
             cursor_byte,
-            dirty: false,
         });
     }
 

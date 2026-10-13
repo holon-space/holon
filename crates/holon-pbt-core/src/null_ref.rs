@@ -293,9 +293,6 @@ impl RefEditorMirror for NullRef {
     fn active_editor_cursor(&self) -> Option<usize> {
         panic!("class-2: invariant read RefEditorMirror::active_editor_cursor")
     }
-    fn active_editor_dirty(&self) -> bool {
-        panic!("class-2: invariant read RefEditorMirror::active_editor_dirty")
-    }
 }
 
 #[allow(unused_variables)]

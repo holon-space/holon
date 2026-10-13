@@ -33,10 +33,6 @@ impl RefEditorMirror for ReferenceState {
     fn active_editor_cursor(&self) -> Option<usize> {
         self.ui.tab.active_editor.as_ref().map(|e| e.cursor_byte)
     }
-
-    fn active_editor_dirty(&self) -> bool {
-        self.ui.tab.active_editor.as_ref().is_some_and(|e| e.dirty)
-    }
 }
 
 impl RefEditorMirrorMut for ReferenceState {
@@ -65,12 +61,6 @@ impl RefEditorMirrorMut for ReferenceState {
         if let Some(editor) = self.ui.tab.active_editor.as_mut() {
             editor.in_memory_content = text.to_string();
             editor.move_cursor(cursor);
-        }
-    }
-
-    fn mark_active_editor_committed(&mut self) {
-        if let Some(editor) = self.ui.tab.active_editor.as_mut() {
-            editor.dirty = false;
         }
     }
 
