@@ -123,6 +123,10 @@ pub enum LowerTwin {
     NoAskHash,
     /// `Answer` has no inhibitor.
     NoAnswerInhibitor,
+    /// `Answer` is not gated on the work in flight — neither by its inhibitor
+    /// nor by the ask it needs: a second answer lands while the first
+    /// answer's work runs.
+    DoubleAnswer,
     /// No `ExpireAnswer`.
     NoExpire,
     /// `Asks` offers the ask while the work is in flight.
@@ -286,7 +290,11 @@ fn lower_as(
 
     let answer_bind: BindFn = {
         let asks = asks.to_string();
-        Arc::new(move |r: &mut Reader<'_>, s: &Subject| r.present(&asks, s).then(Content::new))
+        let in_flight = (twin == Some(LowerTwin::DoubleAnswer)).then(|| running.to_string());
+        Arc::new(move |r: &mut Reader<'_>, s: &Subject| {
+            let gate = r.present(&asks, s) || in_flight.as_ref().is_some_and(|p| r.present(p, s));
+            gate.then(Content::new)
+        })
     };
     let answer_body = {
         let answered = answered.to_string();
@@ -302,6 +310,9 @@ fn lower_as(
     );
     if twin != Some(LowerTwin::NoAnswerInhibitor) {
         for (p, _) in &busy {
+            if twin == Some(LowerTwin::DoubleAnswer) && p.as_str() == running.as_str() {
+                continue;
+            }
             answer = answer.inhibits(p);
         }
     }

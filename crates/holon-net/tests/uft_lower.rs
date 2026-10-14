@@ -2,10 +2,13 @@
 //! executor: model first, then the lowered net must agree after every op.
 //!
 //! Twins (`--features naive-twins`, `UFT_LOWER_TWIN=<name>`), each drops one
-//! lowering rule: `no-ask-hash`, `no-answer-inhibitor`, `no-expire`,
-//! `ask-while-in-flight`, `ask-while-retry-pending`,
+//! lowering rule: `no-ask-hash`, `no-answer-inhibitor`, `double-answer`,
+//! `no-expire`, `ask-while-in-flight`, `ask-while-retry-pending`,
 //! `ask-while-outcome-unknown`; executor twins:
 //! `no-quiescence`, `keep-work-failed`.
+//!
+//! Every twin must be red for the property it drops, not for another twin's:
+//! `scripts/twin-own-red.sh` holds the twin → property table and checks it.
 
 mod uft_lower_support;
 
@@ -190,6 +193,7 @@ fn lowered(d: &TransitionDescriptor) -> NetDef {
         None => return lower(base_net(), d, Some(parts())).expect("lowers"),
         Some("no-ask-hash") => LowerTwin::NoAskHash,
         Some("no-answer-inhibitor") => LowerTwin::NoAnswerInhibitor,
+        Some("double-answer") => LowerTwin::DoubleAnswer,
         Some("no-expire") => LowerTwin::NoExpire,
         Some("ask-while-in-flight") => LowerTwin::AskWhileInFlight,
         Some("no-quiescence" | "keep-work-failed") => {
