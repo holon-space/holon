@@ -12246,6 +12246,85 @@ mod tiered_matcher_tests {
         );
     }
 
+    /// T1 positional guard: the node at the incoming position has DIFFERENT
+    /// content, the same content sits elsewhere -> remap onto the same-content
+    /// candidate, never onto the positional node.
+    #[tokio::test]
+    async fn positional_node_with_different_content_is_not_taken() {
+        let d = doc();
+        let existing = vec![existing("A", &d, 0, "Alpha"), existing("B", &d, 1, "Beta")];
+        let incoming = vec![incoming("i", &d, "Beta", true)];
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(
+            remap(&vs, "i"),
+            Some((EntityUri::block("B"), MatchBasis::ContentUniqueInDocument)),
+        );
+    }
+
+    /// T1 positional guard: the node at the incoming position is already
+    /// claimed (by an earlier incoming block) -> the later block takes the
+    /// other twin; the verdict ids are pairwise distinct.
+    #[tokio::test]
+    async fn claimed_positional_node_is_not_reused() {
+        let d = doc();
+        let other = EntityUri::block("other");
+        let existing = vec![existing("A", &d, 0, "Dup"), existing("X", &d, 1, "Dup")];
+        let incoming = vec![
+            incoming("i1", &other, "Dup", true),
+            incoming("i2", &d, "Dup", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(remap_onto(&vs, "i1"), Some(EntityUri::block("A")));
+        assert_eq!(remap_onto(&vs, "i2"), Some(EntityUri::block("X")));
+    }
+
+    /// T1 positional guard: the positional twin is the SOLE candidate, so it
+    /// wins by position even though its subtree differs.
+    #[tokio::test]
+    async fn sole_positional_candidate_wins_despite_subtree_mismatch() {
+        let d = doc();
+        let other = EntityUri::block("other");
+        let existing = vec![
+            existing("A", &d, 0, "Foo"),
+            existing("ca", &EntityUri::block("A"), 0, "kid"),
+        ];
+        // The second "Foo" makes the content non-unique on the incoming side,
+        // so T3 cannot answer.
+        let incoming = vec![
+            incoming("j1", &d, "Foo", true),
+            incoming("j2", &other, "Foo", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(
+            remap(&vs, "j1"),
+            Some((EntityUri::block("A"), MatchBasis::ContentAtPosition)),
+        );
+        assert!(is_mint_fresh(&vs, "j2"));
+    }
+
+    /// T1 positional guard: several same-content twins and the positional one
+    /// has a different subtree -> defer to T2, the signature match wins.
+    #[tokio::test]
+    async fn positional_twin_with_other_subtree_defers_to_signature() {
+        let d = doc();
+        let existing = vec![
+            existing("A", &d, 0, "Dup"),
+            existing("ca", &EntityUri::block("A"), 0, "childA"),
+            existing("X", &d, 1, "Dup"),
+            existing("cb", &EntityUri::block("X"), 0, "childB"),
+        ];
+        // Position 0 under doc is twin A, but this block carries childB.
+        let incoming = vec![
+            incoming("i1", &d, "Dup", true),
+            incoming("i1c", &EntityUri::block("i1"), "childB", true),
+        ];
+        let vs = verdicts(&existing, &incoming).await;
+        assert_eq!(
+            remap(&vs, "i1"),
+            Some((EntityUri::block("X"), MatchBasis::SubtreeSignature)),
+        );
+    }
+
     // ── Trait-contract tests (same contract as v0) ──
 
     #[tokio::test]
