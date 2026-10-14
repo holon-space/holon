@@ -4,7 +4,9 @@
 //!
 //! The net: `ProviderTries` carries the try count per provider (token data, no
 //! engine retry attribute); `Storage` holds the primary (one token per subject
-//! IS capacity 1); `SecondaryStorage` is the standby slot; `SwapStorage` takes
+//! IS capacity 1); `SecondaryStorage` is the standby slot; `StorageCandidate`
+//! takes every store that opened outside the boot slot, and
+//! `ApplyStorageCandidate` installs, keeps or retires it; `SwapStorage` takes
 //! BOTH store tokens in one firing, applies the final bounded delta while it
 //! holds them and puts them back exchanged; `RetireStandby` closes the demoted
 //! store. `ApplyWrite` also takes the `Storage` token, so no write falls
@@ -267,14 +269,11 @@ struct Pair {
 }
 
 impl Pair {
-    fn new(turso: Faults) -> Self {
+    fn new(turso: Faults, loro: Faults) -> Self {
         let source = Arc::new(Source::default());
         let stores = BTreeMap::from([
             (TURSO, FakeStore::new(TURSO, source.clone(), turso)),
-            (
-                LORO,
-                FakeStore::new(LORO, source.clone(), Faults::default()),
-            ),
+            (LORO, FakeStore::new(LORO, source.clone(), loro)),
         ]);
         Self {
             source,
@@ -406,6 +405,113 @@ fn exchanged(s: &Subject, input: &Content, new_primary_version: i64) -> Vec<Outp
     ]
 }
 
+/// The transitions that take the primary's token for the length of a hold.
+const STORE_HOLDERS: [&str; 2] = ["ApplyWrite", "SwapStorage"];
+
+/// The candidate of a store that opened outside the boot slot: a background
+/// try writes it, and the executor routes a store token that settled over
+/// changed inputs here (NET-cand.a).
+fn candidate_token(token: Content) -> Content {
+    content(&[("output", Value::Object(token.into_iter().collect()))])
+}
+
+/// REV2-cand.a: ONE transition applies a store candidate. It installs it when
+/// no primary exists (REV2-promote.a, disclosed unless the fallback itself
+/// serves), keeps a preferred one as the standby for the swap, and retires the
+/// rest. A holder leaves `Storage` empty while the primary exists
+/// (REV11-running.a), so every holder's in-flight places inhibit it.
+fn apply_storage_candidate() -> Transition {
+    let apply = Transition::new(
+        "ApplyStorageCandidate",
+        Trigger::Auto,
+        bind!(|r, s| {
+            let mut input: Content = match r.field("StorageCandidate", s, "output")? {
+                Value::Object(token) => token.into_iter().collect(),
+                other => panic!("StorageCandidate.output is {other:?}, not a store token"),
+            };
+            let provider = str_of(&input, "provider");
+            let spent = r.field("RetiredStorage", s, &provider).is_some();
+            // No arcs on the slots: a read arc needs a token, and the branch is
+            // chosen by whether there is one.
+            let branch = match r.text("Storage", s, "provider") {
+                None if !spent => "install",
+                None => {
+                    input.insert("idle".to_string(), Value::Boolean(true));
+                    "retire"
+                }
+                Some(primary) => {
+                    let standby = r.text("SecondaryStorage", s, "provider");
+                    let primary_priority = int_at(r, "Storage", s, "priority")?;
+                    let idle =
+                        spent || primary == provider || standby.as_deref() == Some(&*provider);
+                    input.insert("idle".to_string(), Value::Boolean(idle));
+                    if !idle && standby.is_none() && int_of(&input, "priority") > primary_priority {
+                        "keep"
+                    } else {
+                        "retire"
+                    }
+                }
+            };
+            if branch == "install"
+                && provider != LORO
+                && let Some(cause) = r.text("FallbackFailure", s, "cause")
+            {
+                input.insert("cause".to_string(), text(&cause));
+            }
+            input.insert("branch".to_string(), text(branch));
+            Some(input)
+        }),
+        Body::pure(|s, input| {
+            let provider = str_of(input, "provider");
+            let token = provider_token(
+                &provider,
+                int_of(input, "version"),
+                int_of(input, "priority"),
+            );
+            Ok(match &*str_of(input, "branch") {
+                "install" => {
+                    let mut out = vec![
+                        Output::new("Storage", s, token),
+                        Output::new(
+                            "StorageOpened",
+                            s,
+                            content(&[("provider", text(&provider))]),
+                        ),
+                    ];
+                    if let Some(Value::String(cause)) = input.get("cause") {
+                        out.push(Output::new(
+                            "StorageCondition",
+                            s,
+                            content(&[(
+                                "text",
+                                text(&format!(
+                                    "serving {provider} because {LORO} could not open: {cause}"
+                                )),
+                            )]),
+                        ));
+                    }
+                    out
+                }
+                "keep" => vec![Output::new("SecondaryStorage", s, token)],
+                // A store that serves in a slot, or is closed, has nothing to close.
+                "retire" if input.get("idle") == Some(&Value::Boolean(true)) => vec![],
+                "retire" => vec![Output::new("RetiringStorage", s, token)],
+                other => panic!("no candidate branch '{other}'"),
+            })
+        }),
+    )
+    .consumes("StorageCandidate")
+    .inhibits("RetiringStorage");
+    // A retirement in flight decides whether a late candidate is spent.
+    ["RetireStandby"]
+        .iter()
+        .chain(&STORE_HOLDERS)
+        .fold(apply, |t, holder| {
+            t.inhibits(&format!("{holder}.Running"))
+                .inhibits(&format!("{holder}.OutcomeUnknown"))
+        })
+}
+
 fn net() -> Spec {
     let swap = Transition::new(
         "SwapStorage",
@@ -429,9 +535,13 @@ fn net() -> Spec {
         .place("StorageRequest", Class::Process)
         .place("StandbyRequest", Class::Process)
         .place("ProviderTries", Class::Process)
-        .place("Storage", Class::Process)
+        .place_with_candidate("Storage", "StorageCandidate")
+        .place("StorageCandidate", Class::Process)
         .place("SecondaryStorage", Class::Process)
         .place("RetiringStorage", Class::Process)
+        .place("RetiredStorage", Class::Process)
+        .place("FallbackFailure", Class::Process)
+        .place("StorageCondition", Class::Process)
         .place("TursoFailed", Class::Process)
         .place("LoroFailed", Class::Process)
         .place("WriteQueue", Class::Process)
@@ -523,9 +633,21 @@ fn net() -> Spec {
                 bind!(|r, s| {
                     let turso = int_at(r, "ProviderTries", s, "turso")?;
                     let loro = int_at(r, "ProviderTries", s, "loro")?;
-                    Some(tries_token(turso, loro + 1))
+                    let cause = r.text("LoroFailed", s, "cause")?;
+                    let mut input = tries_token(turso, loro + 1);
+                    input.insert("cause".to_string(), text(&cause));
+                    Some(input)
                 }),
-                Body::pure(|s, input| Ok(reposted(s, input))),
+                Body::pure(|s, input| {
+                    let tries = tries_token(int_of(input, "turso"), int_of(input, "loro"));
+                    let mut out = reposted(s, &tries);
+                    out.push(Output::new(
+                        "FallbackFailure",
+                        s,
+                        content(&[("cause", text(&str_of(input, "cause")))]),
+                    ));
+                    Ok(out)
+                }),
             )
             .consumes("LoroFailed")
             .reads("ProviderTries"),
@@ -541,8 +663,8 @@ fn net() -> Spec {
             )
             .reads("ProviderTries"),
         )
-        // The fallback asks for the preferred store in the background; it opens
-        // into the standby slot, never into the occupied primary slot.
+        // The preferred store's background try; it opens as a candidate, never
+        // into the primary slot.
         .transition(
             Transition::new(
                 "MakeTursoStandby",
@@ -564,6 +686,7 @@ fn net() -> Spec {
             .retry(NO_ENGINE_RETRY, 1)
             .consumes("StandbyRequest")
             .inhibits("SecondaryStorage")
+            .inhibits("StorageCandidate")
             .on_failure("TursoFailed")
             .run_timer(Duration::from_secs(RUN_TIMER_SECS))
             .abandon(Duration::from_secs(ABANDON_SECS))
@@ -595,13 +718,20 @@ fn net() -> Spec {
             .reads("Storage"),
         )
         .transition(swap)
+        .transition(apply_storage_candidate())
         .transition(
             Transition::new(
                 "RetireStandby",
                 Trigger::Auto,
                 bind!(|r, s| {
                     let demoted = r.text("RetiringStorage", s, "provider")?;
-                    Some(content(&[("provider", text(&demoted))]))
+                    let mut input = content(&[("provider", text(&demoted))]);
+                    for spent in [TURSO, LORO] {
+                        if r.field("RetiredStorage", s, spent).is_some() {
+                            input.insert(spent.to_string(), Value::Boolean(true));
+                        }
+                    }
+                    Some(input)
                 }),
                 Body::Effectful(Receiver::Keyed),
             )
@@ -640,10 +770,15 @@ fn opened(req: &EffectRequest, place: &str, provider: &str, v: StorageVersion) -
     } else {
         LORO_PRIORITY
     };
+    let token = provider_token(provider, v.0 as i64, prio);
     let mut out = vec![Output::new(
         place,
         &req.subject,
-        provider_token(provider, v.0 as i64, prio),
+        if place == "StorageCandidate" {
+            candidate_token(token)
+        } else {
+            token
+        },
     )];
     if place == "Storage" {
         out.push(Output::new(
@@ -681,7 +816,7 @@ fn run_effect(pair: &Pair, req: &EffectRequest) -> EffectResult {
     match &*req.transition {
         "MakeTursoReady" | "MakeLoroReady" | "MakeTursoStandby" => {
             let place = if req.transition.as_ref() == "MakeTursoStandby" {
-                "SecondaryStorage"
+                "StorageCandidate"
             } else {
                 "Storage"
             };
@@ -721,8 +856,15 @@ fn run_effect(pair: &Pair, req: &EffectRequest) -> EffectResult {
                 Err(e) => failed(e),
             }
         }
+        // A closed store never comes back, so the net remembers it: a late
+        // candidate of it has nothing to close.
         "RetireStandby" => match pair.rt.block_on(store.close()) {
-            Ok(()) => EffectResult::Done(vec![]),
+            Ok(()) => {
+                let mut spent = input.clone();
+                spent.remove("provider");
+                spent.insert(provider.clone(), Value::Boolean(true));
+                EffectResult::Done(vec![Output::new("RetiredStorage", &req.subject, spent)])
+            }
             Err(e) => failed(e),
         },
         "ApplyWrite" => {
@@ -745,8 +887,8 @@ fn run_effect(pair: &Pair, req: &EffectRequest) -> EffectResult {
 }
 
 /// Boots the net: a zeroed try count and a request for a store.
-fn booted(turso: Faults) -> (Driver, Pair) {
-    let pair = Pair::new(turso);
+fn booted(turso: Faults, loro: Faults) -> (Driver, Pair) {
+    let pair = Pair::new(turso, loro);
     let mut d = Driver::new(net());
     d.write("ProviderTries", VAULT, tries_token(0, 0))
         .expect("the net quiesces");
@@ -787,10 +929,13 @@ fn a_swap_applies_the_final_delta_while_it_holds_the_stores() {
         // preferred store keeps the boot slot, so this scenario has no standby.
         return;
     }
-    let (mut d, pair) = booted(Faults {
-        definite_open_failures: 1,
-        ..Faults::default()
-    });
+    let (mut d, pair) = booted(
+        Faults {
+            definite_open_failures: 1,
+            ..Faults::default()
+        },
+        Faults::default(),
+    );
 
     // Turso refuses its first open; Loro takes over at once and Turso's next
     // try goes to the standby slot.
@@ -869,12 +1014,15 @@ fn a_swap_that_cannot_apply_the_final_delta_fails_instead_of_releasing_the_hold(
         // test pins does not exist there.
         return;
     }
-    let (mut d, pair) = booted(Faults {
-        definite_open_failures: 1,
-        // One commit per call: enough for the background batch, short of the
-        // final delta.
-        replay_cap_per_call: Some(1),
-    });
+    let (mut d, pair) = booted(
+        Faults {
+            definite_open_failures: 1,
+            // One commit per call: enough for the background batch, short of the
+            // final delta.
+            replay_cap_per_call: Some(1),
+        },
+        Faults::default(),
+    );
     settle(&mut d, &pair, "MakeTursoReady");
     settle(&mut d, &pair, "MakeLoroReady");
     for seq in 1..=3 {
@@ -925,17 +1073,47 @@ enum Op {
     Retry,
 }
 
+/// The definite open failures of each store: Turso from none to every try,
+/// Loro up to one more than its tries, so it can fail to open at all.
+type FaultCounts = (u32, u32);
+
+fn fault_counts() -> BoxedStrategy<FaultCounts> {
+    (0..=MAX_TRIES as u32, 0..=MAX_TRIES as u32 + 1).boxed()
+}
+
+fn booted_with((turso, loro): FaultCounts) -> (Driver, Pair) {
+    let fails = |n| Faults {
+        definite_open_failures: n,
+        ..Faults::default()
+    };
+    booted(fails(turso), fails(loro))
+}
+
+/// store_serves: a store open in a slot while `Storage` is empty and no holder
+/// is in flight means the net still has work — it is not quiescent.
+fn assert_a_store_serves(d: &Driver) {
+    for slot in ["SecondaryStorage", "StorageCandidate"] {
+        if token_content(d, slot).is_some() {
+            assert!(
+                !d.pending.is_empty() || token_content(d, "Storage").is_some(),
+                "store_serves: a store is open in {slot}, yet the net is quiescent \
+                 with no primary store"
+            );
+        }
+    }
+}
+
 struct Ref;
 
 impl ReferenceStateMachine for Ref {
-    type State = ();
+    type State = FaultCounts;
     type Transition = Op;
 
-    fn init_state() -> BoxedStrategy<()> {
-        Just(()).boxed()
+    fn init_state() -> BoxedStrategy<FaultCounts> {
+        fault_counts()
     }
 
-    fn transitions(_: &()) -> BoxedStrategy<Op> {
+    fn transitions(_: &FaultCounts) -> BoxedStrategy<Op> {
         prop_oneof![
             4 => Just(Op::Enqueue),
             8 => Just(Op::Settle),
@@ -945,7 +1123,7 @@ impl ReferenceStateMachine for Ref {
         .boxed()
     }
 
-    fn apply(state: (), _: &Op) {
+    fn apply(state: FaultCounts, _: &Op) -> FaultCounts {
         state
     }
 }
@@ -962,17 +1140,12 @@ impl StateMachineTest for Test {
     type SystemUnderTest = Sut;
     type Reference = Ref;
 
-    fn init_test(_: &()) -> Sut {
-        // Turso refuses its first open, so Loro takes over at once and Turso
-        // comes back through the standby slot.
-        let (d, pair) = booted(Faults {
-            definite_open_failures: 1,
-            ..Faults::default()
-        });
+    fn init_test(faults: &FaultCounts) -> Sut {
+        let (d, pair) = booted_with(*faults);
         Sut { d, pair, seq: 0 }
     }
 
-    fn apply(mut sut: Sut, _: &(), op: Op) -> Sut {
+    fn apply(mut sut: Sut, _: &FaultCounts, op: Op) -> Sut {
         match op {
             // The queue place holds one token per subject, so a second request
             // would overwrite the first OUTSIDE the net. The producer waits.
@@ -1000,7 +1173,8 @@ impl StateMachineTest for Test {
         sut
     }
 
-    fn check_invariants(sut: &Sut, _: &()) {
+    fn check_invariants(sut: &Sut, _: &FaultCounts) {
+        assert_a_store_serves(&sut.d);
         let quiet = sut.d.pending.is_empty();
         let primary = token_content(&sut.d, "Storage");
 
@@ -1059,10 +1233,6 @@ prop_state_machine! {
 
 // ------------------------------------- property 2, over any clock and answers
 
-/// A store that refuses every open, so the boot slot can only be left by the
-/// try count — never by success.
-const NEVER_OPENS: u32 = u32::MAX;
-
 #[derive(Clone, Debug)]
 enum BootOp {
     /// The effect runner answers the oldest pending request.
@@ -1074,14 +1244,14 @@ enum BootOp {
 struct BootRef;
 
 impl ReferenceStateMachine for BootRef {
-    type State = ();
+    type State = FaultCounts;
     type Transition = BootOp;
 
-    fn init_state() -> BoxedStrategy<()> {
-        Just(()).boxed()
+    fn init_state() -> BoxedStrategy<FaultCounts> {
+        fault_counts()
     }
 
-    fn transitions(_: &()) -> BoxedStrategy<BootOp> {
+    fn transitions(_: &FaultCounts) -> BoxedStrategy<BootOp> {
         prop_oneof![
             2 => Just(BootOp::Settle),
             3 => (1u64..40).prop_map(BootOp::Tick),
@@ -1089,7 +1259,7 @@ impl ReferenceStateMachine for BootRef {
         .boxed()
     }
 
-    fn apply(state: (), _: &BootOp) {
+    fn apply(state: FaultCounts, _: &BootOp) -> FaultCounts {
         state
     }
 }
@@ -1105,15 +1275,12 @@ impl StateMachineTest for BootTest {
     type SystemUnderTest = BootSut;
     type Reference = BootRef;
 
-    fn init_test(_: &()) -> BootSut {
-        let (d, pair) = booted(Faults {
-            definite_open_failures: NEVER_OPENS,
-            ..Faults::default()
-        });
+    fn init_test(faults: &FaultCounts) -> BootSut {
+        let (d, pair) = booted_with(*faults);
         BootSut { d, pair }
     }
 
-    fn apply(mut sut: BootSut, _: &(), op: BootOp) -> BootSut {
+    fn apply(mut sut: BootSut, _: &FaultCounts, op: BootOp) -> BootSut {
         match op {
             BootOp::Settle => {
                 let pair = &sut.pair;
@@ -1125,7 +1292,8 @@ impl StateMachineTest for BootTest {
         sut
     }
 
-    fn check_invariants(sut: &BootSut, _: &()) {
+    fn check_invariants(sut: &BootSut, _: &FaultCounts) {
+        assert_a_store_serves(&sut.d);
         let asked = sut.d.requests_of("MakeLoroReady").count();
         let boot_tries = sut.d.requests_of("MakeTursoReady").count();
 
@@ -1154,9 +1322,10 @@ impl StateMachineTest for BootTest {
 prop_state_machine! {
     #![proptest_config(ProptestConfig { cases: 48, .. ProptestConfig::default() })]
 
-    /// Property 2: for any clock jump and any answer order, the fallback is
-    /// asked within the preferred store's first attempt, and the preferred
-    /// store's later tries never delay it.
+    /// Property 2: for any definite open failures of either store, clock jumps
+    /// and settlement order, the fallback is asked within the preferred store's
+    /// first attempt, the preferred store's later tries never delay it, and a
+    /// store that opened serves.
     #[test]
     fn a_fallback_is_asked_within_the_first_attempt(sequential 1..30 => BootTest);
 }
@@ -1174,7 +1343,7 @@ fn a_timeout_counts_one_try() {
     }
     // A store that never answers: the run timer is the only thing that ends an
     // attempt.
-    let (mut d, _pair) = booted(Faults::default());
+    let (mut d, _pair) = booted(Faults::default(), Faults::default());
     let tries = |d: &Driver| {
         int_of(
             token_content(d, "ProviderTries").expect("a tries token"),
@@ -1215,7 +1384,7 @@ fn a_timeout_counts_one_try() {
 /// MAX_TRIES tries, so the bound is MAX_TRIES * (run timer + abandon).
 #[test]
 fn a_silent_preferred_store_never_delays_the_fallback() {
-    let (mut d, pair) = booted(Faults::default());
+    let (mut d, pair) = booted(Faults::default(), Faults::default());
 
     d.tick(RUN_TIMER_SECS + 1).expect("the net quiesces");
     assert!(
@@ -1250,10 +1419,13 @@ fn a_manual_retry_resets_the_tries() {
         // preferred store keeps the boot slot, so this scenario has no standby.
         return;
     }
-    let (mut d, pair) = booted(Faults {
-        definite_open_failures: MAX_TRIES as u32,
-        ..Faults::default()
-    });
+    let (mut d, pair) = booted(
+        Faults {
+            definite_open_failures: MAX_TRIES as u32,
+            ..Faults::default()
+        },
+        Faults::default(),
+    );
     // One try in the boot slot, the rest in the background standby slot.
     settle(&mut d, &pair, "MakeTursoReady");
     for _ in 1..MAX_TRIES {
@@ -1268,4 +1440,202 @@ fn a_manual_retry_resets_the_tries() {
     d.fire("RetryProvider", VAULT, OccurrenceId::caller("retry#1"))
         .expect("ProviderTries holds a token");
     assert_eq!(tries(&d), (0, 0), "the manual retry reset the counts");
+}
+
+// ----------------------------------------- the standby without a primary
+
+fn fails(n: u32) -> Faults {
+    Faults {
+        definite_open_failures: n,
+        ..Faults::default()
+    }
+}
+
+/// REV2-promote.a: Turso's first try fails, Loro uses up every try, then
+/// Turso's background try opens into the standby slot. With no primary to swap
+/// with, the standby is promoted and the net discloses why.
+#[test]
+fn a_standby_serves_when_the_fallback_cannot_open() {
+    if blocking_boot() {
+        // The blocking variant is a harness for property 2 only: there the
+        // preferred store keeps the boot slot, so this scenario has no standby.
+        return;
+    }
+    let (mut d, pair) = booted(fails(1), fails(MAX_TRIES as u32));
+    settle(&mut d, &pair, "MakeTursoReady");
+    for _ in 0..MAX_TRIES {
+        settle(&mut d, &pair, "MakeLoroReady");
+    }
+    assert!(
+        token_content(&d, "Storage").is_none(),
+        "no store has opened yet"
+    );
+
+    settle(&mut d, &pair, "MakeTursoStandby");
+    assert_eq!(
+        token_content(&d, "Storage").map(|t| str_of(t, "provider")),
+        Some(TURSO.to_string()),
+        "the opened standby serves, since there is no primary to swap with"
+    );
+    assert!(token_content(&d, "SecondaryStorage").is_none());
+    assert_eq!(
+        token_content(&d, "StorageCondition").map(|t| str_of(t, "text")),
+        Some(format!(
+            "serving {TURSO} because {LORO} could not open: \
+             {LORO}: the store lock is held (open {MAX_TRIES} of {MAX_TRIES})"
+        )),
+        "the promotion is disclosed"
+    );
+
+    d.write("WriteQueue", VAULT, content(&[("seq", Value::Integer(1))]))
+        .expect("the net quiesces");
+    settle(&mut d, &pair, "ApplyWrite");
+    assert_eq!(
+        pair.store(TURSO).writes(),
+        1,
+        "the promoted store takes writes"
+    );
+}
+
+/// A write holds the primary's token, so `Storage` is empty while it runs —
+/// but the primary exists (REV11-running.a). A standby that opens during the
+/// write must NOT be promoted beside it.
+#[test]
+fn a_held_write_never_triggers_the_promotion() {
+    if blocking_boot() {
+        // The blocking variant is a harness for property 2 only: there the
+        // preferred store keeps the boot slot, so this scenario has no standby.
+        return;
+    }
+    let (mut d, pair) = booted(fails(2), fails(1));
+    settle(&mut d, &pair, "MakeTursoReady");
+    settle(&mut d, &pair, "MakeLoroReady");
+    settle(&mut d, &pair, "MakeLoroReady");
+    assert_eq!(
+        token_content(&d, "Storage").map(|t| str_of(t, "provider")),
+        Some(LORO.to_string()),
+        "the fallback serves after one failure"
+    );
+    // The failed background try re-posts the store request, which then waits:
+    // a store has opened.
+    settle(&mut d, &pair, "MakeTursoStandby");
+    assert!(token_content(&d, "StorageRequest").is_some());
+
+    d.write("WriteQueue", VAULT, content(&[("seq", Value::Integer(1))]))
+        .expect("the net quiesces");
+    settle(&mut d, &pair, "MakeTursoStandby");
+    assert!(
+        token_content(&d, "Storage").is_none(),
+        "one_primary: '{}' was promoted while a write held '{LORO}'",
+        token_content(&d, "Storage").map_or(String::new(), |t| str_of(t, "provider"))
+    );
+    assert_eq!(
+        token_content(&d, "StorageCandidate").map(|t| match &t["output"] {
+            Value::Object(token) => token["provider"].clone(),
+            other => panic!("a candidate output of {other:?}"),
+        }),
+        Some(text(TURSO)),
+        "the candidate waits for the write"
+    );
+
+    settle(&mut d, &pair, "ApplyWrite");
+    settle(&mut d, &pair, "SwapStorage");
+    assert_eq!(
+        token_content(&d, "Storage").map(|t| str_of(t, "provider")),
+        Some(TURSO.to_string()),
+        "the standby takes over by the swap, after the write"
+    );
+    assert_eq!(
+        pair.store(TURSO).applied(),
+        pair.source.tip(),
+        "no write was lost"
+    );
+}
+
+// ------------------------------------- late store answers (REV2-cand.a)
+
+fn primary_of(d: &Driver) -> Option<String> {
+    token_content(d, "Storage").map(|t| str_of(t, "provider"))
+}
+
+/// D1: a write is enqueued while the previous write holds the store. The held
+/// write's queue input changed, so its returned store token lands as a
+/// candidate and the apply transition installs it — the primary is never lost.
+#[test]
+fn a_contended_write_sequence_never_loses_the_primary() {
+    if blocking_boot() {
+        // The blocking variant is a harness for property 2 only.
+        return;
+    }
+    let (mut d, pair) = booted(fails(1), Faults::default());
+    settle(&mut d, &pair, "MakeTursoReady");
+    settle(&mut d, &pair, "MakeLoroReady");
+    assert_eq!(primary_of(&d), Some(LORO.to_string()));
+
+    let enqueue = |d: &mut Driver, seq: i64| {
+        d.write(
+            "WriteQueue",
+            VAULT,
+            content(&[("seq", Value::Integer(seq))]),
+        )
+        .expect("the net quiesces");
+    };
+    enqueue(&mut d, 1);
+    for seq in 2..=4 {
+        enqueue(&mut d, seq);
+        assert_eq!(
+            d.pending
+                .iter()
+                .filter(|r| r.transition.as_ref() == "ApplyWrite")
+                .count(),
+            1,
+            "a second write fired while the first held the store"
+        );
+        settle(&mut d, &pair, "ApplyWrite");
+        // The next write took the returned token at once, so the primary is in
+        // that write's hold.
+        assert!(
+            d.pending
+                .iter()
+                .any(|r| r.transition.as_ref() == "ApplyWrite"
+                    && str_of(&r.input, "provider") == LORO),
+            "lost_primary: the write over a changed queue dropped the store token (seq {})",
+            seq - 1
+        );
+    }
+    settle(&mut d, &pair, "ApplyWrite");
+    let primary = token_content(&d, "Storage").expect("a primary");
+    assert_eq!(
+        pair.store(LORO).writes(),
+        4,
+        "every write reached the store"
+    );
+    assert_eq!(int_of(primary, "version") as u64, pair.source.tip());
+}
+
+/// D2: Loro's second open outlives its run timer, so a third attempt starts;
+/// the late answer of the second finds its inputs changed. It still opened the
+/// store, so it lands as a candidate and is installed — the net serves.
+#[test]
+fn a_late_open_answer_serves_when_no_store_does() {
+    if blocking_boot() {
+        // The blocking variant is a harness for property 2 only.
+        return;
+    }
+    let (mut d, pair) = booted(fails(MAX_TRIES as u32), fails(1));
+    settle(&mut d, &pair, "MakeTursoReady");
+    settle(&mut d, &pair, "MakeLoroReady");
+    d.tick(RUN_TIMER_SECS).expect("the net quiesces");
+    settle(&mut d, &pair, "MakeLoroReady");
+    assert_eq!(
+        primary_of(&d),
+        Some(LORO.to_string()),
+        "lost_open: the late answer opened '{LORO}', yet no store serves"
+    );
+    settle(&mut d, &pair, "MakeLoroReady");
+    assert_eq!(primary_of(&d), Some(LORO.to_string()));
+    assert!(
+        token_content(&d, "RetiringStorage").is_none(),
+        "the primary is never retired"
+    );
 }

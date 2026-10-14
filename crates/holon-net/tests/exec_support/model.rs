@@ -225,16 +225,34 @@ impl Reads for Reader<'_> {
 
     fn present(&mut self, place: &str, subject: &str) -> bool {
         let model = self.model;
-        if let Some(t) = place.strip_suffix(".Running")
-            && model.spec.transitions.iter().any(|d| d.name == t)
-        {
-            return model.running().contains_key(&key(t, subject));
+        if let Some(held) = model.executor_place_held(place, subject) {
+            return held;
         }
         match model.place(place) {
             PlaceSpec::Derived(_) => model.derived(self, place, subject).is_some(),
             PlaceSpec::Stored { .. } => model.row(self.trace, place, subject).present,
         }
     }
+}
+
+enum ExecutorPlace {
+    Running,
+    OutcomeUnknown,
+}
+
+fn executor_place<'p>(spec: &Spec, place: &'p str) -> Option<(&'p str, ExecutorPlace)> {
+    let (t, kind) = if let Some(t) = place.strip_suffix(".Running") {
+        (t, ExecutorPlace::Running)
+    } else {
+        (
+            place.strip_suffix(".OutcomeUnknown")?,
+            ExecutorPlace::OutcomeUnknown,
+        )
+    };
+    spec.transitions
+        .iter()
+        .any(|d| d.name == t)
+        .then_some((t, kind))
 }
 
 fn cause_content(cause: &Cause) -> Content {
@@ -244,10 +262,17 @@ fn cause_content(cause: &Cause) -> Content {
 impl Model {
     pub fn new(spec: Spec) -> Self {
         for t in &spec.transitions {
-            for p in t.consumes.iter().chain(&t.reads).chain(&t.inhibits) {
+            for p in t.consumes.iter().chain(&t.reads) {
                 assert!(
                     spec.places.contains_key(p.as_str()),
                     "the model reads no executor place: '{}' has an arc on '{p}'",
+                    t.name
+                );
+            }
+            for p in &t.inhibits {
+                assert!(
+                    spec.places.contains_key(p.as_str()) || executor_place(&spec, p).is_some(),
+                    "'{}' inhibits '{p}', which the net does not declare",
                     t.name
                 );
             }
@@ -285,6 +310,16 @@ impl Model {
         self.content(place, subject)
             .expect("decide checked every consumed token")[field]
             .clone()
+    }
+
+    /// Whether an executor place (`<T>.Running`, `<T>.OutcomeUnknown`) holds
+    /// for the subject, derived from the occurrences; `None` for a net place.
+    fn executor_place_held(&self, place: &str, subject: &str) -> Option<bool> {
+        let (t, held) = match executor_place(&self.spec, place)? {
+            (t, ExecutorPlace::Running) => (t, self.running()),
+            (t, ExecutorPlace::OutcomeUnknown) => (t, self.unknown_places()),
+        };
+        Some(held.contains_key(&key(t, subject)))
     }
 
     fn place(&self, name: &str) -> &PlaceSpec {
@@ -774,7 +809,11 @@ impl Model {
                 held_by: self.holder(p, s),
             });
         }
-        if let Some(p) = t.inhibits.iter().find(|p| present(p)) {
+        if let Some(p) = t
+            .inhibits
+            .iter()
+            .find(|p| self.executor_place_held(p, s).unwrap_or_else(|| present(p)))
+        {
             return Err(WhyNot::Inhibited(Place::new(p)));
         }
         let mut trace = Trace::default();
