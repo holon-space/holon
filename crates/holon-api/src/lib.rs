@@ -84,6 +84,7 @@ pub mod spawner;
 #[cfg(feature = "test-helpers")]
 pub mod spelling;
 pub mod storage_error;
+pub mod storage_provider;
 pub mod streaming;
 pub mod template;
 pub mod template_instantiation;
