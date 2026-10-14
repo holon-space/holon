@@ -406,7 +406,7 @@ impl EnrichedRow {
         Self(row)
     }
 
-    /// Enrich a raw `StorageEntity` row (Arc<str> keys). Re-keys to the
+    /// Enrich a raw `StorageEntity` row (`Arc<str>` keys). Re-keys to the
     /// String-keyed row shape once, at the enrichment boundary.
     pub fn from_storage(
         data: crate::StorageEntity,
@@ -494,7 +494,7 @@ impl DataRowAccumulator {
         }
     }
 
-    /// Export as Vec<DataRow> for interpretation.
+    /// Export as `Vec<DataRow>` for interpretation.
     pub fn to_vec(&self) -> Vec<DataRow> {
         self.rows.values().cloned().collect()
     }

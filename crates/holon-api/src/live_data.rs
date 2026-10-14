@@ -301,7 +301,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     /// followed by `MapDiff::Insert` / `MapDiff::Update` / `MapDiff::Remove`
     /// for each subsequent change.
     ///
-    /// Use [`SignalMapExt::for_each`] (or [`SignalMapExt::key_cloned`]) to
+    /// Use `SignalMapExt::for_each` (or `SignalMapExt::key_cloned`) to
     /// react to changes in a background task.
     pub fn signal_map(&self) -> MutableSignalMap<String, Arc<T>> {
         self.items.signal_map_cloned()

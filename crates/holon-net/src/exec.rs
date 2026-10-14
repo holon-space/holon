@@ -1651,7 +1651,7 @@ impl Executor {
     }
 
     /// Hands back the result of an effect request. The result
-    /// closes only its own attempt; the occurrence settles by [`outcome`] over
+    /// closes only its own attempt; the occurrence settles by `outcome` over
     /// all its attempts. A late result of an abandoned attempt counts the same
     /// way, and a late `Unknown` keeps that attempt open.
     pub fn complete(

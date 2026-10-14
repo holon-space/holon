@@ -779,7 +779,7 @@ fn concat_invoke(resolved: &ResolvedArgs) -> Value {
 }
 
 /// Key bound for row maps accepted by the eval entry points: both the
-/// Arc<str>-keyed `StorageEntity` (engine side) and the String-keyed
+/// `Arc<str>`-keyed `StorageEntity` (engine side) and the String-keyed
 /// `DataRow` (frontend/FRB side) qualify.
 pub trait RowKey: std::borrow::Borrow<str> + std::hash::Hash + Eq {}
 impl<T: std::borrow::Borrow<str> + std::hash::Hash + Eq> RowKey for T {}

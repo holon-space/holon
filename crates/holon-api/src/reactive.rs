@@ -464,7 +464,7 @@ where
         }
     }
 
-    /// Export current state as a Vec<DataRow> (for WidgetSpec construction).
+    /// Export current state as a `Vec<DataRow>` (for WidgetSpec construction).
     pub fn to_vec(&self) -> Vec<HashMap<K, crate::Value>> {
         self.state.values().cloned().collect()
     }

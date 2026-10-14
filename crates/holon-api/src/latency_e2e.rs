@@ -722,7 +722,7 @@ fn enrol(
 
 /// Retire the pending entry of an interaction that produced no write, because
 /// the op was **refused or failed**. Without this the entry squats until
-/// [`EXPIRY`] and any unrelated later delivery for that row — a background
+/// `EXPIRY` and any unrelated later delivery for that row — a background
 /// re-projection, a peer edit — closes it as a multi-second measurement of
 /// nothing, which the latency-slo oracle then reports as a real SLO breach.
 ///
@@ -907,10 +907,10 @@ fn block_row_pairs(c: &crate::Change<crate::StorageEntity>) -> Vec<(String, Opti
 ///
 /// `received_at` is when the feed took the batch off its stream. A clock
 /// dispatched after that cannot be what the batch carries, so it is not closed
-/// here: see [`close_received`].
+/// here: see `close_received`.
 ///
 /// A batch that closes no clock of an origin is reported on the feed's next
-/// closure of that origin, in `quiet_batches_us`: see [`log_quiet`]. A batch
+/// closure of that origin, in `quiet_batches_us`: see `log_quiet`. A batch
 /// applied while no clock of ANY origin is pending is not logged: every clock
 /// a later batch closes was dispatched after it. A batch applied while only
 /// the other origin has clocks pending is logged for this origin too.

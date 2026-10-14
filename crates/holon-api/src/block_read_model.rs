@@ -68,7 +68,7 @@ impl BlockReadModel {
         }
     }
 
-    /// Replace the whole set atomically — see [`LiveData::replace_all`].
+    /// Replace the whole set atomically — see `LiveData::replace_all`.
     pub fn publish_snapshot(&self, snapshot: &HashMap<String, SnapshotBlock>) {
         let items: BTreeMap<String, Arc<SnapshotBlock>> = snapshot
             .iter()

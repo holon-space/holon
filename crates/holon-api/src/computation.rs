@@ -338,7 +338,7 @@ pub enum Computation {
     /// A multi-way conditional with **equality-match on a scrutinee** (the
     /// `switch`/`if` shape): evaluate `scrutinee`, then take the `result` of
     /// the first `(match_value, result)` branch whose `match_value` equals
-    /// it (numeric-aware; see [`values_match`]), else `else_`.
+    /// it (numeric-aware; see `values_match`), else `else_`.
     ///
     /// - `switch x { a => r1, b => r2, _ => e }` maps directly: `scrutinee =
     ///   x`, branches `[(a, r1), (b, r2)]`, `else_ = e`.

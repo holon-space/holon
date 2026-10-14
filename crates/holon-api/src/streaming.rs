@@ -279,18 +279,18 @@ impl<T> Change<T> {
     }
 }
 
-/// Type alias for Change<DataRow>
+/// Type alias for `Change<DataRow>`
 ///
 /// Used for streaming query result changes.
 /// flutter_rust_bridge:non_opaque
 pub type MapChange = Change<crate::widget_spec::DataRow>;
 
-/// Type alias for Change<EnrichedRow>
+/// Type alias for `Change<EnrichedRow>`
 ///
 /// Used in the reactive pipeline where data has been through enrichment.
 pub type EnrichedChange = Change<crate::widget_spec::EnrichedRow>;
 
-/// Type alias for Change<Block>
+/// Type alias for `Change<Block>`
 ///
 /// Used for streaming block changes.
 /// flutter_rust_bridge:non_opaque
@@ -306,13 +306,13 @@ pub struct Batch<T> {
     pub items: Vec<T>,
 }
 
-/// Type alias for Batch<MapChange>
+/// Type alias for `Batch<MapChange>`
 ///
 /// Used for streaming batched query result changes.
 /// flutter_rust_bridge:non_opaque
 pub type BatchMapChange = Batch<MapChange>;
 
-/// Type alias for Batch<MapChange> wrapped with metadata
+/// Type alias for `Batch<MapChange>` wrapped with metadata
 ///
 /// Used for streaming batched query result changes with tracing context.
 /// flutter_rust_bridge:non_opaque
@@ -594,7 +594,7 @@ impl BatchTraceContext {
     /// 2. Tracing span context (via set_parent)
     ///
     /// Yields `None` unless an OpenTelemetry layer is installed — see
-    /// [`ChangeOrigin::extract_trace_context_from_current_span`] for why a
+    /// `ChangeOrigin::extract_trace_context_from_current_span` for why a
     /// span-id-derived substitute is not acceptable here.
     ///
     /// flutter_rust_bridge:ignore

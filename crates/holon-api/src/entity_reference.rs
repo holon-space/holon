@@ -2,7 +2,7 @@
 //!
 //! An operation parameter that addresses an entity — the subject `id`, or a
 //! role name like `parent_id` / `block_id` — is declared
-//! [`TypeHint::EntityId`](crate::TypeHint::EntityId), and the operation
+//! [`TypeHint::EntityId`], and the operation
 //! boundary parses it into an [`EntityUri`](crate::EntityUri) once. These two
 //! gates keep that declaration honest: [`validate_entity_references`] refuses
 //! a descriptor set at registration, and

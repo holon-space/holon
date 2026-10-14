@@ -1,6 +1,6 @@
 //! Render DSL: the Rhai-syntax language a render source is written in.
 //!
-//! The source is parsed by Rhai but never evaluated: [`RenderAst`] maps the
+//! The source is parsed by Rhai but never evaluated: `RenderAst` maps the
 //! syntax tree onto [`RenderExpr`], so an expression over `col(...)` becomes a
 //! node the frontend evaluates per row. The grammar is closed; a form with no
 //! `RenderExpr` node is refused when the source is loaded.
@@ -73,7 +73,7 @@ fn validate_dotted_names(expr: &RenderExpr) -> Result<()> {
 }
 
 /// Parse render-DSL predicate text (`eq("completed", 1)`,
-/// `and(…, not(is_not_null("scheduled")))`) into a typed [`Predicate`].
+/// `and(…, not(is_not_null("scheduled")))`) into a typed `Predicate`.
 ///
 /// The predicate constructors are render DSL calls, so this reuses the same
 /// `parse → eval → serde` round-trip the `rules:` argument takes

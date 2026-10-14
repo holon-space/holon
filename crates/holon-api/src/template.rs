@@ -38,7 +38,7 @@ where
     keys.into_iter().find(|k| k.eq_ignore_ascii_case(marker))
 }
 
-/// Case-insensitive marker lookup over a [`Block`]'s properties, returning the
+/// Case-insensitive marker lookup over a `Block`'s properties, returning the
 /// marker's value as a string (the picker's path). `None` when no key matches
 /// `marker` (case-insensitively) or its value is not a string.
 pub fn template_marker_value<'a>(block: &'a crate::block::Block, marker: &str) -> Option<&'a str> {
