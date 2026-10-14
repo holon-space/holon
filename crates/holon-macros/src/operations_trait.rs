@@ -907,10 +907,12 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 if let Some(op) = ops.iter_mut().find(|o| o.name == #op_name) {
                     if let Some(param) = op.required_params.iter_mut().find(|p| p.name == #param_name) {
                         // The answer is the state name the operation takes, so each
-                        // `CompletionStateInfo` contributes its `state` label.
+                        // `CompletionStateInfo` contributes its `state` label; the
+                        // refusal names that type, which only it can state.
+                        let resolved = ds.#method_ident();
                         param.type_hint = holon_api::TypeHint::Enum {
-                            type_name: #param_name.to_string(),
-                            variants: ds.#method_ident()
+                            type_name: holon_api::input_type_name_of(&resolved).to_string(),
+                            variants: resolved
                                 .into_iter()
                                 .map(|info| info.state)
                                 .collect(),

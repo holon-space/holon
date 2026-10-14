@@ -244,7 +244,7 @@ fn enum_from_resolver() {
             type_name,
             variants,
         } => {
-            assert_eq!(type_name, "state");
+            assert_eq!(type_name, "TaskState");
             assert_eq!(
                 variants,
                 &["TODO", "DONE"],
@@ -253,6 +253,40 @@ fn enum_from_resolver() {
         }
         other => panic!("Expected TypeHint::Enum, got {:?}", other),
     }
+}
+
+/// `TypeHint::Enum::type_name` names the set a refusal talks about. The macro
+/// cannot invent that name: it comes from the resolved type's
+/// [`holon_api::InputType`] impl, so no parameter name can stand in for it.
+#[test]
+fn an_enum_refusal_names_the_type_not_the_param() {
+    use holon_api::InputType;
+
+    let mock = MockEnumOps;
+    let ops = __operations_enum_from_test_ops::enum_from_test_ops_with_resolver(
+        &mock, "test", "t", "tests", "id",
+    );
+    let mut seen = 0;
+    for op in &ops {
+        for param in &op.required_params {
+            if let holon_api::TypeHint::Enum { type_name, .. } = &param.type_hint {
+                seen += 1;
+                assert_ne!(
+                    type_name, &param.name,
+                    "{}.{} names the parameter, not its type",
+                    op.name, param.name
+                );
+                assert_eq!(
+                    type_name,
+                    CompletionStateInfo::TYPE_NAME,
+                    "{}.{} must name the resolved type",
+                    op.name,
+                    param.name
+                );
+            }
+        }
+    }
+    assert_eq!(seen, 1, "one resolved enum param in this trait");
 }
 
 // ======== Dispatch metadata tests ========

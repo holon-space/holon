@@ -273,6 +273,10 @@ pub struct CompletionStateInfo {
     pub is_active: bool,
 }
 
+impl holon_api::InputType for CompletionStateInfo {
+    const TYPE_NAME: &'static str = "TaskState";
+}
+
 /// Represents the undo classification of an operation.
 ///
 /// Every provider result MUST carry a deliberate classification — either a

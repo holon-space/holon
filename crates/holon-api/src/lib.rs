@@ -360,10 +360,10 @@ pub use render_eval::is_template_arg;
 pub use render_eval::is_template_arg_for;
 // Re-export render types
 pub use render_types::{
-    Arg, BinaryOperator, BoundaryBehavior, ClickModifiers, MenuExposure, NonMenuSurface, Operation,
-    OperationDescriptor, OperationParam, OperationWiring, ParamMapping, PickerKind, RenderExpr,
-    RenderProfile, RenderVariant, RenderableItem, RowProfile, RowTemplate, SurfaceSet, TargetScope,
-    Trigger, TypeHint, ViewSpec, extract_widget_names,
+    Arg, BinaryOperator, BoundaryBehavior, ClickModifiers, InputType, MenuExposure, NonMenuSurface,
+    Operation, OperationDescriptor, OperationParam, OperationWiring, ParamMapping, PickerKind,
+    RenderExpr, RenderProfile, RenderVariant, RenderableItem, RowProfile, RowTemplate, SurfaceSet,
+    TargetScope, Trigger, TypeHint, ViewSpec, extract_widget_names, input_type_name_of,
 };
 // Re-export streaming types
 pub use streaming::{

@@ -653,6 +653,24 @@ impl TypeHint {
     }
 }
 
+/// A Rust type a user answer is parsed into: it names ITSELF.
+///
+/// A producer of [`TypeHint::Enum`] or [`TypeHint::Newtype`] reads the name
+/// from here instead of guessing it from the parameter it fills, so a refusal
+/// says `TaskState`, never `state`.
+pub trait InputType {
+    /// The name a refusal uses: an enum's own ident, a newtype's parser name.
+    const TYPE_NAME: &'static str;
+}
+
+/// The [`InputType::TYPE_NAME`] of a slice's element type.
+///
+/// A `#[enum_from]` resolver learns its variants at runtime and never sees the
+/// element type as syntax; handing it the resolved values infers that type.
+pub fn input_type_name_of<T: InputType>(_: &[T]) -> &'static str {
+    T::TYPE_NAME
+}
+
 /// Parameter descriptor for operation metadata
 ///
 /// Describes a required parameter for an operation.
