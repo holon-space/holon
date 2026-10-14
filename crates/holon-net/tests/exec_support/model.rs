@@ -390,6 +390,19 @@ impl Model {
             .collect()
     }
 
+    /// `<T>.OutcomeUnknown` of a subject holds while an occurrence of `T` for
+    /// it is parked; any of those occurrences may be the one it names.
+    pub fn unknown_places(&self) -> BTreeMap<Key, BTreeSet<String>> {
+        let mut unknown: BTreeMap<Key, BTreeSet<String>> = BTreeMap::new();
+        for (id, o) in self.occs.iter().filter(|(_, o)| o.parked.is_some()) {
+            unknown
+                .entry(key(&o.transition, &o.subject))
+                .or_default()
+                .insert(id.to_string());
+        }
+        unknown
+    }
+
     pub fn unknown(&self) -> BTreeMap<String, Content> {
         self.occs
             .iter()

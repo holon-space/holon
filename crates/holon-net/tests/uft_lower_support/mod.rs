@@ -39,6 +39,9 @@ pub struct Subj {
     pub ondisk: u32,
     pub answered: Option<Ans>,
     pub flight: Option<Flight>,
+    /// The work whose outcome stayed unknown: parked until the user resolves
+    /// it (EX-unknown.a), so the run is unsettled and (T, s) is not idle.
+    pub parked: Option<Flight>,
     pub failed_port: bool,
     pub removed: bool,
     /// The failed attempt's situation and answer: the answer is in the key.
@@ -58,8 +61,19 @@ impl Subj {
     /// The situation the ask shows: only while the subject is idle, so no
     /// offered ask has a dead `Answer` (D151.a).
     pub fn offered(&self) -> Option<Sit> {
-        let idle = self.answered.is_none() && self.flight.is_none() && !self.failed_port;
+        let idle = self.answered.is_none()
+            && self.flight.is_none()
+            && self.parked.is_none()
+            && !self.failed_port;
         self.sit().filter(|_| idle)
+    }
+
+    /// A running or parked work read the old situation: its inputs are stale,
+    /// so its outputs are withheld when it records.
+    fn situation_changed(&mut self) {
+        for f in self.flight.iter_mut().chain(&mut self.parked) {
+            f.changed = true;
+        }
     }
 
     fn seen_now(&mut self) {
@@ -112,8 +126,14 @@ pub enum Op {
         s: usize,
         ok: bool,
     },
-    /// The work's outcome is unknown, then the user drops it.
+    /// The work's outcome stays unknown: the occurrence parks.
     Lost(usize),
+    /// The user resolves a parked occurrence: `verify` records it as done,
+    /// else it is dropped.
+    Resolve {
+        s: usize,
+        verify: bool,
+    },
 }
 
 pub const EXPIRED_GONE: &str = "the question no longer applies";
@@ -133,7 +153,7 @@ impl Model {
     /// The reply to an answer. The value never matters (UFT-adopt.a).
     pub fn answer_result(&self, s: usize) -> Result<(), Refusal> {
         let sj = &self.subj[s];
-        if sj.answered.is_some() || sj.flight.is_some() {
+        if sj.answered.is_some() || sj.flight.is_some() || sj.parked.is_some() {
             return Err(Refusal::AlreadyAnswered);
         }
         if sj.offered().is_none() {
@@ -200,14 +220,32 @@ impl Model {
         }
     }
 
-    /// The outcome stayed unknown and the user dropped it: the take is
-    /// committed and the failure port gets a token without an `Answered`.
-    fn drop_lost(&mut self, s: usize) {
+    /// The outcome stayed unknown: the run is unsettled, the input stays
+    /// taken and the attempt's failure mark is set (EX-unknown.a).
+    fn park_lost(&mut self, s: usize) {
         let sj = &mut self.subj[s];
         let f = sj.flight.take().expect("precondition: in flight");
-        sj.mark = Some((f.at, f.ans));
-        sj.failed_port = true;
-        sj.last_failed = true;
+        sj.mark = Some((f.at, f.ans.clone()));
+        sj.parked = Some(f);
+    }
+
+    /// The user resolved a parked occurrence. A drop commits the take and
+    /// gives the failure port a token without an `Answered`; a verify records
+    /// the work as done.
+    fn resolve(&mut self, s: usize, verify: bool) {
+        let sj = &mut self.subj[s];
+        let f = sj.parked.take().expect("precondition: parked");
+        if verify {
+            // A stale verify withholds its outputs and keeps the mark the park
+            // set: the mark's key is this attempt's own trace.
+            if !f.changed {
+                sj.mark = None;
+                sj.removed = true;
+            }
+        } else {
+            sj.failed_port = true;
+            sj.last_failed = true;
+        }
     }
 }
 
@@ -248,15 +286,21 @@ impl ReferenceStateMachine for Ref {
                 .prop_map(|(s, value, seen)| Op::Answer { s, value, seen }),
             5 => Just(Op::Step),
             3 => (s.clone(), any::<bool>()).prop_map(|(s, ok)| Op::Complete { s, ok }),
-            1 => s.prop_map(Op::Lost),
+            1 => s.clone().prop_map(Op::Lost),
+            2 => (s, any::<bool>()).prop_map(|(s, verify)| Op::Resolve { s, verify }),
         ]
         .boxed()
     }
 
     fn preconditions(m: &Model, op: &Op) -> bool {
         match op {
-            Op::Reappear(s) => m.subj[*s].refused.is_none() && m.subj[*s].flight.is_none(),
+            Op::Reappear(s) => {
+                m.subj[*s].refused.is_none()
+                    && m.subj[*s].flight.is_none()
+                    && m.subj[*s].parked.is_none()
+            }
             Op::Complete { s, .. } | Op::Lost(s) => m.subj[*s].flight.is_some(),
+            Op::Resolve { s, .. } => m.subj[*s].parked.is_some(),
             Op::Answer { s, seen, .. } => m.seen_sit(*s, *seen).is_some(),
             _ => true,
         }
@@ -283,20 +327,15 @@ impl Model {
         match *op {
             Op::ChangeBase(s) => {
                 m.subj[s].base = tick;
-                if let Some(f) = &mut m.subj[s].flight {
-                    f.changed = true;
-                }
+                m.subj[s].situation_changed();
             }
             Op::ChangeOnDisk(s) => {
                 m.subj[s].ondisk = tick;
-                if let Some(f) = &mut m.subj[s].flight {
-                    f.changed = true;
-                }
+                m.subj[s].situation_changed();
             }
             Op::Saved(s) => {
-                let fired = m.subj[s].refused.take().is_some();
-                if let Some(f) = m.subj[s].flight.as_mut().filter(|_| fired) {
-                    f.changed = true;
+                if m.subj[s].refused.take().is_some() {
+                    m.subj[s].situation_changed();
                 }
             }
             Op::Reappear(s) => m.subj[s].refused = Some(tick),
@@ -312,7 +351,8 @@ impl Model {
             }
             Op::Step => {}
             Op::Complete { s, ok } => m.complete(s, ok),
-            Op::Lost(s) => m.drop_lost(s),
+            Op::Lost(s) => m.park_lost(s),
+            Op::Resolve { s, verify } => m.resolve(s, verify),
         }
     }
 }

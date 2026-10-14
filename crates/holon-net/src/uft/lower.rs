@@ -8,7 +8,7 @@
 //!
 //! | Generated | Kind | Arcs | Fires when |
 //! |---|---|---|---|
-//! | `Asks.<T>` | derived place | — | (T, s) is idle (`Answered.<T>`, `<T>.Running`, `<T>.RetryPending`, `WorkFailed.<T>` empty), the declared arcs hold and the binding holds; row `hash` (ask hash over the trace of the declared arcs and the binding) and `preview` |
+//! | `Asks.<T>` | derived place | — | (T, s) is idle (`Answered.<T>`, `<T>.Running`, `<T>.RetryPending`, `<T>.OutcomeUnknown`, `WorkFailed.<T>` empty), the declared arcs hold and the binding holds; row `hash` (ask hash over the trace of the declared arcs and the binding) and `preview` |
 //! | `Answer.<T>` | manual | inhibits exactly the idle set of `Asks.<T>` | an `Asks.<T>` row exists; the guard never sees the value; puts `Answered.<T>{answer, seen, value}` |
 //! | `<T>` | auto | takes `Answered.<T>` + the declared arcs; failure port `WorkFailed.<T>` | the situation's ask hash equals `Answered.seen` |
 //! | `ExpireAnswer.<T>` | auto | takes `Answered.<T>`; inhibits `WorkFailed.<T>` | the ask is gone or its hash differs; puts `Expired.<T>` keyed by the answer id |
@@ -129,6 +129,9 @@ pub enum LowerTwin {
     AskWhileInFlight,
     /// `Asks` offers the ask while a retry backoff is pending.
     AskWhileRetryPending,
+    /// `Asks` offers the ask while an occurrence is parked with an unknown
+    /// outcome.
+    AskWhileOutcomeUnknown,
 }
 
 /// Lowers one high-level transition into `net`: the work transition and, for
@@ -253,6 +256,10 @@ fn lower_as(
         (
             Place::retry_pending(t).to_string(),
             Some(LowerTwin::AskWhileRetryPending),
+        ),
+        (
+            Place::outcome_unknown(t).to_string(),
+            Some(LowerTwin::AskWhileOutcomeUnknown),
         ),
         // No twin: no `WorkFailed` stands at quiescence (P-quiescent).
         (failed.clone(), None),

@@ -102,6 +102,13 @@ impl Place {
     pub fn retry_pending(transition: &str) -> Self {
         Self::new(&format!("{transition}.RetryPending"))
     }
+
+    /// `<T>.OutcomeUnknown`: a token while an occurrence of `T` for the
+    /// subject is parked with an unknown outcome; its `occurrence` field
+    /// names one of them.
+    pub fn outcome_unknown(transition: &str) -> Self {
+        Self::new(&format!("{transition}.OutcomeUnknown"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -468,7 +475,11 @@ impl NetDef {
             }
         }
         for t in &self.transitions {
-            for reserved in [t.running(), Place::retry_pending(&t.name)] {
+            for reserved in [
+                t.running(),
+                Place::retry_pending(&t.name),
+                Place::outcome_unknown(&t.name),
+            ] {
                 if self.places.contains_key(&reserved) {
                     return Err(LoadError::ReservedPlace(reserved));
                 }
@@ -1821,6 +1832,8 @@ impl Executor {
             &Subject::new(&occurrence.to_string()),
             None,
         );
+        let (transition, subject) = (a.transition.clone(), a.subject.clone());
+        self.mark_unknown(&transition, &subject);
         Ok(a)
     }
 
@@ -2384,7 +2397,24 @@ impl Executor {
             let settle = Cause::definite(format!("outcome unknown: {}", cause.text));
             self.run_failed(&a.transition, &a.subject, &settle, now);
         }
+        let (transition, subject) = (a.transition.clone(), a.subject.clone());
         self.parked.insert(a.occurrence.clone(), a);
+        self.mark_unknown(&transition, &subject);
+    }
+
+    /// `<T>.OutcomeUnknown` of a subject holds while any occurrence of `T`
+    /// for it is parked, so the run is not idle: the token names one of them.
+    fn mark_unknown(&mut self, transition: &Arc<str>, subject: &Subject) {
+        let occurrence = self
+            .parked
+            .values()
+            .find(|a| &a.transition == transition && &a.subject == subject)
+            .map(|a| a.occurrence.to_string());
+        self.tokens.mark_slot(
+            &Place::outcome_unknown(transition),
+            subject,
+            occurrence.map(|o| Content::from([("occurrence".to_string(), Value::String(o))])),
+        );
     }
 
     fn timers(&mut self, now: Duration) {

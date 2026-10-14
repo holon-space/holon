@@ -3,7 +3,8 @@
 //!
 //! Twins (`--features naive-twins`, `UFT_LOWER_TWIN=<name>`), each drops one
 //! lowering rule: `no-ask-hash`, `no-answer-inhibitor`, `no-expire`,
-//! `ask-while-in-flight`, `ask-while-retry-pending`; executor twins:
+//! `ask-while-in-flight`, `ask-while-retry-pending`,
+//! `ask-while-outcome-unknown`; executor twins:
 //! `no-quiescence`, `keep-work-failed`.
 
 mod uft_lower_support;
@@ -195,6 +196,7 @@ fn lowered(d: &TransitionDescriptor) -> NetDef {
             return lower(base_net(), d, Some(parts())).expect("lowers");
         }
         Some("ask-while-retry-pending") => LowerTwin::AskWhileRetryPending,
+        Some("ask-while-outcome-unknown") => LowerTwin::AskWhileOutcomeUnknown,
         Some(other) => panic!("UFT_LOWER_TWIN={other} names no twin"),
     };
     lower_twin(base_net(), d, Some(parts()), twin).expect("lowers")
@@ -233,6 +235,8 @@ struct Sut {
     model: Model,
     now: Duration,
     requests: BTreeMap<usize, EffectRequest>,
+    /// The occurrence each subject has parked with an unknown outcome.
+    parked: BTreeMap<usize, OccurrenceId>,
     /// The ask hash each (subject, situation) showed: a pure function of the
     /// situation content.
     hashes: BTreeMap<(usize, Sit), String>,
@@ -277,6 +281,7 @@ impl StateMachineTest for Test {
             model: m.clone(),
             now: Duration::ZERO,
             requests: BTreeMap::new(),
+            parked: BTreeMap::new(),
             hashes: BTreeMap::new(),
             fired: BTreeSet::new(),
         };
@@ -347,7 +352,7 @@ impl StateMachineTest for Test {
                     .requests
                     .remove(&s)
                     .expect("precondition: a work request is in flight");
-                let mut requests = sut
+                let requests = sut
                     .exec
                     .complete(
                         req.attempt,
@@ -356,13 +361,27 @@ impl StateMachineTest for Test {
                     )
                     .expect("the attempt is known")
                     .requests;
-                requests.extend(
-                    sut.exec
-                        .resolve(&req.occurrence, Resolution::Drop, now)
-                        .expect("the occurrence is parked")
-                        .requests,
-                );
+                sut.parked.insert(s, req.occurrence);
                 requests
+            }
+            Op::Resolve { s, verify } => {
+                let occurrence = sut
+                    .parked
+                    .remove(&s)
+                    .expect("precondition: an occurrence is parked");
+                let resolution = if verify {
+                    Resolution::Verify(vec![Output::new(
+                        "Removed",
+                        &Subject::new(SUBJECTS[s]),
+                        Content::new(),
+                    )])
+                } else {
+                    Resolution::Drop
+                };
+                sut.exec
+                    .resolve(&occurrence, resolution, now)
+                    .expect("the occurrence is parked")
+                    .requests
             }
         };
         no_work_failed_stands(&sut, &op_text);
@@ -539,6 +558,11 @@ fn compare(sut: &mut Sut, m: &Model) {
             "work running",
             present(sut, Place::running(T).as_str(), s),
             sj.flight.is_some(),
+        );
+        row(
+            "work parked with an unknown outcome",
+            present(sut, Place::outcome_unknown(T).as_str(), s),
+            sj.parked.is_some(),
         );
         row(
             "WorkFailed",
@@ -894,6 +918,41 @@ fn a_read_only_work_in_flight_hides_its_ask() {
     assert!(
         exec.derive(&asks_place(T), &Subject::new("a")).is_some(),
         "the ask returns once the run ends"
+    );
+}
+
+/// EX-unknown.a: a parked unknown outcome is no failure — the run stays
+/// unsettled, so the ask of a read-only work must stay hidden until the user
+/// resolves it.
+#[test]
+fn a_parked_unknown_outcome_hides_its_ask() {
+    let mut exec = asking(&read_only(descriptor()));
+    let req = answer_and_start(&mut exec, "1");
+    let lost = exec
+        .complete(
+            req.attempt,
+            EffectResult::Unknown(Cause::definite("lost")),
+            Duration::ZERO,
+        )
+        .expect("the attempt is known");
+    assert!(lost.requests.is_empty());
+    assert_eq!(
+        exec.derive(&asks_place(T), &Subject::new("a")),
+        None,
+        "the ask shows while answer 1 is parked with an unknown outcome"
+    );
+    assert!(
+        exec.asks().is_empty(),
+        "the parked occurrence still offers an Asks row: {:?}",
+        exec.asks()
+    );
+    let verified = exec
+        .resolve(&req.occurrence, Resolution::Verify(vec![]), Duration::ZERO)
+        .expect("the occurrence is parked");
+    assert!(verified.requests.is_empty());
+    assert!(
+        exec.derive(&asks_place(T), &Subject::new("a")).is_some(),
+        "the ask does not return once the parked occurrence resolved"
     );
 }
 

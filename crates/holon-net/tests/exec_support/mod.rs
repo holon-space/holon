@@ -642,6 +642,36 @@ impl Driver {
             self.model.retry_pending(),
         );
 
+        let model_unknown = self.model.unknown_places();
+        let mut sut_unknown_places = BTreeMap::new();
+        for t in &self.spec.transitions {
+            let place = Place::outcome_unknown(&t.name);
+            for s in tokens.subjects(&place) {
+                let content = &tokens.token(&place, &s).expect("listed").content;
+                let occ = match content.get("occurrence") {
+                    Some(Value::String(o)) => o.clone(),
+                    other => panic!("{place} of {s} names occurrence {other:?}"),
+                };
+                sut_unknown_places.insert((t.name.clone(), s.to_string()), occ);
+            }
+        }
+        agree(
+            op,
+            "OutcomeUnknown places (transition, subject)",
+            sut_unknown_places.keys().collect::<Vec<_>>(),
+            model_unknown.keys().collect::<Vec<_>>(),
+        );
+        for (key, occ) in &sut_unknown_places {
+            if !model_unknown[key].contains(occ) {
+                diverge(
+                    op,
+                    &format!("the occurrence in {}.OutcomeUnknown of {}", key.0, key.1),
+                    occ.clone(),
+                    format!("one of {:?}", model_unknown[key]),
+                );
+            }
+        }
+
         let sut_unknown: BTreeMap<String, Content> = tokens
             .subjects(OUTCOME_UNKNOWN)
             .into_iter()
