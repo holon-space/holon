@@ -1400,6 +1400,7 @@ gate-arch:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
+    ./scripts/test-admission-sites-count.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites-count.log
     ./scripts/check-admission-sites.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites.log
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
     # clippy.toml lists the tracing span guards; one held across `.await` leaves

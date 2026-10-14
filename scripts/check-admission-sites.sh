@@ -30,30 +30,9 @@ inventory=scripts/admission-sites.inventory
 entries='execute_operation(_with_origin)?|execute_with_parsed_carriers|execute_intent(_parts)?|execute_gesture(_parts)?|commit_keystroke|dispatch_intent(_sync|_awaitable|_awaiting_result|_chain)?'
 admits="$entries|admit"
 
-observed() {
-    rg -l --type rust -e "(^|[^A-Za-z0-9_])($entries)\(" crates frontends \
-        -g '!**/tests/**' -g '!**/benches/**' -g '!**/examples/**' -g '!**/testing/**' \
-        -g '!*_test.rs' -g '!*_tests.rs' -g '!crates/holon-integration-tests/**' \
-        -g '!crates/*-testing/**' -g '!crates/holon-macros-test/**' \
-        | sort \
-        | while read -r f; do
-            # Production code only: skip each top-level `#[cfg(test)] mod … {`
-            # up to its closing `}` in column 0 (rustfmt layout).
-            n=$(awk -v call="(^|[^A-Za-z0-9_])($entries)\\\\(" -v def="fn ($entries)[<(]" '
-                skip { if (/^}/) skip = 0; next }
-                /^#\[cfg\(test\)\]/ { pending = 1; next }
-                pending && /^(pub(\([a-z]+\))? )?mod .*\{$/ { skip = 1; pending = 0; next }
-                { pending = 0 }
-                /^[[:space:]]*\/\// { next }
-                $0 ~ def { next }
-                $0 ~ call { c++ }
-                END { print c + 0 }' "$f")
-            [ "$n" -gt 0 ] && echo "$n $f"
-        done
-}
-
 scan() {
-    ast-grep scan --json=stream --inline-rules "$1" crates frontends \
+    # shellcheck disable=SC2086 # the scan roots are a deliberate word list
+    ast-grep scan --json=stream --inline-rules "$1" ${ADMISSION_SCAN_ROOTS:-crates frontends} \
         --globs '!**/tests/**' --globs '!**/benches/**' --globs '!**/examples/**' \
         --globs '!**/testing/**' --globs '!*_test.rs' --globs '!*_tests.rs' \
         --globs '!crates/holon-integration-tests/**' --globs '!crates/*-testing/**' \
@@ -67,6 +46,34 @@ not_in_test_mod='
       follows:
         kind: attribute_item
         regex: "cfg\\(test\\)"'
+
+# Call sites naming an entry, per file. Counting parsed nodes rules out the entry
+# name inside a string literal, a doc comment or a trailing comment: a string or
+# a comment is one token, never an identifier. A macro invocation's body is an
+# unparsed token tree, so a call inside one is counted as the token sequence
+# `<entry> ( … )` instead of as a call expression.
+observed() {
+    scan "
+id: entry-call
+language: rust
+rule:
+  any:
+    - kind: call_expression
+      has:
+        field: function
+        regex: \"(^|::|\\\\.)($entries)(::<[^>]*>)?\$\"
+    - kind: token_tree
+      inside: {kind: token_tree, stopBy: end}
+      follows:
+        kind: identifier
+        regex: \"^($entries)\$\"
+        not:
+          follows:
+            regex: \"^fn\$\"
+  not:
+$not_in_test_mod
+" | jq -r '.file' | sort | uniq -c | awk '{ print $1, $2 }'
+}
 
 # A call to an entry or to one of the methods `$2` by method or path, or to
 # one of the free functions `$1`.
@@ -185,6 +192,11 @@ $not_in_test_mod
         done
 }
 
+if [ "${1-}" = "--print" ]; then
+    observed
+    exit 0
+fi
+
 helpers=""
 methods=""
 while :; do
@@ -207,11 +219,6 @@ if [ -n "$deferred" ]; then
     echo "check-admission-sites: a deferred closure admits an operation; mark it ALLOW(admit-in-defer) with the reason it may run after its gesture:" >&2
     echo "$deferred" >&2
     exit 1
-fi
-
-if [ "${1-}" = "--print" ]; then
-    observed
-    exit 0
 fi
 
 expected=$(grep -v '^#' "$inventory" | awk 'NF { print $1, $2 }')

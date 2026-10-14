@@ -3,7 +3,7 @@
 #        FrontendSession, HolonService or dispatch_intent) and must admit before
 #        it spawns or awaits.
 # below: runs inside an already admitted operation, or writes below the dispatcher.
-2 crates/holon-app/src/headless_builder_services.rs below
+1 crates/holon-app/src/headless_builder_services.rs below — the no-op warning names dispatch_intent in its format string, not in a call
 1 crates/holon-app/src/integrations_operations.rs below
 1 crates/holon-app/src/mcp_integrations.rs below
 3 crates/holon-app/src/ordered_block_crud.rs below
@@ -15,7 +15,7 @@
 5 crates/holon-frontend/src/headless_editor_mirror.rs entry
 7 crates/holon-frontend/src/lib.rs entry
 1 crates/holon-frontend/src/operations.rs entry
-16 crates/holon-frontend/src/reactive.rs entry
+14 crates/holon-frontend/src/reactive.rs entry — two log/error format strings name dispatch_intent(_awaiting_result), not calls
 5 crates/holon-frontend/src/user_driver.rs entry
 1 crates/holon-loro-wiring/src/event_infra_module.rs below
 1 crates/holon-loro-wiring/src/typed_entity_sink.rs below
@@ -52,6 +52,6 @@
 1 frontends/gpui/src/views/rich_text_editor.rs entry
 4 frontends/holon-worker/src/lib.rs entry
 1 frontends/holon-worker/src/seed.rs entry
-6 frontends/mcp/src/tools.rs entry
+5 frontends/mcp/src/tools.rs entry — the await_answer tool description names execute_operation in prose, not a call
 6 frontends/tui/src/app_main.rs entry
 1 frontends/tui/src/user_driver.rs entry
