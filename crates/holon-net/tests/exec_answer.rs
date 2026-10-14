@@ -4,13 +4,22 @@
 //!
 //! Twins: `HOLON_NET_TWIN=value-before-bind`, `occurrence-not-in-trace`,
 //! `undo-restores-answered`, `settled-from-answer`.
+//!
+//! The net shape is drawn, not fixed (#195): the downstream consumer of
+//! `Accepted` is part of the generated case, so an undo that finds a firing
+//! holding the row the work wrote is reached by the generator and not only by
+//! the deterministic `undo_while_a_downstream_firing_holds_a_row`.
 
 mod exec_support;
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use exec_support::Driver;
+use exec_support::Spec;
 use exec_support::Transition;
 use exec_support::answer_call;
 use exec_support::answer_spec;
@@ -32,7 +41,9 @@ use holon_net::exec::MAX_ROUNDS;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Place;
+use holon_net::exec::Receiver;
 use holon_net::exec::Resolution;
+use holon_net::exec::ReversalOutcome;
 use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
 use holon_net::exec::answer_transition;
@@ -58,26 +69,78 @@ enum Op {
         value: Option<&'static str>,
     },
     Undo(&'static str),
+    /// Undoes the answer accepted last: it reaches the state where a
+    /// downstream firing still holds the row that work wrote.
+    UndoNewest,
     CompleteDone,
     CompleteFailed,
     CompleteUnknown,
 }
 
+/// How a drawn downstream transition runs: `Effectful` can hold a row it took
+/// across calls, `Pure` fires and finishes inside one quiescence.
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    Effectful,
+    Pure,
+}
+
+/// The drawn net shape: `answer_spec` plus the downstream consumer of
+/// `Accepted`, the row the work writes. `Item`, the row the work consumes,
+/// needs no knob: nothing can hold a token the work already took.
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    consume_accepted: Option<Kind>,
+}
+
+fn spec_of(shape: &Shape) -> Spec {
+    let Some(kind) = shape.consume_accepted else {
+        return answer_spec();
+    };
+    let body = match kind {
+        Kind::Effectful => Body::Effectful(Receiver::None),
+        Kind::Pure => Body::pure(|_, _| Ok(Vec::new())),
+    };
+    answer_spec().transition(
+        Transition::new(
+            "Consume",
+            Trigger::Auto,
+            bind!(|r, s| r.present("Accepted", s).then(Content::new)),
+            body,
+        )
+        .consumes("Accepted"),
+    )
+}
+
 struct Ref;
 
 impl ReferenceStateMachine for Ref {
-    type State = ();
+    type State = Shape;
     type Transition = Op;
 
-    fn init_state() -> BoxedStrategy<()> {
-        Just(()).boxed()
+    fn init_state() -> BoxedStrategy<Shape> {
+        prop_oneof![
+            1 => Just(None),
+            2 => Just(Some(Kind::Effectful)),
+            1 => Just(Some(Kind::Pure)),
+        ]
+        .prop_map(|consume_accepted| Shape { consume_accepted })
+        .boxed()
     }
 
-    fn transitions(_: &()) -> BoxedStrategy<Op> {
+    fn transitions(shape: &Shape) -> BoxedStrategy<Op> {
         let s = prop::sample::select(SUBJECTS.to_vec());
         let id = prop::sample::select(IDS.to_vec());
+        // A firing can hold a written row only in the effectful shape, so undo
+        // of the newest answer is drawn there: that is where the held branch
+        // lives, and it needs the undo right after the work was done.
+        let undo_newest = if matches!(shape.consume_accepted, Some(Kind::Effectful)) {
+            4
+        } else {
+            1
+        };
         prop_oneof![
-            1 => (s.clone(), -1..3i64).prop_map(|(s, n)| Op::WriteItem { s, n }),
+            2 => (s.clone(), -1..3i64).prop_map(|(s, n)| Op::WriteItem { s, n }),
             3 => (
                 s,
                 id.clone(),
@@ -91,14 +154,15 @@ impl ReferenceStateMachine for Ref {
                     value
                 }),
             1 => id.prop_map(Op::Undo),
-            2 => Just(Op::CompleteDone),
+            undo_newest => Just(Op::UndoNewest),
+            4 => Just(Op::CompleteDone),
             2 => Just(Op::CompleteFailed),
             1 => Just(Op::CompleteUnknown),
         ]
         .boxed()
     }
 
-    fn apply(state: (), _: &Op) {
+    fn apply(state: Shape, _: &Op) -> Shape {
         state
     }
 }
@@ -107,7 +171,28 @@ struct Sut {
     d: Driver,
     /// The value of each accepted answer.
     values: BTreeMap<String, Value>,
+    /// The answer accepted last, the target of [`Op::UndoNewest`].
+    newest: Option<&'static str>,
+    /// Answers whose work overwrote an `Accepted` row that was already there:
+    /// their undo reaches the held branch with `before = Some`.
+    overwrote: BTreeSet<String>,
+    held: Reach,
 }
+
+/// How often `undo` reported a row a later firing holds, over the whole run.
+/// Printed once, by the teardown of the last case: the weighting of the shape
+/// and of `Undo` is shown, not assumed (#195).
+#[derive(Default)]
+struct Reach {
+    rows: usize,
+    overwritten_rows: usize,
+}
+
+static CASES: AtomicUsize = AtomicUsize::new(0);
+static HELD_ROWS: AtomicUsize = AtomicUsize::new(0);
+static HELD_OVERWRITTEN_ROWS: AtomicUsize = AtomicUsize::new(0);
+static HELD_CASES: AtomicUsize = AtomicUsize::new(0);
+const CASES_RUN: u32 = 512;
 
 /// An ask for (T, s) is offered only while (T, s) is idle: no `Answered.T`,
 /// no work in flight, no `WorkFailed.T` (`answer_spec` has no retry). An
@@ -157,20 +242,58 @@ fn work_fired_once_with_its_value(sut: &Sut) {
     }
 }
 
+/// Undoes `id` and counts the rows a later firing holds.
+fn undo_and_count(sut: &mut Sut, id: &str) {
+    let Ok(undone) = sut.d.undo(&OccurrenceId::caller(id)) else {
+        return;
+    };
+    if sut.newest == Some(id) {
+        sut.newest = None;
+    }
+    let held = undone
+        .reversed
+        .iter()
+        .filter(|r| matches!(r.outcome, ReversalOutcome::Held(_)))
+        .count();
+    sut.held.rows += held;
+    if held > 0 && sut.overwrote.contains(id) {
+        sut.held.overwritten_rows += held;
+    }
+}
+
 struct Test;
 
 impl StateMachineTest for Test {
     type SystemUnderTest = Sut;
     type Reference = Ref;
 
-    fn init_test(_: &()) -> Sut {
+    fn init_test(shape: &Shape) -> Sut {
         Sut {
-            d: Driver::new(answer_spec()),
+            d: Driver::new(spec_of(shape)),
             values: BTreeMap::new(),
+            newest: None,
+            overwrote: BTreeSet::new(),
+            held: Reach::default(),
         }
     }
 
-    fn apply(mut sut: Sut, _: &(), op: Op) -> Sut {
+    fn teardown(sut: Sut, _: Shape) {
+        HELD_ROWS.fetch_add(sut.held.rows, Ordering::Relaxed);
+        HELD_OVERWRITTEN_ROWS.fetch_add(sut.held.overwritten_rows, Ordering::Relaxed);
+        if sut.held.rows > 0 {
+            HELD_CASES.fetch_add(1, Ordering::Relaxed);
+        }
+        if CASES.fetch_add(1, Ordering::Relaxed) + 1 == CASES_RUN as usize {
+            eprintln!(
+                "held branch reached in {} of {CASES_RUN} cases: {} held rows, {} of them a row the work overwrote",
+                HELD_CASES.load(Ordering::Relaxed),
+                HELD_ROWS.load(Ordering::Relaxed),
+                HELD_OVERWRITTEN_ROWS.load(Ordering::Relaxed),
+            );
+        }
+    }
+
+    fn apply(mut sut: Sut, _: &Shape, op: Op) -> Sut {
         let d = &mut sut.d;
         let op_text = format!("{op:?}");
         match op {
@@ -188,20 +311,43 @@ impl StateMachineTest for Test {
                 if d.answer(c).is_ok() {
                     sut.values
                         .insert(id.to_string(), value.map_or(Value::Null, text));
+                    sut.newest = Some(id);
                 }
             }
-            Op::Undo(id) => {
-                let _disclosed_or_refused = d.undo(&OccurrenceId::caller(id));
+            Op::Undo(id) => undo_and_count(&mut sut, id),
+            Op::UndoNewest => {
+                if let Some(id) = sut.newest {
+                    undo_and_count(&mut sut, id);
+                }
             }
-            Op::CompleteDone => d
-                .complete_oldest(|req| {
+            Op::CompleteDone => {
+                if let Some(OccurrenceId::Work { answer, .. }) = d
+                    .pending
+                    .front()
+                    .filter(|req| {
+                        &*req.transition == "Accept"
+                            && d.exec()
+                                .tokens()
+                                .token("Accepted", req.subject.as_str())
+                                .is_some()
+                    })
+                    .map(|req| req.occurrence.clone())
+                {
+                    sut.overwrote.insert(answer.to_string());
+                }
+                // The drawn `Consume` has an empty input: only the work reads `n`.
+                d.complete_oldest(|req| {
+                    if &*req.transition != "Accept" {
+                        return EffectResult::Done(Vec::new());
+                    }
                     let n = Value::Integer(int(&req.input, "n"));
                     EffectResult::Done(vec![
                         Output::new("Accepted", &req.subject, content(&[("n", n.clone())])),
                         Output::new("Out", &req.subject, content(&[("n", n)])),
                     ])
                 })
-                .expect("the net quiesces"),
+                .expect("the net quiesces");
+            }
             Op::CompleteFailed => d
                 .complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
                 .expect("the net quiesces"),
@@ -217,7 +363,7 @@ impl StateMachineTest for Test {
 
 prop_state_machine! {
     #![proptest_config(ProptestConfig {
-        cases: 512,
+        cases: CASES_RUN,
         .. ProptestConfig::default()
     })]
 
