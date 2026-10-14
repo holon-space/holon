@@ -67,6 +67,7 @@
 
 use std::any::Any;
 use std::any::TypeId;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
@@ -252,6 +253,13 @@ impl CapMap {
         CapSet(self.providers.keys().copied().collect())
     }
 
+    /// The names of every registered capability, sorted. `cap_set` carries only
+    /// `TypeId`s, which cannot be diffed legibly; this is the comparable,
+    /// printable projection a declarative cap-set table is pinned against.
+    pub fn cap_names(&self) -> BTreeSet<&'static str> {
+        self.names.values().copied().collect()
+    }
+
     /// Merge `other`'s providers into `self`, keeping the EXISTING provider for
     /// any capability already present — **first-registered wins**.
     ///
@@ -296,6 +304,12 @@ impl CapMap {
 pub struct CapSet(HashSet<TypeId>);
 
 impl CapSet {
+    /// The cap set a declarative table names, without composing the providers
+    /// it would take to build one through a [`CapMap`].
+    pub fn of_ids(ids: impl IntoIterator<Item = CapId>) -> Self {
+        CapSet(ids.into_iter().map(|c| c.type_id).collect())
+    }
+
     pub fn contains(&self, cap: &CapId) -> bool {
         self.0.contains(&cap.type_id)
     }

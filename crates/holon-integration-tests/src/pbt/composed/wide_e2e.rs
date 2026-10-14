@@ -21,10 +21,8 @@
 //! @pbt covers wide-e2e-swap — the composed general_e2e slice: production
 //! E2ETransition over compose_sut, wiring-drawn
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
@@ -41,6 +39,7 @@ use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::Wiring;
 use holon_pbt_core::capabilities::IntegrationConnectTiming;
+use holon_pbt_core::composition::CapId;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapSet;
 use holon_pbt_core::composition::InvariantId;
@@ -53,7 +52,6 @@ use crate::pbt::composed::boundary::BoundaryEvidence;
 use crate::pbt::composed::boundary::BoundaryOutcome;
 use crate::pbt::composed::boundary::BoundaryWindow;
 use crate::pbt::composed::boundary::settled_and_pending;
-use crate::pbt::composed::builder::compose_sut;
 use crate::pbt::composed::builder::compose_sut_keystone;
 use crate::pbt::composed::builder::compose_sut_over_existing;
 use crate::pbt::composed::builder::compose_sut_windowed_base_seeded;
@@ -2025,38 +2023,151 @@ pub fn set_for_wiring(wiring: &Wiring) -> ComponentSet {
     ComponentSet::new(wiring, projections)
 }
 
-/// The composed cap set for a (normalized) `wiring`, computed ONCE per distinct
-/// `ComponentSet` by booting `compose_sut(set_for_wiring(wiring))` on a
-/// throwaway current-thread runtime and extracting the (runtime-free) `CapSet`.
-/// The swap ref carries this so `aggregate_transitions` auto-narrows the
-/// production alphabet to exactly what THIS composed SUT can drive. Cached by
-/// `Wiring` (linear scan — `Wiring` is `Eq` but not `Hash`/`Ord`, and the draw
-/// set is tiny).
-pub fn cap_set_for_wiring(wiring: &Wiring) -> CapSet {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<Mutex<Vec<(Wiring, CapSet)>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
-    let set = set_for_wiring(wiring);
-    if let Some((_, cs)) = cache
-        .lock()
-        .expect("cap_set cache mutex")
-        .iter()
-        .find(|(w, _)| *w == set.wiring)
-    {
-        return cs.clone();
+/// **The declarative wiring → cap-set table**: which capabilities
+/// `compose_sut(set_for_wiring(wiring))` registers, per arm, WITHOUT booting a
+/// SUT to find out. One arm here per `compose_sut` registration arm, in the
+/// same order.
+///
+/// `compose_sut`'s cap set is a pure function of four booleans
+/// (`has_turso`/`has_loro`/`has_frontend`/`has_editor`) plus the
+/// `HOLON_PBT_ADVANCE_DAY` env gate, and `set_for_wiring` normalizes any drawn
+/// manifest into one of three reachable combinations — so the table is small
+/// enough to read. Its honesty is NOT self-evident, and is pinned by
+/// `tests/composed_cap_set_table_matches_compose_sut.rs`, which boots the real
+/// `compose_sut` per wiring class and asserts set EQUALITY. Change a
+/// registration ⇒ change this table, or that test fails.
+pub fn cap_ids_for_wiring(wiring: &Wiring) -> Vec<CapId> {
+    use holon_frontend::pbt_caps::SutArrowNavigate;
+    use holon_pbt_core::capabilities::*;
+
+    use crate::pbt::net_cap::SutDerivedNet;
+
+    macro_rules! cap_ids {
+        ($($cap:ident),* $(,)?) => { [$(CapId::of::<dyn $cap>()),*] };
     }
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build current-thread runtime for cap_set extraction");
-    let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-    let cs = rt.block_on(async { compose_sut(&set, &resolver).await.caps.cap_set() });
-    drop(rt);
-    cache
-        .lock()
-        .expect("cap_set cache mutex")
-        .push((set.wiring.clone(), cs.clone()));
-    cs
+
+    let set = set_for_wiring(wiring);
+    let has_turso = set.has_storage(StorageAdapter::Turso);
+    let has_loro = set.has_storage(StorageAdapter::Loro);
+    let has_frontend = set.has_projection(Projection::ViewModel);
+    let has_editor = set.has_projection(Projection::EditorState);
+    // `set_for_wiring`'s normalization: Turso ⟺ a frontend ViewModel, Loro ⟺ an
+    // editor, and no-Turso ⇒ Loro. Any other combination means the normalization
+    // changed and the arms below were never measured against it.
+    assert!(
+        has_turso == has_frontend && has_loro == has_editor && (has_turso || has_loro),
+        "cap-set table: unreachable wiring class turso={has_turso} loro={has_loro} \
+         frontend={has_frontend} editor={has_editor} — `set_for_wiring` normalizes to \
+         Turso⟺ViewModel, Loro⟺EditorState"
+    );
+
+    let mut ids: Vec<CapId> = Vec::new();
+    if has_frontend {
+        // `HeadlessFrontendComponent::register_non_gesture`.
+        ids.extend(cap_ids![
+            SutErrorLog,
+            SutRenderer,
+            SutViewSelection,
+            SutBackend,
+            SutOrderKeys,
+            SutWatchContext,
+            SutDerivedNet,
+            SutWatch,
+            SutOrgRead,
+            SutAdviceMatview,
+            SutNavHistoryWrite,
+            SutWatchRegister,
+            SutViewControl,
+            SutMcpEmit,
+            SutHistoryWrite,
+            SutNavHistoryDrive,
+            SutSeamMutate,
+            SutWriteFaults,
+            SutBlockCreate,
+            SutAppLifecycle,
+            SutDispatchHold,
+            SutMatviews,
+            SutFsWrites,
+            SutOrgRender,
+            SutHomeProfile,
+        ]);
+        // The per-config caps `compose_sut` adds on top of `register_non_gesture`,
+        // then the gesture-write family + the VM-rung driver
+        // (`DriverPlacement::HeadlessReactive`, which `compose_sut` always passes).
+        ids.extend(cap_ids![
+            SutSqlProjection,
+            SutFocus,
+            SutQueryResults,
+            SutSearch,
+            SutFullSync,
+            SutRebuildViews,
+            SutHistory,
+            SutTypedEntity,
+            SutTypedEntityWrite,
+            SutIntegrationConnect,
+            SutRemoteListSync,
+            SutEditorMirrorRead,
+            SutFixtureFs,
+            SutBlockToPage,
+            SutRehomeEntity,
+            SutPageIdentity,
+            SutTemplateInstantiate,
+            SutReadOnlyEditAttempt,
+            SutShapeEdit,
+            SutUnschemedIdDispatch,
+            SutCyclicPlaceAttempt,
+            SutPrivateFieldWriteAttempt,
+            SutEntityTypeRegister,
+            SutDenseTools,
+            SutBlockTreeWrite,
+            SutFocusWrite,
+            SutEditorMirrorWrite,
+            SutMutate,
+            SutArrowNavigate,
+            SutBlockInteract,
+        ]);
+        if has_editor {
+            // The frontend booted with `crdt.enabled` (an editor config), so it
+            // publishes a Loro read model and hosts the edge-field writer.
+            ids.extend(cap_ids![SutReadModel, SutEngineViews, SutEdgeFieldWrite]);
+        }
+        if std::env::var("HOLON_PBT_ADVANCE_DAY").is_ok() {
+            ids.extend(cap_ids![SutClockAdvance]);
+        }
+    }
+    if has_loro {
+        // `LoroUiRowsComponent` + `LoroBackendComponent`. `SutBackend` is Turso's
+        // when Turso is wired (`merge_missing` keeps the first registration and
+        // discloses Loro's as shadowed), so it enters the set exactly once.
+        ids.extend(cap_ids![SutLoroUiRows, SutLoroLog, SutLoroTaskState]);
+        if !has_frontend {
+            ids.extend(cap_ids![SutBackend]);
+        }
+        if has_frontend {
+            // `LoroSnapshotDurability` needs the frontend's authority store AND its
+            // sync-controller handle; both exist iff the frontend booted Loro on.
+            ids.extend(cap_ids![SutLoroDurability]);
+        } else {
+            // Pure Loro: the tag/typed-entity writes dispatch through the Loro-only
+            // operation engine.
+            ids.extend(cap_ids![SutEdgeFieldWrite, SutTypedEntityWrite]);
+        }
+        ids.extend(cap_ids![SutTypedEntityLoro, SutLoro]);
+    }
+    if has_editor && !has_frontend {
+        // No frontend session to host the real headless editor mirror, so the
+        // in-memory editor component commits into the canonical backend.
+        ids.extend(cap_ids![SutEditorMirrorRead, SutEditorMirrorWrite]);
+    }
+    ids
+}
+
+/// The composed cap set for a (normalized) `wiring`, read off the declarative
+/// [`cap_ids_for_wiring`] table. The swap ref carries this so
+/// `aggregate_transitions` auto-narrows the production alphabet to exactly what
+/// THIS composed SUT can drive.
+pub fn cap_set_for_wiring(wiring: &Wiring) -> CapSet {
+    CapSet::of_ids(cap_ids_for_wiring(wiring))
 }
 
 /// The `full_headless` cap set — the WIDEST wiring's cap set (used by the
@@ -2797,9 +2908,13 @@ pub fn wiring_draw_floor_violations(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
     use holon_pbt_core::capabilities::PeerEditOp;
 
     use super::*;
+    use crate::pbt::composed::builder::compose_sut;
     use crate::pbt::composed::harness::BurnedPairs;
     use crate::pbt::transitions::AddPeer;
     use crate::pbt::transitions::CreateDocument;
