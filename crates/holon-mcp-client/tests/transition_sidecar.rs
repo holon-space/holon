@@ -150,13 +150,20 @@ fn a_bad_sidecar_transition_is_a_named_load_error() {
         t[key] = value;
         t
     };
+    // Binds the answer, so a row that loads reds on "loaded as" rather than
+    // on the unbound-`input:` rule.
+    let with_answer = |input: serde_json::Value| {
+        let mut t = with("input", input);
+        t["effect"] = answer_to_project();
+        t
+    };
     let cases = [
         (
-            with("input", json!({ "type_hint": "entity_id:" })),
+            with_answer(json!({ "type_hint": "entity_id:" })),
             "transition `t`: type hint `entity_id:` names no entity",
         ),
         (
-            with("input", json!({ "type_hint": "entity_id:todoist_project" })),
+            with_answer(json!({ "type_hint": "entity_id:todoist_project" })),
             "transition `t`: input type `entity_id:todoist_project` names no entity of this \
              sidecar: resolving an entity type of another integration",
         ),
@@ -175,7 +182,7 @@ fn a_bad_sidecar_transition_is_a_named_load_error() {
              transition asks for no `input:`",
         ),
         (
-            with("input", json!({ "type_hint": "colour" })),
+            with_answer(json!({ "type_hint": "colour" })),
             "transition `t`: unknown type hint `colour`",
         ),
         (
@@ -279,6 +286,14 @@ fn a_bad_sidecar_transition_is_a_named_load_error() {
             "transition `t`: only a `retry` timer takes `max_attempts`",
         ),
         (
+            with("timers", json!([{ "kind": "run", "after": [5] }])),
+            "invalid sync interval `[5]`",
+        ),
+        (
+            with("timers", json!([{ "kind": "run", "after": -5 }])),
+            "invalid sync interval `-5`",
+        ),
+        (
             with(
                 "input",
                 json!({ "enum": { "name": "Pick", "variants": [] } }),
@@ -353,6 +368,27 @@ fn a_duplicate_key_in_a_map_section_is_a_named_load_error() {
         );
     }
 }
+#[test]
+fn a_malformed_undo_is_a_named_load_error() {
+    let undo = "undo: { reversible: false }";
+    let cases = [
+        "undo: { reversible: false, tool: undo_delete }",
+        "undo: { tool: undo_delete }",
+        "undo: 5",
+    ];
+    for bad in cases {
+        let yaml = FIXTURE.replace(undo, bad);
+        let error = format!(
+            "{:#}",
+            McpSidecar::from_yaml(&yaml).expect_err("a malformed undo must not load")
+        );
+        assert!(
+            error.contains("tools.delete_task: `undo` takes"),
+            "{bad}: got {error:?}"
+        );
+    }
+}
+
 /// A sidecar file is deserialized on three paths — the bundled one parses the
 /// file text straight into [`IntegrationFileConfig`] — and a duplicate key
 /// must be refused on each. `sidecar()` re-serializes the already-parsed maps,
@@ -473,6 +509,22 @@ fn arc_place() -> impl Strategy<Value = &'static str> {
 
 fn input() -> impl Strategy<Value = DrawnInput> {
     prop_oneof![
+        7 => legal_input(),
+        // An entity type of another integration, or none at all: both are
+        // unresolvable until a system-wide registry is reachable at load.
+        1 => "[a-z]{1,6}"
+            .prop_filter("not this sidecar's", |e| !PLACES.contains(&e.as_str()))
+            .prop_map(|e| (
+                json!({ "type_hint": format!("entity_id:{e}") }),
+                Err(format!(
+                    "input type `entity_id:{e}` names no entity of this sidecar"
+                ))
+            )),
+    ]
+}
+
+fn legal_input() -> impl Strategy<Value = DrawnInput> {
+    prop_oneof![
         Just((json!({ "type_hint": "bool" }), Ok(TypeHint::Bool))),
         Just((json!({ "type_hint": "string" }), Ok(TypeHint::String))),
         Just((json!({ "type_hint": "number" }), Ok(TypeHint::Number))),
@@ -482,16 +534,6 @@ fn input() -> impl Strategy<Value = DrawnInput> {
                 entity_name: EntityName::new(e)
             })
         )),
-        // An entity type of another integration, or none at all: both are
-        // unresolvable until a system-wide registry is reachable at load.
-        "[a-z]{1,6}"
-            .prop_filter("not this sidecar's", |e| !PLACES.contains(&e.as_str()))
-            .prop_map(|e| (
-                json!({ "type_hint": format!("entity_id:{e}") }),
-                Err(format!(
-                    "input type `entity_id:{e}` names no entity of this sidecar"
-                ))
-            )),
         (
             "[A-Z][a-z]{0,5}",
             prop::collection::vec("[A-Za-z]{1,6}", 1..4)
@@ -583,6 +625,79 @@ fn draw() -> impl Strategy<Value = Draw> {
                 args,
                 timers,
                 ask,
+            },
+        )
+}
+
+/// Only draws [`legal`] accepts: each place carries at most one arc, `persist`
+/// only with an `input:`, and an argument binds the answer iff one is asked.
+fn legal_draw() -> impl Strategy<Value = Draw> {
+    let arcs = (
+        Just(PLACES.to_vec()).prop_shuffle(),
+        prop::collection::vec(0..4u8, PLACES.len()),
+    )
+        .prop_map(|(places, kinds)| {
+            let of = |kind| {
+                places
+                    .iter()
+                    .zip(&kinds)
+                    .filter(|(_, k)| **k == kind)
+                    .map(|(p, _)| *p)
+                    .collect::<Vec<_>>()
+            };
+            (of(1), of(2), of(3))
+        });
+    let ask = prop::option::of(prop_oneof![
+        Just((None, false)),
+        (legal_input(), any::<bool>()).prop_map(|(input, persist)| (Some(input), persist)),
+    ]);
+    let args = ask.prop_flat_map(|ask| {
+        let asked = matches!(ask, Some((Some(_), _)));
+        let arg = if asked {
+            prop_oneof![Just(Arg::Answer), literal().prop_map(Arg::Literal)].boxed()
+        } else {
+            literal().prop_map(Arg::Literal).boxed()
+        };
+        (
+            Just(ask),
+            prop::collection::btree_map("[a-z_]{1,8}", arg, 0..3),
+            "[a-z_]{1,8}",
+        )
+            .prop_map(move |(ask, mut args, answer)| {
+                if asked {
+                    args.insert(answer, Arg::Answer);
+                }
+                (ask, args)
+            })
+    });
+    (
+        "[a-z][a-z0-9_]{0,10}",
+        arcs,
+        prop_oneof![Just(("update_task", false)), Just(("delete_task", true))],
+        any::<bool>(),
+        prop::collection::vec(timer(), 0..3),
+        args,
+    )
+        .prop_map(
+            |(
+                name,
+                (take, read, inhibit),
+                (tool, irreversible_tool),
+                said,
+                timers,
+                (ask, args),
+            )| {
+                Draw {
+                    name,
+                    take,
+                    read,
+                    inhibit,
+                    tool,
+                    irreversible: irreversible_tool || said,
+                    args,
+                    timers,
+                    ask,
+                }
             },
         )
 }
@@ -720,15 +835,13 @@ proptest! {
 }
 
 proptest! {
-    // Most draws are illegal — that is the property above — and this one
-    // skips them, so it needs room to reject.
-    #![proptest_config(ProptestConfig { max_global_rejects: 20_000, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 3000, ..ProptestConfig::default() })]
 
     /// The sidecar re-serialized (as `IntegrationFileConfig` does) loads the
     /// same IR.
     #[test]
-    fn a_reserialized_sidecar_loads_the_same_transitions(d in draw()) {
-        prop_assume!(legal(&d).is_ok());
+    fn a_reserialized_sidecar_loads_the_same_transitions(d in legal_draw()) {
+        prop_assert!(legal(&d).is_ok(), "legal_draw drew an illegal transition: {:?}", legal(&d));
         let sidecar = McpSidecar::from_yaml(&sidecar_with(yaml_of(&d))).unwrap();
         let again = McpSidecar::from_yaml(&serde_yaml::to_string(&sidecar).unwrap()).unwrap();
         prop_assert_eq!(

@@ -365,18 +365,19 @@ impl Serialize for SyncInterval {
 
 impl<'de> Deserialize<'de> for SyncInterval {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Raw {
-            Secs(u64),
-            Text(String),
-        }
-        match Raw::deserialize(deserializer)? {
-            Raw::Secs(0) => Err(serde::de::Error::custom(
+        // Read as a raw value so every other shape gets a named error, not
+        // serde's untagged-enum message.
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        match (&raw, raw.as_u64()) {
+            (_, Some(0)) => Err(serde::de::Error::custom(
                 "invalid sync interval: must be > 0 seconds",
             )),
-            Raw::Secs(n) => Ok(Self(std::time::Duration::from_secs(n))),
-            Raw::Text(s) => Self::parse(&s).map_err(serde::de::Error::custom),
+            (_, Some(secs)) => Ok(Self(std::time::Duration::from_secs(secs))),
+            (serde_json::Value::String(s), _) => Self::parse(s).map_err(serde::de::Error::custom),
+            (other, _) => Err(serde::de::Error::custom(format!(
+                "invalid sync interval `{other}`: write seconds (`30`) or a number with a unit \
+                 (`30s`, `5m`, `1h`, `1d`)"
+            ))),
         }
     }
 }
@@ -676,11 +677,42 @@ pub enum WriteOwnership {
     LocalMirror,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum UndoConfig {
     Irreversible { reversible: bool },
     Mirror { tool: String, capture: Vec<String> },
+}
+
+impl<'de> Deserialize<'de> for UndoConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // One struct of every key, so a mixed or partial shape gets a named
+        // error instead of loading as whichever variant matched first.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            reversible: Option<bool>,
+            tool: Option<String>,
+            capture: Option<Vec<String>>,
+        }
+        let expected = "`undo` takes `{ reversible: <bool> }` or `{ tool: <name>, capture: \
+                        [<field>, ...] }`";
+        let raw = Raw::deserialize(deserializer)
+            .map_err(|e| serde::de::Error::custom(format!("{expected}: {e}")))?;
+        match raw {
+            Raw {
+                reversible: Some(reversible),
+                tool: None,
+                capture: None,
+            } => Ok(Self::Irreversible { reversible }),
+            Raw {
+                reversible: None,
+                tool: Some(tool),
+                capture: Some(capture),
+            } => Ok(Self::Mirror { tool, capture }),
+            _ => Err(serde::de::Error::custom(expected)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
