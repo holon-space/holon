@@ -1149,7 +1149,37 @@ mod tests {
             },
             TypeHint::Expr,
             TypeHint::Collection,
+            TypeHint::Newtype {
+                type_name: "FileName".into(),
+            },
+            TypeHint::PlaceId {
+                place: crate::user_transition::PlaceName("Project".into()),
+            },
         ];
+        // No `_` arm: a new variant does not compile until it gets an index here
+        // and a case in `hints`.
+        const VARIANTS: usize = 13;
+        let index = |h: &TypeHint| match h {
+            TypeHint::Bool => 0,
+            TypeHint::String => 1,
+            TypeHint::Number => 2,
+            TypeHint::EntityId { .. } => 3,
+            TypeHint::EntityIdOrRoot { .. } => 4,
+            TypeHint::FieldValue { .. } => 5,
+            TypeHint::RowKey => 6,
+            TypeHint::Object { .. } => 7,
+            TypeHint::Expr => 8,
+            TypeHint::Collection => 9,
+            TypeHint::Enum { .. } => 10,
+            TypeHint::Newtype { .. } => 11,
+            TypeHint::PlaceId { .. } => 12,
+        };
+        let covered: std::collections::BTreeSet<usize> = hints.iter().map(index).collect();
+        assert_eq!(
+            covered,
+            (0..VARIANTS).collect(),
+            "a TypeHint variant has no round-trip case"
+        );
         for type_hint in hints {
             let param = OperationParam {
                 name: "p".into(),

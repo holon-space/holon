@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use holon_api::EntityName;
+use holon_api::OperationParam;
 use holon_api::Value;
 use holon_api::render_types::TypeHint;
 use holon_api::user_transition::*;
@@ -103,10 +105,33 @@ fn name() -> impl Strategy<Value = String> {
     "[A-Za-z][A-Za-z0-9_.#]{0,8}"
 }
 
+fn field(type_hint: TypeHint) -> OperationParam {
+    OperationParam {
+        name: "f".into(),
+        type_hint,
+        description: String::new(),
+    }
+}
+
 fn type_hint() -> impl Strategy<Value = Option<TypeHint>> {
+    let entity = || "[a-z][a-z0-9_]{0,8}".prop_map(|n| EntityName::new(&n));
     prop_oneof![
         Just(None),
         Just(Some(TypeHint::Bool)),
+        Just(Some(TypeHint::String)),
+        Just(Some(TypeHint::Number)),
+        entity().prop_map(|entity_name| Some(TypeHint::EntityId { entity_name })),
+        entity().prop_map(|entity_name| Some(TypeHint::EntityIdOrRoot { entity_name })),
+        name().prop_map(|p| Some(TypeHint::FieldValue {
+            field_param: p,
+            fields: vec![field(TypeHint::RowKey)],
+        })),
+        Just(Some(TypeHint::RowKey)),
+        Just(Some(TypeHint::Object {
+            fields: vec![field(TypeHint::Bool)],
+        })),
+        Just(Some(TypeHint::Expr)),
+        Just(Some(TypeHint::Collection)),
         prop::collection::vec(name(), 1..4).prop_map(|variants| Some(TypeHint::Enum {
             type_name: "Pick".into(),
             variants,
@@ -116,6 +141,38 @@ fn type_hint() -> impl Strategy<Value = Option<TypeHint>> {
             place: PlaceName(p)
         })),
     ]
+}
+
+// No `_` arm: a new variant does not compile until it gets an index here and a
+// strategy in `type_hint`.
+fn variant_index(h: &TypeHint) -> usize {
+    match h {
+        TypeHint::Bool => 0,
+        TypeHint::String => 1,
+        TypeHint::Number => 2,
+        TypeHint::EntityId { .. } => 3,
+        TypeHint::EntityIdOrRoot { .. } => 4,
+        TypeHint::FieldValue { .. } => 5,
+        TypeHint::RowKey => 6,
+        TypeHint::Object { .. } => 7,
+        TypeHint::Expr => 8,
+        TypeHint::Collection => 9,
+        TypeHint::Enum { .. } => 10,
+        TypeHint::Newtype { .. } => 11,
+        TypeHint::PlaceId { .. } => 12,
+    }
+}
+
+#[test]
+fn type_hint_generator_draws_every_variant() {
+    use proptest::strategy::ValueTree;
+    let mut runner = proptest::test_runner::TestRunner::deterministic();
+    let strategy = type_hint();
+    let drawn: std::collections::BTreeSet<usize> = (0..500)
+        .filter_map(|_| strategy.new_tree(&mut runner).unwrap().current())
+        .map(|h| variant_index(&h))
+        .collect();
+    assert_eq!(drawn, (0..13).collect());
 }
 
 fn arc() -> impl Strategy<Value = HlArc> {
