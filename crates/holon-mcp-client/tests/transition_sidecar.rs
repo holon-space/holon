@@ -76,6 +76,7 @@ fn sidecar_transitions_equal_the_hand_built_ir() {
                 preview: None,
                 persist: false,
             }),
+            undoes: None,
         },
         TransitionDescriptor {
             name: TransitionName("drop_task".into()),
@@ -98,6 +99,7 @@ fn sidecar_transitions_equal_the_hand_built_ir() {
                 preview: None,
                 persist: false,
             }),
+            undoes: None,
         },
     ];
     assert_eq!(transitions_from_sidecar(FIXTURE).unwrap(), expected);
@@ -816,6 +818,7 @@ fn legal(d: &Draw) -> Result<TransitionDescriptor, String> {
             preview: None,
             persist: *persist,
         }),
+        undoes: None,
     })
 }
 

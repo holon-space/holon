@@ -195,6 +195,9 @@ pub struct Model {
     /// Per work occurrence: the content before its commit and the version
     /// after it.
     deltas: BTreeMap<OccurrenceId, BTreeMap<Key, (Option<Content>, u64)>>,
+    /// `<T>.UndoPending`: per (work, answer), the rows the undo of that
+    /// answer still owes because a later firing held them (#191).
+    pending_undos: BTreeMap<Key, Vec<(String, String, Arc<str>)>>,
 }
 
 pub struct Reader<'a> {
@@ -292,6 +295,7 @@ impl Model {
             undone: BTreeSet::new(),
             conditions: Vec::new(),
             deltas: BTreeMap::new(),
+            pending_undos: BTreeMap::new(),
         }
     }
 
@@ -753,6 +757,23 @@ impl Model {
                 outcome,
             });
         }
+        let held: Vec<_> = reversed
+            .iter()
+            .filter_map(|r| match &r.outcome {
+                ReversalOutcome::Held(Holder::Running(t)) => {
+                    Some((r.place.to_string(), r.subject.to_string(), Arc::clone(t)))
+                }
+                ReversalOutcome::Held(Holder::OutcomeUnknown(o)) => Some((
+                    r.place.to_string(),
+                    r.subject.to_string(),
+                    Arc::from(o.to_string()),
+                )),
+                _ => None,
+            })
+            .collect();
+        if !held.is_empty() {
+            self.pending_undos.insert(key(&work, id), held);
+        }
         self.undone.insert(id.to_string());
         let requests = self.quiesce(now).map_err(UndoError::NoQuiescence)?;
         Ok(Quiesced {
@@ -864,8 +885,60 @@ impl Model {
     }
 
     /// The auto transitions to quiescence, no timer.
+    /// Settles what an undo could not reverse while a later firing held the
+    /// row (#191). The model decides by what it can SEE of the row: a holder
+    /// that rolled back put the row back, so the row is there to reverse; a
+    /// holder that committed consumed it, so the row is gone and the undo is
+    /// disclosed as stuck. (The executor decides the same case by the row's
+    /// version.)
+    fn apply_pending_undos(&mut self) {
+        for (pending, rows) in std::mem::take(&mut self.pending_undos) {
+            let (work, answer) = pending.clone();
+            let occurrence = work_occurrence(&work, &answer);
+            let mut keep = Vec::new();
+            for (place, subject, holder) in rows {
+                if self.holder(&place, &subject).is_some() {
+                    keep.push((place, subject, holder));
+                    continue;
+                }
+                if self.content(&place, &subject).is_none() {
+                    self.conditions.push(Condition::UndoHeld {
+                        answer: AnswerId(answer.clone()),
+                        place: Place::new(&place),
+                        subject: Subject::new(&subject),
+                        holder,
+                    });
+                    continue;
+                }
+                match self.deltas[&occurrence][&key(&place, &subject)].0.clone() {
+                    Some(content) => self.put(&place, &subject, content),
+                    None => self.remove(&place, &subject),
+                }
+            }
+            if !keep.is_empty() {
+                self.pending_undos.insert(pending, keep);
+            }
+        }
+    }
+
+    /// `<T>.UndoPending`: per (work, answer), the rows its undo still owes.
+    pub fn undo_pending(&self) -> BTreeMap<Key, BTreeSet<String>> {
+        self.pending_undos
+            .iter()
+            .map(|(k, rows)| {
+                (
+                    k.clone(),
+                    rows.iter()
+                        .map(|(p, s, h)| format!("{p}/{s} held by {h}"))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
         for _ in 0..MAX_ROUNDS {
+            self.apply_pending_undos();
             let mut started = Vec::new();
             for t in self.spec.transitions.clone() {
                 if t.trigger != Trigger::Auto {

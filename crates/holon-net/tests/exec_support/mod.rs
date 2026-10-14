@@ -642,6 +642,42 @@ impl Driver {
             self.model.retry_pending(),
         );
 
+        let mut sut_pending = BTreeMap::new();
+        for t in &self.spec.transitions {
+            let place = Place::undo_pending(&t.name);
+            for s in tokens.subjects(&place) {
+                let content = &tokens.token(&place, &s).expect("listed").content;
+                let Some(Value::Array(rows)) = content.get("held") else {
+                    panic!("{place} of {s} has no held rows: {content:?}");
+                };
+                let held: BTreeSet<String> = rows
+                    .iter()
+                    .map(|row| {
+                        let Value::Object(row) = row else {
+                            panic!("a held row of {place} of {s} is no object: {row:?}")
+                        };
+                        let text = |f: &str| match row.get(f) {
+                            Some(Value::String(v)) => v.clone(),
+                            other => panic!("the {f} of a held row is {other:?}"),
+                        };
+                        format!(
+                            "{}/{} held by {}",
+                            text("place"),
+                            text("subject"),
+                            text("holder")
+                        )
+                    })
+                    .collect();
+                sut_pending.insert((t.name.clone(), s.to_string()), held);
+            }
+        }
+        agree(
+            op,
+            "UndoPending places (work, answer) → the rows the undo owes",
+            sut_pending,
+            self.model.undo_pending(),
+        );
+
         let model_unknown = self.model.unknown_places();
         let mut sut_unknown_places = BTreeMap::new();
         for t in &self.spec.transitions {

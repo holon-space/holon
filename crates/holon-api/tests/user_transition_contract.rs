@@ -251,9 +251,10 @@ fn descriptor() -> impl Strategy<Value = TransitionDescriptor> {
         prop::collection::vec(timer(), 0..3),
         prop::option::of(name().prop_map(ExprSlot::new)),
         ask,
+        prop::option::of(name().prop_map(TransitionName)),
     )
-        .prop_map(|(name, arcs, body, irreversible, timers, guard, ask)| {
-            TransitionDescriptor {
+        .prop_map(
+            |(name, arcs, body, irreversible, timers, guard, ask, undoes)| TransitionDescriptor {
                 name: TransitionName(name),
                 arcs,
                 body,
@@ -261,8 +262,9 @@ fn descriptor() -> impl Strategy<Value = TransitionDescriptor> {
                 timers,
                 guard,
                 ask,
-            }
-        })
+                undoes,
+            },
+        )
 }
 
 fn ask_row() -> impl Strategy<Value = AskRow> {

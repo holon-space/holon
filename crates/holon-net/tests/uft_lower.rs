@@ -117,6 +117,7 @@ fn descriptor() -> TransitionDescriptor {
             preview: Some(NativeRef("removal_preview".to_owned())),
             persist: false,
         }),
+        undoes: None,
     }
 }
 
@@ -993,5 +994,105 @@ fn an_ask_hides_while_a_retry_is_pending() {
         exec.derive(&asks_place(T), &Subject::new("a")),
         None,
         "the ask shows while a retry is pending"
+    );
+}
+const U: &str = "RestoreRemoval";
+
+/// ADR 0032 §7: an undo is a *manual* transition that declares `undoes`; the
+/// loader refuses an `auto` one that declares it.
+#[test]
+fn an_auto_transition_cannot_declare_undoes() {
+    let mut d = descriptor();
+    d.ask = None;
+    d.undoes = Some(TransitionName(T.to_owned()));
+    let mut p = parts();
+    p.preview = None;
+    let e = lower(base_net(), &d, Some(p)).err().expect("refused");
+    assert_eq!(e.transition, T, "{e}");
+    assert!(e.reason.contains("undoes"), "{}", e.reason);
+}
+
+/// `RestoreRemoval` undoes `AcceptRemoval`: it asks over `Base` and puts
+/// `Refused` back.
+fn undoing_descriptor() -> TransitionDescriptor {
+    TransitionDescriptor {
+        name: TransitionName(U.to_owned()),
+        arcs: vec![arc(ArcKind::Read, "Base"), arc(ArcKind::Put, "Refused")],
+        body: BodyDecl::Native {
+            symbol: NativeRef("restore_removal".to_owned()),
+            effectful: true,
+        },
+        irreversible: false,
+        timers: vec![],
+        guard: None,
+        ask: Some(AskDecl {
+            input: Some(pick()),
+            preview: None,
+            persist: false,
+        }),
+        undoes: Some(TransitionName(T.to_owned())),
+    }
+}
+
+fn undoing_parts() -> NativeParts {
+    NativeParts {
+        bind: Arc::new(|r: &mut Reader<'_>, s: &Subject| {
+            let base = r.text("Base", s, "text")?;
+            Some(Content::from([("base".to_owned(), text(&base))]))
+        }),
+        body: NativeBody::Effectful(Receiver::None),
+        preview: None,
+    }
+}
+
+/// `undoes` lowers to inhibitors on the work: an answered undo waits while
+/// the work it undoes is in flight, and runs once that work ended.
+#[test]
+fn an_undo_waits_while_the_work_it_undoes_runs() {
+    let net = lower(
+        lower(base_net(), &descriptor(), Some(parts())).expect("lowers"),
+        &undoing_descriptor(),
+        Some(undoing_parts()),
+    )
+    .expect("lowers");
+    let mut exec = Executor::new(net).expect("the lowered net loads");
+    assert!(situation(&mut exec).is_empty(), "no answer, so no work");
+    let accept = answer_and_start(&mut exec, "1");
+    let seen = get(
+        &exec
+            .derive(&asks_place(U), &Subject::new("a"))
+            .expect("the undo asks"),
+        HASH_FIELD,
+    );
+    let answered = exec
+        .fire(
+            &answer_transition(U),
+            "a",
+            OccurrenceId::caller("2"),
+            Content::from([
+                (ANSWER_ID_KEY.to_owned(), text("2")),
+                (SEEN_FIELD.to_owned(), text(&seen)),
+                (ANSWER_INPUT_KEY.to_owned(), text("Remove")),
+            ]),
+            Duration::ZERO,
+        )
+        .expect("the undo answer applies")
+        .requests;
+    assert!(
+        answered.is_empty(),
+        "the undo ran while the work it undoes runs: {answered:?}"
+    );
+    assert!(
+        matches!(exec.why_not(U, "a"), Some(WhyNot::Inhibited(_))),
+        "the undo is not inhibited by the running work: {:?}",
+        exec.why_not(U, "a")
+    );
+    let done = exec
+        .complete(accept.attempt, EffectResult::Done(vec![]), Duration::ZERO)
+        .expect("the attempt is known");
+    assert_eq!(
+        work_answers(&done.requests),
+        vec!["2".to_string()],
+        "the undo does not run once the work it undoes ended"
     );
 }

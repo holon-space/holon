@@ -471,6 +471,12 @@ mark** (§9.3) so the automation that produced *k* does not redo it. The loader
 refuses an `auto` transition that also declares `undoes`. Undoing a claim adds
 a `retract` entry to the claims set (§5), because that set only grows.
 
+**A row a later firing holds is owed, not skipped.** The undo leaves an
+`<T>.UndoPending` token keyed by the answer id. When that firing rolls back,
+the row is reversed; when it commits, the outcome is the disclosed condition
+"cannot undo `<answer>`: `<place>` of `<subject>` is used by `<holder>`" and
+the row stays as its holder left it.
+
 **External-effect transitions have no derived inverse.** No marking delta
 un-sends a message. Such a transition offers either an **authored
 compensation** or an honest "cannot be undone" — the Saga split, taken

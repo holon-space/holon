@@ -285,6 +285,7 @@ fn load_transition(
             .collect::<anyhow::Result<_>>()?,
         guard: None,
         ask,
+        undoes: None,
     })
 }
 

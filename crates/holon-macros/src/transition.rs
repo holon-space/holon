@@ -572,6 +572,7 @@ fn generate(spec: &Spec, item: &ItemFn) -> TokenStream {
                     timers: vec![#(#timers),*],
                     guard: None,
                     ask: #ask,
+                    undoes: None,
                 }
             }
 

@@ -22,6 +22,7 @@ use holon_api::user_transition::UftError;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
+use holon_net::exec::Condition;
 use holon_net::exec::Content;
 use holon_net::exec::EffectResult;
 use holon_net::exec::Executor;
@@ -332,6 +333,52 @@ fn undo_while_a_downstream_firing_holds_a_row() {
     d.complete_oldest(|_| EffectResult::Done(Vec::new()))
         .expect("the net quiesces");
     assert!(d.exec().tokens().token("Accepted", "x").is_none());
+}
+
+/// The holder of an undone row rolls its take back, so the row is live
+/// again: the pending undo must reverse it then (#191).
+#[test]
+fn a_pending_undo_applies_when_the_holder_rolls_back() {
+    let mut d = downstream();
+    d.undo(&a0()).expect("a done answer undoes");
+    d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
+        .expect("the net quiesces");
+    assert!(
+        d.exec().tokens().token("Accepted", "x").is_none(),
+        "the undone Accepted/x is live again after Consume rolled back"
+    );
+    assert!(
+        d.exec().derive("Asks.Accept", &Subject::new("x")).is_some(),
+        "the ask does not show again after the undo completed"
+    );
+}
+
+/// The holder of an undone row commits it, so the undo of that row cannot
+/// complete: a disclosed condition, no silent row change (#191).
+#[test]
+fn a_pending_undo_the_holder_used_is_disclosed() {
+    let mut d = downstream();
+    d.undo(&a0()).expect("a done answer undoes");
+    d.complete_oldest(|_| EffectResult::Done(Vec::new()))
+        .expect("the net quiesces");
+    assert_eq!(
+        d.exec().conditions(),
+        [Condition::UndoHeld {
+            answer: AnswerId("a0".to_string()),
+            place: Place::new("Accepted"),
+            subject: Subject::new("x"),
+            holder: Arc::from("Consume"),
+        }]
+    );
+    let text = d.exec().conditions()[0].to_string();
+    assert!(
+        text.contains("cannot undo") && text.contains("used by Consume"),
+        "{text}"
+    );
+    assert!(
+        d.exec().tokens().token("Accepted", "x").is_none(),
+        "the undo put a row back that its holder had used"
+    );
 }
 
 #[test]

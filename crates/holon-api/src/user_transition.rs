@@ -79,6 +79,11 @@ pub struct TransitionDescriptor {
     /// `Some` makes the transition `manual`: it waits for an answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask: Option<AskDecl>,
+    /// The work this transition undoes (ADR 0032 §7). Only a `manual`
+    /// transition may declare it, and it never runs while the work it undoes
+    /// is in flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undoes: Option<TransitionName>,
 }
 
 impl TransitionDescriptor {

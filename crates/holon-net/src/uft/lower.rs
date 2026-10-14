@@ -203,6 +203,9 @@ fn lower_as(
         if parts.preview.is_some() {
             return Err(refuse("an auto transition has a preview"));
         }
+        if d.undoes.is_some() {
+            return Err(refuse("an auto transition declares undoes (ADR 0032 §7)"));
+        }
         let work = arcs(
             TransitionDef::new(t, Trigger::Auto, parts.bind, body),
             d,
@@ -338,12 +341,24 @@ fn lower_as(
             Some(content)
         })
     };
-    let work = arcs(
+    let mut work = arcs(
         TransitionDef::new(t, Trigger::Auto, work_bind, body).consumes(&answered),
         d,
         &refuse,
     )?
     .on_failure(&failed);
+    // An undo never races the work it undoes (ADR 0032 §7): the answer waits
+    // in `Answered` until that work is neither running nor unsettled.
+    if let Some(target) = &d.undoes {
+        let u = target.0.as_str();
+        for busy in [
+            Place::running(u),
+            Place::retry_pending(u),
+            Place::outcome_unknown(u),
+        ] {
+            work = work.inhibits(&busy.to_string());
+        }
+    }
 
     let expire_bind: BindFn = {
         let (sit, answered, preview) = (situation.clone(), answered.to_string(), parts.preview);

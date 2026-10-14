@@ -109,6 +109,13 @@ impl Place {
     pub fn outcome_unknown(transition: &str) -> Self {
         Self::new(&format!("{transition}.OutcomeUnknown"))
     }
+
+    /// `<T>.UndoPending`: a token keyed by an answer id while the undo of
+    /// that answer still owes rows a later firing held (#191). Its `held`
+    /// field lists them, each with the holder to name if that holder used it.
+    pub fn undo_pending(transition: &str) -> Self {
+        Self::new(&format!("{transition}.UndoPending"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -479,6 +486,7 @@ impl NetDef {
                 t.running(),
                 Place::retry_pending(&t.name),
                 Place::outcome_unknown(&t.name),
+                Place::undo_pending(&t.name),
             ] {
                 if self.places.contains_key(&reserved) {
                     return Err(LoadError::ReservedPlace(reserved));
@@ -1114,6 +1122,87 @@ pub enum Condition {
         subject: Subject,
         steps: usize,
     },
+    /// The undo of `answer` could not reverse `place` of `subject`: the
+    /// firing that held the row used it (#191).
+    UndoHeld {
+        answer: AnswerId,
+        place: Place,
+        subject: Subject,
+        holder: Arc<str>,
+    },
+}
+
+/// The holder an undo names when that holder used the row.
+fn holder_name(holder: &Holder) -> Arc<str> {
+    match holder {
+        Holder::Running(t) => t.clone(),
+        Holder::OutcomeUnknown(o) => Arc::from(o.to_string()),
+    }
+}
+
+/// The `<T>.UndoPending` token of an answer: every row its undo still owes.
+fn pending_content(answer: &str, held: &[(Place, Subject, Arc<str>)]) -> Content {
+    let row = |(place, subject, holder): &(Place, Subject, Arc<str>)| {
+        Value::Object(HashMap::from([
+            ("place".to_owned(), Value::String(place.to_string())),
+            ("subject".to_owned(), Value::String(subject.to_string())),
+            ("holder".to_owned(), Value::String(holder.to_string())),
+        ]))
+    };
+    Content::from([
+        (ANSWER_ID_KEY.to_owned(), Value::String(answer.to_owned())),
+        (
+            "held".to_owned(),
+            Value::Array(held.iter().map(row).collect()),
+        ),
+    ])
+}
+
+fn pending_held(content: &Content) -> Vec<(Place, Subject, Arc<str>)> {
+    let Some(Value::Array(rows)) = content.get("held") else {
+        panic!("an UndoPending token without held rows: {content:?}");
+    };
+    rows.iter()
+        .map(|row| {
+            let Value::Object(row) = row else {
+                panic!("a held row of an UndoPending token is no object: {row:?}")
+            };
+            let text = |field: &str| match row.get(field) {
+                Some(Value::String(s)) => s.clone(),
+                other => panic!("the {field} of a held row is {other:?}"),
+            };
+            (
+                Place::new(&text("place")),
+                Subject::new(&text("subject")),
+                Arc::from(text("holder").as_str()),
+            )
+        })
+        .collect()
+}
+
+impl fmt::Display for Condition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoQuiescence {
+                work,
+                subject,
+                steps,
+            } => write!(
+                f,
+                "the answer of {work} for {subject} left the net unquiesced after {steps} rounds"
+            ),
+            Self::UndoHeld {
+                answer,
+                place,
+                subject,
+                holder,
+            } => write!(
+                f,
+                "cannot undo {}: {place} of {subject} is used by {holder}",
+                answer.0
+            ),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1499,6 +1588,22 @@ impl Executor {
                 outcome,
             });
         }
+        let held: Vec<_> = reversed
+            .iter()
+            .filter_map(|r| match &r.outcome {
+                ReversalOutcome::Held(h) => {
+                    Some((r.place.clone(), r.subject.clone(), holder_name(h)))
+                }
+                _ => None,
+            })
+            .collect();
+        if !held.is_empty() {
+            self.tokens.mark_slot(
+                &Place::undo_pending(&work),
+                &Subject::new(id),
+                Some(pending_content(id, &held)),
+            );
+        }
         self.undone.insert(id.clone());
         let requests = self.quiesce(now).map_err(UndoError::NoQuiescence)?;
         Ok(Quiesced {
@@ -1562,6 +1667,7 @@ impl Executor {
             return Ok(std::mem::take(&mut self.requests));
         }
         for _ in 0..MAX_ROUNDS {
+            self.apply_pending_undos();
             let mut started = Vec::new();
             for i in 0..self.net.transitions.len() {
                 let t = &self.net.transitions[i];
@@ -1593,6 +1699,49 @@ impl Executor {
             }
         }
         Err(MAX_ROUNDS)
+    }
+
+    /// Settles what an undo could not reverse while a later firing held the
+    /// row (#191). A released row is reversed; a row the holder committed is
+    /// disclosed as [`Condition::UndoHeld`] and left as the holder left it.
+    fn apply_pending_undos(&mut self) {
+        for i in 0..self.net.transitions.len() {
+            let work = self.net.transitions[i].name.clone();
+            let pending = Place::undo_pending(&work);
+            for answer in self.tokens.subjects(&pending) {
+                let content = self
+                    .tokens
+                    .token(&pending, &answer)
+                    .expect("a listed subject holds a token")
+                    .content
+                    .clone();
+                let occurrence = work_occurrence(&work, &answer.to_string());
+                let mut keep = Vec::new();
+                for (place, subject, holder) in pending_held(&content) {
+                    if self.holder(&place, &subject).is_some() {
+                        keep.push((place, subject, holder));
+                        continue;
+                    }
+                    let (before, version) =
+                        self.deltas[&occurrence][&(place.clone(), subject.clone())].clone();
+                    if self.tokens.version(&place, &subject) != version {
+                        self.conditions.push(Condition::UndoHeld {
+                            answer: AnswerId(answer.to_string()),
+                            place,
+                            subject,
+                            holder,
+                        });
+                        continue;
+                    }
+                    match before {
+                        Some(content) => self.tokens.put(&place, &subject, content),
+                        None => self.tokens.remove(&place, &subject),
+                    }
+                }
+                let next = (!keep.is_empty()).then(|| pending_content(&answer.to_string(), &keep));
+                self.tokens.mark_slot(&pending, &answer, next);
+            }
+        }
     }
 
     /// A manual fire: `ACCEPTED(occurrence)` at bind (NET-manual.a). A pure
