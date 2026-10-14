@@ -42,6 +42,7 @@ async fn boot_fresh_db(
     assert!(!db_path.exists(), "db file must not pre-exist");
     holon::di::create_backend_engine(
         db_path,
+        holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_api::ConditionBus::new()),
         |injector| {
             EventInfraModule

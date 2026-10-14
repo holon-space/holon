@@ -7385,6 +7385,7 @@ pub(crate) mod engine_harness {
     pub(crate) async fn fresh_engine() -> Arc<holon::api::BackendEngine> {
         holon::di::create_backend_engine_with_extras(
             ":memory:".into(),
+            holon::di::DatabaseRole::DurableStore,
             std::sync::Arc::new(holon_api::ConditionBus::new()),
             |injector| {
                 holon_loro_wiring::EventInfraModule
@@ -7528,6 +7529,7 @@ pub(crate) mod engine_harness {
         let intruded_for_di = intruded.clone();
         holon::di::create_backend_engine_with_extras(
             ":memory:".into(),
+            holon::di::DatabaseRole::DurableStore,
             std::sync::Arc::new(holon_api::ConditionBus::new()),
             move |injector| {
                 injector.provide::<holon_loro_wiring::LoroConfig>(Provider::root(move |_| {
@@ -10004,6 +10006,7 @@ mod shape_sim_cell_branch_tests {
         use fluxdi::Module;
         holon::di::create_backend_engine_with_extras(
             ":memory:".into(),
+            holon::di::DatabaseRole::DurableStore,
             std::sync::Arc::new(holon_api::ConditionBus::new()),
             |injector| {
                 holon_loro_wiring::EventInfraModule

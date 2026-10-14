@@ -2206,7 +2206,17 @@ impl TursoBackend {
         db_path: P,
     ) -> std::result::Result<(Arc<Database>, crate::db_open::OpenOutcome), crate::db_open::OpenFailed>
     {
-        let opened = crate::db_open::open(db_path.as_ref(), crate::scalar_fns::ALL)?;
+        Self::open_database_reporting_outcome_when_held(db_path, crate::db_open::WhenHeld::Wait)
+    }
+
+    /// [`Self::open_database_reporting_outcome`], with what the open does when
+    /// another process holds the file.
+    pub fn open_database_reporting_outcome_when_held<P: AsRef<Path>>(
+        db_path: P,
+        when_held: crate::db_open::WhenHeld,
+    ) -> std::result::Result<(Arc<Database>, crate::db_open::OpenOutcome), crate::db_open::OpenFailed>
+    {
+        let opened = crate::db_open::open(db_path.as_ref(), crate::scalar_fns::ALL, when_held)?;
         tracing::info!("Turso database opened at: {}", db_path.as_ref().display());
         Ok(opened)
     }
@@ -2367,7 +2377,8 @@ impl TursoBackend {
     pub async fn new_in_memory_with_scalar_fns(
         fns: &[crate::scalar_fns::ScalarFn],
     ) -> Result<(Self, DbHandle)> {
-        let (db, _) = crate::db_open::open(Path::new(":memory:"), fns)?;
+        let (db, _) =
+            crate::db_open::open(Path::new(":memory:"), fns, crate::db_open::WhenHeld::Wait)?;
         let (cdc_tx, _cdc_rx) = broadcast::channel(1024);
         Self::new(db, cdc_tx)
     }

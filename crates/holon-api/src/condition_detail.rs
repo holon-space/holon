@@ -329,6 +329,27 @@ impl ConditionKind {
                 *waited_ms as f64 / 1000.0
             )),
 
+            Self::DatabaseHeld { path, hold } => match hold {
+                crate::condition_bus::DatabaseHold::Held => ConditionDetail::with_body(
+                    "Another process holds the database, so Holon keeps its view of the vault \
+                     in memory. Every edit is saved",
+                    vec![path.clone()],
+                ),
+                crate::condition_bus::DatabaseHold::Released => ConditionDetail::with_body(
+                    "The database is free again — restart Holon to use it. Until then Holon \
+                     keeps its view of the vault in memory. Every edit is saved",
+                    vec![path.clone()],
+                ),
+                crate::condition_bus::DatabaseHold::WatchStopped { error } => {
+                    ConditionDetail::with_body(
+                        "Holon stopped watching the database, so it cannot tell when the \
+                         database is free. Holon keeps its view of the vault in memory until a \
+                         restart. Every edit is saved",
+                        vec![path.clone(), error.clone()],
+                    )
+                }
+            },
+
             Self::UndoHistoryClearedAtBoot { entries } => ConditionDetail::prose(format!(
                 "{entries} step{} from the previous session were discarded",
                 if *entries == 1 { "" } else { "s" }

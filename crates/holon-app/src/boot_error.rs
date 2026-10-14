@@ -208,6 +208,7 @@ mod tests {
         let injector = Injector::root();
         let flux_err = CoreInfraModule {
             db_path: bad_db_path,
+            role: holon::di::DatabaseRole::DurableStore,
             conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
         }
         .configure(&injector)
@@ -231,6 +232,7 @@ mod tests {
 
         let flux_err = CoreInfraModule {
             db_path: path.clone(),
+            role: holon::di::DatabaseRole::DurableStore,
             conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
         }
         .configure(&Injector::root())

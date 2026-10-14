@@ -74,6 +74,7 @@ where
     let home_conditions = Arc::clone(&conditions);
     let (engine, (session, extra, types)) = holon::di::create_backend_engine_with_extras(
         db_path,
+        holon::di::DatabaseRole::for_crdt_enabled(holon_config.crdt_enabled()),
         conditions,
         move |injector| {
             #[cfg(not(target_arch = "wasm32"))]

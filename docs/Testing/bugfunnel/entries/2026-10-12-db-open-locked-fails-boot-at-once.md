@@ -28,6 +28,9 @@ process, so no keystone or in-process test can reach a lock that another process
 The open tries again on `Locked` up to `LOCK_TRIES` times, `LOCK_RETRY` apart (5 s in all on
 unix), with a `tracing::warn` for each wait. Then it returns the typed `Locked` error. No
 condition is raised during the wait: the window does not exist yet, so nobody can see it.
-Open: a lock held past the wait still stops the boot. The degraded no-Turso boot (BootLadder
-rung 1a, Increment 4) is not built; see
+With the CRDT store on, the database is only a projection: the boot does not wait, runs on
+an in-memory projection, raises `database-held`, and turns it into "free again — restart"
+when the file is free (`a_loro_boot_on_a_held_database_runs_on_memory_and_says_when_the_database_is_free`
+in `crates/holon-app/tests/database_open_disclosure.rs`).
+Open: with the CRDT store off, a lock held past the wait still stops the boot; see
 `2026-10-12-unopenable-database-ends-the-boot`.

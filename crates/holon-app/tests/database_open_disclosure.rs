@@ -38,13 +38,18 @@ struct Booted {
 }
 
 async fn boot(dir: &std::path::Path, db_file: &str) -> Booted {
-    let config = HolonConfig {
+    boot_with_crdt(dir, db_file, true).await
+}
+
+async fn boot_with_crdt(dir: &std::path::Path, db_file: &str, crdt_enabled: bool) -> Booted {
+    let mut config = HolonConfig {
         db_path: Some(dir.join(db_file)),
         vault: VaultConfig {
             root: Some(dir.to_path_buf()),
         },
         ..Default::default()
     };
+    config.crdt.enabled = Some(crdt_enabled);
     let (session, engine, injector) = holon_app::new_from_config_with_di(
         config,
         SessionConfig::new(holon_api::UiInfo::permissive()),
@@ -446,10 +451,11 @@ fn run_as_holder(path: &str) -> ! {
     std::process::exit(0);
 }
 
-/// A second process holding `path`, already past its open.
-fn spawn_holder(path: &std::path::Path) -> std::process::Child {
+/// A second process holding `path`, already past its open. `test` is the
+/// test the child runs, which becomes the holder.
+fn spawn_holder(path: &std::path::Path, test: &str) -> std::process::Child {
     let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
-        .args(["--exact", HOLD_TEST, "--nocapture", "--test-threads=1"])
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
         .env(CHILD_HOLD_DB_PATH, path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -474,7 +480,7 @@ async fn a_boot_that_waited_for_the_lock_discloses_the_wait_to_the_first_window(
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("probe.org"), VAULT_ORG).expect("write the probe vault");
     let held = dir.path().join(HELD_DB_FILE);
-    let mut holder = spawn_holder(&held);
+    let mut holder = spawn_holder(&held, HOLD_TEST);
 
     // The boot blocks on the lock, so the hold must end from elsewhere.
     let released = tokio::task::spawn_blocking(move || {
@@ -482,7 +488,9 @@ async fn a_boot_that_waited_for_the_lock_discloses_the_wait_to_the_first_window(
         holder.kill().expect("kill the holder");
         holder.wait().expect("reap the holder");
     });
-    let booted = boot(dir.path(), HELD_DB_FILE).await;
+    // Without the CRDT store the database is the durable store, so the boot
+    // waits for it.
+    let booted = boot_with_crdt(dir.path(), HELD_DB_FILE, false).await;
     released.await.expect("the holder's release");
 
     // A window opens only after the boot, so it sees the notice through the
@@ -534,4 +542,127 @@ async fn a_boot_that_waited_for_the_lock_discloses_the_wait_to_the_first_window(
         backups.is_empty(),
         "a wait for a held file must not be mistaken for damage: {backups:?}"
     );
+}
+
+const HOLD_LORO_TEST: &str =
+    "a_loro_boot_on_a_held_database_runs_on_memory_and_says_when_the_database_is_free";
+
+fn database_held_text(booted: &Booted) -> Option<String> {
+    booted
+        .injector
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .current()
+        .into_iter()
+        .find(|c| c.condition_key().kind == "database-held")
+        .map(|c| {
+            let detail = c.reason.detail(&c.subject);
+            format!("{} {}", detail.headline, detail.body.join(" | ")).to_lowercase()
+        })
+}
+
+/// In a Loro mode the database is only the projection, so a held file does not
+/// stop the boot: it runs on an in-memory projection at once, says so, and says
+/// when the file is free again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loro_boot_on_a_held_database_runs_on_memory_and_says_when_the_database_is_free() {
+    if let Ok(path) = std::env::var(CHILD_HOLD_DB_PATH) {
+        run_as_holder(&path);
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("probe.org"), VAULT_ORG).expect("write the probe vault");
+    let held = dir.path().join(HELD_DB_FILE);
+    let mut holder = spawn_holder(&held, HOLD_LORO_TEST);
+
+    let booted = boot_with_crdt(dir.path(), HELD_DB_FILE, true).await;
+    assert!(
+        holder.try_wait().expect("poll the holder").is_none(),
+        "the boot must not outlast the holder"
+    );
+    let text = database_held_text(&booted).unwrap_or_else(|| {
+        panic!(
+            "a boot on a held database did not disclose it: {:?}",
+            raised_kinds(&booted)
+        )
+    });
+    assert!(
+        text.contains("another process holds the database") && text.contains("in memory"),
+        "the text Martin reads must say why and what Holon does instead: {text}"
+    );
+    let blocks = names(
+        &booted,
+        "SELECT id AS name FROM block WHERE id = 'block:rebuild-probe-child'",
+    )
+    .await;
+    assert_eq!(
+        blocks,
+        vec!["block:rebuild-probe-child".to_string()],
+        "the in-memory projection must hold the vault's blocks"
+    );
+
+    holder.kill().expect("kill the holder");
+    holder.wait().expect("reap the holder");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let text = database_held_text(&booted).expect("the condition stays for the session");
+        if text.contains("the database is free again — restart holon to use it") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the condition never said the database is free again: {text}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        std::fs::read_dir(dir.path())
+            .expect("list the vault")
+            .all(|e| !e
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{HELD_DB_FILE}.unusable-"))),
+        "a held file must not be mistaken for damage"
+    );
+}
+
+const HOLD_LORO_PROBE_FAILS_TEST: &str =
+    "a_held_database_whose_probe_fails_says_the_watch_stopped_and_why";
+
+/// When the session can no longer tell whether the held file is free, the
+/// condition must not keep saying "held": it says the watch stopped, and why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_database_whose_probe_fails_says_the_watch_stopped_and_why() {
+    if let Ok(path) = std::env::var(CHILD_HOLD_DB_PATH) {
+        run_as_holder(&path);
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("probe.org"), VAULT_ORG).expect("write the probe vault");
+    let held = dir.path().join(HELD_DB_FILE);
+    let mut holder = spawn_holder(&held, HOLD_LORO_PROBE_FAILS_TEST);
+
+    let booted = boot_with_crdt(dir.path(), HELD_DB_FILE, true).await;
+    database_held_text(&booted).expect("the boot discloses the held database");
+
+    // A directory where the file was: the probe's open fails, and not as Locked.
+    std::fs::remove_file(&held).expect("unlink the held file");
+    std::fs::create_dir(&held).expect("put a directory in its place");
+    let error = holon_turso::db_open::is_held(&held)
+        .expect_err("probing a directory must fail")
+        .to_string()
+        .to_lowercase();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let text = database_held_text(&booted).expect("the condition stays for the session");
+        if text.contains("holon stopped watching the database") && text.contains(&error) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the condition never said the watch stopped and why ({error}): {text}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    holder.kill().expect("kill the holder");
+    holder.wait().expect("reap the holder");
 }

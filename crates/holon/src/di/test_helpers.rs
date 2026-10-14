@@ -86,7 +86,13 @@ where
     F: FnOnce(&Injector) -> Result<()>,
 {
     let conditions = Arc::new(holon_api::ConditionBus::new());
-    let engine = create_backend_engine(db_path, conditions.clone(), setup_fn).await?;
+    let engine = create_backend_engine(
+        db_path,
+        crate::di::DatabaseRole::DurableStore,
+        conditions.clone(),
+        setup_fn,
+    )
+    .await?;
     crate::testing::clock_guard::assert_clock_running(&conditions);
     Ok(engine)
 }
@@ -105,9 +111,14 @@ where
     T: Send + 'static,
 {
     let conditions = Arc::new(holon_api::ConditionBus::new());
-    let booted =
-        create_backend_engine_with_extras(db_path, conditions.clone(), setup_fn, extra_resolve)
-            .await?;
+    let booted = create_backend_engine_with_extras(
+        db_path,
+        crate::di::DatabaseRole::DurableStore,
+        conditions.clone(),
+        setup_fn,
+        extra_resolve,
+    )
+    .await?;
     crate::testing::clock_guard::assert_clock_running(&conditions);
     Ok(booted)
 }

@@ -151,13 +151,27 @@ const DERIVED_CACHE_TABLE: &str = "block_derived";
 const LOCK_TRIES: u32 = if cfg!(target_family = "unix") { 10 } else { 1 };
 const LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// What an open does when another process holds the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhenHeld {
+    /// Try again for a bounded time, then fail.
+    Wait,
+    /// Fail at once with [`DatabaseOpenFailure::Locked`].
+    Fail,
+}
+
 /// The opened database, and what this open did to the file.
 pub(crate) fn open(
     db_path: &Path,
     fns: &[ScalarFn],
+    when_held: WhenHeld,
 ) -> std::result::Result<(Arc<Database>, OpenOutcome), OpenFailed> {
+    let lock_tries = match when_held {
+        WhenHeld::Wait => LOCK_TRIES,
+        WhenHeld::Fail => 1,
+    };
     let mut changes = Vec::new();
-    match open_recording(db_path, fns, &mut changes) {
+    match open_recording(db_path, fns, lock_tries, &mut changes) {
         Ok(db) => Ok((db, OpenOutcome(changes))),
         Err(error) => Err(OpenFailed {
             changed: OpenOutcome(changes),
@@ -171,6 +185,7 @@ pub(crate) fn open(
 fn open_recording(
     db_path: &Path,
     fns: &[ScalarFn],
+    lock_tries: u32,
     changes: &mut Vec<OpenChange>,
 ) -> Result<Arc<Database>> {
     let path = db_path
@@ -199,10 +214,10 @@ fn open_recording(
         };
         if error.failure() == Some(DatabaseOpenFailure::Locked) {
             tries += 1;
-            if tries < LOCK_TRIES {
+            if tries < lock_tries {
                 tracing::warn!(
                     "[open_database] {path}: another process holds it; try {tries} of \
-                     {LOCK_TRIES}, next in {LOCK_RETRY:?}"
+                     {lock_tries}, next in {LOCK_RETRY:?}"
                 );
                 std::thread::sleep(LOCK_RETRY);
                 continue;
@@ -224,6 +239,19 @@ fn open_recording(
         if let Some(OpenChange::MovedAside { .. }) = changes.last() {
             return open_fresh(path, fns).map_err(|e| e.classify(path));
         }
+    }
+}
+
+/// Whether another process holds the file at `db_path`. Takes the file's lock
+/// and releases it, and changes nothing in the file.
+pub fn is_held(db_path: &Path) -> Result<bool> {
+    let path = db_path
+        .to_str()
+        .ok_or_else(|| StorageError::DatabaseError(format!("path {db_path:?} is not UTF-8")))?;
+    match open_file(path, scalar_fns::ALL) {
+        Ok(_) => Ok(false),
+        Err(error) if error.failure() == Some(DatabaseOpenFailure::Locked) => Ok(true),
+        Err(error) => Err(error.classify(path)),
     }
 }
 
@@ -799,7 +827,7 @@ mod tests {
 
     /// A table `t` with two rows and a view `v` that calls `DOUBLE`.
     fn build_with_double(path: &Path) {
-        let (db, _) = open(path, &[DOUBLE]).expect("open with the test function");
+        let (db, _) = open(path, &[DOUBLE], WhenHeld::Wait).expect("open with the test function");
         exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)").unwrap();
         exec(&db, "INSERT INTO t (n) VALUES (1), (2)").unwrap();
         exec(
@@ -845,7 +873,7 @@ mod tests {
         let path = dir.path().join("holon.db");
         build_with_double(&path);
 
-        let (db, _) = open(&path, &[DOUBLE]).expect("reopen with the same set");
+        let (db, _) = open(&path, &[DOUBLE], WhenHeld::Wait).expect("reopen with the same set");
         assert_eq!(count(&db, "SELECT sum(d) FROM v"), 6);
         exec(&db, "INSERT INTO t (n) VALUES (3)").expect("the view is usable");
         assert_eq!(count(&db, "SELECT sum(d) FROM v"), 12);
@@ -856,11 +884,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("holon.db");
         {
-            let db = open(&path, &[]).unwrap().0;
+            let db = open(&path, &[], WhenHeld::Wait).unwrap().0;
             exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
             exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
         }
-        let db = open(&path, &[]).unwrap().0;
+        let db = open(&path, &[], WhenHeld::Wait).unwrap().0;
         assert_eq!(count(&db, "SELECT count(*) FROM t"), 1);
         assert!(
             !has(&db, "table", FN_SET_TABLE),
@@ -873,11 +901,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("holon.db");
         {
-            let db = open(&path, &[]).unwrap().0;
+            let db = open(&path, &[], WhenHeld::Wait).unwrap().0;
             exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
             exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
         }
-        let db = open(&path, &[DOUBLE]).unwrap().0;
+        let db = open(&path, &[DOUBLE], WhenHeld::Wait).unwrap().0;
         assert_eq!(
             count(&db, "SELECT count(*) FROM t"),
             1,
@@ -903,12 +931,12 @@ mod tests {
         };
 
         CRASH_AFTER_DELETE.store(true, std::sync::atomic::Ordering::SeqCst);
-        let crashed = std::panic::catch_unwind(|| open(&path, &[double_v2]));
+        let crashed = std::panic::catch_unwind(|| open(&path, &[double_v2], WhenHeld::Wait));
         CRASH_AFTER_DELETE.store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(crashed.is_err(), "the injected crash must end that open");
         drop(crashed);
         {
-            let (db, _) = open(&path, &[DOUBLE]).expect("open under the old set");
+            let (db, _) = open(&path, &[DOUBLE], WhenHeld::Wait).expect("open under the old set");
             assert_eq!(
                 count(&db, "SELECT sum(d) FROM v"),
                 6,
@@ -916,7 +944,7 @@ mod tests {
             );
         }
 
-        let (db, _) = open(&path, &[double_v2])
+        let (db, _) = open(&path, &[double_v2], WhenHeld::Wait)
             .unwrap_or_else(|e| panic!("the open after a crash must succeed: {e}"));
         let conn = connect(&db).unwrap();
         assert!(matches!(
@@ -934,7 +962,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("holon.db");
         {
-            let db = open(&path, &[]).unwrap().0;
+            let db = open(&path, &[], WhenHeld::Wait).unwrap().0;
             exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
             exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
         }
@@ -962,7 +990,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("holon.db");
             {
-                let db = open(&path, &[]).unwrap().0;
+                let db = open(&path, &[], WhenHeld::Wait).unwrap().0;
                 exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
                 exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
                 exec(
@@ -978,7 +1006,7 @@ mod tests {
                     .unwrap();
                 }
             }
-            let (db, _) = open(&path, &[DOUBLE]).unwrap_or_else(|e| {
+            let (db, _) = open(&path, &[DOUBLE], WhenHeld::Wait).unwrap_or_else(|e| {
                 panic!("{case}: an unreadable signature record must not be an open error: {e}")
             });
             assert_eq!(
@@ -1004,7 +1032,7 @@ mod tests {
         let path = dir.path().join("holon.db");
         build_with_double(&path);
         {
-            let (db, _) = open(&path, &[DOUBLE]).unwrap();
+            let (db, _) = open(&path, &[DOUBLE], WhenHeld::Wait).unwrap();
             exec(
                 &db,
                 "CREATE MATERIALIZED VIEW w AS SELECT id, d FROM v WHERE d > 2",
@@ -1012,7 +1040,7 @@ mod tests {
             .unwrap();
             assert_eq!(count(&db, "SELECT count(*) FROM w"), 1);
         }
-        let (db, _) = open(&path, &[]).expect("open without DOUBLE");
+        let (db, _) = open(&path, &[], WhenHeld::Wait).expect("open without DOUBLE");
         assert!(!has(&db, "view", "v") && !has(&db, "view", "w"));
         assert_eq!(count(&db, "SELECT count(*) FROM t"), 2);
         exec(&db, "INSERT INTO t (n) VALUES (3)").expect("t accepts writes");
@@ -1026,7 +1054,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("holon.db");
         build_with_double(&path);
-        let (db, _) = open(&path, &[DOUBLE]).unwrap();
+        let (db, _) = open(&path, &[DOUBLE], WhenHeld::Wait).unwrap();
         exec(&db, "CREATE TABLE d (x INTEGER)").unwrap();
         exec(&db, "INSERT INTO d (x) VALUES (1)").unwrap();
         let conn = connect(&db).unwrap();
@@ -1059,7 +1087,7 @@ mod tests {
         ));
         drop(conn);
         drop(db);
-        let (db, _) = open(&path, &[DOUBLE]).unwrap();
+        let (db, _) = open(&path, &[DOUBLE], WhenHeld::Wait).unwrap();
         assert!(
             !has(&db, "view", "v"),
             "the committed drop must survive a reopen"
@@ -1153,7 +1181,7 @@ mod tests {
         let garbage = b"not a database, but somebody's only copy".repeat(200);
         std::fs::write(&path, &garbage).unwrap();
 
-        let (db, outcome) = open(&path, &[DOUBLE])
+        let (db, outcome) = open(&path, &[DOUBLE], WhenHeld::Wait)
             .unwrap_or_else(|e| panic!("an unopenable file must not stop the open: {e}"));
         let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
             panic!("the open must report the move, got {outcome:?}");
@@ -1193,8 +1221,8 @@ mod tests {
             std::fs::write(format!("{}{suffix}", path.display()), bytes).unwrap();
         }
 
-        let (db, outcome) =
-            open(&path, &[DOUBLE]).expect("an unopenable file must not stop the open");
+        let (db, outcome) = open(&path, &[DOUBLE], WhenHeld::Wait)
+            .expect("an unopenable file must not stop the open");
         let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
             panic!("the open must report the move, got {outcome:?}");
         };

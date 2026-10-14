@@ -27,6 +27,17 @@ use tokio::sync::broadcast;
 
 use crate::live_data::LiveData;
 
+/// Whether another process still holds a database file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DatabaseHold {
+    Held,
+    Released,
+    /// The session can no longer tell: probing the file failed with `error`.
+    WatchStopped {
+        error: String,
+    },
+}
+
 /// Why a share is in a degraded state.
 #[derive(Clone, Debug)]
 pub enum ConditionKind {
@@ -331,6 +342,15 @@ pub enum ConditionKind {
     ///
     /// All-clear: none — it is a one-shot notice about this boot.
     DatabaseLockWaited { waited_ms: u64 },
+    /// Another process held the database file at `path` when a CRDT-mode boot
+    /// opened it, so this session projects into an in-memory database. The
+    /// CRDT store keeps every edit; the database is only its projection.
+    /// `hold` follows the file: it turns [`DatabaseHold::Released`] when the
+    /// file is free again, which this session cannot use without a restart,
+    /// and [`DatabaseHold::WatchStopped`] when probing the file fails.
+    ///
+    /// All-clear: none — the session stays on the in-memory projection.
+    DatabaseHeld { path: String, hold: DatabaseHold },
     /// A file NAMES a connection but cannot be used, so the connection does
     /// not exist: a stale `schema_version`, a file that will not parse, a
     /// reference to another connection's secret, or two files claiming one
@@ -753,6 +773,7 @@ impl ConditionKind {
         "database-coordination-file-moved-aside";
     pub const DATABASE_VIEWS_DROPPED: &'static str = "database-views-dropped";
     pub const DATABASE_LOCK_WAITED: &'static str = "database-lock-waited";
+    pub const DATABASE_HELD: &'static str = "database-held";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
     pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
     pub const SNAPSHOT_SAVE_FAILED: &'static str = "snapshot-save-failed";
@@ -836,6 +857,7 @@ impl ConditionKind {
             }
             Self::DatabaseViewsDropped { .. } => Self::DATABASE_VIEWS_DROPPED,
             Self::DatabaseLockWaited { .. } => Self::DATABASE_LOCK_WAITED,
+            Self::DatabaseHeld { .. } => Self::DATABASE_HELD,
             Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
             Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,

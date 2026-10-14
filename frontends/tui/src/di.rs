@@ -79,6 +79,7 @@ impl Module for TuiModule {
             injector,
             db_path,
             holon::di::StorageSelector::Turso,
+            holon::di::DatabaseRole::for_crdt_enabled(self.holon_config.crdt_enabled()),
             self.conditions.clone(),
         )
         .map_err(|e| to_di_err("configure", &e))?;

@@ -26,8 +26,9 @@ pub use guard_bindings::sql_block_write_authority;
 pub use guard_bindings::sql_type_write_authority;
 // Re-export public API
 pub use lifecycle::{
-    CoreInfraModule, StorageSelector, build_no_turso_container, create_backend_engine,
-    create_backend_engine_with_extras, open_and_register_core, preload_startup_views,
+    CoreInfraModule, DatabaseRole, StorageSelector, build_no_turso_container,
+    create_backend_engine, create_backend_engine_with_extras, open_and_register_core,
+    preload_startup_views,
 };
 pub use registration::register_core_services_no_turso;
 pub use registration::register_core_services_with_backend;

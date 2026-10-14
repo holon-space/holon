@@ -60,6 +60,7 @@ async fn engine(
 ) -> Arc<holon::api::BackendEngine> {
     let (engine, _) = holon::di::create_backend_engine_with_extras(
         db_path,
+        holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_api::ConditionBus::new()),
         move |injector| {
             EventInfraModule

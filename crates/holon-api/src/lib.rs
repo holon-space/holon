@@ -105,6 +105,7 @@ pub use condition_bus::ConditionChange;
 pub use condition_bus::ConditionKey;
 pub use condition_bus::ConditionKind;
 pub use condition_bus::ConditionSubscription;
+pub use condition_bus::DatabaseHold;
 pub use condition_bus::DerivedFieldSeat;
 pub use condition_bus::DroppedPanics;
 pub use condition_bus::EarlierPanic;

@@ -617,6 +617,15 @@ const DATABASE_LOCK_WAITED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DATABASE_HELD: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Holon runs on a temporary database",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const LEFT_SHARED_PAGE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
     "You left a shared page",
@@ -1029,6 +1038,7 @@ impl ConditionKind {
             }
             Self::DatabaseViewsDropped { .. } => DATABASE_VIEWS_DROPPED,
             Self::DatabaseLockWaited { .. } => DATABASE_LOCK_WAITED,
+            Self::DatabaseHeld { .. } => DATABASE_HELD,
             Self::PairingReimportedLocalContent { .. } => PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::LeftSharedPage { .. } => LEFT_SHARED_PAGE,
             Self::DeletedSharedPage { .. } => DELETED_SHARED_PAGE,

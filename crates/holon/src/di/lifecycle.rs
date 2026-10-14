@@ -8,6 +8,11 @@ use anyhow::Result;
 use fluxdi::Injector;
 use fluxdi::Module;
 pub use holon_api::capability::StorageSelector;
+use holon_core::storage::types::DatabaseOpenFailure;
+use holon_core::storage::types::StorageError;
+use holon_turso::db_open::OpenFailed;
+use holon_turso::db_open::OpenOutcome;
+use holon_turso::db_open::WhenHeld;
 use tokio::sync::RwLock;
 
 use super::STARTUP_QUERIES;
@@ -15,6 +20,100 @@ use super::registration::register_core_services_no_turso;
 use super::registration::register_core_services_with_backend;
 use crate::api::backend_engine::BackendEngine;
 use crate::storage::turso::TursoBackend;
+
+/// What the database file is to this session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseRole {
+    /// It holds the only durable copy of the data, so the boot waits for it.
+    DurableStore,
+    /// It projects the CRDT store, so the boot runs on an in-memory projection
+    /// when another process holds it.
+    Projection,
+}
+
+impl DatabaseRole {
+    pub fn for_crdt_enabled(crdt_enabled: bool) -> Self {
+        match crdt_enabled {
+            true => Self::Projection,
+            false => Self::DurableStore,
+        }
+    }
+}
+
+/// How often the session looks whether a held database is free again.
+const HELD_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const DATABASE_SUBJECT: &str = "database";
+
+fn is_held(failed: &OpenFailed) -> bool {
+    matches!(
+        failed.error,
+        StorageError::DatabaseUnopenable {
+            failure: DatabaseOpenFailure::Locked,
+            ..
+        }
+    )
+}
+
+fn database_held(path: &std::path::Path, hold: holon_api::DatabaseHold) -> holon_api::Condition {
+    holon_api::Condition {
+        subject: DATABASE_SUBJECT.to_string(),
+        reason: holon_api::ConditionKind::DatabaseHeld {
+            path: path.display().to_string(),
+            hold,
+        },
+    }
+}
+
+/// Opens an in-memory projection in place of the held file at `db_path`,
+/// discloses it, and watches the file until it is free.
+fn project_in_memory_while_held(
+    injector: &Injector,
+    db_path: PathBuf,
+    conditions: &Arc<holon_api::ConditionBus>,
+) -> Result<(Arc<turso_core::Database>, OpenOutcome, PathBuf)> {
+    tracing::warn!(
+        "[DI] Another process holds {}; projecting into an in-memory database",
+        db_path.display()
+    );
+    conditions.emit(database_held(&db_path, holon_api::DatabaseHold::Held));
+    let memory = PathBuf::from(":memory:");
+    let (db, outcome) = TursoBackend::open_database_reporting_outcome(&memory)
+        .context("Failed to open the in-memory database for a held database file")?;
+
+    let shutdown = injector.resolve::<holon_api::lifecycle::SessionShutdown>();
+    let cancelled = shutdown.token();
+    let conditions = conditions.clone();
+    shutdown.spawn("database-held-probe", async move {
+        loop {
+            tokio::select! {
+                _ = cancelled.cancelled() => return,
+                _ = tokio::time::sleep(HELD_PROBE_INTERVAL) => {}
+            }
+            match holon_turso::db_open::is_held(&db_path) {
+                Ok(true) => {}
+                Ok(false) => {
+                    conditions.emit(database_held(&db_path, holon_api::DatabaseHold::Released));
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        "[DI] Probing the held database {} failed, so the session stops \
+                         watching it: {error}",
+                        db_path.display()
+                    );
+                    conditions.emit(database_held(
+                        &db_path,
+                        holon_api::DatabaseHold::WatchStopped {
+                            error: error.to_string(),
+                        },
+                    ));
+                    return;
+                }
+            }
+        }
+    });
+    Ok((db, outcome, memory))
+}
 
 /// Pre-create materialized views for startup queries.
 ///
@@ -76,6 +175,7 @@ pub fn open_and_register_core(
     injector: &Injector,
     db_path: PathBuf,
     storage: StorageSelector,
+    role: DatabaseRole,
     conditions: Arc<holon_api::ConditionBus>,
 ) -> Result<()> {
     // Registered before the storage substrate so no wiring can spawn
@@ -94,13 +194,23 @@ pub fn open_and_register_core(
     match storage {
         StorageSelector::Turso => {
             tracing::debug!("[DI] Opening database at {:?}...", db_path);
-            let (db, outcome) =
-                TursoBackend::open_database_reporting_outcome(&db_path).map_err(|e| {
-                    anyhow::Error::new(e).context(format!(
-                        "Failed to open Turso database at {}",
-                        db_path.display()
-                    ))
-                })?;
+            let when_held = match role {
+                DatabaseRole::DurableStore => WhenHeld::Wait,
+                DatabaseRole::Projection => WhenHeld::Fail,
+            };
+            let (db, outcome, db_path) =
+                match TursoBackend::open_database_reporting_outcome_when_held(&db_path, when_held) {
+                    Ok((db, outcome)) => (db, outcome, db_path),
+                    Err(failed) if is_held(&failed) => {
+                        assert_eq!(role, DatabaseRole::Projection);
+                        project_in_memory_while_held(injector, db_path, &conditions)?
+                    }
+                    Err(failed) => {
+                        return Err(anyhow::Error::new(StorageError::from(failed)).context(
+                            format!("Failed to open Turso database at {}", db_path.display()),
+                        ));
+                    }
+                };
             tracing::debug!("[DI] Database opened successfully");
             injector.provide::<holon_turso::db_open::BootOpenOutcome>(fluxdi::Provider::root(
                 move |_| {
@@ -151,6 +261,7 @@ pub fn open_and_register_core(
 /// (not `imports()`, which creates child injector scopes).
 pub struct CoreInfraModule {
     pub db_path: PathBuf,
+    pub role: DatabaseRole,
     /// The frontend core's bus, created before any storage opens.
     pub conditions: Arc<holon_api::ConditionBus>,
 }
@@ -161,6 +272,7 @@ impl Module for CoreInfraModule {
             injector,
             self.db_path.clone(),
             StorageSelector::Turso,
+            self.role,
             self.conditions.clone(),
         )
         .map_err(|e| {
@@ -179,6 +291,7 @@ impl Module for CoreInfraModule {
 /// services resolve their `DbReady<*>` dependencies.
 async fn build_di_container<F>(
     db_path: PathBuf,
+    role: DatabaseRole,
     conditions: Arc<holon_api::ConditionBus>,
     setup_fn: F,
 ) -> Result<Arc<Injector>>
@@ -187,7 +300,7 @@ where
 {
     let injector = Injector::root();
 
-    open_and_register_core(&injector, db_path, StorageSelector::Turso, conditions)?;
+    open_and_register_core(&injector, db_path, StorageSelector::Turso, role, conditions)?;
 
     setup_fn(&injector)?;
     super::guard_bindings::complete_guard_composition(&injector);
@@ -214,7 +327,13 @@ where
     F: FnOnce(&Injector) -> Result<()>,
 {
     let injector = Injector::root();
-    open_and_register_core(&injector, db_path, StorageSelector::LoroMemory, conditions)?;
+    open_and_register_core(
+        &injector,
+        db_path,
+        StorageSelector::LoroMemory,
+        DatabaseRole::Projection,
+        conditions,
+    )?;
     setup_fn(&injector)?;
     super::guard_bindings::complete_guard_composition(&injector);
     tracing::debug!("[DI] Turso-free injector built successfully");
@@ -227,6 +346,7 @@ where
 /// TUI and Flutter.
 pub async fn create_backend_engine<F>(
     db_path: PathBuf,
+    role: DatabaseRole,
     conditions: Arc<holon_api::ConditionBus>,
     setup_fn: F,
 ) -> Result<Arc<BackendEngine>>
@@ -234,7 +354,8 @@ where
     F: FnOnce(&Injector) -> Result<()>,
 {
     let (engine, ()) =
-        create_backend_engine_with_extras(db_path, conditions, setup_fn, |_| async {}).await?;
+        create_backend_engine_with_extras(db_path, role, conditions, setup_fn, |_| async {})
+            .await?;
     Ok(engine)
 }
 
@@ -253,6 +374,7 @@ where
 )]
 pub async fn create_backend_engine_with_extras<F, G, Fut, T>(
     db_path: PathBuf,
+    role: DatabaseRole,
     conditions: Arc<holon_api::ConditionBus>,
     setup_fn: F,
     extra_resolve: G,
@@ -263,7 +385,7 @@ where
     Fut: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let injector = build_di_container(db_path, conditions, setup_fn).await?;
+    let injector = build_di_container(db_path, role, conditions, setup_fn).await?;
 
     // Resolve BackendEngine FIRST, then extras. Resolving in parallel causes
     // a fluxdi TOCTOU race: both tasks call resolve_async::<BackendEngine>,

@@ -48,6 +48,7 @@ async fn boot_fresh_db(
 ) -> Arc<holon::api::backend_engine::BackendEngine> {
     holon::di::create_backend_engine(
         db_path,
+        holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_api::ConditionBus::new()),
         |injector| {
             EventInfraModule

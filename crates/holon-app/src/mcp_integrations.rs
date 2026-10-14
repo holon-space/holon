@@ -1980,6 +1980,7 @@ for line in sys.stdin:
     async fn bare_engine(home: &Path) -> (Arc<BackendEngine>, Arc<TypeRegistry>) {
         holon::di::create_backend_engine_with_extras(
             home.join("supervisor.db"),
+            holon::di::DatabaseRole::DurableStore,
             Arc::new(ConditionBus::new()),
             |_| Ok(()),
             |injector| async move { injector.resolve::<TypeRegistry>() },
