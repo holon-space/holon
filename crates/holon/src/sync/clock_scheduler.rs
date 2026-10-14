@@ -173,7 +173,7 @@ pub async fn reconcile_grain(
     clock: &dyn Clock,
     grain: Grain,
 ) -> Result<ClockTick> {
-    let sample = grain.sample(clock);
+    let sample = grain.sample(clock)?;
     let grain_str = grain.as_str();
 
     let rows = db_handle
@@ -230,7 +230,7 @@ async fn ensure_grain_row(db_handle: &DbHandle, clock: &dyn Clock, grain: Grain)
 
 /// Create a grain's `clock` row at the current instant if absent.
 async fn seed_grain_row(db_handle: &DbHandle, clock: &dyn Clock, grain: Grain) -> Result<()> {
-    let sample = grain.sample(clock);
+    let sample = grain.sample(clock)?;
     let updated_at = chrono::DateTime::from_timestamp_millis(clock.now_millis())
         .ok_or_else(|| anyhow!("clock now_millis out of DateTime range"))?
         .to_rfc3339();
@@ -919,7 +919,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             stored[0].get("epoch_day").unwrap().as_i64().unwrap(),
-            Grain::Hour.sample(&clock).tick,
+            Grain::Hour.sample(&clock).unwrap().tick,
             "the row holds the current hour tick"
         );
 
@@ -960,7 +960,7 @@ mod tests {
         for h in 0..4i64 {
             clock.set(noon_utc_millis(2026, 7, 11) + h * 3_600_000);
             reconcile_grain(&handle, &clock, Grain::Hour).await.unwrap();
-            let tick = Grain::Hour.sample(&clock).tick;
+            let tick = Grain::Hour.sample(&clock).unwrap().tick;
             let present = handle
                 .query("SELECT tick FROM every_2h", HashMap::new())
                 .await

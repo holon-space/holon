@@ -19,10 +19,11 @@ pub trait Clock: Send + Sync + std::fmt::Debug {
     fn utc_offset_seconds_at(&self, millis: i64) -> i32;
 }
 
-fn local_offset(clock: &dyn Clock, millis: i64) -> chrono::FixedOffset {
+fn local_offset(clock: &dyn Clock, millis: i64) -> anyhow::Result<chrono::FixedOffset> {
     let secs = clock.utc_offset_seconds_at(millis);
-    chrono::FixedOffset::east_opt(secs)
-        .unwrap_or_else(|| panic!("clock reported an out-of-range utc offset of {secs}s"))
+    chrono::FixedOffset::east_opt(secs).ok_or_else(|| {
+        anyhow::anyhow!("clock reported an out-of-range utc offset of {secs}s (±86399s fits)")
+    })
 }
 
 /// The host's local offset at `millis`, per-instant so a DST boundary between
@@ -193,19 +194,24 @@ impl Grain {
     /// instant. For [`Grain::Day`] `tick` equals [`CalendarDate::epoch_day`]
     /// and `label` equals [`CalendarDate::ymd`], so the day path is
     /// byte-for-byte the pre-C6 behaviour.
-    pub fn sample(self, clock: &dyn Clock) -> GrainSample {
+    /// Fails loud on a clock whose instant or zone is out of range, so the
+    /// clock seed's degrade (`ClockNotRunning`) carries it instead of a panic
+    /// aborting the boot.
+    pub fn sample(self, clock: &dyn Clock) -> anyhow::Result<GrainSample> {
         let millis = clock.now_millis();
         let dt = chrono::DateTime::from_timestamp_millis(millis)
-            .expect("clock now_millis out of DateTime range");
-        let naive = dt.with_timezone(&local_offset(clock, millis)).naive_local();
+            .ok_or_else(|| anyhow::anyhow!("clock now_millis {millis} is out of DateTime range"))?;
+        let naive = dt
+            .with_timezone(&local_offset(clock, millis)?)
+            .naive_local();
         // Treat the local wall-clock reading as if UTC to get a monotone integer
         // that ticks at each *local* grain boundary. `div_euclid` floors toward
         // negative infinity so pre-epoch instants still land in the right bucket.
         let secs = naive.and_utc().timestamp();
-        GrainSample {
+        Ok(GrainSample {
             tick: secs.div_euclid(self.unit_seconds()),
             label: naive.format(self.label_fmt()).to_string(),
-        }
+        })
     }
 }
 
@@ -310,11 +316,16 @@ impl CalendarDate {
     /// The *local* calendar date at the instant the injected clock reports.
     /// Replaces the SQL `date('now','localtime')` the journal trigger used to
     /// run, sourced from the deterministic injected [`Clock`] instead.
+    ///
+    /// Panics on a clock out of range, unlike [`Grain::sample`], which carries
+    /// it to the boot's clock degrade: this helper has no production caller —
+    /// it is the reference model's `today` — so there is no degrade to reach.
     pub fn from_clock(clock: &dyn Clock) -> Self {
         let millis = clock.now_millis();
         let dt = chrono::DateTime::from_timestamp_millis(millis)
             .expect("clock now_millis out of DateTime range");
-        Self(dt.with_timezone(&local_offset(clock, millis)).date_naive())
+        let offset = local_offset(clock, millis).expect("clock utc offset out of range");
+        Self(dt.with_timezone(&offset).date_naive())
     }
 
     /// Canonical `YYYY-MM-DD` rendering — the `today` column value.
@@ -431,11 +442,11 @@ mod tests {
 
         let utc = FixedZoneClock(millis, 0);
         assert_eq!(CalendarDate::from_clock(&utc).ymd(), "2026-08-31");
-        assert_eq!(Grain::Day.sample(&utc).label, "2026-08-31");
+        assert_eq!(Grain::Day.sample(&utc).unwrap().label, "2026-08-31");
 
         let ahead = FixedZoneClock(millis, 14 * 3600);
         assert_eq!(CalendarDate::from_clock(&ahead).ymd(), "2026-09-01");
-        assert_eq!(Grain::Day.sample(&ahead).label, "2026-09-01");
+        assert_eq!(Grain::Day.sample(&ahead).unwrap().label, "2026-09-01");
 
         let behind = FixedZoneClock(millis, -8 * 3600);
         assert_eq!(CalendarDate::from_clock(&behind).ymd(), "2026-08-31");
@@ -458,7 +469,7 @@ mod tests {
             .and_utc()
             .timestamp_millis();
         let clock = TestClock::new(millis);
-        let s = Grain::Day.sample(&clock);
+        let s = Grain::Day.sample(&clock).unwrap();
         let cal = CalendarDate::from_clock(&clock);
         assert_eq!(s.label, cal.ymd());
         assert_eq!(s.tick, cal.epoch_day());
@@ -473,8 +484,8 @@ mod tests {
             .and_hms_opt(9, 37, 42)
             .unwrap();
         let clock = TestClock::new(base.and_utc().timestamp_millis());
-        let hour = Grain::Hour.sample(&clock);
-        let minute = Grain::Minute.sample(&clock);
+        let hour = Grain::Hour.sample(&clock).unwrap();
+        let minute = Grain::Minute.sample(&clock).unwrap();
         // Labels truncate to their grain (rendered in Local; assert shape+prefix).
         assert!(hour.label.starts_with("2026-07-11T"), "hour label {hour:?}");
         assert_eq!(hour.label.len(), "2026-07-11T09".len());
@@ -485,13 +496,13 @@ mod tests {
                 .and_utc()
                 .timestamp_millis(),
         );
-        assert_eq!(Grain::Hour.sample(&clock).tick, hour.tick + 1);
+        assert_eq!(Grain::Hour.sample(&clock).unwrap().tick, hour.tick + 1);
         clock.set(
             (base + chrono::Duration::minutes(1))
                 .and_utc()
                 .timestamp_millis(),
         );
-        assert_eq!(Grain::Minute.sample(&clock).tick, minute.tick + 1);
+        assert_eq!(Grain::Minute.sample(&clock).unwrap().tick, minute.tick + 1);
     }
 
     #[test]
