@@ -35,6 +35,13 @@ Model FIRST, then red-for-the-right-reason, then green (the standing
 red for the intended reason is itself a reportable gap — say so, don't fake a
 red.
 
+**A boundary parser is a feature too.** For each field that references another
+field or section, list the legality rule and its rejection test. A round trip
+only proves consistency: derive the expected result from an independent
+`legal()` predicate, draw legal AND illegal inputs, and let every rejection
+rule have drawn inputs that must fail by name
+(`crates/holon-mcp-client/tests/transition_sidecar.rs`).
+
 ## 2. Which tier — headless keystone vs GPUI windowed
 
 | The feature is about… | Tier | Where |

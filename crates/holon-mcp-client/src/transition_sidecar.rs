@@ -91,7 +91,11 @@ pub struct EffectSpec {
     /// Tool argument → `input` (the answer value) or `{ literal: v }`. Kept
     /// raw so a malformed value gets a named error in [`tool_call`], not
     /// serde's untagged-enum message.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "unique_args"
+    )]
     pub map: BTreeMap<String, serde_json::Value>,
 }
 
@@ -116,33 +120,57 @@ pub enum TimerKindSpec {
 /// The value a sidecar writes in `effect.map` for the answer value.
 const MAP_INPUT: &str = "input";
 
-/// Deserializes `transitions:`, refusing a name declared twice (a plain map
-/// keeps the last one silently).
-pub(crate) fn unique_transitions<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<BTreeMap<String, TransitionSpec>, D::Error> {
-    struct Unique;
-    impl<'de> Visitor<'de> for Unique {
-        type Value = BTreeMap<String, TransitionSpec>;
+/// Deserializes a map section of a sidecar, refusing a key declared twice: a
+/// plain map keeps the last one silently, so everything downstream reads a
+/// declaration the file does not make. `noun` names what the keys are.
+pub(crate) fn unique_keys<'de, D, V, M>(deserializer: D, noun: &'static str) -> Result<M, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+    M: Default + Extend<(String, V)>,
+{
+    struct Unique<V, M> {
+        noun: &'static str,
+        map: std::marker::PhantomData<fn() -> (V, M)>,
+    }
+    impl<'de, V: Deserialize<'de>, M: Default + Extend<(String, V)>> Visitor<'de> for Unique<V, M> {
+        type Value = M;
 
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a map of transition names to transitions")
+            write!(f, "a map of {} names to {}s", self.noun, self.noun)
         }
 
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-            let mut transitions = BTreeMap::new();
-            while let Some((name, spec)) = map.next_entry::<String, TransitionSpec>()? {
-                if transitions.contains_key(&name) {
+            let mut seen = std::collections::HashSet::new();
+            let mut entries = M::default();
+            while let Some((name, value)) = map.next_entry::<String, V>()? {
+                if !seen.insert(name.clone()) {
                     return Err(A::Error::custom(format!(
-                        "transition `{name}` is declared twice"
+                        "{} `{name}` is declared twice",
+                        self.noun
                     )));
                 }
-                transitions.insert(name, spec);
+                entries.extend([(name, value)]);
             }
-            Ok(transitions)
+            Ok(entries)
         }
     }
-    deserializer.deserialize_map(Unique)
+    deserializer.deserialize_map(Unique {
+        noun,
+        map: std::marker::PhantomData,
+    })
+}
+
+pub(crate) fn unique_transitions<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, TransitionSpec>, D::Error> {
+    unique_keys(deserializer, "transition")
+}
+
+fn unique_args<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, serde_json::Value>, D::Error> {
+    unique_keys(deserializer, "effect argument")
 }
 
 /// Reads the `transitions:` of a sidecar YAML into the HL-IR.
@@ -166,6 +194,7 @@ fn load_transition(
     name: &str,
     spec: &TransitionSpec,
 ) -> anyhow::Result<TransitionDescriptor> {
+    ensure!(!name.is_empty(), "a transition name must not be empty");
     if spec.guard.is_some() {
         bail!("guards come with #166; not supported yet");
     }
@@ -197,6 +226,16 @@ fn load_transition(
         })
     })
     .collect::<anyhow::Result<Vec<_>>>()?;
+    // `Net::load` refuses two arcs on one place; the sidecar must not be able
+    // to write a net that cannot start.
+    let mut arced = std::collections::BTreeSet::new();
+    for HlArc { place, .. } in &arcs {
+        ensure!(
+            arced.insert(place),
+            "place `{}` carries more than one arc (`take:`, `read:`, `inhibit:`)",
+            place.0
+        );
+    }
 
     let tool = sidecar.tools.get(&spec.effect.tool).with_context(|| {
         format!(
@@ -251,6 +290,7 @@ fn load_transition(
 
 /// A place is one of the sidecar's own entities.
 fn place_of(sidecar: &McpSidecar, place: &str) -> anyhow::Result<PlaceName> {
+    ensure!(!place.is_empty(), "a place name must not be empty");
     ensure!(
         sidecar.entities.contains_key(place),
         "place `{place}` is not an entity of this sidecar (`entities:`)"

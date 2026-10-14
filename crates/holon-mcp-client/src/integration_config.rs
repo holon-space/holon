@@ -248,6 +248,12 @@ pub struct AuthConfig {
 ///
 /// Combines transport config with the sidecar entity/tool declarations.
 /// The provider name is derived from the filename (stem without `.yaml`).
+///
+/// This is the type a sidecar FILE is deserialized into, bundled files
+/// included, so every map section guards against a key declared twice
+/// ([`crate::transition_sidecar::unique_keys`]). [`Self::sidecar`]
+/// re-serializes these already-parsed maps, so a duplicate the parse let
+/// through would be laundered and unreachable for any later check.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntegrationFileConfig {
     /// Sidecar-format generation this file was authored against. Absent in
@@ -289,7 +295,7 @@ pub struct IntegrationFileConfig {
     /// Prefix prepended to all entity names for table names, ID schemes, etc.
     #[serde(default)]
     pub entity_prefix: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::mcp_sidecar::unique_entities")]
     pub entities: HashMap<String, EntityConfig>,
     /// Master write switch (leases/read-write ruling). Absent = disabled. Flows
     /// through into the [`McpSidecar`] so the dispatch chokepoint can enforce
@@ -301,7 +307,7 @@ pub struct IntegrationFileConfig {
     /// [`McpSidecar`] so the dispatch chokepoint can select the policy.
     #[serde(default)]
     pub once_only: crate::mcp_sidecar::OnceOnlyAuthorization,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::mcp_sidecar::unique_tools")]
     pub tools: HashMap<String, ToolConfig>,
     /// Sidecar-declared derived views (see
     /// [`crate::mcp_sidecar::McpSidecar::views`]).

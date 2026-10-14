@@ -20,7 +20,7 @@ pub struct McpSidecar {
     /// rows arrive through a `response` mapping declares no cache-table entity
     /// at all, and an empty block would be boilerplate teaching the next
     /// author it is required.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_entities")]
     pub entities: HashMap<String, EntityConfig>,
     /// Master write switch (leases/read-write ruling). Absent = `disabled` =
     /// today's fail-loud behaviour: every non-`read` tool is denied at
@@ -36,7 +36,7 @@ pub struct McpSidecar {
     /// means this device holds write authority and dispatches immediately.
     #[serde(default)]
     pub once_only: OnceOnlyAuthorization,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_tools")]
     pub tools: HashMap<String, ToolConfig>,
     /// Sidecar-declared derived views, created as Turso materialized views at
     /// integration startup (after the cache tables exist). Names get
@@ -59,6 +59,18 @@ pub struct McpSidecar {
         deserialize_with = "crate::transition_sidecar::unique_transitions"
     )]
     pub transitions: BTreeMap<String, crate::transition_sidecar::TransitionSpec>,
+}
+
+pub(crate) fn unique_entities<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, EntityConfig>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "entity")
+}
+
+pub(crate) fn unique_tools<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, ToolConfig>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "tool")
 }
 
 /// A sidecar-declared derived view: `CREATE MATERIALIZED VIEW {prefix}{name} AS
