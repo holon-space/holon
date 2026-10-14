@@ -87,7 +87,10 @@ enum Kind {
 
 /// The drawn net shape: `answer_spec` plus the downstream consumer of
 /// `Accepted`, the row the work writes. `Item`, the row the work consumes,
-/// needs no knob: nothing can hold a token the work already took.
+/// needs no knob: a consumer of `Item` can only take a row written after the
+/// work, which bumps the slot version and makes the reversal `Changed`. The
+/// holder of an `Item` row is an earlier answer's own parked work, which the
+/// generator reaches without a knob.
 #[derive(Clone, Copy, Debug)]
 struct Shape {
     consume_accepted: Option<Kind>,
@@ -173,8 +176,7 @@ struct Sut {
     values: BTreeMap<String, Value>,
     /// The answer accepted last, the target of [`Op::UndoNewest`].
     newest: Option<&'static str>,
-    /// Answers whose work overwrote an `Accepted` row that was already there:
-    /// their undo reaches the held branch with `before = Some`.
+    /// Answers whose work overwrote an `Accepted` row that was already there.
     overwrote: BTreeSet<String>,
     held: Reach,
 }
@@ -185,12 +187,14 @@ struct Sut {
 #[derive(Default)]
 struct Reach {
     rows: usize,
-    overwritten_rows: usize,
+    /// Of those rows, the ones whose delta has `before = Some`: a row that
+    /// existed before the work wrote it.
+    before_some_rows: usize,
 }
 
 static CASES: AtomicUsize = AtomicUsize::new(0);
 static HELD_ROWS: AtomicUsize = AtomicUsize::new(0);
-static HELD_OVERWRITTEN_ROWS: AtomicUsize = AtomicUsize::new(0);
+static HELD_BEFORE_SOME_ROWS: AtomicUsize = AtomicUsize::new(0);
 static HELD_CASES: AtomicUsize = AtomicUsize::new(0);
 const CASES_RUN: u32 = 512;
 
@@ -250,14 +254,18 @@ fn undo_and_count(sut: &mut Sut, id: &str) {
     if sut.newest == Some(id) {
         sut.newest = None;
     }
-    let held = undone
+    for r in undone
         .reversed
         .iter()
         .filter(|r| matches!(r.outcome, ReversalOutcome::Held(_)))
-        .count();
-    sut.held.rows += held;
-    if held > 0 && sut.overwrote.contains(id) {
-        sut.held.overwritten_rows += held;
+    {
+        sut.held.rows += 1;
+        // The work consumes `Item`, so a held `Item` row is one that was there
+        // before the work took it; a held `Accepted` row was only if the work
+        // overwrote it.
+        if &*r.place == "Item" || sut.overwrote.contains(id) {
+            sut.held.before_some_rows += 1;
+        }
     }
 }
 
@@ -279,16 +287,16 @@ impl StateMachineTest for Test {
 
     fn teardown(sut: Sut, _: Shape) {
         HELD_ROWS.fetch_add(sut.held.rows, Ordering::Relaxed);
-        HELD_OVERWRITTEN_ROWS.fetch_add(sut.held.overwritten_rows, Ordering::Relaxed);
+        HELD_BEFORE_SOME_ROWS.fetch_add(sut.held.before_some_rows, Ordering::Relaxed);
         if sut.held.rows > 0 {
             HELD_CASES.fetch_add(1, Ordering::Relaxed);
         }
         if CASES.fetch_add(1, Ordering::Relaxed) + 1 == CASES_RUN as usize {
             eprintln!(
-                "held branch reached in {} of {CASES_RUN} cases: {} held rows, {} of them a row the work overwrote",
+                "held branch reached in {} of {CASES_RUN} cases: {} held rows, {} of them a row that existed before the work",
                 HELD_CASES.load(Ordering::Relaxed),
                 HELD_ROWS.load(Ordering::Relaxed),
-                HELD_OVERWRITTEN_ROWS.load(Ordering::Relaxed),
+                HELD_BEFORE_SOME_ROWS.load(Ordering::Relaxed),
             );
         }
     }
@@ -369,6 +377,40 @@ prop_state_machine! {
 
     #[test]
     fn answers_follow_the_model(sequential 1..30 => Test);
+}
+
+/// The held arm with `before = Some`: the parked work of `a0` holds the `Item`
+/// row that the work of `a2` consumed, so the undo of `a2` leaves that row and
+/// the reach counter must see it (#195). Needs no drawn shape: the holder is an
+/// earlier answer's own work.
+#[test]
+fn a_held_row_the_work_consumed_is_counted() {
+    let shape = Shape {
+        consume_accepted: None,
+    };
+    let answer = |id| Op::Answer {
+        s: "y",
+        id,
+        stale: false,
+        value: None,
+    };
+    let mut sut = Test::init_test(&shape);
+    for op in [
+        Op::WriteItem { s: "y", n: 0 },
+        answer("a0"),
+        Op::WriteItem { s: "y", n: 0 },
+        Op::CompleteUnknown,
+        answer("a2"),
+        Op::CompleteDone,
+        Op::Undo("a2"),
+    ] {
+        sut = Test::apply(sut, &shape, op);
+    }
+    assert_eq!(sut.held.rows, 1, "the undo of a2 leaves the held Item row");
+    assert_eq!(
+        sut.held.before_some_rows, 1,
+        "the held Item row existed before the work took it: before = Some"
+    );
 }
 
 /// An external call returns only after the auto transitions it caused are
