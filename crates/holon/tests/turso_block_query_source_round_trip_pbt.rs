@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use holon::api::backend_engine::BackendEngine;
 use holon::core::SqlOperationProvider;
@@ -110,6 +111,47 @@ async fn write_blocks(
     Ok(())
 }
 
+/// One production engine, booted once, for every case of the round-trip
+/// property. A `BackendEngine` boot costs ~2.3 s of CPU in a debug build (full
+/// schema DDL parse, FTS index, script engine), which at 20 cases was the whole
+/// runtime of the test. Cases stay isolated by purging the case's document at
+/// the end of each case, so every case still reads a store that holds exactly
+/// its own generated blocks.
+fn shared_engine() -> &'static (Runtime, Arc<BackendEngine>) {
+    static SHARED: OnceLock<(Runtime, Arc<BackendEngine>)> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        let rt = Runtime::new().unwrap();
+        let engine = rt.block_on(async {
+            create_test_engine_with_path(unique_db_path())
+                .await
+                .expect("engine init")
+        });
+        (rt, engine)
+    })
+}
+
+/// Purge `doc_id` and, by cascade, the case's whole generated subtree, so the
+/// next case sees an empty store. Without it the store would keep every earlier
+/// case's blocks, and the generator's ids repeat as proptest shrinks: the
+/// second write of an id another entity still holds is refused by the identity
+/// policy, which would replace the counterexample with a collision error.
+async fn purge_document(engine: &BackendEngine, doc_id: &EntityUri) -> Result<(), TestCaseError> {
+    let provider = SqlOperationProvider::with_edge_fields(
+        engine.db_handle().clone(),
+        BLOCK_WRITE_TABLE.to_string(),
+        "block".to_string(),
+        "block".to_string(),
+        BlockSchemaModule.edge_fields(),
+    );
+    let mut params = StorageEntity::new();
+    params.insert("id".into(), Value::String(doc_id.as_str().to_string()));
+    provider
+        .execute_operation(&"block".to_string().into(), "purge", params)
+        .await
+        .map_err(|e| TestCaseError::fail(format!("purge doc {doc_id}: {e}")))?;
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 20,
@@ -121,37 +163,38 @@ proptest! {
     /// fields (id-keyed) and per-parent sibling order.
     #[test]
     fn block_round_trips_through_turso_query_source(headlines in root_headlines_strategy()) {
-        let rt = Runtime::new().unwrap();
+        let (rt, engine) = shared_engine();
         let result: Result<(), TestCaseError> = rt.block_on(async {
-            let engine = create_test_engine_with_path(unique_db_path())
-                .await
-                .map_err(|e| TestCaseError::fail(format!("engine init: {e}")))?;
-
             let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
             let blocks = build_blocks(&doc_id, &headlines);
 
-            write_blocks(&engine, &doc_id, &blocks).await?;
+            let outcome = async {
+                write_blocks(engine, &doc_id, &blocks).await?;
 
-            let source = TursoBlockQuerySource::watch_default(&engine)
-                .await
-                .map_err(|e| TestCaseError::fail(format!("watch: {e}")))?;
-            let snapshot = source
-                .snapshot()
-                .await
-                .map_err(|e| TestCaseError::fail(format!("snapshot: {e}")))?;
+                let source = TursoBlockQuerySource::watch_default(engine)
+                    .await
+                    .map_err(|e| TestCaseError::fail(format!("watch: {e}")))?;
+                let snapshot = source
+                    .snapshot()
+                    .await
+                    .map_err(|e| TestCaseError::fail(format!("snapshot: {e}")))?;
 
-            // Drop the physical doc root; the reference store has no doc block.
-            let actual_blocks: Vec<Block> = snapshot
-                .iter_blocks()
-                .filter(|b| b.id != doc_id)
-                .cloned()
-                .collect();
-            let expected = NormalizedDocument::from_blocks(None, &blocks);
-            let actual = NormalizedDocument::from_blocks(None, &actual_blocks);
-            assert_normalized_docs_equal(&expected, &actual, "turso_block_query_round_trip")?;
-            assert_sibling_order_matches(&blocks, &snapshot, "turso_block_query_round_trip")?;
+                // Drop the physical doc root; the reference store has no doc block.
+                let actual_blocks: Vec<Block> = snapshot
+                    .iter_blocks()
+                    .filter(|b| b.id != doc_id)
+                    .cloned()
+                    .collect();
+                let expected = NormalizedDocument::from_blocks(None, &blocks);
+                let actual = NormalizedDocument::from_blocks(None, &actual_blocks);
+                assert_normalized_docs_equal(&expected, &actual, "turso_block_query_round_trip")?;
+                assert_sibling_order_matches(&blocks, &snapshot, "turso_block_query_round_trip")?;
 
-            Ok(())
+                Ok(())
+            }
+            .await;
+
+            outcome.and(purge_document(engine, &doc_id).await)
         });
         result?;
     }
