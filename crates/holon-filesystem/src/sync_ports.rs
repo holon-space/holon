@@ -648,17 +648,20 @@ pub trait WritebackDisclosure: Send + Sync {
     /// Signal that an accepted removal of `path`'s blocks did not apply.
     /// Sticky, keyed by `path`. Lifted by
     /// [`file_condition_cleared`](Self::file_condition_cleared).
-    // ALLOW(unused_param): trait default; the names document the override's contract.
+    // ALLOW(unused_param): trait default; the names document the override's
+    // contract.
     fn removal_not_accepted(&self, _path: &Path, _cause: &str) {}
 
     /// Signal that a rewrite of `path` from the store did not land. Sticky,
     /// keyed by `path`. Lifted by
     /// [`file_condition_cleared`](Self::file_condition_cleared).
-    // ALLOW(unused_param): trait default; the names document the override's contract.
+    // ALLOW(unused_param): trait default; the names document the override's
+    // contract.
     fn rewrite_from_store_failed(&self, _path: &Path, _cause: &str) {}
 
     /// All-clear for the condition `kind` of `path`.
-    // ALLOW(unused_param): trait default; the names document the override's contract.
+    // ALLOW(unused_param): trait default; the names document the override's
+    // contract.
     fn file_condition_cleared(&self, _path: &Path, _kind: &'static str) {}
 
     /// Signal that write-back of `path` refused the file, or wrote it without
