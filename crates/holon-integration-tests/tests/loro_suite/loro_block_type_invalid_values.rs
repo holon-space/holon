@@ -13,6 +13,7 @@ use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::Value;
 use holon_integration_tests::TestEnvironment;
+use holon_integration_tests::polling::wait_for_file_condition;
 use holon_loro::DocScope;
 use holon_loro::LoroBackend;
 
@@ -372,16 +373,19 @@ fn a_block_type_drawer_is_refused(value: &str) {
             )
             .await
             .unwrap_or_else(|e| panic!("editing the content must land: {e:#}"));
-        env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
-        env.wait_for_org_files_stable(300, Duration::from_secs(10))
-            .await;
-        let file = holon_filesystem::FileSystem::read_to_string(
+        let path = env.org_file_path("drawer.org");
+        // A quiet-window settle can return before a write-back a loaded host delays.
+        let arrived = wait_for_file_condition(
             env.org_fs.as_ref(),
-            &env.org_file_path("drawer.org"),
+            &path,
+            |c| c.contains("drawer edited"),
+            Duration::from_secs(30),
         )
-        .await
-        .expect("read drawer.org");
-        if !file.contains("drawer edited") {
+        .await;
+        let file = holon_filesystem::FileSystem::read_to_string(env.org_fs.as_ref(), &path)
+            .await
+            .expect("read drawer.org");
+        if !arrived {
             failures.push(format!("the edit never reached the file:\n{file}"));
         }
         if file.contains(":block_type:") {
