@@ -62,6 +62,12 @@ pub trait StorageProvider: Send + Sync {
 
     /// Make the store usable and report the version it starts from.
     ///
+    /// Idempotent: a caller may have more than one attempt in flight, so an
+    /// already open store answers `Ok` with its current version instead of
+    /// failing. After [`Self::close`] the handle is spent and every further
+    /// `open` returns [`ProviderFailure::Definite`] — a retired store never
+    /// comes back.
+    ///
     /// Postcondition on `Ok`: [`Self::version`] is callable and returns the
     /// returned version.
     async fn open(&self) -> Result<StorageVersion, ProviderFailure>;

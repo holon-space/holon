@@ -28,6 +28,7 @@
 //! @pbt covers enabledness-query-production-cost — the per-focus enabledness
 //! query's cost with Loro as the write authority
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -39,6 +40,16 @@ use holon_api::user_transition::Offer;
 use holon_integration_tests::TestEnvironment;
 use holon_integration_tests::TestEnvironmentBuilder;
 use holon_net::enabledness::evaluate;
+use holon_net::exec::Body;
+use holon_net::exec::Class;
+use holon_net::exec::Content;
+use holon_net::exec::Executor;
+use holon_net::exec::NetDef;
+use holon_net::exec::Output;
+use holon_net::exec::Reader;
+use holon_net::exec::Subject;
+use holon_net::exec::TransitionDef;
+use holon_net::exec::Trigger;
 use holon_net::marking::Marking;
 
 /// Headline ladder, copied from `vault_scale_interaction_latency.rs` so the
@@ -257,4 +268,92 @@ fn enabledness_query_cost_in_the_production_composition() {
             p95_derive + p95_read + p95_eval
         );
     });
+}
+
+// ----------------------------------------------- #315 task 6: a data firing
+
+/// The subject of the holder net: one vault, like the storage net's.
+const HOLDER_SUBJECT: &str = "vault";
+
+/// One field, read back as the write's identity.
+fn seq_content(seq: i64) -> Content {
+    BTreeMap::from([("seq".to_string(), holon_api::Value::Integer(seq))])
+}
+
+/// The shape `ApplyWrite` has in the storage net
+/// (`crates/holon-net/tests/net_rev2_storage.rs`): a data firing that takes the
+/// primary store's token for the length of the write and puts it back, so no
+/// write can fall between two stores. The body is trivial on purpose — what is
+/// timed is the executor's own cost of such a firing.
+fn holder_net() -> NetDef {
+    NetDef::default()
+        .place("Storage", Class::Process)
+        .place("WriteQueue", Class::Process)
+        .place("WriteDone", Class::Data)
+        .transition(
+            TransitionDef::new(
+                "ApplyWrite",
+                Trigger::Auto,
+                Arc::new(|r: &mut Reader<'_>, s: &Subject| {
+                    let seq = r.field("WriteQueue", s, "seq")?;
+                    r.present("Storage", s).then_some(())?;
+                    Some(BTreeMap::from([("seq".to_string(), seq)]))
+                }),
+                Body::pure(|s, input| {
+                    Ok(vec![
+                        Output::new("WriteDone", s, input.clone()),
+                        Output::new("Storage", s, seq_content(0)),
+                    ])
+                }),
+            )
+            .consumes("WriteQueue")
+            .consumes("Storage"),
+        )
+}
+
+/// Task 6 of #315: the executor's overhead per data firing that takes the
+/// holder, against a 1 ms budget. No store, no SQL, no Loro — the figure is
+/// the executor's own, and it is what the storage net pays per write.
+#[test]
+fn one_data_firing_with_the_holder_take_stays_under_a_millisecond() {
+    let n = runs();
+    let mut exec = Executor::new(holder_net()).expect("the holder net loads");
+    let open = exec
+        .write("Storage", HOLDER_SUBJECT, seq_content(0), Duration::ZERO)
+        .expect("the store opens");
+    assert!(open.requests.is_empty(), "nothing is pending at the start");
+
+    let mut fire = Vec::with_capacity(n);
+    for i in 0..n {
+        let now = Duration::from_millis(i as u64);
+        let t = Instant::now();
+        let q = exec
+            .write("WriteQueue", HOLDER_SUBJECT, seq_content(i as i64 + 1), now)
+            .expect("the net quiesces");
+        fire.push(t.elapsed());
+        assert!(
+            q.requests.is_empty(),
+            "a pure body asks for no effect, so nothing but the executor is timed"
+        );
+    }
+
+    let done = exec
+        .tokens()
+        .token("WriteDone", HOLDER_SUBJECT)
+        .expect("every write lands in the data place");
+    assert_eq!(
+        done.content.get("seq"),
+        Some(&holon_api::Value::Integer(n as i64)),
+        "the last write did not fire, so the figures below are not firings"
+    );
+    assert!(
+        exec.tokens().token("Storage", HOLDER_SUBJECT).is_some(),
+        "the holder was not put back"
+    );
+
+    let p95 = report("data firing + holder take", fire);
+    assert!(
+        p95 < 1.0,
+        "the executor costs {p95:.3} ms per data firing with the holder take, over the 1 ms budget"
+    );
 }

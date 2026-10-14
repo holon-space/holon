@@ -342,6 +342,20 @@ fn naive_swap() -> bool {
     std::env::var("HOLON_NET_SWAP").as_deref() == Ok("naive")
 }
 
+/// `HOLON_NET_BOOT=blocking` restores the ladder that waits for ALL of the
+/// preferred store's tries before the fallback opens, which is what REV2-boot.a
+/// forbids.
+fn blocking_boot() -> bool {
+    std::env::var("HOLON_NET_BOOT").as_deref() == Ok("blocking")
+}
+
+/// A background try of the preferred store, carrying its own try count so the
+/// transition needs no read arc on `ProviderTries` (a read that changes during
+/// an attempt withholds the outputs AND eats the consumed request).
+fn standby_request(tries: i64) -> Content {
+    content(&[("provider", text(TURSO)), ("tries", Value::Integer(tries))])
+}
+
 /// Reads both store tokens and the swap's arguments out of the marking. `None`
 /// — the guard is false — when either slot is empty (a write or another
 /// exclusive holder has the token), the standby is not strictly preferred, or
@@ -422,8 +436,9 @@ fn net() -> Spec {
         .place("LoroFailed", Class::Process)
         .place("WriteQueue", Class::Process)
         .place("WriteDone", Class::Process)
-        // Turso first: its guard is its own try count. A run timer ends a slow
-        // attempt and counts that try through the same failure port.
+        // Turso goes first, but only ONCE: boot never blocks on its retries
+        // (REV2-boot.a). A run timer ends a slow first attempt and counts that
+        // try through the same failure port, which releases the fallback.
         .transition(
             Transition::new(
                 "MakeTursoReady",
@@ -431,7 +446,8 @@ fn net() -> Spec {
                 bind!(|r, s| {
                     r.present("StorageRequest", s).then_some(())?;
                     let tries = int_at(r, "ProviderTries", s, "turso")?;
-                    (tries < MAX_TRIES).then(|| content(&[("provider", text(TURSO))]))
+                    let bound = if blocking_boot() { MAX_TRIES } else { 1 };
+                    (tries < bound).then(|| content(&[("provider", text(TURSO))]))
                 }),
                 Body::Effectful(Receiver::Keyed),
             )
@@ -460,13 +476,23 @@ fn net() -> Spec {
                     let loro = int_at(r, "ProviderTries", s, "loro")?;
                     Some(tries_token(turso + 1, loro))
                 }),
-                Body::pure(|s, input| Ok(reposted(s, input))),
+                Body::pure(|s, input| {
+                    let mut out = reposted(s, input);
+                    let turso = int_of(input, "turso");
+                    // Turso's further tries run in the background, into the
+                    // standby slot, so they never delay the fallback.
+                    if !blocking_boot() && turso < MAX_TRIES {
+                        out.push(Output::new("StandbyRequest", s, standby_request(turso)));
+                    }
+                    Ok(out)
+                }),
             )
             .consumes("TursoFailed")
             .reads("ProviderTries"),
         )
-        // Loro only once Turso has given up: a guard, because the executor has
-        // no priority among the transitions competing for one place.
+        // The fallback opens as soon as Turso's FIRST try failed: a guard,
+        // because the executor has no priority among the transitions competing
+        // for one place.
         .transition(
             Transition::new(
                 "MakeLoroReady",
@@ -475,7 +501,8 @@ fn net() -> Spec {
                     r.present("StorageRequest", s).then_some(())?;
                     let turso = int_at(r, "ProviderTries", s, "turso")?;
                     let loro = int_at(r, "ProviderTries", s, "loro")?;
-                    (loro < MAX_TRIES && turso >= MAX_TRIES)
+                    let after = if blocking_boot() { MAX_TRIES } else { 1 };
+                    (loro < MAX_TRIES && turso >= after)
                         .then(|| content(&[("provider", text(LORO))]))
                 }),
                 Body::Effectful(Receiver::Keyed),
@@ -522,13 +549,25 @@ fn net() -> Spec {
                 Trigger::Auto,
                 bind!(|r, s| {
                     let provider = r.text("StandbyRequest", s, "provider")?;
-                    Some(content(&[("provider", text(&provider))]))
+                    let tries = int_at(r, "StandbyRequest", s, "tries")?;
+                    // The count travels in the request, so this transition needs
+                    // no read arc on `ProviderTries`.
+                    (tries < MAX_TRIES).then(|| {
+                        content(&[
+                            ("provider", text(&provider)),
+                            ("tries", Value::Integer(tries)),
+                        ])
+                    })
                 }),
                 Body::Effectful(Receiver::Keyed),
             )
             .retry(NO_ENGINE_RETRY, 1)
             .consumes("StandbyRequest")
-            .inhibits("SecondaryStorage"),
+            .inhibits("SecondaryStorage")
+            .on_failure("TursoFailed")
+            .run_timer(Duration::from_secs(RUN_TIMER_SECS))
+            .abandon(Duration::from_secs(ABANDON_SECS))
+            .on_timeout("TursoFailed"),
         )
         // Background catch-up: it does NOT hold the primary token, so writes
         // run while it replays. It stops at the swap guard's bound.
@@ -613,12 +652,14 @@ fn opened(req: &EffectRequest, place: &str, provider: &str, v: StorageVersion) -
             content(&[("provider", text(provider))]),
         ));
     }
-    // The fallback keeps asking for the preferred store.
-    if place == "Storage" && provider == LORO {
+    // In the blocking variant the preferred store has used up its tries by the
+    // time the fallback opens, so the standby request starts here. The
+    // non-blocking net posts it at the first failure instead.
+    if blocking_boot() && place == "Storage" && provider == LORO {
         out.push(Output::new(
             "StandbyRequest",
             &req.subject,
-            content(&[("provider", text(TURSO))]),
+            standby_request(0),
         ));
     }
     out
@@ -741,15 +782,19 @@ fn settle(d: &mut Driver, pair: &Pair, transition: &str) {
 /// `HOLON_NET_SWAP=naive` makes this red.
 #[test]
 fn a_swap_applies_the_final_delta_while_it_holds_the_stores() {
+    if blocking_boot() {
+        // The blocking variant is a harness for property 2 only: there the
+        // preferred store keeps the boot slot, so this scenario has no standby.
+        return;
+    }
     let (mut d, pair) = booted(Faults {
-        definite_open_failures: MAX_TRIES as u32,
+        definite_open_failures: 1,
         ..Faults::default()
     });
 
-    // Turso refuses its three opens; Loro takes over and asks for Turso again.
-    for _ in 0..MAX_TRIES {
-        settle(&mut d, &pair, "MakeTursoReady");
-    }
+    // Turso refuses its first open; Loro takes over at once and Turso's next
+    // try goes to the standby slot.
+    settle(&mut d, &pair, "MakeTursoReady");
     settle(&mut d, &pair, "MakeLoroReady");
     assert_eq!(
         str_of(token_content(&d, "Storage").expect("a primary"), "provider"),
@@ -814,20 +859,23 @@ fn a_swap_applies_the_final_delta_while_it_holds_the_stores() {
 /// and the standby does NOT take over.
 #[test]
 fn a_swap_that_cannot_apply_the_final_delta_fails_instead_of_releasing_the_hold() {
+    if blocking_boot() {
+        // The blocking variant is a harness for property 2 only: there the
+        // preferred store keeps the boot slot, so this scenario has no standby.
+        return;
+    }
     if naive_swap() {
         // The naive variant has no catch-up inside the hold, so the rule this
         // test pins does not exist there.
         return;
     }
     let (mut d, pair) = booted(Faults {
-        definite_open_failures: MAX_TRIES as u32,
+        definite_open_failures: 1,
         // One commit per call: enough for the background batch, short of the
         // final delta.
         replay_cap_per_call: Some(1),
     });
-    for _ in 0..MAX_TRIES {
-        settle(&mut d, &pair, "MakeTursoReady");
-    }
+    settle(&mut d, &pair, "MakeTursoReady");
     settle(&mut d, &pair, "MakeLoroReady");
     for seq in 1..=3 {
         d.write(
@@ -915,10 +963,10 @@ impl StateMachineTest for Test {
     type Reference = Ref;
 
     fn init_test(_: &()) -> Sut {
-        // Turso fails its three opens at boot, so Loro takes over and Turso
-        // comes back as the standby.
+        // Turso refuses its first open, so Loro takes over at once and Turso
+        // comes back through the standby slot.
         let (d, pair) = booted(Faults {
-            definite_open_failures: MAX_TRIES as u32,
+            definite_open_failures: 1,
             ..Faults::default()
         });
         Sut { d, pair, seq: 0 }
@@ -1009,12 +1057,121 @@ prop_state_machine! {
     fn a_standby_swaps_in_without_losing_a_write(sequential 1..40 => Test);
 }
 
+// ------------------------------------- property 2, over any clock and answers
+
+/// A store that refuses every open, so the boot slot can only be left by the
+/// try count — never by success.
+const NEVER_OPENS: u32 = u32::MAX;
+
+#[derive(Clone, Debug)]
+enum BootOp {
+    /// The effect runner answers the oldest pending request.
+    Settle,
+    /// Time passes, by any jump.
+    Tick(u64),
+}
+
+struct BootRef;
+
+impl ReferenceStateMachine for BootRef {
+    type State = ();
+    type Transition = BootOp;
+
+    fn init_state() -> BoxedStrategy<()> {
+        Just(()).boxed()
+    }
+
+    fn transitions(_: &()) -> BoxedStrategy<BootOp> {
+        prop_oneof![
+            2 => Just(BootOp::Settle),
+            3 => (1u64..40).prop_map(BootOp::Tick),
+        ]
+        .boxed()
+    }
+
+    fn apply(state: (), _: &BootOp) {
+        state
+    }
+}
+
+struct BootSut {
+    d: Driver,
+    pair: Pair,
+}
+
+struct BootTest;
+
+impl StateMachineTest for BootTest {
+    type SystemUnderTest = BootSut;
+    type Reference = BootRef;
+
+    fn init_test(_: &()) -> BootSut {
+        let (d, pair) = booted(Faults {
+            definite_open_failures: NEVER_OPENS,
+            ..Faults::default()
+        });
+        BootSut { d, pair }
+    }
+
+    fn apply(mut sut: BootSut, _: &(), op: BootOp) -> BootSut {
+        match op {
+            BootOp::Settle => {
+                let pair = &sut.pair;
+                sut.d.complete_oldest(|req| run_effect(pair, req))
+            }
+            BootOp::Tick(secs) => sut.d.tick(secs),
+        }
+        .expect("the net quiesces");
+        sut
+    }
+
+    fn check_invariants(sut: &BootSut, _: &()) {
+        let asked = sut.d.requests_of("MakeLoroReady").count();
+        let boot_tries = sut.d.requests_of("MakeTursoReady").count();
+
+        // non_blocking_boot: once the preferred store's FIRST attempt is over
+        // (its run timer at the latest), the fallback is asked. Nothing the
+        // preferred store does afterwards may push this out.
+        if sut.d.now.as_secs() > RUN_TIMER_SECS {
+            assert!(
+                asked >= 1 || token_content(&sut.d, "Storage").is_some(),
+                "non_blocking_boot: {} s in, the fallback was never asked \
+                 (the preferred store was asked {boot_tries} times)",
+                sut.d.now.as_secs()
+            );
+        }
+
+        // one_boot_try: the preferred store's later tries run in the background
+        // standby slot, so the boot slot is used exactly once.
+        assert!(
+            boot_tries <= 1,
+            "one_boot_try: the boot slot asked the preferred store {boot_tries} times, \
+             so its retries sit between the user and a working store"
+        );
+    }
+}
+
+prop_state_machine! {
+    #![proptest_config(ProptestConfig { cases: 48, .. ProptestConfig::default() })]
+
+    /// Property 2: for any clock jump and any answer order, the fallback is
+    /// asked within the preferred store's first attempt, and the preferred
+    /// store's later tries never delay it.
+    #[test]
+    fn a_fallback_is_asked_within_the_first_attempt(sequential 1..30 => BootTest);
+}
+
 // ------------------------------------------------------------- property 3
 
 /// The run timer ends a slow attempt and that counts ONE try, exactly like a
 /// definite failure; the attempt then runs again because the try count changed.
 #[test]
 fn a_timeout_counts_one_try() {
+    if blocking_boot() {
+        // The blocking variant is a harness for property 2 only: there the
+        // preferred store keeps the boot slot, so this scenario has no standby.
+        return;
+    }
     // A store that never answers: the run timer is the only thing that ends an
     // attempt.
     let (mut d, _pair) = booted(Faults::default());
@@ -1033,19 +1190,54 @@ fn a_timeout_counts_one_try() {
         1,
         "the run timer ended the attempt and that counts one try"
     );
-
-    d.tick(RUN_TIMER_SECS + 1).expect("the net quiesces");
-    d.tick(RUN_TIMER_SECS + 1).expect("the net quiesces");
-    assert_eq!(tries(&d), MAX_TRIES, "three tries are spent");
     assert_eq!(
         d.requests_of("MakeTursoReady").count(),
-        MAX_TRIES as usize,
-        "Turso was attempted exactly MAX_TRIES times"
+        1,
+        "the boot slot asks the preferred store exactly once"
     );
     assert_eq!(
         d.requests_of("MakeLoroReady").count(),
         1,
-        "Turso gave up and the fallback was attempted"
+        "that one try released the fallback"
+    );
+    assert_eq!(
+        d.requests_of("MakeTursoStandby").count(),
+        1,
+        "the preferred store's next try runs in the background"
+    );
+}
+
+/// Property 2 (REV2-boot.a), the witness: a preferred store that never answers
+/// must not delay the fallback. The bound is Turso's FIRST attempt plus Loro's
+/// open — Turso's later tries run in the standby slot and never extend it.
+///
+/// `HOLON_NET_BOOT=blocking` makes this red: there the fallback waits for all
+/// MAX_TRIES tries, so the bound is MAX_TRIES * (run timer + abandon).
+#[test]
+fn a_silent_preferred_store_never_delays_the_fallback() {
+    let (mut d, pair) = booted(Faults::default());
+
+    d.tick(RUN_TIMER_SECS + 1).expect("the net quiesces");
+    assert!(
+        d.pending
+            .iter()
+            .any(|r| r.transition.as_ref() == "MakeLoroReady"),
+        "non_blocking_boot: {} s after the first attempt timed out the fallback was not asked \
+         (the preferred store was asked {} times)",
+        d.now.as_secs(),
+        d.requests_of("MakeTursoReady").count()
+    );
+
+    settle(&mut d, &pair, "MakeLoroReady");
+    assert_eq!(
+        str_of(token_content(&d, "Storage").expect("a primary"), "provider"),
+        LORO,
+        "the fallback serves"
+    );
+    assert_eq!(
+        d.now.as_secs(),
+        RUN_TIMER_SECS + 1,
+        "the store is up within the first attempt's bound plus the fallback's open"
     );
 }
 
@@ -1053,12 +1245,19 @@ fn a_timeout_counts_one_try() {
 /// store can be attempted again after it gave up.
 #[test]
 fn a_manual_retry_resets_the_tries() {
+    if blocking_boot() {
+        // The blocking variant is a harness for property 2 only: there the
+        // preferred store keeps the boot slot, so this scenario has no standby.
+        return;
+    }
     let (mut d, pair) = booted(Faults {
         definite_open_failures: MAX_TRIES as u32,
         ..Faults::default()
     });
-    for _ in 0..MAX_TRIES {
-        settle(&mut d, &pair, "MakeTursoReady");
+    // One try in the boot slot, the rest in the background standby slot.
+    settle(&mut d, &pair, "MakeTursoReady");
+    for _ in 1..MAX_TRIES {
+        settle(&mut d, &pair, "MakeTursoStandby");
     }
     let tries = |d: &Driver| {
         let t = token_content(d, "ProviderTries").expect("a tries token");
