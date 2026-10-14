@@ -266,3 +266,7 @@ required-features = ["test-helpers"]
 [[test]]
 name = "watch_context_membership_leak"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "guard_resolve_fails_loud"
+required-features = ["test-helpers"]

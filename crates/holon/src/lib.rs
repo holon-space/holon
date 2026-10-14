@@ -27,7 +27,7 @@ pub mod storage;
 pub mod sync;
 // `testing` depends on proptest which is native-only (not on any wasm target)
 // and gated behind the `testing` feature so proptest stays out of prod builds.
-#[cfg(all(not(target_arch = "wasm32"), feature = "testing"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "testing")))]
 pub mod testing;
 pub mod util;
 
