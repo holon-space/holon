@@ -201,7 +201,8 @@ pub const ANSWER_INPUT_KEY: &str = "@input";
 
 /// The key under which a lowered work transition's `Content` carries the
 /// [`AnswerId`]; the work occurrence derives from it
-/// (`exec::work_occurrence(transition, answer)`).
+/// (`holon_net::exec::work_occurrence(transition, answer)`; no intra-doc link
+/// because holon-net depends on this crate, not the other way round).
 pub const ANSWER_ID_KEY: &str = "@answer";
 
 /// Names one occurrence of a firing in a runtime net. The variants never
