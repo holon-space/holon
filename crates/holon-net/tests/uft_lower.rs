@@ -1096,3 +1096,15 @@ fn an_undo_waits_while_the_work_it_undoes_runs() {
         "the undo does not run once the work it undoes ended"
     );
 }
+#[test]
+fn undoes_a_transition_absent_from_the_net_is_refused() {
+    let net = lower(base_net(), &undoing_descriptor(), Some(undoing_parts()))
+        .expect("the undo lowers on its own");
+    let Err(err) = Executor::new(net) else {
+        panic!("a dangling undoes loaded")
+    };
+    assert!(
+        format!("{err:?}").contains("AcceptRemoval.Running"),
+        "the refusal does not name the place the undo waits on: {err:?}"
+    );
+}

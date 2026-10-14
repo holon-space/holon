@@ -77,6 +77,10 @@ pub type Read = fn(&mut Reader<'_>, &Subject) -> Option<Content>;
 /// (place or transition, subject).
 type Key = (String, String);
 
+/// What a commit did to one row: its content before, and the version and the
+/// content after.
+type Delta = (Option<Content>, u64, Option<Content>);
+
 fn key(a: &str, s: &str) -> Key {
     (a.to_string(), s.to_string())
 }
@@ -192,9 +196,8 @@ pub struct Model {
     answers: BTreeMap<String, (String, String)>,
     undone: BTreeSet<String>,
     conditions: Vec<Condition>,
-    /// Per work occurrence: the content before its commit and the version
-    /// after it.
-    deltas: BTreeMap<OccurrenceId, BTreeMap<Key, (Option<Content>, u64)>>,
+    /// Per work occurrence, what its commit did to each row it changed.
+    deltas: BTreeMap<OccurrenceId, BTreeMap<Key, Delta>>,
     /// `<T>.UndoPending`: per (work, answer), the rows the undo of that
     /// answer still owes because a later firing held them (#191).
     pending_undos: BTreeMap<Key, Vec<(String, String, Arc<str>)>>,
@@ -728,7 +731,7 @@ impl Model {
             self.remove(&answered, &subject);
         }
         let mut reversed = Vec::new();
-        for ((place, s), (before, version)) in
+        for ((place, s), (before, version, _)) in
             self.deltas.get(&occurrence).cloned().unwrap_or_default()
         {
             let process = matches!(
@@ -884,13 +887,11 @@ impl Model {
         Ok(Quiesced { value, requests })
     }
 
-    /// The auto transitions to quiescence, no timer.
     /// Settles what an undo could not reverse while a later firing held the
-    /// row (#191). The model decides by what it can SEE of the row: a holder
-    /// that rolled back put the row back, so the row is there to reverse; a
-    /// holder that committed consumed it, so the row is gone and the undo is
-    /// disclosed as stuck. (The executor decides the same case by the row's
-    /// version.)
+    /// row (#191). The model decides by the row's CONTENT: it reverses only
+    /// while the row still holds exactly what the work's commit left there,
+    /// and discloses otherwise — consumed, rewritten by its holder, or
+    /// written by anyone else. (The executor decides by the row's version.)
     fn apply_pending_undos(&mut self) {
         for (pending, rows) in std::mem::take(&mut self.pending_undos) {
             let (work, answer) = pending.clone();
@@ -901,7 +902,8 @@ impl Model {
                     keep.push((place, subject, holder));
                     continue;
                 }
-                if self.content(&place, &subject).is_none() {
+                let (before, _, after) = self.deltas[&occurrence][&key(&place, &subject)].clone();
+                if self.content(&place, &subject) != after.as_ref() {
                     self.conditions.push(Condition::UndoHeld {
                         answer: AnswerId(answer.clone()),
                         place: Place::new(&place),
@@ -910,7 +912,7 @@ impl Model {
                     });
                     continue;
                 }
-                match self.deltas[&occurrence][&key(&place, &subject)].0.clone() {
+                match before {
                     Some(content) => self.put(&place, &subject, content),
                     None => self.remove(&place, &subject),
                 }
@@ -936,6 +938,7 @@ impl Model {
             .collect()
     }
 
+    /// The auto transitions to quiescence, no timer.
     fn quiesce(&mut self, now: Duration) -> Result<Vec<EffectRequest>, usize> {
         for _ in 0..MAX_ROUNDS {
             self.apply_pending_undos();
@@ -1419,7 +1422,8 @@ impl Model {
                 .into_iter()
                 .map(|(k, c)| {
                     let version = self.version(&k.0, &k.1);
-                    (k, (c, version))
+                    let after = self.content(&k.0, &k.1).cloned();
+                    (k, (c, version, after))
                 })
                 .collect();
             self.deltas.insert(occ.clone(), delta);

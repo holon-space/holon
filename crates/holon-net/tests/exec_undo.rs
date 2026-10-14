@@ -411,3 +411,52 @@ fn undo_of_an_expired_answer_keeps_no_longer_applies() {
         ))))
     );
 }
+#[test]
+fn a_holder_that_updates_the_held_row_is_disclosed() {
+    let mut d = downstream();
+    d.undo(&a0()).expect("a done answer undoes");
+    d.complete_oldest(|req| EffectResult::Done(vec![Output::new("Accepted", &req.subject, n(9))]))
+        .expect("the net quiesces");
+    assert_eq!(
+        d.exec().conditions(),
+        [Condition::UndoHeld {
+            answer: AnswerId("a0".to_string()),
+            place: Place::new("Accepted"),
+            subject: Subject::new("x"),
+            holder: Arc::from("Consume"),
+        }]
+    );
+    // The rewritten row enables `Consume` again; its rollback shows the row the
+    // undo left behind.
+    d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
+        .expect("the net quiesces");
+    assert_eq!(
+        d.exec()
+            .tokens()
+            .token("Accepted", "x")
+            .map(|t| t.content.clone()),
+        Some(n(9)),
+        "the undo changed a row its holder had rewritten"
+    );
+}
+
+#[test]
+fn an_outside_write_during_the_hold_survives_the_pending_undo() {
+    let mut d = downstream();
+    d.undo(&a0()).expect("a done answer undoes");
+    d.write("Accepted", "x", n(7)).expect("the net quiesces");
+    d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
+        .expect("the net quiesces");
+    assert_eq!(
+        d.exec()
+            .tokens()
+            .token("Accepted", "x")
+            .map(|t| t.content.clone()),
+        Some(n(7)),
+        "the undo overwrote a row written while its holder held it"
+    );
+    assert!(
+        !d.exec().conditions().is_empty(),
+        "an undo it could not finish stayed silent"
+    );
+}
