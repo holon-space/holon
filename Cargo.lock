@@ -6057,6 +6057,8 @@ dependencies = [
 name = "holon-net"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "blake3",
  "holon-api",
  "holon-core",
@@ -6068,6 +6070,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
  "workspace-hack 0.1.0",
 ]
 

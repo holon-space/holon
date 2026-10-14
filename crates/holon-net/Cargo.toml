@@ -21,10 +21,13 @@ thiserror.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
 holon-core.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 
 [features]
 # Each twin breaks one executor rule, so a property test shows red for that rule.
