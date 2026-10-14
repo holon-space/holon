@@ -581,6 +581,15 @@ const DATABASE_VIEWS_DROPPED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DATABASE_LOCK_WAITED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "The boot waited for the database",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const LEFT_SHARED_PAGE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
     "You left a shared page",
@@ -990,6 +999,7 @@ impl ConditionKind {
                 DATABASE_COORDINATION_FILE_MOVED_ASIDE
             }
             Self::DatabaseViewsDropped { .. } => DATABASE_VIEWS_DROPPED,
+            Self::DatabaseLockWaited { .. } => DATABASE_LOCK_WAITED,
             Self::PairingReimportedLocalContent { .. } => PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::LeftSharedPage { .. } => LEFT_SHARED_PAGE,
             Self::DeletedSharedPage { .. } => DELETED_SHARED_PAGE,

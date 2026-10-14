@@ -547,6 +547,11 @@ impl FrontendInjectorExt for Injector {
                                 views: views.clone(),
                             }
                         }
+                        OpenChange::LockWaited { waited_ms } => {
+                            holon_api::ConditionKind::DatabaseLockWaited {
+                                waited_ms: *waited_ms,
+                            }
+                        }
                     };
                     let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
                     bus.emit(holon_api::Condition {

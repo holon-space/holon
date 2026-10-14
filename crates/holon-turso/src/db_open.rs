@@ -65,6 +65,9 @@ pub enum OpenChange {
         reason: String,
         backup: std::path::PathBuf,
     },
+    /// Another process held the file's lock. The open waited `waited_ms` for
+    /// it and then got the file; nothing was changed.
+    LockWaited { waited_ms: u64 },
 }
 
 impl std::fmt::Display for OpenChange {
@@ -89,6 +92,11 @@ impl std::fmt::Display for OpenChange {
                 f,
                 "moved the database aside to {} ({reason})",
                 backup.display()
+            ),
+            Self::LockWaited { waited_ms } => write!(
+                f,
+                "waited {:.1} s for the lock another process held",
+                *waited_ms as f64 / 1000.0
             ),
         }
     }
@@ -179,6 +187,11 @@ fn open_recording(
     loop {
         let Failed { leg, error, db } = match attempt(path, fns) {
             Ok((db, change)) => {
+                if tries > 0 {
+                    changes.push(OpenChange::LockWaited {
+                        waited_ms: (LOCK_RETRY * tries).as_millis() as u64,
+                    });
+                }
                 changes.extend(change);
                 return Ok(db);
             }

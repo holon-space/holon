@@ -431,3 +431,107 @@ async fn a_damaged_coordination_file_is_moved_aside_and_disclosed() {
         "the intact database and its log must stay: {kinds:?}"
     );
 }
+
+/// The test re-execs itself with this variable set to hold the database from a
+/// second process: a lock only another PROCESS can hold.
+const CHILD_HOLD_DB_PATH: &str = "HOLON_DISCLOSURE_TEST_CHILD_HOLD_DB_PATH";
+const HELD_DB_FILE: &str = "held.db";
+const HOLD_TEST: &str = "a_boot_that_waited_for_the_lock_discloses_the_wait_to_the_first_window";
+
+fn run_as_holder(path: &str) -> ! {
+    let _db = holon_turso::turso::TursoBackend::open_database(path).expect("the holder opens");
+    println!("CHILD-HOLDING");
+    std::io::Write::flush(&mut std::io::stdout()).expect("flush");
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    std::process::exit(0);
+}
+
+/// A second process holding `path`, already past its open.
+fn spawn_holder(path: &std::path::Path) -> std::process::Child {
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", HOLD_TEST, "--nocapture", "--test-threads=1"])
+        .env(CHILD_HOLD_DB_PATH, path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the holder");
+    // The harness prints its own lines first, so read until the holder speaks.
+    let mut out = std::io::BufReader::new(child.stdout.take().expect("holder stdout"));
+    let mut line = String::new();
+    while !line.contains("CHILD-HOLDING") {
+        line.clear();
+        let read = std::io::BufRead::read_line(&mut out, &mut line).expect("read the holder");
+        assert!(read > 0, "the holder never reported that it holds the file");
+    }
+    child
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_boot_that_waited_for_the_lock_discloses_the_wait_to_the_first_window() {
+    if let Ok(path) = std::env::var(CHILD_HOLD_DB_PATH) {
+        run_as_holder(&path);
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("probe.org"), VAULT_ORG).expect("write the probe vault");
+    let held = dir.path().join(HELD_DB_FILE);
+    let mut holder = spawn_holder(&held);
+
+    // The boot blocks on the lock, so the hold must end from elsewhere.
+    let released = tokio::task::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        holder.kill().expect("kill the holder");
+        holder.wait().expect("reap the holder");
+    });
+    let booted = boot(dir.path(), HELD_DB_FILE).await;
+    released.await.expect("the holder's release");
+
+    // A window opens only after the boot, so it sees the notice through the
+    // snapshot the bus replays to a late subscriber.
+    let current = booted
+        .injector
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .subscribe()
+        .current;
+    let waited = current
+        .iter()
+        .find(|c| c.condition_key().kind == "database-lock-waited")
+        .unwrap_or_else(|| {
+            panic!(
+                "a boot that waited for the database lock did not disclose the wait: {:?}",
+                raised_kinds(&booted)
+            )
+        });
+    let profile = waited.reason.profile();
+    assert_eq!(
+        profile.all_clear(),
+        holon_api::AllClear::UntilRestart,
+        "the wait is a one-shot notice about this boot"
+    );
+    assert_ne!(
+        profile.severity(),
+        holon_api::ConditionSeverity::Info,
+        "a boot the user had to wait through is not an info-level notice"
+    );
+    let detail = waited.reason.detail(&waited.subject);
+    let rendered = format!("{} {}", detail.headline, detail.body.join(" | "));
+    for needle in ["waited", "s for the database lock held by another process"] {
+        assert!(
+            rendered.contains(needle),
+            "the text Martin reads must hold {needle:?}: {rendered}"
+        );
+    }
+
+    let backups: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+        .expect("list the vault")
+        .map(|e| e.expect("entry").path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&format!("{HELD_DB_FILE}.unusable-")))
+        })
+        .collect();
+    assert!(
+        backups.is_empty(),
+        "a wait for a held file must not be mistaken for damage: {backups:?}"
+    );
+}

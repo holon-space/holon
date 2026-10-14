@@ -315,6 +315,11 @@ impl ConditionKind {
                     .collect(),
             ),
 
+            Self::DatabaseLockWaited { waited_ms } => ConditionDetail::prose(format!(
+                "Holon waited {:.1} s for the database lock held by another process",
+                *waited_ms as f64 / 1000.0
+            )),
+
             Self::UndoHistoryClearedAtBoot { entries } => ConditionDetail::prose(format!(
                 "{entries} step{} from the previous session were discarded",
                 if *entries == 1 { "" } else { "s" }
