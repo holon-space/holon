@@ -633,10 +633,18 @@ pub struct Token {
 struct Slot {
     /// Changes only when a record or an outside write commits a change.
     version: u64,
+    /// The transition whose commit set the current version, `None` for a
+    /// write from outside the net. An undo reads it to tell the holder of a
+    /// row from a later writer (D191-rewritten.a).
+    writer: Option<Arc<str>>,
     token: Option<Token>,
     /// Only the hidden-reservation twin sets it.
     reserved: bool,
 }
+
+/// Who a commit is by: a transition, or `None` for a write from outside the
+/// net (a user edit, an ingest, an undo).
+type Writer<'a> = Option<&'a Arc<str>>;
 
 /// The owned marking: at most one token per (place, subject), with a version
 /// per (place, subject).
@@ -653,6 +661,11 @@ impl Tokens {
 
     pub fn version(&self, place: &str, subject: &str) -> u64 {
         self.slot(place, subject).map_or(0, |s| s.version)
+    }
+
+    /// Who committed the current version: see [`Slot::writer`].
+    fn writer(&self, place: &str, subject: &str) -> Option<Arc<str>> {
+        self.slot(place, subject).and_then(|s| s.writer.clone())
     }
 
     /// The subjects holding a token in `place`.
@@ -678,7 +691,7 @@ impl Tokens {
     }
 
     /// Commits `content`; unchanged content is no change and no new version.
-    fn put(&mut self, place: &Place, subject: &Subject, content: Content) {
+    fn put(&mut self, place: &Place, subject: &Subject, content: Content, by: Writer) {
         let id = self.next_id;
         let slot = self.slot_mut(place, subject);
         if slot.token.as_ref().is_some_and(|t| t.content == content) {
@@ -686,17 +699,19 @@ impl Tokens {
         }
         slot.token = Some(Token { id, content });
         slot.version += 1;
+        slot.writer = by.cloned();
         self.next_id += 1;
     }
 
     /// Commits the removal of a token: a new version.
-    fn remove(&mut self, place: &Place, subject: &Subject) {
+    fn remove(&mut self, place: &Place, subject: &Subject, by: Writer) {
         let slot = self.slot_mut(place, subject);
         assert!(
             slot.token.take().is_some(),
             "a removal of the empty {place} of {subject}"
         );
         slot.version += 1;
+        slot.writer = by.cloned();
     }
 
     /// Places an executor-owned marker (Running, OutcomeUnknown): a move, not
@@ -1130,6 +1145,16 @@ pub enum Condition {
         subject: Subject,
         holder: Arc<str>,
     },
+    /// The undo of `answer` could not reverse `place` of `subject`: a writer
+    /// other than the holder of the row rewrote it, and a record never
+    /// clobbers a later write (D191-rewritten.a). `writer` is the transition
+    /// that wrote it, or `None` for a write from outside the net.
+    UndoRewritten {
+        answer: AnswerId,
+        place: Place,
+        subject: Subject,
+        writer: Option<Arc<str>>,
+    },
 }
 
 /// The holder an undo names when that holder used the row.
@@ -1200,6 +1225,20 @@ impl fmt::Display for Condition {
                 f,
                 "cannot undo {}: {place} of {subject} is used by {holder}",
                 answer.0
+            ),
+            Self::UndoRewritten {
+                answer,
+                place,
+                subject,
+                writer,
+            } => write!(
+                f,
+                "cannot undo {}: {place} of {subject} was rewritten by a later write{}",
+                answer.0,
+                match writer {
+                    Some(w) => format!(" of {w}"),
+                    None => String::new(),
+                }
             ),
         }
     }
@@ -1563,7 +1602,7 @@ impl Executor {
             .token(&answered, &subject)
             .is_some_and(|t| t.content.get(ANSWER_ID_KEY) == Some(&Value::String(id.to_string())));
         if withdrawn {
-            self.tokens.remove(&answered, &subject);
+            self.tokens.remove(&answered, &subject, None);
         }
         let mut reversed = Vec::new();
         for ((place, subject), (before, version)) in
@@ -1576,10 +1615,10 @@ impl Executor {
             } else if let Some(holder) = self.holder(&place, &subject) {
                 ReversalOutcome::Held(holder)
             } else if let Some(content) = before {
-                self.tokens.put(&place, &subject, content);
+                self.tokens.put(&place, &subject, content, None);
                 ReversalOutcome::Restored
             } else {
-                self.tokens.remove(&place, &subject);
+                self.tokens.remove(&place, &subject, None);
                 ReversalOutcome::Removed
             };
             reversed.push(Reversal {
@@ -1630,7 +1669,7 @@ impl Executor {
         );
         self.advance(now);
         self.tokens
-            .put(&Place::new(place), &Subject::new(subject), content);
+            .put(&Place::new(place), &Subject::new(subject), content, None);
         self.quiesced((), now)
     }
 
@@ -1702,8 +1741,11 @@ impl Executor {
     }
 
     /// Settles what an undo could not reverse while a later firing held the
-    /// row (#191). A released row is reversed; a row the holder committed is
-    /// disclosed as [`Condition::UndoHeld`] and left as the holder left it.
+    /// row (#191). A released row is reversed, unless a commit moved its
+    /// version: the holder's own commit is disclosed as
+    /// [`Condition::UndoHeld`], any other writer's as
+    /// [`Condition::UndoRewritten`], and the row stays as that writer left
+    /// it (D191-rewritten.a).
     fn apply_pending_undos(&mut self) {
         for i in 0..self.net.transitions.len() {
             let work = self.net.transitions[i].name.clone();
@@ -1725,17 +1767,29 @@ impl Executor {
                     let (before, version) =
                         self.deltas[&occurrence][&(place.clone(), subject.clone())].clone();
                     if self.tokens.version(&place, &subject) != version {
-                        self.conditions.push(Condition::UndoHeld {
-                            answer: AnswerId(answer.to_string()),
-                            place,
-                            subject,
-                            holder,
-                        });
+                        let writer = self.tokens.writer(&place, &subject);
+                        let answer = AnswerId(answer.to_string());
+                        self.conditions
+                            .push(if writer.as_deref() == Some(&*holder) {
+                                Condition::UndoHeld {
+                                    answer,
+                                    place,
+                                    subject,
+                                    holder,
+                                }
+                            } else {
+                                Condition::UndoRewritten {
+                                    answer,
+                                    place,
+                                    subject,
+                                    writer,
+                                }
+                            });
                         continue;
                     }
                     match before {
-                        Some(content) => self.tokens.put(&place, &subject, content),
-                        None => self.tokens.remove(&place, &subject),
+                        Some(content) => self.tokens.put(&place, &subject, content, None),
+                        None => self.tokens.remove(&place, &subject, None),
                     }
                 }
                 let next = (!keep.is_empty()).then(|| pending_content(&answer.to_string(), &keep));
@@ -2018,7 +2072,7 @@ impl Executor {
             }
             Resolution::Drop => {
                 for (p, _) in &a.taken {
-                    self.commit_consumption(p, &a.subject);
+                    self.commit_consumption(p, &a.subject, &a.transition);
                 }
                 let cause = Cause::definite("dropped by the user");
                 self.occurrences
@@ -2324,7 +2378,8 @@ impl Executor {
             .into_iter()
             .partition(|o| t.facts.contains(&o.place));
         for f in facts {
-            self.tokens.put(&f.place, &f.subject, f.content);
+            self.tokens
+                .put(&f.place, &f.subject, f.content, Some(&a.transition));
         }
         let Some((place, subject)) = self.stale(&a.trace) else {
             self.marks
@@ -2424,10 +2479,11 @@ impl Executor {
             }
         }
         for (p, _) in &a.taken {
-            self.commit_consumption(p, &a.subject);
+            self.commit_consumption(p, &a.subject, &a.transition);
         }
         for o in rows {
-            self.tokens.put(&o.place, &o.subject, o.content);
+            self.tokens
+                .put(&o.place, &o.subject, o.content, Some(&a.transition));
         }
         if !before.is_empty() {
             let delta = before
@@ -2446,15 +2502,16 @@ impl Executor {
 
     /// The consumed token leaves the net; its place changes only now. A newer
     /// token written meanwhile already carries a newer version.
-    fn commit_consumption(&mut self, place: &Place, subject: &Subject) {
+    fn commit_consumption(&mut self, place: &Place, subject: &Subject, by: &Arc<str>) {
         let slot = self.tokens.slot_mut(place, subject);
         if slot.reserved {
             slot.reserved = false;
             slot.token = None;
-            slot.version += 1;
-        } else if slot.token.is_none() {
-            slot.version += 1;
+        } else if slot.token.is_some() {
+            return;
         }
+        slot.version += 1;
+        slot.writer = Some(by.clone());
     }
 
     /// The inputs go back with no version change. A token written meanwhile
@@ -2518,7 +2575,8 @@ impl Executor {
         }
         self.end_run(&key);
         if let Some(port) = on_failure {
-            self.tokens.put(&port, subject, cause_content(cause));
+            self.tokens
+                .put(&port, subject, cause_content(cause), Some(transition));
         }
     }
 
@@ -2600,7 +2658,8 @@ impl Executor {
                 self.end_run(&key);
                 if let Some(port) = on_timeout {
                     let cause = Cause::definite(format!("run timer of '{}' expired", key.0));
-                    self.tokens.put(&port, &key.1, cause_content(&cause));
+                    self.tokens
+                        .put(&port, &key.1, cause_content(&cause), Some(&key.0));
                 }
             } else if self.retry_due(&key.0, &key.1).is_some_and(|due| due <= now) {
                 self.set_retry_due(&key, None);

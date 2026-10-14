@@ -455,8 +455,51 @@ fn an_outside_write_during_the_hold_survives_the_pending_undo() {
         Some(n(7)),
         "the undo overwrote a row written while its holder held it"
     );
+    assert_eq!(
+        d.exec().conditions(),
+        [Condition::UndoRewritten {
+            answer: AnswerId("a0".to_string()),
+            place: Place::new("Accepted"),
+            subject: Subject::new("x"),
+            writer: None,
+        }],
+        "a row a later write rewrote was blamed on its holder"
+    );
+    let text = d.exec().conditions()[0].to_string();
     assert!(
-        !d.exec().conditions().is_empty(),
-        "an undo it could not finish stayed silent"
+        text.contains("cannot undo")
+            && text.contains("rewritten by a later write")
+            && !text.contains("used by"),
+        "{text}"
+    );
+}
+
+/// A later write that happens to restore the content the undone work left is
+/// still a later write: the undo discloses and never reverses over it
+/// (D191-rewritten.a).
+#[test]
+fn an_outside_write_that_restores_the_content_blocks_the_pending_undo() {
+    let mut d = downstream();
+    d.undo(&a0()).expect("a done answer undoes");
+    d.write("Accepted", "x", n(5)).expect("the net quiesces");
+    d.write("Accepted", "x", n(1)).expect("the net quiesces");
+    d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
+        .expect("the net quiesces");
+    assert_eq!(
+        d.exec()
+            .tokens()
+            .token("Accepted", "x")
+            .map(|t| t.content.clone()),
+        Some(n(1)),
+        "the undo removed a row a later write had put back"
+    );
+    assert_eq!(
+        d.exec().conditions(),
+        [Condition::UndoRewritten {
+            answer: AnswerId("a0".to_string()),
+            place: Place::new("Accepted"),
+            subject: Subject::new("x"),
+            writer: None,
+        }]
     );
 }

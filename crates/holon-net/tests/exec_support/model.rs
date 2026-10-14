@@ -77,9 +77,8 @@ pub type Read = fn(&mut Reader<'_>, &Subject) -> Option<Content>;
 /// (place or transition, subject).
 type Key = (String, String);
 
-/// What a commit did to one row: its content before, and the version and the
-/// content after.
-type Delta = (Option<Content>, u64, Option<Content>);
+/// What a commit did to one row: its content before and its version after.
+type Delta = (Option<Content>, u64);
 
 fn key(a: &str, s: &str) -> Key {
     (a.to_string(), s.to_string())
@@ -89,6 +88,9 @@ fn key(a: &str, s: &str) -> Key {
 struct Slot {
     version: u64,
     content: Option<Content>,
+    /// The transition whose commit set the current version, `None` for a
+    /// write from outside the net (D191-rewritten.a).
+    writer: Option<Arc<str>>,
 }
 
 #[derive(Clone, Debug)]
@@ -373,7 +375,7 @@ impl Model {
     }
 
     /// A commit: a new version exactly when the content changes.
-    fn put(&mut self, place: &str, subject: &str, content: Content) {
+    fn put(&mut self, place: &str, subject: &str, content: Content, by: Option<&str>) {
         assert!(
             matches!(self.place(place), PlaceSpec::Stored { .. }),
             "a commit to the derived place '{place}'"
@@ -382,7 +384,15 @@ impl Model {
         if slot.content.as_ref() != Some(&content) {
             slot.content = Some(content);
             slot.version += 1;
+            slot.writer = by.map(Arc::from);
         }
+    }
+
+    /// Who committed the current version: see [`Slot::writer`].
+    fn writer(&self, place: &str, subject: &str) -> Option<Arc<str>> {
+        self.slots
+            .get(&key(place, subject))
+            .and_then(|s| s.writer.clone())
     }
 
     pub fn write(
@@ -393,7 +403,7 @@ impl Model {
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
         self.advance(now);
-        self.put(place, subject, content);
+        self.put(place, subject, content, None);
         self.quiesced((), now)
     }
 
@@ -728,10 +738,10 @@ impl Model {
             .content(&answered, &subject)
             .is_some_and(|c| c.get(ANSWER_ID_KEY) == Some(&Value::String(id.to_string())));
         if withdrawn {
-            self.remove(&answered, &subject);
+            self.remove(&answered, &subject, None);
         }
         let mut reversed = Vec::new();
-        for ((place, s), (before, version, _)) in
+        for ((place, s), (before, version)) in
             self.deltas.get(&occurrence).cloned().unwrap_or_default()
         {
             let process = matches!(
@@ -748,10 +758,10 @@ impl Model {
             } else if let Some(holder) = self.holder(&place, &s) {
                 ReversalOutcome::Held(holder)
             } else if let Some(content) = before {
-                self.put(&place, &s, content);
+                self.put(&place, &s, content, None);
                 ReversalOutcome::Restored
             } else {
-                self.remove(&place, &s);
+                self.remove(&place, &s, None);
                 ReversalOutcome::Removed
             };
             reversed.push(Reversal {
@@ -788,13 +798,14 @@ impl Model {
         })
     }
 
-    fn remove(&mut self, place: &str, subject: &str) {
+    fn remove(&mut self, place: &str, subject: &str, by: Option<&str>) {
         let slot = self.slot_mut(place, subject);
         assert!(
             slot.content.take().is_some(),
             "a removal of the empty {place} of {subject}"
         );
         slot.version += 1;
+        slot.writer = by.map(Arc::from);
     }
 
     // --- enabledness ---
@@ -888,10 +899,12 @@ impl Model {
     }
 
     /// Settles what an undo could not reverse while a later firing held the
-    /// row (#191). The model decides by the row's CONTENT: it reverses only
-    /// while the row still holds exactly what the work's commit left there,
-    /// and discloses otherwise — consumed, rewritten by its holder, or
-    /// written by anyone else. (The executor decides by the row's version.)
+    /// row (#191). A released row is reversed only while nothing has
+    /// committed to it since the work's commit; a commit by its holder is
+    /// disclosed as [`Condition::UndoHeld`], a commit by anyone else as
+    /// [`Condition::UndoRewritten`], and the row stays as that writer left
+    /// it (D191-rewritten.a). Content identity cannot decide this: a later
+    /// write that restores the content is still a later write.
     fn apply_pending_undos(&mut self) {
         for (pending, rows) in std::mem::take(&mut self.pending_undos) {
             let (work, answer) = pending.clone();
@@ -902,19 +915,32 @@ impl Model {
                     keep.push((place, subject, holder));
                     continue;
                 }
-                let (before, _, after) = self.deltas[&occurrence][&key(&place, &subject)].clone();
-                if self.content(&place, &subject) != after.as_ref() {
-                    self.conditions.push(Condition::UndoHeld {
-                        answer: AnswerId(answer.clone()),
-                        place: Place::new(&place),
-                        subject: Subject::new(&subject),
-                        holder,
-                    });
+                let (before, version) = self.deltas[&occurrence][&key(&place, &subject)].clone();
+                if self.version(&place, &subject) != version {
+                    let writer = self.writer(&place, &subject);
+                    let answer = AnswerId(answer.clone());
+                    let (place, subject) = (Place::new(&place), Subject::new(&subject));
+                    self.conditions
+                        .push(if writer.as_deref() == Some(&*holder) {
+                            Condition::UndoHeld {
+                                answer,
+                                place,
+                                subject,
+                                holder,
+                            }
+                        } else {
+                            Condition::UndoRewritten {
+                                answer,
+                                place,
+                                subject,
+                                writer,
+                            }
+                        });
                     continue;
                 }
                 match before {
-                    Some(content) => self.put(&place, &subject, content),
-                    None => self.remove(&place, &subject),
+                    Some(content) => self.put(&place, &subject, content, None),
+                    None => self.remove(&place, &subject, None),
                 }
             }
             if !keep.is_empty() {
@@ -1329,8 +1355,9 @@ impl Model {
         let (facts, rows): (Vec<_>, Vec<_>) = outputs
             .into_iter()
             .partition(|out| t.facts.iter().any(|f| f == out.place.as_str()));
+        let by = o.transition.clone();
         for f in facts {
-            self.put(&f.place, &f.subject, f.content);
+            self.put(&f.place, &f.subject, f.content, Some(&by));
         }
         let Some((place, subject)) = self.stale(&self.occs[occ].trace) else {
             let run_key = self.run_key(occ);
@@ -1413,17 +1440,17 @@ impl Model {
                     .or_insert_with(|| self.content(&out.place, &out.subject).cloned());
             }
         }
+        let by = self.occs[occ].transition.clone();
         self.commit_consumption(occ);
         for out in rows {
-            self.put(&out.place, &out.subject, out.content);
+            self.put(&out.place, &out.subject, out.content, Some(&by));
         }
         if !before.is_empty() {
             let delta = before
                 .into_iter()
                 .map(|(k, c)| {
                     let version = self.version(&k.0, &k.1);
-                    let after = self.content(&k.0, &k.1).cloned();
-                    (k, (c, version, after))
+                    (k, (c, version))
                 })
                 .collect();
             self.deltas.insert(occ.clone(), delta);
@@ -1441,10 +1468,12 @@ impl Model {
             o.taken.iter().map(|(p, _)| p.clone()).collect(),
             o.subject.clone(),
         );
+        let by: Arc<str> = Arc::from(o.transition.as_str());
         for p in places {
             let slot = self.slot_mut(&p, &s);
             if slot.content.is_none() {
                 slot.version += 1;
+                slot.writer = Some(Arc::clone(&by));
             }
         }
     }
@@ -1491,7 +1520,7 @@ impl Model {
         }
         self.runs.remove(&run_key);
         if let Some(port) = &t.on_failure {
-            self.put(port, &run_key.1, cause_content(cause));
+            self.put(port, &run_key.1, cause_content(cause), Some(&run_key.0));
         }
     }
 
@@ -1535,7 +1564,7 @@ impl Model {
                 self.runs.remove(&k);
                 if let Some(port) = &t.on_timeout {
                     let cause = Cause::definite(format!("run timer of '{}' expired", k.0));
-                    self.put(port, &k.1, cause_content(&cause));
+                    self.put(port, &k.1, cause_content(&cause), Some(&k.0));
                 }
             } else if run.retry_due.is_some_and(|due| due <= now) {
                 self.runs.get_mut(&k).expect("listed above").retry_due = None;
