@@ -1634,6 +1634,20 @@ mod tests {
         assert_eq!(cycle_state("DONE", &states), "");
     }
 
+    /// The LogSeq ring is NOT in `states`: a block in `LATER` or `NOW` must
+    /// keep walking LATER -> NOW -> DONE even though the native list it is
+    /// cycled against holds neither keyword. Only the keystone exercised this
+    /// before, and it walks the ring by calling `cycle_state` itself, so both
+    /// arms could be deleted without a test going red.
+    #[test]
+    fn the_logseq_ring_survives_the_native_keyword_list() {
+        let native = vec!["".into(), "TODO".into(), "DOING".into(), "DONE".into()];
+        assert_eq!(cycle_state("LATER", &native), "NOW");
+        assert_eq!(cycle_state("NOW", &native), "DONE");
+        // DONE re-enters the native ring (ForeignVaultCompat §4).
+        assert_eq!(cycle_state("DONE", &native), "");
+    }
+
     #[test]
     fn test_state_display() {
         assert_eq!(state_display("TODO"), ("TODO", ThemeToken::Muted));

@@ -333,6 +333,23 @@ mod tests {
         TaskKeywordVocabulary::default()
     }
 
+    /// A document may declare only one side of the ring (`#+TODO: NEXT`). The
+    /// default vocabulary belongs to a document that declares NOTHING, so one
+    /// empty side must not re-home the whole document onto it — that would
+    /// silently lose the declared keyword.
+    #[test]
+    fn one_declared_side_keeps_the_declared_vocabulary() {
+        let active_only = TaskKeywordVocabulary::for_document(&["NEXT".to_string()], &[]);
+        assert_eq!(active_only.active_keywords(), ["NEXT".to_string()]);
+        assert!(active_only.done_keywords().is_empty());
+        assert_ne!(active_only, TaskKeywordVocabulary::default());
+
+        let done_only = TaskKeywordVocabulary::for_document(&[], &["SHIPPED".to_string()]);
+        assert!(done_only.active_keywords().is_empty());
+        assert_eq!(done_only.done_keywords(), ["SHIPPED".to_string()]);
+        assert_ne!(done_only, TaskKeywordVocabulary::default());
+    }
+
     fn converge(content: &str) -> Option<Promotion> {
         converge_keyword_headed(content, &vocab())
     }

@@ -265,6 +265,35 @@ mod tests {
         assert!(a.as_str().starts_with("block:"));
     }
 
+    /// Checked-in id vector for a template instance. Every other test (and the
+    /// keystone) computes its expectation by calling
+    /// `deterministic_instance_id` itself, so without a literal here a
+    /// swapped namespace or reordered components would keep every one of
+    /// them green.
+    ///
+    /// The second literal is the SAME name under [`HOLON_RULE_NAMESPACE`]: the
+    /// two namespaces must not mint the same id for the same triple.
+    #[test]
+    fn instance_id_matches_its_checked_in_vector() {
+        let id = deterministic_instance_id("tpl:weekly", "rule:journals::action::0", "node:2");
+        assert_eq!(id.as_str(), "block:3d756849-0c88-5cdd-ba0f-4191b5d2c9cc");
+        assert_ne!(id.as_str(), "block:1b4bad95-db12-5da7-bb09-3d4300d2136a");
+    }
+
+    /// The separator keeps the component boundaries: the same characters split
+    /// differently across the three components must mint different ids.
+    /// (A component that itself contains `\x1f` can still collide — no caller
+    /// has one, and the ids are built from vault-authored identifiers.)
+    #[test]
+    fn instance_id_depends_on_where_the_components_are_split() {
+        let a = deterministic_instance_id("ab", "c", "d");
+        let b = deterministic_instance_id("a", "bc", "d");
+        let c = deterministic_instance_id("a", "b", "cd");
+        assert_ne!(a.as_str(), b.as_str());
+        assert_ne!(b.as_str(), c.as_str());
+        assert_ne!(a.as_str(), c.as_str());
+    }
+
     #[test]
     fn id_distinct_across_rule_key_slot() {
         let rule_a = RuleId::new("rule-a");
