@@ -591,11 +591,29 @@ impl TestEnvironmentBuilder {
 /// waits for the boot also waits for the read-only backlog, so recipes are in
 /// the store as before.
 async fn wait_for_vault_backlog(injector: &fluxdi::Injector) -> Result<()> {
-    injector
+    let outcome = injector
         .resolve::<holon_orgmode::VaultBacklogDrained>()
         .wait_drained()
-        .await
-        .map_err(|e| e.context("the vault's read-only backlog"))
+        .await;
+    let Err(e) = outcome else {
+        return Ok(());
+    };
+    // A controller that never started leaves the backlog undrained forever and
+    // discloses it; prod boots on (holon-app wiring `post_ready` logs the same
+    // error), so a harness that aborts here cannot test that disclosure.
+    if sync_not_started(injector) {
+        return Ok(());
+    }
+    Err(e.context("the vault's read-only backlog"))
+}
+
+/// The boot disclosed that the file sync never started.
+fn sync_not_started(injector: &fluxdi::Injector) -> bool {
+    injector
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .current()
+        .iter()
+        .any(|c| c.reason.condition_kind() == holon_api::ConditionKind::VAULT_SYNC_NOT_STARTED)
 }
 
 impl Default for TestEnvironmentBuilder {

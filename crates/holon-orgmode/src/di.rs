@@ -1393,11 +1393,16 @@ async fn hand_over_to_boot_seed(
     let Some(SeedHandover { gate, scan_answer }) = handover else {
         return;
     };
+    let scan_failed = scan.is_err();
     scan_answer.send(scan);
     if let Err(msg) = gate.wait_seeded(shutdown).await {
         let e = anyhow::anyhow!(msg);
         tracing::error!("[OrgMode] boot seed failed: {:#}", e);
-        controller.disclose_start_incomplete("seeding the default layout", &e);
+        // One VaultStartIncomplete per vault stands at a time, so a seed the
+        // failed scan skipped would hide the step that really failed.
+        if !scan_failed {
+            controller.disclose_start_incomplete("seeding the default layout", &e);
+        }
         failures.push((root_directory.to_path_buf(), e));
     }
 }
