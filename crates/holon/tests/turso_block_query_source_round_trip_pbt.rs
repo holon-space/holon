@@ -17,7 +17,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Barrier;
+use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::PoisonError;
 
 use holon::api::backend_engine::BackendEngine;
 use holon::core::SqlOperationProvider;
@@ -33,6 +36,7 @@ use holon_api::SourceBlock;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::repository::Lifecycle;
+use holon_block_roundtrip_testing::HeadlineSpec;
 use holon_block_roundtrip_testing::NormalizedDocument;
 use holon_block_roundtrip_testing::assert_normalized_docs_equal;
 use holon_block_roundtrip_testing::assert_sibling_order_matches;
@@ -46,6 +50,8 @@ use holon_loro::block_to_params;
 use holon_loro_wiring::loro_block_query_source::LoroBlockQuerySource;
 use holon_turso::schema_modules::BlockSchemaModule;
 use proptest::prelude::*;
+use proptest::strategy::ValueTree;
+use proptest::test_runner::TestRunner;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
@@ -111,12 +117,14 @@ async fn write_blocks(
     Ok(())
 }
 
-/// One production engine, booted once, for every case of both properties in
-/// this file. A `BackendEngine` boot costs ~2.3 s of CPU in a debug build (full
-/// schema DDL parse, FTS index, script engine), which at 20 cases was the whole
-/// runtime of the test. Cases stay isolated by purging the case's document at
-/// the end of each case, so every case still reads a store that holds exactly
-/// its own generated blocks.
+/// The one production engine of this test binary, booted once and shared by
+/// EVERY case of BOTH properties. A `BackendEngine` boot costs ~2.3 s of CPU in
+/// a debug build (full schema DDL parse, FTS index, script engine), which at 20
+/// cases per property was the whole runtime of the test.
+///
+/// It is one store, so only [`exclusive_case`] may hand it out: cases are
+/// isolated by running one at a time and purging the case's document at the
+/// end, which leaves every case a store holding exactly its own blocks.
 fn shared_engine() -> &'static (Runtime, Arc<BackendEngine>) {
     static SHARED: OnceLock<(Runtime, Arc<BackendEngine>)> = OnceLock::new();
     SHARED.get_or_init(|| {
@@ -128,6 +136,20 @@ fn shared_engine() -> &'static (Runtime, Arc<BackendEngine>) {
         });
         (rt, engine)
     })
+}
+
+/// Run one case body with exclusive use of [`shared_engine`]. `cargo test` runs
+/// the two properties on two threads of one process, where without this lock
+/// each case's `snapshot()` reads the other property's blocks too; nextest runs
+/// each property in its own process and never did.
+fn exclusive_case<T>(case: impl FnOnce(&Runtime, &BackendEngine) -> T) -> T {
+    static CASE_LOCK: Mutex<()> = Mutex::new(());
+
+    let (rt, engine) = shared_engine();
+    // Keep a poisoning case's real counterexample, rather than reporting the
+    // poison of every case after it.
+    let _held = CASE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    case(rt, engine)
 }
 
 /// Purge `doc_id` and, by cascade, the case's whole generated subtree, so the
@@ -152,6 +174,48 @@ async fn purge_document(engine: &BackendEngine, doc_id: &EntityUri) -> Result<()
     Ok(())
 }
 
+/// One case of [`block_round_trips_through_turso_query_source`]: write the
+/// generated blocks into `engine`, read them back through the query source,
+/// compare, then purge the case's document.
+fn turso_round_trip_case(
+    rt: &Runtime,
+    engine: &BackendEngine,
+    headlines: &[HeadlineSpec],
+) -> Result<(), TestCaseError> {
+    rt.block_on(async {
+        let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
+        let blocks = build_blocks(&doc_id, headlines);
+
+        let outcome = async {
+            write_blocks(engine, &doc_id, &blocks).await?;
+
+            let source = TursoBlockQuerySource::watch_default(engine)
+                .await
+                .map_err(|e| TestCaseError::fail(format!("watch: {e}")))?;
+            let snapshot = source
+                .snapshot()
+                .await
+                .map_err(|e| TestCaseError::fail(format!("snapshot: {e}")))?;
+
+            // Drop the physical doc root; the reference store has no doc block.
+            let actual_blocks: Vec<Block> = snapshot
+                .iter_blocks()
+                .filter(|b| b.id != doc_id)
+                .cloned()
+                .collect();
+            let expected = NormalizedDocument::from_blocks(None, &blocks);
+            let actual = NormalizedDocument::from_blocks(None, &actual_blocks);
+            assert_normalized_docs_equal(&expected, &actual, "turso_block_query_round_trip")?;
+            assert_sibling_order_matches(&blocks, &snapshot, "turso_block_query_round_trip")?;
+
+            Ok(())
+        }
+        .await;
+
+        outcome.and(purge_document(engine, &doc_id).await)
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 20,
@@ -163,40 +227,7 @@ proptest! {
     /// fields (id-keyed) and per-parent sibling order.
     #[test]
     fn block_round_trips_through_turso_query_source(headlines in root_headlines_strategy()) {
-        let (rt, engine) = shared_engine();
-        let result: Result<(), TestCaseError> = rt.block_on(async {
-            let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
-            let blocks = build_blocks(&doc_id, &headlines);
-
-            let outcome = async {
-                write_blocks(engine, &doc_id, &blocks).await?;
-
-                let source = TursoBlockQuerySource::watch_default(engine)
-                    .await
-                    .map_err(|e| TestCaseError::fail(format!("watch: {e}")))?;
-                let snapshot = source
-                    .snapshot()
-                    .await
-                    .map_err(|e| TestCaseError::fail(format!("snapshot: {e}")))?;
-
-                // Drop the physical doc root; the reference store has no doc block.
-                let actual_blocks: Vec<Block> = snapshot
-                    .iter_blocks()
-                    .filter(|b| b.id != doc_id)
-                    .cloned()
-                    .collect();
-                let expected = NormalizedDocument::from_blocks(None, &blocks);
-                let actual = NormalizedDocument::from_blocks(None, &actual_blocks);
-                assert_normalized_docs_equal(&expected, &actual, "turso_block_query_round_trip")?;
-                assert_sibling_order_matches(&blocks, &snapshot, "turso_block_query_round_trip")?;
-
-                Ok(())
-            }
-            .await;
-
-            outcome.and(purge_document(engine, &doc_id).await)
-        });
-        result?;
+        exclusive_case(|rt, engine| turso_round_trip_case(rt, engine, &headlines))?;
     }
 }
 
@@ -251,6 +282,82 @@ async fn seed_loro_backend(
     Ok(Arc::new(backend))
 }
 
+/// One case of [`loro_and_turso_query_sources_agree`]: seed both arms with the
+/// same generated store, compare them, then purge the case's document from
+/// `engine`.
+fn query_sources_agree_case(
+    rt: &Runtime,
+    engine: &BackendEngine,
+    headlines: &[HeadlineSpec],
+) -> Result<(), TestCaseError> {
+    rt.block_on(async {
+        let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
+        let blocks = build_blocks(&doc_id, headlines);
+
+        let outcome = async {
+            // Turso arm: production create path → matview → CDC mirror read.
+            write_blocks(engine, &doc_id, &blocks).await?;
+            let turso_source = TursoBlockQuerySource::watch_default(engine)
+                .await
+                .map_err(|e| TestCaseError::fail(format!("turso watch: {e}")))?;
+            let turso_snapshot = turso_source
+                .snapshot()
+                .await
+                .map_err(|e| TestCaseError::fail(format!("turso snapshot: {e}")))?;
+            // Drop the physical doc root; the reference store has no doc block.
+            let turso_blocks: Vec<Block> = turso_snapshot
+                .iter_blocks()
+                .filter(|b| b.id != doc_id)
+                .cloned()
+                .collect();
+            let turso_doc = NormalizedDocument::from_blocks(None, &turso_blocks);
+
+            // Loro arm: Turso-free tree walk over the same generated store.
+            let backend = seed_loro_backend(&doc_id, &blocks).await?;
+            let loro_snapshot = LoroBlockQuerySource::new(backend)
+                .snapshot()
+                .await
+                .map_err(|e| TestCaseError::fail(format!("loro snapshot: {e}")))?;
+            // Drop the physical doc root; the reference store has no doc block.
+            let loro_blocks: Vec<Block> = loro_snapshot
+                .iter_blocks()
+                .filter(|b| b.id != doc_id)
+                .cloned()
+                .collect();
+            let loro_doc = NormalizedDocument::from_blocks(None, &loro_blocks);
+
+            let expected = NormalizedDocument::from_blocks(None, &blocks);
+            // Each arm reproduces the generated store, hence agree with each other.
+            assert_normalized_docs_equal(&expected, &turso_doc, "query_source_equivalence[turso]")?;
+            assert_normalized_docs_equal(&expected, &loro_doc, "query_source_equivalence[loro]")?;
+            assert_normalized_docs_equal(
+                &turso_doc,
+                &loro_doc,
+                "query_source_equivalence[loro==turso]",
+            )?;
+
+            // Per-parent sibling order under each generated parent (`doc_id` → roots
+            // included); the Loro doc root lives under `no_parent`, which is not a
+            // generated parent, so it is not inspected here.
+            assert_sibling_order_matches(
+                &blocks,
+                &turso_snapshot,
+                "query_source_equivalence[turso]",
+            )?;
+            assert_sibling_order_matches(
+                &blocks,
+                &loro_snapshot,
+                "query_source_equivalence[loro]",
+            )?;
+
+            Ok(())
+        }
+        .await;
+
+        outcome.and(purge_document(engine, &doc_id).await)
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 20,
@@ -268,61 +375,52 @@ proptest! {
     /// asymmetry and is out of scope for this equivalence.
     #[test]
     fn loro_and_turso_query_sources_agree(headlines in root_headlines_strategy()) {
-        let (rt, engine) = shared_engine();
-        let result: Result<(), TestCaseError> = rt.block_on(async {
-            let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
-            let blocks = build_blocks(&doc_id, &headlines);
-
-            let outcome = async {
-                // Turso arm: production create path → matview → CDC mirror read.
-                write_blocks(engine, &doc_id, &blocks).await?;
-                let turso_source = TursoBlockQuerySource::watch_default(engine)
-                    .await
-                    .map_err(|e| TestCaseError::fail(format!("turso watch: {e}")))?;
-                let turso_snapshot = turso_source
-                    .snapshot()
-                    .await
-                    .map_err(|e| TestCaseError::fail(format!("turso snapshot: {e}")))?;
-                // Drop the physical doc root; the reference store has no doc block.
-                let turso_blocks: Vec<Block> = turso_snapshot
-                    .iter_blocks()
-                    .filter(|b| b.id != doc_id)
-                    .cloned()
-                    .collect();
-                let turso_doc = NormalizedDocument::from_blocks(None, &turso_blocks);
-
-                // Loro arm: Turso-free tree walk over the same generated store.
-                let backend = seed_loro_backend(&doc_id, &blocks).await?;
-                let loro_snapshot = LoroBlockQuerySource::new(backend)
-                    .snapshot()
-                    .await
-                    .map_err(|e| TestCaseError::fail(format!("loro snapshot: {e}")))?;
-                // Drop the physical doc root; the reference store has no doc block.
-                let loro_blocks: Vec<Block> = loro_snapshot
-                    .iter_blocks()
-                    .filter(|b| b.id != doc_id)
-                    .cloned()
-                    .collect();
-                let loro_doc = NormalizedDocument::from_blocks(None, &loro_blocks);
-
-                let expected = NormalizedDocument::from_blocks(None, &blocks);
-                // Each arm reproduces the generated store, hence agree with each other.
-                assert_normalized_docs_equal(&expected, &turso_doc, "query_source_equivalence[turso]")?;
-                assert_normalized_docs_equal(&expected, &loro_doc, "query_source_equivalence[loro]")?;
-                assert_normalized_docs_equal(&turso_doc, &loro_doc, "query_source_equivalence[loro==turso]")?;
-
-                // Per-parent sibling order under each generated parent (`doc_id` → roots
-                // included); the Loro doc root lives under `no_parent`, which is not a
-                // generated parent, so it is not inspected here.
-                assert_sibling_order_matches(&blocks, &turso_snapshot, "query_source_equivalence[turso]")?;
-                assert_sibling_order_matches(&blocks, &loro_snapshot, "query_source_equivalence[loro]")?;
-
-                Ok(())
-            }
-            .await;
-
-            outcome.and(purge_document(engine, &doc_id).await)
-        });
-        result?;
+        exclusive_case(|rt, engine| query_sources_agree_case(rt, engine, &headlines))?;
     }
+}
+
+/// `cargo test` runs the two properties on two threads of ONE process, so both
+/// case bodies meet on the one store behind [`exclusive_case`]; nextest gives
+/// each property its own process and never does. Each body must still read back
+/// only its own blocks.
+#[test]
+fn shared_engine_isolates_the_two_properties() {
+    // Cases per thread — one pair can miss each other, several cannot.
+    const ROUNDS: usize = 3;
+
+    let mut runner = TestRunner::deterministic();
+    let mut draw = || {
+        root_headlines_strategy()
+            .new_tree(&mut runner)
+            .expect("draw headlines")
+            .current()
+    };
+    let round_trip_headlines = draw();
+    let agree_headlines = draw();
+
+    let start = Barrier::new(2);
+    std::thread::scope(|scope| {
+        let round_trip = scope.spawn(|| {
+            start.wait();
+            (0..ROUNDS).try_for_each(|_| {
+                exclusive_case(|rt, engine| {
+                    turso_round_trip_case(rt, engine, &round_trip_headlines)
+                })
+            })
+        });
+        let agree = scope.spawn(|| {
+            start.wait();
+            (0..ROUNDS).try_for_each(|_| {
+                exclusive_case(|rt, engine| query_sources_agree_case(rt, engine, &agree_headlines))
+            })
+        });
+        round_trip
+            .join()
+            .expect("round-trip thread")
+            .expect("round-trip case reads only its own blocks");
+        agree
+            .join()
+            .expect("agreement thread")
+            .expect("agreement case reads only its own blocks");
+    });
 }
