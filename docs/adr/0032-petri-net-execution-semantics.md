@@ -1,7 +1,8 @@
 # ADR 0032 — Petri-net execution semantics: one net, derived projection, dispatcher-enforced firing
 
-**Status:** Accepted (ratified by Martin, 2026-08-25). Amended in place 2026-10-13:
-net semantics revisions 1 and 1.1 (§9; changes to §1, §3, §5, §7), #171.
+**Status:** Accepted (ratified by Martin, 2026-08-25). Amended in place
+2026-10-15 — net semantics revisions 1, 1.1 and 2 (§9; changes to §1, §3, §5,
+§7); holon-work #171, experiment #315, undo-over-a-held-row #191.
 **Date:** 2026-08-24
 **Deciders:** Martin (design discussion "PN execution architecture", 2026-08-24)
 **Relates to:**
@@ -521,12 +522,12 @@ compiler-checked rather than documentary. A wholesale rename
 (`OperationDescriptor` → `Transition` and its family) is revisited only after
 the projection exists and the two vocabularies have been lived with.
 
-### 9. Net semantics: runs, firings, marks, classes, watched sources
+### 9. Net semantics: runs, firings, retries, classes, watched sources, providers
 
-Revisions 1 and 1.1 of the net (#171). Every rule here is a **net
+Revisions 1, 1.1 and 2 of the net (#171). Every rule here is a **net
 construction** or a rule of the record step; the executor implements no
-special case for producer order, run state, failure or undo. Worked examples
-and the experiment evidence are in the design note
+special case for producer choice, run state, retry, failure or undo. Worked
+examples and the experiment evidence are in the design note
 `plans/PlacesTransitionsExpressions.md` (holon-work).
 
 #### 9.1 Producers and runs (NET-run.a, NET-cand.a)
@@ -538,11 +539,17 @@ and the experiment evidence are in the design note
   `MakeLoroReady` for `Storage`). Inner steps keep their own verbs
   (`OpenTurso`, `Recover`).
 - **Every producer is a workflow net with ports** (a subnet when it is a
-  chain). Producers of one place are **ordered**. Producer *k* is enabled when
-  the earlier producers' last run failed or timed out and no retry is pending.
-  The failure cause is the derived "why not" of the output port. Inner
+  chain). The failure cause is the derived "why not" of the output port. Inner
   evidence survives a failed run; outer writes go only through declared fusion
   places.
+- **Producers are chosen by priority, not by a declared order.** Priority is
+  data on the provider token (§9.6), so it changes at runtime. Among the
+  enabled producers of one place the highest priority fires.
+- **A producer that cannot fire now does not hold the place.** The next
+  priority fires at once and the preferred producer keeps attempting beside it,
+  with its own request token; it takes over through the standby slot and the
+  swap transition (REV2-boot.a, 338/D2=a, §9.6). So no producer waits for
+  another producer's tries to run out.
 - **One timer per run** (inner ≤ enclosing). A pending backoff counts as
   running. An abandon timer orphans a hung attempt. Timers are process-class,
   monotonic, and carry a count bound beside the time bound.
@@ -563,21 +570,25 @@ and the experiment evidence are in the design note
   place.
 - **Run-state places are process or device class**, never data class. A
   data-class place with alternative producers follows NET-alt-class.a (9.4),
-  not producer order.
-- **Order is a net construction too**: producer *k* takes an input from the
-  failure/timeout port of producer *k−1* and a "no retry pending" place. The
-  why-not chain follows from the marking.
-- **Example.** `MakeTursoReady` fails: the failure mark is
-  `(Storage, h)` for `MakeTursoReady`, where `h` is the hash of its read trace
-  (§9.3). `MakeLoroReady` has no mark and is unaffected.
+  not producer priority.
+- **Retry is token data, not an engine attribute.** The request token carries
+  `tries` per producer, keyed by the producer's stable contribution id, and
+  `next_try` when the author declares a wait. A guard bounds them, so a
+  producer stops attempting when its own guard turns false. A take raises
+  `tries`, so a crash in the middle counts as a try.
+- **Example.** `MakeTursoReady` fails: its firing puts the request token back
+  with `tries.turso = 1` and the cause, which is what its guard reads.
+  `MakeLoroReady` reads `tries.loro` and is unaffected.
 
 **NET-cand.a.** A **candidate** place holds a late or upgrading result. A
 candidate carries its **base**, its **output** and the **read trace** of its
-inputs. The **apply transition** is declared per place. The default for value
-places is a **3-way merge** (base, current, candidate), with conflicts as
-conflict places (CONFLICT-places.a). A **storage switch** is a projection
-catch-up (STORE-cap.a), not a value merge. An apply with conflicts is offered,
-never automatic.
+inputs. The **apply transition** is declared per place; it accepts every put
+without a staleness check, holds any number of tokens, and decides per token,
+oldest first (REV2-cand.a/b/c, §9.6). The default for value places is a
+**3-way merge** (base, current, candidate), with conflicts as conflict places
+(CONFLICT-places.a). A **storage switch** is a projection catch-up
+(STORE-cap.a), not a value merge. An apply with conflicts is offered, never
+automatic.
 
 #### 9.2 Pure and effectful firings (NET-fire.a, REV11-running.a, NET-manual.a)
 
@@ -602,8 +613,11 @@ never automatic.
 - An occurrence's outcome derives from all its attempts. It is Done when any
   attempt is Done, and Failed only when every attempt is definitely Failed.
   Else it stays parked. A late result closes only its own attempt.
-- A **definite failure** of the occurrence returns the input to its place. **Verify** takes a
-  result, or the transition declares outputs derived from its inputs.
+- A **definite failure** of the occurrence returns the input to its place, with
+  its `tries` raised and the cause on it (§9.1). The failure is therefore
+  visible in the token, and nothing about it is held inside the executor.
+  **Verify** takes a result, or the transition declares outputs derived from its
+  inputs.
 - **A record never clobbers.** It has two parts. **Facts** about the outside
   world (what the file now holds = the persisted base; the occurrence is done)
   commit unconditionally. **Writes to authority rows** are a compare-and-set
@@ -617,7 +631,13 @@ never automatic.
   withheld and the condition "done over changed inputs" is disclosed. An
   effect that happened is a fact, so its occurrence and its input consumption
   commit even over stale inputs; only an effect that did not happen (a
-  definite failure) returns the input and sets the failure mark.
+  definite failure) returns the input with its raised `tries`.
+- **An output that carries a live resource is a fact and is never withheld**
+  (REV2-cand.c). An opened store handle, a held lock, an accepted connection
+  exist whatever the inputs now say, and withholding one leaks it. Such an
+  output goes to its target place's candidate place when its firing settles
+  over changed inputs, and the candidate's apply transition decides what
+  becomes of it (§9.6).
 
 **REV11-running.a.** A take moves the token into `<T>.Running`, a place whose
 class is the input's class, at most device. The move changes no content and no
@@ -648,29 +668,26 @@ For an answer (`Answer.T`), the awaited outcome is that of its work occurrence,
 whose id is derived from the answer id; an expired answer settles
 `Failed(NoLongerApplies)`.
 
-#### 9.3 Retry, failure and undo marks (NET-mark.a)
+#### 9.3 Capture-once, the undo mark and the self-feed check (NET-mark.a partly removed)
 
-**NET-mark.a.**
+**NET-mark.a.** The **failure mark** this ruling defined is **removed**
+(2026-10-15, #171, 338/D1=a): a failed attempt leaves its count and its cause on the
+returned token (§9.1), so a second place to remember a failure in has no work
+left, and the engine holds no retry state. The rules of this ruling that do not
+rest on the failure mark stay:
 
-- **An attempt re-fires only on a committed input change or a declared retry
-  timer.**
 - **The binding and the guard's read trace are captured once**, at the
   enabledness check that decided to fire. A guard is never replayed at a later
   marking. A derived place is transparent in the read trace: the content of its
   source tokens is captured (a derived place has no identity or version).
-- **One mark kind**, keyed by (subject, content hash of the captured read
+- **The undo mark** is keyed by (subject, content hash of the captured read
   trace), at most one per (transition, subject). Every transition has exactly
   one subject (ARC-subjects.a); for a producer of a singleton place the subject
-  is that place. Two producers of one place therefore never share or clobber a
-  mark:
-  - Reason `Failed`: process class. Cleared by a content change in the read
-    trace or by a declared retry timer.
-  - The mark is lazy: it blocks while the current read trace hashes (blake3) to
-    its key, so an edit A→B→A with no firing on B blocks again.
-  - Reason `Undone`: data class, so it syncs. Set only by a manual `undoes`
-    transition (the loader refuses auto + `undoes`). Addressed by the occurrence
-    id that the undone delta carries. A stale undo is an error to the caller.
-    Undo of a claim adds a retract entry; `owner` ignores retracted claims.
+  is that place, so two producers of one place never share or clobber a mark. It
+  is data class, so it syncs. It is set only by a manual `undoes` transition
+  (the loader refuses auto + `undoes`), and addressed by the occurrence id that
+  the undone delta carries. A stale undo is an error to the caller. Undo of a
+  claim adds a retract entry; `owner` ignores retracted claims.
 - **Static check at net derivation**: a transition's write-set closure must not
   feed its own read-set, unless the transition declares a fixpoint measure. Run
   triggers and retry inputs are declared places.
@@ -767,9 +784,13 @@ on other devices.
   window is applied over changed inputs and caught up by the next `CatchUp`.
   The record's own row write is not foreign: its render hashes to the recorded
   `Base.authority`, so it enables nothing.
-- **A write the disk refuses is a `CatchUp` failure mark (Q6.a)** with the retry
-  timer, disclosed as a stalled write-back. No poisoned place exists; the mark
-  clears when its read trace changes or a retry lands.
+- **A write the disk refuses raises the file token's `tries` and `next_try`
+  (Q6.a)**, disclosed as a stalled write-back. No poisoned place exists;
+  `CatchUp`'s guard bounds the tries and holds while `next_try` is ahead, and a
+  new file content starts from zero tries. The subnet in
+  `crates/holon-filesystem/src/writeback_net.rs` still carries this as the
+  executor's `retry(backoff, attempts)` attribute and a mark, which §9.1
+  retires; moving it onto the token is the subnet's migration.
 
 **REV11-lockless.a.** A process without the vault writer lock is read-only for
 stored state: no ingest, no write-back, no bases, no device tokens. It is
@@ -787,6 +808,99 @@ single-subject transitions, staged and committed once, and undone as one unit.
 
 **Out of scope:** a data-class token type change across a mixed-version fleet
 (a CRDT schema migration).
+
+#### 9.6 Providers, standby and swap (REV2-boot.a, NETREV2-contract.a, REV2-promote.a, REV2-cand.a/b/c, REV2-holder.a, REV2-foreign-arc.a)
+
+Revision 2 of the net (#171). One mechanism — a capacity-1 place, a standby
+slot, a candidate place and a swap — covers alternative providers of one
+interface, a late result, a provider the user switches at runtime, and a plugin
+that brings a better store. Evidence: `crates/holon-net/tests/net_rev2_storage.rs`
+on the real executor with fake providers, each property beside a naive net twin
+that is red for its own reason (#315). The worked examples, the rulings ledger
+and what revision 2 replaces are in the design note section 14.
+
+Two terms. An **extension point** is a place with a contract (its token type)
+and a selection policy: `exclusive`, where the highest-priority enabled
+contribution fires, or `fan-out`, where every contribution reads the token and
+keeps its own handled record. A **contribution** is a transition attached to an
+extension point, with a stable id, an owner (a plugin or the core) and a
+capability requirement: it is enabled only while its `Service<X>` token exists.
+
+**REV2-boot.a, 338/D2=a.** At an exclusive extension point a waiting
+higher-priority contribution never blocks a lower one: the lower one serves and
+`PromoteStandby` swaps later. Storage boots without blocking. The preferred
+provider fires
+first; on a failure the fallback fires at once, so the window in which Holon has
+no store is one attempt wide. The preferred provider keeps attempting in the
+background, carrying its own request token with its own try count, and takes
+over through the standby slot when it has caught up (the two-phase swap below).
+An extension point that wants a deadline instead of a background retry declares
+`settle_by` on its request token.
+
+**NETREV2-contract.a.** A provider satisfies one trait —
+`holon_api::storage_provider::StorageProvider`
+(`crates/holon-api/src/storage_provider.rs`): `open`, `version`, `catch_up`,
+`close`, and `Definite` / `Unknown` failures so the executor can tell a counted
+try from a parked occurrence. A provider holds no lock, no retry state and no
+rank: the net holds all three (holder tokens, `tries` on the request token,
+priority on the `Service<X>` token). `catch_up` is bounded by a write **count**,
+not by time, because a provider can honour a count at a commit boundary.
+`StorageVersion` is an opaque position in the source's device-local, persisted
+commit sequence; it is comparable only between the two providers of one
+projection pair on one device, and it is not a `WriteSeq`. A swappable pair is a
+**projection pair** (one store is a projection of the other), so catching up
+means replaying the source's commits; other pairs are out of scope. There is no
+drain: `close` is the whole of it. Tries are keyed by the contribution's stable
+id, so a re-installed provider does not inherit another's count.
+
+**Two-phase swap.** `SwapStorage` takes both store tokens in one firing and
+puts them back exchanged, so no write falls between the two stores. Its guard:
+the standby's priority is strictly higher than the primary's, and the lag is at
+most `FINAL_DELTA_MAX`. The held final `catch_up` must then reach the frozen
+target; a shortfall breaks the provider's postcondition and the swap attempt
+reports it as a definite failure, never a silent release of the hold. The guard
+on a strictly higher priority is what stops swaps from flapping: every swap has
+a cause, a changed priority or a changed provider set.
+
+**REV2-promote.a.** A standby becomes the primary when there is no primary:
+`PromoteStandby` (Auto) moves the token from `SecondaryStorage` to `Storage`. It
+is enabled only while `Storage` is empty, no holder of the store is in flight
+(inhibitor arcs on `Storage` and on the holders' `Running` places,
+REV11-running.a) and a `StorageRequest` waits. It discloses "serving
+`<standby>` because `<fallback>` could not open: `<cause>`". What a
+projection-only store may serve is the adapter's question (cf.
+REV11-lockless.a).
+
+**REV2-cand.a.** `Storage` declares an apply transition
+(`place_with_candidate`, NET-cand.a). Every store output whose firing settles
+over changed inputs — a write's returned store token, a late open answer — goes
+to the candidate place instead of being withheld. **One** Auto apply transition
+decides by guard: install it (no primary, no holder in flight — REV2-promote.a's
+branch), keep it as the standby for the swap path, or retire it.
+
+**REV2-cand.b.** The candidate place is its own place, `StorageCandidate`.
+`SecondaryStorage` holds only the standby the apply transition chose. Reason: a
+put into an occupied capacity-1 `SecondaryStorage` overwrote a waiting standby.
+A silent overwrite of a token is an executor defect in its own right: a put into
+an occupied single-token place refuses, it never replaces.
+
+**REV2-cand.c.** An output that carries a live resource is a fact (§9.2) and is
+never withheld. A candidate place therefore accepts every put with no staleness
+check and holds any number of tokens — never capacity 1, so the overwrite of
+REV2-cand.b cannot bite — and only its apply transition decides, oldest first.
+An output whose target already **is** a candidate place always lands there.
+
+**REV2-holder.a.** Holder tokens — a write or a query holding a store token —
+are exempt from the one-class rule (PTE-2.a), like the executor's attempt
+tokens. The condition on the exemption is a budget: the executor's overhead per
+data firing stays under 1 ms in release, measured by
+`crates/holon-integration-tests/tests/enabledness_query_production_cost.rs`.
+Queries are shared holders; writes, swaps and retirement are exclusive holders.
+
+**REV2-foreign-arc.a.** Removing a plugin disables the transitions of other
+plugins that have arcs on the removed places, with the disclosed reason "place
+missing". The user is told which transitions those are before the removal and
+after it.
 
 ## Deferred — open, not decided
 
@@ -825,6 +939,17 @@ single-subject transitions, staged and committed once, and undone as one unit.
    emptied file plus `AcceptRemoval` (§9.5). Options: (a) accept as ruled — each
    block carries its own `NotWritten` condition; (b) add a document-level
    condition "this file cannot hold any of its blocks". Not ruled.
+10. **Three questions of revision 2** (§9.6). (a) Is a provider request token
+    created once per device, so the tries survive a restart, or once per boot?
+    Per device needs a reset rule beyond "a new binary build". (b) Does a
+    contribution added to a fan-out extension point handle the tokens already
+    in the place, or only new ones? (c) Two contributions of equal priority on
+    one extension point: refused at declaration, or a stable tie-break? Not
+    ruled.
+11. **An extension point that needs blocking declares it** (§9.6). Non-blocking
+    is the rule (338/D2=a). Whether an extension point whose consumers cannot
+    take a lower-priority answer may declare blocking, and what the declaration
+    is, is open. Not ruled.
 
 ## Consequences
 
