@@ -101,12 +101,15 @@ fn project_in_memory_while_held(
                          watching it: {error}",
                         db_path.display()
                     );
-                    conditions.emit(database_held(
-                        &db_path,
-                        holon_api::DatabaseHold::WatchStopped {
+                    let held = database_held(&db_path, holon_api::DatabaseHold::Held);
+                    conditions.clear(&held.condition_key());
+                    conditions.emit(holon_api::Condition {
+                        subject: DATABASE_SUBJECT.to_string(),
+                        reason: holon_api::ConditionKind::DatabaseWatchStopped {
+                            path: db_path.display().to_string(),
                             error: error.to_string(),
                         },
-                    ));
+                    });
                     return;
                 }
             }

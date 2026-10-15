@@ -31,6 +31,8 @@ condition is raised during the wait: the window does not exist yet, so nobody ca
 With the CRDT store on, the database is only a projection: the boot does not wait, runs on
 an in-memory projection, raises `database-held`, and turns it into "free again — restart"
 when the file is free (`a_loro_boot_on_a_held_database_runs_on_memory_and_says_when_the_database_is_free`
-in `crates/holon-app/tests/database_open_disclosure.rs`).
+in `crates/holon-app/tests/database_open_disclosure.rs`). If probing the file fails, it
+replaces `database-held` with the Error `database-watch-stopped`, which says to restart
+(`a_held_database_whose_probe_fails_says_the_watch_stopped_and_why`).
 Open: with the CRDT store off, a lock held past the wait still stops the boot; see
 `2026-10-12-unopenable-database-ends-the-boot`.

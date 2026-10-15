@@ -548,15 +548,22 @@ const HOLD_LORO_TEST: &str =
     "a_loro_boot_on_a_held_database_runs_on_memory_and_says_when_the_database_is_free";
 
 fn database_held_text(booted: &Booted) -> Option<String> {
+    condition(booted, "database-held").map(|(_, text)| text)
+}
+
+fn condition(booted: &Booted, kind: &str) -> Option<(holon_api::ConditionSeverity, String)> {
     booted
         .injector
         .resolve::<Arc<holon_api::ConditionBus>>()
         .current()
         .into_iter()
-        .find(|c| c.condition_key().kind == "database-held")
+        .find(|c| c.condition_key().kind == kind)
         .map(|c| {
             let detail = c.reason.detail(&c.subject);
-            format!("{} {}", detail.headline, detail.body.join(" | ")).to_lowercase()
+            (
+                c.reason.profile().severity(),
+                format!("{} {}", detail.headline, detail.body.join(" | ")).to_lowercase(),
+            )
         })
 }
 
@@ -628,8 +635,9 @@ async fn a_loro_boot_on_a_held_database_runs_on_memory_and_says_when_the_databas
 const HOLD_LORO_PROBE_FAILS_TEST: &str =
     "a_held_database_whose_probe_fails_says_the_watch_stopped_and_why";
 
-/// When the session can no longer tell whether the held file is free, the
-/// condition must not keep saying "held": it says the watch stopped, and why.
+/// When the session can no longer tell whether the held file is free, it no
+/// longer says "held": it raises an Error that the watch stopped, why, and that
+/// a restart retries.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_held_database_whose_probe_fails_says_the_watch_stopped_and_why() {
     if let Ok(path) = std::env::var(CHILD_HOLD_DB_PATH) {
@@ -652,17 +660,29 @@ async fn a_held_database_whose_probe_fails_says_the_watch_stopped_and_why() {
         .to_lowercase();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let text = database_held_text(&booted).expect("the condition stays for the session");
-        if text.contains("holon stopped watching the database") && text.contains(&error) {
-            break;
+    let (severity, text) = loop {
+        if let Some(stopped) = condition(&booted, "database-watch-stopped") {
+            break stopped;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the condition never said the watch stopped and why ({error}): {text}"
+            "the watch never stopped ({error}): {:?}",
+            raised_kinds(&booted)
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    };
+    assert_eq!(severity, holon_api::ConditionSeverity::Error, "{text}");
+    assert!(
+        text.contains("holon stopped watching the database")
+            && text.contains("restart holon to retry")
+            && text.contains(&error),
+        "the text Martin reads must say the watch stopped, what to do, and why ({error}): {text}"
+    );
+    assert_eq!(
+        database_held_text(&booted),
+        None,
+        "a stopped watch cannot claim the database is still held"
+    );
     holder.kill().expect("kill the holder");
     holder.wait().expect("reap the holder");
 }

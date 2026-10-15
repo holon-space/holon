@@ -626,6 +626,15 @@ const DATABASE_HELD: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DATABASE_WATCH_STOPPED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Holon stopped watching the database",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const LEFT_SHARED_PAGE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
     "You left a shared page",
@@ -1039,6 +1048,7 @@ impl ConditionKind {
             Self::DatabaseViewsDropped { .. } => DATABASE_VIEWS_DROPPED,
             Self::DatabaseLockWaited { .. } => DATABASE_LOCK_WAITED,
             Self::DatabaseHeld { .. } => DATABASE_HELD,
+            Self::DatabaseWatchStopped { .. } => DATABASE_WATCH_STOPPED,
             Self::PairingReimportedLocalContent { .. } => PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::LeftSharedPage { .. } => LEFT_SHARED_PAGE,
             Self::DeletedSharedPage { .. } => DELETED_SHARED_PAGE,

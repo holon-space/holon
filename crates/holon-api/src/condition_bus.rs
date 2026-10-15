@@ -28,14 +28,10 @@ use tokio::sync::broadcast;
 use crate::live_data::LiveData;
 
 /// Whether another process still holds a database file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatabaseHold {
     Held,
     Released,
-    /// The session can no longer tell: probing the file failed with `error`.
-    WatchStopped {
-        error: String,
-    },
 }
 
 /// Why a share is in a degraded state.
@@ -346,11 +342,16 @@ pub enum ConditionKind {
     /// opened it, so this session projects into an in-memory database. The
     /// CRDT store keeps every edit; the database is only its projection.
     /// `hold` follows the file: it turns [`DatabaseHold::Released`] when the
-    /// file is free again, which this session cannot use without a restart,
-    /// and [`DatabaseHold::WatchStopped`] when probing the file fails.
+    /// file is free again, which this session cannot use without a restart.
     ///
     /// All-clear: none — the session stays on the in-memory projection.
     DatabaseHeld { path: String, hold: DatabaseHold },
+    /// Probing the held database file at `path` failed with `error`, so the
+    /// session can no longer tell when the file is free. It replaces
+    /// [`Self::DatabaseHeld`].
+    ///
+    /// All-clear: none — a restart retries.
+    DatabaseWatchStopped { path: String, error: String },
     /// A file NAMES a connection but cannot be used, so the connection does
     /// not exist: a stale `schema_version`, a file that will not parse, a
     /// reference to another connection's secret, or two files claiming one
@@ -774,6 +775,7 @@ impl ConditionKind {
     pub const DATABASE_VIEWS_DROPPED: &'static str = "database-views-dropped";
     pub const DATABASE_LOCK_WAITED: &'static str = "database-lock-waited";
     pub const DATABASE_HELD: &'static str = "database-held";
+    pub const DATABASE_WATCH_STOPPED: &'static str = "database-watch-stopped";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
     pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
     pub const SNAPSHOT_SAVE_FAILED: &'static str = "snapshot-save-failed";
@@ -858,6 +860,7 @@ impl ConditionKind {
             Self::DatabaseViewsDropped { .. } => Self::DATABASE_VIEWS_DROPPED,
             Self::DatabaseLockWaited { .. } => Self::DATABASE_LOCK_WAITED,
             Self::DatabaseHeld { .. } => Self::DATABASE_HELD,
+            Self::DatabaseWatchStopped { .. } => Self::DATABASE_WATCH_STOPPED,
             Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
             Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,

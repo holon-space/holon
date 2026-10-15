@@ -340,15 +340,14 @@ impl ConditionKind {
                      keeps its view of the vault in memory. Every edit is saved",
                     vec![path.clone()],
                 ),
-                crate::condition_bus::DatabaseHold::WatchStopped { error } => {
-                    ConditionDetail::with_body(
-                        "Holon stopped watching the database, so it cannot tell when the \
-                         database is free. Holon keeps its view of the vault in memory until a \
-                         restart. Every edit is saved",
-                        vec![path.clone(), error.clone()],
-                    )
-                }
             },
+
+            Self::DatabaseWatchStopped { path, error } => ConditionDetail::with_body(
+                "Holon stopped watching the database, so it cannot tell when the database is \
+                 free — restart Holon to retry. Until then Holon keeps its view of the vault in \
+                 memory. Every edit is saved",
+                vec![path.clone(), error.clone()],
+            ),
 
             Self::UndoHistoryClearedAtBoot { entries } => ConditionDetail::prose(format!(
                 "{entries} step{} from the previous session were discarded",
