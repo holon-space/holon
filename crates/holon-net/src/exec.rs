@@ -24,6 +24,7 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -199,9 +200,20 @@ pub enum PlaceKind {
     Derived(Read),
 }
 
+/// How many tokens one (place, subject) row holds (REV2-cand.c).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capacity {
+    /// One: a put rewrites the row in place.
+    Single,
+    /// Any number, oldest first: a put appends and a firing binds and
+    /// consumes the oldest, so no put ever drops a waiting token.
+    Fifo,
+}
+
 pub struct PlaceDef {
     pub class: Class,
     pub kind: PlaceKind,
+    pub capacity: Capacity,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -393,6 +405,21 @@ impl NetDef {
             PlaceDef {
                 class,
                 kind: PlaceKind::Stored { candidate: None },
+                capacity: Capacity::Single,
+            },
+        );
+        self
+    }
+
+    /// A place whose row holds a FIFO of tokens: every candidate place is one
+    /// (REV2-cand.c).
+    pub fn fifo(mut self, name: &str, class: Class) -> Self {
+        self.places.insert(
+            Place::new(name),
+            PlaceDef {
+                class,
+                kind: PlaceKind::Stored { candidate: None },
+                capacity: Capacity::Fifo,
             },
         );
         self
@@ -407,6 +434,7 @@ impl NetDef {
                 kind: PlaceKind::Stored {
                     candidate: Some(Place::new(candidate)),
                 },
+                capacity: Capacity::Single,
             },
         );
         self
@@ -418,6 +446,7 @@ impl NetDef {
             PlaceDef {
                 class: Class::Process,
                 kind: PlaceKind::Derived(derive),
+                capacity: Capacity::Single,
             },
         );
         self
@@ -496,6 +525,7 @@ impl NetDef {
                     PlaceDef {
                         class: Class::Process,
                         kind: PlaceKind::Stored { candidate: None },
+                        capacity: Capacity::Single,
                     },
                 );
             }
@@ -509,6 +539,7 @@ impl NetDef {
             PlaceDef {
                 class: Class::Process,
                 kind: PlaceKind::Stored { candidate: None },
+                capacity: Capacity::Single,
             },
         );
         for (name, def) in &self.places {
@@ -518,13 +549,19 @@ impl NetDef {
                     class: def.class,
                 });
             }
-            if let PlaceKind::Stored { candidate: Some(c) } = &def.kind
-                && !self.places.contains_key(c)
-            {
-                return Err(LoadError::UndeclaredPlace {
-                    user: name.to_string(),
-                    place: c.clone(),
-                });
+            if let PlaceKind::Stored { candidate: Some(c) } = &def.kind {
+                let Some(cand) = self.places.get(c) else {
+                    return Err(LoadError::UndeclaredPlace {
+                        user: name.to_string(),
+                        place: c.clone(),
+                    });
+                };
+                if cand.capacity != Capacity::Fifo {
+                    return Err(LoadError::CandidateNotFifo {
+                        user: name.to_string(),
+                        place: c.clone(),
+                    });
+                }
             }
         }
         for t in &self.transitions {
@@ -605,6 +642,10 @@ pub enum LoadError {
     ReservedPlace(Place),
     #[error("'{user}' names place '{place}', which the net does not declare")]
     UndeclaredPlace { user: String, place: Place },
+    #[error(
+        "'{user}' is applied from '{place}', which is not declared FIFO; a candidate place must hold every waiting token (REV2-cand.c)"
+    )]
+    CandidateNotFifo { user: String, place: Place },
     #[error("place '{place}' is {class:?} class; this executor holds process and data class only")]
     ClassNotSupported { place: Place, class: Class },
     #[error(
@@ -637,8 +678,12 @@ struct Slot {
     /// write from outside the net. An undo reads it to tell the holder of a
     /// row from a later writer (D191-rewritten.a).
     writer: Option<Arc<str>>,
-    token: Option<Token>,
-    /// Only the hidden-reservation twin sets it.
+    /// Oldest first; a [`Capacity::Single`] place holds at most one.
+    tokens: VecDeque<Token>,
+    /// Only the hidden-reservation twin sets it: a real [`Executor::start`]
+    /// takes the token out, so no second attempt can bind it and no two
+    /// attempts ever hold one slot. That is why
+    /// [`Executor::commit_consumption`] needs no owner check.
     reserved: bool,
 }
 
@@ -646,17 +691,26 @@ struct Slot {
 /// net (a user edit, an ingest, an undo).
 type Writer<'a> = Option<&'a Arc<str>>;
 
-/// The owned marking: at most one token per (place, subject), with a version
-/// per (place, subject).
+/// The owned marking: a token queue and a version per (place, subject). Only
+/// a [`Capacity::Fifo`] place ever holds more than one token.
 #[derive(Default)]
 pub struct Tokens {
     slots: BTreeMap<Place, BTreeMap<Subject, Slot>>,
     next_id: u64,
+    fifo: BTreeSet<Place>,
 }
 
 impl Tokens {
+    /// The oldest token: the one a firing binds and consumes (REV2-cand.c).
     pub fn token(&self, place: &str, subject: &str) -> Option<&Token> {
-        self.slot(place, subject).and_then(|s| s.token.as_ref())
+        self.slot(place, subject).and_then(|s| s.tokens.front())
+    }
+
+    /// Every token the row holds, oldest first.
+    pub fn contents(&self, place: &str, subject: &str) -> Vec<Content> {
+        self.slot(place, subject).map_or_else(Vec::new, |s| {
+            s.tokens.iter().map(|t| t.content.clone()).collect()
+        })
     }
 
     pub fn version(&self, place: &str, subject: &str) -> u64 {
@@ -672,7 +726,7 @@ impl Tokens {
     pub fn subjects(&self, place: &str) -> Vec<Subject> {
         self.slots.get(place).map_or_else(Vec::new, |m| {
             m.iter()
-                .filter(|(_, s)| s.token.is_some())
+                .filter(|(_, s)| !s.tokens.is_empty())
                 .map(|(k, _)| k.clone())
                 .collect()
         })
@@ -691,23 +745,46 @@ impl Tokens {
     }
 
     /// Commits `content`; unchanged content is no change and no new version.
+    /// A FIFO place appends, so a put never drops a waiting token
+    /// (REV2-cand.c).
     fn put(&mut self, place: &Place, subject: &Subject, content: Content, by: Writer) {
         let id = self.next_id;
+        let fifo = self.fifo.contains(place);
         let slot = self.slot_mut(place, subject);
-        if slot.token.as_ref().is_some_and(|t| t.content == content) {
+        if fifo {
+            slot.tokens.push_back(Token { id, content });
+        } else if slot.tokens.front().is_some_and(|t| t.content == content) {
             return;
+        } else {
+            slot.tokens = VecDeque::from([Token { id, content }]);
         }
-        slot.token = Some(Token { id, content });
         slot.version += 1;
         slot.writer = by.cloned();
         self.next_id += 1;
+    }
+
+    /// An input goes back with no version change: into a FIFO at the front,
+    /// where it was taken from. A single-token place that holds a token
+    /// written meanwhile keeps it and the taken one is dropped.
+    fn restore(&mut self, place: &Place, subject: &Subject, token: &Token) {
+        let fifo = self.fifo.contains(place);
+        let slot = self.slot_mut(place, subject);
+        slot.reserved = false;
+        if slot.tokens.iter().any(|t| t.id == token.id) {
+            return;
+        }
+        if fifo {
+            slot.tokens.push_front(token.clone());
+        } else if slot.tokens.is_empty() {
+            slot.tokens.push_back(token.clone());
+        }
     }
 
     /// Commits the removal of a token: a new version.
     fn remove(&mut self, place: &Place, subject: &Subject, by: Writer) {
         let slot = self.slot_mut(place, subject);
         assert!(
-            slot.token.take().is_some(),
+            slot.tokens.pop_front().is_some(),
             "a removal of the empty {place} of {subject}"
         );
         slot.version += 1;
@@ -719,7 +796,10 @@ impl Tokens {
     fn mark_slot(&mut self, place: &Place, subject: &Subject, content: Option<Content>) {
         let id = self.next_id;
         self.next_id += 1;
-        self.slot_mut(place, subject).token = content.map(|content| Token { id, content });
+        self.slot_mut(place, subject).tokens = content
+            .map(|content| Token { id, content })
+            .into_iter()
+            .collect();
     }
 }
 
@@ -1318,9 +1398,18 @@ pub fn hash_from_text(text: &str) -> AskHash {
 impl Executor {
     pub fn new(mut net: NetDef) -> Result<Self, LoadError> {
         net.check()?;
+        let fifo = net
+            .places
+            .iter()
+            .filter(|(_, d)| d.capacity == Capacity::Fifo)
+            .map(|(p, _)| p.clone())
+            .collect();
         Ok(Self {
             net,
-            tokens: Tokens::default(),
+            tokens: Tokens {
+                fifo,
+                ..Tokens::default()
+            },
             marks: BTreeMap::new(),
             runs: BTreeMap::new(),
             in_flight: BTreeMap::new(),
@@ -2111,7 +2200,7 @@ impl Executor {
     fn available(&self, place: &Place, subject: &Subject) -> bool {
         self.tokens
             .slot(place, subject)
-            .is_some_and(|s| s.token.is_some() && !s.reserved)
+            .is_some_and(|s| !s.tokens.is_empty() && !s.reserved)
     }
 
     fn holder(&self, place: &Place, subject: &Subject) -> Option<Holder> {
@@ -2224,9 +2313,9 @@ impl Executor {
             let slot = self.tokens.slot_mut(&p, &subject);
             let token = if hidden {
                 slot.reserved = true;
-                slot.token.clone()
+                slot.tokens.front().cloned()
             } else {
-                slot.token.take()
+                slot.tokens.pop_front()
             }
             .expect("decide checked every consumed token");
             taken.push((p, token));
@@ -2355,14 +2444,22 @@ impl Executor {
         self.request(id, &a);
     }
 
-    /// The first row of the trace whose version moved since it was read.
-    fn stale(&self, trace: &Trace) -> Option<(Place, Subject)> {
+    /// The first READ row of the trace whose version moved since it was read.
+    ///
+    /// A consumed row cannot be stale (REV11-running.a): the firing holds it,
+    /// because [`start`] took its token out of the place. A write that lands
+    /// in the empty slot moves that slot's version without touching anything
+    /// the firing read.
+    ///
+    /// [`start`]: Executor::start
+    fn stale(&self, a: &Attempt) -> Option<(Place, Subject)> {
         if self.twin(Twin::NoCas) {
             return None;
         }
-        trace
+        a.trace
             .rows
             .iter()
+            .filter(|((p, s), _)| *s != a.subject || a.taken.iter().all(|(held, _)| held != p))
             .find(|((p, s), r)| self.tokens.version(p, s) != r.version)
             .map(|(k, _)| k.clone())
     }
@@ -2374,14 +2471,18 @@ impl Executor {
     fn record(&mut self, a: Attempt, outputs: Vec<Output>, now: Duration) {
         let t = self.net.transition_def(&a.transition);
         let pure = matches!(t.body, Body::Pure(_));
+        let reads = t.reads.clone();
         let (facts, rows): (Vec<_>, Vec<_>) = outputs
             .into_iter()
             .partition(|o| t.facts.contains(&o.place));
         for f in facts {
+            if !reads.contains(&f.place) {
+                self.refuse_blind_overwrite(&f);
+            }
             self.tokens
                 .put(&f.place, &f.subject, f.content, Some(&a.transition));
         }
-        let Some((place, subject)) = self.stale(&a.trace) else {
+        let Some((place, subject)) = self.stale(&a) else {
             self.marks
                 .remove(&(a.transition.clone(), a.subject.clone()));
             return self.commit(a, rows);
@@ -2447,11 +2548,41 @@ impl Executor {
             self.marks.remove(&run_key);
         }
         let occurrence = a.occurrence.clone();
+        // No kept row can bypass the compare-and-set: a candidate place is
+        // FIFO by the load check, and a data-class place merges.
         self.commit(a, kept);
         self.occurrences.insert(
             occurrence,
             Some(Settled::OverChangedInputs { cause, routes }),
         );
+    }
+
+    /// A put that no compare-and-set backs must not land on an occupied
+    /// single-token place: its writer never saw the held token, so the put
+    /// would drop it, and losing a token is an executor defect in its own
+    /// right (REV2-cand.b). The place's declared capacity decides, not the
+    /// read trace. Two exemptions: a data-class place, whose outputs merge in
+    /// Loro instead of replacing a token (NET-fire.a), and a fact of a
+    /// transition that declares a read arc on the place — the net's own
+    /// compare-and-set, visible in the net text, since the firing saw the
+    /// incumbent (322/E3.a2). Only [`record`]'s facts loop calls this.
+    ///
+    /// [`record`]: Executor::record
+    fn refuse_blind_overwrite(&self, o: &Output) {
+        let def = &self.net.places[&o.place];
+        if def.capacity != Capacity::Single || def.class == Class::Data {
+            return;
+        }
+        if let Some(held) = self.tokens.token(&o.place, &o.subject) {
+            assert!(
+                held.content == o.content,
+                "a put with no compare-and-set into the single-token place {} of {} would drop the held token {:?} for {:?}",
+                o.place,
+                o.subject,
+                held.content,
+                o.content
+            );
+        }
     }
 
     fn commit(&mut self, a: Attempt, rows: Vec<Output>) {
@@ -2463,7 +2594,7 @@ impl Executor {
                 let rewritten = self
                     .tokens
                     .slot(p, &a.subject)
-                    .is_some_and(|s| s.token.is_some() && !s.reserved);
+                    .is_some_and(|s| !s.tokens.is_empty() && !s.reserved);
                 if !rewritten && (keep_answered || Some(p) != answered.as_ref()) {
                     before.insert((p.clone(), a.subject.clone()), Some(token.content.clone()));
                 }
@@ -2500,29 +2631,27 @@ impl Executor {
         self.occurrences.insert(a.occurrence, Some(Settled::Done));
     }
 
-    /// The consumed token leaves the net; its place changes only now. A newer
-    /// token written meanwhile already carries a newer version.
+    /// The consumed token leaves the net; its place changes only now. On a
+    /// single-token place a newer token written meanwhile already carries a
+    /// newer version; on a FIFO place every token left behind is younger than
+    /// the consumed one, so the row did change.
     fn commit_consumption(&mut self, place: &Place, subject: &Subject, by: &Arc<str>) {
+        let fifo = self.tokens.fifo.contains(place);
         let slot = self.tokens.slot_mut(place, subject);
         if slot.reserved {
             slot.reserved = false;
-            slot.token = None;
-        } else if slot.token.is_some() {
+            slot.tokens.pop_front();
+        } else if !fifo && !slot.tokens.is_empty() {
             return;
         }
         slot.version += 1;
         slot.writer = Some(by.clone());
     }
 
-    /// The inputs go back with no version change. A token written meanwhile
-    /// is newer than the taken one, so it stays and the taken one is dropped.
+    /// The inputs go back with no version change: see [`Tokens::restore`].
     fn rollback(&mut self, a: &Attempt) {
         for (p, token) in &a.taken {
-            let slot = self.tokens.slot_mut(p, &a.subject);
-            slot.reserved = false;
-            if slot.token.is_none() {
-                slot.token = Some(token.clone());
-            }
+            self.tokens.restore(p, &a.subject, token);
         }
         self.release_running(&a.transition, &a.subject);
     }

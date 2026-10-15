@@ -23,6 +23,7 @@ use holon_net::exec::Accepted;
 use holon_net::exec::AskMeta;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Body;
+use holon_net::exec::Capacity;
 use holon_net::exec::Class;
 use holon_net::exec::Completion;
 use holon_net::exec::Content;
@@ -116,6 +117,7 @@ pub enum PlaceSpec {
     Stored {
         class: Class,
         candidate: Option<&'static str>,
+        capacity: Capacity,
     },
     Derived(Bind),
 }
@@ -136,6 +138,20 @@ impl Spec {
             PlaceSpec::Stored {
                 class,
                 candidate: None,
+                capacity: Capacity::Single,
+            },
+        );
+        self
+    }
+
+    /// A place whose row holds a FIFO of tokens (REV2-cand.c).
+    pub fn fifo(mut self, name: &'static str, class: Class) -> Self {
+        self.places.insert(
+            name,
+            PlaceSpec::Stored {
+                class,
+                candidate: None,
+                capacity: Capacity::Fifo,
             },
         );
         self
@@ -147,6 +163,7 @@ impl Spec {
             PlaceSpec::Stored {
                 class: Class::Process,
                 candidate: Some(candidate),
+                capacity: Capacity::Single,
             },
         );
         self
@@ -175,10 +192,17 @@ impl Spec {
                 PlaceSpec::Stored {
                     class,
                     candidate: None,
+                    capacity: Capacity::Single,
                 } => net.place(name, *class),
                 PlaceSpec::Stored {
                     class,
+                    candidate: None,
+                    capacity: Capacity::Fifo,
+                } => net.fifo(name, *class),
+                PlaceSpec::Stored {
+                    class,
                     candidate: Some(c),
+                    ..
                 } => {
                     assert_eq!(*class, Class::Process, "a candidate on a {class:?} place");
                     net.place_with_candidate(name, c)
@@ -566,13 +590,10 @@ impl Driver {
             );
         }
         for (p, s) in &keys {
-            let sut = (
-                tokens.version(p, s),
-                tokens.token(p, s).map(|t| t.content.clone()),
-            );
+            let sut = (tokens.version(p, s), tokens.contents(p, s));
             agree(
                 op,
-                &format!("{p} of {s} (version, content)"),
+                &format!("{p} of {s} (version, tokens oldest first)"),
                 sut,
                 self.model.slot(p, s),
             );

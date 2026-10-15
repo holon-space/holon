@@ -141,6 +141,7 @@ pub fn net() -> NetDef {
                 Body::Effectful(Receiver::Keyed),
             )
             .consumes(DISK_CHANGED)
+            .reads(ON_DISK)
             .fact(ON_DISK)
             .retry(CATCH_UP_BACKOFF, 3),
         )
@@ -181,6 +182,7 @@ fn manual(name: &str) -> TransitionDef {
     .consumes(REFUSED)
     .reads(ON_DISK)
     .reads(AUTHORITY)
+    .reads(BASE)
     .fact(BASE)
     .fact(ON_DISK)
     .fact(DISK_CHANGED)
@@ -257,6 +259,7 @@ mod tests {
 
     use holon_net::exec::EffectRequest;
     use holon_net::exec::EffectResult;
+    use holon_net::exec::OccurrenceId;
     use holon_net::exec::Settled;
 
     use super::*;
@@ -435,5 +438,70 @@ mod tests {
         let retry = one(&mut exec, 1 + backoff);
         assert_eq!(retry.len(), 1);
         assert_eq!(&*retry[0].transition, CATCH_UP);
+    }
+
+    /// 322/E3.a2: a disk read replaces the `OnDisk` token it has read, so
+    /// `ReadDisk` declares the read arc that makes the rewrite its own
+    /// compare-and-set. Without the arc the fact refuses as a blind put.
+    #[test]
+    fn a_read_disk_whose_hash_differs_rewrites_on_disk() {
+        let mut exec = seeded();
+        let doc = Subject::new(DOC);
+        exec.write(DISK_CHANGED, DOC, Content::new());
+        let reqs = one(&mut exec, 0);
+        assert_eq!(&*reqs[0].transition, READ_DISK);
+        exec.complete(
+            reqs[0].attempt,
+            EffectResult::Done(vec![output(ON_DISK, &doc, [("hash", "h2")])]),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(
+            token_field(&exec, ON_DISK, DOC, "hash").as_deref(),
+            Some("h2"),
+            "the new disk content replaces the one ReadDisk read"
+        );
+        assert!(is_behind(&exec, DOC), "the file moved away from the base");
+    }
+
+    /// 322/E3.a2: the manual remedy rewrites the `Base` it has read, so
+    /// `manual` declares the read arc on `Base`. Without the arc the remedy
+    /// panics on its own base fact, and the user's repair action is dead.
+    #[test]
+    fn the_rewrite_from_store_remedy_rewrites_an_occupied_base() {
+        let mut exec = seeded();
+        let doc = Subject::new(DOC);
+        exec.write(REFUSED, DOC, content([("seen", "h1"), ("authority", "a1")]));
+        let quiesced = exec
+            .exec
+            .fire(
+                REWRITE_FROM_STORE,
+                DOC,
+                OccurrenceId::caller("rewrite:doc:a:0"),
+                Content::new(),
+                Duration::from_millis(1),
+            )
+            .expect("the remedy is enabled for a refused file");
+        let reqs = quiesced.requests;
+        assert_eq!(&*reqs[0].transition, REWRITE_FROM_STORE);
+        exec.complete(
+            reqs[0].attempt,
+            EffectResult::Done(vec![
+                output(BASE, &doc, [("hash", "h2"), ("authority", "a1")]),
+                output(ON_DISK, &doc, [("hash", "h2")]),
+            ]),
+            Duration::from_millis(2),
+        )
+        .unwrap();
+        assert_eq!(
+            token_field(&exec, BASE, DOC, "hash").as_deref(),
+            Some("h2"),
+            "the store's render replaces the base the remedy read"
+        );
+        assert!(
+            refused_docs(&exec).is_empty(),
+            "the remedy consumed Refused"
+        );
+        assert!(!is_behind(&exec, DOC));
     }
 }

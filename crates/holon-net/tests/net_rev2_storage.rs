@@ -45,8 +45,6 @@ use holon_net::exec::EffectResult;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Receiver;
-use holon_net::exec::Route;
-use holon_net::exec::Settled;
 use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
 use proptest::prelude::*;
@@ -541,7 +539,7 @@ fn net() -> Spec {
         .place("StandbyRequest", Class::Process)
         .place("ProviderTries", Class::Process)
         .place_with_candidate("Storage", "StorageCandidate")
-        .place("StorageCandidate", Class::Process)
+        .fifo("StorageCandidate", Class::Process)
         .place("SecondaryStorage", Class::Process)
         .place("RetiringStorage", Class::Process)
         .place("RetiredStorage", Class::Process)
@@ -1096,23 +1094,13 @@ fn booted_with((turso, loro): FaultCounts) -> (Driver, Pair) {
     booted(fails(turso), fails(loro))
 }
 
-/// store_serves: a store open in a slot while `Storage` is empty and no holder
-/// is in flight means the net still has work — it is not quiescent.
-/// A stale `Storage` output that went to the candidate place may have
-/// overwritten a waiting candidate.
-fn a_store_token_was_routed_to_the_candidate(d: &Driver) -> bool {
-    d.exec().occurrences().any(|(_, settled)| {
-        matches!(settled, Some(Settled::OverChangedInputs { routes, .. })
-            if routes.iter().any(|r| r.place.as_str() == "Storage"
-                && matches!(r.route, Route::Candidate(_))))
-    })
-}
-
 fn assert_a_store_serves(d: &Driver, pair: &Pair) {
     assert_no_open_store_is_lost(d, pair);
     assert_a_slot_store_has_a_primary(d);
 }
 
+/// store_serves: a store open in a slot while `Storage` is empty and no
+/// holder is in flight means the net still has work — it is not quiescent.
 fn assert_no_open_store_is_lost(d: &Driver, pair: &Pair) {
     if d.pending.is_empty() {
         for (name, store) in &pair.stores {
@@ -1222,13 +1210,7 @@ impl StateMachineTest for Test {
     }
 
     fn check_invariants(sut: &Sut, _: &FaultCounts) {
-        // ponytail: the candidate place holds one token, so a returned store
-        // token can overwrite a waiting candidate (#322,
-        // a_returned_write_token_never_overwrites_a_waiting_candidate). Check
-        // every run that this route does not reach until #322 lands.
-        if !a_store_token_was_routed_to_the_candidate(&sut.d) {
-            assert_no_open_store_is_lost(&sut.d, &sut.pair);
-        }
+        assert_no_open_store_is_lost(&sut.d, &sut.pair);
         assert_a_slot_store_has_a_primary(&sut.d);
         let quiet = sut.d.pending.is_empty();
         let primary = token_content(&sut.d, "Storage");
@@ -1756,7 +1738,6 @@ fn a_reinstalled_primary_discloses_nothing() {
 /// A write's returned token lands in the candidate place while the Turso
 /// standby waits there, and overwrites it: Turso stays open with no token.
 #[test]
-#[ignore = "needs #322 (multi-token candidate place)"]
 fn a_returned_write_token_never_overwrites_a_waiting_candidate() {
     let (mut d, pair) = booted_with((1, 0));
     let settle_oldest = |d: &mut Driver| {

@@ -71,7 +71,7 @@ fn net(candidate: bool) -> Spec {
     let net = Spec::default();
     let net = if candidate {
         net.place_with_candidate("TursoReady", "TursoReady.Candidate")
-            .place("TursoReady.Candidate", Class::Process)
+            .fifo("TursoReady.Candidate", Class::Process)
     } else {
         net.place("TursoReady", Class::Process)
     };

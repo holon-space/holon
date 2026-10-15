@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ use holon_api::user_transition::UftError;
 use holon_net::exec::Accepted;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Body;
+use holon_net::exec::Capacity;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
 use holon_net::exec::Completion;
@@ -87,7 +89,8 @@ fn key(a: &str, s: &str) -> Key {
 #[derive(Clone, Default)]
 struct Slot {
     version: u64,
-    content: Option<Content>,
+    /// Oldest first; a [`Capacity::Single`] place holds at most one.
+    content: VecDeque<Content>,
     /// The transition whose commit set the current version, `None` for a
     /// write from outside the net (D191-rewritten.a).
     writer: Option<Arc<str>>,
@@ -347,10 +350,21 @@ impl Model {
             .clone()
     }
 
+    /// The oldest token: what a firing binds (REV2-cand.c).
     fn content(&self, place: &str, subject: &str) -> Option<&Content> {
         self.slots
             .get(&key(place, subject))
-            .and_then(|s| s.content.as_ref())
+            .and_then(|s| s.content.front())
+    }
+
+    fn is_fifo(&self, place: &str) -> bool {
+        matches!(
+            self.place(place),
+            PlaceSpec::Stored {
+                capacity: Capacity::Fifo,
+                ..
+            }
+        )
     }
 
     fn version(&self, place: &str, subject: &str) -> u64 {
@@ -374,18 +388,24 @@ impl Model {
         self.slots.entry(key(place, subject)).or_default()
     }
 
-    /// A commit: a new version exactly when the content changes.
+    /// A commit: a new version exactly when the content changes. A FIFO place
+    /// appends, so a put never drops a waiting token (REV2-cand.c).
     fn put(&mut self, place: &str, subject: &str, content: Content, by: Option<&str>) {
         assert!(
             matches!(self.place(place), PlaceSpec::Stored { .. }),
             "a commit to the derived place '{place}'"
         );
+        let fifo = self.is_fifo(place);
         let slot = self.slot_mut(place, subject);
-        if slot.content.as_ref() != Some(&content) {
-            slot.content = Some(content);
-            slot.version += 1;
-            slot.writer = by.map(Arc::from);
+        if fifo {
+            slot.content.push_back(content);
+        } else if slot.content.front() != Some(&content) {
+            slot.content = VecDeque::from([content]);
+        } else {
+            return;
         }
+        slot.version += 1;
+        slot.writer = by.map(Arc::from);
     }
 
     /// Who committed the current version: see [`Slot::writer`].
@@ -413,11 +433,14 @@ impl Model {
         self.slots.keys().cloned()
     }
 
-    pub fn slot(&self, place: &str, subject: &str) -> (u64, Option<Content>) {
-        (
-            self.version(place, subject),
-            self.content(place, subject).cloned(),
-        )
+    /// The row as the differential check compares it: its version and every
+    /// token it holds, oldest first.
+    pub fn slot(&self, place: &str, subject: &str) -> (u64, Vec<Content>) {
+        let tokens = self
+            .slots
+            .get(&key(place, subject))
+            .map_or_else(Vec::new, |s| s.content.iter().cloned().collect());
+        (self.version(place, subject), tokens)
     }
 
     /// `<T>.Running` of a subject holds while an attempt of `T` for it is in
@@ -695,7 +718,7 @@ impl Model {
         let subjects: BTreeSet<String> = self
             .slots
             .iter()
-            .filter(|(_, slot)| slot.content.is_some())
+            .filter(|(_, slot)| !slot.content.is_empty())
             .map(|((_, s), _)| s.clone())
             .chain(
                 self.in_flight
@@ -801,7 +824,7 @@ impl Model {
     fn remove(&mut self, place: &str, subject: &str, by: Option<&str>) {
         let slot = self.slot_mut(place, subject);
         assert!(
-            slot.content.take().is_some(),
+            slot.content.pop_front().is_some(),
             "a removal of the empty {place} of {subject}"
         );
         slot.version += 1;
@@ -977,7 +1000,8 @@ impl Model {
                     .slots
                     .iter()
                     .filter(|((p, _), slot)| {
-                        slot.content.is_some() && t.consumes.iter().chain(&t.reads).any(|a| a == p)
+                        !slot.content.is_empty()
+                            && t.consumes.iter().chain(&t.reads).any(|a| a == p)
                     })
                     .map(|((_, s), _)| s.clone())
                     .collect();
@@ -1145,7 +1169,7 @@ impl Model {
             .consumes
             .iter()
             .map(|p| {
-                let c = self.slot_mut(p, s).content.take();
+                let c = self.slot_mut(p, s).content.pop_front();
                 (p.clone(), c.expect("decide checked every consumed token"))
             })
             .collect();
@@ -1337,10 +1361,14 @@ impl Model {
         }
     }
 
-    fn stale(&self, trace: &Trace) -> Option<Key> {
-        trace
+    /// The first READ row whose version moved: a consumed row is held by the
+    /// firing (REV11-running.a) and cannot be stale.
+    fn stale(&self, occ: &OccurrenceId) -> Option<Key> {
+        let o = &self.occs[occ];
+        o.trace
             .rows
             .iter()
+            .filter(|((p, s), _)| *s != o.subject || o.taken.iter().all(|(held, _)| held != p))
             .find(|((p, s), r)| self.version(p, s) != r.version)
             .map(|(k, _)| k.clone())
     }
@@ -1359,7 +1387,7 @@ impl Model {
         for f in facts {
             self.put(&f.place, &f.subject, f.content, Some(&by));
         }
-        let Some((place, subject)) = self.stale(&self.occs[occ].trace) else {
+        let Some((place, subject)) = self.stale(occ) else {
             let run_key = self.run_key(occ);
             self.marks.remove(&run_key);
             return self.commit(occ, rows);
@@ -1470,8 +1498,9 @@ impl Model {
         );
         let by: Arc<str> = Arc::from(o.transition.as_str());
         for p in places {
+            let fifo = self.is_fifo(&p);
             let slot = self.slot_mut(&p, &s);
-            if slot.content.is_none() {
+            if fifo || slot.content.is_empty() {
                 slot.version += 1;
                 slot.writer = Some(Arc::clone(&by));
             }
@@ -1484,9 +1513,13 @@ impl Model {
         let o = &self.occs[occ];
         let (taken, s) = (o.taken.clone(), o.subject.clone());
         for (p, c) in taken {
+            let fifo = self.is_fifo(&p);
             let slot = self.slot_mut(&p, &s);
-            if slot.content.is_none() {
-                slot.content = Some(c);
+            if fifo {
+                // The taken token was the oldest, so it goes back in front.
+                slot.content.push_front(c);
+            } else if slot.content.is_empty() {
+                slot.content.push_back(c);
             }
         }
     }

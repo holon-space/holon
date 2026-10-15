@@ -59,7 +59,7 @@ fn unnormalized(r: &mut dyn Reads, place: &str, s: &str) -> Option<Content> {
 fn net() -> Spec {
     Spec::default()
         .place_with_candidate("DocA", "DocA.Candidate")
-        .place("DocA.Candidate", Class::Process)
+        .fifo("DocA.Candidate", Class::Process)
         .place("DocB", Class::Process)
         .place("DocC", Class::Data)
         .transition(normalize("DocA"))
@@ -303,4 +303,209 @@ fn a_consume_arc_on_a_data_place_is_refused() {
         holon_net::exec::Executor::new(spec.netdef()),
         Err(holon_net::exec::LoadError::ConsumesData { .. })
     ));
+}
+
+/// REV11-running.a: a firing holds what it consumes, so an outside write into
+/// a consumed place cannot make that firing stale. Only READ inputs can be
+/// stale. Without this, the second write makes `Apply` stale and its store
+/// token — a process place with no candidate — is withheld and lost (#322 E1,
+/// the cause of #315's D1).
+#[test]
+fn a_consumed_input_is_never_stale() {
+    let n = |v: i64| content(&[("n", Value::Integer(v))]);
+    let net = Spec::default()
+        .place("Queue", Class::Process)
+        .place("Store", Class::Process)
+        .transition(
+            Transition::new(
+                "Apply",
+                Trigger::Auto,
+                bind!(|r, s| {
+                    let seq = n_of(r, "Queue", s)?;
+                    n_of(r, "Store", s)?;
+                    Some(content(&[("n", Value::Integer(seq))]))
+                }),
+                Body::Effectful(Receiver::None),
+            )
+            .consumes("Queue")
+            .consumes("Store"),
+        );
+    let mut d = Driver::new(net);
+    d.write("Store", DOC, n(0)).expect("the net quiesces");
+    d.write("Queue", DOC, n(1)).expect("the net quiesces");
+    assert_eq!(d.pending.len(), 1, "the write holds both tokens");
+    // A second write while the first is held: `Queue`'s version moves.
+    d.write("Queue", DOC, n(2)).expect("the net quiesces");
+
+    let settle = |d: &mut Driver| {
+        d.complete_oldest(|req| {
+            EffectResult::Done(vec![Output::new(
+                "Store",
+                &req.subject,
+                content(&[("n", Value::Integer(int(&req.input, "n")))]),
+            )])
+        })
+        .expect("the net quiesces")
+    };
+    settle(&mut d);
+    // The returned store token took the second queue entry at once, so the
+    // primary is in that firing's hold.
+    assert_eq!(
+        d.pending.len(),
+        1,
+        "lost_primary: 'Apply' held 'Store', yet the changed 'Queue' withheld it"
+    );
+    settle(&mut d);
+
+    assert_eq!(
+        int(
+            &d.exec()
+                .tokens()
+                .token("Store", DOC)
+                .expect("a store")
+                .content,
+            "n"
+        ),
+        2,
+        "both writes reached the store"
+    );
+    assert!(
+        !d.exec()
+            .occurrences()
+            .any(|(_, s)| matches!(s, Some(Settled::OverChangedInputs { .. }))),
+        "a consumed input was treated as stale"
+    );
+}
+
+/// REV2-cand.c: a candidate place holds a FIFO, so the second withheld
+/// normalization waits behind the first instead of replacing it. Without it
+/// the waiting token is dropped (#322 E4, #315's finding 3).
+#[test]
+fn a_put_never_drops_a_waiting_candidate() {
+    let mut d = Driver::new(net());
+    // Each firing is stale — an edit lands while its effect runs — so its
+    // output is kept in the candidate place instead of applied.
+    for (read, edit) in [("Foo", "Bar"), ("Bar", "Qux")] {
+        d.write("DocA", DOC, content(&[("title", text(read))]))
+            .expect("the net quiesces");
+        assert_eq!(d.pending.len(), 1, "'{read}' is unnormalized");
+        d.write("DocA", DOC, content(&[("title", text(edit))]))
+            .expect("the net quiesces");
+        d.complete_oldest(lowered).expect("the net quiesces");
+    }
+    let kept: Vec<String> = d
+        .exec()
+        .tokens()
+        .contents("DocA.Candidate", DOC)
+        .iter()
+        .map(|c| match c.get("output") {
+            Some(Value::Object(o)) => match o.get("title") {
+                Some(Value::String(t)) => t.clone(),
+                other => panic!("a kept output has title {other:?}"),
+            },
+            other => panic!("a candidate token has output {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        vec!["foo".to_string(), "bar".to_string()],
+        "both withheld normalizations wait, oldest first"
+    );
+}
+
+/// REV2-cand.b: a put with no compare-and-set behind it never replaces. A
+/// fact commits unconditionally (NET-fire.a), so the second fact would drop
+/// the first one still waiting in the single-token place; the executor
+/// refuses loudly instead (#322 E3).
+#[test]
+#[should_panic(expected = "would drop the held token")]
+fn a_blind_put_into_an_occupied_single_token_place_refuses() {
+    let net = Spec::default()
+        .place("In", Class::Process)
+        .place("Note", Class::Process)
+        .transition(
+            Transition::new(
+                "Work",
+                Trigger::Auto,
+                bind!(|r, s| Some(content(&[("n", Value::Integer(n_of(r, "In", s)?))]))),
+                Body::Effectful(Receiver::None),
+            )
+            .consumes("In")
+            .fact("Note"),
+        );
+    let mut d = Driver::new(net);
+    for n in [1, 2] {
+        d.write("In", DOC, content(&[("n", Value::Integer(n))]))
+            .expect("the net quiesces");
+        d.complete_oldest(|req| {
+            EffectResult::Done(vec![Output::new(
+                "Note",
+                &req.subject,
+                content(&[("n", Value::Integer(int(&req.input, "n")))]),
+            )])
+        })
+        .expect("the net quiesces");
+    }
+}
+
+/// A candidate place must hold every waiting token (REV2-cand.c), so the load
+/// refuses one that is not declared FIFO.
+#[test]
+fn a_candidate_place_that_is_not_fifo_is_refused() {
+    let spec = Spec::default()
+        .place_with_candidate("DocA", "DocA.Candidate")
+        .place("DocA.Candidate", Class::Process);
+    assert!(matches!(
+        holon_net::exec::Executor::new(spec.netdef()),
+        Err(holon_net::exec::LoadError::CandidateNotFifo { .. })
+    ));
+}
+
+/// 322/E3.a2: a transition that declares a read arc on the place it facts has
+/// seen the incumbent — the net's own compare-and-set, visible in the net
+/// text — so the rewrite is allowed. The write-back net's `CatchUp` rewrites
+/// `Base` and `OnDisk` this way on every catch-up.
+#[test]
+fn a_fact_rewrite_of_a_read_row_is_allowed() {
+    let net = Spec::default()
+        .place("In", Class::Process)
+        .place("Base", Class::Process)
+        .transition(
+            Transition::new(
+                "Work",
+                Trigger::Auto,
+                bind!(|r, s| Some(content(&[("n", Value::Integer(n_of(r, "In", s)?))]))),
+                Body::Effectful(Receiver::None),
+            )
+            .consumes("In")
+            .reads("Base")
+            .fact("Base"),
+        );
+    let mut d = Driver::new(net);
+    d.write("Base", DOC, content(&[("n", Value::Integer(0))]))
+        .expect("the net quiesces");
+    for n in [1, 2] {
+        d.write("In", DOC, content(&[("n", Value::Integer(n))]))
+            .expect("the net quiesces");
+        d.complete_oldest(|req| {
+            EffectResult::Done(vec![Output::new(
+                "Base",
+                &req.subject,
+                content(&[("n", Value::Integer(int(&req.input, "n")))]),
+            )])
+        })
+        .expect("the net quiesces");
+    }
+    assert_eq!(
+        int(
+            &d.exec()
+                .tokens()
+                .token("Base", DOC)
+                .expect("a base")
+                .content,
+            "n"
+        ),
+        2,
+        "the fact rewrote the row its firing read"
+    );
 }

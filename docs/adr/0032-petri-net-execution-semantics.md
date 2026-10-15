@@ -882,7 +882,17 @@ branch), keep it as the standby for the swap path, or retire it.
 `SecondaryStorage` holds only the standby the apply transition chose. Reason: a
 put into an occupied capacity-1 `SecondaryStorage` overwrote a waiting standby.
 A silent overwrite of a token is an executor defect in its own right: a put into
-an occupied single-token place refuses, it never replaces.
+an occupied single-token place refuses, it never replaces. The refusal covers
+every put that **bypasses** the compare-and-set: a fact from a transition that
+does not read the place (322/E3.a2). A put behind the compare-and-set has seen
+the held token, so its rewrite is intended and stays allowed — and so is a fact
+from a transition that declares a **read arc** on the place, because the read
+arc *is* the net's own compare-and-set and it is visible in the net text. A
+data-class place is exempt because its outputs merge rather than replace a
+token (NET-fire.a). The anchor is the place's declared capacity, not the read
+trace. A production transition that rewrites a single-token place therefore
+declares the read arc it relies on; the write-back net's disk and store
+transitions do (`crates/holon-filesystem/src/writeback_net.rs`).
 
 **REV2-cand.c.** An output that carries a live resource is a fact (§9.2) and is
 never withheld. A candidate place therefore accepts every put with no staleness
