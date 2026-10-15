@@ -35,7 +35,7 @@ holon:
     list: {{}}
 "#
     );
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml).expect("fixture parses");
+    let cfg = IntegrationFileConfig::from_yaml(&yaml).expect("fixture parses");
     let built = cfg
         .into_mcp_config_with(
             "fixture".to_string(),

@@ -314,8 +314,8 @@ async fn start_mock_with(mode: Mode, list: ListState) -> Mock {
 /// whole base URL is the credential here, so the whole base URL is the
 /// registered secret.
 fn surface_for(base_url: &str) -> Arc<dyn McpCallSurface> {
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(SHOPPING_SIDECAR).expect("the shipped shopping sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(SHOPPING_SIDECAR)
+        .expect("the shipped shopping sidecar parses");
     let lookup = |name: &str| match name {
         "SHOPPING_LIST_URL" => Some(base_url.to_string()),
         _ => None,
@@ -1089,13 +1089,13 @@ fn the_shipped_sidecar_holds_no_resolved_url() {
 
 #[test]
 fn the_shipped_sidecar_declares_no_mirrored_entity() {
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(SHOPPING_SIDECAR).expect("the shipped shopping sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(SHOPPING_SIDECAR)
+        .expect("the shipped shopping sidecar parses");
     // The generic ENTITY mirror keys rows on a server-issued id column and
     // fails loud without one. This peer issues none — which is why it is a
     // `list_sync` connection, whose identity is the declared key expression.
     assert!(
-        cfg.entities.is_empty(),
+        cfg.sidecar().entities.is_empty(),
         "the shopping sidecar declares an entity the id-less wire shape cannot mirror"
     );
 }
@@ -1142,7 +1142,7 @@ fn sidecar_without_a_cache_buster() -> String {
 }
 
 fn peer_from(sidecar: &str, base_url: &str) -> RestListPeer {
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(sidecar).expect("the sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(sidecar).expect("the sidecar parses");
     let lookup = |name: &str| match name {
         "SHOPPING_LIST_URL" => Some(base_url.to_string()),
         _ => None,

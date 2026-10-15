@@ -197,7 +197,7 @@ tools:
 /// The surface and sidecar a `rest` file resolves to — the same two halves
 /// `finish_rest_integration` builds.
 fn config_from(yaml: &str) -> (RestCallSurface, McpSidecar) {
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("the sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(yaml).expect("the sidecar parses");
     let lookup = |_: &str| None;
     let mcp = cfg
         .into_mcp_config_with("rest_writer".to_string(), &lookup, &credential_root())

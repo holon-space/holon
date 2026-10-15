@@ -18,9 +18,7 @@ use crate::integration_state::enabling_state_file;
 use crate::mcp_integration::AuthMode;
 use crate::mcp_integration::McpIntegrationConfig;
 use crate::mcp_integration::McpTransport;
-use crate::mcp_sidecar::EntityConfig;
 use crate::mcp_sidecar::McpSidecar;
-use crate::mcp_sidecar::ToolConfig;
 use crate::redaction::Redactor;
 use crate::rest_oauth2::RestOAuth2Config;
 use crate::rest_transport::RestAuth;
@@ -249,11 +247,12 @@ pub struct AuthConfig {
 /// Combines transport config with the sidecar entity/tool declarations.
 /// The provider name is derived from the filename (stem without `.yaml`).
 ///
-/// This is the type a sidecar FILE is deserialized into, bundled files
-/// included, so every map section guards against a key declared twice
-/// ([`crate::transition_sidecar::unique_keys`]). [`Self::sidecar`]
-/// re-serializes these already-parsed maps, so a duplicate the parse let
-/// through would be laundered and unreachable for any later check.
+/// This is the type a sidecar FILE is parsed into, bundled files included, and
+/// [`Self::from_yaml`] is the only way to get one: it hands the file text to
+/// [`McpSidecar::from_yaml`], which is the one parse of the sidecar sections
+/// (ruling UFT-sidecar-boundary.a). A second copy of those sections here would
+/// launder whatever that parse refuses — a duplicate key above all — into a
+/// shape no later check can see.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntegrationFileConfig {
     /// Sidecar-format generation this file was authored against. Absent in
@@ -292,32 +291,11 @@ pub struct IntegrationFileConfig {
     pub holon: Option<HolonSection>,
     #[serde(default)]
     pub auth: Option<AuthConfig>,
-    /// Prefix prepended to all entity names for table names, ID schemes, etc.
-    #[serde(default)]
-    pub entity_prefix: Option<String>,
-    #[serde(default, deserialize_with = "crate::mcp_sidecar::unique_entities")]
-    pub entities: HashMap<String, EntityConfig>,
-    /// Master write switch (leases/read-write ruling). Absent = disabled. Flows
-    /// through into the [`McpSidecar`] so the dispatch chokepoint can enforce
-    /// it.
-    #[serde(default)]
-    pub writes: crate::mcp_sidecar::WritesPolicy,
-    /// Writer designation for `once_only` effects (leases/read-write ruling,
-    /// increment 4). Absent = confirm_manually. Flows through into the
-    /// [`McpSidecar`] so the dispatch chokepoint can select the policy.
-    #[serde(default)]
-    pub once_only: crate::mcp_sidecar::OnceOnlyAuthorization,
-    #[serde(default, deserialize_with = "crate::mcp_sidecar::unique_tools")]
-    pub tools: HashMap<String, ToolConfig>,
-    /// Sidecar-declared derived views (see
-    /// [`crate::mcp_sidecar::McpSidecar::views`]).
-    #[serde(default)]
-    pub views: Vec<crate::mcp_sidecar::ViewConfig>,
-    #[serde(
-        default,
-        deserialize_with = "crate::transition_sidecar::unique_transitions"
-    )]
-    pub transitions: std::collections::BTreeMap<String, crate::transition_sidecar::TransitionSpec>,
+    /// The sidecar half of this file — entities, tools, views, transitions and
+    /// the write policy. serde never fills it: [`Self::from_yaml`] parses it
+    /// from the file text, so these sections have one shape and one parse.
+    #[serde(skip)]
+    sidecar: Option<McpSidecar>,
 }
 
 /// Build the direct-HTTP transport from a manual plus its `holon:` section.
@@ -575,23 +553,27 @@ impl IntegrationFileConfig {
             .and_then(|auth| auth.oauth2.as_ref())
     }
 
-    /// The sidecar this connection runs, parsed exactly as the connect parses
-    /// it.
-    pub fn sidecar(&self) -> anyhow::Result<McpSidecar> {
-        McpSidecar::from_yaml(&self.sidecar_yaml())
+    /// Parse one sidecar file's text.
+    ///
+    /// The file's own keys and its sidecar sections are read from the SAME
+    /// text, the latter by [`McpSidecar::from_yaml`] — which is also where
+    /// every rule over those sections lives, so a file defect is one error
+    /// here rather than a surprise at connect.
+    pub fn from_yaml(yaml: &str) -> anyhow::Result<Self> {
+        let mut config: Self = serde_yaml::from_str(yaml)?;
+        config.sidecar = Some(McpSidecar::from_yaml(yaml)?);
+        Ok(config)
+    }
+
+    /// The sidecar this connection runs.
+    pub fn sidecar(&self) -> &McpSidecar {
+        self.sidecar
+            .as_ref()
+            .expect("an IntegrationFileConfig is built by IntegrationFileConfig::from_yaml")
     }
 
     fn sidecar_yaml(&self) -> String {
-        let sidecar = McpSidecar {
-            entity_prefix: self.entity_prefix.clone(),
-            entities: self.entities.clone(),
-            writes: self.writes,
-            once_only: self.once_only,
-            tools: self.tools.clone(),
-            views: self.views.clone(),
-            transitions: self.transitions.clone(),
-        };
-        serde_yaml::to_string(&sidecar).expect("McpSidecar must be serializable")
+        serde_yaml::to_string(self.sidecar()).expect("McpSidecar must be serializable")
     }
 
     /// Convert into the runtime config, expanding `${VAR}` references in
@@ -885,25 +867,12 @@ fn choose_content_for(
                     path.display()
                 )
             })?;
-            match serde_yaml::from_str::<IntegrationFileConfig>(content) {
+            match IntegrationFileConfig::from_yaml(content) {
                 Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
-                    // `IntegrationFileConfig` is the serde shape; the RULES
-                    // over it (identity column is TEXT, the overflow-column
-                    // pair, the write policy) live in `McpSidecar::from_yaml`,
-                    // which the connect path runs later. Running it here too
-                    // costs one extra parse of a small file and buys the user
-                    // the same load-time disclosure as every other file defect
-                    // — the alternative is a connect failure, which reads as
-                    // "the peer is down" rather than "your file is wrong".
-                    match crate::mcp_sidecar::McpSidecar::from_yaml(content) {
-                        Ok(_) => Ok(ResolvedContent::Usable {
-                            config: Box::new(config),
-                            superseded: None,
-                        }),
-                        Err(e) => Ok(ResolvedContent::Unusable {
-                            why: format!("{e:#}"),
-                        }),
-                    }
+                    Ok(ResolvedContent::Usable {
+                        config: Box::new(config),
+                        superseded: None,
+                    })
                 }
                 Ok(config) => Ok(ResolvedContent::Unusable {
                     why: format!(
@@ -923,7 +892,7 @@ fn choose_content_for(
                         "it does not parse against this build's sidecar format, so no \
                          schema_version could be established, and there is no bundled copy of \
                          '{}' to fall back to. Once it parses, it must also declare \
-                         `schema_version: {SIDECAR_SCHEMA_VERSION}`: {e}",
+                         `schema_version: {SIDECAR_SCHEMA_VERSION}`: {e:#}",
                         entry.name
                     ),
                 }),
@@ -947,7 +916,7 @@ fn choose_content(
         return Ok((parse_bundled(bundled)?, None));
     }
 
-    let incompatibility = match serde_yaml::from_str::<IntegrationFileConfig>(content) {
+    let incompatibility = match IntegrationFileConfig::from_yaml(content) {
         Ok(config) if config.schema_version == Some(SIDECAR_SCHEMA_VERSION) => {
             tracing::info!(
                 "[load_integration_configs] Provider '{provider}' is OVERRIDDEN by '{}' \
@@ -967,7 +936,7 @@ fn choose_content(
         ),
         Err(e) => format!(
             "it does not parse against this build's sidecar format, so no schema_version could be \
-             established: {e}"
+             established: {e:#}"
         ),
     };
     Ok((parse_bundled(bundled)?, Some(incompatibility)))
@@ -1385,7 +1354,7 @@ fn orphan_state_files(
 }
 
 fn parse_bundled(bundled: &'static BundledSidecar) -> anyhow::Result<IntegrationFileConfig> {
-    let config = serde_yaml::from_str::<IntegrationFileConfig>(bundled.yaml)
+    let config = IntegrationFileConfig::from_yaml(bundled.yaml)
         .with_context(|| format!("Bundled sidecar '{}' does not parse", bundled.source_path))?;
     refuse_machine_specific_command(&config, bundled.source_path)?;
     Ok(config)
@@ -1513,7 +1482,7 @@ entities:
 
 tools: {}
 "#;
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
 
         let transport = config.transport.as_ref().unwrap();
         let cp = transport.child_process.as_ref().unwrap();
@@ -1523,10 +1492,10 @@ tools: {}
         assert!(transport.http.is_none());
 
         assert!(config.auth.is_none());
-        assert_eq!(config.entities.len(), 1);
-        assert!(config.entities.contains_key("session"));
+        assert_eq!(config.sidecar().entities.len(), 1);
+        assert!(config.sidecar().entities.contains_key("session"));
 
-        let sync = config.entities["session"].sync.as_ref().unwrap();
+        let sync = config.sidecar().entities["session"].sync.as_ref().unwrap();
         assert_eq!(
             sync.list_resource.as_deref(),
             Some("claude-history://projects/{project_id}/sessions")
@@ -1554,9 +1523,10 @@ entities:
 tools:
   complete-task:
     entity: task
+    effect: idempotent
     affected_fields: [completed]
 "#;
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
 
         let transport = config.transport.as_ref().unwrap();
         let http = transport.http.as_ref().unwrap();
@@ -1570,7 +1540,7 @@ tools:
         );
         assert!(!auth.oauth);
 
-        assert!(config.tools.contains_key("complete-task"));
+        assert!(config.sidecar().tools.contains_key("complete-task"));
     }
 
     #[test]
@@ -1583,7 +1553,7 @@ transport:
 auth:
   oauth: true
 "#;
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
 
         let auth = config.auth.as_ref().unwrap();
         assert!(auth.oauth);
@@ -1605,7 +1575,7 @@ entities:
     short_name: item
     id_column: id
 "#;
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
         let mcp_config = config
             .into_mcp_config(
                 "test-provider".into(),
@@ -1638,7 +1608,7 @@ auth:
   static_token: "${MY_KEY}"
 entities: {}
 "#;
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
         let mcp_config = config
             .into_mcp_config_with(
                 "http-provider".into(),
@@ -1736,10 +1706,10 @@ transport:
   child_process:
     command: my-server
 "#;
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
         assert!(config.auth.is_none());
-        assert!(config.entities.is_empty());
-        assert!(config.tools.is_empty());
+        assert!(config.sidecar().entities.is_empty());
+        assert!(config.sidecar().tools.is_empty());
     }
 
     #[test]
@@ -1755,7 +1725,7 @@ auth:
 entities: {}
 "#;
         unsafe { std::env::set_var("HOLON_TEST_TODOIST_HOST", "ai.todoist.net") };
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
         let mcp_config = config
             .into_mcp_config(
                 "todoist".into(),
@@ -1785,7 +1755,7 @@ auth:
   static_token: "${HOLON_TEST_DEFINITELY_UNSET_VAR}"
 entities: {}
 "#;
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
         let err = match config
             .into_mcp_config("p".into(), &CredentialRoot::new("/tmp/holon-test-config"))
         {
@@ -1808,7 +1778,7 @@ entities: {}
 transport: {}
 entities: {}
 "#;
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
         let err = config
             .into_mcp_config("p".into(), &CredentialRoot::new("/tmp/holon-test-config"))
             .expect_err("missing transport must be a hard error");
@@ -1846,7 +1816,7 @@ auth:
   static_token: "${TODOIST_API_KEY}"
 entities: {}
 "#;
-        let config: IntegrationFileConfig = serde_yaml::from_str(yaml).unwrap();
+        let config = IntegrationFileConfig::from_yaml(yaml).unwrap();
         let mcp_config = config
             .into_mcp_config_with(
                 "todoist".into(),
@@ -1867,8 +1837,8 @@ mod presentation_fields {
 
     const MINIMAL_TRANSPORT: &str = "\ntransport:\n  http:\n    uri: https://example.invalid/mcp\n";
 
-    fn parse(extra: &str) -> Result<IntegrationFileConfig, serde_yaml::Error> {
-        serde_yaml::from_str(&format!("{extra}{MINIMAL_TRANSPORT}"))
+    fn parse(extra: &str) -> anyhow::Result<IntegrationFileConfig> {
+        IntegrationFileConfig::from_yaml(&format!("{extra}{MINIMAL_TRANSPORT}"))
     }
 
     #[test]
@@ -1911,8 +1881,8 @@ mod presentation_fields {
     fn the_bundled_claude_history_sidecar_carries_the_presentation_triple() {
         let bundled = crate::bundled_sidecars::bundled_sidecar("claude-history")
             .expect("claude-history is bundled");
-        let config: IntegrationFileConfig =
-            serde_yaml::from_str(bundled.yaml).expect("the bundled sidecar parses");
+        let config =
+            IntegrationFileConfig::from_yaml(bundled.yaml).expect("the bundled sidecar parses");
         assert_eq!(config.display_name.as_deref(), Some("Claude History"));
         assert_eq!(config.icon.as_ref().map(|i| i.as_str()), Some("robot"));
         assert_eq!(config.default_view.as_deref(), Some("claude-history-view"));
@@ -1925,7 +1895,7 @@ mod presentation_fields {
     #[test]
     fn every_bundled_sidecar_carries_the_presentation_triple() {
         for bundled in crate::bundled_sidecars::BUNDLED_SIDECARS {
-            let config: IntegrationFileConfig = serde_yaml::from_str(bundled.yaml)
+            let config = IntegrationFileConfig::from_yaml(bundled.yaml)
                 .unwrap_or_else(|e| panic!("{} parses: {e}", bundled.source_path));
             assert!(
                 config.display_name.is_some()
@@ -1960,7 +1930,7 @@ mod bundled_command_portability {
     /// that would have worked.
     #[test]
     fn an_absolute_command_in_a_bundled_sidecar_is_refused_by_name() {
-        let config: IntegrationFileConfig = serde_yaml::from_str(
+        let config = IntegrationFileConfig::from_yaml(
             "transport:\n  child_process:\n    command: \
              /Users/someone/Workspaces/ai/claude-code-history-mcp/target/debug/claude-code-history-mcp\n",
         )
@@ -1989,7 +1959,7 @@ mod bundled_command_portability {
             "${CLAUDE_HISTORY_MCP}",
             "${MCP_BIN_DIR}/connector",
         ] {
-            let config: IntegrationFileConfig = serde_yaml::from_str(&format!(
+            let config = IntegrationFileConfig::from_yaml(&format!(
                 "transport:\n  child_process:\n    command: \"{command}\"\n"
             ))
             .expect("well-formed yaml");
@@ -2014,7 +1984,7 @@ mod bundled_command_portability {
     /// asset is fixed.
     #[test]
     fn a_home_directory_env_value_in_a_bundled_sidecar_is_refused_by_name() {
-        let config: IntegrationFileConfig = serde_yaml::from_str(
+        let config = IntegrationFileConfig::from_yaml(
             "transport:\n  child_process:\n    command: claude-code-history-mcp\n    env:\n      \
              CLAUDE_DATA_DIR: \"/Users/martin/.claude\"\n",
         )
@@ -2044,7 +2014,7 @@ mod bundled_command_portability {
     #[test]
     fn a_system_absolute_env_value_is_left_alone() {
         for value in ["/usr/share/dict/words", "/etc/ssl/certs", "${HOME}/.claude"] {
-            let config: IntegrationFileConfig = serde_yaml::from_str(&format!(
+            let config = IntegrationFileConfig::from_yaml(&format!(
                 "transport:\n  child_process:\n    command: connector\n    env:\n      DATA: \"{value}\"\n"
             ))
             .expect("well-formed yaml");
@@ -2056,9 +2026,10 @@ mod bundled_command_portability {
     /// A transport with no child process has no command to judge.
     #[test]
     fn an_http_only_sidecar_passes_without_a_command() {
-        let config: IntegrationFileConfig =
-            serde_yaml::from_str("transport:\n  http:\n    uri: https://example.invalid/mcp\n")
-                .expect("well-formed yaml");
+        let config = IntegrationFileConfig::from_yaml(
+            "transport:\n  http:\n    uri: https://example.invalid/mcp\n",
+        )
+        .expect("well-formed yaml");
         refuse_machine_specific_command(&config, "assets/integrations/example.yaml")
             .expect("no child_process means nothing to refuse");
     }

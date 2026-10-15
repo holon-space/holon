@@ -90,6 +90,7 @@ fn a_stale_installed_claude_history_does_not_shadow_the_shipped_sidecar() {
         .expect("the installed file enables 'claude-history'");
 
     let message = cfg
+        .sidecar()
         .entities
         .get("message")
         .expect("shipped claude-history declares a 'message' entity");
@@ -155,7 +156,7 @@ fn a_current_schema_version_override_is_honored() {
         .expect("provider enabled");
 
     assert!(
-        cfg.entities["message"]
+        cfg.sidecar().entities["message"]
             .vtable
             .as_ref()
             .unwrap()
@@ -189,7 +190,7 @@ fn an_unparseable_installed_sidecar_is_superseded_not_fatal() {
         .map(|(_, cfg)| cfg)
         .expect("provider enabled, running the bundled content");
     assert!(
-        cfg.entities["message"]
+        cfg.sidecar().entities["message"]
             .vtable
             .as_ref()
             .unwrap()

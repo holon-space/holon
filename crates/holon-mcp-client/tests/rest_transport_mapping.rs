@@ -21,7 +21,7 @@ const SECRET_URL: &str = "https://list.example.test/!Tok3nQ7xLpZm4/api/list/9f2c
 const SHOPPING_SIDECAR: &str = include_str!("../../../assets/integrations/shopping.yaml");
 
 fn surface(yaml: &str) -> Arc<dyn McpCallSurface> {
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("the sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(yaml).expect("the sidecar parses");
     let mcp = cfg
         .into_mcp_config_with(
             "shopping".to_string(),
@@ -108,7 +108,7 @@ transport:
 entities: {}
 tools: {}
 ";
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("the sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(yaml).expect("the sidecar parses");
     let mcp = cfg
         .into_mcp_config_with(
             "peer".to_string(),

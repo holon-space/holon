@@ -262,7 +262,7 @@ fn lookup(name: &str) -> Option<String> {
 }
 
 fn surface_from(yaml: &str) -> RestCallSurface {
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(yaml).expect("sidecar parses");
     // These fixtures write their credential files into a tempdir and name it
     // absolutely, so that tempdir IS the profile's config dir.
     let root = cfg
@@ -438,10 +438,10 @@ fn shipped_gcal_sidecar_shape() {
         "/../../assets/integrations/gcal.yaml"
     );
     let yaml = std::fs::read_to_string(path).expect("read gcal.yaml");
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&yaml).expect("gcal.yaml parses as IntegrationFileConfig");
+    let cfg =
+        IntegrationFileConfig::from_yaml(&yaml).expect("gcal.yaml parses as IntegrationFileConfig");
 
-    assert_eq!(cfg.entity_prefix.as_deref(), Some("gcal_"));
+    assert_eq!(cfg.sidecar().entity_prefix.as_deref(), Some("gcal_"));
     let manual = cfg.utcp.as_ref().expect("utcp manual");
     let holon = cfg.holon.as_ref().expect("holon section");
     assert_eq!(
@@ -508,8 +508,8 @@ fn shipped_gcal_sidecar_shape() {
     assert!(pg.max_pages >= 1);
 
     // Two entities; event uses field projection to flatten start/end/all_day.
-    assert!(cfg.entities.contains_key("calendar"));
-    let event = cfg.entities.get("event").expect("event entity");
+    assert!(cfg.sidecar().entities.contains_key("calendar"));
+    let event = cfg.sidecar().entities.get("event").expect("event entity");
     let sync = event.sync.as_ref().expect("event sync");
     assert_eq!(
         sync.list_params.get("calendar_id").and_then(|v| v.as_str()),
@@ -525,7 +525,12 @@ fn shipped_gcal_sidecar_shape() {
     );
 
     // Two chained upcoming views.
-    let view_names: Vec<&str> = cfg.views.iter().map(|v| v.name.as_str()).collect();
+    let view_names: Vec<&str> = cfg
+        .sidecar()
+        .views
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
     assert!(
         view_names.contains(&"upcoming_flagged"),
         "views: {view_names:?}"

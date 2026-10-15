@@ -79,8 +79,8 @@ async fn connect_shipped_sidecar(db: &DbHandle) -> McpIntegration {
         "/../../assets/integrations/claude-history.yaml"
     );
     let yaml = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    let mut cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+    let mut cfg =
+        IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"));
     let cp = cfg
         .transport
         .as_mut()

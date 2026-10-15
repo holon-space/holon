@@ -722,3 +722,50 @@ fn no_proptest_in_prod_graph() {
         );
     }
 }
+
+/// A sidecar YAML has ONE parse boundary (ruling UFT-sidecar-boundary.a).
+///
+/// `IntegrationFileConfig::from_yaml` parses the file text and hands its
+/// sidecar sections to `McpSidecar::from_yaml`. A site that deserializes the
+/// type directly gets a config whose sidecar half never saw that parse — the
+/// second shape the ruling forbids.
+#[test]
+fn an_integration_file_is_deserialized_only_through_from_yaml() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("crates"), &mut files);
+    rust_sources(&root.join("frontends"), &mut files);
+
+    let mut offenders = Vec::new();
+    for file in &files {
+        let rel = file
+            .strip_prefix(&root)
+            .expect("source under the repo root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == file!() || rel == "crates/holon-mcp-client/src/integration_config.rs" {
+            continue;
+        }
+        let src = std::fs::read_to_string(file).expect("readable rust source");
+        let lines: Vec<&str> = src.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("IntegrationFileConfig") {
+                continue;
+            }
+            // A turbofish or an annotated binding puts the type and the call on
+            // the same line or splits them over the next two.
+            let window = lines[i..(i + 3).min(lines.len())].join(" ");
+            if window.contains("serde_yaml::from_str") {
+                offenders.push(format!("{rel}:{}", i + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these sites deserialize `IntegrationFileConfig` directly:\n{}\n\nCall \
+         `IntegrationFileConfig::from_yaml` instead — it is the one place the sidecar sections \
+         are parsed.\n",
+        offenders.join("\n"),
+    );
+}

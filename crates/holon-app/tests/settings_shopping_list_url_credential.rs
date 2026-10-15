@@ -63,7 +63,8 @@ fn shopping_sidecar() -> IntegrationFileConfig {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/integrations/shopping.yaml");
     let yaml =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+    IntegrationFileConfig::from_yaml(&yaml)
+        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
 fn preferences(url: &str) -> HashMap<PrefKey, toml::Value> {

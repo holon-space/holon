@@ -18,8 +18,8 @@ use holon_mcp_client::integration_config::IntegrationFileConfig;
 /// real one, and these exist to be REFUSED, so nothing here reaches a network.
 const SYNTHETIC_LITERAL: &str = "SYNTHETIC-NOT-A-REAL-TOKEN-0000";
 
-fn parse(yaml: &str) -> Result<IntegrationFileConfig, serde_yaml::Error> {
-    serde_yaml::from_str(yaml)
+fn parse(yaml: &str) -> anyhow::Result<IntegrationFileConfig> {
+    IntegrationFileConfig::from_yaml(yaml)
 }
 
 fn mcp_sidecar_with_token(token: &str) -> String {

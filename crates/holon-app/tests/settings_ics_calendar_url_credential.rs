@@ -71,7 +71,8 @@ fn ics_sidecar() -> IntegrationFileConfig {
         .join("../../assets/integrations/ics-calendar.yaml");
     let yaml =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+    IntegrationFileConfig::from_yaml(&yaml)
+        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
 fn preferences(url: &str) -> HashMap<PrefKey, toml::Value> {
@@ -216,7 +217,7 @@ fn the_shipped_sidecar_declares_the_ics_codec_and_a_bounded_window() {
 
     let cfg = ics_sidecar();
     assert_eq!(
-        cfg.entity_prefix.as_deref(),
+        cfg.sidecar().entity_prefix.as_deref(),
         Some("ics_"),
         "the mirror tables are namespaced by the sidecar's prefix; an empty one would collide \
          with whatever else declares an `event` table"

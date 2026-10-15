@@ -243,7 +243,7 @@ fn lookup(name: &str) -> Option<String> {
 /// ever read from; the OAuth2 arms pass the tempdir holding their refresh
 /// token.
 fn surface_from(yaml: &str, root: &CredentialRoot) -> RestCallSurface {
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(yaml).expect("sidecar parses");
     let mcp = cfg
         .into_mcp_config_with("capability".to_string(), &lookup, root)
         .expect("into_mcp_config");

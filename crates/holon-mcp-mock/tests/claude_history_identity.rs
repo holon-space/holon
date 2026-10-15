@@ -57,7 +57,7 @@ const FIXTURE_PATH: &str = concat!(
 fn sidecar() -> IntegrationFileConfig {
     let yaml = std::fs::read_to_string(SIDECAR_PATH)
         .unwrap_or_else(|e| panic!("read {SIDECAR_PATH}: {e}"));
-    serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("parse {SIDECAR_PATH}: {e}"))
+    IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse {SIDECAR_PATH}: {e}"))
 }
 
 /// What the yaml INTENDS each entity's row identity to be, spelled out
@@ -137,6 +137,7 @@ async fn every_claude_history_entity_declares_the_identity_its_yaml_intends() {
 
     for (name, intended) in INTENDED_IDENTITY {
         let entity = cfg
+            .sidecar()
             .entities
             .get(*name)
             .unwrap_or_else(|| panic!("the shipped sidecar declares entity '{name}'"));
@@ -149,6 +150,7 @@ async fn every_claude_history_entity_declares_the_identity_its_yaml_intends() {
     }
 
     let unlisted: Vec<&String> = cfg
+        .sidecar()
         .entities
         .iter()
         .filter(|(name, e)| e.vtable.is_some() && !listed.contains(name.as_str()))
@@ -167,10 +169,10 @@ async fn every_claude_history_entity_declares_the_identity_its_yaml_intends() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_wrapper_resolves_each_declaration_to_its_schema_column_indices() {
     let cfg = sidecar();
-    let prefix = cfg.entity_prefix.as_deref();
+    let prefix = cfg.sidecar().entity_prefix.as_deref();
 
     for (name, intended) in INTENDED_IDENTITY {
-        let entity = cfg.entities.get(*name).expect("entity present");
+        let entity = cfg.sidecar().entities.get(*name).expect("entity present");
         if entity.vtable.is_none() {
             continue;
         }
@@ -372,6 +374,7 @@ async fn scan_identity(
     table: &str,
 ) -> Measurement {
     let declared = cfg
+        .sidecar()
         .entities
         .get(entity)
         .unwrap_or_else(|| panic!("sidecar declares '{entity}'"))
@@ -497,6 +500,7 @@ async fn the_recorded_measurement_covers_the_declared_identities() {
     let cfg = sidecar();
     for entity in ["session", "agent", "message", "agent_message"] {
         let declared = cfg
+            .sidecar()
             .entities
             .get(entity)
             .expect("entity present")
@@ -519,8 +523,8 @@ const MOCK_BIN: &str = env!("CARGO_BIN_EXE_mock-mcp-server");
 async fn connect_fixture(fixture: &str) -> anyhow::Result<McpConnectionResult> {
     let path = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
     let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    let mut cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+    let mut cfg =
+        IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"));
     let cp = cfg
         .transport
         .as_mut()
@@ -620,7 +624,7 @@ async fn a_live_query_over_an_fdw_table_without_a_fetch_contract_is_refused_at_c
 async fn every_shipped_vtable_entity_declares_a_scoped_snapshot_contract() {
     let cfg = sidecar();
     let mut checked = 0;
-    for (name, entity) in &cfg.entities {
+    for (name, entity) in &cfg.sidecar().entities {
         let Some(vtable) = entity.vtable.as_ref() else {
             continue;
         };

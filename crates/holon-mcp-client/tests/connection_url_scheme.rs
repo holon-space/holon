@@ -44,8 +44,8 @@ holon:
 }
 
 fn build(url: &str) -> anyhow::Result<()> {
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&sidecar_calling(url)).expect("the fixture sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(&sidecar_calling(url))
+        .expect("the fixture sidecar parses");
     cfg.into_mcp_config_with("fixture".to_string(), &|_| None, &credential_root())
         .map(|_| ())
 }
@@ -102,8 +102,8 @@ fn a_malformed_url_is_refused() {
 #[test]
 fn the_refusal_does_not_echo_an_expanded_secret_url() {
     let secret = "http://host.example/!SYNTHETIC-CAPABILITY-TOKEN/api";
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&sidecar_calling("${LIST_URL}")).expect("the fixture sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(&sidecar_calling("${LIST_URL}"))
+        .expect("the fixture sidecar parses");
     let err = cfg
         .into_mcp_config_with(
             "fixture".to_string(),
@@ -123,7 +123,7 @@ fn the_refusal_does_not_echo_an_expanded_secret_url() {
 #[test]
 fn every_bundled_sidecar_satisfies_the_rule() {
     for bundled in holon_mcp_client::BUNDLED_SIDECARS {
-        let cfg: IntegrationFileConfig = serde_yaml::from_str(bundled.yaml)
+        let cfg = IntegrationFileConfig::from_yaml(bundled.yaml)
             .unwrap_or_else(|e| panic!("bundled '{}' parses: {e:#}", bundled.provider));
         // Resolve every `${VAR}` to an https placeholder: this test is about
         // the scheme rule, and an unresolved var is a different refusal.
@@ -168,8 +168,8 @@ tools: {{}}
 }
 
 fn build_mcp(uri: &str) -> anyhow::Result<()> {
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&mcp_sidecar_calling(uri)).expect("the fixture sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(&mcp_sidecar_calling(uri))
+        .expect("the fixture sidecar parses");
     cfg.into_mcp_config_with(
         "fixture".to_string(),
         &|_| Some("SYNTHETIC-TOKEN-VALUE".to_string()),

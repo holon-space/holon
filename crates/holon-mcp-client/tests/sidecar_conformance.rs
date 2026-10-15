@@ -119,7 +119,7 @@ fn every_sidecar_parses_strictly() {
     for path in sidecar_paths() {
         let file = name_of(&path);
         let yaml = read(&path);
-        serde_yaml::from_str::<IntegrationFileConfig>(&yaml)
+        IntegrationFileConfig::from_yaml(&yaml)
             .unwrap_or_else(|e| panic!("[{file}] does not parse as IntegrationFileConfig: {e}"));
     }
 }
@@ -193,8 +193,8 @@ async fn every_sidecar_view_is_ivm_valid() {
 fn every_rest_sidecar_sync_and_projection_reference_declared_names() {
     for path in sidecar_paths() {
         let file = name_of(&path);
-        let cfg: IntegrationFileConfig =
-            serde_yaml::from_str(&read(&path)).unwrap_or_else(|e| panic!("[{file}] parse: {e}"));
+        let cfg = IntegrationFileConfig::from_yaml(&read(&path))
+            .unwrap_or_else(|e| panic!("[{file}] parse: {e}"));
         let Some(manual) = cfg.utcp.as_ref() else {
             continue; // only a `utcp:` manual declares HTTP tools
         };
@@ -218,7 +218,7 @@ fn every_rest_sidecar_sync_and_projection_reference_declared_names() {
             }
         }
 
-        for (entity_name, entity) in &cfg.entities {
+        for (entity_name, entity) in &cfg.sidecar().entities {
             let Some(sync) = entity.sync.as_ref() else {
                 continue;
             };

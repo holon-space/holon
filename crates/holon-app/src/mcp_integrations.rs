@@ -226,9 +226,9 @@ fn declare_entity_tables(
     display_name: &str,
     config: &holon_mcp_client::IntegrationFileConfig,
 ) {
-    for key in config.entities.keys() {
+    for key in config.sidecar().entities.keys() {
         let table = holon_mcp_client::mcp_sidecar::canonical_entity_name(
-            config.entity_prefix.as_deref(),
+            config.sidecar().entity_prefix.as_deref(),
             key,
         )
         .table_name();
@@ -534,10 +534,8 @@ fn refuse_inadmissible(
         .map_err(|e| anyhow::anyhow!("the shipped capability profiles must parse: {e}"))?;
     let mut refused = Vec::new();
     configs.retain(|(provider, config)| {
-        let Ok(sidecar) = config.sidecar() else {
-            return true;
-        };
-        let refusals = crate::type_admission::sidecar_refusals(&profiles, provider, &sidecar);
+        let refusals =
+            crate::type_admission::sidecar_refusals(&profiles, provider, config.sidecar());
         if refusals.is_empty() {
             return true;
         }
@@ -1274,8 +1272,8 @@ impl Module for McpIntegrationsModule {
             |(name, cfg)| {
                 (
                     name.as_str(),
-                    cfg.entity_prefix.as_deref(),
-                    cfg.entities.keys().map(String::as_str),
+                    cfg.sidecar().entity_prefix.as_deref(),
+                    cfg.sidecar().entities.keys().map(String::as_str),
                 )
             },
         ))

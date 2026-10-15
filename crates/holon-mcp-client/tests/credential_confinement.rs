@@ -31,8 +31,8 @@ use proptest::prelude::*;
 /// needs no OAuth at all.
 fn bundled_oauth2(provider: &str) -> Option<RestOAuth2Config> {
     let bundled = holon_mcp_client::bundled_sidecar(provider).expect("bundled");
-    let config: IntegrationFileConfig =
-        serde_yaml::from_str(bundled.yaml).expect("the bundled sidecar parses");
+    let config =
+        IntegrationFileConfig::from_yaml(bundled.yaml).expect("the bundled sidecar parses");
     config.holon?.auth?.oauth2
 }
 
@@ -97,7 +97,7 @@ fn a_valid_credential_outside_the_config_dir_is_never_read() {
     write_private(&decoy.path().join("refresh-token"), "decoy-refresh-token");
 
     let bundled = holon_mcp_client::bundled_sidecar("gcal").expect("bundled");
-    let mut config: IntegrationFileConfig = serde_yaml::from_str(bundled.yaml).expect("parses");
+    let mut config = IntegrationFileConfig::from_yaml(bundled.yaml).expect("parses");
     let oauth2 = config
         .holon
         .as_mut()
@@ -168,7 +168,7 @@ fn a_symlink_at_the_credential_name_is_never_followed_out_of_the_config_dir() {
     }
 
     let bundled = holon_mcp_client::bundled_sidecar("gcal").expect("bundled");
-    let config: IntegrationFileConfig = serde_yaml::from_str(bundled.yaml).expect("parses");
+    let config = IntegrationFileConfig::from_yaml(bundled.yaml).expect("parses");
     let root = CredentialRoot::new(sandbox.path());
 
     match config.into_mcp_config_with("gcal".to_string(), &|_| None, &root) {

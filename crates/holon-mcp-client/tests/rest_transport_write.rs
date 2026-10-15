@@ -182,7 +182,7 @@ tools: {{}}
 }
 
 fn surface_from(yaml: &str) -> anyhow::Result<RestCallSurface> {
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml)?;
+    let cfg = IntegrationFileConfig::from_yaml(yaml)?;
     let lookup = |_: &str| None;
     let mcp = cfg.into_mcp_config_with("writer".to_string(), &lookup, &credential_root())?;
     match mcp.transport {
@@ -398,8 +398,7 @@ entities: {{}}
 tools: {{}}
 "#
         );
-        let cfg: IntegrationFileConfig =
-            serde_yaml::from_str(&yaml).expect("the method sidecar parses");
+        let cfg = IntegrationFileConfig::from_yaml(&yaml).expect("the method sidecar parses");
         let lookup = |_: &str| None;
         let mcp = cfg
             .into_mcp_config_with("m".to_string(), &lookup, &credential_root())

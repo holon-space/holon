@@ -1268,12 +1268,16 @@ fn claude_history_yaml_multi_project_shape() {
         "/../../assets/integrations/claude-history.yaml"
     );
     let body = std::fs::read_to_string(path).expect("read claude-history.yaml");
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&body).expect("claude-history.yaml parses as IntegrationFileConfig");
-    assert_eq!(cfg.entity_prefix.as_deref(), Some("cc_"));
+    let cfg = IntegrationFileConfig::from_yaml(&body)
+        .expect("claude-history.yaml parses as IntegrationFileConfig");
+    assert_eq!(cfg.sidecar().entity_prefix.as_deref(), Some("cc_"));
 
     // `project` is the sync-only multi-project root (no write-through vtable).
-    let project = cfg.entities.get("project").expect("project entity");
+    let project = cfg
+        .sidecar()
+        .entities
+        .get("project")
+        .expect("project entity");
     assert!(project.sync.is_some(), "project must sync-warm its cache");
     assert!(
         project.vtable.is_none(),
@@ -1282,7 +1286,11 @@ fn claude_history_yaml_multi_project_shape() {
 
     // session + task + agent fan out over project via enumerate_from on project_id.
     for ent in ["session", "task", "agent"] {
-        let e = cfg.entities.get(ent).unwrap_or_else(|| panic!("{ent}"));
+        let e = cfg
+            .sidecar()
+            .entities
+            .get(ent)
+            .unwrap_or_else(|| panic!("{ent}"));
         assert!(
             e.sync.is_none(),
             "{ent} must NOT sync — enumeration lives in the write-through vtable"
@@ -1301,7 +1309,7 @@ fn claude_history_yaml_multi_project_shape() {
     }
 
     // The session watermark strips the 'cc-project:' scheme (11 chars → 12).
-    let session_ef = match cfg.entities["session"]
+    let session_ef = match cfg.sidecar().entities["session"]
         .vtable
         .as_ref()
         .unwrap()
@@ -1318,7 +1326,11 @@ fn claude_history_yaml_multi_project_shape() {
     );
 
     // message fan-out is ENABLED: enumerate_from session, bounded, watermarked.
-    let msg = cfg.entities.get("message").expect("message entity");
+    let msg = cfg
+        .sidecar()
+        .entities
+        .get("message")
+        .expect("message entity");
     let mvt = msg.vtable.as_ref().expect("message vtable enabled");
     assert!(mvt.write_through);
     assert_eq!(mvt.max_fan_out, Some(50));
@@ -1339,7 +1351,7 @@ fn claude_history_yaml_multi_project_shape() {
     // Agent grain: `agent` carries the attribution columns a Holon task links
     // through, and `agent_message` is pinned by agent id (the `agent` render's
     // live_query) with the same bounded+watermarked fan-out as `message`.
-    let agent = cfg.entities.get("agent").expect("agent entity");
+    let agent = cfg.sidecar().entities.get("agent").expect("agent entity");
     let agent_cols: Vec<&str> = agent.schema.iter().map(|f| f.name.as_str()).collect();
     for col in [
         "id",
@@ -1355,6 +1367,7 @@ fn claude_history_yaml_multi_project_shape() {
     }
 
     let agent_msg = cfg
+        .sidecar()
         .entities
         .get("agent_message")
         .expect("agent_message entity");
@@ -1386,7 +1399,7 @@ fn claude_history_yaml_multi_project_shape() {
 
     // agent_id is the attribution column on BOTH message shapes.
     for ent in ["message", "agent_message"] {
-        let cols: Vec<&str> = cfg.entities[ent]
+        let cols: Vec<&str> = cfg.sidecar().entities[ent]
             .schema
             .iter()
             .map(|f| f.name.as_str())
@@ -1398,7 +1411,7 @@ fn claude_history_yaml_multi_project_shape() {
     }
 
     // The clash invariant: sync XOR write-through vtable, per entity.
-    for (name, e) in &cfg.entities {
+    for (name, e) in &cfg.sidecar().entities {
         let has_sync = e.sync.is_some();
         let has_wt = e.vtable.as_ref().is_some_and(|v| v.write_through);
         assert!(

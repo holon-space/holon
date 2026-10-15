@@ -65,8 +65,8 @@ async fn main() -> Result<()> {
 
     let yaml = std::fs::read_to_string(&yaml_path)
         .with_context(|| format!("read {}", yaml_path.display()))?;
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&yaml).with_context(|| format!("parse {}", yaml_path.display()))?;
+    let cfg = IntegrationFileConfig::from_yaml(&yaml)
+        .with_context(|| format!("parse {}", yaml_path.display()))?;
 
     // into_mcp_config performs the ${VAR} env-expansion on uri + static_token.
     // The probe's config dir is where a credential file would have to live; the
@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
     let store = MemTokenStore::new();
     let mut any_empty = false;
 
-    for (entity_name, entity) in &cfg.entities {
+    for (entity_name, entity) in &cfg.sidecar().entities {
         let Some(sync) = entity.sync.as_ref() else {
             continue;
         };

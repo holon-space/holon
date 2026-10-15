@@ -275,10 +275,9 @@ fn every_bundled_integration_has_a_seeded_default_view() {
 
         for bundled in holon_mcp_client::BUNDLED_SIDECARS {
             let provider = bundled.provider;
-            let config: holon_mcp_client::IntegrationFileConfig =
-                serde_yaml::from_str(bundled.yaml)
-                    .unwrap_or_else(|e| panic!("{} must parse: {e}", bundled.source_path));
-            let Some(view) = config.default_view else {
+            let config = holon_mcp_client::IntegrationFileConfig::from_yaml(bundled.yaml)
+                .unwrap_or_else(|e| panic!("{} must parse: {e}", bundled.source_path));
+            let Some(view) = config.default_view.clone() else {
                 problems.push(format!(
                     "{} declares no `default_view`, so the Integrations row for '{provider}' \
                      opens nothing — every bundled integration gets an authored page (D53.c)",
@@ -345,8 +344,9 @@ fn every_bundled_integration_has_a_seeded_default_view() {
             // `{entity_prefix}{entity key}`, so the sidecar itself says which
             // names count — a page pointed at another provider's data reads as
             // plausible in review and is wrong in the window.
-            let prefix = config.entity_prefix.clone().unwrap_or_default();
+            let prefix = config.sidecar().entity_prefix.clone().unwrap_or_default();
             let mut tables: Vec<String> = config
+                .sidecar()
                 .entities
                 .keys()
                 .map(|name| format!("{prefix}{name}"))

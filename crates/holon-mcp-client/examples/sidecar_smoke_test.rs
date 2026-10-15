@@ -71,14 +71,14 @@ async fn main() -> Result<()> {
 
     let yaml = std::fs::read_to_string(&yaml_path)
         .with_context(|| format!("read {}", yaml_path.display()))?;
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml)
+    let cfg = IntegrationFileConfig::from_yaml(&yaml)
         .with_context(|| format!("parse {} as IntegrationFileConfig", yaml_path.display()))?;
-    let prefix = cfg.entity_prefix.as_deref().unwrap_or("");
+    let prefix = cfg.sidecar().entity_prefix.as_deref().unwrap_or("");
 
     println!("# Sidecar smoke test");
     println!("  file:           {}", yaml_path.display());
     println!("  entity_prefix:  {prefix:?}");
-    println!("  entities:       {}", cfg.entities.len());
+    println!("  entities:       {}", cfg.sidecar().entities.len());
 
     let (peer, _service) = connect(&cfg).await?;
     let peer: Arc<dyn McpCallSurface> = Arc::new(peer);
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     let mut results: Vec<EntityResult> = Vec::new();
 
     for entity_name in &order {
-        let entity = cfg.entities.get(entity_name).expect("present");
+        let entity = cfg.sidecar().entities.get(entity_name).expect("present");
         let result = exercise_entity(
             entity_name,
             entity,
@@ -479,7 +479,7 @@ fn open_memory_conn() -> Arc<CoreConnection> {
 /// come before children. Cycles → error.
 fn topological_order(cfg: &IntegrationFileConfig) -> Result<Vec<String>> {
     let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
-    for (name, ent) in &cfg.entities {
+    for (name, ent) in &cfg.sidecar().entities {
         let mut d = HashSet::new();
         if let Some(v) = ent.vtable.as_ref() {
             for fc in v.filter_mapping.values() {

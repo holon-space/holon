@@ -40,9 +40,9 @@ async fn main() -> anyhow::Result<()> {
             "{}/../../assets/integrations/{file}",
             env!("CARGO_MANIFEST_DIR")
         ))?;
-        let config: IntegrationFileConfig = serde_yaml::from_str(&yaml)?;
-        let prefix = config.entity_prefix.unwrap_or_default();
-        for view in config.views {
+        let config = IntegrationFileConfig::from_yaml(&yaml)?;
+        let prefix = config.sidecar().entity_prefix.clone().unwrap_or_default();
+        for view in &config.sidecar().views {
             reconcile_named_view(&handle, &format!("{prefix}{}", view.name), &view.sql).await?;
         }
     }

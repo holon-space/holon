@@ -30,8 +30,8 @@ fn a_manual_written_back_out_is_the_bytes_it_came_in_as() {
 #[test]
 fn the_shopping_sidecars_utcp_section_is_that_manual() {
     let published: UtcpManual = serde_json::from_str(MANUAL).expect("the manual parses");
-    let sidecar: IntegrationFileConfig =
-        serde_yaml::from_str(SHOPPING_SIDECAR).expect("the shipped sidecar parses");
+    let sidecar =
+        IntegrationFileConfig::from_yaml(SHOPPING_SIDECAR).expect("the shipped sidecar parses");
     let embedded = sidecar
         .utcp
         .expect("the shopping sidecar declares a `utcp:` manual");
@@ -66,8 +66,8 @@ fn a_call_template_holon_cannot_drive_names_itself_when_it_is_skipped() {
 fn a_holon_entry_for_a_tool_the_manual_does_not_declare_is_refused() {
     let doctored = SHOPPING_SIDECAR.replace("    pull_list:\n", "    pull_lst:\n");
     assert_ne!(doctored, SHOPPING_SIDECAR, "the typo was actually injected");
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(&doctored).expect("the doctored sidecar still parses");
+    let cfg =
+        IntegrationFileConfig::from_yaml(&doctored).expect("the doctored sidecar still parses");
     let err = cfg
         .into_mcp_config_with(
             "shopping".to_string(),
@@ -114,8 +114,8 @@ holon:
 
 #[test]
 fn an_unmodelled_utcp_key_is_ignored_preserved_and_disclosed() {
-    let cfg: IntegrationFileConfig =
-        serde_yaml::from_str(FORWARD).expect("a manual with unmodelled keys still loads");
+    let cfg = IntegrationFileConfig::from_yaml(FORWARD)
+        .expect("a manual with unmodelled keys still loads");
     let manual = cfg.utcp.clone().expect("the manual parsed");
 
     let disclosed = manual.unmodelled_keys();
@@ -170,7 +170,7 @@ fn an_unmodelled_holon_key_is_still_loudly_refused() {
         "      query: {limit: \"50\"}",
         "      queryy: {limit: \"50\"}",
     );
-    let err = serde_yaml::from_str::<IntegrationFileConfig>(&doctored)
+    let err = IntegrationFileConfig::from_yaml(&doctored)
         .expect_err("a typo in OUR half is a mapping that would silently never run");
     let text = err.to_string();
     assert!(
@@ -229,7 +229,7 @@ fn sidecar_remedy_keys_are_keys_the_parser_accepts() {
         oauth2[1], oauth2[2]
     );
 
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml).unwrap_or_else(|e| {
+    let cfg = IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| {
         panic!("a remedy message names a key the parser rejects: {e}\n\n{yaml}")
     });
     assert!(

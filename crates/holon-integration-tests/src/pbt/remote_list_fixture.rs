@@ -42,7 +42,7 @@ pub const IDENTITY_COLUMNS: &[&str] = &["name", "cat"];
 fn sidecar() -> IntegrationFileConfig {
     let bundled = holon_mcp_client::bundled_sidecar(CONNECTION)
         .unwrap_or_else(|| panic!("this build ships no '{CONNECTION}' sidecar"));
-    serde_yaml::from_str(bundled.yaml)
+    IntegrationFileConfig::from_yaml(bundled.yaml)
         .unwrap_or_else(|e| panic!("the shipped '{CONNECTION}' sidecar does not parse: {e}"))
 }
 

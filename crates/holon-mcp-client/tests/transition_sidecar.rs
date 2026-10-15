@@ -391,11 +391,10 @@ fn a_malformed_undo_is_a_named_load_error() {
     }
 }
 
-/// A sidecar file is deserialized on three paths — the bundled one parses the
-/// file text straight into [`IntegrationFileConfig`] — and a duplicate key
-/// must be refused on each. `sidecar()` re-serializes the already-parsed maps,
-/// so a duplicate that survives the first parse is laundered and invisible to
-/// every later check.
+/// A sidecar file's text reaches exactly one parse of its sidecar sections —
+/// [`IntegrationFileConfig::from_yaml`] hands the file text to
+/// [`McpSidecar::from_yaml`] — so a duplicate key has one place left to be
+/// refused, and it is refused there.
 #[test]
 fn a_duplicate_key_is_refused_on_every_sidecar_parse_path() {
     const BUNDLED: &str = include_str!("../../../assets/integrations/todoist.yaml");
@@ -421,13 +420,9 @@ fn a_duplicate_key_is_refused_on_every_sidecar_parse_path() {
     ];
     /// A named way to parse a sidecar file's text.
     type ParsePath = (&'static str, fn(&str) -> anyhow::Result<()>);
-    let paths: [ParsePath; 3] = [
-        ("serde_yaml::from_str::<IntegrationFileConfig>", |yaml| {
-            serde_yaml::from_str::<IntegrationFileConfig>(yaml)?;
-            Ok(())
-        }),
-        ("IntegrationFileConfig::sidecar", |yaml| {
-            serde_yaml::from_str::<IntegrationFileConfig>(yaml)?.sidecar()?;
+    let paths: [ParsePath; 2] = [
+        ("IntegrationFileConfig::from_yaml", |yaml| {
+            IntegrationFileConfig::from_yaml(yaml)?;
             Ok(())
         }),
         ("McpSidecar::from_yaml", |yaml| {

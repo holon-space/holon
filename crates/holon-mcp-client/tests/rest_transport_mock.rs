@@ -316,7 +316,7 @@ fn surface_from(
     entity: &str,
     lookup: &holon_mcp_client::integration_config::VarLookup<'_>,
 ) -> RestCallSurface {
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("sidecar parses");
+    let cfg = IntegrationFileConfig::from_yaml(yaml).expect("sidecar parses");
     let mcp_cfg = cfg
         .into_mcp_config_with(entity.to_string(), lookup, &test_credential_root())
         .expect("into_mcp_config");
@@ -360,8 +360,8 @@ tools: {{}}
         base = mock.base_url
     );
 
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml).expect("parse");
-    let strategy = cfg.entities["jp_posts"]
+    let cfg = IntegrationFileConfig::from_yaml(&yaml).expect("parse");
+    let strategy = cfg.sidecar().entities["jp_posts"]
         .sync
         .as_ref()
         .expect("sync present")
@@ -434,8 +434,8 @@ entities:
 tools: {{}}
 "#
     );
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml).expect("parse");
-    let strategy = cfg.entities["feed_items"]
+    let cfg = IntegrationFileConfig::from_yaml(&yaml).expect("parse");
+    let strategy = cfg.sidecar().entities["feed_items"]
         .sync
         .as_ref()
         .expect("sync")
@@ -501,8 +501,8 @@ async fn try_fetch_ics(
     base: &str,
 ) -> anyhow::Result<Vec<serde_json::Map<String, serde_json::Value>>> {
     let yaml = ics_feed_yaml(base, path);
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml)?;
-    let strategy = cfg.entities["ics_events"]
+    let cfg = IntegrationFileConfig::from_yaml(&yaml)?;
+    let strategy = cfg.sidecar().entities["ics_events"]
         .sync
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("the ICS sidecar declares no sync block"))?
@@ -821,7 +821,7 @@ fn shipped_jsonplaceholder_sidecar_parses_as_rest() {
         "/../../assets/integrations/jsonplaceholder.yaml"
     );
     let yaml = std::fs::read_to_string(path).expect("read jsonplaceholder.yaml");
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml).expect("example parses");
+    let cfg = IntegrationFileConfig::from_yaml(&yaml).expect("example parses");
     let mcp_cfg = cfg
         .into_mcp_config("jsonplaceholder".to_string(), &test_credential_root())
         .expect("into_mcp_config");
@@ -843,7 +843,7 @@ fn shipped_jsonplaceholder_sidecar_parses_as_rest() {
 fn unknown_transport_field_is_rejected() {
     // deny_unknown_fields: a typo'd transport key fails loud at parse.
     let yaml = "transport:\n  htttp:\n    uri: x\nentities: {}\ntools: {}\n";
-    let err = serde_yaml::from_str::<IntegrationFileConfig>(yaml).unwrap_err();
+    let err = IntegrationFileConfig::from_yaml(yaml).unwrap_err();
     assert!(err.to_string().contains("htttp") || err.to_string().contains("unknown field"));
 }
 
@@ -866,7 +866,7 @@ holon:
 entities: {}
 tools: {}
 "#;
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(yaml).expect("parse");
+    let cfg = IntegrationFileConfig::from_yaml(yaml).expect("parse");
     let mcp_cfg = cfg
         .into_mcp_config("p".to_string(), &test_credential_root())
         .expect("into_mcp_config");
@@ -887,7 +887,7 @@ fn unknown_field_under_holon_is_rejected() {
     // parse rather than being silently ignored.
     let yaml = "utcp:\n  utcp_version: \"1.1.3\"\n  manual_version: \"1.0.0\"\n  tools: \
                      []\nholon:\n  poll_intervall: 90s\nentities: {}\ntools: {}\n";
-    let err = serde_yaml::from_str::<IntegrationFileConfig>(yaml).unwrap_err();
+    let err = IntegrationFileConfig::from_yaml(yaml).unwrap_err();
     assert!(
         err.to_string().contains("poll_intervall") || err.to_string().contains("unknown field"),
         "unexpected error: {err}"
@@ -1162,8 +1162,8 @@ async fn rest_poll_runner_syncs_reuses_mirror_and_survives_failure() {
     let mock = start_controlled_mock(posts_body("first")).await;
     let yaml = poll_runner_yaml(&mock.base_url);
 
-    let cfg: IntegrationFileConfig = serde_yaml::from_str(&yaml).expect("parse cfg");
-    let strategy = cfg.entities["jp_posts"]
+    let cfg = IntegrationFileConfig::from_yaml(&yaml).expect("parse cfg");
+    let strategy = cfg.sidecar().entities["jp_posts"]
         .sync
         .as_ref()
         .expect("sync present")

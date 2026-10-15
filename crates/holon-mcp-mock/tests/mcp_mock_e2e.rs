@@ -82,7 +82,7 @@ async fn setup_db() -> DbHandle {
 fn load_fixture(name: &str) -> IntegrationFileConfig {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
     let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"))
+    IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"))
 }
 
 /// Build an integration from a fixture, overriding the command with `bin` and
