@@ -111,8 +111,8 @@ async fn write_blocks(
     Ok(())
 }
 
-/// One production engine, booted once, for every case of the round-trip
-/// property. A `BackendEngine` boot costs ~2.3 s of CPU in a debug build (full
+/// One production engine, booted once, for every case of both properties in
+/// this file. A `BackendEngine` boot costs ~2.3 s of CPU in a debug build (full
 /// schema DDL parse, FTS index, script engine), which at 20 cases was the whole
 /// runtime of the test. Cases stay isolated by purging the case's document at
 /// the end of each case, so every case still reads a store that holds exactly
@@ -268,59 +268,60 @@ proptest! {
     /// asymmetry and is out of scope for this equivalence.
     #[test]
     fn loro_and_turso_query_sources_agree(headlines in root_headlines_strategy()) {
-        let rt = Runtime::new().unwrap();
+        let (rt, engine) = shared_engine();
         let result: Result<(), TestCaseError> = rt.block_on(async {
-            let engine = create_test_engine_with_path(unique_db_path())
-                .await
-                .map_err(|e| TestCaseError::fail(format!("engine init: {e}")))?;
-
             let doc_id = EntityUri::block(&Uuid::new_v4().to_string());
             let blocks = build_blocks(&doc_id, &headlines);
 
-            // Turso arm: production create path → matview → CDC mirror read.
-            write_blocks(&engine, &doc_id, &blocks).await?;
-            let turso_source = TursoBlockQuerySource::watch_default(&engine)
-                .await
-                .map_err(|e| TestCaseError::fail(format!("turso watch: {e}")))?;
-            let turso_snapshot = turso_source
-                .snapshot()
-                .await
-                .map_err(|e| TestCaseError::fail(format!("turso snapshot: {e}")))?;
-            // Drop the physical doc root; the reference store has no doc block.
-            let turso_blocks: Vec<Block> = turso_snapshot
-                .iter_blocks()
-                .filter(|b| b.id != doc_id)
-                .cloned()
-                .collect();
-            let turso_doc = NormalizedDocument::from_blocks(None, &turso_blocks);
+            let outcome = async {
+                // Turso arm: production create path → matview → CDC mirror read.
+                write_blocks(engine, &doc_id, &blocks).await?;
+                let turso_source = TursoBlockQuerySource::watch_default(engine)
+                    .await
+                    .map_err(|e| TestCaseError::fail(format!("turso watch: {e}")))?;
+                let turso_snapshot = turso_source
+                    .snapshot()
+                    .await
+                    .map_err(|e| TestCaseError::fail(format!("turso snapshot: {e}")))?;
+                // Drop the physical doc root; the reference store has no doc block.
+                let turso_blocks: Vec<Block> = turso_snapshot
+                    .iter_blocks()
+                    .filter(|b| b.id != doc_id)
+                    .cloned()
+                    .collect();
+                let turso_doc = NormalizedDocument::from_blocks(None, &turso_blocks);
 
-            // Loro arm: Turso-free tree walk over the same generated store.
-            let backend = seed_loro_backend(&doc_id, &blocks).await?;
-            let loro_snapshot = LoroBlockQuerySource::new(backend)
-                .snapshot()
-                .await
-                .map_err(|e| TestCaseError::fail(format!("loro snapshot: {e}")))?;
-            // Drop the physical doc root; the reference store has no doc block.
-            let loro_blocks: Vec<Block> = loro_snapshot
-                .iter_blocks()
-                .filter(|b| b.id != doc_id)
-                .cloned()
-                .collect();
-            let loro_doc = NormalizedDocument::from_blocks(None, &loro_blocks);
+                // Loro arm: Turso-free tree walk over the same generated store.
+                let backend = seed_loro_backend(&doc_id, &blocks).await?;
+                let loro_snapshot = LoroBlockQuerySource::new(backend)
+                    .snapshot()
+                    .await
+                    .map_err(|e| TestCaseError::fail(format!("loro snapshot: {e}")))?;
+                // Drop the physical doc root; the reference store has no doc block.
+                let loro_blocks: Vec<Block> = loro_snapshot
+                    .iter_blocks()
+                    .filter(|b| b.id != doc_id)
+                    .cloned()
+                    .collect();
+                let loro_doc = NormalizedDocument::from_blocks(None, &loro_blocks);
 
-            let expected = NormalizedDocument::from_blocks(None, &blocks);
-            // Each arm reproduces the generated store, hence agree with each other.
-            assert_normalized_docs_equal(&expected, &turso_doc, "query_source_equivalence[turso]")?;
-            assert_normalized_docs_equal(&expected, &loro_doc, "query_source_equivalence[loro]")?;
-            assert_normalized_docs_equal(&turso_doc, &loro_doc, "query_source_equivalence[loro==turso]")?;
+                let expected = NormalizedDocument::from_blocks(None, &blocks);
+                // Each arm reproduces the generated store, hence agree with each other.
+                assert_normalized_docs_equal(&expected, &turso_doc, "query_source_equivalence[turso]")?;
+                assert_normalized_docs_equal(&expected, &loro_doc, "query_source_equivalence[loro]")?;
+                assert_normalized_docs_equal(&turso_doc, &loro_doc, "query_source_equivalence[loro==turso]")?;
 
-            // Per-parent sibling order under each generated parent (`doc_id` → roots
-            // included); the Loro doc root lives under `no_parent`, which is not a
-            // generated parent, so it is not inspected here.
-            assert_sibling_order_matches(&blocks, &turso_snapshot, "query_source_equivalence[turso]")?;
-            assert_sibling_order_matches(&blocks, &loro_snapshot, "query_source_equivalence[loro]")?;
+                // Per-parent sibling order under each generated parent (`doc_id` → roots
+                // included); the Loro doc root lives under `no_parent`, which is not a
+                // generated parent, so it is not inspected here.
+                assert_sibling_order_matches(&blocks, &turso_snapshot, "query_source_equivalence[turso]")?;
+                assert_sibling_order_matches(&blocks, &loro_snapshot, "query_source_equivalence[loro]")?;
 
-            Ok(())
+                Ok(())
+            }
+            .await;
+
+            outcome.and(purge_document(engine, &doc_id).await)
         });
         result?;
     }
