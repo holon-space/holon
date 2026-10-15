@@ -248,3 +248,37 @@ fn a_byte_identical_installed_copy_discloses_nothing() {
     assert!(loaded.superseded.is_empty());
     assert!(loaded.ignored.is_empty());
 }
+
+/// The normal population a format bump creates: a file a generation behind
+/// whose sections ALSO no longer satisfy the current sidecar rules. Its
+/// disclosure must still name the generation it declares — the two arms differ
+/// in the remedy they point at (the file is a generation behind: replace or
+/// re-declare it) versus (the file is unreadable: fix its content), so
+/// collapsing a declared version into "no schema_version could be established"
+/// states something untrue about the user's file.
+#[test]
+fn a_declared_stale_version_is_named_even_when_the_content_also_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let installed = dir.path().join("claude-history.yaml");
+    std::fs::write(
+        &installed,
+        format!(
+            "schema_version: 1\ntools:\n  complete-task:\n    description: \"finish a task\"\n{STALE_INSTALLED_CLAUDE_HISTORY}"
+        ),
+    )
+    .unwrap();
+
+    let loaded = load_with_enabled(dir.path(), "claude-history").expect("load");
+    let notice = loaded
+        .superseded
+        .iter()
+        .find(|n| n.provider == "claude-history")
+        .expect("an old-generation override is disclosed");
+
+    assert!(
+        notice.incompatibility.contains("declares schema_version 1"),
+        "a file that DECLARES a generation is disclosed as stale, not as one from which no \
+         version could be read: {}",
+        notice.incompatibility
+    );
+}

@@ -874,26 +874,24 @@ fn choose_content_for(
                         superseded: None,
                     })
                 }
-                Ok(config) => Ok(ResolvedContent::Unusable {
+                other => Ok(ResolvedContent::Unusable {
                     why: format!(
-                        "it declares schema_version {} but this build's sidecar format is \
-                         schema_version {SIDECAR_SCHEMA_VERSION}, and there is no bundled copy of \
-                         '{}' to fall back to. Declare `schema_version: {SIDECAR_SCHEMA_VERSION}` \
-                         once the file matches this format",
-                        match config.schema_version {
-                            Some(v) => v.to_string(),
-                            None => "none".to_string(),
-                        },
-                        entry.name
-                    ),
-                }),
-                Err(e) => Ok(ResolvedContent::Unusable {
-                    why: format!(
-                        "it does not parse against this build's sidecar format, so no \
-                         schema_version could be established, and there is no bundled copy of \
-                         '{}' to fall back to. Once it parses, it must also declare \
-                         `schema_version: {SIDECAR_SCHEMA_VERSION}`: {e:#}",
-                        entry.name
+                        "{}, and there is no bundled copy of '{}' to fall back to. {}",
+                        incompatibility(content, other.as_ref().err()),
+                        entry.name,
+                        // The remedy answers the defect the classifier found: a
+                        // file that parses needs a re-declaration, not a repair.
+                        if other.is_err() {
+                            format!(
+                                "Once it parses, it must also declare `schema_version: \
+                                 {SIDECAR_SCHEMA_VERSION}`"
+                            )
+                        } else {
+                            format!(
+                                "Declare `schema_version: {SIDECAR_SCHEMA_VERSION}` once the file \
+                                 matches this format"
+                            )
+                        }
                     ),
                 }),
             }
@@ -926,20 +924,60 @@ fn choose_content(
             );
             return Ok((config, None));
         }
-        Ok(config) => format!(
-            "it declares schema_version {} but this build's sidecar format is schema_version \
-             {SIDECAR_SCHEMA_VERSION}",
-            match config.schema_version {
-                Some(v) => v.to_string(),
-                None => "none".to_string(),
-            }
+        other => incompatibility(content, other.as_ref().err()),
+    };
+    Ok((parse_bundled(bundled)?, Some(incompatibility)))
+}
+
+/// Why one file's text is not usable as a sidecar of this build's format.
+///
+/// A file that DECLARES a generation is disclosed as that generation even when
+/// its sections also fail to parse: its remedy (replace it, or re-declare it
+/// once it matches this format) is not the remedy for a file no version can be
+/// read from (fix its content).
+fn incompatibility(content: &str, parse_error: Option<&anyhow::Error>) -> String {
+    let mismatch = |v: u32| {
+        format!(
+            "it declares schema_version {v} but this build's sidecar format is schema_version \
+             {SIDECAR_SCHEMA_VERSION}"
+        )
+    };
+    match (declared_schema_version(content), parse_error) {
+        (Some(v), None) => mismatch(v),
+        (Some(v), Some(e)) if v != SIDECAR_SCHEMA_VERSION => {
+            format!(
+                "{}, and its sections no longer parse against it: {e:#}",
+                mismatch(v)
+            )
+        }
+        (Some(v), Some(e)) => {
+            format!("it declares schema_version {v} but does not parse against that format: {e:#}")
+        }
+        (None, None) => format!(
+            "it declares no schema_version, and this build's sidecar format is schema_version \
+             {SIDECAR_SCHEMA_VERSION}"
         ),
-        Err(e) => format!(
+        (None, Some(e)) => format!(
             "it does not parse against this build's sidecar format, so no schema_version could be \
              established: {e:#}"
         ),
-    };
-    Ok((parse_bundled(bundled)?, Some(incompatibility)))
+    }
+}
+
+/// The `schema_version` a file declares, read WITHOUT its sidecar sections, so
+/// a file whose sections no longer parse can still be disclosed as the
+/// generation it declares. `None` covers both "declares none" and "not even
+/// this much is readable" — the caller's parse error separates them.
+fn declared_schema_version(yaml: &str) -> Option<u32> {
+    #[derive(serde::Deserialize)]
+    struct VersionOnly {
+        schema_version: Option<u32>,
+    }
+    // ALLOW(ok): the unreadable case IS one of the two answers this classifier
+    // reports; the caller already carries the error that explains it.
+    serde_yaml::from_str::<VersionOnly>(yaml)
+        .ok()?
+        .schema_version
 }
 
 /// One provider's governing content, plus whatever the caller must disclose

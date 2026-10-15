@@ -54,6 +54,21 @@ fn load(dir: &Path) -> anyhow::Result<LoadedIntegrations> {
     )
 }
 
+/// The disclosure one refused provider carries. Panics unless the load
+/// succeeded and that provider was refused as `Unusable`.
+fn unusable_why(dir: &Path, provider: &str) -> String {
+    let loaded = load(dir).expect("one unusable file cannot break the load");
+    loaded
+        .ignored
+        .iter()
+        .find(|i| i.provider == provider)
+        .map(|i| match &i.reason {
+            IgnoredReason::Unusable { why } => why.clone(),
+            other => panic!("expected Unusable, got {other:?}"),
+        })
+        .expect("the refused file is disclosed")
+}
+
 fn enable(dir: &Path, provider: &str) {
     IntegrationConfigStore::load(dir)
         .expect("store loads")
@@ -391,16 +406,7 @@ tools: {}
     install(dir.path(), "my-own-thing", yaml);
     enable(dir.path(), "my-own-thing");
 
-    let loaded = load(dir.path()).expect("one unusable file cannot break the load");
-    let why = loaded
-        .ignored
-        .iter()
-        .find(|i| i.provider == "my-own-thing")
-        .map(|i| match &i.reason {
-            IgnoredReason::Unusable { why } => why.clone(),
-            other => panic!("expected Unusable, got {other:?}"),
-        })
-        .expect("the refused file is disclosed");
+    let why = unusable_why(dir.path(), "my-own-thing");
     let current = format!(
         "schema_version: {}",
         holon_mcp_client::SIDECAR_SCHEMA_VERSION
@@ -411,4 +417,34 @@ tools: {}
         why.contains("static_token: \"${GITHUB_TOKEN}\""),
         "got: {why}"
     );
+    assert!(why.contains("Once it parses"), "got: {why}");
+}
+
+/// The remedy must answer the defect the classifier found. A file that PARSES
+/// and is merely a generation behind is told to re-declare; only a file that
+/// does not parse is told to make it parse.
+#[test]
+fn a_stale_but_parsing_unbundled_file_is_told_to_re_declare_not_to_fix_parsing() {
+    let current = format!(
+        "schema_version: {}",
+        holon_mcp_client::SIDECAR_SCHEMA_VERSION
+    );
+    for yaml in [
+        fixture_yaml().replace(&current, "schema_version: 1"),
+        fixture_yaml().replace(&current, ""),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        install(dir.path(), "my-own-thing", &yaml);
+        enable(dir.path(), "my-own-thing");
+
+        let why = unusable_why(dir.path(), "my-own-thing");
+        assert!(
+            !why.contains("so it parses") && !why.contains("Once it parses"),
+            "this file parses; telling the reader to make it parse is untrue: {why}\nfile: {yaml}"
+        );
+        assert!(
+            why.contains("once the file matches this format"),
+            "got: {why}\nfile: {yaml}"
+        );
+    }
 }
