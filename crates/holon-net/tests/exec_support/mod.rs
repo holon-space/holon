@@ -7,6 +7,8 @@
 
 pub mod model;
 
+mod twin_names;
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -323,25 +325,8 @@ pub fn executor(net: NetDef) -> Executor {
 
 #[cfg(feature = "naive-twins")]
 fn with_twin(exec: Executor, name: &str) -> Executor {
-    use holon_net::exec::Twin;
-    let twin = match name {
-        "hidden-reservation" => Twin::HiddenReservation,
-        "mark-by-version" => Twin::MarkByVersion,
-        "no-mark" => Twin::NoMark,
-        "no-cas" => Twin::NoCas,
-        "no-count-bound" => Twin::NoCountBound,
-        "unknown-is-failure" => Twin::UnknownIsFailure,
-        "unknown-settles-failed" => Twin::UnknownSettlesFailed,
-        "stale-done-returns-input" => Twin::StaleDoneReturnsInput,
-        "drop-late-done" => Twin::DropLateDone,
-        "drop-late-failed" => Twin::DropLateFailed,
-        "failed-settles-alone" => Twin::FailedSettlesAlone,
-        "value-before-bind" => Twin::ValueBeforeBind,
-        "occurrence-not-in-trace" => Twin::OccurrenceNotInTrace,
-        "undo-restores-answered" => Twin::UndoRestoresAnswered,
-        "settled-from-answer" => Twin::SettledFromAnswer,
-        other => panic!("HOLON_NET_TWIN={other} names no twin"),
-    };
+    let twin = twin_names::executor_twin(name)
+        .unwrap_or_else(|| panic!("HOLON_NET_TWIN={name} names no twin"));
     exec.with_twin(twin)
 }
 

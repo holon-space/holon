@@ -10,6 +10,8 @@
 //! Every twin must be red for the property it drops, not for another twin's:
 //! `scripts/twin-own-red.sh` holds the twin → property table and checks it.
 
+#[path = "exec_support/twin_names.rs"]
+mod twin_names;
 mod uft_lower_support;
 
 use std::collections::BTreeMap;
@@ -187,49 +189,50 @@ fn pbt_descriptor(m: &Model) -> TransitionDescriptor {
 }
 
 #[cfg(feature = "naive-twins")]
-fn lowered(d: &TransitionDescriptor) -> NetDef {
+fn lowered(d: &TransitionDescriptor, p: NativeParts) -> NetDef {
     use holon_net::uft::LowerTwin;
     use holon_net::uft::lower_twin;
     let twin = match std::env::var("UFT_LOWER_TWIN").ok().as_deref() {
-        None => return lower(base_net(), d, Some(parts())).expect("lowers"),
+        None => return lower(base_net(), d, Some(p)).expect("lowers"),
         Some("no-ask-hash") => LowerTwin::NoAskHash,
         Some("no-answer-inhibitor") => LowerTwin::NoAnswerInhibitor,
         Some("double-answer") => LowerTwin::DoubleAnswer,
         Some("no-expire") => LowerTwin::NoExpire,
         Some("ask-while-in-flight") => LowerTwin::AskWhileInFlight,
-        Some("no-quiescence" | "keep-work-failed") => {
-            return lower(base_net(), d, Some(parts())).expect("lowers");
+        Some(name) if twin_names::executor_twin(name).is_some() => {
+            return lower(base_net(), d, Some(p)).expect("lowers");
         }
         Some("ask-while-retry-pending") => LowerTwin::AskWhileRetryPending,
         Some("ask-while-outcome-unknown") => LowerTwin::AskWhileOutcomeUnknown,
         Some(other) => panic!("UFT_LOWER_TWIN={other} names no twin"),
     };
-    lower_twin(base_net(), d, Some(parts()), twin).expect("lowers")
+    lower_twin(base_net(), d, Some(p), twin).expect("lowers")
 }
 
 #[cfg(not(feature = "naive-twins"))]
-fn lowered(d: &TransitionDescriptor) -> NetDef {
+fn lowered(d: &TransitionDescriptor, p: NativeParts) -> NetDef {
     assert!(
         std::env::var("UFT_LOWER_TWIN").is_err(),
         "UFT_LOWER_TWIN needs --features naive-twins"
     );
-    lower(base_net(), d, Some(parts())).expect("lowers")
+    lower(base_net(), d, Some(p)).expect("lowers")
 }
 
-/// The executor of the net lowered from `d`; `UFT_LOWER_TWIN=no-quiescence`
-/// and `keep-work-failed` select executor twins.
-fn executor(d: &TransitionDescriptor) -> Executor {
-    let exec = Executor::new(lowered(d)).expect("the lowered net loads");
+/// The executor of the net lowered from `d` with native parts `p`;
+/// `UFT_LOWER_TWIN` selects a lowering or an executor twin.
+fn executor_with(d: &TransitionDescriptor, p: NativeParts) -> Executor {
+    let exec = Executor::new(lowered(d, p)).expect("the lowered net loads");
     #[cfg(feature = "naive-twins")]
+    if let Ok(name) = std::env::var("UFT_LOWER_TWIN")
+        && let Some(twin) = twin_names::executor_twin(&name)
     {
-        use holon_net::exec::Twin;
-        match std::env::var("UFT_LOWER_TWIN").as_deref() {
-            Ok("no-quiescence") => return exec.with_twin(Twin::NoQuiescence),
-            Ok("keep-work-failed") => return exec.with_twin(Twin::KeepWorkFailed),
-            _ => {}
-        }
+        return exec.with_twin(twin);
     }
     exec
+}
+
+fn executor(d: &TransitionDescriptor) -> Executor {
+    executor_with(d, parts())
 }
 
 // --------------------------------------------------------------- the SUT
@@ -247,6 +250,8 @@ struct Sut {
     hashes: BTreeMap<(usize, Sit), String>,
     /// Answer ids whose work fired.
     fired: BTreeSet<String>,
+    /// Whether the model comparisons run besides P-quiescent.
+    oracles: bool,
 }
 
 fn counter(tick: u32) -> Content {
@@ -261,6 +266,7 @@ fn value_of(v: Option<&str>) -> Value {
     v.map_or(Value::Null, text)
 }
 
+/// The full oracle: every model comparison and P-property.
 struct Test;
 
 impl StateMachineTest for Test {
@@ -268,133 +274,186 @@ impl StateMachineTest for Test {
     type Reference = Ref;
 
     fn init_test(m: &Model) -> Sut {
-        let mut exec = executor(&pbt_descriptor(m));
-        for s in SUBJECTS {
-            for (place, content) in [
-                ("Refused", Content::from([("why".to_owned(), text("0"))])),
-                ("Base", counter(0)),
-                ("OnDisk", counter(0)),
-            ] {
-                let q = exec
-                    .write(place, s, content, Duration::ZERO)
-                    .expect("the lowered net quiesces");
-                assert!(q.requests.is_empty(), "no answer, so no work");
-            }
-        }
-        let mut sut = Sut {
-            exec,
-            model: m.clone(),
-            now: Duration::ZERO,
-            requests: BTreeMap::new(),
-            parked: BTreeMap::new(),
-            hashes: BTreeMap::new(),
-            fired: BTreeSet::new(),
-        };
-        compare(&mut sut, m);
-        sut
+        init_sut(m, true)
     }
 
-    fn apply(mut sut: Sut, m: &Model, op: Op) -> Sut {
-        sut.now += Duration::from_millis(1);
-        let now = sut.now;
-        let pre = sut.model.clone();
-        let mut mid = pre.clone();
-        mid.apply_op(&op);
-        let tick = pre.next;
-        let op_text = format!("{op:?}");
-        let quiesced =
-            |q: Result<Quiesced<()>, ExecError>| q.expect("the lowered net quiesces").requests;
-        let requests = match op {
-            Op::ChangeBase(s) => quiesced(sut.exec.write("Base", SUBJECTS[s], counter(tick), now)),
-            Op::ChangeOnDisk(s) => {
-                quiesced(sut.exec.write("OnDisk", SUBJECTS[s], counter(tick), now))
-            }
-            Op::Reappear(s) => quiesced(sut.exec.write(
-                "Refused",
+    fn apply(sut: Sut, m: &Model, op: Op) -> Sut {
+        apply_op(sut, m, op)
+    }
+}
+
+/// Drives the same ops but checks only P-quiescent, so a defect in another
+/// rule does not make this property red.
+struct PQuiescentOnly;
+
+impl StateMachineTest for PQuiescentOnly {
+    type SystemUnderTest = Sut;
+    type Reference = Ref;
+
+    fn init_test(m: &Model) -> Sut {
+        init_sut(m, false)
+    }
+
+    fn apply(sut: Sut, m: &Model, op: Op) -> Sut {
+        apply_op(sut, m, op)
+    }
+}
+
+fn init_sut(m: &Model, oracles: bool) -> Sut {
+    let mut exec = executor(&pbt_descriptor(m));
+    for s in SUBJECTS {
+        for (place, content) in [
+            ("Refused", Content::from([("why".to_owned(), text("0"))])),
+            ("Base", counter(0)),
+            ("OnDisk", counter(0)),
+        ] {
+            let q = exec
+                .write(place, s, content, Duration::ZERO)
+                .expect("the lowered net quiesces");
+            assert!(q.requests.is_empty(), "no answer, so no work");
+        }
+    }
+    let mut sut = Sut {
+        exec,
+        model: m.clone(),
+        now: Duration::ZERO,
+        requests: BTreeMap::new(),
+        parked: BTreeMap::new(),
+        hashes: BTreeMap::new(),
+        fired: BTreeSet::new(),
+        oracles,
+    };
+    check_state(&mut sut, m);
+    sut
+}
+
+fn apply_op(mut sut: Sut, m: &Model, op: Op) -> Sut {
+    sut.now += Duration::from_millis(1);
+    let now = sut.now;
+    let pre = sut.model.clone();
+    let mut mid = pre.clone();
+    mid.apply_op(&op);
+    let tick = pre.next;
+    let op_text = format!("{op:?}");
+    let quiesced =
+        |q: Result<Quiesced<()>, ExecError>| q.expect("the lowered net quiesces").requests;
+    let requests = match op {
+        Op::ChangeBase(s) => quiesced(sut.exec.write("Base", SUBJECTS[s], counter(tick), now)),
+        Op::ChangeOnDisk(s) => quiesced(sut.exec.write("OnDisk", SUBJECTS[s], counter(tick), now)),
+        Op::Reappear(s) => quiesced(sut.exec.write(
+            "Refused",
+            SUBJECTS[s],
+            Content::from([("why".to_owned(), text(&tick.to_string()))]),
+            now,
+        )),
+        Op::Saved(s) => {
+            let got = sut.exec.fire(
+                "Saved",
                 SUBJECTS[s],
-                Content::from([("why".to_owned(), text(&tick.to_string()))]),
+                OccurrenceId::caller(&format!("op{tick}")),
+                Content::new(),
                 now,
-            )),
-            Op::Saved(s) => {
-                let got = sut.exec.fire(
-                    "Saved",
-                    SUBJECTS[s],
-                    OccurrenceId::caller(&format!("op{tick}")),
-                    Content::new(),
-                    now,
-                );
+            );
+            if sut.oracles {
                 assert_eq!(
                     got.is_ok(),
                     pre.subj[s].refused.is_some(),
                     "model divergence: Saved on {} gave {got:?}",
                     SUBJECTS[s]
                 );
-                got.map_or_else(|_| Vec::new(), |q| q.requests)
             }
-            Op::Answer { s, value, seen } => answer(&mut sut, &pre, s, value, seen, tick, now),
-            Op::Step => sut.exec.step(now).expect("the lowered net quiesces"),
-            Op::Complete { s, ok } => {
-                let req = sut
-                    .requests
-                    .remove(&s)
-                    .expect("precondition: a work request is in flight");
-                let result = if ok {
-                    EffectResult::Done(vec![Output::new(
-                        "Removed",
-                        &req.subject,
-                        req.input.clone(),
-                    )])
-                } else {
-                    EffectResult::Failed(Cause::definite("disk full"))
-                };
-                sut.exec
-                    .complete(req.attempt, result, now)
-                    .expect("the attempt is known")
-                    .requests
-            }
-            Op::Lost(s) => {
-                let req = sut
-                    .requests
-                    .remove(&s)
-                    .expect("precondition: a work request is in flight");
-                let requests = sut
-                    .exec
-                    .complete(
-                        req.attempt,
-                        EffectResult::Unknown(Cause::definite("lost")),
-                        now,
-                    )
-                    .expect("the attempt is known")
-                    .requests;
-                sut.parked.insert(s, req.occurrence);
-                requests
-            }
-            Op::Resolve { s, verify } => {
-                let occurrence = sut
-                    .parked
-                    .remove(&s)
-                    .expect("precondition: an occurrence is parked");
-                let resolution = if verify {
-                    Resolution::Verify(vec![Output::new(
-                        "Removed",
-                        &Subject::new(SUBJECTS[s]),
-                        Content::new(),
-                    )])
-                } else {
-                    Resolution::Drop
-                };
-                sut.exec
-                    .resolve(&occurrence, resolution, now)
-                    .expect("the occurrence is parked")
-                    .requests
-            }
-        };
-        no_work_failed_stands(&sut, &op_text);
-        no_answered_stands(&sut, &op_text);
+            got.map_or_else(|_| Vec::new(), |q| q.requests)
+        }
+        Op::Answer { s, value, seen } => answer(&mut sut, &pre, s, value, seen, tick, now),
+        Op::Step => sut.exec.step(now).expect("the lowered net quiesces"),
+        Op::Complete { s, ok } => {
+            let req = sut
+                .requests
+                .remove(&s)
+                .expect("precondition: a work request is in flight");
+            let result = if ok {
+                EffectResult::Done(vec![Output::new(
+                    "Removed",
+                    &req.subject,
+                    req.input.clone(),
+                )])
+            } else {
+                EffectResult::Failed(Cause::definite("disk full"))
+            };
+            sut.exec
+                .complete(req.attempt, result, now)
+                .expect("the attempt is known")
+                .requests
+        }
+        Op::Lost(s) => {
+            let req = sut
+                .requests
+                .remove(&s)
+                .expect("precondition: a work request is in flight");
+            let requests = sut
+                .exec
+                .complete(
+                    req.attempt,
+                    EffectResult::Unknown(Cause::definite("lost")),
+                    now,
+                )
+                .expect("the attempt is known")
+                .requests;
+            sut.parked.insert(s, req.occurrence);
+            requests
+        }
+        Op::Resolve { s, verify } => {
+            let occurrence = sut
+                .parked
+                .remove(&s)
+                .expect("precondition: an occurrence is parked");
+            let resolution = if verify {
+                Resolution::Verify(vec![Output::new(
+                    "Removed",
+                    &Subject::new(SUBJECTS[s]),
+                    Content::new(),
+                )])
+            } else {
+                Resolution::Drop
+            };
+            sut.exec
+                .resolve(&occurrence, resolution, now)
+                .expect("the occurrence is parked")
+                .requests
+        }
+    };
+    no_work_failed_stands(&sut, &op_text);
+    no_answered_stands(&sut, &op_text);
+    if sut.oracles {
         started(&mut sut, &mid, m, requests);
-        compare(&mut sut, m);
-        sut.model = m.clone();
-        sut
+    } else {
+        for req in requests {
+            let s = SUBJECTS
+                .iter()
+                .position(|x| *x == req.subject.as_str())
+                .expect("a known subject");
+            sut.requests.insert(s, req);
+        }
+    }
+    check_state(&mut sut, m);
+    sut.model = m.clone();
+    sut
+}
+
+/// The full state comparison for `Test`; the hash bookkeeping `Answer` needs
+/// for both.
+fn check_state(sut: &mut Sut, m: &Model) {
+    if sut.oracles {
+        compare(sut, m);
+        return;
+    }
+    for (i, s) in SUBJECTS.iter().enumerate() {
+        if let (Some(ask), Some(sit)) = (
+            sut.exec.derive(&asks_place(T), &Subject::new(s)),
+            m.subj[i].offered(),
+        ) {
+            sut.hashes.entry((i, sit)).or_insert(get(&ask, HASH_FIELD));
+        }
     }
 }
 
@@ -457,6 +516,9 @@ fn answer(
         Err(e) => panic!("Answer refused for an unplanned reason: {e}"),
     };
     let requests = got.as_ref().map_or_else(|_| Vec::new(), Clone::clone);
+    if !sut.oracles {
+        return requests;
+    }
     match (got.map(|_| ()), pre.answer_result(s)) {
         (Ok(()), Err(Refusal::AlreadyAnswered)) => {
             panic!("P3 a second answer on {subject} was accepted: two Answered for one ask")
@@ -645,12 +707,41 @@ prop_state_machine! {
     #[test]
     fn lowered_manual_transition(sequential 1..40 => Test);
 
-    /// P-quiescent runs in `apply`; this name carries it.
     #[test]
-    fn p_quiescent_no_answered_or_work_failed_stands(sequential 1..40 => Test);
+    fn p_quiescent_only_names_its_own_defect(sequential 1..40 => PQuiescentOnly);
 }
 
 // ------------------------------------------------- structural checks
+
+/// A test that lowers and loads a net itself skips the twin factory, so
+/// every twin stays green there.
+#[test]
+fn no_test_bypasses_the_twin_factory() {
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut files = vec![tests.join("uft_lower.rs")];
+    for dir in [tests.clone(), tests.join("exec_support")] {
+        for entry in std::fs::read_dir(&dir).expect("the tests directory reads") {
+            let path = entry.expect("a directory entry").path();
+            let name = path.file_name().expect("a file name").to_string_lossy();
+            let exec_test = dir == tests && name.starts_with("exec_");
+            if path.extension().is_some_and(|e| e == "rs") && (exec_test || dir != tests) {
+                files.push(path);
+            }
+        }
+    }
+    let needle = ["Executor::new(", "lower("].concat();
+    let bypassing: Vec<_> = files
+        .iter()
+        .filter(|f| {
+            let src = std::fs::read_to_string(f).expect("a test source reads");
+            src.split_whitespace().collect::<String>().contains(&needle)
+        })
+        .collect();
+    assert!(
+        bypassing.is_empty(),
+        "construct the executor with executor_with / the exec_support factory, not {needle}: {bypassing:?}"
+    );
+}
 
 #[test]
 fn ask_row_carries_the_declared_input_type() {
@@ -682,7 +773,7 @@ fn an_auto_descriptor_lowers_one_to_one() {
     d.ask = None;
     let mut p = parts();
     p.preview = None;
-    let mut exec = Executor::new(lower(base_net(), &d, Some(p)).expect("lowers")).expect("loads");
+    let mut exec = executor_with(&d, p);
     let requests = situation(&mut exec);
     assert_eq!(requests.len(), 1);
     assert_eq!(&*requests[0].transition, T);
@@ -733,7 +824,7 @@ fn a_pure_work_body_reads_the_answer_value_and_id_under_the_adapter_keys() {
     p.body = NativeBody::Pure(Arc::new(|s: &Subject, input: &Content| {
         Ok(vec![Output::new("Removed", s, input.clone())])
     }));
-    let mut exec = Executor::new(lower(base_net(), &d, Some(p)).expect("lowers")).expect("loads");
+    let mut exec = executor_with(&d, p);
     assert!(situation(&mut exec).is_empty(), "no answer, so no work");
     let ask = exec
         .derive(&asks_place(T), &Subject::new("a"))
