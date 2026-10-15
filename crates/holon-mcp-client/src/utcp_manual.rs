@@ -34,6 +34,7 @@ pub struct UtcpManual {
     pub utcp_version: String,
     /// The publisher's own version of this manual's content.
     pub manual_version: String,
+    #[serde(deserialize_with = "unique_tools")]
     pub tools: Vec<UtcpTool>,
     /// Manual-level keys this build does not model, kept so an export gives
     /// back what was imported.
@@ -47,7 +48,40 @@ pub struct UtcpManual {
 /// map: content survives an export, the position it sat in does not. An empty
 /// one contributes no keys, so a manual that carried none exports
 /// byte-identically.
-pub type Extras = std::collections::BTreeMap<String, OrderedJson>;
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[serde(transparent)]
+pub struct Extras(std::collections::BTreeMap<String, OrderedJson>);
+
+impl std::ops::Deref for Extras {
+    type Target = std::collections::BTreeMap<String, OrderedJson>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Extras {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::transition_sidecar::unique_keys(deserializer, "a sidecar manual key").map(Self)
+    }
+}
+
+/// Reads the manual's `tools:` list, refusing a tool name it carries twice:
+/// every reader keys the tools by name — the transport builds one call per
+/// name — so the second declaration would silently replace the first.
+fn unique_tools<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<UtcpTool>, D::Error> {
+    let tools = Vec::<UtcpTool>::deserialize(deserializer)?;
+    let mut seen = std::collections::HashSet::new();
+    if let Some(dup) = tools.iter().find(|t| !seen.insert(&t.name)) {
+        return Err(serde::de::Error::custom(format!(
+            "utcp.tools `{}` is declared twice",
+            dup.name
+        )));
+    }
+    Ok(tools)
+}
 
 impl UtcpManual {
     /// Every key in this manual this build does not model, dotted, in the order
@@ -232,8 +266,15 @@ impl<'de> serde::de::Visitor<'de> for OrderedJsonVisitor {
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<OrderedJson, A::Error> {
-        let mut entries = Vec::new();
+        let mut entries: Vec<(String, OrderedJson)> = Vec::new();
         while let Some((key, value)) = map.next_entry::<String, OrderedJson>()? {
+            // Both would survive here, but every reader of this document goes
+            // through `serde_json::Value`, which keeps one.
+            if entries.iter().any(|(seen, _)| *seen == key) {
+                return Err(serde::de::Error::custom(format!(
+                    "the JSON object key `{key}` is declared twice"
+                )));
+            }
             entries.push((key, value));
         }
         Ok(OrderedJson::Object(entries))

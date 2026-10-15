@@ -51,6 +51,12 @@ use crate::integration_config::UnresolvedVar;
 use crate::integration_config::VarLookup;
 use crate::redaction::Redactor;
 
+fn unique_auth_params<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, String>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "holon.auth.oauth2.auth_params")
+}
+
 /// OAuth2 refresh-token-grant configuration, as declared under
 /// `holon.auth.oauth2` in a sidecar.
 ///
@@ -77,7 +83,7 @@ pub struct RestOAuth2Config {
     /// provider-specific knobs that govern whether a refresh token is issued at
     /// all (Google needs `access_type=offline` and `prompt=consent`). Keeping
     /// them in the sidecar is what lets the flow engine stay provider-generic.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_auth_params")]
     pub auth_params: std::collections::HashMap<String, String>,
     /// Env var holding the OAuth client id. Exactly one of `client_id_env` /
     /// `client_id_file` / `client_id_keychain` must be set.

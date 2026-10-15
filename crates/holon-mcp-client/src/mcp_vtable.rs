@@ -35,6 +35,36 @@ use crate::mcp_call_surface::McpCallSurface;
 // YAML sidecar config types
 // ============================================================================
 
+fn unique_uri_params<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, UriParamValue>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "vtable.uri_params")
+}
+
+fn unique_filter_mapping<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, FilterColumnConfig>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "vtable.filter_mapping")
+}
+
+fn unique_static_args<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<serde_json::Map<String, serde_json::Value>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "vtable.static_args")
+}
+
+fn unique_columns<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, ColumnConfig>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "vtable.columns")
+}
+
+fn unique_enumerate_fields<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, String>>, D::Error> {
+    crate::transition_sidecar::unique_keys_opt(deserializer, "enumerate_from.fields")
+}
+
 /// What a source honestly promises about a fetch — the property that decides
 /// which maintenance mechanism is SOUND for an entity, declared rather than
 /// inferred (RULED 2026-08-06).
@@ -89,7 +119,7 @@ pub struct VtableConfig {
     #[serde(default)]
     pub list_resource: Option<String>,
     /// Parameters to expand in the resource URI template.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_uri_params")]
     pub uri_params: HashMap<String, UriParamValue>,
     /// If true, write fetched results back to the cache table (opportunistic
     /// caching).
@@ -97,19 +127,19 @@ pub struct VtableConfig {
     pub write_through: bool,
     /// Maps column names to MCP tool parameters with supported operators.
     /// Only meaningful for tool-based mode.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_filter_mapping")]
     pub filter_mapping: HashMap<String, FilterColumnConfig>,
     /// Constant arguments injected into every tool call.
     ///
     /// Merged into the params dict alongside WHERE-derived and enumeration-
     /// derived values. Useful for `minimal_output: false`, fixed `state`
     /// filters, etc. WHERE constraints win over static args on key collision.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_static_args")]
     pub static_args: serde_json::Map<String, serde_json::Value>,
     /// Per-column extraction overrides. The map key is the SQL column name;
     /// the value declares how to read it out of each response record.
     /// Columns without an entry use a flat `obj[column_name]` lookup.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_columns")]
     pub columns: HashMap<String, ColumnConfig>,
     /// Pagination strategy. When unset, only one call is made per fetch.
     #[serde(default)]
@@ -256,7 +286,11 @@ pub struct EnumerateFrom {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     /// Paired multi-field — `tool_param_name → parent_column_name`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "unique_enumerate_fields"
+    )]
     pub fields: Option<HashMap<String, String>>,
     /// Optional SQL predicate appended as `WHERE {where}` to the enumeration
     /// query. Runs as pure local SQL against the parent cache table, so

@@ -409,6 +409,165 @@ fn a_duplicate_key_in_a_map_section_is_a_named_load_error() {
         );
     }
 }
+
+/// An MCP peer's file, with the sections a case replaces left out.
+const MCP_FILE: &str = "transport:\n  http:\n    uri: https://example.invalid/mcp\n";
+
+/// A `utcp:` peer's file: one manual tool, so a `holon:` entry for it loads.
+const UTCP_FILE: &str = "\
+utcp:
+  utcp_version: \"1.0\"
+  manual_version: \"1\"
+  tools:
+    - name: list_items
+      tool_call_template:
+        call_template_type: http
+        url: https://example.invalid/items
+        http_method: GET
+";
+
+/// Every map section of a sidecar file, not only the four #196 guarded: a
+/// plain map keeps the last value of a duplicate key silently, which is a
+/// declaration the author wrote and the system never read.
+///
+/// The file parse is the one gate ([`IntegrationFileConfig::from_yaml`] hands
+/// the same text to [`McpSidecar::from_yaml`]), so each case goes through it
+/// and the refusal must name both the section and the key.
+#[test]
+fn a_duplicate_key_in_any_map_section_is_a_named_load_error() {
+    let entity_sync = |sync: &str| format!("{MCP_FILE}entities:\n  task:\n    sync:\n{sync}");
+    let entity_vtable =
+        |vtable: &str| format!("{MCP_FILE}entities:\n  task:\n    vtable:\n{vtable}");
+    let searching = "      search_tool: find_tasks\n      extract_path: tasks\n";
+    let cases = [
+        (
+            entity_sync(
+                "      list_tool: list_tasks\n      extract_path: tasks\n      list_params: { \
+                 limit: 1, limit: 2 }\n",
+            ),
+            "sync.list_params `limit` is declared twice",
+        ),
+        (
+            entity_sync(
+                "      list_tool: list_tasks\n      extract_path: tasks\n      project: { start: \
+                 { path: [start.dateTime] }, start: { exists: start.date } }\n",
+            ),
+            "sync.project `start` is declared twice",
+        ),
+        (
+            entity_sync(
+                "      list_resource: \"tasks/{project}\"\n      uri_params: { project: \"1\", \
+                 project: \"2\" }\n",
+            ),
+            "sync.uri_params `project` is declared twice",
+        ),
+        (
+            MCP_FILE.to_string()
+                + "tools:\n  update_task:\n    effect: read\n    param_overrides: { project_id: \
+                   { type_hint: text }, project_id: { type_hint: text } }\n",
+            "tools.param_overrides `project_id` is declared twice",
+        ),
+        (
+            entity_vtable(
+                "      list_resource: \"tasks/{project}\"\n      uri_params: { project: \"1\", \
+                 project: \"2\" }\n",
+            ),
+            "vtable.uri_params `project` is declared twice",
+        ),
+        (
+            entity_vtable(
+                &(searching.to_string()
+                    + "      filter_mapping: { due: { param: due }, due: { param: when } }\n"),
+            ),
+            "vtable.filter_mapping `due` is declared twice",
+        ),
+        (
+            entity_vtable(
+                &(searching.to_string() + "      static_args: { state: open, state: closed }\n"),
+            ),
+            "vtable.static_args `state` is declared twice",
+        ),
+        (
+            entity_vtable(
+                &(searching.to_string()
+                    + "      columns: { owner: { source_path: owner.login }, owner: { \
+                       source_path: owner.id } }\n"),
+            ),
+            "vtable.columns `owner` is declared twice",
+        ),
+        (
+            entity_vtable(
+                &(searching.to_string()
+                    + "      filter_mapping:\n        owner:\n          param: owner\n          \
+                       enumerate_from: { entity: repo, fields: { owner: owner, owner: login } }\n"),
+            ),
+            "enumerate_from.fields `owner` is declared twice",
+        ),
+        (
+            "transport:\n  child_process:\n    command: echo\n    env: { A: \"1\", A: \"2\" }\n"
+                .to_string(),
+            "transport.child_process.env `A` is declared twice",
+        ),
+        (
+            format!("{UTCP_FILE}holon:\n  tools:\n    list_items: {{}}\n    list_items: {{}}\n"),
+            "holon.tools `list_items` is declared twice",
+        ),
+        (
+            format!(
+                "{UTCP_FILE}holon:\n  tools:\n    list_items:\n      query: {{ since: \"1\", \
+                 since: \"2\" }}\n"
+            ),
+            "holon.tools.query `since` is declared twice",
+        ),
+        (
+            format!(
+                "{UTCP_FILE}holon:\n  auth:\n    oauth2:\n      token_url: \
+                 https://example.invalid/token\n      refresh_token_file: refresh\n      \
+                 auth_params: {{ prompt: consent, prompt: none }}\n"
+            ),
+            "holon.auth.oauth2.auth_params `prompt` is declared twice",
+        ),
+        (
+            UTCP_FILE.replace("  tools:\n", "  tools:\n    - name: list_items\n      tool_call_template:\n        call_template_type: http\n        url: https://example.invalid/items\n        http_method: GET\n"),
+            "utcp.tools `list_items` is declared twice",
+        ),
+        (
+            UTCP_FILE.replace(
+                "  manual_version: \"1\"\n",
+                "  manual_version: \"1\"\n  info: a\n  info: b\n",
+            ),
+            "`info` is declared twice",
+        ),
+        (
+            UTCP_FILE.replace(
+                "      tool_call_template:\n",
+                "      inputs: { type: object, properties: { a: {}, a: {} } }\n      \
+                 tool_call_template:\n",
+            ),
+            "`a` is declared twice",
+        ),
+    ];
+    // Every case is judged, so one run names each section that still accepts a
+    // duplicate instead of stopping at the first.
+    let mut accepted = Vec::new();
+    for (yaml, expected) in cases {
+        match IntegrationFileConfig::from_yaml(&yaml) {
+            Ok(_) => accepted.push(format!("{expected}: the file loaded")),
+            Err(error) => {
+                let error = format!("{error:#}");
+                if !error.contains(expected) {
+                    accepted.push(format!("{expected}: refused as {error:?}"));
+                }
+            }
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "a duplicate key must be refused by the section's own name:\n{}",
+        accepted.join("\n")
+    );
+}
+
 #[test]
 fn a_malformed_undo_is_a_named_load_error() {
     let undo = "undo: { reversible: false }";

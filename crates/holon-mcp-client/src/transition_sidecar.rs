@@ -137,7 +137,7 @@ where
         type Value = M;
 
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "a map of {} names to {}s", self.noun, self.noun)
+            write!(f, "a map whose {} keys are each declared once", self.noun)
         }
 
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
@@ -156,6 +156,50 @@ where
         }
     }
     deserializer.deserialize_map(Unique {
+        noun,
+        map: std::marker::PhantomData,
+    })
+}
+
+/// [`unique_keys`] for a section whose absence is itself a declaration, so the
+/// field keeps its `Option`.
+pub(crate) fn unique_keys_opt<'de, D, V, M>(
+    deserializer: D,
+    noun: &'static str,
+) -> Result<Option<M>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+    M: Default + Extend<(String, V)>,
+{
+    struct Opt<V, M> {
+        noun: &'static str,
+        map: std::marker::PhantomData<fn() -> (V, M)>,
+    }
+    impl<'de, V: Deserialize<'de>, M: Default + Extend<(String, V)>> Visitor<'de> for Opt<V, M> {
+        type Value = Option<M>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(
+                f,
+                "a map whose {} keys are each declared once, or nothing",
+                self.noun
+            )
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            unique_keys(d, self.noun).map(Some)
+        }
+    }
+    deserializer.deserialize_option(Opt {
         noun,
         map: std::marker::PhantomData,
     })

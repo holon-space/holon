@@ -73,6 +73,30 @@ pub(crate) fn unique_tools<'de, D: serde::Deserializer<'de>>(
     crate::transition_sidecar::unique_keys(deserializer, "tool")
 }
 
+fn unique_list_params<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, serde_json::Value>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "sync.list_params")
+}
+
+fn unique_projections<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, crate::mcp_sync_strategy::Projection>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "sync.project")
+}
+
+fn unique_uri_params<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, String>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "sync.uri_params")
+}
+
+fn unique_param_overrides<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<HashMap<String, ParamOverride>>, D::Error> {
+    crate::transition_sidecar::unique_keys_opt(deserializer, "tools.param_overrides")
+}
+
 /// A sidecar-declared derived view: `CREATE MATERIALIZED VIEW {prefix}{name} AS
 /// {sql}`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -274,7 +298,7 @@ pub struct SyncConfig {
     /// Required when `list_tool` is set.
     pub extract_path: Option<String>,
     /// Static parameters passed to the list tool.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_list_params")]
     pub list_params: HashMap<String, serde_json::Value>,
     /// Optional resumable incremental sync token (tool sync only). For paging
     /// through one result set use `paginate` — see [`CursorConfig`].
@@ -286,13 +310,13 @@ pub struct SyncConfig {
     /// scalars into flat columns (e.g. Google Calendar's `start.dateTime` →
     /// `start`, `start.date` presence → `all_day`). See
     /// [`crate::mcp_sync_strategy::Projection`].
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_projections")]
     pub project: HashMap<String, crate::mcp_sync_strategy::Projection>,
     /// MCP resource URI (or URI template) to read for listing records.
     /// Required for resource-based sync.
     pub list_resource: Option<String>,
     /// Parameters to expand in the resource URI template (e.g. `{project_id}`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_uri_params")]
     pub uri_params: HashMap<String, String>,
     /// Optional polling interval. When set, the integration emits a poll tick
     /// for this entity on this cadence (serialized with notification resyncs).
@@ -479,6 +503,7 @@ pub struct ToolConfig {
     pub affected_fields: Option<Vec<String>>,
     pub triggered_by: Option<Vec<TriggerConfig>>,
     pub precondition: Option<RhaiPrecondition>,
+    #[serde(default, deserialize_with = "unique_param_overrides")]
     pub param_overrides: Option<HashMap<String, ParamOverride>>,
     pub undo: Option<UndoConfig>,
     /// Write-effect classification (leases/read-write ruling). Governs whether

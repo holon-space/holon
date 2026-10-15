@@ -40,6 +40,24 @@ pub const HOLON_TOOLS_KEY: &str = "holon.tools";
 /// Where a connection's OAuth2 block lives.
 pub const HOLON_OAUTH2_KEY: &str = "holon.auth.oauth2";
 
+fn unique_env<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, String>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "transport.child_process.env")
+}
+
+fn unique_holon_tools<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, HolonToolConfig>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "holon.tools")
+}
+
+fn unique_query_params<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, String>, D::Error> {
+    crate::transition_sidecar::unique_keys(deserializer, "holon.tools.query")
+}
+
 /// How a sidecar reaches an MCP *server*: `child_process` over stdio, or
 /// `http` over Streamable HTTP. Exactly one must be set.
 ///
@@ -62,7 +80,7 @@ pub struct ChildProcessTransport {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_env")]
     pub env: HashMap<String, String>,
 }
 
@@ -100,7 +118,7 @@ pub struct HolonSection {
     pub poll_interval: Option<crate::mcp_sidecar::SyncInterval>,
     /// Keyed by the manual's tool name. A key naming no declared tool is
     /// refused at load.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_holon_tools")]
     pub tools: HashMap<String, HolonToolConfig>,
     /// Set when this connection mirrors a remote LIST: one generic reconciler
     /// then serves it, parameterised by what is declared here
@@ -119,7 +137,7 @@ pub struct HolonSection {
 #[serde(deny_unknown_fields)]
 pub struct HolonToolConfig {
     /// Query parameters; values may be literals or `{arg}` placeholders.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_query_params")]
     pub query: HashMap<String, String>,
     /// JSON request-body template for a writing method. Every string leaf is
     /// placeholder-filled; a leaf that is EXACTLY one placeholder takes the
