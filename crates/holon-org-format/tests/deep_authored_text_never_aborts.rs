@@ -1,6 +1,10 @@
 //! Deeply nested authored text reads and writes back without taking the
 //! process down: an unedited file keeps its bytes or the render names what it
 //! changes, and block text holding the same shape reads back as it writes.
+//!
+//! What a wall clock or minutes of work would judge is `#[ignore]`d here and
+//! runs as a quiet gate timing step (`just org-deep-text-timing`); what is
+//! left reads no clock, so a loaded host cannot turn it red.
 
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
@@ -156,14 +160,18 @@ fn check(shape: Shape, size: usize, where_: Place) -> Result<(), TestCaseError> 
     Ok(())
 }
 
+const PLACES: [Place; 3] = [Place::FirstLine, Place::HeadlineBody, Place::HeadlineTitle];
+
 /// A line of stars in a body is nested bold to org, which emacs 30.2 reads
 /// only up to its lisp depth (it fails at 5000 stars), and Holon re-parses
-/// level by level; `check` writes the line into a body in every place.
+/// level by level; `check` writes the line into a body in every place. The
+/// 100 000-marker rung of the same shape is minutes of work even unloaded, so
+/// it runs in `deep_authored_text_at_scale_reads_and_writes_back`.
 #[test]
-fn a_line_of_100k_markers_reads_and_writes_back() {
+fn a_line_of_10k_markers_reads_and_writes_back() {
     for marker in ['*', '[', '('] {
-        for where_ in [Place::FirstLine, Place::HeadlineBody, Place::HeadlineTitle] {
-            check(Shape::Markers(marker), 100_000, where_).unwrap();
+        for where_ in PLACES {
+            check(Shape::Markers(marker), 10_000, where_).unwrap();
         }
     }
 }
@@ -181,7 +189,12 @@ fn cost(line: &str) -> std::time::Duration {
         .expect("three runs")
 }
 
+/// A wall-clock budget: the oracle reads the host's load as well as the code,
+/// so it is a quiet gate timing step (`just org-deep-text-timing`), not a lane
+/// test. `a_marker_line_allocates_linear_in_its_length` holds the same shapes
+/// to a load-free bound.
 #[test]
+#[ignore = "wall-clock budget: a quiet gate timing step (just org-deep-text-timing)"]
 fn a_marker_line_costs_time_linear_in_its_length() {
     let mut superlinear = Vec::new();
     for unit in [
@@ -216,7 +229,13 @@ fn render_cost(line: &str) -> std::time::Duration {
 /// One mark every few characters is the render's worst case: a render pass
 /// that compares each mark with the others is quadratic in the line. The
 /// read-and-write test above uses lines too short for that to show.
+///
+/// A wall-clock budget, so it runs as a quiet gate timing step
+/// (`just org-deep-text-timing`);
+/// `a_marked_line_renders_allocating_linear_in_its_length` is the lane's
+/// load-free half.
 #[test]
+#[ignore = "wall-clock budget: a quiet gate timing step (just org-deep-text-timing)"]
 fn a_marked_line_renders_in_time_linear_in_its_length() {
     let mut superlinear = Vec::new();
     for unit in ["*a* ", "*/a/* ", "=a= ", "[[a]] "] {
@@ -242,6 +261,55 @@ fn allocated(line: &str) -> usize {
     ALLOCATED.with(Cell::get) - before
 }
 
+/// The bytes one lossless render of the content and marks `line` reads as
+/// allocates.
+fn render_allocated(line: &str) -> usize {
+    let (content, marks) = extract_inline_marks(line);
+    let before = ALLOCATED.with(Cell::get);
+    render_lossless(&content, &marks).unwrap_or_else(|e| panic!("render failed: {e:#}"));
+    ALLOCATED.with(Cell::get) - before
+}
+
+/// The load-free half of `a_marker_line_costs_time_linear_in_its_length`: the
+/// same units and lengths, judged by allocated bytes, and to the same loose
+/// bound (4x the input may cost 8x, between linear and quadratic).
+#[test]
+fn a_marker_line_allocates_linear_in_its_length() {
+    let mut superlinear = Vec::new();
+    for unit in [
+        "*", "/", "+", "_", "[", "[[", "{", "(", "((", "~", "=", "*a* ", "*/a/* ", "[[a]] ",
+    ] {
+        let short = allocated(&unit.repeat(1_000));
+        let long = allocated(&unit.repeat(4_000));
+        if long > short * 8 {
+            superlinear.push(format!("{unit:?}: 1k {short} B, 4k {long} B"));
+        }
+    }
+    assert!(
+        superlinear.is_empty(),
+        "4x the length allocated more than 8x the bytes:\n{}",
+        superlinear.join("\n")
+    );
+}
+
+/// The load-free half of `a_marked_line_renders_in_time_linear_in_its_length`.
+#[test]
+fn a_marked_line_renders_allocating_linear_in_its_length() {
+    let mut superlinear = Vec::new();
+    for unit in ["*a* ", "*/a/* ", "=a= ", "[[a]] "] {
+        let short = render_allocated(&unit.repeat(16_000 / unit.len()));
+        let long = render_allocated(&unit.repeat(64_000 / unit.len()));
+        if long > short * 8 {
+            superlinear.push(format!("{unit:?}: 16k {short} B, 64k {long} B"));
+        }
+    }
+    assert!(
+        superlinear.is_empty(),
+        "4x the length allocated more than 8x the bytes to render:\n{}",
+        superlinear.join("\n")
+    );
+}
+
 #[test]
 fn a_line_of_closed_markup_allocates_linear_in_its_length() {
     let mut superlinear = Vec::new();
@@ -265,9 +333,41 @@ proptest! {
     #[test]
     fn deeply_nested_text_reads_and_writes_back(
         shape in shape(),
-        size in 2_000usize..8_000,
+        size in 1_000usize..3_000,
         where_ in prop_oneof![Just(Place::FirstLine), Just(Place::HeadlineBody), Just(Place::HeadlineTitle)],
     ) {
         check(shape, size, where_)?;
+    }
+}
+
+const SHAPES: [Shape; 9] = [
+    Shape::Markers('*'),
+    Shape::NestedEmphasis,
+    Shape::NestedSuperscript,
+    Shape::NestedFootnoteReferences,
+    Shape::NestedLinkDescriptions,
+    Shape::NestedQuoteBlocks,
+    Shape::NestedList,
+    Shape::OpenEmphasisRun,
+    Shape::ClosedEmphasisRun,
+];
+
+/// The scale rungs of the two round trips above: a line of 100 000 markers,
+/// and every shape at the depth the property test no longer reaches. Minutes
+/// of work in a debug build, which on a loaded host reads as a timeout rather
+/// than as a verdict, so this runs as a quiet gate timing step
+/// (`just org-deep-text-timing`) where the load is logged.
+#[test]
+#[ignore = "minutes of work: a quiet gate timing step (just org-deep-text-timing)"]
+fn deep_authored_text_at_scale_reads_and_writes_back() {
+    for marker in ['*', '[', '('] {
+        for where_ in PLACES {
+            check(Shape::Markers(marker), 100_000, where_).unwrap();
+        }
+    }
+    for shape in SHAPES {
+        for where_ in PLACES {
+            check(shape, 8_000, where_).unwrap();
+        }
     }
 }

@@ -496,6 +496,23 @@ measure-latency cases='16' *FLAGS:
     echo "raw log: target/gate-logs/holon-latency.log ($(grep -c holon_latency target/gate-logs/holon-latency.log || true) events)"
     python3 scripts/measure_latency.py target/gate-logs/holon-latency.log --max-contention-ms 30
 
+# The clock-reading half of the org deep-authored-text tests: the linearity of
+# the parse and the render pass, and the 100k-marker and 8k-nesting round trips.
+# Their oracles read the host's load as well as the code (a loaded host made
+# them red in every lane, #337), so they are `#[ignore]`d in the test target and
+# run here, as a quiet gate timing step. `cargo test` rather than nextest: the
+# scale rungs are minutes of work, past any per-test cap that fits a lane.
+org-deep-text-timing *FLAGS:
+    #!/usr/bin/env bash
+    # pipefail is REQUIRED for the same reason as `hand-authored`: without it the
+    # recipe's exit status is `tee`'s, so a failing test would report success.
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    echo "org-deep-text-timing: load before $(sysctl -n vm.loadavg 2>/dev/null || uptime)"
+    cargo test -p holon-org-format --test deep_authored_text_never_aborts \
+        -- --ignored --nocapture --test-threads=1 {{FLAGS}} 2>&1 \
+        | tee target/gate-logs/org-deep-text-timing.log
+
 # Self-check for the clock-origin split in the latency log parsers (D119.a).
 # The Rust side keeps UI and facade samples apart with types; these scripts have
 # no type system to lean on, and that is where the split leaked once already

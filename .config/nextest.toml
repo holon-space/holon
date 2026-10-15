@@ -116,15 +116,11 @@ filter = "binary(hand_authored_regressions)"
 slow-timeout = { period = "60s", terminate-after = 49 }  # 49 min hard cap
 
 
-# The 100k-marker and deep-nesting round trips take 72-105 s and 8-73 s alone
-# in a debug build (measured 2026-10-03), close to the 2 min default.
+# The round trips over deeply nested text are tens of seconds in a debug build
+# (the 10k-marker line and the nesting property, measured 2026-10-15). What was
+# minutes — the 100k-marker rung and the two wall-clock linearity budgets — is
+# `#[ignore]`d and runs under `just org-deep-text-timing` instead, so no
+# per-test cap here has to hold a loaded host's worst case (#337).
 [[profile.default.overrides]]
 filter = "binary_id(holon-org-format::deep_authored_text_never_aborts)"
 slow-timeout = { period = "60s", terminate-after = 5 }  # 5 min hard cap
-
-# The linearity tests compare the wall-clock time of an input with that of one
-# 4x as large, so CPU a neighbour test takes lands in one measurement and not
-# the other. Each needs every test thread to itself.
-[[profile.default.overrides]]
-filter = "package(holon-org-format) & (test(=a_marker_line_costs_time_linear_in_its_length) + test(=a_marked_line_renders_in_time_linear_in_its_length) + test(~each_render_pass_costs_time_linear_in_its_work))"
-threads-required = "num-test-threads"
