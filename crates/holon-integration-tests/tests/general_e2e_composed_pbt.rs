@@ -127,9 +127,19 @@ fn general_e2e_composed_pbt() {
             ) == 0,
         )
     });
+    // A kind the drawn wiring promised but the generator only ever declined
+    // for an alphabet-gone reason left the alphabet silently. Caught like
+    // `reach` above, so a diverged run reports its own panic — and the
+    // per-kind dashboard prints either way.
+    let alphabet = std::panic::catch_unwind(
+        holon_integration_tests::pbt::alphabet_coverage::assert_no_kind_left_the_alphabet,
+    );
     match result {
         Ok(()) => {
             if let Err(panic) = reach {
+                std::panic::resume_unwind(panic);
+            }
+            if let Err(panic) = alphabet {
                 std::panic::resume_unwind(panic);
             }
             if let Err(breach) = tally.check_floor(cases) {

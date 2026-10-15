@@ -5,6 +5,7 @@
 
 pub mod action_actor_state;
 pub mod advice_expectation;
+pub mod alphabet_coverage;
 pub mod bisect_driver;
 pub mod block_state;
 pub mod clock_state;

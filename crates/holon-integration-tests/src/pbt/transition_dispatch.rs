@@ -490,13 +490,19 @@ macro_rules! declare_e2e_transitions {
                 // generator (the dynamic `weighted_generator` would Fail it
                 // anyway, but the manifest gate makes the exclusion explicit
                 // and reason-free).
-                if <$ty as ::holon_pbt_core::TransitionFactory<
+                let promised = <$ty as ::holon_pbt_core::TransitionFactory<
                     $crate::pbt::reference_state::ReferenceState,
                 >>::required_wiring()
                     .satisfied_by(&state.harness.wiring)
                     && state.caps_available(&<$ty as ::holon_pbt_core::TransitionFactory<
                         $crate::pbt::reference_state::ReferenceState,
-                    >>::required_caps())
+                    >>::required_caps());
+                // The promise `inv-alphabet-coverage` judges: admitted by the
+                // manifest, so the run owes evidence it is drawable.
+                if promised {
+                    $crate::pbt::alphabet_coverage::note_promised(stringify!($variant));
+                }
+                if promised
                     // Absent, not rejected, while the model describes no such
                     // step (a block on disk in two files).
                     && state.copies_window_gate(stringify!($variant)).is_good()
@@ -511,9 +517,16 @@ macro_rules! declare_e2e_transitions {
                         variant_weight_multiplier(stringify!($variant)),
                         |v| $enum_name::from(v),
                     ) {
-                        ::validated::Validated::Good(Some(arm)) => arms.push(arm),
+                        ::validated::Validated::Good(Some(arm)) => {
+                            $crate::pbt::alphabet_coverage::note_offered(stringify!($variant));
+                            arms.push(arm)
+                        }
                         ::validated::Validated::Good(None) => {}
                         ::validated::Validated::Fail(reasons) => {
+                            $crate::pbt::alphabet_coverage::note_declined(
+                                stringify!($variant),
+                                &reasons,
+                            );
                             ::holon_pbt_core::validation::record_rejection(
                                 stringify!($variant),
                                 &reasons,

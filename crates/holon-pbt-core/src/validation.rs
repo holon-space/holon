@@ -167,6 +167,107 @@ pub enum Reason {
     PreconditionFailed,
 }
 
+/// What a decline says about the alphabet, for `inv-alphabet-coverage`: either
+/// a surface the composition must render is missing EVERYWHERE, so the kind
+/// left the alphabet, or the state has not reached the shape the kind needs.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum ReasonClass {
+    /// The kind can never be served while the composition renders what it
+    /// renders. Promised by the wiring and only ever declined this way, the
+    /// kind is a silent coverage hole.
+    AlphabetGone,
+    /// This state is no fit; another state in the same run can be.
+    PreconditionUnmet,
+}
+
+impl Reason {
+    /// Exhaustive by construction: a new `Reason` does not compile until it is
+    /// classified. `AlphabetGone` is grown one variant at a time, each promoted
+    /// only once a run proves the reason is state-INDEPENDENT — a reason that
+    /// merely looks like a missing surface (`NoSwitchableHandles`,
+    /// `NoModeSwitchableSurface`) still fires in states that simply have not
+    /// built the shape yet.
+    pub fn class(&self) -> ReasonClass {
+        match self {
+            // No block in the whole composition renders a `state_toggle`
+            // widget, so no state can offer a toggle (the 2026-07-05
+            // `ToggleState` vanish).
+            Reason::NoTogglableStates => ReasonClass::AlphabetGone,
+            Reason::AppNotStarted
+            | Reason::AppAlreadyStarted
+            | Reason::NotProperlySetup
+            | Reason::PreStartupFileCountZero
+            | Reason::BlockIdAlreadyExists
+            | Reason::DirectoryLimitReached
+            | Reason::VcsAlreadyInitialized
+            | Reason::LoroDisabledForCorruption
+            | Reason::NoFocusInMain
+            | Reason::MainFocusNotSet
+            | Reason::FocusedIsNotSelf
+            | Reason::FocusedBlockMissing
+            | Reason::FocusedNotText
+            | Reason::FocusedIsPage
+            | Reason::FocusedNotFocusable
+            | Reason::FocusedInNoContentUpdate
+            | Reason::FocusedInLayoutBlocks
+            | Reason::FocusedNotDescendantOfFocusRoot
+            | Reason::NoFocusableBlocks
+            | Reason::SidebarFocusNotRendered
+            | Reason::LeftSidebarDrawerClosed
+            | Reason::NoPreviousSibling
+            | Reason::NoNextSibling
+            | Reason::NoEditorBuffer
+            | Reason::EditorCellRequired
+            | Reason::NoActiveEditor
+            | Reason::EditorContentEmpty
+            | Reason::AtomicEditorActiveOverride
+            | Reason::NoGrandparent
+            | Reason::ParentIsPage
+            | Reason::DragDropDisabled
+            | Reason::SourceNotRendered
+            | Reason::BlocksNotInteractiveUnderLayout
+            | Reason::CyclicParentMove
+            | Reason::NoOpParentMove
+            | Reason::NoNavigationHistory
+            | Reason::StateToggleNotApplicable
+            | Reason::InsufficientTextBlocksForLink
+            | Reason::BlockIsDefaultLayout
+            | Reason::InsufficientBlocksForDelete
+            | Reason::LoroRequiredForPeers
+            | Reason::PeerLimitReached
+            | Reason::NoPeersAvailable
+            | Reason::PeerIndexOutOfBounds
+            | Reason::PeerBlockMissing
+            | Reason::PeerEditSourceBlockViolation
+            | Reason::NoUndoHistory
+            | Reason::NoRedoHistory
+            | Reason::NoActiveWatches
+            | Reason::NoDocumentsAvailable
+            | Reason::BlockStateEmpty
+            | Reason::NoWatchesActive
+            | Reason::NoPinCandidates
+            | Reason::NoPinsToRemove
+            | Reason::NoExpandToggleCandidates
+            | Reason::NoCollapseToggleCandidates
+            | Reason::ToggleAlreadyExpanded
+            | Reason::ToggleNotExpanded
+            | Reason::NoSwitchableHandles
+            | Reason::NoModeSwitchableSurface
+            | Reason::ModeNotOfferedByBlock
+            | Reason::NoDrawerHandles
+            | Reason::NoCollapsibleTargets
+            | Reason::DeliverNotMeaningfulInBackendTests
+            | Reason::HandAuthoredOnly
+            | Reason::VaultAlreadyShared
+            | Reason::CopyStands
+            | Reason::NoCopyStands
+            | Reason::IntegrationPeerNotHeld
+            | Reason::Unmigrated
+            | Reason::PreconditionFailed => ReasonClass::PreconditionUnmet,
+        }
+    }
+}
+
 /// Map every element of an `NEVec<A>` through `f` into an `NEVec<B>`. Used
 /// to translate per-variant `Reason` enums from `holon-layout-testing` /
 /// `holon-pbt-core` into this crate's `Reason` enum without losing the
