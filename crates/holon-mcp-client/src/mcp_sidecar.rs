@@ -662,11 +662,24 @@ pub fn canonical_entity_name(
     entity_prefix: Option<&str>,
     entity_key: &str,
 ) -> holon_api::EntityName {
-    let raw = match entity_prefix {
+    holon_api::EntityName::new(raw_entity_name(entity_prefix, entity_key))
+}
+
+/// [`canonical_entity_name`] for data that has not been through
+/// [`McpSidecar::from_yaml`] yet: the refusal belongs to the load, so every
+/// later caller reads the infallible form.
+pub fn parse_entity_name(
+    entity_prefix: Option<&str>,
+    entity_key: &str,
+) -> Result<holon_api::EntityName, String> {
+    holon_api::EntityName::parse_named(&raw_entity_name(entity_prefix, entity_key))
+}
+
+fn raw_entity_name(entity_prefix: Option<&str>, entity_key: &str) -> String {
+    match entity_prefix {
         Some(prefix) => format!("{prefix}{entity_key}"),
         None => entity_key.to_string(),
-    };
-    holon_api::EntityName::new(raw)
+    }
 }
 
 /// Whether a connector serves an entity's writes, or the entity is a local
@@ -913,6 +926,7 @@ impl McpSidecar {
 
     pub fn from_yaml(yaml: &str) -> anyhow::Result<Self> {
         let mut sidecar: McpSidecar = serde_yaml::from_str(yaml)?;
+        sidecar.validate_entity_names()?;
         sidecar.validate_write_policy()?;
         sidecar.parse_entity_schemas()?;
         sidecar.validate_view_clocks()?;
@@ -980,6 +994,26 @@ impl McpSidecar {
             let fields = std::mem::take(&mut config.schema).0;
             config.schema =
                 MirrorSchema::parse(&format!("sidecar entity '{entity}'"), fields, &id_column)?;
+        }
+        Ok(())
+    }
+
+    /// Every entity key, with `entity_prefix` applied, must be a name the
+    /// system can route and store under. This runs before every other check:
+    /// those canonicalize the keys, and canonicalization of an unnameable key
+    /// is what used to panic.
+    fn validate_entity_names(&self) -> anyhow::Result<()> {
+        let applied = match &self.entity_prefix {
+            Some(prefix) => format!(" with `entity_prefix: {prefix}` applied"),
+            None => String::new(),
+        };
+        for key in self.entities.keys() {
+            parse_entity_name(self.entity_prefix.as_deref(), key).map_err(|why| {
+                anyhow::anyhow!(
+                    "sidecar `entities` key `{key}`: {why}{applied} — an entity name must start \
+                     with a letter and hold only letters, digits, `+`, `-` or `.`"
+                )
+            })?;
         }
         Ok(())
     }

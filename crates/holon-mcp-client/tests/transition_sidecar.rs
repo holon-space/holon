@@ -329,6 +329,45 @@ fn an_empty_transition_name_is_a_load_error() {
     );
 }
 
+/// An entity key the system cannot name must be refused where the file is
+/// read. `EntityName::new` only debug-asserts, so without a load-time refusal
+/// a test build panics and a release build routes the entity under an invalid
+/// scheme.
+#[test]
+fn an_entity_name_that_is_no_uri_scheme_is_a_load_error() {
+    let cases = [
+        (
+            "  inbox: {}",
+            "  inbox: {}\n  \"\": {}",
+            "`entities` key ``",
+        ),
+        (
+            "  inbox: {}",
+            "  inbox: {}\n  \"9lives\": {}",
+            "`entities` key `9lives`",
+        ),
+        // The prefix is part of the name, so it spoils a key that is fine on
+        // its own. It spoils every key of the fixture and `entities` is a
+        // `HashMap`, so the refusal is asserted on the prefix, not on one key.
+        (
+            "entities:\n",
+            "entity_prefix: \"-\"\nentities:\n",
+            "`entity_prefix: -`",
+        ),
+    ];
+    for (from, to, expected) in cases {
+        let yaml = FIXTURE.replace(from, to);
+        let error = format!(
+            "{:#}",
+            McpSidecar::from_yaml(&yaml).expect_err("an unnameable entity must not load")
+        );
+        assert!(
+            error.contains(expected) && error.contains("is not a valid entity name"),
+            "expected {expected:?}, got {error:?}"
+        );
+    }
+}
+
 /// A key declared twice in any map section of a sidecar: a plain map keeps the
 /// last one silently, so the load must refuse it. Proptest cannot draw this —
 /// the generated YAML goes through `serde_json::Value`, which holds one entry
