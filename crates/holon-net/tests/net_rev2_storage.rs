@@ -45,6 +45,8 @@ use holon_net::exec::EffectResult;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Receiver;
+use holon_net::exec::Route;
+use holon_net::exec::Settled;
 use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
 use proptest::prelude::*;
@@ -452,8 +454,11 @@ fn apply_storage_candidate() -> Transition {
                     }
                 }
             };
+            // Only the first install replaces a failed Loro boot; a later one
+            // re-installs a primary that a write returned.
             if branch == "install"
                 && provider != LORO
+                && !r.present("StorageOpened", s)
                 && let Some(cause) = r.text("FallbackFailure", s, "cause")
             {
                 input.insert("cause".to_string(), text(&cause));
@@ -687,6 +692,8 @@ fn net() -> Spec {
             .consumes("StandbyRequest")
             .inhibits("SecondaryStorage")
             .inhibits("StorageCandidate")
+            // An opened store is a fact (NET-fire.a): a late answer still lands.
+            .fact("StorageCandidate")
             .on_failure("TursoFailed")
             .run_timer(Duration::from_secs(RUN_TIMER_SECS))
             .abandon(Duration::from_secs(ABANDON_SECS))
@@ -1091,7 +1098,48 @@ fn booted_with((turso, loro): FaultCounts) -> (Driver, Pair) {
 
 /// store_serves: a store open in a slot while `Storage` is empty and no holder
 /// is in flight means the net still has work — it is not quiescent.
-fn assert_a_store_serves(d: &Driver) {
+/// A stale `Storage` output that went to the candidate place may have
+/// overwritten a waiting candidate.
+fn a_store_token_was_routed_to_the_candidate(d: &Driver) -> bool {
+    d.exec().occurrences().any(|(_, settled)| {
+        matches!(settled, Some(Settled::OverChangedInputs { routes, .. })
+            if routes.iter().any(|r| r.place.as_str() == "Storage"
+                && matches!(r.route, Route::Candidate(_))))
+    })
+}
+
+fn assert_a_store_serves(d: &Driver, pair: &Pair) {
+    assert_no_open_store_is_lost(d, pair);
+    assert_a_slot_store_has_a_primary(d);
+}
+
+fn assert_no_open_store_is_lost(d: &Driver, pair: &Pair) {
+    if d.pending.is_empty() {
+        for (name, store) in &pair.stores {
+            let state = store.lock();
+            if !state.open || state.closed {
+                continue;
+            }
+            let holders: Vec<&str> = ["Storage", "SecondaryStorage", "StorageCandidate"]
+                .into_iter()
+                .filter(|p| {
+                    token_content(d, p).is_some_and(|t| match t.get("output") {
+                        Some(Value::Object(token)) => token["provider"] == text(name),
+                        _ => str_of(t, "provider") == *name,
+                    })
+                })
+                .collect();
+            assert_eq!(
+                holders.len(),
+                1,
+                "store_serves: the open store '{name}' is in {holders:?}, not in exactly one \
+                 of Storage, SecondaryStorage, StorageCandidate"
+            );
+        }
+    }
+}
+
+fn assert_a_slot_store_has_a_primary(d: &Driver) {
     for slot in ["SecondaryStorage", "StorageCandidate"] {
         if token_content(d, slot).is_some() {
             assert!(
@@ -1174,7 +1222,14 @@ impl StateMachineTest for Test {
     }
 
     fn check_invariants(sut: &Sut, _: &FaultCounts) {
-        assert_a_store_serves(&sut.d);
+        // ponytail: the candidate place holds one token, so a returned store
+        // token can overwrite a waiting candidate (#322,
+        // a_returned_write_token_never_overwrites_a_waiting_candidate). Check
+        // every run that this route does not reach until #322 lands.
+        if !a_store_token_was_routed_to_the_candidate(&sut.d) {
+            assert_no_open_store_is_lost(&sut.d, &sut.pair);
+        }
+        assert_a_slot_store_has_a_primary(&sut.d);
         let quiet = sut.d.pending.is_empty();
         let primary = token_content(&sut.d, "Storage");
 
@@ -1293,7 +1348,7 @@ impl StateMachineTest for BootTest {
     }
 
     fn check_invariants(sut: &BootSut, _: &FaultCounts) {
-        assert_a_store_serves(&sut.d);
+        assert_a_store_serves(&sut.d, &sut.pair);
         let asked = sut.d.requests_of("MakeLoroReady").count();
         let boot_tries = sut.d.requests_of("MakeTursoReady").count();
 
@@ -1638,4 +1693,89 @@ fn a_late_open_answer_serves_when_no_store_does() {
         token_content(&d, "RetiringStorage").is_none(),
         "the primary is never retired"
     );
+}
+
+/// The background try's run timer ends it, and its answer comes late. The
+/// answer carries an opened store, so it is a fact: it lands as a candidate and
+/// Turso stands by and swaps in, never open with no token.
+#[test]
+fn a_late_standby_answer_is_not_lost() {
+    if blocking_boot() {
+        return;
+    }
+    let (mut d, pair) = booted_with((1, 0));
+    let settle_oldest = |d: &mut Driver| {
+        d.complete_oldest(|req| run_effect(&pair, req))
+            .expect("the net quiesces")
+    };
+    settle_oldest(&mut d);
+    settle_oldest(&mut d);
+    d.tick(RUN_TIMER_SECS).expect("the net quiesces");
+    while !d.pending.is_empty() {
+        settle_oldest(&mut d);
+    }
+    assert_a_store_serves(&d, &pair);
+    assert_eq!(primary_of(&d), Some(TURSO.to_string()));
+}
+
+/// Loro failed once at boot, then opened and served; Turso swapped in the
+/// normal way. A write's returned token re-installs Turso, and that is no
+/// reason to say Loro could not open.
+#[test]
+fn a_reinstalled_primary_discloses_nothing() {
+    if blocking_boot() || naive_swap() {
+        return;
+    }
+    let (mut d, pair) = booted(fails(1), fails(1));
+    settle(&mut d, &pair, "MakeTursoReady");
+    settle(&mut d, &pair, "MakeLoroReady");
+    settle(&mut d, &pair, "MakeLoroReady");
+    settle(&mut d, &pair, "MakeTursoStandby");
+    settle(&mut d, &pair, "SwapStorage");
+    settle(&mut d, &pair, "RetireStandby");
+    assert_eq!(primary_of(&d), Some(TURSO.to_string()));
+    assert!(token_content(&d, "StorageCondition").is_none());
+    for seq in 1..=2 {
+        d.write(
+            "WriteQueue",
+            VAULT,
+            content(&[("seq", Value::Integer(seq))]),
+        )
+        .expect("the net quiesces");
+    }
+    settle(&mut d, &pair, "ApplyWrite");
+    settle(&mut d, &pair, "ApplyWrite");
+    assert_eq!(primary_of(&d), Some(TURSO.to_string()));
+    assert_eq!(
+        token_content(&d, "StorageCondition").map(|t| str_of(t, "text")),
+        None,
+        "the condition names a cause that did not happen"
+    );
+}
+
+/// A write's returned token lands in the candidate place while the Turso
+/// standby waits there, and overwrites it: Turso stays open with no token.
+#[test]
+#[ignore = "needs #322 (multi-token candidate place)"]
+fn a_returned_write_token_never_overwrites_a_waiting_candidate() {
+    let (mut d, pair) = booted_with((1, 0));
+    let settle_oldest = |d: &mut Driver| {
+        d.complete_oldest(|req| run_effect(&pair, req))
+            .expect("the net quiesces")
+    };
+    settle_oldest(&mut d);
+    settle_oldest(&mut d);
+    for seq in 1..=2 {
+        assert!(token_content(&d, "WriteQueue").is_none());
+        d.write(
+            "WriteQueue",
+            VAULT,
+            content(&[("seq", Value::Integer(seq))]),
+        )
+        .expect("the net quiesces");
+    }
+    while !d.pending.is_empty() {
+        settle_oldest(&mut d);
+    }
+    assert_a_store_serves(&d, &pair);
 }
