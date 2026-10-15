@@ -1023,6 +1023,14 @@ async fn compose_sut_seeded_impl(
         }
     }
 
+    // A fresh boot clears the process-global dedup behind
+    // `warn_missing_declared_column`, which warns once per (context, column)
+    // per PROCESS: without this, the first booted case swallows every later
+    // case's gap signal and `inv-no-declared-column-absent` reads green
+    // vacuously. Last step of the boot, so the warnings the boot itself emits
+    // do not dedup the ones the transitions are checked on.
+    holon_api::computed::reset_missing_declared_warnings();
+
     ComposedSut {
         caps,
         engine,

@@ -1179,13 +1179,12 @@ fn install_observability_caps(caps: &mut CapMap, carry: Option<ObservabilityCarr
         caps.insert(std::sync::Arc::new(ComposedObservedErrors::new())
             as std::sync::Arc<dyn ObservedProblems>);
 
-        // Declared-column-gap pin: the read cap plus a per-case reset of the
-        // process-global dedup behind `warn_missing_declared_column`, which
-        // warns once per (context, column) per PROCESS and would otherwise let
-        // the first case swallow every later case's signal.
+        // Declared-column-gap pin: the read cap only. The per-case reset of the
+        // process-global dedup behind `warn_missing_declared_column` is a boot
+        // concern and lives in the SUT boot (`composed::builder`), so the
+        // reference never mutates production global state.
         use crate::pbt::composed::declared_column_gaps::ComposedDeclaredColumnGaps;
         use crate::pbt::composed::declared_column_gaps::DeclaredColumnGaps;
-        holon_api::computed::reset_missing_declared_warnings();
         caps.insert(std::sync::Arc::new(ComposedDeclaredColumnGaps::new())
             as std::sync::Arc<dyn DeclaredColumnGaps>);
 

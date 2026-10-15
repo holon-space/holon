@@ -769,3 +769,60 @@ fn an_integration_file_is_deserialized_only_through_from_yaml() {
         offenders.join("\n"),
     );
 }
+
+/// Production process-global mutators (bare function names) that the keystone
+/// may call from its SUT boot and nowhere else.
+const PRODUCTION_GLOBAL_MUTATORS: [&str; 1] = ["reset_missing_declared_warnings"];
+
+/// The one keystone source file allowed to call them: the composed SUT boot.
+const KEYSTONE_SUT_BOOT: &str = "crates/holon-integration-tests/src/pbt/composed/builder.rs";
+
+/// The keystone reference model must not mutate production global state.
+///
+/// A reference that resets a production global is no longer an independent
+/// oracle: the same call shapes the SUT's behaviour, so a SUT bug can vanish
+/// from both sides at once (#262, ruling PBT-ref-sut.a). Clearing the
+/// `warn_missing_declared_column` dedup is a BOOT concern — the composed SUT
+/// boot owns it, and `inv-no-declared-column-absent` then asserts on a signal
+/// the reference never touched.
+///
+/// Scope: `holon-integration-tests/src` (the keystone reference, its
+/// transitions and its harness). A dedicated test under `tests/` is its own
+/// SUT driver, not the reference.
+#[test]
+fn the_keystone_reference_never_mutates_production_globals() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("crates/holon-integration-tests/src"), &mut files);
+
+    let mut offenders = Vec::new();
+    for file in &files {
+        let rel = file
+            .strip_prefix(&root)
+            .expect("source under repo root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == KEYSTONE_SUT_BOOT {
+            continue;
+        }
+        let src = std::fs::read_to_string(file).expect("readable rust source");
+        for (i, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for mutator in PRODUCTION_GLOBAL_MUTATORS {
+                if line.contains(mutator) {
+                    offenders.push(format!("  {rel}:{} calls `{mutator}`", i + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "the keystone reference/harness mutates production global state:\n{}\n\nMove the reset \
+         into the composed SUT boot ({KEYSTONE_SUT_BOOT}), which is the only file allowed to \
+         call these.\n",
+        offenders.join("\n"),
+    );
+}
