@@ -16,7 +16,9 @@ holon-api.workspace = true
 holon-net-layout.workspace = true
 holon-pattern.workspace = true
 holon-rules.workspace = true
+indexmap = { workspace = true, features = ["serde"] }
 serde.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 

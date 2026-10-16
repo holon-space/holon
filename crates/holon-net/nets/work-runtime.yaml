@@ -1,0 +1,161 @@
+name: work-runtime
+places:
+  Agent:
+    capacity: register
+  Card:
+    capacity: register
+  Budget:
+    capacity: register
+  Cpu:
+    capacity: fifo
+    pool: 4
+  Waiting:
+    capacity: fifo
+  Job:
+    capacity: single
+  Stalled:
+    capacity: single
+transitions:
+  StartJob:
+    trigger: auto
+    priority: 10
+    consumes:
+    - Waiting
+    - Cpu
+    reads:
+    - Budget
+    inhibits:
+    - Job
+    produces:
+    - Job
+    on_failure: Stalled
+    on_timeout: Stalled
+    effect: run_job
+    receiver: none
+    timers:
+      run: 2h
+      abandon: 3h
+      count_bound: 2
+      backoff: 5m
+  JobEnded:
+    trigger: auto
+    priority: 10
+    consumes:
+    - Job
+    reads:
+    - Agent
+    produces:
+    - Cpu
+    facts:
+    - Card
+  AgentTurnEnded:
+    trigger: auto
+    priority: 5
+    consumes:
+    - Job
+    reads:
+    - Agent
+    produces:
+    - Waiting
+  Stalled:
+    trigger: auto
+    priority: 1
+    reads:
+    - Agent
+    inhibits:
+    - Stalled
+    - Job
+    produces:
+    - Stalled
+  Continue:
+    trigger: manual
+    priority: 20
+    consumes:
+    - Stalled
+    produces:
+    - Waiting
+  Handoff:
+    trigger: manual
+    priority: 20
+    consumes:
+    - Stalled
+    reads:
+    - Card
+    produces:
+    - Waiting
+    effect: write_handoff
+    receiver: keyed
+    timers:
+      run: 5m
+      count_bound: 3
+      backoff: 1m
+effects:
+  run_job:
+    kind: shell
+    command:
+      argv:
+      - bash
+      - -lc
+      - just gate
+      working_dir: /Users/martin/Workspaces/pkm/holon
+      env_allow:
+      - HOME
+      - PATH
+      timeout: 2h
+    log_path: target/net/{transition}/{subject}/{attempt}.log
+    exit_codes:
+      done:
+      - 0
+      failed:
+      - 1
+      - 2
+      other: outcome_unknown
+  write_handoff:
+    kind: shell
+    command:
+      argv:
+      - bash
+      - -lc
+      - flow handoff "$CARD"
+      working_dir: /Users/martin/Workspaces/pkm/holon
+      env_allow:
+      - HOME
+      - PATH
+      - CARD
+      timeout: 5m
+    log_path: target/net/{transition}/{subject}/{attempt}.log
+    exit_codes:
+      done:
+      - 0
+      failed:
+      - 1
+      other: outcome_unknown
+probes:
+  agent_liveness:
+    command:
+      argv:
+      - bash
+      - -lc
+      - flow agents --json
+      working_dir: /Users/martin/Workspaces/pkm/holon
+      env_allow:
+      - HOME
+      - PATH
+      timeout: 30s
+    interval: 1m
+    facts_into: Agent
+    subject_field: agent
+  board_cards:
+    command:
+      argv:
+      - bash
+      - -lc
+      - flow report --json
+      working_dir: /Users/martin/Workspaces/pkm/holon
+      env_allow:
+      - HOME
+      - PATH
+      timeout: 1m
+    interval: 5m
+    facts_into: Card
+    subject_field: card
