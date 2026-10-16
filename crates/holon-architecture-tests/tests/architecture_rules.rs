@@ -503,6 +503,13 @@ const STABLE_ID_WRITERS: &[(&str, usize)] = &[
         "crates/holon-integration-tests/tests/loro_suite/loro_root_deliveries_are_guarded.rs",
         2,
     ),
+    // Spike #351: two devices build raw doc states to measure whether locally
+    // resolved slots converge, so there is no stable-id index to tell.
+    (
+        "crates/holon-integration-tests/tests/slot_convergence_pbt.rs",
+        4,
+    ),
+    ("crates/holon-loro/tests/slot_loro_mechanics.rs", 2),
     ("crates/holon-loro/examples/projection_extract_bench.rs", 1),
     ("crates/holon/tests/sync_import_read_only_adoption.rs", 3),
 ];

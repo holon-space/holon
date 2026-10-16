@@ -515,6 +515,28 @@ line, the one AFTER the `panicked at` header.
 | `tour-spike-advance-cursor-not-visible` | known-red | `advance op must persist the progress cursor; block_in_snapshot=true property_keys=.* visible_within_2s=true` | — | `crates/holon-integration-tests/tests/frontend_suite/tour_spike.rs:151:9` `tour_spike_parses_advances_and_gates_on_real_engine`: ``assertion `left == right` failed: advance op must persist the progress cursor; block_in_snapshot=true property_keys=Some([...]) visible_within_2s=true`` with `left: None`. The cursor shows up within 2 s. `visible_within_2s=false` (a write that never lands) or `block_in_snapshot=false` classify NOVEL. | **READ LAGS THE WRITE, measured.** The snapshot read right after `set_field` returns Ok has no `tour_active_step`, and the cursor is there within 2 s (`lane-logs/reds-registry-5-b-*.log`; 1 failure in 6 runs, more in the earlier set). Not found: why the read lags. The test reads with no wait. |
 | `journal-feed-main-panel-still-loading` | known-red | `main panel must delegate to block:journals via live_block; loading placeholders=[1-9][0-9]* live_blocks=[1-9]` | — | `crates/holon-integration-tests/src/pbt/frontend_slice/structural_pbt.rs:4767:17` `teeth::journal_feed_via_main_panel_focus_shows_feed`: `main panel must delegate to block:journals via live_block; loading placeholders=3 live_blocks=3: WidgetSnapshot { ... }`. Matches only while the tree still holds `loading` placeholders. A fully loaded tree without the delegation prints `loading placeholders=0` and classifies NOVEL. | **TREE STILL LOADING when the fixed sleep ends, measured as shape only.** All observed failures show `loading placeholders=3` (8 of 10 runs of the three-test set under another lane's build load, `lane-logs/reds-registry-5-run-*.log`; 2 of 6 in `lane-logs/reds-registry-5-b-*.log`). Not proven: that the tree would finish loading given more time, because the test does not poll. A panel that stays `loading` forever would match this row too. The same test's earlier line `direct journals render` also failed in 2 runs; that shape has no row. |
 
+## Spike #351 known red (`slot_convergence_pbt`, `holon-integration-tests`)
+
+One row, from the spike of card holon-space/holon-work#351 (concept #345), not
+from a land-gate sweep: the property the spike exists for does not hold yet, and
+main ruled (2026-10-19) that it lands as a SELF-CHECKING known red instead of an
+`#[ignore]`. `the_set_function_rule_converges_on_both_devices` asserts the
+failure and its named reason, so a normal `cargo nextest` run of the binary is
+GREEN and raises no panic for this row to classify. The row exists so the
+signature is a REGISTERED residual with a task and an owner, and so the
+classifier recognises it (rather than calling it novel) in any log where the
+property is run outside that self-check — by removing the marker, or from another
+harness.
+
+The test's own self-check panics carry none of the row's wording on purpose: a
+failure for any OTHER reason must stay NOVEL, so the proptest reason is printed
+to stdout and never put into the panic message.
+
+| Key | Status | Match pattern | Site | Signature | Evidence | Task | Owner |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `slot-withdrawn-last-claim-no-retraction` | known-red | `the slot of '[^']+' differs between the devices` | — | `crates/holon-integration-tests/tests/slot_convergence_pbt.rs` `the_set_function_rule_converges_on_both_devices`: the proptest reason, measured verbatim at TREE `8703ca4414c6` (`target/slot-converge-green.log:13-15`): ``assertion failed: `(left == right)` `` / `` left: `Some({"merge": Boolean(false), "set_hash": String("..."), "winner": String("...")})`, `` / `` right: `None`: the slot of 'journals' differs between the devices at crates/holon-integration-tests/tests/slot_convergence_pbt.rs:1081``. `Resolve<K>` never fires on the EMPTY contestant set, so a device that resolved a key and then lost its last carrier keeps a slot no device can retract, while a device that saw the carrier already deleted holds none. The key tracks the draw, so the pattern wildcards it. Site is unpinned on purpose: the self-check converts this failure into a pass, so no panic site exists to measure. | Deterministic, and pinned as its own test: `a_withdrawn_last_claim_leaves_a_slot_no_device_can_retract` reproduces the three steps (`Claim`, `Resolve`, `Withdraw`) and asserts the DOCUMENTS converge, so the divergence is the net's output place, not Loro. Spike report `.claude/worktrees/lane-351-slot-converge/target/slot-converge-report.md`; run log `.claude/worktrees/lane-351-slot-converge/target/slot-converge-green.log`. | Ruling `345/total-resolve.a` gives `Resolve<K>` a total domain: holon-space/holon-work#345. Removing the row means deleting BOTH tests' markers — the self-check fails with "remove the known-red marker, #345 fixed it" the moment the property holds. | Martin (concept #345) |
+
+
 ## File-watcher known reds (`holon-filesystem`, `holon-orgmode`)
 
 These tests wait for real fs events. A process an agent launches gets no
