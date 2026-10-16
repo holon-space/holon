@@ -2682,34 +2682,33 @@ impl FileSyncController {
             .then_some(home_path))
     }
 
-    /// Whether the write authority already routes `slug` to `claimant`'s own
-    /// document — the store and the disk naming ONE owner.
+    /// Whether the write authority already routes `slug` to the document homed
+    /// in `file` — the store and that file naming ONE owner.
     ///
     /// `false` covers both an authority that is absent and one naming a
-    /// DIFFERENT file's document. Either way the two files genuinely contest
-    /// the slug, which is what the whole-file refusal exists for.
-    async fn authority_routes_slug_to_claimant(
-        &self,
-        slug: &EntityUri,
-        claimant: &PathBuf,
-    ) -> Result<bool> {
+    /// DIFFERENT file's document.
+    async fn authority_routes_slug_to_file(&self, slug: &EntityUri, file: &Path) -> Result<bool> {
         let Some(auth_doc) = self.resolve_authoritative_doc(slug).await? else {
             return Ok(false);
         };
         Ok(self
             .doc_home
             .get(&auth_doc)
-            .is_some_and(|home| home.as_path_buf() == claimant))
+            .is_some_and(|home| home.as_path_buf().as_path() == file))
     }
 
     /// The first parsed block slug another file declares that the store's
-    /// authority does not already route to that same file.
+    /// authority routes to NEITHER of the two files.
     ///
-    /// When the authority DOES name the claimant's document the slug is a
-    /// second copy or half of a move rather than a contested identity, and
-    /// the cross-doc-membership guard decides which. The document's own root is
-    /// excluded: its identity is the `#+ID:`, which the duplicate-document
-    /// refusal upstream already settled.
+    /// When the authority names the claimant's document the slug is a second
+    /// copy or half of a move rather than a contested identity, and the
+    /// cross-doc-membership guard decides which. When it names the candidate's
+    /// own document the candidate IS the owner and the claimant holds the copy:
+    /// a copy holder's ingest takes over `block_home` and the owner's claim
+    /// comes back only at the end of that ingest, so refusing here would
+    /// quarantine the owner's own file. The document's own root is excluded:
+    /// its identity is the `#+ID:`, which the duplicate-document refusal
+    /// upstream already settled.
     async fn colliding_block_slug(
         &self,
         blocks: &[Block],
@@ -2724,8 +2723,11 @@ impl FileSyncController {
                 continue;
             };
             if self
-                .authority_routes_slug_to_claimant(&block.id, &claimant)
+                .authority_routes_slug_to_file(&block.id, &claimant)
                 .await?
+                || self
+                    .authority_routes_slug_to_file(&block.id, candidate.as_path_buf())
+                    .await?
             {
                 continue;
             }
