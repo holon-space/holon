@@ -167,9 +167,10 @@ pub enum Reason {
     PreconditionFailed,
 }
 
-/// What a decline says about the alphabet, for `inv-alphabet-coverage`: either
-/// a surface the composition must render is missing EVERYWHERE, so the kind
-/// left the alphabet, or the state has not reached the shape the kind needs.
+/// What a decline says about the alphabet, for `inv-alphabet-coverage`: a
+/// surface the composition must render is missing EVERYWHERE so the kind left
+/// the alphabet, the state has not reached the shape the kind needs, or this
+/// medium never generates the kind at all.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum ReasonClass {
     /// The kind can never be served while the composition renders what it
@@ -178,6 +179,11 @@ pub enum ReasonClass {
     AlphabetGone,
     /// This state is no fit; another state in the same run can be.
     PreconditionUnmet,
+    /// The generator declines by construction — it ignores the state and fails
+    /// for every one. The kind is drawn by another suite (a hand-authored
+    /// regression step, another medium's PBT), so its alphabet is not gone;
+    /// `alphabet_coverage::EXPECTED_ABSENT` names where each one IS covered.
+    NotDrawnHere,
 }
 
 impl Reason {
@@ -186,13 +192,21 @@ impl Reason {
     /// only once a run proves the reason is state-INDEPENDENT — a reason that
     /// merely looks like a missing surface (`NoSwitchableHandles`,
     /// `NoModeSwitchableSurface`) still fires in states that simply have not
-    /// built the shape yet.
+    /// built the shape yet. A reason a generator returns without binding the
+    /// state at all is `NotDrawnHere`, not `AlphabetGone`: the kind is drawn
+    /// elsewhere, so nothing is missing from the composition.
     pub fn class(&self) -> ReasonClass {
         match self {
             // No block in the whole composition renders a `state_toggle`
             // widget, so no state can offer a toggle (the 2026-07-05
             // `ToggleState` vanish).
             Reason::NoTogglableStates => ReasonClass::AlphabetGone,
+            // Returned by a `weighted_generator(_: &R)` that never binds the
+            // state: the kind declines in every state of every run, and the
+            // suite that does draw it is named in `EXPECTED_ABSENT`.
+            Reason::HandAuthoredOnly | Reason::DeliverNotMeaningfulInBackendTests => {
+                ReasonClass::NotDrawnHere
+            }
             Reason::AppNotStarted
             | Reason::AppAlreadyStarted
             | Reason::NotProperlySetup
@@ -256,8 +270,6 @@ impl Reason {
             | Reason::ModeNotOfferedByBlock
             | Reason::NoDrawerHandles
             | Reason::NoCollapsibleTargets
-            | Reason::DeliverNotMeaningfulInBackendTests
-            | Reason::HandAuthoredOnly
             | Reason::VaultAlreadyShared
             | Reason::CopyStands
             | Reason::NoCopyStands
@@ -369,5 +381,33 @@ pub fn print_rejection_histogram() {
         for (r, count) in rs {
             eprintln!("  {r:?} — {count}");
         }
+    }
+}
+
+#[cfg(test)]
+mod reason_class_state_independence {
+    use super::Reason;
+    use super::ReasonClass;
+
+    /// A reason whose only producers are `fn weighted_generator(_: &R)` — the
+    /// state is not even bound — is state-INDEPENDENT by signature, so the
+    /// kind never reaches the generated alphabet of this medium.
+    /// `HandAuthoredOnly` is produced exactly that way by
+    /// `RebootWithBacklogHeld`, `ReleaseBacklog`, `ReleaseHeld`,
+    /// `StructuralKeyBurst`, `DelayAdmissions`, `FailNextDispatch` and
+    /// `HoldDispatch`; `DeliverNotMeaningfulInBackendTests` by
+    /// `DeliverBlockContent`.
+    #[test]
+    fn a_reason_no_state_can_satisfy_is_not_drawn_here() {
+        assert_eq!(
+            Reason::HandAuthoredOnly.class(),
+            ReasonClass::NotDrawnHere,
+            "HandAuthoredOnly is returned by weighted_generator(_: &R) with the state unbound"
+        );
+        assert_eq!(
+            Reason::DeliverNotMeaningfulInBackendTests.class(),
+            ReasonClass::NotDrawnHere,
+            "DeliverNotMeaningfulInBackendTests is returned with the state unbound"
+        );
     }
 }

@@ -565,6 +565,33 @@ macro_rules! declare_e2e_transitions {
                 >>::required_caps(),
             )),* ]
         }
+
+        /// Every declared variant whose `weighted_generator` declines `state`
+        /// with nothing but `ReasonClass::NotDrawnHere` reasons. Those reasons
+        /// are returned by generators that never bind the state, so one state
+        /// decides the whole set. Macro-generated from the one variant list, so
+        /// a variant that joins or leaves the set is a visible test diff
+        /// (`alphabet_coverage`: the set must equal `EXPECTED_ABSENT`).
+        $vis fn kinds_declining_by_construction(
+            state: &$crate::pbt::reference_state::ReferenceState,
+        ) -> ::std::vec::Vec<&'static str> {
+            let mut names: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+            $(
+                if let ::validated::Validated::Fail(reasons) =
+                    <$ty as ::holon_pbt_core::TransitionFactory<
+                        $crate::pbt::reference_state::ReferenceState,
+                    >>::weighted_generator(state)
+                {
+                    if reasons.iter().all(|r| {
+                        ::holon_pbt_core::validation::Reason::class(r)
+                            == ::holon_pbt_core::validation::ReasonClass::NotDrawnHere
+                    }) {
+                        names.push(stringify!($variant));
+                    }
+                }
+            )*
+            names
+        }
     };
 }
 

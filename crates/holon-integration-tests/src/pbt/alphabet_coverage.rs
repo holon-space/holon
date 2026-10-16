@@ -32,6 +32,16 @@
 //! live on `Reason` itself as an exhaustive match, so a new reason does not
 //! compile until it is classified.
 //!
+//! A third population declines by CONSTRUCTION: kinds whose
+//! `weighted_generator(_: &R)` never binds the state and fails every time
+//! ([`ReasonClass::NotDrawnHere`]). Their alphabet is not gone — they are drawn
+//! by a hand-authored regression step or another medium's PBT — so they are
+//! named in `EXPECTED_ABSENT` with the suite that covers them, and that list is
+//! pinned against the generators by a test. Six of them decline for a second
+//! reason — the `HOLON_PBT_WRITEBACK_FAULTS` gate is off — so they live in
+//! `EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS` and count as accepted holes only
+//! while that gate stays off.
+//!
 //! The counters are thread-local, like the rejection histogram in
 //! `holon_pbt_core::validation`: proptest runs a test's cases on the test's own
 //! thread, so one test's alphabet is never mixed into another's.
@@ -47,11 +57,97 @@ use nonempty_collections::NEVec;
 /// alphabet rather than about a run too short to have reached the kind's state.
 const PROMISE_FLOOR: u64 = 20;
 
-/// Kinds a wiring promises that the keystone corpus never offers to the
-/// generator, each with the reason its `weighted_generator` declines on every
-/// state. Keep this list MINIMAL: an entry is a coverage hole that is
-/// understood, not one that is fixed.
-const EXPECTED_ABSENT: &[(&str, &str)] = &[];
+/// Kinds whose `weighted_generator` declines by construction — it never binds
+/// the state — each with WHERE the kind is drawn instead. The list is pinned
+/// against the generators themselves by
+/// `the_by_construction_declines_are_exactly_the_listed_kinds`, so a kind that
+/// joins or leaves it is a test diff, never silent. An entry whose second field
+/// names no other suite is an uncovered kind, i.e. a finding.
+const EXPECTED_ABSENT: &[(&str, &str)] = &[
+    (
+        "CrashRestart",
+        "hand-authored-regressions/keystone.jsonl (5 steps)",
+    ),
+    (
+        "DelayAdmissions",
+        "hand-authored-regressions/keystone.jsonl (3 steps)",
+    ),
+    (
+        "DeliverBlockContent",
+        "NOWHERE: the GPUI layout PBT that drew it is gone (no \
+         `arb_deferred_live_block_scenario` in the tree) and `layout_bridge` reports no deferred \
+         blocks, so the deferred-live-block axis is uncovered",
+    ),
+    (
+        "FailNextDispatch",
+        "hand-authored-regressions/keystone.jsonl (2 steps)",
+    ),
+    (
+        "HoldDispatch",
+        "hand-authored-regressions/keystone.jsonl (10 steps)",
+    ),
+    (
+        "RebootWithBacklogHeld",
+        "hand-authored-regressions/keystone.jsonl (1 step)",
+    ),
+    (
+        "ReleaseBacklog",
+        "hand-authored-regressions/keystone.jsonl (1 step)",
+    ),
+    (
+        "ReleaseHeld",
+        "hand-authored-regressions/keystone.jsonl (10 steps)",
+    ),
+    (
+        "StructuralKeyBurst",
+        "crates/holon-integration-tests/tests/structural_burst_under_lag.rs",
+    ),
+];
+
+/// Kinds the writeback-fault gate keeps out of the generated alphabet: their
+/// `weighted_generator` declines for every state while
+/// `HOLON_PBT_WRITEBACK_FAULTS` is unset
+/// (`transitions::arm_write_churn::writeback_faults_enabled`), and nothing in
+/// this repo sets it, so today they are absent from every run. Same contract as
+/// [`EXPECTED_ABSENT`]: the second field names where the kind IS covered, and
+/// "NOWHERE" is a finding.
+const EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS: &[(&str, &str)] = &[
+    (
+        "ArmWriteChurn",
+        "hand-authored-regressions/keystone.jsonl (7 steps)",
+    ),
+    (
+        "ArmWriteFailure",
+        "hand-authored-regressions/keystone.jsonl (2 steps)",
+    ),
+    (
+        "DisarmWriteChurn",
+        "hand-authored-regressions/keystone.jsonl (3 steps)",
+    ),
+    (
+        "DropNextWatcherEvent",
+        "hand-authored-regressions/keystone.jsonl (1 step)",
+    ),
+    (
+        "ExternalLineEdit",
+        "hand-authored-regressions/keystone.jsonl (7 steps)",
+    ),
+    (
+        "TouchFile",
+        "NOWHERE: no hand-authored step draws it and the only generator is behind \
+         `HOLON_PBT_WRITEBACK_FAULTS`, which nothing sets — the no-op-save axis is uncovered",
+    ),
+];
+
+/// The accepted holes for THIS process: the always-absent kinds, plus the
+/// writeback-fault kinds while that gate is off.
+fn expected_absent() -> Vec<(&'static str, &'static str)> {
+    let mut all: Vec<(&'static str, &'static str)> = EXPECTED_ABSENT.to_vec();
+    if !crate::pbt::transitions::arm_write_churn::writeback_faults_enabled() {
+        all.extend_from_slice(EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS);
+    }
+    all
+}
 
 /// One kind's run tallies.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -67,6 +163,9 @@ pub struct Counts {
     pub alphabet_gone: u64,
     /// Declines whose reason says THIS state is no fit, and another could be.
     pub precondition_unmet: u64,
+    /// Declines whose reason says this medium never generates the kind; it is
+    /// drawn by the suite `EXPECTED_ABSENT` names.
+    pub not_drawn_here: u64,
 }
 
 thread_local! {
@@ -100,6 +199,7 @@ pub fn note_declined(name: &'static str, reasons: &NEVec<Reason>) {
             match reason.class() {
                 ReasonClass::AlphabetGone => c.alphabet_gone += 1,
                 ReasonClass::PreconditionUnmet => c.precondition_unmet += 1,
+                ReasonClass::NotDrawnHere => c.not_drawn_here += 1,
             }
         }
     });
@@ -119,6 +219,7 @@ fn judge(
                 && c.offered == 0
                 && c.alphabet_gone > 0
                 && c.precondition_unmet == 0
+                && c.not_drawn_here == 0
                 && !expected_absent.iter().any(|(n, _)| n == *name)
         })
         .map(|(name, c)| {
@@ -187,30 +288,43 @@ fn disclose(counts: &BTreeMap<&'static str, Counts>, expected_absent: &[(&str, &
 /// the hole this guard hunts.
 pub fn assert_no_kind_left_the_alphabet() {
     let counts = COUNTERS.with(|c| c.borrow().clone());
-    disclose(&counts, EXPECTED_ABSENT);
+    let expected_absent = expected_absent();
+    disclose(&counts, &expected_absent);
     if let Some(spec) = std::env::var_os("HOLON_PBT_WEIGHTS") {
         eprintln!(
             "[alphabet coverage] NOT judged: HOLON_PBT_WEIGHTS={spec:?} may remove arms on purpose"
         );
         return;
     }
-    if let Err(breach) = judge(&counts, EXPECTED_ABSENT) {
+    if let Err(breach) = judge(&counts, &expected_absent) {
         panic!("{breach}");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
 
-    /// `(kind, promised, offered, drawn, alphabet_gone, precondition_unmet)`
+    use super::*;
+    use crate::pbt::reference_state::ReferenceState;
+
+    /// `(kind, promised, offered, drawn, alphabet_gone, precondition_unmet,
+    /// not_drawn_here)`
     fn tally(
-        entries: &[(&'static str, u64, u64, u64, u64, u64)],
+        entries: &[(&'static str, u64, u64, u64, u64, u64, u64)],
     ) -> BTreeMap<&'static str, Counts> {
         entries
             .iter()
             .map(
-                |(name, promised, offered, drawn, alphabet_gone, precondition_unmet)| {
+                |(
+                    name,
+                    promised,
+                    offered,
+                    drawn,
+                    alphabet_gone,
+                    precondition_unmet,
+                    not_drawn_here,
+                )| {
                     (
                         *name,
                         Counts {
@@ -219,6 +333,7 @@ mod tests {
                             drawn: *drawn,
                             alphabet_gone: *alphabet_gone,
                             precondition_unmet: *precondition_unmet,
+                            not_drawn_here: *not_drawn_here,
                         },
                     )
                 },
@@ -230,7 +345,8 @@ mod tests {
     /// the generator never served it.
     #[test]
     fn a_promised_kind_the_generator_never_offered_is_a_breach() {
-        let err = judge(&tally(&[("ToggleState", 400, 0, 0, 400, 0)]), &[]).expect_err("must red");
+        let err =
+            judge(&tally(&[("ToggleState", 400, 0, 0, 400, 0, 0)]), &[]).expect_err("must red");
         assert!(
             err.contains("ToggleState (promised in 400 states, 400 alphabet-gone declines)"),
             "{err}"
@@ -240,7 +356,7 @@ mod tests {
     /// Offered but never sampled is the accident this guard refuses to red on.
     #[test]
     fn a_kind_offered_but_never_drawn_passes() {
-        judge(&tally(&[("ToggleState", 400, 400, 0, 0, 0)]), &[]).expect("offered is the claim");
+        judge(&tally(&[("ToggleState", 400, 400, 0, 0, 0, 0)]), &[]).expect("offered is the claim");
     }
 
     /// Below the floor the run, not the alphabet, is what the absence
@@ -248,7 +364,15 @@ mod tests {
     #[test]
     fn a_kind_promised_fewer_times_than_the_floor_is_not_judged() {
         judge(
-            &tally(&[("ToggleState", PROMISE_FLOOR - 1, 0, 0, PROMISE_FLOOR - 1, 0)]),
+            &tally(&[(
+                "ToggleState",
+                PROMISE_FLOOR - 1,
+                0,
+                0,
+                PROMISE_FLOOR - 1,
+                0,
+                0,
+            )]),
             &[],
         )
         .expect("under the floor");
@@ -258,20 +382,49 @@ mod tests {
     /// never offered, because the state never reached the shape the kind needs.
     #[test]
     fn a_kind_declined_only_for_an_unmet_precondition_is_not_judged() {
-        judge(&tally(&[("Redo", 400, 0, 0, 0, 400)]), &[]).expect("the state, not the alphabet");
+        judge(&tally(&[("Redo", 400, 0, 0, 0, 400, 0)]), &[]).expect("the state, not the alphabet");
     }
 
     /// A kind whose surface is gone in some states but present in others is
     /// the state's doing, not the alphabet's.
     #[test]
     fn a_kind_with_a_mixed_decline_history_is_not_judged() {
-        judge(&tally(&[("ToggleState", 400, 0, 0, 399, 1)]), &[]).expect("mixed declines");
+        judge(&tally(&[("ToggleState", 400, 0, 0, 399, 1, 0)]), &[]).expect("mixed declines");
+    }
+
+    /// A by-construction decliner: its generator ignores the state, so absence
+    /// says nothing about the alphabet.
+    #[test]
+    fn a_kind_declining_by_construction_is_not_judged() {
+        judge(&tally(&[("ReleaseHeld", 400, 0, 0, 0, 0, 400)]), &[])
+            .expect("drawn by the hand-authored regressions, not by the generator");
+    }
+
+    /// The accepted holes are pinned against the generators themselves: the
+    /// set of kinds that decline with nothing but `NotDrawnHere` must be
+    /// exactly `expected_absent()` for this process. A kind that joins or
+    /// leaves the set fails here instead of silently widening (or vacating)
+    /// the accepted holes.
+    #[test]
+    fn the_by_construction_declines_are_exactly_the_listed_kinds() {
+        let interp = Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new());
+        let state = ReferenceState::new(holon_pbt_core::Wiring::full(), interp);
+        let mut derived = crate::pbt::transitions::kinds_declining_by_construction(&state);
+        derived.sort_unstable();
+        let mut listed: Vec<&str> = expected_absent().iter().map(|(name, _)| *name).collect();
+        listed.sort_unstable();
+        assert_eq!(
+            derived, listed,
+            "the generators that decline by construction and the EXPECTED_ABSENT list disagree — \
+             add the new kind with the suite that DOES draw it, or drop the kind whose generator \
+             now serves the state"
+        );
     }
 
     #[test]
     fn a_listed_kind_is_an_accepted_hole() {
         judge(
-            &tally(&[("AdvanceDay", 400, 0, 0, 400, 0)]),
+            &tally(&[("AdvanceDay", 400, 0, 0, 400, 0, 0)]),
             &[(
                 "AdvanceDay",
                 "its cap registers only under HOLON_PBT_ADVANCE_DAY",
