@@ -21,6 +21,7 @@ mod loro_projection_withheld_delete;
 mod loro_read_model_publish_ordering_and_disclosure;
 mod loro_restart_unseeded_vault;
 mod loro_root_deliveries_are_guarded;
+mod loro_sibling_tie_rule;
 mod loro_snapshot_durability;
 mod loro_sync_controller_pbt;
 mod loro_typed_writer_census;
