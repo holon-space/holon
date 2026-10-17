@@ -1373,10 +1373,35 @@ impl Model {
             .map(|(k, _)| k.clone())
     }
 
-    /// Facts commit; every other output compares and sets against the read
-    /// trace. A stale pure firing rolls back. A stale effect happened, so its
-    /// consumption commits and each output goes to the place's candidate, or
-    /// applies on a data-class place, or is withheld; the settle discloses it.
+    /// Whether the compare-and-set of a fact into a read row fails: that row
+    /// moved since the firing read it (322/E3.c). Another input having changed
+    /// does not withhold the fact.
+    fn moved_read_row(&self, occ: &OccurrenceId, out: &Output) -> bool {
+        self.read_row(occ, out)
+            && self.version(&out.place, &out.subject)
+                != self.occs[occ].trace.rows[&key(&out.place, &out.subject)].version
+    }
+
+    /// Whether the firing read the row this output writes, so a put compares
+    /// against the version in its trace. A consumed row is held, not read.
+    fn read_row(&self, occ: &OccurrenceId, out: &Output) -> bool {
+        let o = &self.occs[occ];
+        let t = self.transition(&o.transition);
+        let inhibit_only = t.inhibits.iter().any(|p| p == out.place.as_str())
+            && !t.reads.iter().any(|p| p == out.place.as_str())
+            && !t.consumes.iter().any(|p| p == out.place.as_str());
+        o.trace.rows.contains_key(&key(&out.place, &out.subject))
+            && !inhibit_only
+            && (out.subject.as_str() != o.subject
+                || o.taken.iter().all(|(held, _)| held != out.place.as_str()))
+    }
+
+    /// Every output compares and sets against the read trace, a fact into a
+    /// row the firing read included (322/E3.c), so the staleness decides
+    /// before any put. A stale pure firing rolls back. A stale effect
+    /// happened, so its consumption commits and each output goes to the
+    /// place's candidate, or applies on a data-class place, or is withheld;
+    /// the settle discloses it.
     fn record(&mut self, occ: &OccurrenceId, outputs: Vec<Output>) {
         let o = &self.occs[occ];
         let t = self.transition(&o.transition);
@@ -1384,10 +1409,10 @@ impl Model {
             .into_iter()
             .partition(|out| t.facts.iter().any(|f| f == out.place.as_str()));
         let by = o.transition.clone();
-        for f in facts {
-            self.put(&f.place, &f.subject, f.content, Some(&by));
-        }
         let Some((place, subject)) = self.stale(occ) else {
+            for f in facts {
+                self.put(&f.place, &f.subject, f.content, Some(&by));
+            }
             let run_key = self.run_key(occ);
             self.marks.remove(&run_key);
             return self.commit(occ, rows);
@@ -1405,8 +1430,20 @@ impl Model {
             self.occ_mut(occ).settled = Some(Settled::Failed(cause));
             return;
         }
+        let mut routes = Vec::new();
+        for f in facts {
+            if self.moved_read_row(occ, &f) {
+                routes.push(Routed {
+                    place: f.place.clone(),
+                    subject: f.subject.clone(),
+                    route: Route::Withheld,
+                });
+            } else {
+                self.put(&f.place, &f.subject, f.content, Some(&by));
+            }
+        }
         let trace = &self.occs[occ].trace;
-        let (mut kept, mut routes) = (Vec::new(), Vec::new());
+        let mut kept = Vec::new();
         for out in &rows {
             let route = match self.place(&out.place) {
                 PlaceSpec::Stored {

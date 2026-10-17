@@ -882,17 +882,38 @@ branch), keep it as the standby for the swap path, or retire it.
 `SecondaryStorage` holds only the standby the apply transition chose. Reason: a
 put into an occupied capacity-1 `SecondaryStorage` overwrote a waiting standby.
 A silent overwrite of a token is an executor defect in its own right: a put into
-an occupied single-token place refuses, it never replaces. The refusal covers
-every put that **bypasses** the compare-and-set: a fact from a transition that
-does not read the place (322/E3.a2). A put behind the compare-and-set has seen
-the held token, so its rewrite is intended and stays allowed — and so is a fact
-from a transition that declares a **read arc** on the place, because the read
-arc *is* the net's own compare-and-set and it is visible in the net text. A
-data-class place is exempt because its outputs merge rather than replace a
-token (NET-fire.a). The anchor is the place's declared capacity, not the read
-trace. A production transition that rewrites a single-token place therefore
-declares the read arc it relies on; the write-back net's disk and store
-transitions do (`crates/holon-filesystem/src/writeback_net.rs`).
+an occupied `Single` place refuses, it never replaces. The refusal covers every
+put that **bypasses** the compare-and-set: a fact, which commits
+unconditionally. A put behind the compare-and-set has seen the held token, so
+its rewrite is intended and stays allowed. A data-class place is exempt because
+its outputs merge rather than replace a token (NET-fire.a).
+
+**322/E3.b.** A row a transition is *meant* to rewrite without comparing is
+declared, not inferred: capacity gets a third kind, `Register` — a
+single-token place whose fact put replaces the held token. `Single` is the
+default and keeps the loud refusal. The write-back net declares `OnDisk` and
+`Base` registers, so a leg that rewrites one of them without reading it
+replaces rather than refuses (`crates/holon-filesystem/src/writeback_net.rs`).
+A place that holds a live resource — a store handle, a lock, a connection — is
+never a register: dropping such a token leaks it (REV2-cand.c).
+
+**322/E3.c.** No silent lost update: a fact into a single-token row *its own
+firing read* is a compare-and-set against the token it read, whatever the
+capacity declares. The held token still being the read one, the fact replaces
+it. The row having moved while the effect was in flight, the fact is **not**
+put: the newer token wins, the occurrence settles `OverChangedInputs`, and the
+withheld fact is one of its disclosed routes, so `unsettled` and the
+conditions show it and the changed read input enables the transition again for
+a level-triggered re-fire. The comparison is against the row the fact writes,
+not against the firing's other inputs: a firing stale through a different
+input still puts a fact whose own row stands. The staleness of the read trace
+therefore decides before any fact is put. Three rows carry no comparison and
+follow 322/E3.b instead: one the firing did not read, one it consumed and so
+holds, and one it only inhibited — an inhibitor saw no token, so none can be
+lost, and withholding such a fact would drop a live resource the firing just
+opened (REV2-cand.c). This is what makes `ReadDisk`'s read arc on `OnDisk` and
+the manual remedies' arc on `Base` load-bearing: a file the user deletes while a disk read is in flight
+stays deleted (322/F3).
 
 **REV2-cand.c.** An output that carries a live resource is a fact (§9.2) and is
 never withheld. A candidate place therefore accepts every put with no staleness
@@ -960,6 +981,21 @@ after it.
     is the rule (338/D2=a). Whether an extension point whose consumers cannot
     take a lower-priority answer may declare blocking, and what the declaration
     is, is open. Not ruled.
+12. **What declares that a place holds a live resource?** (§9.6, 322/E3.b.) A
+    register must never hold one, but no declaration marks a resource-holding
+    place: `Storage` is `Class::Process` like every other place, and the
+    engine cannot infer it from a place name. Options: (a) a declared marker on
+    the place definition; (b) the unused `Class::Device`, which this executor
+    refuses at load today. Until it is ruled, the rule is a review rule, not a
+    load check.
+13. **Is `DiskChanged` a register?** (§9.6, 322/E3.b.) `CatchUp` inhibits the
+    place it writes, so its fact never meets a token; the manual transitions
+    (`AcceptRemoval`, `RewriteFromStore`) do not, so a disk change that arrives
+    before the user resolves the refusal makes their firing refuse loudly.
+    Options: (a) declare `DiskChanged` a register — a second change notice says
+    nothing the first does not; (b) inhibit `DiskChanged` on the manual
+    transitions, which defers the resolution until the notice is drained. Not
+    ruled; the ruling named only `Base` and `OnDisk`.
 
 ## Consequences
 

@@ -144,6 +144,20 @@ impl Spec {
         self
     }
 
+    /// A single-token place whose fact put replaces the held token
+    /// (322/E3.b).
+    pub fn register(mut self, name: &'static str, class: Class) -> Self {
+        self.places.insert(
+            name,
+            PlaceSpec::Stored {
+                class,
+                candidate: None,
+                capacity: Capacity::Register,
+            },
+        );
+        self
+    }
+
     /// A place whose row holds a FIFO of tokens (REV2-cand.c).
     pub fn fifo(mut self, name: &'static str, class: Class) -> Self {
         self.places.insert(
@@ -194,6 +208,11 @@ impl Spec {
                     candidate: None,
                     capacity: Capacity::Single,
                 } => net.place(name, *class),
+                PlaceSpec::Stored {
+                    class,
+                    candidate: None,
+                    capacity: Capacity::Register,
+                } => net.register(name, *class),
                 PlaceSpec::Stored {
                     class,
                     candidate: None,

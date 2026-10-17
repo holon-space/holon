@@ -2,9 +2,13 @@
 //! document's URI. The controller runs the effects; this module holds the
 //! places, the transitions and the reads of the marking.
 //!
-//! - `OnDisk{hash}`: the file as `ReadDisk` last read it.
+//! - `OnDisk{hash}`: the file as `ReadDisk` last read it. A register
+//!   (322/E3.b): the disk read and the catch-up replace the token. Every
+//!   transition that rewrites it also reads it, so each rewrite is a
+//!   compare-and-set against the token that firing read (322/E3.c).
 //! - `Base{hash, authority}`: the text Holon last wrote or ingested, and the
-//!   `Authority` hash that text holds.
+//!   `Authority` hash that text holds. A register too, read by every leg that
+//!   rewrites it.
 //! - `Authority{hash}`: the hash of the store's render of the document, an
 //!   outside write on every block change.
 //! - `Refused{seen, authority}`: the file holds no content while the store
@@ -128,8 +132,8 @@ fn refused(r: &mut Reader<'_>, s: &Subject) -> Option<Content> {
 pub fn net() -> NetDef {
     NetDef::default()
         .place(DISK_CHANGED, Class::Process)
-        .place(ON_DISK, Class::Process)
-        .place(BASE, Class::Process)
+        .register(ON_DISK, Class::Process)
+        .register(BASE, Class::Process)
         .place(AUTHORITY, Class::Data)
         .place(REFUSED, Class::Process)
         .derived(BEHIND, Arc::new(behind))
@@ -172,6 +176,10 @@ pub fn net() -> NetDef {
         .transition(manual(REWRITE_FROM_STORE))
 }
 
+/// A remedy the user fires on a refusal. It reads `Base` and `OnDisk` as well
+/// as consuming `Refused`, so its rewrite of both is a compare-and-set
+/// against what it read: a disk change during the remedy wins over it
+/// (322/E3.c).
 fn manual(name: &str) -> TransitionDef {
     TransitionDef::new(
         name,
@@ -181,8 +189,8 @@ fn manual(name: &str) -> TransitionDef {
     )
     .consumes(REFUSED)
     .reads(ON_DISK)
-    .reads(AUTHORITY)
     .reads(BASE)
+    .reads(AUTHORITY)
     .fact(BASE)
     .fact(ON_DISK)
     .fact(DISK_CHANGED)
@@ -260,6 +268,7 @@ mod tests {
     use holon_net::exec::EffectRequest;
     use holon_net::exec::EffectResult;
     use holon_net::exec::OccurrenceId;
+    use holon_net::exec::Route;
     use holon_net::exec::Settled;
 
     use super::*;
@@ -440,9 +449,9 @@ mod tests {
         assert_eq!(&*retry[0].transition, CATCH_UP);
     }
 
-    /// 322/E3.a2: a disk read replaces the `OnDisk` token it has read, so
-    /// `ReadDisk` declares the read arc that makes the rewrite its own
-    /// compare-and-set. Without the arc the fact refuses as a blind put.
+    /// 322/E3.b: a disk read replaces the `OnDisk` token, which the net
+    /// declares a register. Declared `Single` instead, the fact refuses as a
+    /// blind put and every disk read of changed content panics.
     #[test]
     fn a_read_disk_whose_hash_differs_rewrites_on_disk() {
         let mut exec = seeded();
@@ -464,9 +473,9 @@ mod tests {
         assert!(is_behind(&exec, DOC), "the file moved away from the base");
     }
 
-    /// 322/E3.a2: the manual remedy rewrites the `Base` it has read, so
-    /// `manual` declares the read arc on `Base`. Without the arc the remedy
-    /// panics on its own base fact, and the user's repair action is dead.
+    /// 322/E3.b: the manual remedy rewrites `Base`, a register. Declared
+    /// `Single` instead, the remedy panics on its own base fact and the
+    /// user's repair action is dead.
     #[test]
     fn the_rewrite_from_store_remedy_rewrites_an_occupied_base() {
         let mut exec = seeded();
@@ -503,5 +512,56 @@ mod tests {
             "the remedy consumed Refused"
         );
         assert!(!is_behind(&exec, DOC));
+    }
+
+    /// 322/E3.c: `ReadDisk` reads `OnDisk`, so its fact is a compare-and-set
+    /// against the token it read. While the effect is in flight the file
+    /// vanishes and `forget_file_state` writes `OnDisk{hash: absent}`; the
+    /// newer token wins, the fact is withheld and the occurrence settles
+    /// `OverChangedInputs`, so `CatchUp` does not rewrite a file the user
+    /// deleted.
+    #[test]
+    fn a_read_disk_fact_loses_to_the_absent_token_written_while_it_ran() {
+        let mut exec = seeded();
+        let doc = Subject::new(DOC);
+        exec.write(DISK_CHANGED, DOC, Content::new());
+        let reqs = one(&mut exec, 0);
+        assert_eq!(&*reqs[0].transition, READ_DISK);
+        exec.write(ON_DISK, DOC, content([("hash", ABSENT)]));
+        assert_eq!(
+            token_field(&exec, ON_DISK, DOC, "hash").as_deref(),
+            Some(ABSENT),
+            "the vanished file is the incumbent token"
+        );
+        exec.complete(
+            reqs[0].attempt,
+            EffectResult::Done(vec![output(ON_DISK, &doc, [("hash", "h2")])]),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(
+            token_field(&exec, ON_DISK, DOC, "hash").as_deref(),
+            Some(ABSENT),
+            "a fact must not drop the token written while its effect was in \
+             flight"
+        );
+        let settled = exec
+            .settled(&reqs[0].occurrence)
+            .expect("the occurrence is known");
+        let Some(Settled::OverChangedInputs { routes, .. }) = &settled else {
+            panic!("the withheld fact is not disclosed: {settled:?}");
+        };
+        assert_eq!(
+            routes
+                .iter()
+                .map(|r| (r.place.as_str().to_string(), r.route.clone()))
+                .collect::<Vec<_>>(),
+            vec![(ON_DISK.to_string(), Route::Withheld)],
+            "the withheld fact is the disclosed route of the occurrence"
+        );
+        assert!(
+            unsettled(&exec).contains(&DOC.to_string()),
+            "the document is unsettled, so the net reconciles the deletion"
+        );
     }
 }

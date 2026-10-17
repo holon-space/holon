@@ -17,6 +17,7 @@ use exec_support::string;
 use exec_support::text;
 use holon_api::Value;
 use holon_net::exec::Body;
+use holon_net::exec::Capacity;
 use holon_net::exec::Class;
 use holon_net::exec::Content;
 use holon_net::exec::EffectRequest;
@@ -461,27 +462,101 @@ fn a_candidate_place_that_is_not_fifo_is_refused() {
     ));
 }
 
-/// 322/E3.a2: a transition that declares a read arc on the place it facts has
-/// seen the incumbent — the net's own compare-and-set, visible in the net
-/// text — so the rewrite is allowed. The write-back net's `CatchUp` rewrites
-/// `Base` and `OnDisk` this way on every catch-up.
+/// 322/E3.c: a fact into a row its firing read is a compare-and-set against
+/// the token it read. Nothing moved `Base` while the effect ran, so the
+/// rewrite lands — and it lands on the default `Single` capacity, because the
+/// read arc, not the declaration, is what permits it.
 #[test]
-fn a_fact_rewrite_of_a_read_row_is_allowed() {
-    let net = Spec::default()
-        .place("In", Class::Process)
-        .place("Base", Class::Process)
-        .transition(
-            Transition::new(
-                "Work",
-                Trigger::Auto,
-                bind!(|r, s| Some(content(&[("n", Value::Integer(n_of(r, "In", s)?))]))),
-                Body::Effectful(Receiver::None),
-            )
-            .consumes("In")
-            .reads("Base")
-            .fact("Base"),
-        );
-    let mut d = Driver::new(net);
+fn a_fact_rewrite_of_a_read_row_is_a_compare_and_set() {
+    let mut d = Driver::new(fact_net(Capacity::Single, ReadArc::Base));
+    rewrite_twice(&mut d);
+    assert_eq!(base_n(&d), 2, "the second rewrite compared and set");
+    assert!(
+        !d.exec()
+            .occurrences()
+            .any(|(_, s)| matches!(s, Some(Settled::OverChangedInputs { .. }))),
+        "no firing read a row that moved"
+    );
+}
+
+/// 322/E3.c, the case of 322/F3: the row the firing read moved while the
+/// effect ran, so its fact is NOT put. The newer token wins, the occurrence
+/// settles `OverChangedInputs` and discloses the withheld fact, and the
+/// changed read input enables `Work` again.
+#[test]
+fn a_fact_into_a_read_row_that_moved_loses_to_the_newer_token() {
+    let mut d = Driver::new(fact_net(Capacity::Register, ReadArc::Base));
+    d.write("Base", DOC, content(&[("n", Value::Integer(0))]))
+        .expect("the net quiesces");
+    d.write("In", DOC, content(&[("n", Value::Integer(1))]))
+        .expect("the net quiesces");
+    d.write("Base", DOC, content(&[("n", Value::Integer(9))]))
+        .expect("the net quiesces");
+    d.complete_oldest(|req| {
+        EffectResult::Done(vec![Output::new(
+            "Base",
+            &req.subject,
+            content(&[("n", Value::Integer(int(&req.input, "n")))]),
+        )])
+    })
+    .expect("the net quiesces");
+    assert_eq!(
+        base_n(&d),
+        9,
+        "the token written while the effect ran stands"
+    );
+    let routes: Vec<_> = d
+        .exec()
+        .occurrences()
+        .filter_map(|(_, s)| match s {
+            Some(Settled::OverChangedInputs { routes, .. }) => Some(routes.clone()),
+            _ => None,
+        })
+        .flatten()
+        .map(|r| (r.place.as_str().to_string(), r.route))
+        .collect();
+    assert_eq!(
+        routes,
+        vec![("Base".to_string(), Route::Withheld)],
+        "the withheld fact is disclosed"
+    );
+}
+
+/// 322/E3.b: a fact into a row its firing did NOT read carries no comparison,
+/// so the place's declaration alone permits it. A `Register` is the row the
+/// writing transitions own, and the write-back net declares `Base` and
+/// `OnDisk` registers for the legs that rewrite them.
+#[test]
+fn a_fact_rewrite_of_an_unread_register_place_is_allowed() {
+    let mut d = Driver::new(fact_net(Capacity::Register, ReadArc::Nothing));
+    rewrite_twice(&mut d);
+    assert_eq!(base_n(&d), 2, "the fact rewrote the register");
+}
+
+/// 322/E3.b: `Single` is the default and keeps the loud refusal of 322/E3.a.
+/// The same net as the register case, one word of declaration apart: nothing
+/// compared the token this fact replaces, so the executor refuses.
+#[test]
+#[should_panic(expected = "would drop the held token")]
+fn a_fact_rewrite_of_an_unread_single_place_refuses() {
+    let mut d = Driver::new(fact_net(Capacity::Single, ReadArc::Nothing));
+    rewrite_twice(&mut d);
+}
+
+fn base_n(d: &Driver) -> i64 {
+    int(
+        &d.exec()
+            .tokens()
+            .token("Base", DOC)
+            .expect("a base")
+            .content,
+        "n",
+    )
+}
+
+/// Seeds `Base` from outside the net, then lets `Work` fact a new content
+/// over it twice.
+fn rewrite_twice(d: &mut Driver) {
     d.write("Base", DOC, content(&[("n", Value::Integer(0))]))
         .expect("the net quiesces");
     for n in [1, 2] {
@@ -496,16 +571,33 @@ fn a_fact_rewrite_of_a_read_row_is_allowed() {
         })
         .expect("the net quiesces");
     }
-    assert_eq!(
-        int(
-            &d.exec()
-                .tokens()
-                .token("Base", DOC)
-                .expect("a base")
-                .content,
-            "n"
-        ),
-        2,
-        "the fact rewrote the row its firing read"
-    );
+}
+
+/// Whether `Work` reads the row it facts: the arc that makes the fact a
+/// compare-and-set (322/E3.c) instead of a declared replacement (322/E3.b).
+enum ReadArc {
+    Base,
+    Nothing,
+}
+
+/// `Work` consumes `In` and facts `Base`, which carries `capacity`.
+fn fact_net(capacity: Capacity, reads: ReadArc) -> Spec {
+    let spec = Spec::default().place("In", Class::Process);
+    let spec = match capacity {
+        Capacity::Register => spec.register("Base", Class::Process),
+        Capacity::Single => spec.place("Base", Class::Process),
+        Capacity::Fifo => panic!("a FIFO base is a different test"),
+    };
+    let work = Transition::new(
+        "Work",
+        Trigger::Auto,
+        bind!(|r, s| Some(content(&[("n", Value::Integer(n_of(r, "In", s)?))]))),
+        Body::Effectful(Receiver::None),
+    )
+    .consumes("In")
+    .fact("Base");
+    spec.transition(match reads {
+        ReadArc::Base => work.reads("Base"),
+        ReadArc::Nothing => work,
+    })
 }

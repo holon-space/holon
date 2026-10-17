@@ -203,7 +203,7 @@ mod tests {
     fn net() -> NetDef {
         NetDef::default()
             .place("In", Class::Process)
-            .place("Out", Class::Process)
+            .register("Out", Class::Process)
             .transition(
                 TransitionDef::new(
                     "Go",

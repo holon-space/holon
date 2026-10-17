@@ -200,11 +200,18 @@ pub enum PlaceKind {
     Derived(Read),
 }
 
-/// How many tokens one (place, subject) row holds (REV2-cand.c).
+/// How many tokens one (place, subject) row holds (REV2-cand.c), and what a
+/// put with no compare-and-set behind it may do to the row (322/E3.b). A fact
+/// into a row its own firing read compares against the token it read whatever
+/// the capacity says (322/E3.c), so the capacity decides the other puts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Capacity {
-    /// One: a put rewrites the row in place.
+    /// One, kept: a put that no compare-and-set backs refuses rather than
+    /// drop the held token (REV2-cand.b). The default.
     Single,
+    /// One, replaced: a fact put replaces the held token, because the net
+    /// declares this row the writing transitions' own output (322/E3.b).
+    Register,
     /// Any number, oldest first: a put appends and a firing binds and
     /// consumes the oldest, so no put ever drops a waiting token.
     Fifo,
@@ -406,6 +413,21 @@ impl NetDef {
                 class,
                 kind: PlaceKind::Stored { candidate: None },
                 capacity: Capacity::Single,
+            },
+        );
+        self
+    }
+
+    /// A single-token place whose fact put replaces the held token: the net
+    /// declares the row the writing transitions' own output (322/E3.b). The
+    /// `OnDisk` and `Base` places of the write-back net are registers.
+    pub fn register(mut self, name: &str, class: Class) -> Self {
+        self.places.insert(
+            Place::new(name),
+            PlaceDef {
+                class,
+                kind: PlaceKind::Stored { candidate: None },
+                capacity: Capacity::Register,
             },
         );
         self
@@ -2464,25 +2486,22 @@ impl Executor {
             .map(|(k, _)| k.clone())
     }
 
-    /// The record never clobbers: facts commit, rows compare-and-set against
-    /// the read trace (NET-fire.a). A stale effect happened, so each row goes
-    /// to its place's candidate, applies on a data-class place, or is withheld,
-    /// and a mark on its input stays: the effect never runs twice on it.
+    /// The record never clobbers: every output compares and sets against the
+    /// read trace (NET-fire.a), a fact included, so the staleness of the trace
+    /// decides before any fact is put (322/E3.c). A stale effect happened, so
+    /// each row goes to its place's candidate, applies on a data-class place,
+    /// or is withheld, and a mark on its input stays: the effect never runs
+    /// twice on it.
     fn record(&mut self, a: Attempt, outputs: Vec<Output>, now: Duration) {
         let t = self.net.transition_def(&a.transition);
         let pure = matches!(t.body, Body::Pure(_));
-        let reads = t.reads.clone();
         let (facts, rows): (Vec<_>, Vec<_>) = outputs
             .into_iter()
             .partition(|o| t.facts.contains(&o.place));
-        for f in facts {
-            if !reads.contains(&f.place) {
-                self.refuse_blind_overwrite(&f);
-            }
-            self.tokens
-                .put(&f.place, &f.subject, f.content, Some(&a.transition));
-        }
         let Some((place, subject)) = self.stale(&a) else {
+            for f in facts {
+                self.put_fact(&a, f);
+            }
             self.marks
                 .remove(&(a.transition.clone(), a.subject.clone()));
             return self.commit(a, rows);
@@ -2505,6 +2524,17 @@ impl Executor {
         }
         let trace = a.trace.as_value();
         let (mut kept, mut routes) = (Vec::new(), Vec::new());
+        for f in facts {
+            if self.moved_read_row(&a, &f) {
+                routes.push(Routed {
+                    place: f.place.clone(),
+                    subject: f.subject.clone(),
+                    route: Route::Withheld,
+                });
+            } else {
+                self.put_fact(&a, f);
+            }
+        }
         for o in &rows {
             let route = if let Some(c) = self.net.candidate_of(&o.place) {
                 let base = a
@@ -2557,17 +2587,59 @@ impl Executor {
         );
     }
 
+    /// Commits one fact. A fact into a row the firing READ is a
+    /// compare-and-set against the token it read, and the caller reaches this
+    /// only while that trace stands, so the put replaces what the firing saw
+    /// (322/E3.c). A fact into any other row carries no comparison: the
+    /// place's declaration alone says whether it may replace what it finds
+    /// (322/E3.b).
+    fn put_fact(&mut self, a: &Attempt, f: Output) {
+        if !self.read_row(a, &f) {
+            self.refuse_blind_overwrite(&f);
+        }
+        self.tokens
+            .put(&f.place, &f.subject, f.content, Some(&a.transition));
+    }
+
+    /// Whether the compare-and-set of a fact into a row the firing read fails:
+    /// the row moved since the firing read it, so the newer token wins and the
+    /// fact is not put (322/E3.c). Another input of the same firing having
+    /// changed does not withhold this fact — the comparison is against the row
+    /// the fact writes.
+    fn moved_read_row(&self, a: &Attempt, o: &Output) -> bool {
+        self.read_row(a, o)
+            && self.tokens.version(&o.place, &o.subject)
+                != a.trace.rows[&(o.place.clone(), o.subject.clone())].version
+    }
+
+    /// Whether the firing read the row this output writes, so that the row's
+    /// version in the trace is what a put compares against. Two rows in the
+    /// trace are not read: one the firing consumed holds that token, so there
+    /// is nothing to compare (REV11-running.a), and one it only inhibited held
+    /// nothing, so no token can be lost and the declaration decides
+    /// (322/E3.b).
+    fn read_row(&self, a: &Attempt, o: &Output) -> bool {
+        let t = self.net.transition_def(&a.transition);
+        let inhibit_only = t.inhibits.contains(&o.place)
+            && !t.reads.contains(&o.place)
+            && !t.consumes.contains(&o.place);
+        a.trace
+            .rows
+            .contains_key(&(o.place.clone(), o.subject.clone()))
+            && !inhibit_only
+            && (o.subject != a.subject || a.taken.iter().all(|(held, _)| *held != o.place))
+    }
+
     /// A put that no compare-and-set backs must not land on an occupied
-    /// single-token place: its writer never saw the held token, so the put
-    /// would drop it, and losing a token is an executor defect in its own
-    /// right (REV2-cand.b). The place's declared capacity decides, not the
-    /// read trace. Two exemptions: a data-class place, whose outputs merge in
-    /// Loro instead of replacing a token (NET-fire.a), and a fact of a
-    /// transition that declares a read arc on the place — the net's own
-    /// compare-and-set, visible in the net text, since the firing saw the
-    /// incumbent (322/E3.a2). Only [`record`]'s facts loop calls this.
+    /// [`Capacity::Single`] place: its writer never saw the held token, so
+    /// the put would drop it, and losing a token is an executor defect in its
+    /// own right (REV2-cand.b). For a row the firing did not read, the
+    /// place's declaration decides: a [`Capacity::Register`] place is the one
+    /// whose fact put replaces (322/E3.b), and a data-class place is exempt
+    /// because its outputs merge in Loro instead of replacing a token
+    /// (NET-fire.a). Only [`put_fact`] calls this.
     ///
-    /// [`record`]: Executor::record
+    /// [`put_fact`]: Executor::put_fact
     fn refuse_blind_overwrite(&self, o: &Output) {
         let def = &self.net.places[&o.place];
         if def.capacity != Capacity::Single || def.class == Class::Data {
