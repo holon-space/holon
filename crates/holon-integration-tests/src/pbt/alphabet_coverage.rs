@@ -36,11 +36,18 @@
 //! `weighted_generator(_: &R)` never binds the state and fails every time
 //! ([`ReasonClass::NotDrawnHere`]). Their alphabet is not gone — they are drawn
 //! by a hand-authored regression step or another medium's PBT — so they are
-//! named in `EXPECTED_ABSENT` with the suite that covers them, and that list is
-//! pinned against the generators by a test. Six of them decline for a second
-//! reason — the `HOLON_PBT_WRITEBACK_FAULTS` gate is off — so they live in
-//! `EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS` and count as accepted holes only
-//! while that gate stays off.
+//! named in `EXPECTED_ABSENT` with the [`CoveredBy`] site that draws them, and
+//! that list is pinned against the generators by a test. Six of them decline
+//! for a second reason — the `HOLON_PBT_WRITEBACK_FAULTS` gate is off — so they
+//! live in `EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS` and count as accepted
+//! holes only while that gate stays off.
+//!
+//! A coverage site is a VALUE a test resolves, never prose: an annotation that
+//! names a case the gate skips reads exactly like live coverage, and the kind
+//! is then absent from every runner with no signal at all — the very hole this
+//! module hunts, one level up. A kind nothing draws is annotated
+//! [`CoveredBy::Nowhere`] and must appear in [`UNCOVERED_KINDS`], which names
+//! where the hole is reported.
 //!
 //! The counters are thread-local, like the rejection histogram in
 //! `holon_pbt_core::validation`: proptest runs a test's cases on the test's own
@@ -57,50 +64,58 @@ use nonempty_collections::NEVec;
 /// alphabet rather than about a run too short to have reached the kind's state.
 const PROMISE_FLOOR: u64 = 20;
 
+/// Where a kind that declines by construction IS drawn. A value, not prose: the
+/// site is resolved against the corpus and the runners by
+/// `every_accepted_hole_names_coverage_a_runner_draws`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CoveredBy {
+    /// The hand-authored regression corpus
+    /// (`hand_authored::DEFAULT_SIDECAR`). WHICH cases draw the kind is derived
+    /// from the corpus, so the entry cannot claim a step that is not there, and
+    /// at least one of those cases must be one the `hand-authored` recipe runs
+    /// by default — a kind whose every case sits in the recipe's quarantine
+    /// list is drawn by nobody.
+    HandAuthored,
+    /// A test file, repo-root-relative, that names the kind.
+    Suite(&'static str),
+    /// Nothing draws the kind: an uncovered axis, reported via
+    /// [`UNCOVERED_KINDS`]. The string says why the surface is gone.
+    Nowhere(&'static str),
+}
+
 /// Kinds whose `weighted_generator` declines by construction — it never binds
 /// the state — each with WHERE the kind is drawn instead. The list is pinned
 /// against the generators themselves by
 /// `the_by_construction_declines_are_exactly_the_listed_kinds`, so a kind that
-/// joins or leaves it is a test diff, never silent. An entry whose second field
-/// names no other suite is an uncovered kind, i.e. a finding.
-const EXPECTED_ABSENT: &[(&str, &str)] = &[
-    (
-        "CrashRestart",
-        "hand-authored-regressions/keystone.jsonl (5 steps)",
-    ),
-    (
-        "DelayAdmissions",
-        "hand-authored-regressions/keystone.jsonl (3 steps)",
-    ),
+/// joins or leaves it is a test diff, never silent.
+const EXPECTED_ABSENT: &[(&str, CoveredBy)] = &[
+    ("CrashRestart", CoveredBy::HandAuthored),
+    ("DelayAdmissions", CoveredBy::HandAuthored),
     (
         "DeliverBlockContent",
-        "NOWHERE: the GPUI layout PBT that drew it is gone (no \
-         `arb_deferred_live_block_scenario` in the tree) and `layout_bridge` reports no deferred \
-         blocks, so the deferred-live-block axis is uncovered",
+        CoveredBy::Nowhere(
+            "the GPUI layout PBT that drew it is gone (no `arb_deferred_live_block_scenario` in \
+             the tree) and `layout_bridge` reports no deferred blocks, so the deferred-live-block \
+             axis is uncovered",
+        ),
     ),
     (
         "FailNextDispatch",
-        "hand-authored-regressions/keystone.jsonl (2 steps)",
+        CoveredBy::Nowhere(
+            "the only two corpus steps live in \
+             `a-failed-create-cancels-its-keystrokes-with-one-disclosure` and its `-loro-dispatch` \
+             twin, both quarantined by the `hand-authored` recipe's default \
+             `HOLON_HAND_AUTHORED_SKIP` (registered known reds until admission Inc 2) — the \
+             failed-dispatch axis is uncovered until those cases run again",
+        ),
     ),
-    (
-        "HoldDispatch",
-        "hand-authored-regressions/keystone.jsonl (10 steps)",
-    ),
-    (
-        "RebootWithBacklogHeld",
-        "hand-authored-regressions/keystone.jsonl (1 step)",
-    ),
-    (
-        "ReleaseBacklog",
-        "hand-authored-regressions/keystone.jsonl (1 step)",
-    ),
-    (
-        "ReleaseHeld",
-        "hand-authored-regressions/keystone.jsonl (10 steps)",
-    ),
+    ("HoldDispatch", CoveredBy::HandAuthored),
+    ("RebootWithBacklogHeld", CoveredBy::HandAuthored),
+    ("ReleaseBacklog", CoveredBy::HandAuthored),
+    ("ReleaseHeld", CoveredBy::HandAuthored),
     (
         "StructuralKeyBurst",
-        "crates/holon-integration-tests/tests/structural_burst_under_lag.rs",
+        CoveredBy::Suite("crates/holon-integration-tests/tests/structural_burst_under_lag.rs"),
     ),
 ];
 
@@ -109,44 +124,71 @@ const EXPECTED_ABSENT: &[(&str, &str)] = &[
 /// `HOLON_PBT_WRITEBACK_FAULTS` is unset
 /// (`transitions::arm_write_churn::writeback_faults_enabled`), and nothing in
 /// this repo sets it, so today they are absent from every run. Same contract as
-/// [`EXPECTED_ABSENT`]: the second field names where the kind IS covered, and
-/// "NOWHERE" is a finding.
-const EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS: &[(&str, &str)] = &[
-    (
-        "ArmWriteChurn",
-        "hand-authored-regressions/keystone.jsonl (7 steps)",
-    ),
-    (
-        "ArmWriteFailure",
-        "hand-authored-regressions/keystone.jsonl (2 steps)",
-    ),
-    (
-        "DisarmWriteChurn",
-        "hand-authored-regressions/keystone.jsonl (3 steps)",
-    ),
-    (
-        "DropNextWatcherEvent",
-        "hand-authored-regressions/keystone.jsonl (1 step)",
-    ),
-    (
-        "ExternalLineEdit",
-        "hand-authored-regressions/keystone.jsonl (7 steps)",
-    ),
+/// [`EXPECTED_ABSENT`], and the same checks: splitting the data into a second
+/// const does not split the coverage duty, which is read over
+/// [`all_declared_absent`].
+const EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS: &[(&str, CoveredBy)] = &[
+    ("ArmWriteChurn", CoveredBy::HandAuthored),
+    ("ArmWriteFailure", CoveredBy::HandAuthored),
+    ("DisarmWriteChurn", CoveredBy::HandAuthored),
+    ("DropNextWatcherEvent", CoveredBy::HandAuthored),
+    ("ExternalLineEdit", CoveredBy::HandAuthored),
     (
         "TouchFile",
-        "NOWHERE: no hand-authored step draws it and the only generator is behind \
-         `HOLON_PBT_WRITEBACK_FAULTS`, which nothing sets — the no-op-save axis is uncovered",
+        CoveredBy::Nowhere(
+            "no hand-authored step draws it and the only generator is behind \
+             `HOLON_PBT_WRITEBACK_FAULTS`, which nothing sets — the no-op-save axis is uncovered",
+        ),
     ),
+];
+
+/// The uncovered axes, each with WHERE the hole is reported. Ruling
+/// 280/static-decline.c makes an accepted hole with no coverage elsewhere a
+/// finding, so a [`CoveredBy::Nowhere`] entry that reaches nobody is itself the
+/// defect; `every_uncovered_hole_is_reported` pins this list against the
+/// `Nowhere` entries in both directions.
+const UNCOVERED_KINDS: &[(&str, &str)] = &[
+    ("DeliverBlockContent", "holon-work#280"),
+    ("FailNextDispatch", "holon-work#280"),
+    ("TouchFile", "holon-work#280"),
 ];
 
 /// The accepted holes for THIS process: the always-absent kinds, plus the
 /// writeback-fault kinds while that gate is off.
-fn expected_absent() -> Vec<(&'static str, &'static str)> {
-    let mut all: Vec<(&'static str, &'static str)> = EXPECTED_ABSENT.to_vec();
+fn expected_absent() -> Vec<(&'static str, CoveredBy)> {
+    let mut all: Vec<(&'static str, CoveredBy)> = EXPECTED_ABSENT.to_vec();
     if !crate::pbt::transitions::arm_write_churn::writeback_faults_enabled() {
         all.extend_from_slice(EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS);
     }
     all
+}
+
+/// Where an uncovered kind's hole is reported. Every [`CoveredBy::Nowhere`]
+/// entry has one; `every_uncovered_hole_is_reported` pins that, so a miss here
+/// is a broken invariant, not a missing annotation.
+fn reported_at(kind: &str) -> &'static str {
+    UNCOVERED_KINDS
+        .iter()
+        .find(|(name, _)| *name == kind)
+        .map(|(_, card)| *card)
+        .unwrap_or_else(|| {
+            panic!(
+                "{kind} is an accepted hole NOTHING draws and it is reported nowhere — \
+                 UNCOVERED_KINDS must name the card that carries it"
+            )
+        })
+}
+
+/// Every DECLARED accepted hole, both lists, whatever the writeback-fault gate
+/// says: a hole's coverage duty is a property of the declaration, not of the
+/// run that happens to merge it.
+#[cfg(test)]
+fn all_declared_absent() -> Vec<(&'static str, CoveredBy)> {
+    EXPECTED_ABSENT
+        .iter()
+        .chain(EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS)
+        .copied()
+        .collect()
 }
 
 /// One kind's run tallies.
@@ -210,7 +252,7 @@ pub fn note_declined(name: &'static str, reasons: &NEVec<Reason>) {
 /// known hole.
 fn judge(
     counts: &BTreeMap<&'static str, Counts>,
-    expected_absent: &[(&str, &str)],
+    expected_absent: &[(&str, CoveredBy)],
 ) -> Result<(), String> {
     let vanished: Vec<String> = counts
         .iter()
@@ -255,7 +297,7 @@ fn judge(
 /// 4-case CI run reaches far fewer states than the 16-case tier), so reding on
 /// them would make the keystone's verdict depend on its case count. The judged
 /// claim beside it is not: an `AlphabetGone` decline is state-independent.
-fn disclose(counts: &BTreeMap<&'static str, Counts>, expected_absent: &[(&str, &str)]) {
+fn disclose(counts: &BTreeMap<&'static str, Counts>, expected_absent: &[(&str, CoveredBy)]) {
     let undrawn: Vec<String> = counts
         .iter()
         .filter(|(_, c)| c.promised > 0 && c.drawn == 0)
@@ -276,6 +318,17 @@ fn disclose(counts: &BTreeMap<&'static str, Counts>, expected_absent: &[(&str, &
         eprintln!(
             "[alphabet coverage] stale EXPECTED_ABSENT (this run DID offer them): {stale:?} — \
              drop them from the list"
+        );
+    }
+    let uncovered: Vec<String> = expected_absent
+        .iter()
+        .filter(|(_, site)| matches!(site, CoveredBy::Nowhere(_)))
+        .map(|(name, _)| format!("{name} (reported: {})", reported_at(name)))
+        .collect();
+    if !uncovered.is_empty() {
+        eprintln!(
+            "[alphabet coverage] accepted holes NOTHING draws: {}",
+            uncovered.join(" ")
         );
     }
 }
@@ -303,10 +356,104 @@ pub fn assert_no_kind_left_the_alphabet() {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use super::*;
+    use crate::pbt::hand_authored;
     use crate::pbt::reference_state::ReferenceState;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("the crate lives two levels under the repo root")
+            .to_path_buf()
+    }
+
+    /// The `hand-authored` recipe's DEFAULT quarantine list: the cases
+    /// `just hand-authored` does NOT run unless the caller overrides
+    /// `HOLON_HAND_AUTHORED_SKIP`. The justfile is the only place it exists, so
+    /// a shape change there must fail here rather than silently read as "skips
+    /// nothing".
+    fn gate_skipped_cases() -> Vec<String> {
+        let justfile = repo_root().join("justfile");
+        let text = std::fs::read_to_string(&justfile)
+            .unwrap_or_else(|e| panic!("{justfile:?} is unreadable: {e}"));
+        let marker = format!(
+            "export {env}=${{{env}-",
+            env = hand_authored::SKIP_FILTER_ENV
+        );
+        let tail = text
+            .split_once(&marker)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{justfile:?} holds no `{marker}` default — the `hand-authored` recipe's \
+                     quarantine list moved, so this check can no longer tell a case the gate runs \
+                     from one it skips"
+                )
+            })
+            .1;
+        let spec = tail
+            .split_once('}')
+            .expect("the shell default is brace-terminated")
+            .0;
+        spec.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Corpus case names whose transition list draws `kind`.
+    fn corpus_cases_drawing(kind: &str) -> Vec<String> {
+        hand_authored::load_cases()
+            .into_iter()
+            .filter(|case| case.transitions.iter().any(|t| t.variant_name() == kind))
+            .map(|case| case.name)
+            .collect()
+    }
+
+    /// Resolve one accepted hole's coverage site against what the runners
+    /// actually execute. `Err` carries the kind and why its claim is empty.
+    fn resolve_coverage(kind: &str, site: CoveredBy) -> Result<(), String> {
+        match site {
+            // Judged by `every_uncovered_hole_is_reported` instead: the claim
+            // here is "nothing draws it", and that is reported, not resolved.
+            CoveredBy::Nowhere(_) => Ok(()),
+            CoveredBy::Suite(path) => {
+                let file = repo_root().join(path);
+                let text = std::fs::read_to_string(&file)
+                    .map_err(|e| format!("{kind}: its suite {path} is unreadable: {e}"))?;
+                if text.contains(kind) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{kind}: its suite {path} exists but never names the kind"
+                    ))
+                }
+            }
+            CoveredBy::HandAuthored => {
+                let drawing = corpus_cases_drawing(kind);
+                if drawing.is_empty() {
+                    return Err(format!(
+                        "{kind}: no case of {} draws it",
+                        hand_authored::DEFAULT_SIDECAR
+                    ));
+                }
+                let skipped = gate_skipped_cases();
+                if drawing.iter().all(|case| skipped.contains(case)) {
+                    return Err(format!(
+                        "{kind}: the {} case(s) that draw it are ALL in the `hand-authored` \
+                         recipe's default {} list ({drawing:?}), so no runner draws the kind",
+                        drawing.len(),
+                        hand_authored::SKIP_FILTER_ENV,
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
 
     /// `(kind, promised, offered, drawn, alphabet_gone, precondition_unmet,
     /// not_drawn_here)`
@@ -427,9 +574,68 @@ mod tests {
             &tally(&[("AdvanceDay", 400, 0, 0, 400, 0, 0)]),
             &[(
                 "AdvanceDay",
-                "its cap registers only under HOLON_PBT_ADVANCE_DAY",
+                CoveredBy::Nowhere("its cap registers only under HOLON_PBT_ADVANCE_DAY"),
             )],
         )
         .expect("listed");
+    }
+
+    /// Ruling 280/static-decline.c: an accepted hole names where the kind IS
+    /// covered. A site no runner executes is no coverage — the kind is then
+    /// absent from the generated alphabet AND from every other suite, which is
+    /// exactly the silent hole `inv-alphabet-coverage` exists to refuse.
+    #[test]
+    fn every_accepted_hole_names_coverage_a_runner_draws() {
+        let empty_claims: Vec<String> = all_declared_absent()
+            .into_iter()
+            .filter_map(|(kind, site)| resolve_coverage(kind, site).err())
+            .collect();
+        assert!(
+            empty_claims.is_empty(),
+            "{} accepted hole(s) claim coverage no runner draws: {}. Either make a runner draw \
+             the kind, or annotate it `CoveredBy::Nowhere` and report it in UNCOVERED_KINDS.",
+            empty_claims.len(),
+            empty_claims.join("; "),
+        );
+    }
+
+    /// The reporting half of the same ruling: an uncovered axis that reaches
+    /// nobody is the defect. Pinned both ways, so a kind that loses its last
+    /// runner cannot be parked as `Nowhere` without a report, and a kind that
+    /// regains coverage cannot stay on the reported list.
+    #[test]
+    fn every_uncovered_hole_is_reported() {
+        let mut uncovered: Vec<&str> = all_declared_absent()
+            .iter()
+            .filter(|(_, site)| matches!(site, CoveredBy::Nowhere(_)))
+            .map(|(name, _)| *name)
+            .collect();
+        uncovered.sort_unstable();
+        let mut reported: Vec<&str> = UNCOVERED_KINDS.iter().map(|(name, _)| *name).collect();
+        reported.sort_unstable();
+        assert_eq!(
+            uncovered, reported,
+            "the accepted holes nothing draws and the reported ones disagree — report the new \
+             uncovered kind on its card and add it to UNCOVERED_KINDS, or drop the kind whose \
+             coverage is back"
+        );
+    }
+
+    /// The exclusion side: a hole whose corpus cases the gate really runs
+    /// resolves. `HoldDispatch` is drawn by 10 steps, none quarantined.
+    #[test]
+    fn a_hole_whose_hand_authored_cases_the_gate_runs_resolves() {
+        resolve_coverage("HoldDispatch", CoveredBy::HandAuthored)
+            .expect("the hand-authored recipe runs the cases that draw it");
+    }
+
+    /// Same for the other live site shape: a suite file that names the kind.
+    #[test]
+    fn a_hole_whose_suite_names_the_kind_resolves() {
+        resolve_coverage(
+            "StructuralKeyBurst",
+            CoveredBy::Suite("crates/holon-integration-tests/tests/structural_burst_under_lag.rs"),
+        )
+        .expect("the suite draws it");
     }
 }
