@@ -76,7 +76,12 @@ enum CoveredBy {
     /// by default — a kind whose every case sits in the recipe's quarantine
     /// list is drawn by nobody.
     HandAuthored,
-    /// A test file, repo-root-relative, that names the kind.
+    /// A test target the gate runs (`crates/<crate>/tests/<file>.rs` or
+    /// `frontends/<frontend>/tests/<file>.rs`, repo-root-relative) whose own
+    /// run ATTESTS the draw: the file calls [`attest_drew`] with the kind, and
+    /// that call reds in the suite's process when the suite's draw counter for
+    /// the kind stayed at zero. Naming the kind is no claim — a transition's
+    /// declaration file names every kind it declares, and so does this one.
     Suite(&'static str),
     /// Nothing draws the kind: an uncovered axis, reported via
     /// [`UNCOVERED_KINDS`]. The string says why the surface is gone.
@@ -231,6 +236,20 @@ pub fn note_offered(name: &'static str) {
 /// A transition of this kind was applied to the reference.
 pub fn note_drawn(name: &'static str) {
     bump(name, |c| c.drawn += 1);
+}
+
+/// A suite outside the generated alphabet attests that ITS run drew `kind`.
+/// The counter is the evidence, never the file's text: every
+/// [`CoveredBy::Suite`] site is resolved against this call, so the suite reds
+/// in its own process the moment it stops drawing the kind it vouches for.
+pub fn attest_drew(kind: &str) {
+    let drawn = COUNTERS.with(|c| c.borrow().get(kind).map_or(0, |counts| counts.drawn));
+    assert!(
+        drawn > 0,
+        "{kind}: this suite is its coverage site in `EXPECTED_ABSENT`, but its run drew it 0 \
+         times — draw the kind here, or move the claim to the suite that does"
+    );
+    eprintln!("[alphabet coverage] attested: this suite drew {kind} {drawn}x");
 }
 
 /// The kind's generator declined one state; its reasons say whether the state
@@ -414,6 +433,18 @@ mod tests {
             .collect()
     }
 
+    /// The two path shapes cargo builds as a test target of its own. A path
+    /// under `src/` is none: a transition's declaration file and this data
+    /// file are compiled into a library, so an attestation written there would
+    /// never run.
+    fn is_gate_test_target(path: &str) -> bool {
+        let parts: Vec<&str> = path.split('/').collect();
+        path.ends_with(".rs")
+            && parts.len() >= 4
+            && matches!(parts[0], "crates" | "frontends")
+            && parts[2] == "tests"
+    }
+
     /// Resolve one accepted hole's coverage site against what the runners
     /// actually execute. `Err` carries the kind and why its claim is empty.
     fn resolve_coverage(kind: &str, site: CoveredBy) -> Result<(), String> {
@@ -422,14 +453,24 @@ mod tests {
             // here is "nothing draws it", and that is reported, not resolved.
             CoveredBy::Nowhere(_) => Ok(()),
             CoveredBy::Suite(path) => {
+                if !is_gate_test_target(path) {
+                    return Err(format!(
+                        "{kind}: its site {path} is no test target the gate runs (expected \
+                         `crates/<crate>/tests/<file>.rs` or \
+                         `frontends/<frontend>/tests/<file>.rs`), so nothing there ever runs"
+                    ));
+                }
                 let file = repo_root().join(path);
                 let text = std::fs::read_to_string(&file)
                     .map_err(|e| format!("{kind}: its suite {path} is unreadable: {e}"))?;
-                if text.contains(kind) {
+                let attestation = format!("attest_drew(\"{kind}\")");
+                if text.contains(&attestation) {
                     Ok(())
                 } else {
                     Err(format!(
-                        "{kind}: its suite {path} exists but never names the kind"
+                        "{kind}: its suite {path} never attests the draw — a file that only names \
+                         the kind draws nothing; call \
+                         `alphabet_coverage::{attestation}` there, where the suite has applied it"
                     ))
                 }
             }
@@ -629,13 +670,52 @@ mod tests {
             .expect("the hand-authored recipe runs the cases that draw it");
     }
 
-    /// Same for the other live site shape: a suite file that names the kind.
+    /// Ruling 280/static-decline.c: the site is "the hand-authored regression
+    /// file, or the suite that DRAWS it". A file that merely NAMES the kind
+    /// draws nothing — the transition's own declaration site names every kind
+    /// it declares, and so does this data file.
     #[test]
-    fn a_hole_whose_suite_names_the_kind_resolves() {
+    fn a_suite_site_that_only_names_the_kind_is_refused() {
+        resolve_coverage(
+            "TouchFile",
+            CoveredBy::Suite("crates/holon-integration-tests/src/pbt/transitions/touch_file.rs"),
+        )
+        .expect_err("the transition's own declaration file draws nothing");
+        resolve_coverage(
+            "DeliverBlockContent",
+            CoveredBy::Suite("crates/holon-integration-tests/src/pbt/alphabet_coverage.rs"),
+        )
+        .expect_err("the coverage data file cannot vouch for its own kinds");
+    }
+
+    /// Same for the other live site shape: a gate-run suite that attests its
+    /// own draw.
+    #[test]
+    fn a_hole_whose_suite_attests_the_draw_resolves() {
         resolve_coverage(
             "StructuralKeyBurst",
             CoveredBy::Suite("crates/holon-integration-tests/tests/structural_burst_under_lag.rs"),
         )
         .expect("the suite draws it");
+    }
+
+    /// The attestation, not the name, is what resolves a `Suite` site: this
+    /// suite's case literal names `Indent` and really draws it, yet the site
+    /// vouches only for the kind it attests.
+    #[test]
+    fn a_gate_run_suite_that_names_a_kind_without_attesting_it_is_refused() {
+        resolve_coverage(
+            "Indent",
+            CoveredBy::Suite("crates/holon-integration-tests/tests/structural_burst_under_lag.rs"),
+        )
+        .expect_err("the suite attests StructuralKeyBurst, not Indent");
+    }
+
+    /// The attestation's teeth: the suite's claim is the COUNTER, so vouching
+    /// for a kind the run never drew reds in the suite's own process.
+    #[test]
+    #[should_panic(expected = "its run drew it 0 times")]
+    fn a_suite_attesting_a_kind_it_never_drew_reds() {
+        attest_drew("StructuralKeyBurst");
     }
 }
