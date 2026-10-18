@@ -54,7 +54,8 @@ fn tabs_then_shift_tabs_without_settling_decide_on_the_write_authority() {
     };
     ComposedSut::<WideE2E>::test_sequential(config, wide_e2e_ref(), case.transitions, None);
 
-    // `EXPECTED_ABSENT` names this file as `StructuralKeyBurst`'s coverage
-    // site; the claim holds only while this run really draws the kind.
+    // `EXPECTED_ABSENT` marks `StructuralKeyBurst` as covered by a
+    // self-attesting suite, and this is that suite: nothing outside this
+    // process resolves the claim, so the counter read below is all of it.
     holon_integration_tests::pbt::alphabet_coverage::attest_drew("StructuralKeyBurst");
 }

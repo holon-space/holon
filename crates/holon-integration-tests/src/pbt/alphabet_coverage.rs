@@ -36,25 +36,31 @@
 //! `weighted_generator(_: &R)` never binds the state and fails every time
 //! ([`ReasonClass::NotDrawnHere`]). Their alphabet is not gone — they are drawn
 //! by a hand-authored regression step or another medium's PBT — so they are
-//! named in `EXPECTED_ABSENT` with the [`CoveredBy`] site that draws them, and
-//! that list is pinned against the generators by a test. Six of them decline
-//! for a second reason — the `HOLON_PBT_WRITEBACK_FAULTS` gate is off — so they
-//! live in `EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS` and count as accepted
-//! holes only while that gate stays off.
+//! named in `EXPECTED_ABSENT` with the [`CoveredBy`] claim that accounts for
+//! them, and that list is pinned against the generators by a test. Six of them
+//! decline for a second reason — the `HOLON_PBT_WRITEBACK_FAULTS` gate is off —
+//! so they live in `EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS` and count as
+//! accepted holes only while that gate stays off.
 //!
-//! A coverage site is a VALUE a test resolves, never prose: an annotation that
-//! names a case the gate skips reads exactly like live coverage, and the kind
-//! is then absent from every runner with no signal at all — the very hole this
-//! module hunts, one level up. A kind nothing draws is annotated
-//! [`CoveredBy::Nowhere`] and must appear in [`UNCOVERED_KINDS`], which names
-//! where the hole is reported.
+//! A coverage claim this process cannot MEASURE is not representable (ruling
+//! 280/suite-owns-claim.b). [`CoveredBy::HandAuthored`] is resolved against the
+//! corpus this process loads; every other claim is REPORTED in
+//! [`ACCOUNTED_ELSEWHERE`] and resolved by nobody. Resolving a claim against
+//! the TEXT of the file it pointed at was the earlier shape, and an
+//! `attest_drew` line sitting in a comment satisfied it while nothing ran. So a
+//! suite outside the generated alphabet vouches for ITSELF: it calls
+//! [`attest_drew`], which reds in that suite's own process when its run drew
+//! the kind 0 times.
 //!
-//! The counters are thread-local, like the rejection histogram in
-//! `holon_pbt_core::validation`: proptest runs a test's cases on the test's own
-//! thread, so one test's alphabet is never mixed into another's.
+//! The counters are process-global, not thread-local: a vouching suite may
+//! apply its transitions on a worker thread while [`attest_drew`] runs on the
+//! test thread (holon-work#441), and nextest gives every test its own process,
+//! so "this process" is "this test's run".
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::ReasonClass;
@@ -64,9 +70,10 @@ use nonempty_collections::NEVec;
 /// alphabet rather than about a run too short to have reached the kind's state.
 const PROMISE_FLOOR: u64 = 20;
 
-/// Where a kind that declines by construction IS drawn. A value, not prose: the
-/// site is resolved against the corpus and the runners by
-/// `every_accepted_hole_names_coverage_a_runner_draws`.
+/// What accounts for a kind that declines by construction. A closed set of
+/// claims this process can either MEASURE or must REPORT — never a site whose
+/// file some check greps (ruling 280/suite-owns-claim.b), which is why no
+/// variant carries a path. Pinned by `no_coverage_claim_carries_a_site_path`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CoveredBy {
     /// The hand-authored regression corpus
@@ -76,15 +83,14 @@ enum CoveredBy {
     /// by default — a kind whose every case sits in the recipe's quarantine
     /// list is drawn by nobody.
     HandAuthored,
-    /// A test target the gate runs (`crates/<crate>/tests/<file>.rs` or
-    /// `frontends/<frontend>/tests/<file>.rs`, repo-root-relative) whose own
-    /// run ATTESTS the draw: the file calls [`attest_drew`] with the kind, and
-    /// that call reds in the suite's process when the suite's draw counter for
-    /// the kind stayed at zero. Naming the kind is no claim — a transition's
-    /// declaration file names every kind it declares, and so does this one.
-    Suite(&'static str),
+    /// A suite outside the generated alphabet draws the kind and vouches for
+    /// ITSELF: it calls [`attest_drew`], which reds in that suite's process
+    /// when its run drew the kind 0 times. This process cannot see that run, so
+    /// the entry is no claim this module resolves — [`ACCOUNTED_ELSEWHERE`]
+    /// names the suite, for the reader.
+    SelfAttestingSuite,
     /// Nothing draws the kind: an uncovered axis, reported via
-    /// [`UNCOVERED_KINDS`]. The string says why the surface is gone.
+    /// [`ACCOUNTED_ELSEWHERE`]. The string says why the surface is gone.
     Nowhere(&'static str),
 }
 
@@ -118,10 +124,7 @@ const EXPECTED_ABSENT: &[(&str, CoveredBy)] = &[
     ("RebootWithBacklogHeld", CoveredBy::HandAuthored),
     ("ReleaseBacklog", CoveredBy::HandAuthored),
     ("ReleaseHeld", CoveredBy::HandAuthored),
-    (
-        "StructuralKeyBurst",
-        CoveredBy::Suite("crates/holon-integration-tests/tests/structural_burst_under_lag.rs"),
-    ),
+    ("StructuralKeyBurst", CoveredBy::SelfAttestingSuite),
 ];
 
 /// Kinds the writeback-fault gate keeps out of the generated alphabet: their
@@ -147,14 +150,22 @@ const EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS: &[(&str, CoveredBy)] = &[
     ),
 ];
 
-/// The uncovered axes, each with WHERE the hole is reported. Ruling
-/// 280/static-decline.c makes an accepted hole with no coverage elsewhere a
-/// finding, so a [`CoveredBy::Nowhere`] entry that reaches nobody is itself the
-/// defect; `every_uncovered_hole_is_reported` pins this list against the
-/// `Nowhere` entries in both directions.
-const UNCOVERED_KINDS: &[(&str, &str)] = &[
+/// Every accepted hole this process cannot measure, each with WHERE it is
+/// accounted for: the card that carries an uncovered axis
+/// ([`CoveredBy::Nowhere`], a finding per ruling 280/static-decline.c), or the
+/// suite that vouches for itself ([`CoveredBy::SelfAttestingSuite`], whose own
+/// run reds). These values are pointers for the reader, resolved by no check —
+/// a claim a check could resolve belongs in [`CoveredBy`] instead.
+/// `every_claim_this_process_cannot_measure_is_reported` pins the list against
+/// those two variants in both directions.
+const ACCOUNTED_ELSEWHERE: &[(&str, &str)] = &[
     ("DeliverBlockContent", "holon-work#280"),
     ("FailNextDispatch", "holon-work#280"),
+    (
+        "StructuralKeyBurst",
+        "crates/holon-integration-tests/tests/structural_burst_under_lag.rs, whose own run calls \
+         `attest_drew`",
+    ),
     ("TouchFile", "holon-work#280"),
 ];
 
@@ -168,18 +179,20 @@ fn expected_absent() -> Vec<(&'static str, CoveredBy)> {
     all
 }
 
-/// Where an uncovered kind's hole is reported. Every [`CoveredBy::Nowhere`]
-/// entry has one; `every_uncovered_hole_is_reported` pins that, so a miss here
-/// is a broken invariant, not a missing annotation.
+/// Where an unmeasurable claim is accounted for. Every [`CoveredBy::Nowhere`]
+/// and [`CoveredBy::SelfAttestingSuite`] entry has one;
+/// `every_claim_this_process_cannot_measure_is_reported` pins that, so a miss
+/// here is a broken invariant, not a missing annotation.
 fn reported_at(kind: &str) -> &'static str {
-    UNCOVERED_KINDS
+    ACCOUNTED_ELSEWHERE
         .iter()
         .find(|(name, _)| *name == kind)
-        .map(|(_, card)| *card)
+        .map(|(_, where_)| *where_)
         .unwrap_or_else(|| {
             panic!(
-                "{kind} is an accepted hole NOTHING draws and it is reported nowhere — \
-                 UNCOVERED_KINDS must name the card that carries it"
+                "{kind} is an accepted hole this process cannot measure and it is accounted for \
+                 nowhere — ACCOUNTED_ELSEWHERE must name the card or the self-attesting suite \
+                 that carries it"
             )
         })
 }
@@ -210,17 +223,24 @@ pub struct Counts {
     pub alphabet_gone: u64,
     /// Declines whose reason says THIS state is no fit, and another could be.
     pub precondition_unmet: u64,
-    /// Declines whose reason says this medium never generates the kind; it is
-    /// drawn by the suite `EXPECTED_ABSENT` names.
+    /// Declines whose reason says this medium never generates the kind; what
+    /// accounts for it instead is the `EXPECTED_ABSENT` claim.
     pub not_drawn_here: u64,
 }
 
-thread_local! {
-    static COUNTERS: RefCell<BTreeMap<&'static str, Counts>> = const { RefCell::new(BTreeMap::new()) };
+static COUNTERS: LazyLock<Mutex<BTreeMap<&'static str, Counts>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+/// The run's tally. Poisoned means a case panicked mid-bump, which is a defect
+/// of its own and must not read as an empty alphabet.
+fn counters() -> MutexGuard<'static, BTreeMap<&'static str, Counts>> {
+    COUNTERS
+        .lock()
+        .expect("a panic poisoned the alphabet counters; the tally cannot be trusted")
 }
 
 fn bump(name: &'static str, f: impl FnOnce(&mut Counts)) {
-    COUNTERS.with(|c| f(c.borrow_mut().entry(name).or_default()));
+    f(counters().entry(name).or_default());
 }
 
 /// The wiring + caps gate admitted this kind in one state.
@@ -239,15 +259,16 @@ pub fn note_drawn(name: &'static str) {
 }
 
 /// A suite outside the generated alphabet attests that ITS run drew `kind`.
-/// The counter is the evidence, never the file's text: every
-/// [`CoveredBy::Suite`] site is resolved against this call, so the suite reds
-/// in its own process the moment it stops drawing the kind it vouches for.
+/// The counter is the only evidence, and it is read here, in the suite's own
+/// process: nothing resolves a [`CoveredBy::SelfAttestingSuite`] entry from
+/// outside, so this call is where the claim lives or dies.
 pub fn attest_drew(kind: &str) {
-    let drawn = COUNTERS.with(|c| c.borrow().get(kind).map_or(0, |counts| counts.drawn));
+    let drawn = counters().get(kind).map_or(0, |counts| counts.drawn);
     assert!(
         drawn > 0,
-        "{kind}: this suite is its coverage site in `EXPECTED_ABSENT`, but its run drew it 0 \
-         times — draw the kind here, or move the claim to the suite that does"
+        "{kind}: this suite vouches for itself as the kind's coverage \
+         (`CoveredBy::SelfAttestingSuite` in `EXPECTED_ABSENT`), but its run drew it 0 times — \
+         draw the kind here, or move the claim to the suite that does"
     );
     eprintln!("[alphabet coverage] attested: this suite drew {kind} {drawn}x");
 }
@@ -350,6 +371,18 @@ fn disclose(counts: &BTreeMap<&'static str, Counts>, expected_absent: &[(&str, C
             uncovered.join(" ")
         );
     }
+    let attested_elsewhere: Vec<String> = expected_absent
+        .iter()
+        .filter(|(_, site)| matches!(site, CoveredBy::SelfAttestingSuite))
+        .map(|(name, _)| format!("{name} (its own run reds: {})", reported_at(name)))
+        .collect();
+    if !attested_elsewhere.is_empty() {
+        eprintln!(
+            "[alphabet coverage] accepted holes a self-attesting suite covers, unmeasurable from \
+             THIS run: {}",
+            attested_elsewhere.join(" ")
+        );
+    }
 }
 
 /// `inv-alphabet-coverage`: disclose the run's alphabet tally, then judge it.
@@ -359,7 +392,7 @@ fn disclose(counts: &BTreeMap<&'static str, Counts>, expected_absent: &[(&str, C
 /// multiplier removes an arm on purpose, which is indistinguishable here from
 /// the hole this guard hunts.
 pub fn assert_no_kind_left_the_alphabet() {
-    let counts = COUNTERS.with(|c| c.borrow().clone());
+    let counts = counters().clone();
     let expected_absent = expected_absent();
     disclose(&counts, &expected_absent);
     if let Some(spec) = std::env::var_os("HOLON_PBT_WEIGHTS") {
@@ -433,47 +466,13 @@ mod tests {
             .collect()
     }
 
-    /// The two path shapes cargo builds as a test target of its own. A path
-    /// under `src/` is none: a transition's declaration file and this data
-    /// file are compiled into a library, so an attestation written there would
-    /// never run.
-    fn is_gate_test_target(path: &str) -> bool {
-        let parts: Vec<&str> = path.split('/').collect();
-        path.ends_with(".rs")
-            && parts.len() >= 4
-            && matches!(parts[0], "crates" | "frontends")
-            && parts[2] == "tests"
-    }
-
-    /// Resolve one accepted hole's coverage site against what the runners
-    /// actually execute. `Err` carries the kind and why its claim is empty.
+    /// Resolve one accepted hole's claim against what THIS process can measure.
+    /// `Err` carries the kind and why its claim is empty. The two claims this
+    /// process cannot measure are reported instead, by
+    /// `every_claim_this_process_cannot_measure_is_reported`.
     fn resolve_coverage(kind: &str, site: CoveredBy) -> Result<(), String> {
         match site {
-            // Judged by `every_uncovered_hole_is_reported` instead: the claim
-            // here is "nothing draws it", and that is reported, not resolved.
-            CoveredBy::Nowhere(_) => Ok(()),
-            CoveredBy::Suite(path) => {
-                if !is_gate_test_target(path) {
-                    return Err(format!(
-                        "{kind}: its site {path} is no test target the gate runs (expected \
-                         `crates/<crate>/tests/<file>.rs` or \
-                         `frontends/<frontend>/tests/<file>.rs`), so nothing there ever runs"
-                    ));
-                }
-                let file = repo_root().join(path);
-                let text = std::fs::read_to_string(&file)
-                    .map_err(|e| format!("{kind}: its suite {path} is unreadable: {e}"))?;
-                let attestation = format!("attest_drew(\"{kind}\")");
-                if text.contains(&attestation) {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "{kind}: its suite {path} never attests the draw — a file that only names \
-                         the kind draws nothing; call \
-                         `alphabet_coverage::{attestation}` there, where the suite has applied it"
-                    ))
-                }
-            }
+            CoveredBy::Nowhere(_) | CoveredBy::SelfAttestingSuite => Ok(()),
             CoveredBy::HandAuthored => {
                 let drawing = corpus_cases_drawing(kind);
                 if drawing.is_empty() {
@@ -604,7 +603,8 @@ mod tests {
         assert_eq!(
             derived, listed,
             "the generators that decline by construction and the EXPECTED_ABSENT list disagree — \
-             add the new kind with the suite that DOES draw it, or drop the kind whose generator \
+             add the new kind with the claim that accounts for it (`HandAuthored` resolves here; \
+             anything else is reported in ACCOUNTED_ELSEWHERE), or drop the kind whose generator \
              now serves the state"
         );
     }
@@ -622,9 +622,11 @@ mod tests {
     }
 
     /// Ruling 280/static-decline.c: an accepted hole names where the kind IS
-    /// covered. A site no runner executes is no coverage — the kind is then
+    /// covered. A claim no runner executes is no coverage — the kind is then
     /// absent from the generated alphabet AND from every other suite, which is
-    /// exactly the silent hole `inv-alphabet-coverage` exists to refuse.
+    /// exactly the silent hole `inv-alphabet-coverage` exists to refuse. Only
+    /// `HandAuthored` is resolved here, against the corpus this process loads;
+    /// the rest is reported, by the test below.
     #[test]
     fn every_accepted_hole_names_coverage_a_runner_draws() {
         let empty_claims: Vec<String> = all_declared_absent()
@@ -634,32 +636,57 @@ mod tests {
         assert!(
             empty_claims.is_empty(),
             "{} accepted hole(s) claim coverage no runner draws: {}. Either make a runner draw \
-             the kind, or annotate it `CoveredBy::Nowhere` and report it in UNCOVERED_KINDS.",
+             the kind, or annotate it `CoveredBy::Nowhere` and report it in \
+             ACCOUNTED_ELSEWHERE.",
             empty_claims.len(),
             empty_claims.join("; "),
         );
     }
 
-    /// The reporting half of the same ruling: an uncovered axis that reaches
-    /// nobody is the defect. Pinned both ways, so a kind that loses its last
-    /// runner cannot be parked as `Nowhere` without a report, and a kind that
-    /// regains coverage cannot stay on the reported list.
+    /// The reporting half of the same ruling, widened by ruling
+    /// 280/suite-owns-claim.b: a claim this process cannot measure is REPORTED,
+    /// and one that reaches nobody is the defect. Pinned both ways, so a kind
+    /// that loses its last runner cannot be parked without a report, and a kind
+    /// this process measures again cannot stay on the list.
     #[test]
-    fn every_uncovered_hole_is_reported() {
-        let mut uncovered: Vec<&str> = all_declared_absent()
+    fn every_claim_this_process_cannot_measure_is_reported() {
+        let mut unmeasurable: Vec<&str> = all_declared_absent()
             .iter()
-            .filter(|(_, site)| matches!(site, CoveredBy::Nowhere(_)))
+            .filter(|(_, site)| {
+                matches!(site, CoveredBy::Nowhere(_) | CoveredBy::SelfAttestingSuite)
+            })
             .map(|(name, _)| *name)
             .collect();
-        uncovered.sort_unstable();
-        let mut reported: Vec<&str> = UNCOVERED_KINDS.iter().map(|(name, _)| *name).collect();
+        unmeasurable.sort_unstable();
+        let mut reported: Vec<&str> = ACCOUNTED_ELSEWHERE.iter().map(|(name, _)| *name).collect();
         reported.sort_unstable();
         assert_eq!(
-            uncovered, reported,
-            "the accepted holes nothing draws and the reported ones disagree — report the new \
-             uncovered kind on its card and add it to UNCOVERED_KINDS, or drop the kind whose \
-             coverage is back"
+            unmeasurable, reported,
+            "the accepted holes this process cannot measure and the reported ones disagree — name \
+             the new one in ACCOUNTED_ELSEWHERE (its card, or the suite whose own run reds), or \
+             drop the kind whose coverage this process measures again"
         );
+    }
+
+    /// Ruling 280/suite-owns-claim.b: a claim resolved from the TEXT of a file
+    /// needs that file's path in the data, so no variant of [`CoveredBy`] may
+    /// carry one. The match is the pin — a new variant does not compile until
+    /// it is classified here — and the assertion catches the cheaper
+    /// regression, a path smuggled into a `Nowhere` reason. The paths in
+    /// `ACCOUNTED_ELSEWHERE` are deliberate: no check resolves them.
+    #[test]
+    fn no_coverage_claim_carries_a_site_path() {
+        for (kind, site) in all_declared_absent() {
+            let prose = match site {
+                CoveredBy::HandAuthored | CoveredBy::SelfAttestingSuite => continue,
+                CoveredBy::Nowhere(why) => why,
+            };
+            assert!(
+                !prose.contains(".rs"),
+                "{kind}: its claim carries the path `{prose}` — a claim this process cannot \
+                 measure is reported in ACCOUNTED_ELSEWHERE, never resolved against a file's text"
+            );
+        }
     }
 
     /// The exclusion side: a hole whose corpus cases the gate really runs
@@ -670,52 +697,22 @@ mod tests {
             .expect("the hand-authored recipe runs the cases that draw it");
     }
 
-    /// Ruling 280/static-decline.c: the site is "the hand-authored regression
-    /// file, or the suite that DRAWS it". A file that merely NAMES the kind
-    /// draws nothing — the transition's own declaration site names every kind
-    /// it declares, and so does this data file.
-    #[test]
-    fn a_suite_site_that_only_names_the_kind_is_refused() {
-        resolve_coverage(
-            "TouchFile",
-            CoveredBy::Suite("crates/holon-integration-tests/src/pbt/transitions/touch_file.rs"),
-        )
-        .expect_err("the transition's own declaration file draws nothing");
-        resolve_coverage(
-            "DeliverBlockContent",
-            CoveredBy::Suite("crates/holon-integration-tests/src/pbt/alphabet_coverage.rs"),
-        )
-        .expect_err("the coverage data file cannot vouch for its own kinds");
-    }
-
-    /// Same for the other live site shape: a gate-run suite that attests its
-    /// own draw.
-    #[test]
-    fn a_hole_whose_suite_attests_the_draw_resolves() {
-        resolve_coverage(
-            "StructuralKeyBurst",
-            CoveredBy::Suite("crates/holon-integration-tests/tests/structural_burst_under_lag.rs"),
-        )
-        .expect("the suite draws it");
-    }
-
-    /// The attestation, not the name, is what resolves a `Suite` site: this
-    /// suite's case literal names `Indent` and really draws it, yet the site
-    /// vouches only for the kind it attests.
-    #[test]
-    fn a_gate_run_suite_that_names_a_kind_without_attesting_it_is_refused() {
-        resolve_coverage(
-            "Indent",
-            CoveredBy::Suite("crates/holon-integration-tests/tests/structural_burst_under_lag.rs"),
-        )
-        .expect_err("the suite attests StructuralKeyBurst, not Indent");
-    }
-
     /// The attestation's teeth: the suite's claim is the COUNTER, so vouching
     /// for a kind the run never drew reds in the suite's own process.
     #[test]
     #[should_panic(expected = "its run drew it 0 times")]
     fn a_suite_attesting_a_kind_it_never_drew_reds() {
         attest_drew("StructuralKeyBurst");
+    }
+
+    /// holon-work#441: the vouching suite applies its transitions on a worker
+    /// thread, so the draw is counted THERE while `attest_drew` runs on the
+    /// test thread. The counter is the suite's, not the thread's.
+    #[test]
+    fn a_suite_that_draws_on_a_worker_thread_still_attests() {
+        std::thread::spawn(|| note_drawn("WorkerThreadDraw"))
+            .join()
+            .expect("the drawing thread must not panic");
+        attest_drew("WorkerThreadDraw");
     }
 }

@@ -182,7 +182,7 @@ pub enum ReasonClass {
     /// The generator declines by construction — it ignores the state and fails
     /// for every one. The kind is drawn by another suite (a hand-authored
     /// regression step, another medium's PBT), so its alphabet is not gone;
-    /// `alphabet_coverage::EXPECTED_ABSENT` names where each one IS covered.
+    /// `alphabet_coverage::EXPECTED_ABSENT` names what accounts for each one.
     NotDrawnHere,
 }
 
@@ -202,8 +202,8 @@ impl Reason {
             // `ToggleState` vanish).
             Reason::NoTogglableStates => ReasonClass::AlphabetGone,
             // Returned by a `weighted_generator(_: &R)` that never binds the
-            // state: the kind declines in every state of every run, and the
-            // suite that does draw it is named in `EXPECTED_ABSENT`.
+            // state: the kind declines in every state of every run, and what
+            // accounts for it is its `EXPECTED_ABSENT` claim.
             Reason::HandAuthoredOnly | Reason::DeliverNotMeaningfulInBackendTests => {
                 ReasonClass::NotDrawnHere
             }
