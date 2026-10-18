@@ -134,8 +134,8 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
   completion notification); never `cargo update`. `tee` build and app logs under a per-session
   `/tmp/dogfood-<date>-logs/` dir.
 - **Latency SLO:** p95 interaction→projection-visible > 200ms is itself a bug — triage it. The
-  threshold judges `origin="ui"` samples; facade samples are reported separately (see §2 step 7).
-  Take SLO numbers from `click`, not `execute_operation`.
+  threshold judges `origin="ui"` samples (from `click`, not `execute_operation`); facade samples
+  are reported separately (see §2 step 7).
 - **Window width:** measure at 1400 px wide (or set `HOLON_INITIAL_WINDOW_SIZE`).
 - **Scroll:** negative `dy` scrolls down. Move the pointer over the target before a scroll.
 - **Vault root is single and launch-time-fixed** (`HOLON_VAULT_ROOT`; `VaultConfig.root` is a
