@@ -135,6 +135,9 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
   `/tmp/dogfood-<date>-logs/` dir.
 - **Latency SLO:** p95 interaction→projection-visible > 200ms is itself a bug — triage it. The
   threshold judges `origin="ui"` samples; facade samples are reported separately (see §2 step 7).
+  Take SLO numbers from `click`, not `execute_operation`.
+- **Window width:** measure at 1400 px wide (or set `HOLON_INITIAL_WINDOW_SIZE`).
+- **Scroll:** negative `dy` scrolls down. Move the pointer over the target before a scroll.
 - **Vault root is single and launch-time-fixed** (`HOLON_VAULT_ROOT`; `VaultConfig.root` is a
   single `Option<PathBuf>`, `crates/holon-frontend/src/config.rs`). Testing another vault
   (e.g. an Obsidian or LogSeq copy) = a SEPARATE launch on another port with its own sandbox
@@ -518,6 +521,8 @@ internal vs disk, screenshots, latency table), triaged rows, DISCLOSED CASUALTIE
 observations, tool errors, flakiness).
 
 ## 5. Teardown (always)
+
+Record the pid of every process you start. Stop them all before you write the report.
 
 ```bash
 kill $(cat $SANDBOX/app.pid)     # PID from lsof-by-port — NEVER pkill (8520 = live instance)

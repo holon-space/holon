@@ -48,6 +48,9 @@ not vault scale).
    ENVIRONMENT: COVERAGE = the *interaction* is ungeneratable; ENVIRONMENT =
    the interaction is generatable but the *failing code path/wiring/timing*
    doesn't exist in the test environment.
+   If torn between COVERAGE and ORACLE: the fix decides. An added scenario or
+   generator = COVERAGE. An added or stronger invariant = ORACLE.
+   The entry writes both litmus answers.
 2. **Write one file** under
    [docs/Testing/bugfunnel/entries/](../../../docs/Testing/bugfunnel/), named
    `YYYY-MM-DD-short-slug.md`. One escape, one file — never append to a shared

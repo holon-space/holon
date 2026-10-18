@@ -257,6 +257,20 @@ Test the Turso fix in holon.
      ```
    - Or update the git branch in `Cargo.toml`
 
+   **Rev for a consumer to pin:**
+   - Start the rev from the consumer's pin (`rev =` in `Cargo.toml`).
+   - Check ancestry from the pin to the base.
+   - Probe one accepted fix on both lines.
+
+   **Pin bump:**
+   - Grep the whole tree for the old rev. `frontends/holon-worker` pins it too.
+   - Run `just check-worker-wasm`.
+
+   **Rebased fork:**
+   - It keeps its branch name.
+   - The old head goes to `holon-<oldshort>-keep`.
+   - Before a rebase to re-run CI, compare `git ls-remote upstream main` with the PR head's parent.
+
 2. **Rebuild**
    ```bash
    cargo build -p holon-tools 2>&1 | tee /tmp/turso-fix-rebuild.log
