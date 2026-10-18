@@ -44,7 +44,7 @@
 //! ```
 //!
 //! The guards and bodies have no YAML form at all: `bind` is a Rust `fn` and
-//! `Body::Pure` a Rust `fn`, so a loader would also need a guard/body language.
+//! `Body::pure` a Rust `fn`, so a loader would also need a guard/body language.
 //!
 //! Twins, each breaking ONE modelling rule, selected by
 //! `HOLON_WORK_RUNTIME_TWIN`, so that a passing assertion is shown sensitive:
@@ -63,6 +63,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use holon_net::exec::Body;
@@ -142,8 +143,8 @@ fn net() -> NetDef {
     let mut job_ended = TransitionDef::new(
         "JobEnded",
         Trigger::Auto,
-        bind_job_ended,
-        Body::Pure(body_job_ended),
+        Arc::new(bind_job_ended),
+        Body::pure(body_job_ended),
     )
     .consumes(P_JOB);
     if twin != "no-slot-release" {
@@ -152,8 +153,8 @@ fn net() -> NetDef {
     let mut notice_stall = TransitionDef::new(
         "NoticeStall",
         Trigger::Auto,
-        compute_stall,
-        Body::Pure(body_put_stalled),
+        Arc::new(compute_stall),
+        Body::pure(body_put_stalled),
     )
     .reads(P_AGENT)
     .inhibits(P_WOKEN);
@@ -166,8 +167,8 @@ fn net() -> NetDef {
             TransitionDef::new(
                 "AgentTurnEnded",
                 Trigger::Auto,
-                bind_turn_ended,
-                Body::Pure(body_put_agent),
+                Arc::new(bind_turn_ended),
+                Body::pure(body_put_agent),
             )
             .consumes(P_TURN_ENDED)
             .reads(P_AGENT),
@@ -176,8 +177,8 @@ fn net() -> NetDef {
             TransitionDef::new(
                 "StartJob",
                 Trigger::Auto,
-                bind_start_job,
-                Body::Pure(body_start_job),
+                Arc::new(bind_start_job),
+                Body::pure(body_start_job),
             )
             .consumes(P_JOB)
             .inhibits(P_CPU),
@@ -189,8 +190,8 @@ fn net() -> NetDef {
             TransitionDef::new(
                 "Restall",
                 Trigger::Auto,
-                bind_restall,
-                Body::Pure(body_restall),
+                Arc::new(bind_restall),
+                Body::pure(body_restall),
             )
             .consumes(P_STALLED)
             .reads(P_AGENT),
@@ -200,8 +201,8 @@ fn net() -> NetDef {
         TransitionDef::new(
             "Continue",
             Trigger::Auto,
-            compute_proposal,
-            Body::Pure(body_put_proposal),
+            Arc::new(compute_proposal),
+            Body::pure(body_put_proposal),
         )
         .reads(P_STALLED)
         .reads(P_AGENT)
@@ -211,8 +212,8 @@ fn net() -> NetDef {
         TransitionDef::new(
             "Reconsider",
             Trigger::Auto,
-            bind_reconsider,
-            Body::Pure(body_put_proposal),
+            Arc::new(bind_reconsider),
+            Body::pure(body_put_proposal),
         )
         .consumes(P_PROPOSAL)
         .reads(P_STALLED)
@@ -222,8 +223,8 @@ fn net() -> NetDef {
         TransitionDef::new(
             "DropProposal",
             Trigger::Auto,
-            bind_drop_proposal,
-            Body::Pure(body_nothing),
+            Arc::new(bind_drop_proposal),
+            Body::pure(body_nothing),
         )
         .consumes(P_PROPOSAL)
         .inhibits(P_STALLED),
@@ -232,8 +233,8 @@ fn net() -> NetDef {
         TransitionDef::new(
             "Handoff",
             Trigger::Manual,
-            bind_handoff,
-            Body::Pure(body_woken),
+            Arc::new(bind_handoff),
+            Body::pure(body_woken),
         )
         .consumes(P_STALLED)
         .consumes(P_PROPOSAL),
@@ -478,7 +479,13 @@ fn replay() -> Executor {
         assert!(at_s >= last, "the fixture is not time-ordered at {at_s}");
         last = at_s;
         apply(&mut exec, &ev);
-        exec.write(P_CLOCK, MACHINE, content([("now_s", Value::Integer(at_s))]));
+        write(
+            &mut exec,
+            P_CLOCK,
+            MACHINE,
+            content([("now_s", Value::Integer(at_s))]),
+            at_s,
+        );
         let reqs = exec
             .step(Duration::from_secs(at_s as u64))
             .unwrap_or_else(|e| panic!("step at {at_s}: {e:?}"));
@@ -490,9 +497,24 @@ fn replay() -> Executor {
     exec
 }
 
+/// An outside commit at the fixture clock. `Executor::write` advances the
+/// executor to `at_s` and quiesces on the spot, so the replay also asserts
+/// here that the pure net asks for no effect.
+fn write(exec: &mut Executor, place: &str, subject: &str, content: Content, at_s: i64) {
+    let reqs = exec
+        .write(place, subject, content, Duration::from_secs(at_s as u64))
+        .unwrap_or_else(|e| panic!("write {place}/{subject} at {at_s}: {e:?}"))
+        .requests;
+    assert!(
+        reqs.is_empty(),
+        "the net is pure, yet the write to {place}/{subject} at {at_s} asked for an effect"
+    );
+}
+
 fn apply(exec: &mut Executor, ev: &serde_json::Map<String, serde_json::Value>) {
     let s = |k: &str| ev[k].as_str().expect(k).to_string();
     let i = |k: &str| ev[k].as_i64().expect(k);
+    let at = i("at_s");
     match ev["kind"].as_str().expect("kind") {
         "policy" => {
             // The `no-resume-ceiling` twin publishes no ceiling at all, so a
@@ -501,7 +523,8 @@ fn apply(exec: &mut Executor, ev: &serde_json::Map<String, serde_json::Value>) {
                 "no-resume-ceiling" => i64::MAX,
                 _ => i("resume_ctx_under"),
             };
-            exec.write(
+            write(
+                exec,
                 P_BUDGET,
                 MACHINE,
                 content([
@@ -510,17 +533,21 @@ fn apply(exec: &mut Executor, ev: &serde_json::Map<String, serde_json::Value>) {
                     ("fresh_ctx_over", Value::Integer(i("fresh_ctx_over"))),
                     ("resume_ctx_under", Value::Integer(ceiling)),
                 ]),
+                at,
             )
         }
-        "card_stage" => exec.write(
+        "card_stage" => write(
+            exec,
             P_CARD,
             &s("card"),
             content([
                 ("stage", Value::String(s("stage"))),
                 ("agent", Value::String(s("agent"))),
             ]),
+            at,
         ),
-        "agent_started" => exec.write(
+        "agent_started" => write(
+            exec,
             P_AGENT,
             &s("agent"),
             content([
@@ -530,16 +557,20 @@ fn apply(exec: &mut Executor, ev: &serde_json::Map<String, serde_json::Value>) {
                 ("last_turn_end_s", Value::Integer(i("at_s"))),
                 ("ctx_tokens", Value::Integer(0)),
             ]),
+            at,
         ),
-        "turn_end" => exec.write(
+        "turn_end" => write(
+            exec,
             P_TURN_ENDED,
             &s("agent"),
             content([
                 ("at_s", Value::Integer(i("at_s"))),
                 ("ctx_tokens", Value::Integer(i("ctx_tokens"))),
             ]),
+            at,
         ),
-        "job_start" => exec.write(
+        "job_start" => write(
+            exec,
             P_JOB,
             &s("job"),
             content([
@@ -547,8 +578,10 @@ fn apply(exec: &mut Executor, ev: &serde_json::Map<String, serde_json::Value>) {
                 ("owner", Value::String(s("owner"))),
                 ("start_s", Value::Integer(i("at_s"))),
             ]),
+            at,
         ),
-        "job_end" => exec.write(
+        "job_end" => write(
+            exec,
             P_JOB,
             &s("job"),
             content([
@@ -557,6 +590,7 @@ fn apply(exec: &mut Executor, ev: &serde_json::Map<String, serde_json::Value>) {
                 ("end_s", Value::Integer(i("at_s"))),
                 ("exit", Value::Integer(i("exit"))),
             ]),
+            at,
         ),
         "snapshot" => {}
         other => panic!("unknown fixture event kind {other}"),
@@ -726,7 +760,8 @@ fn proposes_the_per_agent_decision_of_ruling_363_a3b() {
 #[test]
 fn the_resume_ceiling_excludes_a_hot_agent_over_150k() {
     let mut exec = replay();
-    exec.write(
+    write(
+        &mut exec,
         P_AGENT,
         "lane-999",
         content([
@@ -736,11 +771,14 @@ fn the_resume_ceiling_excludes_a_hot_agent_over_150k() {
             ("last_turn_end_s", Value::Integer(SNAPSHOT_S - 1_800)),
             ("ctx_tokens", Value::Integer(151_000)),
         ]),
+        SNAPSHOT_S,
     );
-    exec.write(
+    write(
+        &mut exec,
         P_CLOCK,
         MACHINE,
         content([("now_s", Value::Integer(SNAPSHOT_S))]),
+        SNAPSHOT_S,
     );
     exec.step(Duration::from_secs(SNAPSHOT_S as u64))
         .expect("a step on the injected agent");
