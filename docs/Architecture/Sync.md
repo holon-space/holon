@@ -14,6 +14,8 @@ When Loro is disabled (SqlOnly mode), `LwwTextCellBacking` (implemented, `crates
 
 ### Loro CRDT Integration Overview
 
+Convergence is not preservation: devices agree on which container won, so the loss of a lazily created container is silent (pin: `crates/holon-loro/tests/slot_loro_mechanics.rs`, step 0 (e); rule: Replication §9, invariant 8).
+
 **What is Loro?**
 
 [Loro](https://loro.dev) is a high-performance Conflict-free Replicated Data Type (CRDT) library written in Rust. CRDTs enable multiple users to edit the same data simultaneously without coordination, automatically merging changes in a mathematically consistent way. Loro provides rich data structures (text, lists, maps, trees) optimized for real-time collaboration.

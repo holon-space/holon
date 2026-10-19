@@ -87,6 +87,10 @@ states:
 This asymmetry *derives* the rule "structural merge exists only when Loro is
 the store" (Replication §2) rather than asserting it. The degradation ladder
 for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW.
+LWW on a field's VALUE keeps the field. LWW on the map KEY of a lazily created
+container discards the whole container. So for a container-valued field the
+worst case is not "LWW per field": create the container with its node
+(Replication §9, invariant 8; pin: `crates/holon-loro/tests/slot_loro_mechanics.rs`, step 0 (e)).
 
 ## Invariants
 

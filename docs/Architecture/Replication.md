@@ -445,6 +445,11 @@ this section — not three.
    if P2P is ever needed).
 7. **`LoroStore` and `TextMerge` are decoupled** — borrowing CRDT text merge
    never implies storing in Loro.
+8. **A CRDT child container is created by the op that creates its node.**
+   Never get-or-create it on an existing node: that writes the map KEY, so
+   two devices that each create the container concurrently meet under
+   last-write-wins and one container is lost whole. Pinned by
+   `crates/holon-loro/tests/slot_loro_mechanics.rs`, step 0 (e).
 
 ---
 
