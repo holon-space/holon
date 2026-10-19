@@ -268,7 +268,7 @@ Test the Turso fix in holon.
 
    **Rebased fork:**
    - It keeps its branch name.
-   - The old head goes to `holon-<oldshort>-keep`.
+   - The old head goes to `pin-<oldshort>-keep`. Read the convention off the repo: `git branch -a --list '*keep*'`.
    - Before a rebase to re-run CI, compare `git ls-remote upstream main` with the PR head's parent.
 
 2. **Rebuild**

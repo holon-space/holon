@@ -35,7 +35,7 @@ You MUST override all three or you will drive live data:
 | Concern | Default (DANGER) | You MUST pass |
 |---|---|---|
 | Config dir (holon.toml + default db) | `~/.config/holon` (real config, real `holon.db`) | `HOLON_CONFIG_DIR=<throwaway>` |
-| Vault root (org/md files synced) | from real holon.toml | `HOLON_VAULT_ROOT=<throwaway>` |
+| Vault root (org/md files synced) | from real holon.toml | `HOLON_VAULT_ROOT=<throwaway>` (e.g. `/tmp/holon-sandbox/vault`) |
 | MCP server port | `8520` = **Martin's LIVE instance — NEVER touch** | `MCP_SERVER_PORT=8620`+ |
 
 Verified in code (re-check if these files changed):
@@ -136,7 +136,7 @@ piping to a JSON parser, or read stdout only with `2>/dev/null`.
 - **Latency SLO:** p95 interaction→projection-visible > 200ms is itself a bug — triage it. The
   threshold judges `origin="ui"` samples (from `click`, not `execute_operation`); facade samples
   are reported separately (see §2 step 7).
-- **Window width:** measure at 1400 px wide (or set `HOLON_INITIAL_WINDOW_SIZE`).
+- **Window width:** measure at 1400 px wide (or set `HOLON_INITIAL_WINDOW_SIZE=1400x900`). The format is `WIDTHxHEIGHT` in px. A malformed value falls back silently to the default bounds.
 - **Scroll:** negative `dy` scrolls down. Move the pointer over the target before a scroll.
 - **Vault root is single and launch-time-fixed** (`HOLON_VAULT_ROOT`; `VaultConfig.root` is a
   single `Option<PathBuf>`, `crates/holon-frontend/src/config.rs`). Testing another vault
