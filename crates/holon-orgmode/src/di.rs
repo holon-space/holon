@@ -116,9 +116,13 @@ impl VaultBacklogDrained {
     }
 }
 
+/// What every side waiting on the controller's start reads when the
+/// controller ends without reporting it.
+const CONTROLLER_ENDED: &str = "the file sync controller ended before it reported the initial scan";
+
 /// Sender half of the FileWatcher ready signal
 pub struct FileWatcherReadySender {
-    sender: tokio::sync::watch::Sender<Option<Result<(), String>>>,
+    sender: GateSlot,
 }
 
 impl FileWatcherReadySender {
@@ -131,21 +135,47 @@ impl FileWatcherReadySender {
     pub fn signal_error(self, error: String) {
         let _ = self.sender.send(Some(Err(error)));
     }
+
+    /// The answer this signal's waiter reads if the controller never signals.
+    /// The sender itself does NOT carry it — see [`Unanswered`].
+    fn unanswered(&self) -> Unanswered {
+        Unanswered {
+            slot: self.sender.clone(),
+            unanswered: CONTROLLER_ENDED,
+        }
+    }
 }
 
-/// Dropped unsignalled — the controller task panicked or was aborted before
-/// its scan ended — the waiter reads an error instead of parking.
-impl Drop for FileWatcherReadySender {
-    fn drop(&mut self) {
-        self.sender.send_if_modified(|outcome| {
+/// The answer a side waiting on the controller reads when the controller ends
+/// without sending one.
+///
+/// The controller's panic handler owns these, NOT the controller task
+/// (`spawn_file_sync_controller`): a waiter woken by a sender that the unwind
+/// dropped would run before the handler disclosed the death, so on a panic the
+/// handler answers [`answer`](Self::answer) itself, after the disclosure. This
+/// `Drop` is what answers the OTHER way out — a task aborted at shutdown,
+/// where nothing panics and nothing is disclosed.
+struct Unanswered {
+    slot: GateSlot,
+    unanswered: &'static str,
+}
+
+impl Unanswered {
+    fn answer(&self) {
+        self.slot.send_if_modified(|outcome| {
             if outcome.is_some() {
                 return false;
             }
-            *outcome = Some(Err(
-                "the file sync controller ended before it reported the initial scan".to_string(),
-            ));
+            tracing::error!("[OrgMode] {}", self.unanswered);
+            *outcome = Some(Err(self.unanswered.to_string()));
             true
         });
+    }
+}
+
+impl Drop for Unanswered {
+    fn drop(&mut self) {
+        self.answer();
     }
 }
 
@@ -190,10 +220,19 @@ impl BootSeedGate {
         }
     }
 
-    fn scan_answer(&self) -> BootSeedAnswer {
-        BootSeedAnswer {
+    /// The controller's end of the scan gate. It carries no unanswered
+    /// guarantee of its own: [`Unanswered`] does, and the controller's panic
+    /// handler holds it, so a disclosure always stands before this answer.
+    fn scan_report(&self) -> ScanReport {
+        ScanReport {
             slot: self.scanned.clone(),
-            unanswered: "the file sync controller ended before it reported the initial scan",
+        }
+    }
+
+    fn scan_unanswered(&self) -> Unanswered {
+        Unanswered {
+            slot: self.scanned.clone(),
+            unanswered: CONTROLLER_ENDED,
         }
     }
 
@@ -232,6 +271,17 @@ pub struct BootSeedAnswer {
 
 impl BootSeedAnswer {
     pub fn send(self, outcome: Result<(), String>) {
+        self.slot.send_replace(Some(outcome));
+    }
+}
+
+/// How the controller reports the initial scan to the seeder.
+struct ScanReport {
+    slot: GateSlot,
+}
+
+impl ScanReport {
+    fn send(self, outcome: Result<(), String>) {
         self.slot.send_replace(Some(outcome));
     }
 }
@@ -862,7 +912,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                         .optional_resolve_async::<BootSeedGate>()
                         .await
                         .map(|gate| SeedHandover {
-                            scan_answer: gate.scan_answer(),
+                            scan_answer: gate.scan_report(),
                             gate: (*gate).clone(),
                         });
 
@@ -1090,25 +1140,41 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 }
                 drop(rerender_tx);
 
-                spawn_writeback_task(
+                let start_reported = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (ready_sender, drained_sender) = ready_sender
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("FileSyncStarted is built once");
+                // Taken BEFORE the senders move into the task, because the
+                // panic handler — not the task — owes every one of these
+                // answers.
+                let unanswered: Vec<Unanswered> = [
+                    Some(ready_sender.unanswered()),
+                    Some(drained_sender.unanswered()),
+                    seed_handover.as_ref().map(|h| h.gate.scan_unanswered()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                spawn_file_sync_controller(
                     &shutdown,
-                    "file-sync-controller",
                     writeback_disclosure.clone(),
+                    config.root_directory.clone(),
+                    start_reported.clone(),
+                    unanswered,
                     run_file_sync_controller(
                         controller,
                         config.root_directory.clone(),
                         idle_signal_weak,
                         rerender_rx,
-                        ready_sender
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .expect("FileSyncStarted is built once"),
+                        (ready_sender, drained_sender),
                         seed_handover,
                         fs,
                         change_source,
                         formats_for_loop,
                         shutdown.clone(),
+                        start_reported,
                     ),
                 );
 
@@ -1118,6 +1184,43 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
     }
 
     Ok(())
+}
+
+/// Spawn the file-sync controller through the same single catch boundary as
+/// the rest of the chain, with one disclosure more: a panic before
+/// `start_reported` killed the controller mid-boot, so the vault is not
+/// ingested at all — "edits do not reach disk" would understate it, and the
+/// gates the start answers (the ready signal, the boot seed) only ever learn
+/// that the controller "ended".
+///
+/// This handler also OWES every `unanswered` answer, so the sides waiting on
+/// the start (the ready signal, the backlog, the boot seed) learn that the
+/// controller ended only after the disclosure above stands. `start_reported`
+/// says which of the two deaths this is, because the ready signal cannot: a
+/// panic reaches this handler through the controller's own frame, and reading
+/// that signal would see whatever the start had already sent.
+fn spawn_file_sync_controller<F>(
+    shutdown: &holon_api::lifecycle::SessionShutdown,
+    disclosure: Option<Arc<dyn holon_filesystem::WritebackDisclosure>>,
+    vault: PathBuf,
+    start_reported: Arc<std::sync::atomic::AtomicBool>,
+    unanswered: Vec<Unanswered>,
+    task: F,
+) where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    shutdown.spawn_disclosing_panic("file-sync-controller", task, move |message| {
+        let cause = format!("the file sync controller panicked: {message}");
+        if !start_reported.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Some(disclosure) = &disclosure {
+                disclosure.vault_start_incomplete(&vault, "the initial scan", &cause);
+            }
+        }
+        disclose_writeback_down(disclosure.as_deref(), &cause);
+        for answer in &unanswered {
+            answer.answer();
+        }
+    });
 }
 
 /// Spawn one task of the org write-back chain. When it panics, edits stop
@@ -1377,7 +1480,7 @@ pub fn route_remove(home: &DocHome, key: &str) -> Option<OrgRerender> {
 /// answers the seeder.
 struct SeedHandover {
     gate: BootSeedGate,
-    scan_answer: BootSeedAnswer,
+    scan_answer: ScanReport,
 }
 
 /// Tell the seeder how the scan went and wait for its answer. A failed seed —
@@ -1590,6 +1693,7 @@ async fn run_file_sync_controller(
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
     formats: Arc<holon_core::FormatRegistry>,
     shutdown: Arc<holon_api::lifecycle::SessionShutdown>,
+    start_reported: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use tracing::Instrument;
     use tracing::error;
@@ -1809,6 +1913,9 @@ async fn run_file_sync_controller(
         // breaks `create_document`.
         ready_sender.signal_ready();
     }
+    // The start reported its own outcome, whatever it was, so a panic from
+    // here on is a runtime death and not an unfinished boot.
+    start_reported.store(true, std::sync::atomic::Ordering::SeqCst);
 
     // Arm detached, on its own thread.
     // Holds a strong ref to the change source alive
@@ -2164,7 +2271,7 @@ mod boot_seed_gate_tests {
     async fn an_answer_dropped_unsent_wakes_the_waiter_with_an_error() {
         let gate = BootSeedGate::new();
         let shutdown = SessionShutdown::new();
-        let answer = gate.scan_answer();
+        let answer = gate.scan_unanswered();
         let controller = tokio::spawn(async move {
             let _answer = answer;
             panic!("the controller dies before it reports the scan");
@@ -2208,11 +2315,14 @@ mod writeback_panic_tests {
     use super::*;
 
     #[derive(Default)]
-    struct Recorder(Mutex<Vec<String>>);
+    struct Recorder {
+        degraded: Mutex<Vec<String>>,
+        incomplete_start: Mutex<Vec<String>>,
+    }
 
     impl holon_filesystem::WritebackDisclosure for Recorder {
         fn writeback_degraded(&self, detail: &str) {
-            self.0.lock().unwrap().push(detail.to_string());
+            self.degraded.lock().unwrap().push(detail.to_string());
         }
         fn writeback_stalled(&self, _: &std::path::Path, _: &str) {}
         fn writeback_resumed(&self, _: &std::path::Path) {}
@@ -2261,7 +2371,12 @@ mod writeback_panic_tests {
         }
         fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
         fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
-        fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+        fn vault_start_incomplete(&self, _: &std::path::Path, step: &str, cause: &str) {
+            self.incomplete_start
+                .lock()
+                .unwrap()
+                .push(format!("{step}: {cause}"));
+        }
         fn vault_backlog_ingesting(&self, _: &std::path::Path, _: usize, _: usize) {}
         fn vault_backlog_ingested(&self, _: &std::path::Path) {}
         fn written_files_unrecorded(&self, _: &std::path::Path, _: &[&std::path::Path], _: &str) {}
@@ -2286,9 +2401,72 @@ mod writeback_panic_tests {
             .expect("a panicked task has stopped");
 
         assert_eq!(
-            *recorder.0.lock().unwrap(),
+            *recorder.degraded.lock().unwrap(),
             vec!["org-writeback-consumer panicked: the consumer panicked on a diff".to_string()],
             "a dead write-back consumer must raise WritebackDegraded"
         );
+    }
+
+    /// The order the boot depends on: whatever wakes on the scan gate finds
+    /// the death already disclosed, so a reader of the conditions can never
+    /// see an unexplained "the controller ended".
+    #[tokio::test]
+    async fn a_controller_that_panics_discloses_before_it_answers_the_scan_gate() {
+        let shutdown = holon_api::lifecycle::SessionShutdown::new();
+        let recorder = Arc::new(Recorder::default());
+        let gate = BootSeedGate::new();
+
+        spawn_file_sync_controller(
+            &shutdown,
+            Some(recorder.clone() as Arc<dyn holon_filesystem::WritebackDisclosure>),
+            PathBuf::from("/vault"),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            vec![gate.scan_unanswered()],
+            async { panic!("the controller dies during the initial scan") },
+        );
+
+        let err = gate
+            .wait_scanned(&shutdown)
+            .await
+            .expect_err("a dead controller must not read as a successful scan");
+        let disclosed = recorder.incomplete_start.lock().unwrap().clone();
+        assert_eq!(
+            disclosed.len(),
+            1,
+            "the scan answer arrived before the disclosure stood: {disclosed:?}"
+        );
+        assert!(
+            disclosed[0].starts_with("the initial scan: the file sync controller panicked"),
+            "got: {}",
+            disclosed[0]
+        );
+        assert!(err.contains("ended before it reported"), "got: {err}");
+    }
+
+    /// A controller that reported its start and dies later did not fail to
+    /// start: the write-back disclosure stands alone.
+    #[tokio::test]
+    async fn a_controller_that_panics_after_the_start_raises_no_incomplete_start() {
+        let shutdown = holon_api::lifecycle::SessionShutdown::new();
+        let recorder = Arc::new(Recorder::default());
+
+        spawn_file_sync_controller(
+            &shutdown,
+            Some(recorder.clone() as Arc<dyn holon_filesystem::WritebackDisclosure>),
+            PathBuf::from("/vault"),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            Vec::new(),
+            async { panic!("the loop dies on an edit") },
+        );
+        shutdown
+            .shutdown(holon_api::lifecycle::DEFAULT_SHUTDOWN_TIMEOUT)
+            .await
+            .expect("a panicked task has stopped");
+
+        assert_eq!(
+            *recorder.incomplete_start.lock().unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(recorder.degraded.lock().unwrap().len(), 1);
     }
 }

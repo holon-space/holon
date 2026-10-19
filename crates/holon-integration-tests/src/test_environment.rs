@@ -598,22 +598,28 @@ async fn wait_for_vault_backlog(injector: &fluxdi::Injector) -> Result<()> {
     let Err(e) = outcome else {
         return Ok(());
     };
-    // A controller that never started leaves the backlog undrained forever and
-    // discloses it; prod boots on (holon-app wiring `post_ready` logs the same
-    // error), so a harness that aborts here cannot test that disclosure.
-    if sync_not_started(injector) {
+    // A controller that never started, or died mid-start, leaves the backlog
+    // undrained forever and discloses it; prod boots on (holon-app wiring
+    // `post_ready` logs the same error), so a harness that aborts here cannot
+    // test that disclosure.
+    if start_degradation_disclosed(injector) {
         return Ok(());
     }
     Err(e.context("the vault's read-only backlog"))
 }
 
-/// The boot disclosed that the file sync never started.
-fn sync_not_started(injector: &fluxdi::Injector) -> bool {
+/// The boot disclosed that the file sync never started, or that it did not
+/// finish starting.
+fn start_degradation_disclosed(injector: &fluxdi::Injector) -> bool {
     injector
         .resolve::<Arc<holon_api::ConditionBus>>()
         .current()
         .iter()
-        .any(|c| c.reason.condition_kind() == holon_api::ConditionKind::VAULT_SYNC_NOT_STARTED)
+        .any(|c| {
+            let kind = c.reason.condition_kind();
+            kind == holon_api::ConditionKind::VAULT_SYNC_NOT_STARTED
+                || kind == holon_api::ConditionKind::VAULT_START_INCOMPLETE
+        })
 }
 
 impl Default for TestEnvironmentBuilder {

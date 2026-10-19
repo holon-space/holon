@@ -6,7 +6,8 @@
 //! @pbt covers boot-seed-outcome-disclosure — the boot report records the
 //! default-layout seed as performed only after it succeeded
 //! @pbt covers boot-seed-controller-death — a controller that dies during the
-//! initial scan fails the boot loud instead of parking the seed
+//! initial scan discloses an incomplete start and reports the seed as failed
+//! instead of parking it
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone asserts
 //! behaviour, never the boot-step ledger, and injects no controller death
 
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon_frontend::platform::BootStep;
+use holon_integration_tests::TestEnvironment;
 use holon_integration_tests::TestEnvironmentBuilder;
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
@@ -23,6 +25,19 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
             .build()
             .expect("Failed to create runtime"),
     )
+}
+
+/// The incomplete-start conditions the boot disclosed, as the user would read
+/// them.
+fn start_incomplete(env: &TestEnvironment) -> Vec<String> {
+    env.injector()
+        .expect("a booted environment has an injector")
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .current()
+        .into_iter()
+        .filter(|c| c.reason.condition_kind() == holon_api::ConditionKind::VAULT_START_INCOMPLETE)
+        .map(|c| format!("{:?}", c.reason))
+        .collect()
 }
 
 const NOTES_ORG: &str = "\
@@ -103,6 +118,11 @@ fn a_background_seed_is_reported_as_performed_once_it_succeeds() {
                 .await,
             "the report says performed, so the layout must be in the store"
         );
+        assert_eq!(
+            start_incomplete(&env),
+            Vec::<String>::new(),
+            "nothing died, so no incomplete start may stand"
+        );
     });
 }
 
@@ -121,9 +141,9 @@ fn a_controller_that_dies_during_the_scan_does_not_park_the_seed() {
                 .build(rt_for_boot)
                 .await
                 .expect("a dead controller is disclosed, not a boot failure");
-            env.session().boot_report().failed()
+            (env.session().boot_report().failed(), start_incomplete(&env))
         });
-        let failed = tokio::time::timeout(Duration::from_secs(60), boot)
+        let (failed, incomplete) = tokio::time::timeout(Duration::from_secs(60), boot)
             .await
             .expect(
                 "the boot parked: the seed waits for a scan report a dead controller never sends",
@@ -141,6 +161,16 @@ fn a_controller_that_dies_during_the_scan_does_not_park_the_seed() {
         assert!(
             why.contains("ended before it reported the initial scan"),
             "the failure must name the dead controller; got: {why}"
+        );
+        assert_eq!(
+            incomplete.len(),
+            1,
+            "the dead controller must stand as one incomplete start: {incomplete:?}"
+        );
+        assert!(
+            incomplete[0].contains("the file sync controller panicked"),
+            "the disclosed cause must name the panic; got: {}",
+            incomplete[0]
         );
     });
 }
