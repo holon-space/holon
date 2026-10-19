@@ -25,6 +25,7 @@ pub use holon_pbt_core::budget::{
 use holon_pbt_core::types::Mutation;
 
 use super::reference_state::ReferenceState;
+use crate::pbt::timing_mode::TimingMode;
 use crate::test_tracing::TransitionMetrics;
 
 // ── SQL count model ───────────────────────────────────────────────
@@ -275,9 +276,23 @@ pub fn transition_key(transition: &crate::pbt::transitions::E2ETransition) -> St
 
 // ── Checking ──────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub enum Violation {
     Warning(String),
     Error(String),
+    /// A breach of a NON-DETERMINISTIC ceiling (wall, query, settle, RSS)
+    /// observed under `HOLON_PBT_TIMING=measure`: measured, disclosed and
+    /// appended to the trend ledger, but not failed (#475). A deterministic
+    /// metric never becomes one of these — load does not move a SQL count.
+    ///
+    /// Carries the numbers, not only the message: the trend ledger must not
+    /// have to parse a log line back into a value.
+    Measured {
+        metric: Metric,
+        actual: f64,
+        limit: f64,
+        message: String,
+    },
     /// A breach of a PINNED ceiling — a budget measured and fixed at the
     /// observed maximum. Unlike [`Violation::Error`] this fails the run whether
     /// or not `HOLON_PERF_BUDGET` enforces, so the pinned number is a real
@@ -323,6 +338,34 @@ impl Metric {
             Metric::SettleMs => "settle_ms",
             Metric::RssDeltaBytes => "rss_delta_bytes",
             Metric::RssCumulativeBytes => "rss_cumulative_bytes",
+        }
+    }
+
+    /// The unit the trend ledger records this metric's value in.
+    pub fn unit(self) -> &'static str {
+        match self {
+            Metric::SqlReads | Metric::SqlReadRepeat | Metric::SqlWrites | Metric::SqlDdl => "",
+            Metric::MaxQueryMs | Metric::WallMs | Metric::SettleMs => "ms",
+            Metric::RssDeltaBytes | Metric::RssCumulativeBytes => "B",
+        }
+    }
+
+    /// Whether the reference model determines this metric's value, so a loaded
+    /// host cannot move it.
+    ///
+    /// The split the module header states ("SQL counts are deterministic …
+    /// timing is non-deterministic") becomes a decision here: only the
+    /// non-deterministic metrics obey `HOLON_PBT_TIMING`, so the N+1 /
+    /// SQL-count ratchet keeps its teeth at any load and only the wall,
+    /// query, settle and RSS ceilings need a quiet host (#475).
+    pub fn deterministic(self) -> bool {
+        match self {
+            Metric::SqlReads | Metric::SqlReadRepeat | Metric::SqlWrites | Metric::SqlDdl => true,
+            Metric::MaxQueryMs
+            | Metric::WallMs
+            | Metric::SettleMs
+            | Metric::RssDeltaBytes
+            | Metric::RssCumulativeBytes => false,
         }
     }
 }
@@ -585,15 +628,45 @@ pub fn build_samples(
     samples
 }
 
-/// Single comparator: a sample violates iff `actual > limit`.
+/// Single comparator at the mode `HOLON_PBT_TIMING` selects.
 pub fn evaluate(samples: &[MetricSample]) -> Vec<Violation> {
+    evaluate_in(crate::pbt::timing_mode::mode(), samples)
+}
+
+/// Single comparator: a sample violates iff `actual > limit`.
+///
+/// Under [`TimingMode::Measure`] an `Error` breach of a NON-deterministic
+/// metric becomes [`Violation::Measured`]. Everything else is unchanged in both
+/// modes: warnings stay warnings, a pinned ceiling stays fatal, and a breach of
+/// a deterministic metric stays an `Error` however loaded the host is.
+pub fn evaluate_in(mode: TimingMode, samples: &[MetricSample]) -> Vec<Violation> {
     samples
         .iter()
         .filter(|s| s.actual > s.limit)
         .map(|s| match s.severity {
             Severity::Warn => Violation::Warning(s.message.clone()),
+            Severity::Error if mode == TimingMode::Measure && !s.metric.deterministic() => {
+                Violation::Measured {
+                    metric: s.metric,
+                    actual: s.actual,
+                    limit: s.limit,
+                    message: s.message.clone(),
+                }
+            }
             Severity::Error => Violation::Error(s.message.clone()),
-            Severity::Pinned => Violation::PinnedError(s.message.clone()),
+            Severity::Pinned => {
+                // A pinned ceiling is a measured maximum enforced unconditionally,
+                // which only a deterministic metric can be. Pinning a wall clock
+                // would make `measure` unable to soften it and reintroduce the
+                // load flake this mode exists to remove.
+                assert!(
+                    s.metric.deterministic(),
+                    "{} is pinned but non-deterministic: a pinned ceiling must be a metric load \
+                     cannot move",
+                    s.metric.key()
+                );
+                Violation::PinnedError(s.message.clone())
+            }
         })
         .collect()
 }
@@ -929,6 +1002,117 @@ mod tests {
             limit,
             severity,
             message: format!("{}: {actual} > {limit}", metric.key()),
+        }
+    }
+
+    /// #475: `measure` softens the ceilings load moves and NOTHING else. The
+    /// SQL-count ratchet is the point — it keeps its teeth on a loaded host,
+    /// which is what lets the big suites leave the quiet hold.
+    #[test]
+    fn measure_softens_only_the_non_deterministic_ceilings() {
+        let samples = vec![
+            sample(Metric::WallMs, 31_000.0, 30_000.0, Severity::Error),
+            sample(Metric::SqlReads, 90.0, 40.0, Severity::Error),
+        ];
+        let enforced = evaluate_in(TimingMode::Enforce, &samples);
+        assert_eq!(
+            enforced
+                .iter()
+                .filter(|v| matches!(v, Violation::Error(_)))
+                .count(),
+            2,
+            "enforce fails both: {enforced:?}"
+        );
+
+        let measured = evaluate_in(TimingMode::Measure, &samples);
+        let errors: Vec<_> = measured
+            .iter()
+            .filter_map(|v| match v {
+                Violation::Error(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "the SQL-count breach must still be an Error: {measured:?}"
+        );
+        assert!(errors[0].contains("sql_reads"), "{errors:?}");
+        assert!(
+            measured.iter().any(|v| matches!(
+                v,
+                Violation::Measured {
+                    metric: Metric::WallMs,
+                    ..
+                }
+            )),
+            "the wall breach must be Measured with its metric: {measured:?}"
+        );
+    }
+
+    /// The trend ledger must not parse a log line back into a number.
+    #[test]
+    fn a_measured_violation_carries_its_value_and_limit() {
+        let measured = evaluate_in(
+            TimingMode::Measure,
+            &[sample(Metric::WallMs, 31_000.0, 30_000.0, Severity::Error)],
+        );
+        let [
+            Violation::Measured {
+                actual,
+                limit,
+                metric,
+                ..
+            },
+        ] = &measured[..]
+        else {
+            panic!("one Measured violation expected, got {measured:?}");
+        };
+        assert_eq!((*actual, *limit), (31_000.0, 30_000.0));
+        assert_eq!(metric.unit(), "ms");
+    }
+
+    /// A warning stays a warning and a pinned ceiling stays fatal in both
+    /// modes: `measure` is not a global softener.
+    #[test]
+    fn measure_changes_neither_warnings_nor_pinned_ceilings() {
+        let samples = vec![
+            sample(Metric::SettleMs, 3_000.0, 2_500.0, Severity::Warn),
+            sample(Metric::SqlReads, 90.0, 40.0, Severity::Pinned),
+        ];
+        for mode in [TimingMode::Enforce, TimingMode::Measure] {
+            let out = evaluate_in(mode, &samples);
+            assert!(
+                out.iter().any(|v| matches!(v, Violation::Warning(_)))
+                    && out.iter().any(|v| matches!(v, Violation::PinnedError(_))),
+                "{mode:?} must keep both dispositions: {out:?}"
+            );
+        }
+    }
+
+    /// Every metric is classified, and the two classes are the ones the module
+    /// header names. A new metric that joins the enum without a class cannot
+    /// compile; one that joins with the WRONG class is what this pins.
+    #[test]
+    fn the_deterministic_metrics_are_exactly_the_counts() {
+        for m in [
+            Metric::SqlReads,
+            Metric::SqlReadRepeat,
+            Metric::SqlWrites,
+            Metric::SqlDdl,
+        ] {
+            assert!(m.deterministic(), "{} is a count", m.key());
+            assert_eq!(m.unit(), "", "a count is unitless: {}", m.key());
+        }
+        for m in [
+            Metric::MaxQueryMs,
+            Metric::WallMs,
+            Metric::SettleMs,
+            Metric::RssDeltaBytes,
+            Metric::RssCumulativeBytes,
+        ] {
+            assert!(!m.deterministic(), "{} is load-perturbed", m.key());
+            assert!(!m.unit().is_empty(), "{} carries a unit", m.key());
         }
     }
 

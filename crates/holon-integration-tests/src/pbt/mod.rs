@@ -75,6 +75,7 @@ pub mod stepper;
 pub use holon_loro_testing::sut_loro;
 mod sut_metrics;
 mod sut_row_parsing;
+pub mod timing_mode;
 #[cfg(feature = "otel-testing")]
 pub mod transition_budgets;
 pub mod transition_dispatch;

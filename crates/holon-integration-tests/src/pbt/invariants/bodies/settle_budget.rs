@@ -39,6 +39,10 @@ use holon::api::operation_dispatcher::OpClass;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
 
+use crate::pbt::timing_mode;
+use crate::pbt::timing_mode::Breach;
+use crate::pbt::timing_mode::TimingMode;
+
 /// Canonical id home. The dispatched body is
 /// [`crate::pbt::composed::settle_latency::InvComposedSettleBudget`].
 pub struct InvSettleBudget;
@@ -154,11 +158,35 @@ pub fn settle_class(dispatched: &std::collections::BTreeSet<(String, String)>) -
     }
 }
 
+/// Disclose a breach and pass. The `Ok` carries no message, so the engagement
+/// ledger still counts the tick as exercised; the breach itself goes to stderr
+/// and to the trend ledger.
+fn measured(quantity: &str, sample: &SettleSample, budget: Duration) -> InvariantResult {
+    timing_mode::disclose(&Breach::ms(
+        &format!("{}/{quantity}", InvSettleBudget::ID.0),
+        &sample.action,
+        sample.elapsed,
+        budget,
+    ));
+    InvariantResult::Ok
+}
+
+/// The verdict at the mode [`HOLON_PBT_TIMING`] selects.
+///
+/// [`HOLON_PBT_TIMING`]: crate::pbt::timing_mode
+pub fn verdict(sample: Option<&SettleSample>) -> InvariantResult {
+    verdict_in(timing_mode::mode(), sample)
+}
+
 /// The verdict. Over the hard threshold ⇒ `Fail` with the RAW duration; under
 /// it but over the bare SLO ⇒ `Ok` plus a recorded warning (the slack is a
 /// fairness allowance, not a redefinition of the SLO). No sample yet (the
 /// pre-first-transition check) ⇒ `Ok`.
-pub fn verdict(sample: Option<&SettleSample>) -> InvariantResult {
+///
+/// In [`TimingMode::Measure`] every one of the three budgets above reports
+/// instead of failing (#475). The measurement is identical in both modes; the
+/// WEDGE is not a budget and is armed in both (see [`DEFAULT_WEDGE_MS`]).
+pub fn verdict_in(mode: TimingMode, sample: Option<&SettleSample>) -> InvariantResult {
     let Some(sample) = sample else {
         return InvariantResult::Ok;
     };
@@ -173,6 +201,9 @@ pub fn verdict(sample: Option<&SettleSample>) -> InvariantResult {
             "boot, judged by the boot budget",
         );
         if sample.elapsed > BOOT_BUDGET {
+            if mode == TimingMode::Measure {
+                return measured("boot", sample, BOOT_BUDGET);
+            }
             return InvariantResult::Fail(format!(
                 "[inv-settle-budget] boot '{}' took {}ms, past the boot budget {}ms.",
                 sample.action,
@@ -192,6 +223,9 @@ pub fn verdict(sample: Option<&SettleSample>) -> InvariantResult {
             "maintenance op, judged by the maintenance budget",
         );
         if sample.elapsed > MAINTENANCE_BUDGET {
+            if mode == TimingMode::Measure {
+                return measured("maintenance", sample, MAINTENANCE_BUDGET);
+            }
             return InvariantResult::Fail(format!(
                 "[inv-settle-budget] maintenance '{}' took {}ms, past the maintenance budget \
                  {}ms.",
@@ -204,6 +238,9 @@ pub fn verdict(sample: Option<&SettleSample>) -> InvariantResult {
     }
     let budget = hard_budget();
     if sample.elapsed > budget {
+        if mode == TimingMode::Measure {
+            return measured("interaction", sample, budget);
+        }
         return InvariantResult::Fail(format!(
             "[inv-settle-budget] '{}' took {}ms — interaction→projection-visible past the \
              hard threshold {}ms (p95 SLO {}ms × slack {}{}). This is the latency SLO \
@@ -249,6 +286,79 @@ mod tests {
     #[test]
     fn no_sample_is_ok() {
         assert!(matches!(verdict(None), InvariantResult::Ok));
+    }
+
+    /// #475: the gate-44 red — `'SharePage' took 7292ms` against the 5000ms
+    /// hard threshold — is what `measure` must turn into a report, while
+    /// `enforce` must still fail it. Both halves asserted together: a mode that
+    /// softened BOTH would pass a one-sided test.
+    #[test]
+    fn measure_reports_the_gate_44_breach_and_enforce_still_fails_it() {
+        let gate_44 = SettleSample {
+            action: "SharePage".to_string(),
+            elapsed: Duration::from_millis(7_292),
+            class: SettleClass::Op(OpClass::Interaction),
+        };
+        assert!(
+            matches!(
+                verdict_in(TimingMode::Measure, Some(&gate_44)),
+                InvariantResult::Ok
+            ),
+            "measure must not fail a load-perturbed settle"
+        );
+        let InvariantResult::Fail(msg) = verdict_in(TimingMode::Enforce, Some(&gate_44)) else {
+            panic!("enforce must still fail 7292ms against the 5000ms threshold");
+        };
+        assert!(msg.contains("7292ms"), "{msg}");
+    }
+
+    /// Measure mode changes the VERDICT, never the MEASUREMENT: the disclosure
+    /// carries the raw duration and the budget it missed.
+    #[test]
+    fn a_measured_breach_is_disclosed_with_its_raw_duration() {
+        let line = Breach::ms(
+            "inv-settle-budget/interaction",
+            "SharePage",
+            Duration::from_millis(7_292),
+            hard_budget(),
+        )
+        .to_string();
+        assert!(line.contains("MEASURE-ONLY"), "{line}");
+        assert!(line.contains("7292ms"), "{line}");
+    }
+
+    /// Every one of the three budgets softens, not just the interaction one —
+    /// a boot or maintenance breach under load is the same kind of artifact.
+    #[test]
+    fn measure_covers_the_boot_and_maintenance_budgets_too() {
+        let boot = SettleSample {
+            action: "Reboot".to_string(),
+            elapsed: BOOT_BUDGET + Duration::from_secs(5),
+            class: SettleClass::Boot,
+        };
+        let maintenance = SettleSample {
+            action: "RebuildViews".to_string(),
+            elapsed: MAINTENANCE_BUDGET + Duration::from_secs(5),
+            class: SettleClass::Op(OpClass::Maintenance),
+        };
+        for sample in [&boot, &maintenance] {
+            assert!(
+                matches!(
+                    verdict_in(TimingMode::Measure, Some(sample)),
+                    InvariantResult::Ok
+                ),
+                "measure must soften '{}'",
+                sample.action
+            );
+            assert!(
+                matches!(
+                    verdict_in(TimingMode::Enforce, Some(sample)),
+                    InvariantResult::Fail(_)
+                ),
+                "enforce must still fail '{}'",
+                sample.action
+            );
+        }
     }
 
     #[test]

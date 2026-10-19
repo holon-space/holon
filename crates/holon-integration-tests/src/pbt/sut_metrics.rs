@@ -22,6 +22,8 @@ use std::time::Duration;
 #[cfg(feature = "otel-testing")]
 use super::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
+use crate::pbt::invariants::bodies::sql_budget::InvSqlBudget;
+#[cfg(feature = "otel-testing")]
 use crate::pbt::invariants::bodies::sql_budget::SqlBudgetReport;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transitions::E2ETransition;
@@ -314,9 +316,19 @@ impl MetricsSut {
             .map(|v| v != "0")
             .unwrap_or(false);
 
-        let has_memory_violation = violations.iter().any(
-            |v| matches!(v, transition_budgets::Violation::Error(msg) if msg.contains("rss_")),
-        );
+        // A memory diagnosis is a report, so it fires in `measure` too — the
+        // mode decides what FAILS, never what is observed.
+        let has_memory_violation = violations.iter().any(|v| match v {
+            transition_budgets::Violation::Error(msg) => msg.contains("rss_"),
+            transition_budgets::Violation::Measured { metric, .. } => {
+                matches!(
+                    metric,
+                    transition_budgets::Metric::RssDeltaBytes
+                        | transition_budgets::Metric::RssCumulativeBytes
+                )
+            }
+            _ => false,
+        });
         if has_memory_violation {
             transition_budgets::diagnose_memory(&key);
         }
@@ -342,6 +354,25 @@ impl MetricsSut {
                     eprintln!("[inv-sql-budget PINNED] {msg}");
                     pinned_breach = true;
                     errors.push(msg.clone());
+                }
+                transition_budgets::Violation::Measured {
+                    metric,
+                    actual,
+                    limit,
+                    message,
+                } => {
+                    // Measured, disclosed and kept as a trend line, not failed:
+                    // `HOLON_PBT_TIMING=measure` and the metric is one load
+                    // moves (#475). The message still goes out verbatim so the
+                    // existing `[inv-sql-budget …]` greps keep seeing it.
+                    eprintln!("[inv-sql-budget MEASURED] {message}");
+                    crate::pbt::timing_mode::disclose(&crate::pbt::timing_mode::Breach::new(
+                        &format!("{}/{}", InvSqlBudget::ID.0, metric.key()),
+                        &key,
+                        *actual,
+                        *limit,
+                        metric.unit(),
+                    ));
                 }
             }
         }
