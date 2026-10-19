@@ -1499,6 +1499,8 @@ landing-gate:
     mkdir -p target/gate-logs
     echo "== landing [1/18]: fmt =="
     cargo fmt --all -- --check
+    echo "== landing [1b/18]: licences and advisories (cargo-deny) =="
+    just deny
     echo "== landing [2/18]: typecheck incl. every test target =="
     just gate-compile
     echo "== landing [3/18]: typecheck of the release feature set =="
