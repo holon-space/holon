@@ -285,7 +285,10 @@ mod tests {
 
     #[test]
     fn no_sample_is_ok() {
-        assert!(matches!(verdict(None), InvariantResult::Ok));
+        assert!(matches!(
+            verdict_in(TimingMode::Enforce, None),
+            InvariantResult::Ok
+        ));
     }
 
     /// #475: the gate-44 red — `'SharePage' took 7292ms` against the 5000ms
@@ -363,7 +366,10 @@ mod tests {
 
     #[test]
     fn under_slo_is_ok() {
-        assert!(matches!(verdict(Some(&sample(20))), InvariantResult::Ok));
+        assert!(matches!(
+            verdict_in(TimingMode::Enforce, Some(&sample(20))),
+            InvariantResult::Ok
+        ));
     }
 
     /// The tooth: the 2026-07-28 IVM regime (~9s per navigation focus) fails
@@ -371,7 +377,8 @@ mod tests {
     /// duration.
     #[test]
     fn vault_scale_regime_fails_with_its_measured_duration() {
-        let InvariantResult::Fail(msg) = verdict(Some(&sample(9_000))) else {
+        let InvariantResult::Fail(msg) = verdict_in(TimingMode::Enforce, Some(&sample(9_000)))
+        else {
             panic!("9s per interaction must FAIL the settle budget");
         };
         assert!(
@@ -388,11 +395,14 @@ mod tests {
         assert!(hard_budget() > SLO, "default slack must exceed 1");
         let just_over = SLO + Duration::from_millis(1);
         assert!(matches!(
-            verdict(Some(&SettleSample {
-                action: "Edit".to_string(),
-                elapsed: just_over,
-                class: SettleClass::Op(OpClass::Interaction),
-            })),
+            verdict_in(
+                TimingMode::Enforce,
+                Some(&SettleSample {
+                    action: "Edit".to_string(),
+                    elapsed: just_over,
+                    class: SettleClass::Op(OpClass::Interaction),
+                })
+            ),
             InvariantResult::Ok
         ));
     }
@@ -431,10 +441,12 @@ mod tests {
             class: SettleClass::Op(OpClass::Maintenance),
         };
         assert!(matches!(
-            verdict(Some(&maintenance(9_000))),
+            verdict_in(TimingMode::Enforce, Some(&maintenance(9_000))),
             InvariantResult::Ok
         ));
-        let InvariantResult::Fail(msg) = verdict(Some(&maintenance(13_000))) else {
+        let InvariantResult::Fail(msg) =
+            verdict_in(TimingMode::Enforce, Some(&maintenance(13_000)))
+        else {
             panic!("13s must fail the 12s maintenance budget");
         };
         assert!(msg.contains("13000ms"), "{msg}");
@@ -447,8 +459,12 @@ mod tests {
             elapsed: Duration::from_millis(ms),
             class: SettleClass::Boot,
         };
-        assert!(matches!(verdict(Some(&boot(9_500))), InvariantResult::Ok));
-        let InvariantResult::Fail(msg) = verdict(Some(&boot(31_000))) else {
+        assert!(matches!(
+            verdict_in(TimingMode::Enforce, Some(&boot(9_500))),
+            InvariantResult::Ok
+        ));
+        let InvariantResult::Fail(msg) = verdict_in(TimingMode::Enforce, Some(&boot(31_000)))
+        else {
             panic!("31s must fail the 30s boot budget");
         };
         assert!(msg.contains("31000ms"), "{msg}");

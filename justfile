@@ -190,6 +190,11 @@ pbt name='general' cases='64' *FLAGS:
 #
 # One drawn case may carry no decision, so the smoke also replays one
 # hand-authored case in which the shape gate refuses one edit and admits one.
+#
+# It is also the gate's ENFORCED latency rung (#475): it inherits the default
+# `HOLON_PBT_TIMING=enforce` and runs inside `just timing-gate`, under the quiet
+# hold. Do not default it to `measure` — every other composed step measures, so
+# this is the only place the 200ms SLO is judged over generated transitions.
 keystone-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -265,6 +270,13 @@ hand-authored *FLAGS:
     mkdir -p target/gate-logs
     # See `pbt` for why the budget is armed by default.
     export HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}
+    # This replay asserts no duration of ITS own; it only carried the composed
+    # harness's latency oracles, which is why it sat under the gate's quiet hold
+    # for 6464 s (#475). `measure` keeps the measurement and drops the verdict,
+    # so it runs at lane load. The enforced verdict lives in `just timing-gate`.
+    export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}
+    L=target/gate-logs/pbt-hand-authored.log
+    echo "HOLON_PBT_TIMING=$HOLON_PBT_TIMING" | tee "$L"
     # D175.a: known-red until the never-seeded seed pass lands
     # (docs/Testing/bugfunnel/entries/2026-09-22-unseeded-vault-blocks-are-sql-only-so-a-loro-fed-read-model-cannot-show-them.md).
     # Re-strict by deleting this default the day that pass lands; the
@@ -279,7 +291,8 @@ hand-authored *FLAGS:
     export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers,external-rewrite-keeps-a-promoted-pages-body,a-failed-create-cancels-its-keystrokes-with-one-disclosure,a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch,split-then-two-backspaces-caret-follows-second-join}
     cargo test \
         {{CANON}} --test hand_authored_regressions \
-        -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-hand-authored.log
+        -- --nocapture {{FLAGS}} 2>&1 | tee -a "$L"
+    if [ "$HOLON_PBT_TIMING" = measure ]; then ./scripts/assert-measure-mode.sh "$L"; fi
 
 # The projector-lag lock: committed reproducers for Loro→SQL read-your-own-write
 # races — `convert_block_to_page` (bugfunnel
@@ -508,6 +521,10 @@ org-deep-text-timing *FLAGS:
     # recipe's exit status is `tee`'s, so a failing test would report success.
     set -euo pipefail
     mkdir -p target/gate-logs
+    # PINNED, not defaulted: these two budgets ARE this recipe's subject, so a
+    # caller that exported `measure` for the surrounding gate must not soften
+    # them (#475).
+    export HOLON_PBT_TIMING=enforce
     echo "org-deep-text-timing: load before $(sysctl -n vm.loadavg 2>/dev/null || uptime)"
     cargo test -p holon-org-format --test deep_authored_text_never_aborts \
         -- --ignored --nocapture --test-threads=1 {{FLAGS}} 2>&1 \
@@ -738,6 +755,8 @@ latency-slo-gate *FLAGS:
              crates/holon-api/src/latency_drain.rs; do
         [ -f "$f" ] || { echo "latency-slo-gate: wrong tree — missing $f" >&2; exit 2; }
     done
+    # PINNED, not defaulted: latency is this gate's subject (#475).
+    export HOLON_PBT_TIMING=enforce
     cargo nextest run {{CANON}} --test latency_slo_gate --ignore-default-filter \
         --no-capture --no-fail-fast {{FLAGS}} 2>&1 \
         | tee target/gate-logs/latency-slo-gate.log
@@ -1419,6 +1438,9 @@ gate-arch:
     mkdir -p target/gate-logs
     ./scripts/test-admission-sites-count.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites-count.log
     ./scripts/check-admission-sites.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites.log
+    # The duration-assertion ratchet and the generated nextest split (#475).
+    # Both read the tree only, so they belong here rather than past the build.
+    ./scripts/check-timing-assertions.sh 2>&1 | tee target/gate-logs/gate-arch-timing-assertions.log
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
     # clippy.toml lists the tracing span guards; one held across `.await` leaves
     # its span current on the worker thread and panics an unrelated task. That
@@ -1439,18 +1461,20 @@ gate-arch:
 precommit:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "== Tier 1 [1/6]: justfile pipefail guard =="
+    echo "== Tier 1 [1/7]: justfile pipefail guard =="
     ./scripts/check-justfile-pipefail.sh
     ./scripts/check-unix-cfg.sh
-    echo "== Tier 1 [2/6]: defensive-code ratchet =="
+    echo "== Tier 1 [2/7]: defensive-code ratchet =="
     ./scripts/defensive-ratchet.sh
-    echo "== Tier 1 [3/6]: workspace typecheck incl. every test target =="
+    echo "== Tier 1 [3/7]: duration-assertion ratchet =="
+    ./scripts/check-timing-assertions.sh
+    echo "== Tier 1 [4/7]: workspace typecheck incl. every test target =="
     just gate-compile
-    echo "== Tier 1 [4/6]: browser-target typecheck =="
+    echo "== Tier 1 [5/7]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== Tier 1 [5/6]: out-of-workspace browser frontend =="
+    echo "== Tier 1 [6/7]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== Tier 1 [6/6]: out-of-workspace worker =="
+    echo "== Tier 1 [7/7]: out-of-workspace worker =="
     just check-worker-wasm
     echo "== Tier 1 PASS =="
 
@@ -1486,8 +1510,138 @@ windowed-gate:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs/windowed
+    # No `frontends/gpui/tests/*` test asserts a duration; the composed loop
+    # inherits `inv-settle-budget` only, so this gate measures rather than
+    # judges and needs no quiet host (#475).
+    export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}
+    L=target/gate-logs/windowed-gate.log
+    echo "HOLON_PBT_TIMING=$HOLON_PBT_TIMING" | tee "$L"
     /usr/bin/python3 scripts/windowed-gate.py --features {{CANON_FEATURES}} \
-        --log-dir target/gate-logs/windowed 2>&1 | tee target/gate-logs/windowed-gate.log
+        --log-dir target/gate-logs/windowed 2>&1 | tee -a "$L"
+    # The per-binary logs hold the oracle output; the summary log does not.
+    if [ "$HOLON_PBT_TIMING" = measure ]; then
+        cat target/gate-logs/windowed/*.log >> "$L"
+        ./scripts/assert-measure-mode.sh "$L"
+    fi
+
+# The ONE quiet-hold step of the landing gate (#475): everything whose own
+# assertion is a duration, and nothing else. Before this split the hold ran
+# steps 13-19 for 2h51m, 90% of which asserted no duration at all.
+#
+# `--profile timing` and the `own-recipe` recipes are complementary halves of
+# docs/Testing/TimingCritical.md's table — see its `Runs` legend. `keystone-smoke`
+# is the rung that ENFORCES the 200ms interaction→projection-visible SLO: every
+# other step measures, so without it nothing under the hold would judge latency
+# at all. A hand-authored subset cannot be that rung (its corpus misses 48 of
+# the 129 budgeted kinds, `SharePage` — the kind of the gate-44 breach — among
+# them); the generated keystone draws from the whole alphabet. #414's
+# deterministic tour replaces the random draw here when it lands.
+timing-gate:
+    #!/usr/bin/env bash
+    # pipefail so a `tee`'d failure cannot report success (see `hand-authored`).
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    # This recipe TAKES the machine-wide quiet hold, it does not expect a caller
+    # to hold it: `flow job run --quiet-hold` only DECLARES one (it skips the
+    # load cap), so a run that trusted the declaration measured wall clock
+    # against other lanes' builds — and against its own tree being lowered when
+    # the next job took the empty hold (#475, 2026-10-19). Taking it here makes
+    # every caller clean: the land gate, a lane and a bare `just timing-gate`.
+    SLOT=~/.claude/skills/orchestrator/scripts/with-build-slot.sh
+    bash "$SLOT" --quiet-hold $$
+    export HOLON_BUILD_QUIET_HOLDER=$$
+    trap "bash $SLOT --quiet-release $$" EXIT
+    # Explicit, never inherited: this is the ONE step that judges.
+    export HOLON_PBT_TIMING=enforce
+    # Taking the hold LOWERS the other builds, it does not finish their in-flight
+    # work, so the latency rung's own contention probe refused to score 47s after
+    # a hold was taken (#475, 2026-10-19). Wait for that probe — the rung's own
+    # measure of "quiet enough", not a load cap of this recipe's invention —
+    # bounded, and then judge anyway: ruling 475/settle-then-judge.a says a
+    # timed-out wait yields no verdict, never a fabricated green.
+    P=target/gate-logs/timing-gate-settle.log
+    deadline=$(( $(date +%s) + 600 ))
+    round=0
+    while :; do
+        round=$(( round + 1 ))
+        just latency-slo-gate a_slowed_pipeline_fails_the_drain_test > "$P" 2>&1 || true
+        probe="$(grep -oE 'mean boot matview_ddl [0-9.]+ms[^.]*' "$P" | tail -1)"
+        if grep -q 'host admitted' "$P"; then
+            echo "timing-gate settle: round $round: ${probe:-probe line absent} — judging"
+            break
+        fi
+        if [ -z "$probe" ]; then
+            echo "timing-gate settle: round $round: the probe round printed neither an admission nor a contention value — the probe itself is broken, and waiting cannot fix it; judging now (see $P)"
+            break
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "timing-gate settle: round $round: ${probe:-probe line absent} — 600s bound reached; judging anyway, so a busy host yields NO VERDICT rather than a wait without end"
+            break
+        fi
+        echo "timing-gate settle: round $round: ${probe:-probe line absent} — too busy, waiting"
+        sleep 30
+    done
+    # The steps are independent and the verdict is one (ruling
+    # 475/settle-then-judge.a); the runner is a script so planted steps can pin
+    # it (scripts/check-timing-gate-verdict.sh).
+    bash scripts/timing-gate-steps.sh \
+      "latency SLO (D50.a)" \
+        'just latency-slo-gate' \
+      "org deep-text wall-clock budgets" \
+        'just org-deep-text-timing' \
+      "the timing-critical nextest profile" \
+        'L=target/gate-logs/timing-profile.log
+         cargo nextest run {{CANON}} --profile timing --no-fail-fast 2>&1 | tee "$L"
+         # A filter set that selects nothing reports `0 tests run` and exits 0,
+         # which would make the whole profile a green that proves nothing.
+         grep -qE "^ *Summary \[.*\] +[1-9][0-9]* tests? run" "$L" || {
+             echo "FAIL: --profile timing ran no tests. Its default-filter selects"
+             echo "nothing — run scripts/timing-split.py resolve to see which row."
+             exit 1
+         }' \
+      "keystone smoke, latency ENFORCED" \
+        'K=target/gate-logs/timing-gate-keystone.log
+         just keystone-smoke 2>&1 | tee "$K"
+         # Which of the 129 budgeted kinds this rung actually judged. One random
+         # draw cannot touch them all, so a single run WARNS and lists what it
+         # missed; the hard red lives over the accumulated window.
+         /usr/bin/python3 scripts/timing-split.py coverage "$K"'
+
+# The wide nextest sweep at whatever load the lanes produce: the exact
+# complement of the timing group (#475). JUnit is on, so every run feeds the
+# duration ledger the caps are derived from.
+load-tolerant-nextest *FLAGS:
+    #!/usr/bin/env bash
+    # pipefail so a `tee`'d failure cannot report success (see `hand-authored`).
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}
+    L=target/gate-logs/load-tolerant-nextest.log
+    echo "HOLON_PBT_TIMING=$HOLON_PBT_TIMING" | tee "$L"
+    # The ledger's `p95_low` filter is the hang detector, and it can only work
+    # on an honest load stamp, so the load is SAMPLED across the run rather than
+    # read once at the end.
+    LOAD_START=$(sysctl -n vm.loadavg | awk '{print $2}')
+    ( while :; do sysctl -n vm.loadavg | awk '{print $2}'; sleep 30; done ) \
+        > target/gate-logs/load-tolerant-load.txt & SAMPLER=$!
+    trap 'kill $SAMPLER 2>/dev/null || true' EXIT
+    rc=0
+    cargo nextest run {{CANON}} --profile load-tolerant --no-fail-fast {{FLAGS}} \
+        2>&1 | tee -a "$L" || rc=$?
+    kill $SAMPLER 2>/dev/null || true
+    LOAD_MAX=$(sort -g target/gate-logs/load-tolerant-load.txt | tail -1)
+    echo "load over the run: start=$LOAD_START max=$LOAD_MAX" | tee -a "$L"
+    # Record BEFORE resolve: the JUnit is the calibration data the caps are
+    # derived from, and losing it to a later step's failure wastes the whole run.
+    /usr/bin/python3 scripts/timing-split.py record target/nextest/load-tolerant/junit.xml \
+        "$LOAD_START" "$LOAD_MAX" 2>&1 | tee -a "$L"
+    # The binaries are built now, so this is the cheap place to ask nextest what
+    # each generated filter actually selects — a cap row that selects nothing is
+    # a cap that silently does not exist. It gets THIS run's feature set, since
+    # the workspace does not build under `--all-features`.
+    /usr/bin/python3 scripts/timing-split.py resolve {{CANON}} 2>&1 | tee -a "$L"
+    if [ "$HOLON_PBT_TIMING" = measure ]; then ./scripts/assert-measure-mode.sh "$L"; fi
+    exit $rc
 
 # The composed landing gate: what a lane runs before reporting done and what the
 # orchestrator runs before weaving. One recipe name, so it survives being passed
@@ -1497,43 +1651,45 @@ landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    echo "== landing [1/18]: fmt =="
+    echo "== landing [1/17]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [1b/18]: licences and advisories (cargo-deny) =="
+    echo "== landing [1b/17]: licences and advisories (cargo-deny) =="
     just deny
-    echo "== landing [2/18]: typecheck incl. every test target =="
+    echo "== landing [2/17]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/18]: typecheck of the release feature set =="
+    echo "== landing [3/17]: typecheck of the release feature set =="
     just check-release-shape
-    echo "== landing [4/18]: browser-target typecheck =="
+    echo "== landing [4/17]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [5/18]: out-of-workspace browser frontend =="
+    echo "== landing [5/17]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [6/18]: out-of-workspace wasi worker =="
+    echo "== landing [6/17]: out-of-workspace wasi worker =="
     just check-worker-wasm
-    echo "== landing [7/18]: architecture rules =="
+    echo "== landing [7/17]: architecture rules =="
     just gate-arch
-    echo "== landing [8/18]: @c4 structure matches the committed baseline =="
+    echo "== landing [8/17]: @c4 structure matches the committed baseline =="
     just arch-validate 2>&1 | tee target/gate-logs/landing-arch-validate.log
-    echo "== landing [9/18]: feature map matches the tree =="
+    echo "== landing [9/17]: feature map matches the tree =="
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
-    echo "== landing [10/18]: architecture lints (archlint) =="
+    echo "== landing [10/17]: architecture lints (archlint) =="
     just analyze-arch 2>&1 | tee target/gate-logs/landing-analyze-arch.log
-    echo "== landing [11/18]: keystone smoke =="
-    just keystone-smoke
-    echo "== landing [12/18]: loro consolidator suite =="
+    echo "== landing [11/17]: loro consolidator suite =="
     just loro-suite
-    echo "== landing [13/18]: hand-authored regressions =="
+    # Steps 12-14 MEASURE latency and judge nothing about it, so they may run at
+    # any load (#475). The gate script places them outside the quiet hold.
+    echo "== landing [12/17]: hand-authored regressions (latency measured) =="
     just hand-authored
-    echo "== landing [14/18]: projector-lag lock =="
+    echo "== landing [13/17]: projector-lag lock =="
     just projector-lag-lock
-    echo "== landing [15/18]: windowed GPUI tests =="
+    echo "== landing [14/17]: windowed GPUI tests (latency measured) =="
     just windowed-gate
-    echo "== landing [16/18]: latency SLO (D50.a) =="
-    just latency-slo-gate
-    echo "== landing [17/18]: guest wasm artifacts match their source =="
+    echo "== landing [15/17]: guest wasm artifacts match their source =="
     just guests-verify
-    echo "== landing [18/18]: target-gc (D85.c, this lane's own target/ only) =="
+    # The ONE step that needs the quiet host: it holds `keystone-smoke`, the SLO
+    # gate, the deep-text budgets and the timing profile.
+    echo "== landing [16/17]: timing-critical tests, latency ENFORCED =="
+    just timing-gate
+    echo "== landing [17/17]: target-gc (D85.c, this lane's own target/ only) =="
     just target-gc || echo "target-gc: non-fatal (busy or nothing to reclaim), see above"
     echo "== landing gate PASS =="
 

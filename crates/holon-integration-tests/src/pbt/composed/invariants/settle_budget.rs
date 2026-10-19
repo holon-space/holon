@@ -35,6 +35,8 @@ mod tests {
 
     use crate::pbt::composed::fixtures::*;
     use crate::pbt::invariants::bodies::settle_budget::SLO;
+    use crate::pbt::timing_mode;
+    use crate::pbt::timing_mode::TimingMode;
 
     /// Positive: a fast transition ⇒ selected and passing.
     #[tokio::test]
@@ -81,18 +83,37 @@ mod tests {
     /// Catch: the 2026-07-28 vault-scale IVM regime (~9s per navigation focus)
     /// FIRES — and past the loosest default slack, so no machine-load
     /// allowance can explain it away.
+    ///
+    /// This is the one test that proves the PRODUCTION composed path reaches
+    /// `HOLON_PBT_TIMING`, so its expectation is the ambient mode's: the body
+    /// reads the variable and the cap has no mode parameter to pin. Both arms
+    /// are asserted, so neither mode can pass by saying nothing.
     #[tokio::test]
-    async fn settle_budget_catches_vault_scale_regime() {
+    async fn settle_budget_catches_vault_scale_regime_in_enforce_and_reports_it_in_measure() {
         let sut = settle_map(Some(Duration::from_secs(9)));
         let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
 
-        let failures = report.failures();
         assert!(
-            failures
-                .iter()
-                .any(|(id, msg)| *id == "inv-settle-budget" && msg.contains("9000ms")),
-            "a 9s interaction must be caught with its measured duration; failures={failures:?}",
+            report.ran_ids().contains(&"inv-settle-budget"),
+            "the invariant must RUN in either mode — measure softens the verdict, \
+             never the measurement; ran={:?}",
+            report.ran_ids(),
         );
+        let failures = report.failures();
+        match timing_mode::mode() {
+            TimingMode::Enforce => assert!(
+                failures
+                    .iter()
+                    .any(|(id, msg)| *id == "inv-settle-budget" && msg.contains("9000ms")),
+                "a 9s interaction must be caught with its measured duration; \
+                 failures={failures:?}",
+            ),
+            TimingMode::Measure => assert!(
+                !failures.iter().any(|(id, _)| *id == "inv-settle-budget"),
+                "measure must not FAIL a 9s interaction — it discloses it as a \
+                 MEASURE-ONLY line; failures={failures:?}",
+            ),
+        }
         assert!(SLO < Duration::from_secs(9));
     }
 }
