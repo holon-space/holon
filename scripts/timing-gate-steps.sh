@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Run the timing gate's steps independently and give ONE verdict over them
-# (ruling 475/settle-then-judge.a, 2026-10-19).
+# Run the timing gate's steps independently and give ONE verdict over them.
 #
 # Usage: timing-gate-steps.sh <name> <command> [<name> <command> ...]
 #
 # The steps are arguments so this file can be pinned with planted steps
 # (scripts/check-timing-gate-verdict.sh); `just timing-gate` passes the real
-# four.
+# four. `TIMING_GATE_LOG_DIR` moves the step logs, so a pin does not overwrite
+# a real gate's.
 #
 # Per step: exit 0 is GREEN, exit 3 or an `INVALID` line is NO VERDICT (the host
 # was too busy to judge, which is not evidence about the tree), anything else is
@@ -22,7 +22,8 @@ set -uo pipefail
     exit 2
 }
 
-mkdir -p target/gate-logs
+LOG_DIR="${TIMING_GATE_LOG_DIR:-target/gate-logs}"
+mkdir -p "$LOG_DIR"
 total=$(( $# / 2 ))
 i=0
 names=()
@@ -35,7 +36,7 @@ while [ "$#" -gt 0 ]; do
     cmd="$2"
     shift 2
     i=$(( i + 1 ))
-    log="target/gate-logs/timing-gate-step-$i.log"
+    log="$LOG_DIR/timing-gate-step-$i.log"
     echo "== timing-gate [$i/$total]: $name =="
     bash -o pipefail -euc "$cmd" 2>&1 | tee "$log"
     rc="${PIPESTATUS[0]}"

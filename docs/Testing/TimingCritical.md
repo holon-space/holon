@@ -1,11 +1,10 @@
 # Timing-critical tests, and the caps of the load-tolerant ones
 
 The landing gate holds the machine quiet while it runs the steps that measure
-time. Before #475 that hold was 2 h 51 m, and **90 % of it asserted no duration
-at all** — the hand-authored replay, the windowed gate and the wide nextest
-sweep were there only because the composed harness arms a latency oracle on
-every transition. This file is the source of truth for the split: which tests
-really do judge a duration, and what cap the others get.
+time, and only those: the hand-authored replay, the windowed gate and the wide
+nextest sweep assert no duration of their own, although the composed harness
+arms a latency oracle on every transition. This file is the source of truth for
+the split: which tests really do judge a duration, and what cap the others get.
 
 `scripts/timing-split.py` reads the two tables below and generates the
 `.config/nextest.toml` blocks from them. Nothing in that file is hand-edited;
@@ -24,7 +23,7 @@ takes.
 | **liveness bound** | An upper-bound duration whose message reads "it never happened". It proves progress, not speed. Load-tolerant. | as above |
 | **bug-under-load** | A CONTENT assertion whose value changes under load. This is a RACE. It stays load-tolerant and stays RED until it is fixed. | as above |
 
-Two consequences worth stating, because both were breached before #475:
+Three consequences worth stating:
 
 - **A lower-bound duration assertion is load-insensitive.** Load can only make
   it pass. `assert!(start.elapsed() >= Duration::from_millis(250))` — a debounce
@@ -42,8 +41,8 @@ Two consequences worth stating, because both were breached before #475:
   the timing table must name the `file:line` of its duration assertion, and the
   check REJECTS a row whose named site holds no duration assertion. A content
   flake has no duration to point at, so the mechanism refuses it rather than
-  relying on a reviewer to notice. Open examples: #459 (an edited quantity reads
-  200 instead of 250), #458 (a real 120 s hang), and the
+  relying on a reviewer to notice. Open examples: an edited quantity that reads
+  200 instead of 250, a real 120 s hang in the default layout seed, and the
   `inv-two-instance-convergence` divergence that a latency red was concealing.
 
 ## Timing-critical tests
@@ -69,16 +68,17 @@ drain twice in one hold.
 | `binary(latency_slo_gate)` | own-recipe | `crates/holon-integration-tests/tests/latency_slo_gate.rs:1211` | `FENCE_ROUND_PATIENCE` per fence round | thin by design |
 | `binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)` | own-recipe | `crates/holon-org-format/tests/deep_authored_text_never_aborts.rs:205` | marker-line parse cost linear in length | thin; `#[ignore]`d, run by `just org-deep-text-timing` |
 | `binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)` | own-recipe | `crates/holon-org-format/tests/deep_authored_text_never_aborts.rs:244` | marked-line render cost linear in length | thin; `#[ignore]`d, run by `just org-deep-text-timing` |
-| `test(=cursor_filtered_main_panel_delivers_at_vault_scale)` | timing-step | `crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs:184` | cold matview create + first read < 5 s at ~70 pages | thin: 853 ms alone, 4.74 s at load 46, 7.52 s in an 885-test run |
+| `test(=tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)` | timing-step | `crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs:184` | cold matview create + first read < 5 s at ~70 pages | thin: 853 ms alone, 4.74 s at load 46, 7.52 s in an 885-test run |
 | `package(holon-rows) & test(=a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work)` | timing-step | `crates/holon-rows/tests/mapper_bounds.rs:338` | 500 000 digits refused in < 2 s — a superlinear-parse DoS bound | thin |
-| `package(holon-loro) & test(=loro_sync_controller::tests::dropped_gate_is_observed_before_the_watchdog)` | timing-step | `crates/holon-loro/src/loro_sync_controller.rs:2566` | a dropped gate is observed before `WATCHDOG` = 200 ms, after a 30 ms sleep | **very thin: 170 ms** |
+| `package(holon-loro) & test(=loro_sync_controller::boot_gate_tests::dropped_gate_is_observed_before_the_watchdog)` | timing-step | `crates/holon-loro/src/loro_sync_controller.rs:2566` | a dropped gate is observed before `WATCHDOG` = 200 ms, after a 30 ms sleep | **very thin: 170 ms** |
 | `package(holon-loro) & test(=loro_share_backend::tests::settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer)` | timing-step | `crates/holon-loro/src/loro_share_backend.rs:4921` | settle stays under 3 s while the worker dials an unreachable peer | moderate |
 | `package(holon) & test(=api::backend_engine::tests::deriving_the_net_is_cheap_enough_for_the_tick_path)` | timing-step | `crates/holon/src/api/backend_engine.rs:3267` | one net derive costs < 5 ms on the tick path | thin |
 | `package(holon) & test(=wakes_when_blocks_arrive_via_cdc)` | timing-step | `crates/holon/tests/block_live_data_catch_up.rs:124` | the wait wakes on CDC arrival in < 2 s rather than poll-spinning | moderate |
 | `package(holon) & test(=a_failed_watch_setup_leaves_no_membership_row)` | timing-step | `crates/holon/tests/watch_context_membership_leak.rs:218` | the failure path returns in < 20 s rather than parking in a dependency wait | generous |
 | `package(holon-app) & test(=dispatching_begin_oauth_returns_before_the_flow_finishes)` | timing-step | `crates/holon-app/tests/integration_set_field_op.rs:401` | `begin_oauth` returns in < 1 s, once STARTED rather than once finished | moderate |
+| `package(holon-app) & test(=quick_open_search_at_vault_scale)` | timing-step | `crates/holon-app/tests/quick_open_search_at_vault_scale.rs:165` | each keystroke's search returns in < 6 s, the join-regression bound | thin: 0.8-5.3 s across quiet and loaded runs |
 | `package(holon-loro) & test(=a_create_costs_the_same_in_a_large_tree_as_in_a_small_one)` | timing-step | `crates/holon-loro/tests/stable_id_index_create_cost.rs:64` | a create in a large tree costs at most 3x one in a small tree | thin |
-| `package(holon-mcp) & test(=tools::tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)` | timing-step | `frontends/mcp/src/tools.rs:10382` | an inexact apply answers within its 5 s limit | generous |
+| `package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)` | timing-step | `frontends/mcp/src/tools.rs:10382` | an inexact apply answers within its 5 s limit | generous |
 | `package(holon-mcp) & test(=fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)` | timing-step | `frontends/mcp/tests/describe_ui_deferred.rs:320` | a bounded fan-out pass finishes in < 5 s | generous |
 | `package(holon-mcp-client) & test(=a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout)` | timing-step | `crates/holon-mcp-client/tests/oauth_bootstrap_flow.rs:899` | a 400 ms timeout returns within 5 s | generous |
 | `package(holon-loro) & test(=shape_cost_at_ten_thousand_entities)` | release-bench | `crates/holon-loro/tests/typed_entity_scale.rs:348` | read p95 < 200 ms at 10 000 entities — the SLO itself | thin |
@@ -88,22 +88,17 @@ The generous-headroom rows cost the hold seconds. They stay in the group
 anyway: the rule must not acquire a "but the headroom is big" exception, or it
 stops being mechanical.
 
-Nine of these rows were found by `scripts/timing-split.py assertions`, not by
-reading the gate: the manual inventory in the #475 plan missed them, including a
-`p95 < 200 ms` that IS the SLO. The same check removed two: the #475 plan's
-A14 and A15 measure a PAUSED clock, so they are `virtual-clock`, not timing.
-
 The latency gate's two sites are `timing`, not `liveness`, although both
 messages read "produced no e2e sample" / "still not visible". `TEETH_WRITE_DEADLINE`
 and `FENCE_ROUND_PATIENCE` bound a *teeth* rung whose whole purpose is that the
-wait is short, so the deadline IS the judgement (the #475 plan's A6 and A7).
+wait is short, so the deadline IS the judgement.
 The p95 the gate reports is judged one layer down, in
 `crates/holon-api/src/latency_slo.rs:487`, through a `RungVerdict` — not a
 comparison in assertion position, so the ratchet's line scanner does not see
 it, and the row is held to its own named site instead.
 
-**The drain gate is not in this table either**, although the #475 plan listed
-it (A8). `latency_drain::tests::the_drain_gate_passes_every_healthy_pipeline_and_fails_every_slow_one`
+**The drain gate is not in this table.**
+`latency_drain::tests::the_drain_gate_passes_every_healthy_pipeline_and_fails_every_slow_one`
 sweeps 1500 SYNTHETIC pipelines whose per-row microseconds are drawn by its own
 RNG, and asserts `wrong.is_empty()` — a content assertion over a deterministic
 simulation. `SERVICE_TIME_SLO_MS` bounds the simulated rows, never a measured
@@ -121,8 +116,9 @@ the hold, `measure` everywhere else. They are why the hold was 2 h 51 m.
 ## Caps of the load-tolerant tests
 
 A raised cap must still catch a hang, or the split trades a quiet host for a
-blind gate. #458 is the proof: a real 120 s hang, reproduced on BOTH A/B legs,
-3/3, at load under 14. A generous cap would have hidden it — and hidden it as a
+blind gate. The default layout seed's test is the proof: a real 120 s hang,
+reproduced on BOTH legs of an A/B, 3/3, at load under 14. A generous cap would
+have hidden it — and hidden it as a
 "load artifact", the most expensive kind of false green, because it arrives with
 an explanation.
 
@@ -135,7 +131,7 @@ Three refusals:
 1. **No low-load p95 means no raise.** A test that does not COMPLETE at low load
    has no p95, keeps the default 120 s cap, and stays red. A TIMEOUT is a
    CENSORED measurement, not a slow one, and a censored measurement buys no
-   headroom. This is what catches #458 by construction.
+   headroom. This is what catches that hang by construction.
 2. **No cap above `8 × p95_low`.** The clamp is the hang detector. A test whose
    honest high-load inflation exceeds 8× is not slow — its work scales with
    load, which is a defect to report, not to pad.
@@ -148,8 +144,9 @@ Three refusals:
 The 95th percentile of per-test wall time over runs that COMPLETED (green or
 red, never TIMEOUT) with the 1-minute load average **< 16** at start and
 throughout, one test per nextest process, `NEXTEST_TEST_THREADS=1`, at least
-5 completed runs. Load < 16 is the gate-44 A/B's own quiet condition (observed
-4.2-15.0 over 84 runs), so the two data sets are comparable.
+5 completed runs. Load < 16 is the quiet condition of the A/B runs the ledger
+was seeded from (observed 4.2-15.0 over 84 runs), so the two data sets are
+comparable.
 
 Collected from nextest's JUnit output: `[profile.load-tolerant.junit]` plus
 `scripts/timing-split.py record <junit.xml> <load_start> <load_max>`, which appends
@@ -213,8 +210,8 @@ one. It needs the test binaries built, so it runs inside
 
 | Test | `p95_low` | Cap | Evidence |
 | --- | --- | --- | --- |
-| `split_block_stale_display_regression::split_block_stale_viewmodel_display_regression` | 121 s | 484 s | 6 completed runs, load 4.8-8.6, 2026-10-19 (gate-44 A/B); was a 120 s cap with 2 s of headroom |
-| `convert_block_to_page_survives_a_lagging_projection` | 108 s | 432 s | 6 completed runs, load 5.5-9.9, 2026-10-19 (gate-44 A/B); was a 120 s cap with 12 s of headroom |
+| `split_block_stale_display_regression::split_block_stale_viewmodel_display_regression` | 121 s | 484 s | 6 completed runs, load 4.8-8.6, 2026-10-19 |
+| `convert_block_to_page_survives_a_lagging_projection` | 108 s | 432 s | 6 completed runs, load 5.5-9.9, 2026-10-19 |
 
 ## The enforced latency rung and its kind coverage
 
@@ -228,9 +225,8 @@ over `E2ETransition::VARIANT_NAMES` (125 variants, `ApplyMutation` split by its
 5 mutations) = **129 kinds**. The hand-authored corpus
 (`crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`,
 291 cases) exercises **81** of them; **48 are absent from the corpus
-entirely**, `SharePage` among them — the very kind of the gate-44 breach
-(`'SharePage' took 7292ms`) that motivated #475. A rung built from that corpus
-would not have covered the event that prompted the card.
+entirely**, `SharePage` among them — the kind of a real gate breach
+(`'SharePage' took 7292ms`). A rung built from that corpus would not cover it.
 
 So the enforced rung is the generated keystone, which does draw from the whole
 alphabet. `scripts/timing-split.py coverage` checks it, and the threshold is ONE
@@ -249,10 +245,9 @@ only teach agents to ignore it — while the accumulated coverage keeps its
 teeth. 20 is a starting value and is calibrated the way K is: the first gates'
 logs say how many random runs the alphabet needs.
 
-#414 ("Replace the land gate's random keystone smoke with a deterministic tour
-of every transition") removes the guess: a deterministic tour draws every kind
-every time, so the window goes to 1, the gate's own call starts judging, and
-the check becomes exact.
+A deterministic tour of every transition removes the guess: it draws every
+kind every time, so the window goes to 1, the gate's own call starts judging,
+and the check becomes exact.
 
 ## The recipes, and which of them the hold covers
 
@@ -274,15 +269,16 @@ Each measure-mode recipe ends in `scripts/assert-measure-mode.sh`, which
 asserts two things its log can actually prove: that the step really ran in
 `measure` (the recipe echoes `HOLON_PBT_TIMING=` into the log first), and that
 no ENFORCE-shaped timing verdict appears — in `measure` a breach can only
-surface as a `MEASURE-ONLY` line, so `[inv-settle-budget] … took …ms` in the
-log means the mode did not reach that oracle. It does NOT demand that a
+surface as a `MEASURE-ONLY` line, so `[inv-settle-budget] … took …ms`, or an
+`[inv-sql-budget]` failure naming a wall, query, settle or RSS ceiling, ANYWHERE
+in a line — the composed harness Debug-quotes a failed invariant inside its
+panic — means the mode did not reach that oracle. It does NOT demand that a
 `MEASURE-ONLY` line be present: a step whose every transition stayed inside its
 budget emits none, and that is the honest green. The count is reported either
 way.
 
-The gate script that places these steps is the steward's (#475 T4). It must
-export `HOLON_GATE_ID=$GATE`, which is what stamps the measure ledger; without
-it every line reads `local`.
+The gate script that places these steps must export `HOLON_GATE_ID=$GATE`,
+which is what stamps the measure ledger; without it every line reads `local`.
 
 ## Measure mode is never silent
 
@@ -297,6 +293,5 @@ and appended to `~/.cache/holon-build/timing-measure.jsonl` as
 regression the enforced rung missed. `HOLON_GATE_ID` stamps the gate; a lane run
 stamps `local`.
 
-`MEASURE-ONLY` is the grep handle each measure-mode recipe asserts the PRESENCE
-of: a measure-mode step that emitted no measurement measured nothing, which is a
-false green.
+`MEASURE-ONLY` is the grep handle `scripts/assert-measure-mode.sh` counts in
+each measure-mode step's log.

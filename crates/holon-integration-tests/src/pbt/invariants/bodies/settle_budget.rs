@@ -184,7 +184,7 @@ pub fn verdict(sample: Option<&SettleSample>) -> InvariantResult {
 /// pre-first-transition check) ⇒ `Ok`.
 ///
 /// In [`TimingMode::Measure`] every one of the three budgets above reports
-/// instead of failing (#475). The measurement is identical in both modes; the
+/// instead of failing. The measurement is identical in both modes; the
 /// WEDGE is not a budget and is armed in both (see [`DEFAULT_WEDGE_MS`]).
 pub fn verdict_in(mode: TimingMode, sample: Option<&SettleSample>) -> InvariantResult {
     let Some(sample) = sample else {
@@ -291,25 +291,25 @@ mod tests {
         ));
     }
 
-    /// #475: the gate-44 red — `'SharePage' took 7292ms` against the 5000ms
-    /// hard threshold — is what `measure` must turn into a report, while
+    /// A real gate red — `'SharePage' took 7292ms` against the 5000ms hard
+    /// threshold — is what `measure` must turn into a report, while
     /// `enforce` must still fail it. Both halves asserted together: a mode that
     /// softened BOTH would pass a one-sided test.
     #[test]
-    fn measure_reports_the_gate_44_breach_and_enforce_still_fails_it() {
-        let gate_44 = SettleSample {
+    fn measure_reports_a_sharepage_breach_and_enforce_still_fails_it() {
+        let breach = SettleSample {
             action: "SharePage".to_string(),
             elapsed: Duration::from_millis(7_292),
             class: SettleClass::Op(OpClass::Interaction),
         };
         assert!(
             matches!(
-                verdict_in(TimingMode::Measure, Some(&gate_44)),
+                verdict_in(TimingMode::Measure, Some(&breach)),
                 InvariantResult::Ok
             ),
             "measure must not fail a load-perturbed settle"
         );
-        let InvariantResult::Fail(msg) = verdict_in(TimingMode::Enforce, Some(&gate_44)) else {
+        let InvariantResult::Fail(msg) = verdict_in(TimingMode::Enforce, Some(&breach)) else {
             panic!("enforce must still fail 7292ms against the 5000ms threshold");
         };
         assert!(msg.contains("7292ms"), "{msg}");

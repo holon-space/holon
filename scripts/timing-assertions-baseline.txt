@@ -1,7 +1,8 @@
 # Every duration comparison in assertion position, with the class its author assigned.
 # Classes: timing (the point is that the duration is SMALL; must be in the
 #   timing group), liveness (the message reads 'it never happened'), lower-bound
-#   (load can only make it pass), harness (plumbing: a wait helper's own bound).
+#   (load can only make it pass), harness (plumbing: a wait helper's own bound),
+#   virtual-clock (a PAUSED tokio clock: load cannot move it at all).
 # See docs/Testing/TimingCritical.md. Regenerate with `scripts/timing-split.py assertions --update`.
 crates/holon/src/api/action_watcher.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon/src/api/backend_engine.rs	timing	per_derive < std::time::Duration::from_millis(5),
@@ -10,6 +11,7 @@ crates/holon/src/sync/clock_scheduler.rs	liveness	tokio::time::Instant::now() < 
 crates/holon/src/sync/clock_scheduler.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon/src/sync/clock_scheduler.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon/src/testing/database_stuck_guard.rs	liveness	std::time::Instant::now() < deadline,
+crates/holon-api/src/latency_slo.rs	lower-bound	drain.elapsed > Duration::ZERO,
 crates/holon-frontend/src/reactive_view.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-frontend/src/reactive_view.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt/composed/invariants/settle_budget.rs	harness	assert!(SLO < Duration::from_secs(9));
@@ -74,6 +76,7 @@ crates/holon-app/tests/deleted_vault_profile_releases_its_claim.rs	liveness	star
 crates/holon-app/tests/integration_set_field_op.rs	timing	elapsed < std::time::Duration::from_secs(1),
 crates/holon-app/tests/integrations_settings_vm.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-app/tests/page_slot_completes_a_placeholder.rs	liveness	tokio::time::Instant::now() < deadline,
+crates/holon-app/tests/quick_open_search_at_vault_scale.rs	timing	elapsed < JOIN_REGRESSION_BOUND,
 crates/holon-app/tests/refused_profile_boots_degraded.rs	liveness	start.elapsed() < DEADLINE,
 crates/holon-app/tests/refused_profile_boots_degraded.rs	liveness	start.elapsed() < DEADLINE,
 crates/holon-app/tests/stale_type_table_boots.rs	liveness	tokio::time::Instant::now() < deadline,
@@ -182,6 +185,8 @@ frontends/gpui/tests/condition_bus_container.rs	liveness	Instant::now() < deadli
 frontends/gpui/tests/integrations_sidebar_rows_windowed.rs	liveness	std::time::Instant::now() < deadline,
 frontends/gpui/tests/mcp_write_repaints_windowed.rs	liveness	Instant::now() < deadline,
 frontends/gpui/tests/mcp_write_repaints_windowed.rs	liveness	Instant::now() < deadline,
+frontends/gpui/tests/mcp_write_repaints_windowed.rs	lower-bound	elapsed >= CLICK_BOUNDS_TIMEOUT,
+frontends/gpui/tests/mcp_write_repaints_windowed.rs	harness	elapsed < CLICK_BOUNDS_TIMEOUT * 2,
 frontends/gpui/tests/reactive_vm_realwindow_test.rs	liveness	Instant::now() < deadline,
 frontends/gpui/tests/reactive_vm_realwindow_test.rs	liveness	Instant::now() < deadline,
 frontends/gpui/tests/screenshot_readback_windowed.rs	liveness	Instant::now() < boot_deadline,

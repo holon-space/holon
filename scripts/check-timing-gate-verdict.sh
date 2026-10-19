@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Pin the timing gate's step independence and its verdict
-# (ruling 475/settle-then-judge.a): an INVALID step must NOT end the gate, and
-# a run with no red and at least one INVALID must exit 3, not 0 and not 1.
+# Pin the timing gate's step independence and its verdict: an INVALID step
+# must NOT end the gate, and a run with no red and at least one INVALID must
+# exit 3, not 0 and not 1.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 STEPS=scripts/timing-gate-steps.sh
 fail=0
+TIMING_GATE_LOG_DIR="$(mktemp -d)"
+export TIMING_GATE_LOG_DIR
+trap 'rm -rf "$TIMING_GATE_LOG_DIR"' EXIT
 
 run() {  # run <expected exit> <case> <steps...>
     local want="$1" case="$2"

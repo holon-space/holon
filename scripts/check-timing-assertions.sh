@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The duration-assertion ratchet (#475): every duration comparison in assertion
+# The duration-assertion ratchet: every duration comparison in assertion
 # position carries a reviewed class, and a `timing` one is selected by the
 # timing profile.
 #
