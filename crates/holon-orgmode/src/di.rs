@@ -2318,6 +2318,10 @@ mod writeback_panic_tests {
     struct Recorder {
         degraded: Mutex<Vec<String>>,
         incomplete_start: Mutex<Vec<String>>,
+        /// Read at the moment the incomplete start is disclosed: the gate must
+        /// still be unanswered then.
+        gate_under_disclosure: Mutex<Option<BootSeedGate>>,
+        gate_was_unanswered: Mutex<Vec<bool>>,
     }
 
     impl holon_filesystem::WritebackDisclosure for Recorder {
@@ -2372,6 +2376,12 @@ mod writeback_panic_tests {
         fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
         fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
         fn vault_start_incomplete(&self, _: &std::path::Path, step: &str, cause: &str) {
+            if let Some(gate) = self.gate_under_disclosure.lock().unwrap().as_ref() {
+                self.gate_was_unanswered
+                    .lock()
+                    .unwrap()
+                    .push(gate.scanned.borrow().is_none());
+            }
             self.incomplete_start
                 .lock()
                 .unwrap()
@@ -2468,5 +2478,35 @@ mod writeback_panic_tests {
             Vec::<String>::new()
         );
         assert_eq!(recorder.degraded.lock().unwrap().len(), 1);
+    }
+
+    /// No second task can observe this order: the handler never yields, so a
+    /// waiter woken by `answer()` sits in the worker's LIFO slot until the
+    /// handler has returned. The gate is read inside the disclosure instead.
+    #[tokio::test]
+    async fn the_scan_gate_is_still_unanswered_when_the_death_is_disclosed() {
+        let shutdown = holon_api::lifecycle::SessionShutdown::new();
+        let recorder = Arc::new(Recorder::default());
+        let gate = BootSeedGate::new();
+        *recorder.gate_under_disclosure.lock().unwrap() = Some(gate.clone());
+
+        spawn_file_sync_controller(
+            &shutdown,
+            Some(recorder.clone() as Arc<dyn holon_filesystem::WritebackDisclosure>),
+            PathBuf::from("/vault"),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            vec![gate.scan_unanswered()],
+            async { panic!("the controller dies during the initial scan") },
+        );
+        let _ = gate
+            .wait_scanned(&shutdown)
+            .await
+            .expect_err("a dead controller must not read as a successful scan");
+
+        assert_eq!(
+            *recorder.gate_was_unanswered.lock().unwrap(),
+            vec![true],
+            "the scan gate was already answered when the death was disclosed"
+        );
     }
 }
