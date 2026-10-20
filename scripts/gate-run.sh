@@ -3,8 +3,14 @@
 # gate's steps in the integration checkout that gate-combine.sh prepared, which
 # is the current directory.
 #
-# Usage: scripts/gate-run.sh [--dry-run]
+# Usage: GATE_CARD=<card> scripts/gate-run.sh [--dry-run]
+#   GATE_CARD  the card the gate job counts against (`flow job run --card`).
+#   GATE_DISK_FLOOR_GIB  free disk the gate needs (default 130).
 #   --dry-run  runs the guards, then prints the steps instead of running them.
+#
+# Outside a build slot it starts itself as a `flow job run --quiet-steps` job,
+# streams the job's log and exits with the job's exit code. The job stops when
+# this waiter dies, a SIGKILL included.
 #
 # Exit 0: every step green. A red step stops the gate with that step's exit
 # code; 9 = the checkout is not the combined tip, 8 = free disk below the floor.
@@ -13,7 +19,7 @@ set -euo pipefail
 
 SCRIPTS=~/.claude/skills/orchestrator/scripts
 WBS=$SCRIPTS/with-build-slot.sh
-DISK_FLOOR_GIB=130
+DISK_FLOOR_GIB=${GATE_DISK_FLOOR_GIB:-130}
 PBT_FEATURES="holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt"
 
 # A step of its own: `step` runs one command, and the smoke's known-red
@@ -37,14 +43,31 @@ tip=$(cat target/gate-tip)
 [ "$(df -g . | awk 'NR==2{print $4}')" -ge "$DISK_FLOOR_GIB" ] || { echo "DISK BELOW $DISK_FLOOR_GIB GiB"; exit 8; }
 
 if [ -z "$DRY" ] && [ -z "${HOLON_BUILD_SLOT_HOLDER:-}" ]; then
-  HOLON_BUILD_TAKES_QUIET_HOLD=1 exec "$WBS" "$0" "$@"
+  : "${GATE_CARD:?gate-run.sh: set GATE_CARD, the card the gate job counts against}"
+  export GATE_WAITER=$$
+  out=$(flow job run --queue --card "$GATE_CARD" --lane gate --kind gate --quiet-steps -- "$0" "$@")
+  echo "$out"
+  id=$(sed -n 's/^OUTCOME: waiting-for //p' <<<"$out")
+  [ -n "$id" ] || { echo "gate-run.sh: flow job run printed no job id"; exit 1; }
+  status="target/jobs/$id.status"
+  tail -n +1 -F "target/jobs/$id.log" 2>/dev/null & tailer=$!
+  until [ -f "$status" ]; do sleep "${GATE_WAIT_POLL_S:-10}"; done
+  kill "$tailer"
+  exit "$(/usr/bin/python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["exit"])' "$status")"
+fi
+
+if [ -n "${GATE_WAITER:-}" ]; then
+  slot=$HOLON_BUILD_SLOT_HOLDER gate=$$
+  ( while kill -0 "$gate" 2>/dev/null && kill -0 "$GATE_WAITER" 2>/dev/null; do sleep 30; done
+    kill -0 "$gate" 2>/dev/null || exit 0
+    echo "gate-run.sh: the waiter $GATE_WAITER is gone; stopping the gate job"; kill -TERM "$slot" ) &
 fi
 
 mkdir -p target/gate-logs
 GATE="gate-${tip:0:12}"
 GATE_CARDS="${GATE_CARDS:-${FLOW_PR_HEADS:?gate-run.sh: set GATE_CARDS or FLOW_PR_HEADS}}"
 export HOLON_GATE_ID=$GATE
-echo "gate-run.sh: $GATE, tip $tip, heads: $GATE_CARDS"
+echo "gate-run.sh: $GATE (pid $$), tip $tip, heads: $GATE_CARDS"
 if [ -n "$DRY" ]; then
   step() { local n=$1 name=$2; shift 2; echo "step $n $name: $*"; }
   run() { echo "run: $*"; }
@@ -67,22 +90,26 @@ step 10 featuremap /usr/bin/python3 scripts/featuremap.py check
 step 11 analyze-arch just analyze-arch
 step 12 keystone-smoke "$0" --keystone-smoke
 step 13 loro-suite just loro-suite
+step 14 guests-verify just guests-verify
 
 # The timing steps must not compile under the quiet hold.
 run cargo test --workspace --features "$PBT_FEATURES" --no-run
 run cargo nextest run --no-run --workspace --features holon/test-helpers
 
+# The hold lowers every other build, so it spans the timing steps only.
 run "$WBS" --quiet-hold $$
 export HOLON_BUILD_QUIET_HOLDER=$$
 [ -n "$DRY" ] || trap '"$WBS" --quiet-release $$' EXIT
-step 14 hand-authored just hand-authored
-step 15 projector-lag-lock just projector-lag-lock
-step 16 windowed-gate just windowed-gate
-step 17 latency-slo-gate just latency-slo-gate
-step 18 org-deep-text-timing just org-deep-text-timing
-step 19 guests-verify just guests-verify
+step 15 hand-authored just hand-authored
+step 16 projector-lag-lock just projector-lag-lock
+step 17 windowed-gate just windowed-gate
+step 18 latency-slo-gate just latency-slo-gate
+step 19 org-deep-text-timing just org-deep-text-timing
 extra_red=""
 step 20 extra-nextest cargo nextest run --no-fail-fast --workspace --features holon/test-helpers || { echo "EXTRA NEXTEST RED"; extra_red=1; }
+run "$WBS" --quiet-release $$
+unset HOLON_BUILD_QUIET_HOLDER
+trap - EXIT
 [ -n "$extra_red" ] || echo "GATE ALL GREEN"
 
 echo "== information only: org_suite (compare its reds with the known reds) =="
