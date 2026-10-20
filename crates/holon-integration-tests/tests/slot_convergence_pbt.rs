@@ -59,6 +59,7 @@ use proptest::test_runner::RngAlgorithm;
 use proptest::test_runner::TestError;
 use proptest::test_runner::TestRng;
 use proptest::test_runner::TestRunner;
+use regex::Regex;
 
 // ------------------------------------------------------------------ constants
 
@@ -1340,7 +1341,7 @@ fn assert_the_registered_known_red(failure: TestError<Vec<Step>>) {
 /// red, even with the registered shape of one device holding nothing after a
 /// withdrawn claim.
 #[test]
-#[should_panic(expected = "does not cover")]
+#[should_panic(expected = "its registry pattern matches no line")]
 fn the_self_check_rejects_a_displaced_set_divergence() {
     let diverged = || -> Result<(), TestCaseError> {
         prop_assert_eq!(
@@ -1381,17 +1382,58 @@ fn the_naive_first_arrival_rule_does_not_converge() {
     match run_property("naive first-arrival (negative control)", |s| {
         converges(&s, Rule::Naive)
     }) {
-        Err(TestError::Fail(reason, counterexample)) => {
-            println!("NAIVE RULE RED, as required.");
-            println!("reason: {reason}");
-            println!("shrunk counterexample: {counterexample:#?}");
-        }
-        Err(TestError::Abort(why)) => panic!("the naive run aborted: {why}"),
+        Err(failure) => assert_the_naive_rule_diverges(failure),
         Ok(()) => panic!(
             "the naive first-arrival rule converged in every case: \
              the negative control has no teeth"
         ),
     }
+}
+
+/// Passes only for the negative control's own failure: a slot divergence.
+fn assert_the_naive_rule_diverges(failure: TestError<Vec<Step>>) {
+    let (reason, counterexample) = match failure {
+        TestError::Fail(reason, counterexample) => (reason, counterexample),
+        TestError::Abort(why) => panic!("the naive run aborted: {why}"),
+    };
+    println!("reason: {reason}");
+    println!("shrunk counterexample: {counterexample:#?}");
+    let slot_diverged = Regex::new(r"the slot of '[^']+' differs between the devices")
+        .expect("the slot-divergence pattern compiles");
+    assert!(
+        slot_diverged.is_match(&reason.to_string()),
+        "the naive first-arrival rule failed for a reason other than a slot \
+         divergence (see the printed reason above)"
+    );
+    println!("NAIVE RULE RED, as required.");
+}
+
+/// The negative control counts only a slot divergence as its red; any other
+/// failure of the naive run is a regression, not the control biting.
+#[test]
+#[should_panic(expected = "for a reason other than a slot divergence")]
+fn the_negative_control_rejects_an_unrelated_failure() {
+    let diverged = || -> Result<(), TestCaseError> {
+        prop_assert_eq!(
+            Some("winner"),
+            None,
+            "the displaced set of '{}' differs between the devices",
+            KEYS[0]
+        );
+        Ok(())
+    };
+    let TestCaseError::Fail(reason) = diverged().unwrap_err() else {
+        unreachable!("prop_assert_eq! fails, it never rejects")
+    };
+    assert_the_naive_rule_diverges(TestError::Fail(
+        reason,
+        vec![Step::Claim {
+            device: true,
+            key: 0,
+            origin: 0,
+            hlc: 0,
+        }],
+    ));
 }
 
 /// Run 2 of the card: device B carries one extra well-known-id policy row. The
