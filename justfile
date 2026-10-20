@@ -1442,6 +1442,8 @@ gate-arch:
     # than past the build.
     ./scripts/check-timing-assertions.sh 2>&1 | tee target/gate-logs/gate-arch-timing-assertions.log
     ./scripts/check-timing-gate-verdict.sh 2>&1 | tee target/gate-logs/gate-arch-timing-gate-verdict.log
+    { ./scripts/check-known-red-evidence.py && ./scripts/check-known-red-evidence.py --self-check; } \
+        2>&1 | tee target/gate-logs/gate-arch-known-red-evidence.log
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
     # clippy.toml lists the tracing span guards; one held across `.await` leaves
     # its span current on the worker thread and panics an unrelated task. That
