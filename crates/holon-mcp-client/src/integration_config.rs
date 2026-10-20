@@ -52,6 +52,12 @@ fn unique_holon_tools<'de, D: serde::Deserializer<'de>>(
     crate::transition_sidecar::unique_keys(deserializer, "holon.tools")
 }
 
+fn unique_body<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    crate::transition_sidecar::unique_json_opt(deserializer, "holon.tools.body")
+}
+
 fn unique_query_params<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<HashMap<String, String>, D::Error> {
@@ -143,7 +149,7 @@ pub struct HolonToolConfig {
     /// placeholder-filled; a leaf that is EXACTLY one placeholder takes the
     /// argument's own JSON value, so an array or object argument arrives with
     /// its type intact. A body on `GET` is a configuration error.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "unique_body")]
     pub body: Option<serde_json::Value>,
     /// Response body codec: `json` (default), `atom`, or `rss`. The manual
     /// states a `content_type`; this states how Holon DECODES what arrives,

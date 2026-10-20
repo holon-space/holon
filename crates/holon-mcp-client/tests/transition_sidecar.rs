@@ -426,9 +426,9 @@ utcp:
         http_method: GET
 ";
 
-/// Every map section of a sidecar file, not only the four #196 guarded: a
-/// plain map keeps the last value of a duplicate key silently, which is a
-/// declaration the author wrote and the system never read.
+/// Every map section of a sidecar file: a plain map keeps the last value of a
+/// duplicate key silently, which is a declaration the author wrote and the
+/// system never read.
 ///
 /// The file parse is the one gate ([`IntegrationFileConfig::from_yaml`] hands
 /// the same text to [`McpSidecar::from_yaml`]), so each case goes through it
@@ -566,6 +566,19 @@ fn a_duplicate_key_in_any_map_section_is_a_named_load_error() {
         "a duplicate key must be refused by the section's own name:\n{}",
         accepted.join("\n")
     );
+}
+
+/// A declared JSON subtree reads its keys through a visitor, which has to
+/// answer for an empty declaration too: `body:` with nothing after it is the
+/// absence of a body, not a body that is the JSON null.
+#[test]
+fn a_body_declared_with_nothing_after_it_is_no_body() {
+    let config = IntegrationFileConfig::from_yaml(&format!(
+        "{UTCP_FILE}holon:\n  tools:\n    list_items:\n      body:\n"
+    ))
+    .expect("a tool that declares no body loads");
+    let tool = &config.holon.expect("the holon section").tools["list_items"];
+    assert_eq!(tool.body, None, "`body:` with no value is no body");
 }
 
 #[test]

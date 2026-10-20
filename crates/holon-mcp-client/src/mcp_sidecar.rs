@@ -76,7 +76,7 @@ pub(crate) fn unique_tools<'de, D: serde::Deserializer<'de>>(
 fn unique_list_params<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<HashMap<String, serde_json::Value>, D::Error> {
-    crate::transition_sidecar::unique_keys(deserializer, "sync.list_params")
+    crate::transition_sidecar::unique_json_map(deserializer, "sync.list_params")
 }
 
 fn unique_projections<'de, D: serde::Deserializer<'de>>(

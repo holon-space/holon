@@ -205,6 +205,106 @@ where
     })
 }
 
+/// Deserializes a JSON subtree a sidecar declares, refusing a key declared
+/// twice at ANY depth. A section whose Rust type is `serde_json::Value` is
+/// still a map in the FILE, and that type keeps one of a repeated key, so the
+/// shape of the type cannot be what decides whether the law applies.
+pub(crate) fn unique_json<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    noun: &'static str,
+) -> Result<serde_json::Value, D::Error> {
+    // `OrderedJson` already refuses a repeated key at every depth; it is the
+    // one JSON reader of this crate that does.
+    let ordered = crate::utcp_manual::OrderedJson::deserialize(deserializer)
+        .map_err(|error| D::Error::custom(format!("{noun}: {error}")))?;
+    serde_json::to_value(&ordered).map_err(D::Error::custom)
+}
+
+/// [`unique_json`] for a subtree whose absence is itself a declaration, so the
+/// field keeps its `Option`.
+pub(crate) fn unique_json_opt<'de, D: Deserializer<'de>>(
+    deserializer: D,
+    noun: &'static str,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    struct Opt(&'static str);
+    impl<'de> Visitor<'de> for Opt {
+        type Value = Option<serde_json::Value>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(
+                f,
+                "a {} whose keys are each declared once, or nothing",
+                self.0
+            )
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            unique_json(d, self.0).map(Some)
+        }
+    }
+    deserializer.deserialize_option(Opt(noun))
+}
+
+/// [`unique_keys`] for a map whose VALUES are JSON subtrees the sidecar
+/// declares: a repeated key is refused at the top level and at every depth
+/// inside a value.
+pub(crate) fn unique_json_map<'de, D, M>(deserializer: D, noun: &'static str) -> Result<M, D::Error>
+where
+    D: Deserializer<'de>,
+    M: Default + Extend<(String, serde_json::Value)>,
+{
+    struct Unique<M> {
+        noun: &'static str,
+        map: std::marker::PhantomData<fn() -> M>,
+    }
+    impl<'de, M: Default + Extend<(String, serde_json::Value)>> Visitor<'de> for Unique<M> {
+        type Value = M;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(
+                f,
+                "a map whose {} keys are each declared once, nested keys included",
+                self.noun
+            )
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut seen = std::collections::HashSet::new();
+            let mut entries = M::default();
+            while let Some(name) = map.next_key::<String>()? {
+                if !seen.insert(name.clone()) {
+                    return Err(A::Error::custom(format!(
+                        "{} `{name}` is declared twice",
+                        self.noun
+                    )));
+                }
+                let value = map
+                    .next_value::<crate::utcp_manual::OrderedJson>()
+                    .map_err(|error| {
+                        A::Error::custom(format!("{} `{name}`: {error}", self.noun))
+                    })?;
+                entries.extend([(
+                    name,
+                    serde_json::to_value(&value).map_err(A::Error::custom)?,
+                )]);
+            }
+            Ok(entries)
+        }
+    }
+    deserializer.deserialize_map(Unique {
+        noun,
+        map: std::marker::PhantomData,
+    })
+}
+
 pub(crate) fn unique_transitions<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<BTreeMap<String, TransitionSpec>, D::Error> {
@@ -214,7 +314,7 @@ pub(crate) fn unique_transitions<'de, D: Deserializer<'de>>(
 fn unique_args<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<BTreeMap<String, serde_json::Value>, D::Error> {
-    unique_keys(deserializer, "effect argument")
+    unique_json_map(deserializer, "effect argument")
 }
 
 /// Reads the `transitions:` of a sidecar YAML into the HL-IR.

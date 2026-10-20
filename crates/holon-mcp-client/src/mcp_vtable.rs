@@ -50,7 +50,7 @@ fn unique_filter_mapping<'de, D: serde::Deserializer<'de>>(
 fn unique_static_args<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<serde_json::Map<String, serde_json::Value>, D::Error> {
-    crate::transition_sidecar::unique_keys(deserializer, "vtable.static_args")
+    crate::transition_sidecar::unique_json_map(deserializer, "vtable.static_args")
 }
 
 fn unique_columns<'de, D: serde::Deserializer<'de>>(
