@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon_api::Value;
+use holon_integration_tests::pbt::known_reds::KnownReds;
 use holon_net::exec::Body;
 use holon_net::exec::Class;
 use holon_net::exec::Content;
@@ -1288,39 +1289,88 @@ fn the_set_function_rule_converges_on_both_devices() {
     match run_property("set-function convergence", |s| {
         converges(&s, Rule::SetFunction)
     }) {
-        Err(TestError::Fail(reason, counterexample)) => {
-            // The reason is printed, never panicked with: the registry pattern
-            // matches its text, so putting it in a panic message would let a
-            // NOVEL failure wear the known red's words.
-            println!("KNOWN RED slot-withdrawn-last-claim-no-retraction (#345), as registered.");
-            println!("reason: {reason}");
-            println!("shrunk counterexample: {counterexample:#?}");
-            let reason = reason.to_string();
-            assert!(
-                reason.contains("differs between the devices"),
-                "the set-function rule failed for a reason the known red \
-                 slot-withdrawn-last-claim-no-retraction (#345) does not cover: \
-                 no place of a device diverged (see the printed reason above)"
-            );
-            assert!(
-                reason.contains("left: `None`") || reason.contains("right: `None`"),
-                "the set-function rule diverged with BOTH devices holding a place, \
-                 which the known red slot-withdrawn-last-claim-no-retraction (#345) \
-                 does not cover: its shape is one device holding nothing at all"
-            );
-            assert!(
-                format!("{counterexample:?}").contains("Withdraw"),
-                "the set-function rule diverged WITHOUT a withdrawn claim, which the \
-                 known red slot-withdrawn-last-claim-no-retraction (#345) does not \
-                 cover: its mechanism is the empty contestant set"
-            );
-        }
-        Err(TestError::Abort(why)) => panic!("the set-function run aborted: {why}"),
+        Err(failure) => assert_the_registered_known_red(failure),
         Ok(()) => panic!(
             "the set-function rule converged in every case: remove the known-red \
              marker, #345 fixed it"
         ),
     }
+}
+
+const KNOWN_RED: &str = "slot-withdrawn-last-claim-no-retraction";
+
+/// Passes only for the failure registered as [`KNOWN_RED`] in
+/// `docs/Testing/KeystoneKnownReds.md`, matched by that row's own pattern.
+fn assert_the_registered_known_red(failure: TestError<Vec<Step>>) {
+    let (reason, counterexample) = match failure {
+        TestError::Fail(reason, counterexample) => (reason, counterexample),
+        TestError::Abort(why) => panic!("the set-function run aborted: {why}"),
+    };
+    // The reason is printed, never panicked with: the registry pattern
+    // matches its text, so putting it in a panic message would let a
+    // NOVEL failure wear the known red's words.
+    println!("reason: {reason}");
+    println!("shrunk counterexample: {counterexample:#?}");
+    let reason = reason.to_string();
+    let known_reds = KnownReds::load().expect("known-reds registry");
+    assert!(
+        reason
+            .lines()
+            .any(|line| known_reds.classify(line) == Some(KNOWN_RED)),
+        "the set-function rule failed for a reason the known red \
+         slot-withdrawn-last-claim-no-retraction does not cover: \
+         its registry pattern matches no line of the printed reason above"
+    );
+    assert!(
+        reason.contains("left: `None`") || reason.contains("right: `None`"),
+        "the set-function rule diverged with BOTH devices holding a place, \
+         which the known red slot-withdrawn-last-claim-no-retraction \
+         does not cover: its shape is one device holding nothing at all"
+    );
+    assert!(
+        format!("{counterexample:?}").contains("Withdraw"),
+        "the set-function rule diverged WITHOUT a withdrawn claim, which the \
+         known red slot-withdrawn-last-claim-no-retraction does not \
+         cover: its mechanism is the empty contestant set"
+    );
+    println!("KNOWN RED {KNOWN_RED}, as registered.");
+}
+
+/// A divergence of a place other than the slot is not the registered known
+/// red, even with the registered shape of one device holding nothing after a
+/// withdrawn claim.
+#[test]
+#[should_panic(expected = "does not cover")]
+fn the_self_check_rejects_a_displaced_set_divergence() {
+    let diverged = || -> Result<(), TestCaseError> {
+        prop_assert_eq!(
+            Some("winner"),
+            None,
+            "the displaced set of '{}' differs between the devices",
+            KEYS[0]
+        );
+        Ok(())
+    };
+    let TestCaseError::Fail(reason) = diverged().unwrap_err() else {
+        unreachable!("prop_assert_eq! fails, it never rejects")
+    };
+    assert_the_registered_known_red(TestError::Fail(
+        reason,
+        vec![
+            Step::Claim {
+                device: true,
+                key: 0,
+                origin: 0,
+                hlc: 0,
+            },
+            Step::Resolve { device: true },
+            Step::Withdraw {
+                device: true,
+                key: 0,
+                nth: 0,
+            },
+        ],
+    ));
 }
 
 /// The negative control. A rule whose input is the local arrival order cannot
