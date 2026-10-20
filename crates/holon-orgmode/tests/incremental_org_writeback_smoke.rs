@@ -1219,7 +1219,8 @@ async fn childless_runtime_page_materializes_its_identity_file() {
 // marker; the seed BOUNDARY reads its presence (`default_org_exists`) and
 // suppresses re-seeding, so a subsequent shipped-asset change never overrides
 // it (proven at the seed layer by
-// `holon-app::seed_copy_on_write::present_default_file_suppresses_default_layout_seed`).
+// `holon-app::main
+// seed_copy_on_write::present_default_file_suppresses_default_layout_seed`).
 
 /// The default-layout doc-root (`block:__default__`) as a `Page` with two leaf
 /// children — the seed-doc shape. Distinct from `make_doc_and_blocks` only in
@@ -1307,7 +1308,8 @@ fn build_seed_harness() -> Harness {
 /// The complementary half — a subsequent shipped-asset/seed change does NOT
 /// override the materialized file (file-wins) — is enforced at the SEED
 /// boundary and proven by
-/// `holon-app::seed_copy_on_write::present_default_file_suppresses_default_layout_seed`
+/// `holon-app::main
+/// seed_copy_on_write::present_default_file_suppresses_default_layout_seed`
 /// (a present `__default__.org` → `default_org_exists` → no re-seed).
 #[tokio::test]
 async fn user_edit_materializes_virtual_seed_doc_copy_on_write() {

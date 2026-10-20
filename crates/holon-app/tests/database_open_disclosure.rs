@@ -454,8 +454,11 @@ fn run_as_holder(path: &str) -> ! {
 /// A second process holding `path`, already past its open. `test` is the
 /// test the child runs, which becomes the holder.
 fn spawn_holder(path: &std::path::Path, test: &str) -> std::process::Child {
+    // `--exact` matches the test's path below the crate root.
+    let (_crate_root, module) = module_path!().split_once("::").expect("a test module");
+    let exact = format!("{module}::{test}");
     let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
-        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .args(["--exact", &exact, "--nocapture", "--test-threads=1"])
         .env(CHILD_HOLD_DB_PATH, path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

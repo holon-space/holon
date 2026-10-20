@@ -157,7 +157,7 @@ pbt name='general' cases='64' *FLAGS:
             ;;
         petri)
             PROPTEST_CASES={{cases}} cargo test \
-                {{CANON}} --test petri_e2e_pbt \
+                {{CANON}} --test main petri_e2e_pbt:: \
                 -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-petri.log
             ;;
         orgmode)
@@ -175,7 +175,7 @@ pbt name='general' cases='64' *FLAGS:
             ;;
         loro)
             PROPTEST_CASES={{cases}} cargo test \
-                {{CANON}} --test api_suite loro_backend_pbt \
+                {{CANON}} --test main api_pbt::loro_backend_pbt:: \
                 -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-loro.log
             ;;
         *)

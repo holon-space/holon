@@ -15,4 +15,4 @@ echo "report dir: ${HOLON_CAPABILITY_REPORT_DIR:-$ROOT/target/capability-certifi
 # fail-fast skipped the day-29 boundary alarm; the hazard is milder here (a
 # cross-format assertion rather than an alarm) and the fix is the same.
 exec cargo nextest run -p holon --features test-helpers \
-    -E 'binary(capability_certification)' --no-capture --no-fail-fast
+    -E 'binary_id(holon::main) & test(/^capability_certification::/)' --no-capture --no-fail-fast

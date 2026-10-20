@@ -86,7 +86,7 @@ const CLAUDE_HISTORY_VIEW: &str = "block:claude-history-view";
 /// rows are what separates "the op resolves the clicked row's `default_view`"
 /// from "the op opens the one view somebody hardcoded"; the remaining three
 /// providers would only re-buy that at another windowed boot's runtime, so the
-/// headless sweep in `holon-app::integrations_section_seed` covers them.
+/// headless sweep in holon-app's `integrations_section_seed` tests covers them.
 const TODOIST: &str = "todoist";
 const TODOIST_VIEW: &str = "block:todoist-view";
 

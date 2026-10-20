@@ -343,7 +343,7 @@ panel on a plain block. `JumpToSearchHit` already issues
 the gap is relaxing that precondition **and** answering the oracle question
 behind it — queued, not part of the lane that added this case. Until then the
 oracle's teeth are pinned at unit level by
-`holon::watch_context_membership_leak::the_ownership_oracle_names_a_row_no_watch_owns`.
+`holon::main watch_context_membership_leak::the_ownership_oracle_names_a_row_no_watch_owns`.
 
 ## What a hand-authored regression covers — vs. a unit test
 

@@ -1,6 +1,5 @@
-//! Shared harness for the two session-shutdown test binaries. Lives in a
-//! subdirectory so cargo does not compile it as a test binary of its own; both
-//! binaries pull it in with `#[path]`.
+//! Shared session-shutdown harness, declared once in `main.rs` as
+//! `session_shutdown::harness`.
 
 use std::collections::HashSet;
 use std::sync::Arc;

@@ -287,12 +287,12 @@ done
 # A `FAIL + LEAK` test failed in its body: its own panic is the signature, and a
 # known one stays known.
 cat >"$work/fail-leak-known-panic.log" <<'EOF'
- FAIL + LEAK [   6.486s] (197/682) holon-app::integration_toggle_round_trip a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
+ FAIL + LEAK [   6.486s] (197/682) holon-app::main integration_toggle_round_trip::a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
   stderr ───
     thread 'a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection' (2) panicked at crates/holon-app/tests/integration_toggle_round_trip.rs:83:9:
     the seeded Integrations section never showed 'todoist' as true — it is still false. The operation wrote the state file, so the break is between the store's signal and the mirror.
      Summary [  25.469s] 682 tests run: 681 passed (1 leaky), 1 failed, 1 skipped
- FAIL + LEAK [   6.486s] (197/682) holon-app::integration_toggle_round_trip a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
+ FAIL + LEAK [   6.486s] (197/682) holon-app::main integration_toggle_round_trip::a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
 EOF
 expect_outcome fail-leak-known-panic 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' "$work/fail-leak-known-panic.log"
 # D101.a: the cross-file move re-ingest signature (N+4 per-block reads) is a
@@ -342,15 +342,15 @@ expect_outcome sample-floor-breach 1 '^SAMPLE: cases=16 attempted=4 completed=3 
 # A test that returned `Err` printed no panic: its status line stands in, with
 # the `Error:` it returned, so two root causes in one binary stay apart.
 cat >"$work/fail-leak-no-panic.log" <<'EOF'
- FAIL + LEAK [   0.906s] (36/49) holon::integration_tests test_multiple_containers
+ FAIL + LEAK [   0.906s] (36/49) holon::main integration_tests::test_multiple_containers
   stderr ───
     Error: aborted by peer: the cryptographic handshake failed: error 120: peer doesn't support any known protocol
      Summary [  31.396s] 49 tests run: 48 passed, 1 failed, 0 skipped
 EOF
-expect_outcome fail-leak-no-panic 1 "^ *1 FAIL + LEAK: holon::integration_tests test_multiple_containers: Error: aborted by peer: the cryptographic handshake failed: error 120: peer doesn't support any known protocol\$" \
+expect_outcome fail-leak-no-panic 1 "^ *1 FAIL + LEAK: holon::main integration_tests::test_multiple_containers: Error: aborted by peer: the cryptographic handshake failed: error 120: peer doesn't support any known protocol\$" \
     "$work/fail-leak-no-panic.log"
 cat >"$work/fail-two-errors.log" <<'EOF'
-        FAIL [   1.973s] (356/893) holon::e2e_backend_engine_test test_basic_query_execution
+        FAIL [   1.973s] (356/893) holon::main e2e_backend_engine_test::test_basic_query_execution
   stdout ───
 
     running 1 test
@@ -361,18 +361,18 @@ cat >"$work/fail-two-errors.log" <<'EOF'
   stderr ───
     Error: Failed to insert test data: Database error: Failed to prepare statement: Parse error: cannot modify materialized view block
 
-        FAIL [   2.008s] (357/893) holon::e2e_backend_engine_test test_create_and_delete_workflow
+        FAIL [   2.008s] (357/893) holon::main e2e_backend_engine_test::test_create_and_delete_workflow
   stderr ───
     Error: the certification harness must run
 
      Summary [ 319.449s] 893 tests run: 891 passed, 2 failed, 0 skipped
-        FAIL [   1.973s] (356/893) holon::e2e_backend_engine_test test_basic_query_execution
-        FAIL [   2.008s] (357/893) holon::e2e_backend_engine_test test_create_and_delete_workflow
+        FAIL [   1.973s] (356/893) holon::main e2e_backend_engine_test::test_basic_query_execution
+        FAIL [   2.008s] (357/893) holon::main e2e_backend_engine_test::test_create_and_delete_workflow
 error: test run failed
 EOF
-expect_outcome fail-two-errors/first 1 '^ *1 FAIL: holon::e2e_backend_engine_test test_basic_query_execution: Error: Failed to insert test data: .*cannot modify materialized view block$' \
+expect_outcome fail-two-errors/first 1 '^ *1 FAIL: holon::main e2e_backend_engine_test::test_basic_query_execution: Error: Failed to insert test data: .*cannot modify materialized view block$' \
     "$work/fail-two-errors.log"
-expect_outcome fail-two-errors/second 1 '^ *1 FAIL: holon::e2e_backend_engine_test test_create_and_delete_workflow: Error: the certification harness must run$' \
+expect_outcome fail-two-errors/second 1 '^ *1 FAIL: holon::main e2e_backend_engine_test::test_create_and_delete_workflow: Error: the certification harness must run$' \
     "$work/fail-two-errors.log"
 # A panic belongs to the test whose output holds it: the captured block under
 # its status line. A `harness = false` binary panics on `main`, not on a thread
@@ -472,7 +472,7 @@ cat >"$work/stress-index.log" <<'EOF'
   Cancelling due to signal: 1 test still running
      SIGTERM [  20.778s] [10/12] (1/1) holon-integration-tests::two_instance_composed_pbt edit_on_receiver_concurrent_with_create_on_owner_converges
  Stress test [  20.778s] iteration 10/12: 1 test run: 0 passed, 1 failed, 37 skipped
-     TIMEOUT [  20.778s] [11/12] (1/1) holon::turso_block_query_source_round_trip_pbt round_trip
+     TIMEOUT [  20.778s] [11/12] (1/1) holon::main turso_block_query_source_round_trip_pbt::round_trip
      Summary [ 385.895s] 11/12 stress run iterations: 9 passed; cancelled due to signal
      SIGTERM [  20.778s] [10/12] (1/1) holon-integration-tests::two_instance_composed_pbt edit_on_receiver_concurrent_with_create_on_owner_converges
 error: test run failed
@@ -496,10 +496,10 @@ cat >"$work/retry-flaky-pass.log" <<'EOF'
 EOF
 expect_outcome retry-flaky-pass 0 '^\[known-reds\] PASS: 1 green run' "$work/retry-flaky-pass.log"
 cat >"$work/retry-final-fail.log" <<'EOF'
-  TRY 1 SLOW [>120.000s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
-  TRY 1 TRMNTG [>120.000s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
-   TRY 1 TMT [ 120.034s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
-   TRY 2 TMT [ 120.034s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
+  TRY 1 SLOW [>120.000s] (1/3) holon::main turso_block_query_source_round_trip_pbt::round_trip
+  TRY 1 TRMNTG [>120.000s] (1/3) holon::main turso_block_query_source_round_trip_pbt::round_trip
+   TRY 1 TMT [ 120.034s] (1/3) holon::main turso_block_query_source_round_trip_pbt::round_trip
+   TRY 2 TMT [ 120.034s] (1/3) holon::main turso_block_query_source_round_trip_pbt::round_trip
    TRY 1 LKFAIL [   0.312s] (2/3) holon-gpui::layout_smoke leaky
  TRY 2 SIG 9 [   0.312s] (2/3) holon-gpui::layout_smoke leaky
   TRY 1 FAIL [   0.120s] (3/3) holon::flaky_suite never
@@ -524,7 +524,7 @@ cat >"$work/captured-output-lines.log" <<'EOF'
         PASS [   0.010s] (1/2) holon-capability::certify prints_report
     TIGHTENING [org] foo
     VIOLATION  [logseq] bar
- FAIL + LEAK [   6.486s] (2/2) holon-app::integration_toggle_round_trip a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
+ FAIL + LEAK [   6.486s] (2/2) holon-app::main integration_toggle_round_trip::a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
   stderr ───
     thread 'a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection' (2) panicked at crates/holon-app/tests/integration_toggle_round_trip.rs:83:9:
     the seeded Integrations section never showed 'todoist' as true — it is still false. The operation wrote the state file, so the break is between the store's signal and the mirror.
@@ -544,13 +544,13 @@ expect_outcome setup-fail 1 '^ *1 SETUP LEAK-FAIL: leaky-script: ./scripts/leaky
 # A row whose known failure is a budget assertion must not absorb a TIMEOUT of
 # the same test: a hang past the nextest cap is a different bug.
 cat >"$work/budget-test-timeout.log" <<'EOF'
-     TIMEOUT [ 600.012s] (1/1) holon::turso_storage_repros tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale
+     TIMEOUT [ 600.012s] (1/1) holon::main turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale
      Summary [ 600.355s] 1 tests run: 0 passed, 1 timed out, 0 skipped
 EOF
-expect_outcome budget-test-timeout 1 '^PRIMARY: \[novel\] .*TIMEOUT: holon::turso_storage_repros ' \
+expect_outcome budget-test-timeout 1 '^PRIMARY: \[novel\] .*TIMEOUT: holon::main turso_storage_repros::' \
     "$work/budget-test-timeout.log"
 cat >"$work/timeout-row.log" <<'EOF'
-     TIMEOUT [ 600.012s] (1/1) holon::turso_block_query_source_round_trip_pbt round_trip
+     TIMEOUT [ 600.012s] (1/1) holon::main turso_block_query_source_round_trip_pbt::round_trip
      Summary [ 600.355s] 1 tests run: 0 passed, 1 timed out, 0 skipped
 EOF
 expect_outcome timeout-row 0 '^PRIMARY: \[known-red:turso-block-query-source-round-trip\]' \

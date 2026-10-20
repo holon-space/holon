@@ -123,15 +123,15 @@ cargo test --tests -- --test-threads=1
 ### Run Specific Test Suite
 
 ```bash
-cargo test-seq --test integration_tests
-cargo test-seq --test stress_tests
-cargo test-seq --test reliability_tests
+cargo test -p holon --test main integration_tests:: -- --test-threads=1
+cargo test -p holon --test main stress_tests:: -- --test-threads=1
+cargo test -p holon --test main reliability_tests:: -- --test-threads=1
 ```
 
 ### Run Individual Test
 
 ```bash
-cargo test --test integration_tests test_basic_two_peer_sync
+cargo test -p holon --test main integration_tests::test_basic_two_peer_sync
 ```
 
 ### Run with Output

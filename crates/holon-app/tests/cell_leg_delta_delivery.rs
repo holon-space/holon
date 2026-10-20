@@ -10,11 +10,6 @@
 //! This is not an undo wrinkle: the same hop carries a peer's merge and an org
 //! ingest to a block the user has open.
 
-// The harness serves several binaries; this one drives only its boot.
-#[allow(dead_code)]
-#[path = "session_shutdown/harness.rs"]
-mod harness;
-
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -25,6 +20,8 @@ use holon_api::OpOrigin;
 use holon_api::Value;
 use holon_core::cell::Cell;
 use holon_frontend::cell::EntityCellRegistry;
+
+use crate::session_shutdown::harness;
 
 const PROBE_CHILD: &str = "shutdown-probe-child";
 

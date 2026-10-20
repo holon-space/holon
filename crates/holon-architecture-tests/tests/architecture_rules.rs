@@ -322,7 +322,6 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     ("crates/holon-sharing/src/sync.rs", 1),
     ("crates/holon-loro-wiring/src/loro_module.rs", 1),
     ("crates/holon/tests/api_pbt/loro_backend_pbt.rs", 4),
-    ("crates/holon/tests/api_suite/loro_backend_pbt.rs", 4),
     ("crates/holon/tests/sync_suite/sync_pbt.rs", 3),
     // Plants the mount that places the share, the way an accept does.
     ("crates/holon/tests/sync_import_read_only_adoption.rs", 1),

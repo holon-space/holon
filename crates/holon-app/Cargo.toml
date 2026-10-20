@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # The wiring crate (storage de-leak Stage 6, ADR plan quirky-dazzling-map):
 # owns all DI assembly that names concrete backends (BackendEngine, Loro/OrgMode
@@ -65,3 +66,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", 
 toml.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

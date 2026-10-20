@@ -7,11 +7,6 @@
 //! exclude. One shared prefix makes that exclusion fail-safe: a seam added
 //! later is excluded unless it deliberately claims to be a keystroke.
 
-// The harness serves two other binaries too; this one drives only its boot.
-#[allow(dead_code)]
-#[path = "session_shutdown/harness.rs"]
-mod harness;
-
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,6 +21,8 @@ use holon_frontend::cell::EntityCellRegistry;
 use holon_loro::loro_document_store::DocScope;
 use holon_loro::loro_document_store::LoroDocumentStore;
 use holon_loro::write_origin::WriteOrigin;
+
+use crate::session_shutdown::harness;
 
 /// The block the probe vault gives every test here to write into.
 const PROBE_CHILD: &str = "shutdown-probe-child";

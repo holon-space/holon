@@ -4,11 +4,6 @@
 //! what it holds. Nothing is wired to cmd-z yet — `OperationEngine::undo` still
 //! replays the inverse journal and knows nothing about this.
 
-// The harness serves three other binaries; this one drives only its boot.
-#[allow(dead_code)]
-#[path = "session_shutdown/harness.rs"]
-mod harness;
-
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,6 +17,8 @@ use holon_frontend::cell::EntityCellRegistry;
 use holon_loro::TextUndo;
 use holon_loro::loro_document_store::DocScope;
 use holon_loro::loro_document_store::LoroDocumentStore;
+
+use crate::session_shutdown::harness;
 
 const PROBE_CHILD: &str = "shutdown-probe-child";
 

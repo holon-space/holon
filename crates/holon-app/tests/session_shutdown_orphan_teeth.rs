@@ -13,8 +13,7 @@
 //! tasks still running produces orphan reads, so the orderly-shutdown assertion
 //! is not vacuous
 
-#[path = "session_shutdown/harness.rs"]
-mod harness;
+use crate::session_shutdown::harness;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_the_store_under_a_live_session_orphans_its_watchers() {

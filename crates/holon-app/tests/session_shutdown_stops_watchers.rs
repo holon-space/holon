@@ -25,8 +25,7 @@
 //! covers the same defect end-to-end; kept because this one names the seam and
 //! runs in seconds
 
-#[path = "session_shutdown/harness.rs"]
-mod harness;
+use crate::session_shutdown::harness;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shutting_the_session_down_stops_its_watchers_before_the_store_closes() {
