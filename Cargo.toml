@@ -345,6 +345,11 @@ opt-level = 3
 debug-assertions = false
 overflow-checks = false
 
+# Optimized dependencies shrink the test executables by ~40% and keep their
+# line tables, so a failing test still prints file:line for every frame.
+[profile.test.package."*"]
+opt-level = 3
+
 [profile.release]
 debug = "line-tables-only"
 codegen-units = 4
