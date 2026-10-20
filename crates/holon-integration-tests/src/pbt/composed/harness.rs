@@ -179,6 +179,16 @@ pub(crate) async fn feed_sut_clock(caps: &CapMap, ref_state: &ReferenceState) {
     }
 }
 
+/// The SUT primary doc's Lamport height, for the atom-count recorder.
+/// `None` when the recorder is off, the drawn wiring exposes no Loro log
+/// (SqlOnly), or the doc is not live yet.
+async fn atom_counts_height(caps: &CapMap) -> Option<u32> {
+    if !holon_loro_testing::atom_counts::enabled() {
+        return None;
+    }
+    caps.get::<dyn SutLoroLog>()?.loro_lamport_height().await
+}
+
 /// Inject `scaffold_ids` into the oracle as `block_documents[id]=no_parent` so
 /// they join `seed_block_ids()` and filter out of the SUT-side block
 /// comparison.
@@ -796,6 +806,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
                 // minutes — must become a red, not a hung suite. Slow-but-
                 // progressing transitions stay well inside this and are reported
                 // with their real measured duration by the invariant below.
+                let atoms_before = atom_counts_height(caps).await;
                 let progressed = tokio::time::timeout(wedge, async {
                     match plan {
                         // UNMASKED — the same two statements, in the same order,
@@ -861,6 +872,12 @@ impl<S: ComposedSlice> ComposedSut<S> {
                     "holon_latency",
                 );
                 feed_sut_clock(caps, ref_state).await;
+                if holon_loro_testing::atom_counts::enabled() {
+                    let delta = atoms_before
+                        .zip(atom_counts_height(caps).await)
+                        .map(|(b, a)| a.saturating_sub(b));
+                    holon_loro_testing::atom_counts::note_tick(&kind, delta);
+                }
                 let after = sut_ids(caps).await;
                 (before, after, action_us)
             })

@@ -56,6 +56,10 @@ impl ShadowDoc {
     pub fn doc(&self) -> &LoroDoc {
         &self.doc
     }
+
+    pub fn lamport_height(&self) -> u32 {
+        multi_peer::lamport_height(&self.doc)
+    }
 }
 
 impl Clone for ShadowDoc {

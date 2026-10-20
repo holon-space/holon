@@ -45,6 +45,7 @@
 //! floor; the central table keeps only the not-yet-co-located `block_raw` +
 //! `matview` arms (Phase 2).
 
+pub mod atom_counts;
 pub mod component;
 #[cfg(test)]
 mod convergence_pbt;

@@ -760,6 +760,21 @@ latency-slo-gate *FLAGS:
         --no-capture --no-fail-fast {{FLAGS}} 2>&1 \
         | tee target/gate-logs/latency-slo-gate.log
 
+# Measure the atoms (Lamport-height deltas) the keystone's two Loro write legs
+# spend per transition: the SUT primary vs the oracle's shadow primary.
+# Both tests are `#[ignore]`d — the keystone gate is the bottleneck and this
+# measurement must add no gate time. `cargo test`, not nextest: the
+# instrumented run boots a composed SUT per drawn case, so it outlives every
+# per-test cap in .config/nextest.toml, and the harness here has none.
+# PROPTEST_CASES sets how many cases the instrumented run draws.
+atom-counts *FLAGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    L=target/gate-logs/atom-counts.log
+    HOLON_ATOM_COUNTS=1 cargo test {{CANON}} --test keystone_atom_counts {{FLAGS}} \
+        -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$L"
+
 # Report what an `owning_page` walk costs each write authority on a
 # 10 000-block vault. A debug build cannot seed that vault inside the nextest
 # cap, so the test is `#[ignore]`d and runs here in release.

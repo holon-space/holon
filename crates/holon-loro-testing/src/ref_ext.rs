@@ -195,12 +195,24 @@ impl LoroRefExt {
         // clock matches the SUT peer's (clock_parity_spike s3/s7: staggered
         // fork heights are exactly what an unpadded shadow gets wrong).
         if self.shadow_mesh.is_none() {
-            self.shadow_mesh = Some(ShadowMesh::seeded_from_blocks(primary_blocks));
+            let mesh = ShadowMesh::seeded_from_blocks(primary_blocks);
+            // The seeding BUILDS the shadow primary, so its whole height is
+            // what this step spent; there is no earlier height to subtract.
+            crate::atom_counts::record("add_peer:seed", "primary", mesh.primary.lamport_height());
+            self.shadow_mesh = Some(mesh);
         }
+        let feed = *self.clock_feed.lock().expect("clock_feed lock");
         let mesh = self.shadow_mesh.as_mut().expect("just seeded");
-        mesh.catch_up_primary(primary_blocks);
-        if let Some(h) = *self.clock_feed.lock().expect("clock_feed lock") {
-            mesh.pad_primary_to(h);
+        {
+            let doc = &mesh.primary;
+            crate::atom_counts::measure("add_peer:edit", "primary", doc, || {
+                mesh.catch_up_primary(primary_blocks)
+            });
+            crate::atom_counts::measure("add_peer:pad", "primary", doc, || {
+                if let Some(h) = feed {
+                    mesh.pad_primary_to(h);
+                }
+            });
         }
         let shadow_peer_id = mesh.fork_peer();
 
@@ -255,10 +267,13 @@ impl LoroRefExt {
         content: &str,
         stable_id: &str,
     ) {
-        self.shadow_mesh
+        let mesh = self
+            .shadow_mesh
             .as_ref()
-            .expect("shadow mesh exists once peers do")
-            .peer_create(peer_idx, parent_stable_id, content, stable_id);
+            .expect("shadow mesh exists once peers do");
+        crate::atom_counts::measure("peer_create", "peer", &mesh.peers[peer_idx], || {
+            mesh.peer_create(peer_idx, parent_stable_id, content, stable_id)
+        });
         let peer = &mut self.peers[peer_idx];
         peer.blocks.insert(
             stable_id.to_string(),
@@ -272,10 +287,13 @@ impl LoroRefExt {
     }
 
     pub fn peer_apply_update(&mut self, peer_idx: usize, stable_id: &str, content: &str) {
-        self.shadow_mesh
+        let mesh = self
+            .shadow_mesh
             .as_ref()
-            .expect("shadow mesh exists once peers do")
-            .peer_update(peer_idx, stable_id, content);
+            .expect("shadow mesh exists once peers do");
+        crate::atom_counts::measure("peer_update", "peer", &mesh.peers[peer_idx], || {
+            mesh.peer_update(peer_idx, stable_id, content)
+        });
         let peer = &mut self.peers[peer_idx];
         let block = peer.blocks.get_mut(stable_id).unwrap_or_else(|| {
             panic!(
@@ -288,10 +306,13 @@ impl LoroRefExt {
     }
 
     pub fn peer_apply_delete(&mut self, peer_idx: usize, stable_id: &str) {
-        self.shadow_mesh
+        let mesh = self
+            .shadow_mesh
             .as_ref()
-            .expect("shadow mesh exists once peers do")
-            .peer_delete(peer_idx, stable_id);
+            .expect("shadow mesh exists once peers do");
+        crate::atom_counts::measure("peer_delete", "peer", &mesh.peers[peer_idx], || {
+            mesh.peer_delete(peer_idx, stable_id)
+        });
         let peer = &mut self.peers[peer_idx];
         peer.blocks.remove(stable_id);
         peer.deleted_stable_ids.insert(stable_id.to_string());
@@ -311,7 +332,9 @@ impl LoroRefExt {
             .shadow_mesh
             .as_ref()
             .expect("shadow mesh exists once peers do");
-        mesh.peer_char_insert(peer_idx, stable_id, pos, text);
+        crate::atom_counts::measure("peer_char_insert", "peer", &mesh.peers[peer_idx], || {
+            mesh.peer_char_insert(peer_idx, stable_id, pos, text)
+        });
         let content = mesh
             .peer_content(peer_idx, stable_id)
             .unwrap_or_else(|| panic!("shadow peer {peer_idx} lacks {stable_id}"));
@@ -334,7 +357,9 @@ impl LoroRefExt {
             .shadow_mesh
             .as_ref()
             .expect("shadow mesh exists once peers do");
-        mesh.peer_char_delete(peer_idx, stable_id, pos, len);
+        crate::atom_counts::measure("peer_char_delete", "peer", &mesh.peers[peer_idx], || {
+            mesh.peer_char_delete(peer_idx, stable_id, pos, len)
+        });
         let content = mesh
             .peer_content(peer_idx, stable_id)
             .unwrap_or_else(|| panic!("shadow peer {peer_idx} lacks {stable_id}"));
@@ -362,11 +387,19 @@ impl LoroRefExt {
                 .shadow_mesh
                 .as_ref()
                 .expect("shadow mesh exists once peers do");
-            mesh.catch_up_primary(primary_blocks);
-            if let Some(h) = *self.clock_feed.lock().expect("clock_feed lock") {
-                mesh.pad_primary_to(h);
-            }
-            mesh.sync_peer_bidirectional(peer_idx);
+            let feed = *self.clock_feed.lock().expect("clock_feed lock");
+            let doc = &mesh.primary;
+            crate::atom_counts::measure("sync:edit", "primary", doc, || {
+                mesh.catch_up_primary(primary_blocks)
+            });
+            crate::atom_counts::measure("sync:pad", "primary", doc, || {
+                if let Some(h) = feed {
+                    mesh.pad_primary_to(h);
+                }
+            });
+            crate::atom_counts::measure("sync:merge", "primary", doc, || {
+                mesh.sync_peer_bidirectional(peer_idx)
+            });
         }
         self.take_merge_intent(peer_idx)
     }
@@ -383,11 +416,19 @@ impl LoroRefExt {
                 .shadow_mesh
                 .as_ref()
                 .expect("shadow mesh exists once peers do");
-            mesh.catch_up_primary(primary_blocks);
-            if let Some(h) = *self.clock_feed.lock().expect("clock_feed lock") {
-                mesh.pad_primary_to(h);
-            }
-            mesh.merge_peer_into_primary(peer_idx);
+            let feed = *self.clock_feed.lock().expect("clock_feed lock");
+            let doc = &mesh.primary;
+            crate::atom_counts::measure("merge:edit", "primary", doc, || {
+                mesh.catch_up_primary(primary_blocks)
+            });
+            crate::atom_counts::measure("merge:pad", "primary", doc, || {
+                if let Some(h) = feed {
+                    mesh.pad_primary_to(h);
+                }
+            });
+            crate::atom_counts::measure("merge:merge", "primary", doc, || {
+                mesh.merge_peer_into_primary(peer_idx)
+            });
         }
         self.take_merge_intent(peer_idx)
     }
@@ -455,9 +496,15 @@ impl LoroRefExt {
         let Some(mesh) = &self.shadow_mesh else {
             return;
         };
-        if let Some(h) = *self.clock_feed.lock().expect("clock_feed lock") {
-            mesh.pad_primary_to(h);
-        }
-        mesh.catch_up_primary(primary_blocks);
+        let feed = *self.clock_feed.lock().expect("clock_feed lock");
+        let doc = &mesh.primary;
+        crate::atom_counts::measure("catch_up:pad", "primary", doc, || {
+            if let Some(h) = feed {
+                mesh.pad_primary_to(h);
+            }
+        });
+        crate::atom_counts::measure("catch_up:edit", "primary", doc, || {
+            mesh.catch_up_primary(primary_blocks)
+        });
     }
 }

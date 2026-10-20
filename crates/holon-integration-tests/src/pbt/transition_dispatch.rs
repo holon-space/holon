@@ -197,6 +197,9 @@ macro_rules! declare_e2e_transitions {
             }
 
             fn apply_to_ref(&self, state: &mut $crate::pbt::reference_state::ReferenceState) {
+                // Atom-count recorder: opens the tick so every shadow
+                // write site inside this apply is attributed to this kind.
+                ::holon_loro_testing::atom_counts::begin_ref_transition(self.variant_name());
                 let before: ::std::collections::BTreeSet<::holon_api::EntityUri> =
                     state.domain.block_state.blocks.keys().cloned().collect();
                 let copies_before = state.snapshot_copies();
