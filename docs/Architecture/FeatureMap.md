@@ -351,6 +351,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `cooklang-read-only-write-refusal-any-op`
 - `create-sql-read-repeat-budget`
 - `deletebackward-sql-reads-budget`
+- `dogfood-replay-load-timeout`
 - `external-rewrite-drops-page-body`
 - `failed-slot-create-loro-dispatch-keystrokes-run-anyway`
 - `failed-slot-create-sqlonly-keystrokes-run-anyway`
@@ -393,6 +394,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `vault-scale-main-panel-delivery`
 - `wb-d6-stall-resurrects-deleted-line`
 - `wb-d7-stall-splits-edited-line`
+- `windowed-clickblock-bounds-under-load`
 - `windowed-splitblock-no-editable-surface`
 - `writeorgfile-sql-reads-budget`
 
