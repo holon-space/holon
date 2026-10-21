@@ -14,37 +14,10 @@
 //!   - `card_stage`: the steward's 11:46 stall table. `.flow/moves.jsonl` has
 //!     NO entry before the snapshot, so the move log cannot supply the stages.
 //!
-//! The net is built with [`NetDef`] because holon-net has no standalone YAML
-//! net loader (see the missing-feature list in the lane summary). The YAML such
-//! a loader would have to accept for this net:
-//!
-//! ```yaml
-//! places:
-//!   Clock:      {class: process}   # machine: now_s
-//!   Budget:     {class: process}   # machine: the policy constants
-//!   Card:       {class: process}   # <card>: stage, agent
-//!   Agent:      {class: process}   # <agent>: card, role, started_s, last_turn_end_s, ctx_tokens
-//!   TurnEnded:  {class: process}   # <agent>: at_s, ctx_tokens          (evidence, consumed)
-//!   Job:        {class: process}   # <job>: ws, owner, start_s, end_s?  (evidence, consumed)
-//!   Cpu:        {class: process}   # <job>: the one real build slot hold
-//!   Waiting:    {class: process}   # <agent>: job, live
-//!   Stalled:    {class: process}   # <agent>: idle_s, age_s, board_holds_cargo
-//!   Proposal:   {class: process}   # <agent>: action, idle_s, age_s, ctx_tokens
-//!   Woken:      {class: process}   # <agent>: action, at_s
-//! transitions:
-//!   AgentTurnEnded: {trigger: auto, consumes: [TurnEnded], reads: [Agent]}
-//!   StartJob:       {trigger: auto, consumes: [Job], inhibits: [Cpu]}
-//!   JobEnded:       {trigger: auto, consumes: [Job, Cpu]}
-//!   NoticeStall:    {trigger: auto, reads: [Agent], inhibits: [Stalled, Woken]}
-//!   Restall:        {trigger: auto, consumes: [Stalled], reads: [Agent]}
-//!   Continue:       {trigger: auto, reads: [Stalled, Agent], inhibits: [Proposal]}
-//!   Reconsider:     {trigger: auto, consumes: [Proposal], reads: [Stalled, Agent]}
-//!   DropProposal:   {trigger: auto, consumes: [Proposal], inhibits: [Stalled]}
-//!   Handoff:        {trigger: manual, consumes: [Stalled, Proposal]}
-//! ```
-//!
-//! The guards and bodies have no YAML form at all: `bind` is a Rust `fn` and
-//! `Body::pure` a Rust `fn`, so a loader would also need a guard/body language.
+//! The net's shape — its places and arcs — is the file
+//! `nets/work-runtime-replay.yaml`, loaded through [`net_def`]. The guards and
+//! the firings have no YAML form: `bind` is a Rust `fn` and `Body::pure` a
+//! Rust `fn`, so [`logic`] hands one of each in per transition.
 //!
 //! Twins, each breaking ONE modelling rule, selected by
 //! `HOLON_WORK_RUNTIME_TWIN`, so that a passing assertion is shown sensitive:
@@ -66,9 +39,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon_net::exec::Body;
 use holon_net::exec::Cause;
-use holon_net::exec::Class;
 use holon_net::exec::Content;
 use holon_net::exec::Executor;
 use holon_net::exec::NetDef;
@@ -76,9 +47,12 @@ use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Reader;
 use holon_net::exec::Subject;
-use holon_net::exec::TransitionDef;
-use holon_net::exec::Trigger;
+use holon_net::load::Logic;
+use holon_net::load::net_def;
 use holon_pattern::Value;
+
+const NET_PATH: &str = "nets/work-runtime-replay.yaml";
+const NET: &str = include_str!("../nets/work-runtime-replay.yaml");
 
 const P_CLOCK: &str = "Clock";
 const P_BUDGET: &str = "Budget";
@@ -122,123 +96,62 @@ fn twin() -> String {
     std::env::var("HOLON_WORK_RUNTIME_TWIN").unwrap_or_default()
 }
 
+/// The replay net, as the file declares it, with the twin's edit applied to
+/// the file text.
 fn net() -> NetDef {
-    let twin = twin();
-    let mut n = NetDef::default();
-    for place in [
-        P_CLOCK,
-        P_BUDGET,
-        P_CARD,
-        P_AGENT,
-        P_TURN_ENDED,
-        P_JOB,
-        P_CPU,
-        P_WAITING,
-        P_STALLED,
-        P_PROPOSAL,
-        P_WOKEN,
-    ] {
-        n = n.place(place, Class::Process);
+    match net_def(NET_PATH, &twinned(NET), logic) {
+        Ok(net) => net,
+        Err(e) => panic!("{e}"),
     }
-    let mut job_ended = TransitionDef::new(
-        "JobEnded",
-        Trigger::Auto,
-        Arc::new(bind_job_ended),
-        Body::pure(body_job_ended),
-    )
-    .consumes(P_JOB);
-    if twin != "no-slot-release" {
-        job_ended = job_ended.consumes(P_CPU);
-    }
-    let mut notice_stall = TransitionDef::new(
-        "NoticeStall",
-        Trigger::Auto,
-        Arc::new(compute_stall),
-        Body::pure(body_put_stalled),
-    )
-    .reads(P_AGENT)
-    .inhibits(P_WOKEN);
-    if twin != "no-stall-inhibitor" {
-        notice_stall = notice_stall.inhibits(P_STALLED);
-    }
+}
 
-    n = n
-        .transition(
-            TransitionDef::new(
-                "AgentTurnEnded",
-                Trigger::Auto,
-                Arc::new(bind_turn_ended),
-                Body::pure(body_put_agent),
-            )
-            .consumes(P_TURN_ENDED)
-            .reads(P_AGENT),
-        )
-        .transition(
-            TransitionDef::new(
-                "StartJob",
-                Trigger::Auto,
-                Arc::new(bind_start_job),
-                Body::pure(body_start_job),
-            )
-            .consumes(P_JOB)
-            .inhibits(P_CPU),
-        )
-        .transition(job_ended)
-        .transition(notice_stall);
-    if twin != "no-restall" {
-        n = n.transition(
-            TransitionDef::new(
-                "Restall",
-                Trigger::Auto,
-                Arc::new(bind_restall),
-                Body::pure(body_restall),
-            )
-            .consumes(P_STALLED)
-            .reads(P_AGENT),
-        );
+/// The Rust the net file cannot hold, by transition.
+fn logic(transition: &str) -> Logic {
+    match transition {
+        "AgentTurnEnded" => Logic::pure(Arc::new(bind_turn_ended), Arc::new(body_put_agent)),
+        "StartJob" => Logic::pure(Arc::new(bind_start_job), Arc::new(body_start_job)),
+        "JobEnded" => Logic::pure(Arc::new(bind_job_ended), Arc::new(body_job_ended)),
+        "NoticeStall" => Logic::pure(Arc::new(compute_stall), Arc::new(body_put_stalled)),
+        "Restall" => Logic::pure(Arc::new(bind_restall), Arc::new(body_restall)),
+        "Continue" => Logic::pure(Arc::new(compute_proposal), Arc::new(body_put_proposal)),
+        "Reconsider" => Logic::pure(Arc::new(bind_reconsider), Arc::new(body_put_proposal)),
+        "DropProposal" => Logic::pure(Arc::new(bind_drop_proposal), Arc::new(body_nothing)),
+        "Handoff" => Logic::pure(Arc::new(bind_handoff), Arc::new(body_woken)),
+        other => panic!("the net file declares `{other}`, which has no guard and body here"),
     }
-    n.transition(
-        TransitionDef::new(
-            "Continue",
-            Trigger::Auto,
-            Arc::new(compute_proposal),
-            Body::pure(body_put_proposal),
-        )
-        .reads(P_STALLED)
-        .reads(P_AGENT)
-        .inhibits(P_PROPOSAL),
-    )
-    .transition(
-        TransitionDef::new(
-            "Reconsider",
-            Trigger::Auto,
-            Arc::new(bind_reconsider),
-            Body::pure(body_put_proposal),
-        )
-        .consumes(P_PROPOSAL)
-        .reads(P_STALLED)
-        .reads(P_AGENT),
-    )
-    .transition(
-        TransitionDef::new(
-            "DropProposal",
-            Trigger::Auto,
-            Arc::new(bind_drop_proposal),
-            Body::pure(body_nothing),
-        )
-        .consumes(P_PROPOSAL)
-        .inhibits(P_STALLED),
-    )
-    .transition(
-        TransitionDef::new(
-            "Handoff",
-            Trigger::Manual,
-            Arc::new(bind_handoff),
-            Body::pure(body_woken),
-        )
-        .consumes(P_STALLED)
-        .consumes(P_PROPOSAL),
-    )
+}
+
+/// The net file with the selected twin's one arc or transition cut out.
+fn twinned(text: &str) -> String {
+    match twin().as_str() {
+        "no-slot-release" => without(
+            text,
+            "    - Cpu\n    produces:\n    - Waiting\n",
+            "    produces:\n    - Waiting\n",
+        ),
+        "no-stall-inhibitor" => without(
+            text,
+            "    inhibits:\n    - Woken\n    - Stalled\n",
+            "    inhibits:\n    - Woken\n",
+        ),
+        "no-restall" => without(
+            text,
+            "  Restall:\n    trigger: auto\n    priority: 0\n    consumes:\n    - Stalled\n    reads:\n    - Agent\n    produces:\n    - Stalled\n",
+            "",
+        ),
+        _ => text.to_string(),
+    }
+}
+
+/// `text` with `from` replaced by `to`, asserting the edit hit the net it was
+/// written for.
+fn without(text: &str, from: &str, to: &str) -> String {
+    assert_eq!(
+        text.matches(from).count(),
+        1,
+        "the twin's edit must hit exactly one spot of the net file"
+    );
+    text.replace(from, to)
 }
 
 /// A turn end moves the agent's clock and context. The evidence is consumed,

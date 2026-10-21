@@ -254,7 +254,7 @@ Detailed documentation lives in `docs/Architecture/`:
 | [sync.md](Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, sync wiring (LiveData<Block> + direct cache feeds), P2P, Consistency Model |
 | [replication.md](Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |
 | [archlint.md](Architecture/Archlint.md) | Architecture linter (ast-grep YAML + ripgrep smells + dylint cdylib), Claude Code PostToolUse hook, ALLOW protocol, cargo arch-test wrapper |
-| [NetFileFormat.md](Architecture/NetFileFormat.md) | The standalone net file: places and their capacity, transitions with read and inhibitor arcs, priority and timers, shell effect descriptors, probe descriptors, the canonical byte-stable form, every named load error |
+| [NetFileFormat.md](Architecture/NetFileFormat.md) | The standalone net file: places and their capacity, transitions with read and inhibitor arcs, priority and timers, shell effect descriptors, probe descriptors, the canonical byte-stable form, every named load error, and the loader that builds the executor's net from one file |
 
 See also [wiki/overview.md](../wiki/overview.md) for the navigational layer and [wiki/index.md](../wiki/index.md) for per-crate / per-concept pages.
 

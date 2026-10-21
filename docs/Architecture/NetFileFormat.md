@@ -2,8 +2,11 @@
 
 *Part of [Architecture](../Architecture.md). Status: the format is built
 (`crates/holon-net/src/file.rs`, pinned by
-`crates/holon-net/tests/net_file.rs`). Nothing loads it into the executor yet
-— that is holon-space/holon-work#370.*
+`crates/holon-net/tests/net_file.rs`) and the loader builds the executor's net
+from it (`crates/holon-net/src/load.rs`, pinned by
+`crates/holon-net/tests/net_load.rs`). The shell effect
+(holon-space/holon-work#371) and the probe host
+(holon-space/holon-work#373) are still descriptors only.*
 
 A **net file** is one YAML file that holds one whole runtime net: its places,
 its transitions, the shell commands its firings run, and the probes that feed
@@ -118,7 +121,9 @@ decides (ADR 0032 §9.2). After two attempts the count bound stops it.
 - `register` holds one token per subject that a fact put **replaces**, for a
   value that is re-derived rather than accumulated: a hash, a probe's fact.
 - `pool: N` needs `capacity: fifo`, because the N tokens queue. The format
-  only declares the pool; the behaviour is holon-space/holon-work#372.
+  only declares the pool; the behaviour is holon-space/holon-work#372, so the
+  loader refuses a net that declares one rather than loading it as a plain
+  queue.
 
 ## Transitions
 
@@ -261,3 +266,32 @@ Each of these is a field a later card adds, not a silent default:
 - **Correlated arcs.** The derived net of ADR 0032 §2 binds one subject across
   several places; an arc here is a place name, and the subject comes from the
   token the executor matches.
+
+## The loader
+
+`holon_net::load::load` reads one file and returns the `NetDef` the sans-IO
+executor runs. The file owns the shape: the places with their capacity, the
+consume, read and inhibitor arcs, the ports, the timers, and the effect a
+firing runs. The caller owns what the format cannot hold — the guard and
+binding of each transition, and the body of each transition that runs no
+effect — and hands them in per transition name as a `Logic`.
+
+The authored `priority` becomes the order the executor fires in, highest
+first. `produces` stays the file's declaration of a transition's outputs: the
+executor takes the outputs from the firing itself, so the loader builds
+nothing from it.
+
+Every refusal names the file, the line of the declaration it refused and the
+field, so a reader can open the file at that line:
+
+```
+nets/work-runtime-replay.yaml:45: transition `JobEnded`: `consumes` names the place `Cpuu`, which the file does not declare
+```
+
+The executor's own load checks (reserved place names, token class, a candidate
+place that is not a queue) run on a loaded net exactly as on one built in
+Rust, and `Executor::new` returns them as a `LoadError`.
+
+`crates/holon-net/nets/work-runtime-replay.yaml` is the net of the agent-work
+replay (`crates/holon-net/tests/work_runtime_replay.rs`), which runs a day of
+real fixture events through the net the file declares.

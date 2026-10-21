@@ -28,6 +28,39 @@ use serde::de;
 /// The placeholders a shell effect's log path pattern may name.
 const LOG_PLACEHOLDERS: [&str; 4] = ["transition", "subject", "attempt", "occurrence"];
 
+/// The top-level map of a net file a declaration lives in. `Display` is the
+/// word a refusal uses for one of its entries, and [`Section::key`] the file's
+/// key of the map itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Places,
+    Transitions,
+    Effects,
+    Probes,
+}
+
+impl Section {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Places => "places",
+            Self::Transitions => "transitions",
+            Self::Effects => "effects",
+            Self::Probes => "probes",
+        }
+    }
+}
+
+impl fmt::Display for Section {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Places => "place",
+            Self::Transitions => "transition",
+            Self::Effects => "effect",
+            Self::Probes => "probe",
+        })
+    }
+}
+
 /// One net, as one file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -252,7 +285,7 @@ impl TransitionSpec {
             for place in places {
                 if !net.declares(place) {
                     return Err(NetFileError::UndeclaredPlace {
-                        owner: "transition",
+                        owner: Section::Transitions,
                         name: transition.to_owned(),
                         field,
                         place: place.clone(),
@@ -269,7 +302,7 @@ impl TransitionSpec {
                 && !net.declares(place)
             {
                 return Err(NetFileError::UndeclaredPlace {
-                    owner: "transition",
+                    owner: Section::Transitions,
                     name: transition.to_owned(),
                     field,
                     place: place.clone(),
@@ -383,7 +416,7 @@ pub struct ShellEffect {
 
 impl ShellEffect {
     fn check(&self, effect: &str) -> Result<(), NetFileError> {
-        self.command.check("effect", effect)?;
+        self.command.check(Section::Effects, effect)?;
         check_log_path(effect, &self.log_path)?;
         self.exit_codes.check(effect)
     }
@@ -441,7 +474,7 @@ pub struct CommandSpec {
 }
 
 impl CommandSpec {
-    fn check(&self, owner: &'static str, name: &str) -> Result<(), NetFileError> {
+    fn check(&self, owner: Section, name: &str) -> Result<(), NetFileError> {
         if self.argv.is_empty() {
             return Err(NetFileError::EmptyArgv {
                 owner,
@@ -467,10 +500,10 @@ pub struct ProbeSpec {
 
 impl ProbeSpec {
     fn check(&self, probe: &str, net: &NetFile) -> Result<(), NetFileError> {
-        self.command.check("probe", probe)?;
+        self.command.check(Section::Probes, probe)?;
         if !net.declares(&self.facts_into) {
             return Err(NetFileError::UndeclaredPlace {
-                owner: "probe",
+                owner: Section::Probes,
                 name: probe.to_owned(),
                 field: "facts_into",
                 place: self.facts_into.clone(),
@@ -641,7 +674,7 @@ pub enum NetFileError {
         "{owner} `{name}`: `{field}` names the place `{place}`, which the file does not declare"
     )]
     UndeclaredPlace {
-        owner: &'static str,
+        owner: Section,
         name: String,
         field: &'static str,
         place: String,
@@ -679,5 +712,35 @@ pub enum NetFileError {
     )]
     LogPathWithoutAttempt { effect: String },
     #[error("{owner} `{name}`: `argv` is empty, so there is no program to run")]
-    EmptyArgv { owner: &'static str, name: String },
+    EmptyArgv { owner: Section, name: String },
+}
+
+impl NetFileError {
+    /// The declaration the refusal names, as the map it lives in and its key,
+    /// so a reader can be pointed at the line that declares it. A name can be
+    /// a place AND a transition, so the map is part of the answer. `None` for
+    /// a refusal of the parser, whose own message carries the position.
+    pub fn declaration(&self) -> Option<(Section, &str)> {
+        match self {
+            Self::Syntax(_) => None,
+            Self::PoolNeedsFifo { place, .. } | Self::EmptyPool { place } => {
+                Some((Section::Places, place))
+            }
+            Self::NoInputArc { transition }
+            | Self::UndeclaredEffect { transition, .. }
+            | Self::EffectWithoutReceiver { transition }
+            | Self::ReceiverWithoutEffect { transition }
+            | Self::KeyedWithoutCountBound { transition }
+            | Self::RetryNeedsBoth { transition }
+            | Self::NoTimer { transition }
+            | Self::ZeroCountBound { transition } => Some((Section::Transitions, transition)),
+            Self::ExitCodeTwice { effect, .. }
+            | Self::UnknownLogPlaceholder { effect, .. }
+            | Self::UnbalancedLogPath { effect }
+            | Self::LogPathWithoutAttempt { effect } => Some((Section::Effects, effect)),
+            Self::UndeclaredPlace { owner, name, .. } | Self::EmptyArgv { owner, name } => {
+                Some((*owner, name))
+            }
+        }
+    }
 }

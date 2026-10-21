@@ -1,0 +1,106 @@
+name: work-runtime-replay
+places:
+  Clock:
+    capacity: single
+  Budget:
+    capacity: single
+  Card:
+    capacity: single
+  Agent:
+    capacity: single
+  TurnEnded:
+    capacity: single
+  Job:
+    capacity: single
+  Cpu:
+    capacity: single
+  Waiting:
+    capacity: single
+  Stalled:
+    capacity: single
+  Proposal:
+    capacity: single
+  Woken:
+    capacity: single
+transitions:
+  AgentTurnEnded:
+    trigger: auto
+    priority: 0
+    consumes:
+    - TurnEnded
+    reads:
+    - Agent
+    produces:
+    - Agent
+  StartJob:
+    trigger: auto
+    priority: 0
+    consumes:
+    - Job
+    inhibits:
+    - Cpu
+    produces:
+    - Cpu
+    - Waiting
+  JobEnded:
+    trigger: auto
+    priority: 0
+    consumes:
+    - Job
+    - Cpu
+    produces:
+    - Waiting
+  NoticeStall:
+    trigger: auto
+    priority: 0
+    reads:
+    - Agent
+    inhibits:
+    - Woken
+    - Stalled
+    produces:
+    - Stalled
+  Restall:
+    trigger: auto
+    priority: 0
+    consumes:
+    - Stalled
+    reads:
+    - Agent
+    produces:
+    - Stalled
+  Continue:
+    trigger: auto
+    priority: 0
+    reads:
+    - Stalled
+    - Agent
+    inhibits:
+    - Proposal
+    produces:
+    - Proposal
+  Reconsider:
+    trigger: auto
+    priority: 0
+    consumes:
+    - Proposal
+    reads:
+    - Stalled
+    - Agent
+    produces:
+    - Proposal
+  DropProposal:
+    trigger: auto
+    priority: 0
+    consumes:
+    - Proposal
+    inhibits:
+    - Stalled
+  Handoff:
+    trigger: manual
+    priority: 0
+    consumes:
+    - Stalled
+    - Proposal
+    produces:
+    - Woken
