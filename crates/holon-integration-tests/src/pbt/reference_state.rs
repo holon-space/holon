@@ -389,6 +389,10 @@ pub struct HarnessEnv {
     /// clone, so it never carries another state's engine.
     pub profile_engine: ProfileEngineCache,
 
+    /// Memoized main-panel rendered set — see [`RenderedSetCache`]. Empty in a
+    /// fresh clone, so it never carries another state's set.
+    pub rendered_main_set: RenderedSetCache,
+
     /// The reference's answer to "is this link scheme registered?" — built-in
     /// schemes only, since the reference carries no live type registry.
     pub link_classifier: holon_api::link_parser::LinkTargetClassifier,
@@ -417,6 +421,49 @@ impl Clone for ProfileEngineCache {
 impl std::fmt::Debug for ProfileEngineCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ProfileEngineCache")
+    }
+}
+
+/// Holds the main-panel rendered set for the span of ONE alphabet build — see
+/// [`ReferenceState::hold_rendered_set`].
+///
+/// Empty except under a [`RenderedSetHold`], so there is no key to keep
+/// complete and no state a stale entry could describe: the hold exists only
+/// while a `&ReferenceState` is borrowed, and the borrow is what rules out a
+/// mutation beneath it. Without it, every block-interaction precondition
+/// rebuilt the whole set, so building the alphabet cost O(blocks² × depth) per
+/// generated step — the generators ask once per candidate block.
+///
+/// `Clone` yields an EMPTY cell rather than sharing one: proptest clones the
+/// reference per step, and a clone must not inherit another state's set.
+#[derive(Default)]
+pub struct RenderedSetCache(std::sync::Mutex<Option<BTreeSet<EntityUri>>>);
+
+impl Clone for RenderedSetCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for RenderedSetCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RenderedSetCache")
+    }
+}
+
+/// The live span of a held rendered set. Dropping it empties the cell, so the
+/// set cannot outlive the borrow it was computed under.
+pub struct RenderedSetHold<'a>(&'a ReferenceState);
+
+impl Drop for RenderedSetHold<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .harness
+            .rendered_main_set
+            .0
+            .lock()
+            .expect("the rendered-set cell is never held across a panic") = None;
     }
 }
 
@@ -1389,6 +1436,7 @@ impl ReferenceState {
                 cap_set: None,
                 interpreter,
                 profile_engine: ProfileEngineCache::default(),
+                rendered_main_set: RenderedSetCache::default(),
                 link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             },
             loro: LoroRefExt::default(),
@@ -1840,7 +1888,55 @@ impl ReferenceState {
     /// default layout (focus-root descendants) and is correct for custom
     /// layouts (a `from children` layout renders only the layout block's
     /// direct children, an all-blocks layout renders everything).
+    /// Answered off a [`RenderedSetHold`] when one stands, else walked afresh.
     pub fn main_rendered_block_ids(&self) -> BTreeSet<EntityUri> {
+        if let Some(ids) = self.rendered_set_slot().as_ref() {
+            return ids.clone();
+        }
+        self.compute_main_rendered_block_ids()
+    }
+
+    /// Whether the active main-panel layout renders `block_id` — the
+    /// membership question every caller of [`Self::main_rendered_block_ids`]
+    /// actually asks. Reads a held set WITHOUT cloning it, so asking once per
+    /// block costs no allocation.
+    pub fn main_renders_block(&self, block_id: &EntityUri) -> bool {
+        if let Some(ids) = self.rendered_set_slot().as_ref() {
+            return ids.contains(block_id);
+        }
+        self.compute_main_rendered_block_ids().contains(block_id)
+    }
+
+    /// Compute the main-panel rendered set once and hold it until the returned
+    /// guard drops.
+    ///
+    /// Building one step's alphabet asks `main_renders_block` once per
+    /// candidate block, and the walk behind it is O(blocks × depth) — so
+    /// without the hold a step costs O(blocks² × depth). The hold borrows
+    /// `self`, and that borrow is the whole correctness argument: no `&mut`
+    /// can exist while it stands, so the set it carries cannot go stale.
+    pub fn hold_rendered_set(&self) -> RenderedSetHold<'_> {
+        let ids = self.compute_main_rendered_block_ids();
+        let mut slot = self.rendered_set_slot();
+        assert!(
+            slot.is_none(),
+            "hold_rendered_set is already held — a nested hold would be dropped by the inner \
+             guard and leave the outer one reading a walked-fresh set"
+        );
+        *slot = Some(ids);
+        drop(slot);
+        RenderedSetHold(self)
+    }
+
+    fn rendered_set_slot(&self) -> std::sync::MutexGuard<'_, Option<BTreeSet<EntityUri>>> {
+        self.harness
+            .rendered_main_set
+            .0
+            .lock()
+            .expect("the rendered-set cell is never held across a panic")
+    }
+
+    fn compute_main_rendered_block_ids(&self) -> BTreeSet<EntityUri> {
         let query = self.active_main_query();
         let mut focus_roots = std::collections::BTreeMap::new();
         focus_roots.insert("main".to_string(), self.rendered_focus_root(Region::Main));
@@ -1906,8 +2002,7 @@ impl ReferenceState {
     /// `blocks_render_interactively()` stopgap (`!has_user_index_org()`) with a
     /// faithful rendered-set ∩ template-interactivity computation.
     pub fn renders_block_interactively(&self, block_id: &EntityUri) -> bool {
-        self.main_rendered_block_ids().contains(block_id)
-            && self.layout_renders_interactively(block_id)
+        self.main_renders_block(block_id) && self.layout_renders_interactively(block_id)
     }
 
     /// Get the active `RenderExpr` for the root layout's render source block.
@@ -4080,6 +4175,126 @@ mod main_panel_visibility_tests {
             !state.main_editable_descendants().contains(&leaf),
             "the candidate set must not offer a click target the panel does not paint"
         );
+    }
+
+    /// A held rendered set must answer exactly as a fresh walk, for the set
+    /// and for per-block membership, and the hold must not outlive its guard.
+    #[test]
+    fn a_held_rendered_set_answers_as_a_fresh_walk_and_ends_with_its_guard() {
+        let mut state = wide_e2e_ref();
+        let root = state
+            .rendered_focus_root(Region::Main)
+            .iter()
+            .next()
+            .cloned()
+            .expect("the default layout gives Main a focus root");
+        let page = EntityUri::block("hold-mid-page");
+        let leaf = EntityUri::block("hold-leaf");
+        let mut page_block = Block::new_text(page.clone(), root.clone(), "a nested page");
+        page_block.set_page(true);
+        state
+            .domain
+            .block_state
+            .blocks
+            .insert(page.clone(), page_block);
+        state.domain.block_state.blocks.insert(
+            leaf.clone(),
+            Block::new_text(leaf.clone(), page.clone(), "leaf"),
+        );
+
+        let walked = state.compute_main_rendered_block_ids();
+        {
+            let _hold = state.hold_rendered_set();
+            assert_eq!(
+                state.main_rendered_block_ids(),
+                walked,
+                "a held set must equal a fresh walk"
+            );
+            for id in state.domain.block_state.blocks.keys() {
+                assert_eq!(
+                    state.main_renders_block(id),
+                    walked.contains(id),
+                    "held membership disagrees with the walked set for {id}"
+                );
+            }
+            assert!(
+                !state.main_renders_block(&leaf),
+                "premise: the leaf sits behind a non-root page, so the panel renders no row \
+                 for it — a held set that said otherwise would not be testing anything"
+            );
+        }
+
+        // The guard dropped, so the next mutation must be seen.
+        state.domain.block_state.blocks.remove(&page);
+        assert_eq!(
+            state.main_rendered_block_ids(),
+            state.compute_main_rendered_block_ids(),
+            "after the hold ended, a mutation must reach the answer again"
+        );
+    }
+
+    /// Without a hold every answer is a fresh walk. Each mutation below moves
+    /// one input of that walk — a new row, a page that stops the descent, a
+    /// reparent, a lifted page flag, a deletion — and the answer has to follow
+    /// every one.
+    #[test]
+    fn the_rendered_set_tracks_every_mutation_of_its_inputs() {
+        let mut state = wide_e2e_ref();
+        let root = state
+            .rendered_focus_root(Region::Main)
+            .iter()
+            .next()
+            .cloned()
+            .expect("the default layout gives Main a focus root");
+
+        let page = EntityUri::block("memo-mid-page");
+        let leaf = EntityUri::block("memo-leaf");
+
+        let check = |state: &ReferenceState, after: &str| {
+            assert_eq!(
+                state.main_rendered_block_ids(),
+                state.compute_main_rendered_block_ids(),
+                "the rendered set disagrees with a fresh walk after {after}"
+            );
+        };
+
+        check(&state, "no mutation");
+
+        let mut page_block = Block::new_text(page.clone(), root.clone(), "a nested page");
+        page_block.set_page(true);
+        state
+            .domain
+            .block_state
+            .blocks
+            .insert(page.clone(), page_block);
+        check(&state, "inserting a page under the focus root");
+
+        state.domain.block_state.blocks.insert(
+            leaf.clone(),
+            Block::new_text(leaf.clone(), page.clone(), "leaf"),
+        );
+        check(&state, "inserting a leaf behind that page");
+
+        state
+            .domain
+            .block_state
+            .blocks
+            .get_mut(&leaf)
+            .expect("the leaf was just inserted")
+            .parent_id = root.clone();
+        check(&state, "reparenting the leaf onto the focus root");
+
+        state
+            .domain
+            .block_state
+            .blocks
+            .get_mut(&leaf)
+            .expect("the leaf is in the tree")
+            .set_page(true);
+        check(&state, "making the leaf a page");
+
+        state.domain.block_state.blocks.remove(&page);
+        check(&state, "removing the page");
     }
 }
 

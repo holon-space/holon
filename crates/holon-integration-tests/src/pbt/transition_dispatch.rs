@@ -484,6 +484,13 @@ macro_rules! declare_e2e_transitions {
             use ::proptest::strategy::{Strategy, Union};
             use $crate::pbt::transition_dispatch::variant_weight_multiplier;
 
+            // The block-interaction generators each enumerate every block and
+            // ask whether the main panel renders it. Walking the rendered set
+            // per candidate makes one alphabet O(blocks² × depth); holding it
+            // for this call makes it O(blocks). `state` is borrowed, so
+            // nothing can mutate it under the hold.
+            let _rendered_set = state.hold_rendered_set();
+
             let mut arms: Vec<(u32, ::proptest::strategy::BoxedStrategy<$enum_name>)> = Vec::new();
 
             $(
