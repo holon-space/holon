@@ -34,10 +34,10 @@ run 3 "an INVALID step 1 does not end the gate" \
     "step 3" 'echo three' \
     "step 4" 'echo four'
 for step in two three four; do
-    printf '%s' "$LAST_OUT" | grep -q "^$step$" \
+    grep -q "^$step$" <<<"$LAST_OUT" \
         || { echo "FAIL: step printing '$step' did not run after the INVALID"; fail=1; }
 done
-printf '%s' "$LAST_OUT" | grep -q "NO VERDICT (not red)" \
+grep -q "NO VERDICT (not red)" <<<"$LAST_OUT" \
     || { echo "FAIL: the gate did not report NO VERDICT"; fail=1; }
 
 # 2. The UNJUDGED exit code of a step counts the same as an INVALID line.
@@ -50,12 +50,12 @@ run 1 "a red outranks a no verdict" \
     "planted INVALID" 'echo INVALID; exit 1' \
     "planted red" 'echo "assertion failed"; exit 101' \
     "step 3" 'echo three'
-printf '%s' "$LAST_OUT" | grep -q "^three$" \
+grep -q "^three$" <<<"$LAST_OUT" \
     || { echo "FAIL: step 3 did not run after a red"; fail=1; }
 
 # 4. All green is the only green.
 run 0 "all green" "a" 'echo a' "b" 'echo b'
-printf '%s' "$LAST_OUT" | grep -q "timing-gate PASS" \
+grep -q "timing-gate PASS" <<<"$LAST_OUT" \
     || { echo "FAIL: an all-green run did not say PASS"; fail=1; }
 
 # 5. A step's own pipeline failure is a red, not a green (pipefail per step).
