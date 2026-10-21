@@ -4,6 +4,11 @@
 //!
 //! The executor sits behind a lock that is never held across an effect, so a
 //! fire or a marking read from another task waits only for one step.
+//!
+//! [`effect`] is the one effect the shell runs itself: a net file's `shell`
+//! descriptor, as a child process group.
+
+pub mod effect;
 
 use std::sync::Arc;
 use std::sync::Mutex;

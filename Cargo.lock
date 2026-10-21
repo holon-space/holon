@@ -6092,6 +6092,10 @@ version = "0.1.0"
 dependencies = [
  "holon-net",
  "holon-pattern",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "workspace-hack 0.1.0",
 ]

@@ -10,9 +10,14 @@ ignored = ["workspace-hack"]
 
 [dependencies]
 holon-net.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+libc = "0.2"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "process", "sync", "time"] }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 holon-pattern.workspace = true
-tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+libc = "0.2"
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "process", "rt", "sync", "time"] }
