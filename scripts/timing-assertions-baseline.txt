@@ -95,6 +95,7 @@ crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::In
 crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::Instant::now() < deadline,
+crates/holon-integration-tests/tests/dense_patch_engine_exact.rs	liveness	started.elapsed() < WRITEBACK_WAIT,
 crates/holon-integration-tests/tests/editing_suite/cycle_task_state_cold_boot_reingest.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/editing_suite/drawer_id_write_boundary.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/editing_suite/drawer_key_write_boundary.rs	liveness	std::time::Instant::now() < deadline,

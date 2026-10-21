@@ -780,12 +780,76 @@ impl Session {
     }
 }
 
+/// How long a file read waits for write-back to write what the store owes the
+/// file. Generous: a loaded host renders several documents per pass, each one
+/// authority read plus disk.
+const WRITEBACK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Printed by [`org_file_named`] for every read that had to wait, so a run can
+/// be checked for the wait FIRING. A wait nothing ever observed proves nothing,
+/// and a green run alone does not tell the two apart.
+const WAITED_FOR_WRITEBACK: &str = "waited for write-back:";
+
+/// What a file read waited for: how often it found the file behind the store,
+/// and how long write-back took to catch up.
+#[derive(Debug)]
+struct WritebackLag {
+    polls: u32,
+    waited: std::time::Duration,
+}
+
+/// The file's bytes, read only once the file holds what write-back owes it —
+/// the write-back render of the store, which is the very text the write-back
+/// loop writes. `None` = the file was already current.
+///
+/// A settle cannot stand in for this comparison. Between the edit landing in
+/// SQL and the write-back loop being handed the render that carries it, the
+/// block mirror, the loop's tick and its unsettled set are all quiet, so every
+/// settle returns while the file still holds the render before the edit.
+fn read_when_written(
+    sut: &Sut,
+    driver: &McpUserDriver,
+    file: &str,
+) -> (String, Option<WritebackLag>) {
+    let started = std::time::Instant::now();
+    let mut polls = 0;
+    loop {
+        let disk = sut
+            .runtime()
+            .block_on(driver.call_tool_json("read_org_file", serde_json::json!({ "doc_id": file })))
+            .unwrap_or_else(|e| panic!("read_org_file {file}: {e:#}"));
+        let disk = disk["content"].as_str().expect("content").to_string();
+        let owed = sut
+            .runtime()
+            .block_on(driver.call_tool_json("render_org", serde_json::json!({ "doc_id": file })))
+            .unwrap_or_else(|e| panic!("render_org {file}: {e:#}"));
+        let owed = owed["rendered"].as_str().expect("rendered");
+        if disk == owed {
+            let lag = (polls > 0).then(|| WritebackLag {
+                polls,
+                waited: started.elapsed(),
+            });
+            return (disk, lag);
+        }
+        assert!(
+            started.elapsed() < WRITEBACK_WAIT,
+            "{file} still does not hold what write-back owes it after {WRITEBACK_WAIT:?}, so \
+             the store's state never reached the disk\nowed:\n{owed}\nfile:\n{disk}"
+        );
+        polls += 1;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 fn org_file_named(sut: &Sut, driver: &McpUserDriver, file: &str) -> String {
-    let disk = sut
-        .runtime()
-        .block_on(driver.call_tool_json("read_org_file", serde_json::json!({ "doc_id": file })))
-        .unwrap_or_else(|e| panic!("read_org_file {file}: {e:#}"));
-    disk["content"].as_str().expect("content").to_string()
+    let (content, lag) = read_when_written(sut, driver, file);
+    if let Some(lag) = lag {
+        eprintln!(
+            "{WAITED_FOR_WRITEBACK} {file} was behind the store for {:?} ({} poll(s))",
+            lag.waited, lag.polls
+        );
+    }
+    content
 }
 
 /// Each row's words as the text spells them (`holon_org_format::row_lines`):
@@ -1034,9 +1098,12 @@ fn judge(
             }
             let file = session.file_dense(page);
             if row_texts(&file) != row_texts(text) {
+                session.sut.settle_projections();
+                let again = session.file_dense(page);
                 return Err(format!(
                     "the org file does not hold the text the agent wrote\nedited:\n{text}\n\
-                     file:\n{file}"
+                     file:\n{file}\nafter a second settle (same = the file stays wrong, \
+                     different = the first read was early):\n{again}"
                 ));
             }
             session.categories_agree(page)?;
