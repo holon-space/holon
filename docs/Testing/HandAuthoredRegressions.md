@@ -62,6 +62,7 @@ cases leave defaulted:
 | `transitions: Vec<T>` | the repro, as the production `E2ETransition` enum |
 | `initial_state: Option<CapturedInitialState>` (`#[serde(default)]`) | the drawn wiring of the run being reproduced; omit to replay over `wide_e2e_ref()` |
 | `environment: CaptureEnvironment` (`#[serde(default)]`) | omitted — the wiring/env-flag capture is for generator-captured fixtures |
+| `also_check_after: [usize]` (replay-only, optional) | 1-based transition numbers whose state the catalog also judges; see [Where the catalog runs](#where-the-catalog-runs) |
 
 Because `initial_state`/`environment` are `#[serde(default)]`, a JSONL line that
 names only `name`/`description`/`transitions` deserializes losslessly and
@@ -173,24 +174,53 @@ bespoke `ReferenceState` — only the wiring is capturable.
 
 ## How replay works (same harness as the random keystone)
 
-The driver calls the **exact** keystone entry point:
-
-```rust
-ComposedSut::<WideE2E>::test_sequential(config, wide_e2e_ref(), case.transitions, None)
-```
-
-`test_sequential` (proptest-state-machine) does, per case:
+The driver drives each case through the **exact** keystone harness,
+`ComposedSut::<WideE2E>`, with `hand_authored::replay` in place of
+proptest-state-machine's `test_sequential`:
 
 1. `init_test(&ref_state)` — boot the composed SUT from the base's wiring.
-2. `check_invariants` on the initial state.
-3. For each transition: `Reference::apply` (the model), then `Self::apply` (the
-   production SUT), then the **full composed invariant catalog**.
+2. For each transition: `Reference::apply` (the model), then `Self::apply` (the
+   production SUT).
+3. The **full composed invariant catalog** runs only at the checkpoints below.
 
-The only difference from the random keystone is the *source* of
-`(initial_state, transitions)` — a fixed base + your list, instead of a proptest
-draw. Same SUT, same production transition `apply`, same invariants, same
-reporting. Shrinking is irrelevant (the case is already the minimal repro), so
-`seen_counter` is `None` and shrink iters are unused.
+Same SUT, same production transition `apply`, same invariants, same reporting
+as the random keystone. Only the source of `(initial_state, transitions)` and
+the checkpoints differ. Shrinking is irrelevant: the case is already the
+minimal repro.
+
+### Where the catalog runs
+
+A case locks one known bug, so the replay judges only the transitions that
+show it:
+
+- **Judged transitions:** always the last one, plus each number in
+  `also_check_after`. The catalog runs after each judged transition.
+- **Pre-sweeps:** the catalog also runs just before each judged transition
+  (after boot when transition 1 is judged). A sweep renders every view and so
+  creates their matviews. Without it, the judged transition's SQL budget window
+  would hold that first-use view creation, and the pinned ceilings are
+  calibrated on windows that start from a swept state, as in every drawn run.
+- A case without transitions runs the catalog once, after boot.
+
+Example: 6 transitions with `"also_check_after": [2]` run the catalog after
+transitions 1, 2, 5 and 6. Transitions 2 and 6 are judged; 1 and 5 are
+pre-sweeps.
+
+`inv-sql-budget` does not judge a window that started from an unswept state
+(the window of a pre-sweep). It reports `Skipped` with the reason and prints
+`[inv-sql-budget] <kind>: not judged — started from an unswept state`. All
+other invariants judge every sweep.
+
+**Trade-off:** a divergence at a transition that is not swept, and that a later
+transition heals, is not caught. Give `also_check_after` to every case whose
+bug shows mid-sequence and heals, and say why in its `description`.
+
+`also_check_after` is parsed at load. These fail the load and name the case:
+
+- not an array, or an empty array
+- an entry that is not a non-negative integer (`"2"` is refused)
+- a number outside `1..n-1`: the last transition `n` is always judged
+- the same number twice
 
 Parsing is **fail-loud** (parse-don't-validate): an unreadable sidecar, a
 malformed line, or an unknown transition variant panics with the offending
@@ -355,8 +385,9 @@ cannot:**
 
 - **End-to-end, cross-projection.** The transition runs through the real op
   dispatch and every wired projection (Turso CDC matviews, Loro CRDT, org
-  writeback, ViewModel), then the full composed invariant catalog checks them all
-  agree. A unit test asserts one function's return; this asserts *system
+  writeback, ViewModel), then the full composed invariant catalog checks that
+  they all agree after the judged transitions. A unit test asserts one
+  function's return; this asserts *system
   convergence* after the action.
 - **Oracle-checked, not assertion-checked.** You don't hand-write the expected
   output. The reference model computes it and ~45 invariants compare. That is why

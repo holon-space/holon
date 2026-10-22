@@ -18,6 +18,7 @@
 //! [`SutSpanMetrics`]: crate::pbt::invariants::bodies::sql_budget::SutSpanMetrics
 //! [`BridgedInvariant`]: holon_pbt_core::composition::BridgedInvariant
 
+use std::cell::Cell;
 use std::cell::RefCell;
 
 use holon_pbt_core::capabilities::RefSqlCardinality;
@@ -44,6 +45,10 @@ use crate::pbt::transitions::E2ETransition;
 #[holon_macros::capmap_adapter]
 pub trait ComposedBudget {
     fn budget_report(&self) -> SqlBudgetReport;
+    /// Whether the catalog swept the state the last transition started from.
+    /// An unswept start leaves first-use view creation the sweep would have
+    /// done inside the window, which no ceiling is calibrated for.
+    fn window_started_swept(&self) -> bool;
 }
 
 /// Lifecycle the composed [`ComposedSut`] harness drives so the budget measures
@@ -74,6 +79,8 @@ pub struct ComposedSpanMetrics {
     /// from the SAME freeze point the budget reads — one collection pipeline,
     /// two consumers.
     trend: RefCell<TrendAccumulator>,
+    swept_since_transition: Cell<bool>,
+    window_started_swept: Cell<bool>,
 }
 
 impl ComposedSpanMetrics {
@@ -83,6 +90,8 @@ impl ComposedSpanMetrics {
             last_transition: RefCell::new(None),
             frozen_ref: RefCell::new(None),
             trend: RefCell::new(TrendAccumulator::new()),
+            swept_since_transition: Cell::new(false),
+            window_started_swept: Cell::new(true),
         }
     }
 }
@@ -96,16 +105,28 @@ impl Default for ComposedSpanMetrics {
 impl SutMetricsLifecycle for ComposedSpanMetrics {
     fn note_transition_start(&self, transition: &E2ETransition) {
         *self.last_transition.borrow_mut() = Some(transition.clone());
+        self.window_started_swept
+            .set(self.swept_since_transition.replace(false));
         self.metrics.borrow_mut().on_transition_start();
     }
 
     fn freeze_for_check(&self, ref_state: &ReferenceState) {
         self.metrics.borrow().freeze_at_check_start();
         *self.frozen_ref.borrow_mut() = Some(ref_state.clone());
+        self.swept_since_transition.set(true);
         // Accumulate BEFORE any invariant body runs: `budget_report` CONSUMES
         // the frozen snapshot, and catalog order does not promise this
         // invariant runs first.
-        if let Some(transition) = self.last_transition.borrow().as_ref() {
+        let last_transition = self.last_transition.borrow();
+        let Some(transition) = last_transition.as_ref() else {
+            return;
+        };
+        if !self.window_started_swept.get() {
+            eprintln!(
+                "[inv-sql-budget] {}: not judged — started from an unswept state",
+                transition_key(transition)
+            );
+        } else {
             let (reads, writes) = self
                 .metrics
                 .borrow()
@@ -131,6 +152,10 @@ impl ComposedTrend for ComposedSpanMetrics {
 }
 
 impl ComposedBudget for ComposedSpanMetrics {
+    fn window_started_swept(&self) -> bool {
+        self.window_started_swept.get()
+    }
+
     fn budget_report(&self) -> SqlBudgetReport {
         // The harness runs an initial `check_invariants` BEFORE the first transition
         // (proptest-state-machine semantics), so on that tick no transition has been
@@ -194,6 +219,13 @@ impl Invariant<CapMap, CapMap> for InvComposedBudget {
     }
 
     async fn check(&self, _: &CapMap, sut: &CapMap) -> InvariantResult {
+        if !sut.window_started_swept() {
+            return InvariantResult::Skipped(
+                "not judged — the transition started from a state the catalog never swept, so \
+                 the window holds first-use view creation a sweep would have done"
+                    .to_string(),
+            );
+        }
         budget_verdict(&sut.budget_report())
     }
 }
@@ -208,6 +240,25 @@ mod tests {
             errors: errors.iter().map(|e| (*e).to_string()).collect(),
             observed_statements,
         }
+    }
+
+    #[test]
+    fn a_window_is_swept_only_when_a_check_ran_since_the_previous_transition() {
+        let metrics = ComposedSpanMetrics::new();
+        let undo = E2ETransition::UndoLastMutation(crate::pbt::transitions::UndoLastMutation);
+        let ref_state = ReferenceState::new(
+            holon_pbt_core::Wiring::full(),
+            std::sync::Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new()),
+        );
+        let mut started_swept = Vec::new();
+        for check_before in [false, true, true, false] {
+            if check_before {
+                metrics.freeze_for_check(&ref_state);
+            }
+            metrics.note_transition_start(&undo);
+            started_swept.push(metrics.window_started_swept());
+        }
+        assert_eq!(started_swept, vec![false, true, true, false]);
     }
 
     #[test]

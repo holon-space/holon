@@ -15,12 +15,13 @@
 //! each case is a **serialized `Vec<E2ETransition>`** (the production
 //! transition enum derives `serde`) plus an optional
 //! [`CapturedInitialState`]. It then drives each case through the EXACT
-//! keystone harness (`ComposedSut::<WideE2E>::test_sequential`): the same SUT
-//! boot, the same production transition `apply`, and the same composed
-//! invariant catalog the random keystone runs. The only thing that differs
-//! from the random keystone is the source of the `(initial_state,
-//! transitions)` pair — here both halves come from the JSONL instead of a
-//! `proptest` draw.
+//! keystone harness (`ComposedSut::<WideE2E>`): the same SUT boot, the same
+//! production transition `apply`, and the same composed invariant catalog the
+//! random keystone runs. Two things differ from the random keystone: the
+//! `(initial_state, transitions)` pair comes from the JSONL instead of a
+//! `proptest` draw, and the catalog runs only just before and after the case's
+//! last transition and any it names in `also_check_after`
+//! (`hand_authored::replay`).
 //!
 //! ## `initial_state` is the drawn wiring; `environment` is the rest
 //!
@@ -71,16 +72,25 @@
 //! and the limits of what a hand-authored regression can express.
 
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
+use holon_integration_tests::pbt::composed::span_metrics::ComposedBudget;
+use holon_integration_tests::pbt::composed::span_metrics::ComposedSpanMetrics;
+use holon_integration_tests::pbt::composed::span_metrics::SutMetricsLifecycle;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::hand_authored::CapturedInitialState;
 use holon_integration_tests::pbt::hand_authored::HandAuthoredCase;
+use holon_integration_tests::pbt::hand_authored::ReplayCase;
 use holon_integration_tests::pbt::hand_authored::SIDECAR_ENV;
 use holon_integration_tests::pbt::hand_authored::case_filter;
-use holon_integration_tests::pbt::hand_authored::load_cases;
+use holon_integration_tests::pbt::hand_authored::load_replay_cases;
 use holon_integration_tests::pbt::hand_authored::parse_case;
+use holon_integration_tests::pbt::hand_authored::parse_replay_case;
+use holon_integration_tests::pbt::hand_authored::replay;
 use holon_integration_tests::pbt::hand_authored::sidecar_path;
 use holon_integration_tests::pbt::invariants::bodies::shape_sim_matches_authority;
+use holon_integration_tests::pbt::reference_state::ReferenceState;
+use holon_integration_tests::pbt::transitions::E2ETransition;
+use holon_integration_tests::pbt::transitions::UndoLastMutation;
 use proptest::test_runner::Config;
 use proptest_state_machine::StateMachineTest;
 
@@ -90,24 +100,16 @@ use proptest_state_machine::StateMachineTest;
 /// green once the defect is fixed.
 #[test]
 fn hand_authored_keystone_regressions() {
-    let cases = load_cases();
+    let cases = load_replay_cases();
     assert!(
         !cases.is_empty(),
         "no hand-authored regression cases found in {:?} — the sidecar must not be empty",
         sidecar_path()
     );
 
-    // Direct replay: `cases`/`max_shrink_iters` are irrelevant (we apply one
-    // fixed sequence per case, never generate or shrink). `verbose >= 1` makes
-    // `test_sequential` disclose each transition it applies on stderr.
-    let config = Config {
-        verbose: 1,
-        ..Config::default()
-    };
-
-    for case in cases {
+    for ReplayCase { case, checkpoints } in cases {
         eprintln!(
-            "[hand-authored regression] running case {:?} ({} transitions)",
+            "[hand-authored regression] running case {:?} ({} transitions, {checkpoints:?})",
             case.name,
             case.transitions.len()
         );
@@ -133,12 +135,7 @@ fn hand_authored_keystone_regressions() {
                  starting state differs from the one this case pins:\n{report}"
             );
         }
-        ComposedSut::<WideE2E>::test_sequential(
-            config.clone(),
-            initial_state,
-            case.transitions,
-            None,
-        );
+        replay::<ComposedSut<WideE2E>>(initial_state, case.transitions, &checkpoints);
         eprintln!("[hand-authored regression] PASSED case {:?}", case.name);
     }
     // Another sidecar or a name filter may hold no decision edit, so only the
@@ -278,5 +275,163 @@ fn recorded_env_flag_mismatch_is_reported() {
     assert!(
         report.is_some_and(|r| r.contains("env flags differ")),
         "a recorded flag absent from the live env must be reported"
+    );
+}
+
+thread_local! {
+    /// Transitions applied when each sweep of [`CountingSut`] ran.
+    static SWEPT: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Counts transitions applied; stands in for the keystone reference.
+struct CountingRef;
+
+impl proptest_state_machine::ReferenceStateMachine for CountingRef {
+    type State = usize;
+    type Transition = ();
+
+    fn init_state() -> proptest::strategy::BoxedStrategy<usize> {
+        proptest::strategy::Strategy::boxed(proptest::strategy::Just(0))
+    }
+
+    fn transitions(_: &usize) -> proptest::strategy::BoxedStrategy<()> {
+        proptest::strategy::Strategy::boxed(proptest::strategy::Just(()))
+    }
+
+    fn apply(applied: usize, _: &()) -> usize {
+        applied + 1
+    }
+}
+
+/// Records every invariant sweep into [`SWEPT`].
+struct CountingSut;
+
+impl StateMachineTest for CountingSut {
+    type SystemUnderTest = ();
+    type Reference = CountingRef;
+
+    fn init_test(_: &usize) {}
+
+    fn apply(sut: (), _: &usize, _: ()) {
+        sut
+    }
+
+    fn check_invariants(_: &(), applied: &usize) {
+        SWEPT.with(|swept| swept.borrow_mut().push(*applied));
+    }
+}
+
+fn four_transition_case(extra: &str) -> String {
+    let create = r#"{"CreateBlockUnderFocus": {"content": "c", "id": "block:c"}}"#;
+    format!(r#"{{"name": "n", "transitions": [{create}, {create}, {create}, {create}]{extra}}}"#)
+}
+
+fn sweeps_of_replay(line: &str) -> Vec<usize> {
+    let ReplayCase { case, checkpoints } =
+        parse_replay_case(std::path::Path::new("<inline>"), 1, line);
+    SWEPT.with(|swept| swept.borrow_mut().clear());
+    replay::<CountingSut>(0, vec![(); case.transitions.len()], &checkpoints);
+    SWEPT.with(|swept| swept.take())
+}
+
+#[test]
+fn replay_sweeps_around_the_last_transition_only() {
+    assert_eq!(sweeps_of_replay(&four_transition_case("")), vec![3, 4]);
+}
+
+#[test]
+fn replay_also_sweeps_around_each_named_transition() {
+    assert_eq!(
+        sweeps_of_replay(&four_transition_case(r#", "also_check_after": [1]"#)),
+        vec![0, 1, 3, 4]
+    );
+}
+
+#[test]
+fn replay_of_a_case_without_transitions_sweeps_once_after_boot() {
+    assert_eq!(
+        sweeps_of_replay(r#"{"name": "n", "transitions": []}"#),
+        vec![0]
+    );
+}
+
+/// The drawn keystone runs `test_sequential`, which sweeps after boot and after
+/// every transition.
+#[test]
+fn drawn_run_sweeps_after_boot_and_every_transition() {
+    SWEPT.with(|swept| swept.borrow_mut().clear());
+    CountingSut::test_sequential(Config::default(), 0, vec![(); 4], None);
+    assert_eq!(SWEPT.with(|swept| swept.take()), vec![0, 1, 2, 3, 4]);
+}
+
+thread_local! {
+    static STARTED_SWEPT: std::cell::RefCell<Vec<(usize, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Drives the production budget lifecycle and records, per sweep, whether the
+/// window `inv-sql-budget` would judge started from a swept state.
+struct BudgetWindowSut;
+
+impl StateMachineTest for BudgetWindowSut {
+    type SystemUnderTest = ComposedSpanMetrics;
+    type Reference = CountingRef;
+
+    fn init_test(_: &usize) -> ComposedSpanMetrics {
+        ComposedSpanMetrics::new()
+    }
+
+    fn apply(sut: ComposedSpanMetrics, _: &usize, _: ()) -> ComposedSpanMetrics {
+        sut.note_transition_start(&E2ETransition::UndoLastMutation(UndoLastMutation));
+        sut
+    }
+
+    fn check_invariants(sut: &ComposedSpanMetrics, applied: &usize) {
+        sut.freeze_for_check(&ReferenceState::new(
+            holon_pbt_core::Wiring::full(),
+            std::sync::Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new()),
+        ));
+        STARTED_SWEPT.with(|log| {
+            log.borrow_mut()
+                .push((*applied, sut.window_started_swept()))
+        });
+    }
+}
+
+/// `inv-sql-budget` skips exactly the windows that started unswept, so every
+/// judged transition must start swept and only the pre-sweeps may not.
+#[test]
+fn judged_windows_start_swept_and_only_pre_sweeps_do_not() {
+    let line = format!(
+        r#"{{"name": "n", "transitions": [{0}, {0}, {0}, {0}, {0}, {0}], "also_check_after": [2]}}"#,
+        r#"{"CreateBlockUnderFocus": {"content": "c", "id": "block:c"}}"#
+    );
+    let ReplayCase { checkpoints, .. } =
+        parse_replay_case(std::path::Path::new("<inline>"), 1, &line);
+    STARTED_SWEPT.with(|log| log.borrow_mut().clear());
+    replay::<BudgetWindowSut>(0, vec![(); 6], &checkpoints);
+    assert_eq!(
+        STARTED_SWEPT.with(|log| log.take()),
+        vec![(1, false), (2, true), (5, false), (6, true)]
+    );
+}
+
+#[test]
+#[should_panic(expected = "case \"n\": `also_check_after` names transition 4, out of range 1..3")]
+fn also_check_after_the_last_transition_is_refused() {
+    parse_replay_case(
+        std::path::Path::new("<inline>"),
+        1,
+        &four_transition_case(r#", "also_check_after": [4]"#),
+    );
+}
+
+#[test]
+#[should_panic(expected = "case \"n\": `also_check_after` holds \"2\", not a transition number")]
+fn malformed_also_check_after_is_refused() {
+    parse_replay_case(
+        std::path::Path::new("<inline>"),
+        1,
+        &four_transition_case(r#", "also_check_after": ["2"]"#),
     );
 }

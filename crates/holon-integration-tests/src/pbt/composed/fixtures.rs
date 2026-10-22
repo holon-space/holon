@@ -542,6 +542,10 @@ impl crate::pbt::composed::span_metrics::ComposedBudget for FixtureBudget {
             observed_statements: self.observed_statements,
         }
     }
+
+    fn window_started_swept(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(feature = "otel-testing")]
