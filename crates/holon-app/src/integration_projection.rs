@@ -230,34 +230,53 @@ impl IntegrationStateProjector {
     ) -> anyhow::Result<()> {
         self.project().await?;
 
+        let mut first_runs = Vec::new();
         for (provider, signal) in self.vm.signals() {
-            self.clone().reproject_on(signal.signal_cloned(), shutdown);
-            self.clone().reproject_on(
+            first_runs.push(self.clone().reproject_on(signal.signal_cloned(), shutdown));
+            first_runs.push(self.clone().reproject_on(
                 self.vm.configure_progress(&provider).signal_cloned(),
                 shutdown,
-            );
+            ));
+        }
+        // Each watcher re-projects once on subscribing; returning before those
+        // runs finish would leave the mirror being rewritten after boot.
+        for first_run in first_runs {
+            first_run.await.map_err(|_| {
+                anyhow::anyhow!("session shut down before the integration watchers' first run")
+            })?;
         }
         Ok(())
     }
 
-    /// Re-project whenever `signal` fires.
+    /// Re-project whenever `signal` fires. The returned receiver resolves once
+    /// the first re-projection (the signal's initial value) has finished.
     ///
     /// Session-scoped: a re-projection writes into the store, so it must not
     /// outlive it.
-    fn reproject_on<S>(self: Arc<Self>, signal: S, shutdown: &holon_api::lifecycle::SessionShutdown)
+    fn reproject_on<S>(
+        self: Arc<Self>,
+        signal: S,
+        shutdown: &holon_api::lifecycle::SessionShutdown,
+    ) -> tokio::sync::oneshot::Receiver<()>
     where
         S: futures_signals::signal::Signal + Send + 'static,
         S::Item: Send,
     {
         let cancelled = shutdown.cancelled();
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let mut first_tx = Some(first_tx);
         let pump = signal.for_each(move |_| {
             let projector = self.clone();
+            let first_tx = first_tx.take();
             async move {
                 if let Err(e) = projector.project().await {
                     tracing::warn!(
                         "[IntegrationStateProjector] re-projection after a state change failed; \
                          the Integrations section is stale until the next change: {e:#}"
                     );
+                }
+                if let Some(first_tx) = first_tx {
+                    let _ = first_tx.send(());
                 }
             }
         });
@@ -268,6 +287,7 @@ impl IntegrationStateProjector {
                 () = pump => {}
             }
         });
+        first_rx
     }
 }
 

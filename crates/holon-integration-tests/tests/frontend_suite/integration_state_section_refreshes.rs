@@ -44,6 +44,34 @@ fn insert_sql() -> &'static str {
      VALUES (?, ?, 1, 'Pending', 'unconfigured', 0, '', '2026-08-18 00:00:00')"
 }
 
+const FIXTURE_PROVIDERS: [&str; 4] = ["fixture-a", "fixture-b", "fixture-c", "fixture-d"];
+
+#[test]
+fn fixture_providers_are_ids_the_app_never_writes() {
+    for fixture in FIXTURE_PROVIDERS {
+        assert!(
+            !holon_mcp_client::BUNDLED_SIDECARS
+                .iter()
+                .any(|s| s.provider.to_string() == fixture),
+            "fixture provider '{fixture}' is a bundled provider: the booted projector upserts \
+             `integration:{fixture}` concurrently, so the test's plain INSERT hits UNIQUE"
+        );
+    }
+}
+
+/// Rows the test itself wrote. The booted app's projector keeps upserting its
+/// own bundled-provider rows for a while after boot, so the test counts only
+/// the `fixture-` providers, which the app never writes.
+fn fixture_rows(rows: &[Arc<holon_api::widget_spec::DataRow>]) -> usize {
+    rows.iter()
+        .filter(|r| {
+            r.get("provider_name")
+                .and_then(|v| v.as_string())
+                .is_some_and(|p| p.starts_with("fixture-"))
+        })
+        .count()
+}
+
 #[test]
 fn a_row_written_after_the_watch_is_live_reaches_the_section() {
     let runtime = Arc::new(
@@ -89,8 +117,8 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     db.execute_values(
         insert_sql(),
         vec![
-            Value::String("integration:claude-history".to_string()),
-            Value::String("claude-history".to_string()),
+            Value::String(format!("integration:{}", FIXTURE_PROVIDERS[0])),
+            Value::String(FIXTURE_PROVIDERS[0].to_string()),
         ],
     )
     .await
@@ -109,13 +137,13 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let (_expr, snapshot) = rows.snapshot();
-        if snapshot.len() == 1 && rows.error().is_none() {
+        if fixture_rows(&snapshot) == 1 && rows.error().is_none() {
             break;
         }
         assert!(
             Instant::now() < deadline,
             "sanity: the section must first deliver the one row that exists — rows={} error={:?}",
-            snapshot.len(),
+            fixture_rows(&snapshot),
             rows.error()
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -123,7 +151,7 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
 
     // THE RED. The remaining providers land AFTER the watch is established —
     // the exact window the dogfood bug lives in.
-    for provider in ["gcal", "gmail", "todoist"] {
+    for provider in &FIXTURE_PROVIDERS[1..] {
         db.execute_values(
             insert_sql(),
             vec![
@@ -138,7 +166,7 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let (_expr, snapshot) = rows.snapshot();
-        if snapshot.len() == 4 && rows.error().is_none() {
+        if fixture_rows(&snapshot) == 4 && rows.error().is_none() {
             break;
         }
         assert!(
@@ -146,7 +174,7 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
             "the Integrations section NEVER saw the rows written after its watch went live: \
              rows={} error={:?} — a section that latches one snapshot and stops is how the live \
              app showed a single stale integration for minutes",
-            snapshot.len(),
+            fixture_rows(&snapshot),
             rows.error()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -212,12 +240,12 @@ async fn run_from_empty(runtime: Arc<tokio::runtime::Runtime>) {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (_expr, snapshot) = rows.snapshot();
     assert_eq!(
-        snapshot.len(),
+        fixture_rows(&snapshot),
         0,
         "sanity: the section starts empty in this rung"
     );
 
-    for provider in ["claude-history", "gcal", "gmail", "todoist"] {
+    for provider in FIXTURE_PROVIDERS {
         db.execute_values(
             insert_sql(),
             vec![
@@ -232,14 +260,14 @@ async fn run_from_empty(runtime: Arc<tokio::runtime::Runtime>) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let (_expr, snapshot) = rows.snapshot();
-        if snapshot.len() == 4 && rows.error().is_none() {
+        if fixture_rows(&snapshot) == 4 && rows.error().is_none() {
             break;
         }
         assert!(
             Instant::now() < deadline,
             "a section whose watch went live on an EMPTY mirror never received the rows the \
              projector wrote afterwards: rows={} error={:?}",
-            snapshot.len(),
+            fixture_rows(&snapshot),
             rows.error()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;

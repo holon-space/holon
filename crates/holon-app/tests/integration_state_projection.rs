@@ -970,3 +970,54 @@ fn a_drifted_mirror_reconverges_on_the_next_projection() {
         );
     });
 }
+
+/// `start` is the boot step after which the mirror is only written in response
+/// to a store change. A watcher's first run still pending when `start` returns
+/// rewrites the mirror (and prunes rows it does not bundle) behind whoever
+/// writes next.
+#[test]
+fn the_mirror_is_quiet_once_start_returns() {
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false, false)
+            .await
+            .expect("seed");
+        let db = engine.db_handle();
+
+        let state_dir = dir.path().join("integrations");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let store = store_with(&state_dir, &["todoist"]);
+        let shutdown = holon_api::lifecycle::SessionShutdown::new();
+        Arc::new(projector_over(db.clone(), store))
+            .start(&shutdown)
+            .await
+            .expect("start");
+
+        db.execute_values(
+            "INSERT INTO integration_state \
+             (id, provider_name, enabled, status, config_status, configurable, \
+             configure_progress, updated_at) \
+             VALUES ('integration:ghost', 'ghost', 1, 'Pending', 'unconfigured', 0, '', \
+             '2026-01-01 00:00:00')",
+            vec![],
+        )
+        .await
+        .expect("insert a ghost row");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let rows = db
+            .query(
+                "SELECT id FROM integration_state WHERE id = 'integration:ghost'",
+                HashMap::new(),
+            )
+            .await
+            .expect("query the ghost row");
+        assert_eq!(
+            rows.len(),
+            1,
+            "a watcher's first re-projection ran after `start` returned and pruned the row"
+        );
+    });
+}
