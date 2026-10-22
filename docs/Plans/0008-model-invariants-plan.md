@@ -2,7 +2,7 @@
 
 **Status: proposed (2026-07-01); Phases 0–3 executed 2026-07-02 (2.3 deferred
 behind spec 0007 Phase 5).** Companion to
-[docs/Architecture/Model.md](../../docs/Architecture/Model.md) (invariants 1–12)
+[docs/Architecture/Model.md](../Architecture/Model.md) (invariants 1–12)
 and successor-in-spirit to spec 0007, which already tracks: sole Turso writer,
 authority-first delete, intent-vocabulary flip (stop decoding `sort_key`,
 Phase 5), and total verbatim fi projection. **This spec does not duplicate

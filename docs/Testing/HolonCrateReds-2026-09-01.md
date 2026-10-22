@@ -193,7 +193,7 @@ Not chased further.
 
 ## Delta — 2026-09-01, after adversarial verification
 
-`reds-triage-verify.md` returned CONFIRMED with three defects; all addressed.
+`devlog/reds-triage-verify.md` returned CONFIRMED with three defects; all addressed.
 
 - **Classification corrected.** The 15 A+B rows read `REAL-DEFECT`; the adapter
   has zero production callers. Relabelled **DEAD/TEST-ONLY PATH** and the

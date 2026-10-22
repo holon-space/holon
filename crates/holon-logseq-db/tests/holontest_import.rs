@@ -36,7 +36,7 @@ use holon_logseq_db::kvs_writer;
 /// do NOT come from REPORT and are the direct recount:
 ///  - `DISTINCT_ATTRS` is 57; REPORT's prose says 58.
 ///  - `KV_SINGLETONS` is 7, not the 9 the plan assumed — see `ORPHAN_ENTITIES`
-///    and amendment A6 in `plan-lsqdb-import.md`.
+///    and amendment A6 in `docs/Plans/plan-lsqdb-import.md`.
 ///  - `JOURNAL_AUG20_UPDATED_AT` pins max-tx resolution (amendment A8).
 mod fixture_facts {
     pub const UNIQUE_DATOMS: usize = 2631;

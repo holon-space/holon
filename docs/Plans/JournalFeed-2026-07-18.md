@@ -122,7 +122,7 @@ Questions Q1 — a single matview is the alternative if Martin prefers minimalis
   Adding cursor pagination (a window parameter through `QueryContext` /
   `execute_query` / `query_and_watch`, plus snapshot-vs-stream reconciliation
   for a windowed relation) is a new delivery protocol affecting every reactive
-  surface, and needs its own ruling. See `plan-journals-view.md` §2.3 and §8.1.
+  surface, and needs its own ruling. See `plan-journals-view.md` (same directory) §2.3 and §8.1.
 - **Increment 3 (deferred):** per-day child-count / summary column on the feed
   (grouped aggregate on the detection layer, like `automations_journal`).
 

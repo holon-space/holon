@@ -24,7 +24,7 @@ Append-only. One entry per significant wiki operation.
 ## 2026-04-13 — INIT
 
 - Performed initial wiki creation from codebase exploration.
-- Read: README.md, ARCHITECTURE.md, DEVELOPMENT.md, CLAUDE.md
+- Read: README.md, docs/Architecture.md, DEVELOPMENT.md, CLAUDE.md
 - Explored all crates under `crates/` and frontends under `frontends/`
 - Created: index.md, log.md, schema.md, overview.md
 - Created entities/: holon-crate, holon-api, holon-core, holon-frontend, holon-orgmode, holon-engine, holon-macros, holon-integration-tests, gpui-frontend, mcp-frontend

@@ -6,7 +6,7 @@
 //! formats — `holon-orgmode` provides `OrgFormatAdapter`, a future
 //! `holon-markdown` would provide `MarkdownFormatAdapter`, and so on.
 //!
-//! Phase 1 of `codev/specs/0006-pre-velocity-refactors.md`. The trait
+//! Phase 1 of `docs/Plans/0006-pre-velocity-refactors.md`. The trait
 //! lives here (in `holon-core`) so future format crates can implement it
 //! without taking a dependency on `holon-orgmode`.
 

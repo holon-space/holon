@@ -7,7 +7,7 @@ encodings: the `"Page"` tag (`Block::is_page()`, canonical), the `doc:` URI
 scheme, and the `set_is_document` op. `Block::is_document()` was already deleted
 (2026-06-28); this ADR retires the remaining two.
 **Relates to:** ADR 0003 (all-in-LoroTree — pages are ordinary tree blocks),
-CONTEXT.md §4 synonym registry, `docs/Architecture/BlockEventStorm.md` §4 H7.
+docs/Reference/CONTEXT.md §4 synonym registry, `docs/Architecture/BlockEventStorm.md` §4 H7.
 
 ## Problem
 

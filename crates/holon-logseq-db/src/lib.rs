@@ -19,7 +19,8 @@
 //! name. See docs/Testing/LogseqDbPush.md.
 //!
 //! Stage 1 scope and the identity-based acceptance gate are described in
-//! `plan-lsqdb-import.md`; the fixture-driven amendments are its §9b.
+//! `docs/Plans/plan-lsqdb-import.md`; the fixture-driven amendments are its
+//! §9b.
 
 use std::collections::HashMap;
 use std::path::Path;

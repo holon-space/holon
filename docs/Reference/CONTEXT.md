@@ -5,8 +5,8 @@ disagree on what a word means, **this file wins** — change it deliberately, th
 the code follow.
 
 Derived from the Block-lifecycle Event Storm
-([docs/Architecture/BlockEventStorm.md](docs/Architecture/BlockEventStorm.md)) and the
-ADRs in [docs/adr/](docs/adr/). Read those for the *why*; read this for the *words*.
+([docs/Architecture/BlockEventStorm.md](../Architecture/BlockEventStorm.md)) and the
+ADRs in [docs/adr/](../adr/). Read those for the *why*; read this for the *words*.
 
 How to use it:
 - Before naming a new type, field, or op, check the canonical term below and reuse it.
@@ -174,11 +174,11 @@ them as settled.
 ---
 
 ## See also
-- [docs/Architecture/BlockEventStorm.md](docs/Architecture/BlockEventStorm.md) — the
+- [docs/Architecture/BlockEventStorm.md](../Architecture/BlockEventStorm.md) — the
   full event timeline, hotspots H1–H11, and file:line references.
-- [docs/adr/0003-all-in-lorotree-architecture.md](docs/adr/0003-all-in-lorotree-architecture.md)
+- [docs/adr/0003-all-in-lorotree-architecture.md](../adr/0003-all-in-lorotree-architecture.md)
   — the CRDT-of-record architecture.
-- [docs/adr/0005-children-as-ordered-list.md](docs/adr/0005-children-as-ordered-list.md)
+- [docs/adr/0005-children-as-ordered-list.md](../adr/0005-children-as-ordered-list.md)
   — sibling order / fractional index.
-- [docs/Reference/ORG_SYNTAX.md](docs/Reference/ORG_SYNTAX.md) — the bare-id↔scheme
+- [docs/Reference/ORG_SYNTAX.md](ORG_SYNTAX.md) — the bare-id↔scheme
   boundary convention.

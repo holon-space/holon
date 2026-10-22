@@ -71,7 +71,7 @@ config singletons (`:db/ident :logseq.kv/…` + `:kv/value`), while **e197**
 (`:block/created-at` plus an empty `:block/title`) and **e199**
 (`:block/created-at` only) are LogSeq's own half-created remnants. They are
 classified as `EntityKind::Orphan` and counted, never folded in with the
-singletons — see amendment A6 in `plan-lsqdb-import.md`.
+singletons — see amendment A6 in `docs/Plans/plan-lsqdb-import.md`.
 
 **e193 carries TWO `:block/updated-at` datoms** (tx 536870916 → 1787218310305,
 tx 536871019 → 1787221153038) although the attribute is declared

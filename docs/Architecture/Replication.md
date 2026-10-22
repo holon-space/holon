@@ -487,7 +487,7 @@ See [Sync.md](Sync.md) for the current implementation surface this evolves.
 > (`loro_block_operations.rs::children_ordered`). Step 3 is partial: the
 > `sole_block_writer` archlint gate exists, but it sanctions two mode-dependent
 > writers (Loro projection in Full mode, `SqlBlockOperations` in SqlOnly), and
-> `codev/specs/0007-architecture-improvement-plan.md` — the tracking spec for
+> `docs/Plans/0007-architecture-improvement-plan.md` — the tracking spec for
 > the sole-writer / authority-first-delete / intent-vocabulary work — still has
 > those Phase 1 items open (spec header: Phase 0 in progress).
 > Cell backing types `LoroMetaCellBacking<T>`

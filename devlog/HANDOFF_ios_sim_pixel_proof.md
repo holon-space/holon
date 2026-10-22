@@ -69,7 +69,7 @@ redirects) and READ the log afterward. From the workspace root:
 
 ## 4. Where the evidence goes
 
-Update `logs/android-upstream-issue-draft.md` — it has TWO clearly marked
+Update `devlog/android-upstream-issue-draft.md` — it has TWO clearly marked
 "NOT CAPTURED" slots (lines ~70-78, "Evidence status (iOS)" section):
 1. The runtime-pixel-proof bullet: replace with PASS/FAIL + what the screenshots show.
 2. The screenshot-paths bullet: replace with the actual `logs/ios-sim-*.png` paths

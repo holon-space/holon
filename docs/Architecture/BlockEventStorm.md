@@ -130,7 +130,7 @@ purple frame on the wall): `FileSyncStarted`, `BlocksProjectedToSql`,
 
 Event Storming earns its keep by exposing where one concept wears many names.
 
-**The canonical glossary lives in [CONTEXT.md](../../CONTEXT.md)** — its §2 (core
+**The canonical glossary lives in [CONTEXT.md](../Reference/CONTEXT.md)** — its §2 (core
 vocabulary), §3 (per-context dialects), and §4 (synonym & deprecation registry)
 carry every stable term with its canonical form and cleanup action. This section
 keeps only the rows that are *hotspot evidence*: places where the naming drift IS
