@@ -187,16 +187,28 @@ fn line_in_section(text: &str, section: Section, key: &str) -> Option<usize> {
         }
         let indent = line.len() - content.len();
         if indent == 0 {
-            inside = content.trim_end() == format!("{}:", section.key());
+            inside = is_key_line(content, section.key());
             entry_indent = None;
         } else if inside
             && *entry_indent.get_or_insert(indent) == indent
-            && content.trim_end() == format!("{key}:")
+            && is_key_line(content, key)
         {
             return Some(index + 1);
         }
     }
     None
+}
+
+/// Whether `content` (a line without its indent) is `key:` alone or followed
+/// only by a comment.
+fn is_key_line(content: &str, key: &str) -> bool {
+    content
+        .strip_prefix(key)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .is_some_and(|rest| {
+            let tail = rest.trim_start();
+            tail.is_empty() || (rest.starts_with(char::is_whitespace) && tail.starts_with('#'))
+        })
 }
 
 /// Why a net file is not a runnable net. Every refusal names the file, the

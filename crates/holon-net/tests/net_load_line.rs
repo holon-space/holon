@@ -1,5 +1,4 @@
-//! Verifier probes of the loader's line resolution on legal, non-canonical
-//! files.
+//! The loader's line resolution on legal, non-canonical files.
 
 use std::sync::Arc;
 

@@ -5,8 +5,7 @@
 `crates/holon-net/tests/net_file.rs`) and the loader builds the executor's net
 from it (`crates/holon-net/src/load.rs`, pinned by
 `crates/holon-net/tests/net_load.rs`). The shell effect
-(holon-space/holon-work#371) and the probe host
-(holon-space/holon-work#373) are still descriptors only.*
+and the probe host are still descriptors only.*
 
 A **net file** is one YAML file that holds one whole runtime net: its places,
 its transitions, the shell commands its firings run, and the probes that feed
@@ -121,7 +120,7 @@ decides (ADR 0032 §9.2). After two attempts the count bound stops it.
 - `register` holds one token per subject that a fact put **replaces**, for a
   value that is re-derived rather than accumulated: a hash, a probe's fact.
 - `pool: N` needs `capacity: fifo`, because the N tokens queue. The format
-  only declares the pool; the behaviour is holon-space/holon-work#372, so the
+  only declares the pool; the executor does not implement it yet, so the
   loader refuses a net that declares one rather than loading it as a plain
   queue.
 
