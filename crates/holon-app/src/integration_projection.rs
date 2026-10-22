@@ -236,6 +236,12 @@ impl IntegrationStateProjector {
 
         let mut first_runs = Vec::new();
         for (provider, signal) in self.vm.signals() {
+            if shutdown.token().is_cancelled() {
+                tracing::info!(
+                    "[IntegrationStateProjector] session shut down before the watchers were spawned"
+                );
+                return Ok(());
+            }
             first_runs.push(self.clone().reproject_on(signal.signal_cloned(), shutdown));
             first_runs.push(self.clone().reproject_on(
                 self.vm.configure_progress(&provider).signal_cloned(),

@@ -1062,3 +1062,42 @@ fn a_shutdown_during_start_does_not_fail_it() {
         canceller.await.expect("canceller");
     });
 }
+
+/// A quit that lands while `start` runs its initial projection must not fail
+/// the boot step either.
+#[test]
+fn a_shutdown_during_the_initial_projection_does_not_fail_start() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create runtime");
+    rt.block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false, false)
+            .await
+            .expect("seed");
+        let state_dir = dir.path().join("integrations");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let store = store_with(&state_dir, &["todoist"]);
+        let shutdown = Arc::new(holon_api::lifecycle::SessionShutdown::new());
+
+        let started = tokio::spawn({
+            let shutdown = shutdown.clone();
+            let projector = Arc::new(projector_over(engine.db_handle().clone(), store));
+            async move { projector.start(&shutdown).await }
+        });
+        // `start` is polled first, so the cancel lands at its first await,
+        // inside the initial projection.
+        let canceller = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move { shutdown.token().cancel() }
+        });
+        canceller.await.expect("canceller");
+        assert!(shutdown.token().is_cancelled());
+        started
+            .await
+            .unwrap_or_else(|e| panic!("start panicked on shutdown: {e}"))
+            .unwrap_or_else(|e| panic!("start failed on shutdown: {e:#}"));
+    });
+}
