@@ -215,6 +215,10 @@ impl IntegrationStateProjector {
 
     /// Project now, then keep the mirror in step with the store.
     ///
+    /// Returns once every watcher's first re-projection has finished, so none
+    /// of those runs writes after `start` returns. Later store changes still
+    /// re-project, and `set_integration_status` still updates rows.
+    ///
     /// One watcher per provider re-projects the WHOLE store on any change,
     /// rather than patching the row that moved: routing every change through
     /// the same full re-derivation is what makes the mirror self-repairing.
@@ -241,9 +245,14 @@ impl IntegrationStateProjector {
         // Each watcher re-projects once on subscribing; returning before those
         // runs finish would leave the mirror being rewritten after boot.
         for first_run in first_runs {
-            first_run.await.map_err(|_| {
-                anyhow::anyhow!("session shut down before the integration watchers' first run")
-            })?;
+            // A dropped sender means the session was cancelled mid-boot; the
+            // mirror then needs no further work, and a quit must not fail boot.
+            if first_run.await.is_err() {
+                tracing::info!(
+                    "[IntegrationStateProjector] session shut down before the watchers' first run"
+                );
+                break;
+            }
         }
         Ok(())
     }

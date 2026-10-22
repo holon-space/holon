@@ -52,16 +52,16 @@ fn fixture_providers_are_ids_the_app_never_writes() {
         assert!(
             !holon_mcp_client::BUNDLED_SIDECARS
                 .iter()
-                .any(|s| s.provider.to_string() == fixture),
+                .any(|s| s.provider == fixture),
             "fixture provider '{fixture}' is a bundled provider: the booted projector upserts \
-             `integration:{fixture}` concurrently, so the test's plain INSERT hits UNIQUE"
+             `integration:{fixture}` on any store change, so the test's plain INSERT can hit UNIQUE"
         );
     }
 }
 
-/// Rows the test itself wrote. The booted app's projector keeps upserting its
-/// own bundled-provider rows for a while after boot, so the test counts only
-/// the `fixture-` providers, which the app never writes.
+/// Rows the test itself wrote. The booted app's projector re-projects its own
+/// bundled-provider rows on any store change, so the test counts only the
+/// `fixture-` providers, which the app never writes.
 fn fixture_rows(rows: &[Arc<holon_api::widget_spec::DataRow>]) -> usize {
     rows.iter()
         .filter(|r| {
