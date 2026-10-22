@@ -35,11 +35,15 @@ fn descriptor(argv: &[&str], timeout: &str, working_dir: &Path) -> ShellEffect {
 }
 
 fn request(attempt: u64) -> EffectRequest {
+    request_for(attempt, "a")
+}
+
+fn request_for(attempt: u64, subject: &str) -> EffectRequest {
     EffectRequest {
         attempt: AttemptId(attempt),
         occurrence: OccurrenceId::caller("op-1"),
         transition: Arc::from("Run"),
-        subject: Subject::new("a"),
+        subject: Subject::new(subject),
         input: Content::new(),
         probe: false,
     }
@@ -199,4 +203,57 @@ async fn a_restarted_runner_reports_the_group_a_dead_runner_left() {
 
     kill_group(left[0].pgid).await;
     until("was killed", || !alive(left[0].pgid)).await;
+}
+
+#[tokio::test]
+async fn a_group_member_that_ignores_sigterm_is_killed_before_the_run_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = runner(dir.path());
+    let effect = descriptor(
+        &[
+            "/bin/bash",
+            "-c",
+            "/bin/bash -c 'trap \"\" TERM; echo $$ > stubborn.pid; exec /bin/sleep 60' & /bin/sleep 60",
+        ],
+        "200ms",
+        dir.path(),
+    );
+
+    let finished = runner.run(&effect, &request(1)).await.unwrap();
+
+    assert_eq!(finished.ended, Ended::Killed(Kill::Timeout));
+    let stubborn: Pgid = std::fs::read_to_string(dir.path().join("stubborn.pid"))
+        .expect("the member wrote its pid")
+        .trim()
+        .parse()
+        .unwrap();
+    until("died with its process group", || unsafe {
+        libc::kill(stubborn, 0) != 0
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_pid_file_round_trips_every_subject() {
+    for subject in ["a\tb", "a\nb", "", "h\u{e9}llo"] {
+        let dir = tempfile::tempdir().unwrap();
+        let dead = Arc::new(runner(dir.path()));
+        let effect = descriptor(&["/bin/sleep", "60"], "10s", dir.path());
+        let run = {
+            let dead = Arc::clone(&dead);
+            tokio::spawn(async move { dead.run(&effect, &request_for(7, subject)).await })
+        };
+        until("started", || !dead.in_flight().is_empty()).await;
+        run.abort();
+        let _ = run.await;
+        drop(dead);
+
+        let (_restarted, left) =
+            Runner::open(dir.path().join("groups.pid")).expect("the pid file is readable");
+
+        assert_eq!(left.len(), 1, "the leftover group is reported: {left:?}");
+        assert_eq!(left[0].subject, subject);
+        kill_group(left[0].pgid).await;
+        until("was killed", || !alive(left[0].pgid)).await;
+    }
 }

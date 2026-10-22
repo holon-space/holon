@@ -152,7 +152,12 @@ impl Runner {
         let ended = match stop {
             Stop::Exited(status) => exited(status, &effect.exit_codes),
             Stop::Kill(kill) => {
-                end_run(pgid, &mut child, &argv).await?;
+                end_group(pgid, Some(&mut child))
+                    .await
+                    .map_err(|source| ShellError::Wait {
+                        argv: argv.clone(),
+                        source,
+                    })?;
                 Ended::Killed(kill)
             }
         };
@@ -221,10 +226,9 @@ impl Runner {
             .values()
             .map(|live| {
                 let g = &live.group;
-                format!(
-                    "{}\t{}\t{}\t{}\n",
-                    g.pgid, g.attempt.0, g.transition, g.subject
-                )
+                let line = serde_json::to_string(&(g.pgid, g.attempt.0, &g.transition, &g.subject))
+                    .expect("a group is serializable");
+                line + "\n"
             })
             .collect();
         let temp = self.pid_file.with_extension("writing");
@@ -237,34 +241,35 @@ impl Runner {
     }
 }
 
-/// Ends a group this runner did not spawn: there is no child to reap, so the
-/// group's own aliveness is what the grace period waits on.
+/// Ends a group this runner did not spawn: there is no child to reap.
 pub async fn kill_group(pgid: Pgid) {
+    end_group(pgid, None)
+        .await
+        .expect("a group without a child has nothing to wait for");
+}
+
+/// SIGTERM to the whole group, then SIGKILL to it when a member is left at
+/// the end of the grace period. The grace period waits on the group, not on
+/// the child: a member that ignores SIGTERM outlives the child.
+async fn end_group(pgid: Pgid, mut child: Option<&mut Child>) -> io::Result<()> {
     signal_group(pgid, libc::SIGTERM);
     let deadline = tokio::time::Instant::now() + KILL_GRACE;
-    while alive(pgid) && tokio::time::Instant::now() < deadline {
+    loop {
+        if let Some(child) = child.as_deref_mut() {
+            child.try_wait()?;
+        }
+        if !alive(pgid) || tokio::time::Instant::now() >= deadline {
+            break;
+        }
         tokio::time::sleep(POLL).await;
     }
     if alive(pgid) {
         signal_group(pgid, libc::SIGKILL);
     }
-}
-
-/// SIGTERM to the whole group, then SIGKILL to it when the child has not
-/// exited by the end of the grace period.
-async fn end_run(pgid: Pgid, child: &mut Child, argv: &str) -> Result<(), ShellError> {
-    signal_group(pgid, libc::SIGTERM);
-    let waited = match tokio::time::timeout(KILL_GRACE, child.wait()).await {
-        Ok(status) => status,
-        Err(_) => {
-            signal_group(pgid, libc::SIGKILL);
-            child.wait().await
-        }
-    };
-    waited.map(|_| ()).map_err(|source| ShellError::Wait {
-        argv: argv.to_owned(),
-        source,
-    })
+    if let Some(child) = child {
+        child.wait().await?;
+    }
+    Ok(())
 }
 
 fn spawn(effect: &ShellEffect, log_path: &Path) -> Result<(Child, Pgid), ShellError> {
@@ -347,15 +352,13 @@ fn parse_groups(text: &str, path: &Path) -> Result<Vec<Group>, ShellError> {
                 path: path.to_owned(),
                 line: line.to_owned(),
             };
-            let mut fields = line.split('\t');
-            let mut next = || fields.next().ok_or_else(refused);
-            let pgid = next()?.parse().map_err(|_| refused())?;
-            let attempt = AttemptId(next()?.parse().map_err(|_| refused())?);
+            let (pgid, attempt, transition, subject): (Pgid, u64, String, String) =
+                serde_json::from_str(line).map_err(|_| refused())?;
             Ok(Group {
                 pgid,
-                attempt,
-                transition: next()?.to_owned(),
-                subject: next()?.to_owned(),
+                attempt: AttemptId(attempt),
+                transition,
+                subject,
             })
         })
         .collect()
