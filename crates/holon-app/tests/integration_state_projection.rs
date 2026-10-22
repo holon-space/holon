@@ -1101,3 +1101,46 @@ fn a_shutdown_during_the_initial_projection_does_not_fail_start() {
             .unwrap_or_else(|e| panic!("start failed on shutdown: {e:#}"));
     });
 }
+
+/// A quit from another thread while `start` spawns its watchers must not fail
+/// the boot step.
+#[test]
+fn a_shutdown_from_another_thread_while_the_watchers_spawn_does_not_fail_start() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("Failed to create runtime");
+    rt.block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, ordering) = fresh_engine(dir.path().join("fresh.db")).await;
+        holon_app::seed_default_layout(&engine, ordering, false, false)
+            .await
+            .expect("seed");
+        let state_dir = dir.path().join("integrations");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let store = store_with(&state_dir, &["todoist"]);
+        for attempt in 0..50 {
+            let shutdown = Arc::new(holon_api::lifecycle::SessionShutdown::new());
+            let quitter = std::thread::spawn({
+                let shutdown = shutdown.clone();
+                move || {
+                    while shutdown.registered().is_empty() {
+                        std::hint::spin_loop();
+                    }
+                    shutdown.token().cancel();
+                }
+            });
+            let projector = Arc::new(projector_over(engine.db_handle().clone(), store.clone()));
+            let started = tokio::spawn({
+                let shutdown = shutdown.clone();
+                async move { projector.start(&shutdown).await }
+            });
+            let outcome = started.await;
+            quitter.join().expect("quitter");
+            outcome
+                .unwrap_or_else(|e| panic!("attempt {attempt}: start panicked on shutdown: {e}"))
+                .unwrap_or_else(|e| panic!("attempt {attempt}: start failed on shutdown: {e:#}"));
+        }
+    });
+}

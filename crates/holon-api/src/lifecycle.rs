@@ -55,6 +55,10 @@ impl Default for SessionShutdown {
     }
 }
 
+/// The session was already shutting down when a task was handed to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnedAfterShutdown;
+
 impl SessionShutdown {
     pub fn new() -> Self {
         Self {
@@ -76,16 +80,38 @@ impl SessionShutdown {
         F: Future<Output = ()> + Send + 'static,
     {
         let name = name.into();
-        assert!(
-            !self.cancel.is_cancelled(),
-            "[SessionShutdown] '{name}' was spawned after shutdown — the task would never be \
-             joined and would outlive the store it reads"
-        );
-        let handle = tokio::spawn(future);
-        self.tasks
+        if self.try_spawn(name.clone(), future).is_err() {
+            panic!(
+                "[SessionShutdown] '{name}' was spawned after shutdown — the task would never be \
+                 joined and would outlive the store it reads"
+            );
+        }
+    }
+
+    /// [`Self::spawn`] for a caller that can be reached by a quit and must
+    /// not fail because of it. Returns `Err` instead of panicking when the
+    /// session is already shutting down.
+    ///
+    /// The check and the registration happen under one lock, and
+    /// [`Self::shutdown`] cancels before it takes the registry: a task is
+    /// either refused or joined, never registered after the join.
+    pub fn try_spawn<F>(
+        &self,
+        name: impl Into<String>,
+        future: F,
+    ) -> Result<(), SpawnedAfterShutdown>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let mut tasks = self
+            .tasks
             .lock()
-            .expect("SessionShutdown task registry poisoned")
-            .push((name, handle));
+            .expect("SessionShutdown task registry poisoned");
+        if self.cancel.is_cancelled() {
+            return Err(SpawnedAfterShutdown);
+        }
+        tasks.push((name.into(), tokio::spawn(future)));
+        Ok(())
     }
 
     /// [`Self::spawn`] for a task whose death stops something the user relies

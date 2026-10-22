@@ -347,6 +347,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `bulk-add-sibling-order`
 - `catalog-advice-step6-weave-dismiss`
 - `concurrent-keystroke-undo-steps-load`
+- `convert-block-to-page-journals-planning-failed`
+- `cook-vault-ingest-layout-seed-timeout`
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
 - `create-sql-read-repeat-budget`
@@ -358,6 +360,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `fs-watcher-arm-no-event-agent-session`
 - `fs-watcher-no-events-agent-session`
 - `fs-watcher-rename-unpaired-agent-session`
+- `fts-query-block-watch-view-create-fails`
 - `integration-toggle-load`
 - `iroh-accept-drain-recv-stream`
 - `iroh-nat-traversal-address-set`
@@ -366,11 +369,13 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `journal-feed-main-panel-still-loading`
 - `lib-type-chars-home-profile-derived`
 - `logseq-parity-caret-fold-lost-loro`
+- `logseq-parity-slash-menu-offers-no-delete`
 - `loro-backend-change-count`
 - `loro-move-false-cycle-duplicate-id`
 - `loro-owning-page-types-share-removal`
 - `metamorphic-undo-facet-unchanged`
 - `metamorphic-undo-snapshot-missing`
+- `mirrored-entity-authority-ops-missing`
 - `orgmode-file-watcher-no-event`
 - `paste-block-copy-sql-read-repeat-budget`
 - `pinblock-lazy-day-page-shell`
@@ -388,6 +393,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `tour-spike-advance-cursor-not-visible`
 - `tui-inline-row-mount-unsettled-frame`
 - `turso-block-query-source-round-trip`
+- `two-instance-loro-docs-no-common-state`
 - `typechars-sql-reads-budget`
 - `undo-prod-session-source-block-marks`
 - `undo-prod-session-stale-dropped`

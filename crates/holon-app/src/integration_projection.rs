@@ -236,17 +236,24 @@ impl IntegrationStateProjector {
 
         let mut first_runs = Vec::new();
         for (provider, signal) in self.vm.signals() {
-            if shutdown.token().is_cancelled() {
-                tracing::info!(
-                    "[IntegrationStateProjector] session shut down before the watchers were spawned"
-                );
-                return Ok(());
+            let watchers = [
+                self.clone().reproject_on(signal.signal_cloned(), shutdown),
+                self.clone().reproject_on(
+                    self.vm.configure_progress(&provider).signal_cloned(),
+                    shutdown,
+                ),
+            ];
+            for watcher in watchers {
+                match watcher {
+                    Some(first_run) => first_runs.push(first_run),
+                    None => {
+                        tracing::info!(
+                            "[IntegrationStateProjector] session shut down before the watchers were spawned"
+                        );
+                        return Ok(());
+                    }
+                }
             }
-            first_runs.push(self.clone().reproject_on(signal.signal_cloned(), shutdown));
-            first_runs.push(self.clone().reproject_on(
-                self.vm.configure_progress(&provider).signal_cloned(),
-                shutdown,
-            ));
         }
         // Each watcher re-projects once on subscribing; returning before those
         // runs finish would leave the mirror being rewritten after boot.
@@ -267,12 +274,12 @@ impl IntegrationStateProjector {
     /// the first re-projection (the signal's initial value) has finished.
     ///
     /// Session-scoped: a re-projection writes into the store, so it must not
-    /// outlive it.
+    /// outlive it. `None` means the session was already shutting down.
     fn reproject_on<S>(
         self: Arc<Self>,
         signal: S,
         shutdown: &holon_api::lifecycle::SessionShutdown,
-    ) -> tokio::sync::oneshot::Receiver<()>
+    ) -> Option<tokio::sync::oneshot::Receiver<()>>
     where
         S: futures_signals::signal::Signal + Send + 'static,
         S::Item: Send,
@@ -295,14 +302,17 @@ impl IntegrationStateProjector {
                 }
             }
         });
-        shutdown.spawn("integration-reprojector", async move {
+        let spawned = shutdown.try_spawn("integration-reprojector", async move {
             tokio::select! {
                 biased;
                 () = cancelled => {}
                 () = pump => {}
             }
         });
-        first_rx
+        if spawned.is_err() {
+            return None;
+        }
+        Some(first_rx)
     }
 }
 
