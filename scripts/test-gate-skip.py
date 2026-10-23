@@ -59,8 +59,15 @@ def main():
     out, err = on_paths("docs/Plans/x.md", "crates/holon-net/tests/net_file.rs", "crates/holon-core/tests/shape_gate/claims.rs")
     assert out == SKIP, f"a docs and unnamed-test-binary diff must skip, got {out!r}: {err}"
 
+    out, err = on_paths("docs/Architecture/FeatureMap.md", "docs/Architecture/featuremap.yaml",
+                        "docs/Architecture/baseline/crates", "docs/Testing/known-red-evidence/x/y.md",
+                        "crates/holon-net/tests/net_file.rs")
+    assert out == SKIP, f"files only steps outside the skip set read must skip, got {out!r}: {err}"
+
     for trigger in ["Cargo.lock", "crates/holon-api/Cargo.toml", "justfile", ".config/nextest.toml",
-                    "rust-toolchain.toml", ".cargo/config.toml", "docs/Testing/KeystoneKnownReds.md"]:
+                    "rust-toolchain.toml", ".cargo/config.toml", "docs/Testing/KeystoneKnownReds.md",
+                    "scripts/timing-assertions-baseline.txt", "docs/Testing/AdmissionFootprintCensus.md",
+                    "docs/Testing/HomeProfileLookupLatency.txt"]:
         expect_full([trigger], trigger, "trigger")
 
     expect_full(["crates/holon-api/src/lib.rs"], "crates/holon-api/src/lib.rs",

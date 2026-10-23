@@ -32,7 +32,7 @@ SKIPPED_RECIPES = [
 ]
 CLOSURE_ROOT = "holon-integration-tests"
 
-# Files every step reads, and files that tests or step recipes read at run time.
+# Files every step reads, and files that the skipped steps or the tests they run read.
 TRIGGERS = [
     "Cargo.lock", "*/Cargo.lock", "Cargo.toml", "*/Cargo.toml",
     "justfile", ".config/*", "rust-toolchain*", ".cargo/*", "workspace-hack/*",
@@ -40,10 +40,6 @@ TRIGGERS = [
     "docs/Testing/TimingCritical.md",
     "docs/Testing/AdmissionFootprintCensus.md",
     "docs/Testing/HomeProfileLookupLatency.txt",
-    "docs/Testing/known-red-evidence/*",
-    "docs/Architecture/featuremap.yaml",
-    "docs/Architecture/FeatureMap.md",
-    "docs/Architecture/baseline/*",
     "scripts/timing-assertions-baseline.txt",
     "crates/holon-integration-tests/hand-authored-regressions/*",
     "crates/holon-integration-tests/src/pbt/transitions/mod.rs",
