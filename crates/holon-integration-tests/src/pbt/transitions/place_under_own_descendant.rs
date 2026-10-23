@@ -11,6 +11,9 @@
 //! The oracle applies it as a NO-OP; `inv-no-parent-cycles` and the tree
 //! comparisons judge the store.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
@@ -48,6 +51,32 @@ fn is_strict_descendant<R: RefBlockTree>(
         && state.is_descendant_of_any(descendant, &std::iter::once(ancestor.clone()).collect())
 }
 
+/// Every block's strict descendants among `all`, in `all`'s order: one walk
+/// up from each block instead of an ancestry check per pair.
+fn strict_descendants<R: RefBlockTree>(
+    state: &R,
+    all: &BTreeSet<EntityUri>,
+) -> BTreeMap<EntityUri, Vec<EntityUri>> {
+    let mut out: BTreeMap<EntityUri, Vec<EntityUri>> = BTreeMap::new();
+    for d in all {
+        // The same bound on the walk as `is_descendant_of_any`.
+        let mut ancestors = BTreeSet::new();
+        let mut current = d.clone();
+        for _ in 0..50 {
+            let Some(parent) = state.parent_of(&current) else {
+                break;
+            };
+            ancestors.insert(parent.clone());
+            current = parent;
+        }
+        ancestors.remove(d);
+        for ancestor in ancestors {
+            out.entry(ancestor).or_default().push(d.clone());
+        }
+    }
+    out
+}
+
 impl<R: RefLifecycle + RefBlockTree + RefLayout> TransitionFactory<R> for PlaceUnderOwnDescendant {
     fn required_caps() -> Vec<holon_pbt_core::composition::CapId> {
         Self::declared_caps()
@@ -57,12 +86,15 @@ impl<R: RefLifecycle + RefBlockTree + RefLayout> TransitionFactory<R> for PlaceU
 
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         let all = state.all_block_ids();
+        let descendants = strict_descendants(state, &all);
         let pairs: Vec<PlaceUnderOwnDescendant> = all
             .iter()
             .filter(|id| movable(state, id))
             .flat_map(|id| {
-                all.iter()
-                    .filter(|d| is_strict_descendant(state, d, id))
+                descendants
+                    .get(id)
+                    .into_iter()
+                    .flatten()
                     .map(|d| PlaceUnderOwnDescendant {
                         id: id.clone(),
                         descendant: d.clone(),

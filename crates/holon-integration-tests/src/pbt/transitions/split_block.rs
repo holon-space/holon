@@ -223,6 +223,11 @@ pub fn split_block_weighted_generator<R: RefBlockTree + RefEditorMirror + RefLif
     let mut candidates: Vec<(EntityUri, usize)> = vec![];
     for id in state.main_editable_descendants() {
         if let Some(text) = state.block_content(&id) {
+            // Every caret position below passes the position checks, so the
+            // block's own checks decide for all of them at once.
+            if !split_block_preconditions(&id, 0, state).is_good() {
+                continue;
+            }
             // Char boundaries only — a user caret can't sit mid-codepoint.
             // `0..=len` over bytes generated unsliceable positions once
             // multi-byte content existed (extended-gen axis 1).
@@ -231,9 +236,7 @@ pub fn split_block_weighted_generator<R: RefBlockTree + RefEditorMirror + RefLif
                 .map(|(i, _)| i)
                 .chain(std::iter::once(text.len()))
             {
-                if split_block_preconditions(&id, position, state).is_good() {
-                    candidates.push((id.clone(), position));
-                }
+                candidates.push((id.clone(), position));
             }
         }
     }

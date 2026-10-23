@@ -120,12 +120,13 @@ pub fn type_chars_weighted_generator<
         // A seated creation slot is the rare state (a jump into an EMPTY page)
         // where typing is the whole point; at weight 1 the random walk almost
         // always left it before any multi-character draw reached it.
-        // Doubled with `FocusEditableText`'s weights, for the same reason.
+        // Scaled with `FocusEditableText`'s weights against the copies-window
+        // arms (`MIN_SQLONLY_TYPING_CASE_SHARE`).
         let tc_weight = match last {
-            _ if caret_creation_slot_parent(state).is_some() => 12,
-            Some("FocusEditableText") | Some("MoveCursor") => 12,
-            Some("TypeChars") => 8,
-            _ => 2,
+            _ if caret_creation_slot_parent(state).is_some() => 18,
+            Some("FocusEditableText") | Some("MoveCursor") => 18,
+            Some("TypeChars") => 12,
+            _ => 3,
         };
         let strat = crate::pbt::generators::typing_text_strategy()
             .prop_map(|text: String| TypeChars { text })

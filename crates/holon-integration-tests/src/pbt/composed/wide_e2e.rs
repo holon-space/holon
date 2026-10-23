@@ -1985,18 +1985,20 @@ pub const MIN_SQL_CRUD_DRAW_SHARE: f64 = 1.0 / 8.0;
 
 /// The floor on the share of GENERATED SqlOnly cases that must commit at least
 /// one typed edit into block content — see
-/// `sqlonly_generated_cases_commit_typed_edits_into_block_content`.
+/// `sqlonly_typing_share_meets_its_floor_beside_the_loro_control`.
 /// [`MIN_SQL_CRUD_DRAW_SHARE`] only proves the shipped-default mode is drawn;
 /// this proves the mode can be TYPED in, which is the coverage both the
 /// post-split sibling-order and the stale-marks prod bugs escaped through.
 ///
 /// A DRIFT DETECTOR, a third below the 0.109 first measured over 64 cases ×
-/// 40 steps; every run prints the current SqlOnly and Loro-control shares as
-/// `[keystone-typing-share]`. The modes are at parity: the rate is what the
-/// SHARED generator offers (a case must draw `FocusEditableText` and then
-/// `TypeChars` before anything blurs the editor). The draw is deterministic,
-/// so only a generator change moves it: a red means a change starved typing,
-/// typically a new high-weight arm, and the fix is in the generator weights.
+/// 40 steps, and below the share the current weights give
+/// (`TYPING_SHARE_MEASURED` in the test); every run prints the current SqlOnly
+/// and Loro-control shares in one `[keystone-typing-share]` line. The modes are
+/// at parity: the rate is what the SHARED generator offers (a case must draw
+/// `FocusEditableText` and then `TypeChars` before anything blurs the editor).
+/// The draw is deterministic, so only a generator change moves it: a red means
+/// a change starved typing, typically a new high-weight arm, and the fix is in
+/// the generator weights.
 pub const MIN_SQLONLY_TYPING_CASE_SHARE: f64 = 0.07;
 
 /// Resolve a drawn manifest into the `ComponentSet` the composed SUT boots.
@@ -3467,13 +3469,33 @@ mod tests {
             .collect()
     }
 
-    // Cases × steps mirror the live keystone's `sequential_strategy(1..40)`.
-    const TYPING_CASES: usize = 64;
+    // Steps mirror the live keystone's `sequential_strategy(1..40)`.
     const TYPING_STEPS: usize = 40;
 
-    /// Share of generated cases in which a drawn `TypeChars` actually
+    /// The SqlOnly typing share the current weights give, measured over the
+    /// first 300 deterministic cases.
+    const TYPING_SHARE_MEASURED: f64 = 0.157;
+
+    /// One-sided 95 % normal quantile.
+    const TYPING_SHARE_Z: f64 = 1.645;
+
+    /// Draw count from the share tolerance: with a true share `p` the
+    /// measured share has standard error `sqrt(p(1-p)/n)`, so it stays above
+    /// the floor `f` at confidence `z` when `n >= z²·p(1-p)/(p-f)²`
+    /// (p = 0.157, f = 0.07, z = 1.645 → 48).
+    fn typing_cases() -> usize {
+        let p = TYPING_SHARE_MEASURED;
+        let tolerance = p - MIN_SQLONLY_TYPING_CASE_SHARE;
+        assert!(
+            tolerance > 0.0,
+            "the floor must sit below the measured share"
+        );
+        (TYPING_SHARE_Z.powi(2) * p * (1.0 - p) / tolerance.powi(2)).ceil() as usize
+    }
+
+    /// Number of generated cases in which a drawn `TypeChars` actually
     /// CHANGED reference block content.
-    fn committed_typing_share(base: &ReferenceState) -> (usize, f64) {
+    fn committed_typing_cases(base: &ReferenceState, cases: usize) -> usize {
         use proptest::strategy::Strategy;
         use proptest::strategy::ValueTree;
         use proptest::test_runner::TestRunner;
@@ -3482,7 +3504,7 @@ mod tests {
 
         let mut runner = TestRunner::deterministic();
         let mut typed_cases = 0usize;
-        for _ in 0..TYPING_CASES {
+        for _ in 0..cases {
             let mut state = base.clone();
             let mut committed = false;
             for _ in 0..TYPING_STEPS {
@@ -3509,7 +3531,7 @@ mod tests {
                 typed_cases += 1;
             }
         }
-        (typed_cases, typed_cases as f64 / TYPING_CASES as f64)
+        typed_cases
     }
 
     /// **Tasks #20 / #52 — the SqlOnly mode must be TYPEABLE, per case.**
@@ -3530,47 +3552,46 @@ mod tests {
     /// The SUT half of that claim (the same commit landing in `block_raw`
     /// through the production editor sink) is
     /// `sqlonly_typing_commits_through_the_editor_sink_into_block_raw`.
+    ///
+    /// The same draw under a Loro wiring is printed in the same line as a
+    /// parity control, so a drift reads as a mode gap or as a generator-wide
+    /// one.
     #[test]
-    fn sqlonly_generated_cases_commit_typed_edits_into_block_content() {
+    fn sqlonly_typing_share_meets_its_floor_beside_the_loro_control() {
         let wiring = sqlonly_wiring();
         assert!(
             !set_for_wiring(&wiring).has_projection(Projection::EditorState),
             "premise: this draw runs SqlOnly (SQL block-CRUD authority)"
         );
-        // Boots one composed SqlOnly SUT to read its real cap set (cached).
-        let (sql_cases, sql_share) = committed_typing_share(&wide_e2e_ref_for(&wiring));
+        let cases = typing_cases();
+        // Boots one composed SUT per wiring to read its real cap set (cached).
+        let sql_cases = committed_typing_cases(&wide_e2e_ref_for(&wiring), cases);
+        let loro_cases = committed_typing_cases(
+            &wide_e2e_ref_for(&Wiring::custom(
+                vec![
+                    StorageAdapter::Org,
+                    StorageAdapter::Loro,
+                    StorageAdapter::Turso,
+                ],
+                vec![],
+                vec![],
+            )),
+            cases,
+        );
+        let sql_share = sql_cases as f64 / cases as f64;
+        let loro_share = loro_cases as f64 / cases as f64;
         eprintln!(
-            "[keystone-typing-share] SqlOnly {sql_cases}/{TYPING_CASES} ({sql_share:.3}) floor \
-             {MIN_SQLONLY_TYPING_CASE_SHARE:.3} — cases that committed a typed edit into block \
-             content"
+            "[keystone-typing-share] SqlOnly {sql_cases}/{cases} ({sql_share:.3}) floor \
+             {MIN_SQLONLY_TYPING_CASE_SHARE:.3} | Loro control {loro_cases}/{cases} \
+             ({loro_share:.3}) — cases that committed a typed edit into block content"
         );
         assert!(
             sql_share >= MIN_SQLONLY_TYPING_CASE_SHARE,
-            "SqlOnly TYPING coverage floor: only {sql_cases}/{TYPING_CASES} ({sql_share:.3}) \
+            "SqlOnly TYPING coverage floor: only {sql_cases}/{cases} ({sql_share:.3}) \
              generated SqlOnly cases committed a typed edit into block content, below the \
              {MIN_SQLONLY_TYPING_CASE_SHARE:.3} floor — the keystone cannot type with \
              `crdt.enabled = false`, so no property covers its \
              editor→`set_field(\"content\")` write path"
-        );
-    }
-
-    /// The parity control of the SqlOnly typing share: the same draw under a
-    /// Loro wiring, disclosed beside it, so a drift reads as a mode gap or as
-    /// a generator-wide one.
-    #[test]
-    fn loro_control_typing_share_is_disclosed() {
-        let (cases, share) = committed_typing_share(&wide_e2e_ref_for(&Wiring::custom(
-            vec![
-                StorageAdapter::Org,
-                StorageAdapter::Loro,
-                StorageAdapter::Turso,
-            ],
-            vec![],
-            vec![],
-        )));
-        eprintln!(
-            "[keystone-typing-share] Loro control {cases}/{TYPING_CASES} ({share:.3}) — cases \
-             that committed a typed edit into block content"
         );
     }
 

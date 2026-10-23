@@ -10,6 +10,8 @@
 //!   and a condition names the block, its owner's file and the file with the
 //!   copy (D229.b)
 
+use std::collections::HashSet;
+
 use holon_api::EntityUri;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
@@ -79,10 +81,16 @@ impl TransitionFactory<ReferenceState> for PasteBlockCopy {
                 .collect();
             // A heading with children too, so the editor can delete a child
             // line while the copy stands.
-            let blocks = &state.domain.block_state.blocks;
+            let parent_ids: HashSet<&EntityUri> = state
+                .domain
+                .block_state
+                .blocks
+                .values()
+                .map(|b| &b.parent_id)
+                .collect();
             let parents: Vec<(EntityUri, EntityUri, EntityUri)> = candidates
                 .iter()
-                .filter(|(id, _, _)| blocks.values().any(|b| b.parent_id == *id))
+                .filter(|(id, _, _)| parent_ids.contains(id))
                 .cloned()
                 .collect();
             let mut picks = vec![(1, prop::sample::select(candidates).boxed())];
