@@ -3,6 +3,7 @@
 
 Run: `python3 scripts/test-gate-skip.py`. Exits non-zero on the first violation.
 """
+import ast
 import importlib.util
 import json
 import subprocess
@@ -52,8 +53,25 @@ def check_scan():
     assert ws.named_pkgs == {"holon-net"}, f"a bare test(=module::) row names the crate holding tests/module: {ws.named_pkgs}"
 
 
+def check_baseline_readers():
+    """timing-assertions-baseline.txt is allowed because only `assertions` (step 7) reads it."""
+    timing_split = (REPO / "scripts" / "timing-split.py").read_text()
+    g = load_module()
+    other_steps = g.step_sources(REPO, (REPO / "justfile").read_text()).replace(timing_split, "")
+    assert "timing-assertions-baseline" not in other_steps, "a skipped step outside timing-split.py names the baseline"
+    tree = ast.parse(timing_split)
+    readers = {"cmd_assertions", "read_baseline"}
+    for node in tree.body:
+        scope = node.name if isinstance(node, ast.FunctionDef) else None
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name) and n.id in ("BASELINE", "read_baseline") and isinstance(n.ctx, ast.Load):
+                assert scope in readers, f"timing-split.py:{n.lineno}: {n.id} used in {scope or 'module scope'}; " \
+                    "a skipped step may now read the baseline, so put it back on gate-skip.py's TRIGGERS"
+
+
 def main():
     check_scan()
+    check_baseline_readers()
     out, err = on_paths("crates/holon-net/tests/net_load.rs")
     assert out == SKIP, f"a tests/-only diff of one binary must skip, got {out!r}: {err}"
     out, err = on_paths("docs/Plans/x.md", "crates/holon-net/tests/net_file.rs", "crates/holon-core/tests/shape_gate/claims.rs")
@@ -64,9 +82,12 @@ def main():
                         "crates/holon-net/tests/net_file.rs")
     assert out == SKIP, f"files only steps outside the skip set read must skip, got {out!r}: {err}"
 
+    out, err = on_paths("scripts/timing-assertions-baseline.txt", "crates/holon-net/tests/net_file.rs")
+    assert out == SKIP, f"the timing-assertions baseline plus one test binary must skip, got {out!r}: {err}"
+
     for trigger in ["Cargo.lock", "crates/holon-api/Cargo.toml", "justfile", ".config/nextest.toml",
                     "rust-toolchain.toml", ".cargo/config.toml", "docs/Testing/KeystoneKnownReds.md",
-                    "scripts/timing-assertions-baseline.txt", "docs/Testing/AdmissionFootprintCensus.md",
+                    "docs/Testing/AdmissionFootprintCensus.md",
                     "docs/Testing/HomeProfileLookupLatency.txt"]:
         expect_full([trigger], trigger, "trigger")
 

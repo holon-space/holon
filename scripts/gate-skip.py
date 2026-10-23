@@ -40,7 +40,6 @@ TRIGGERS = [
     "docs/Testing/TimingCritical.md",
     "docs/Testing/AdmissionFootprintCensus.md",
     "docs/Testing/HomeProfileLookupLatency.txt",
-    "scripts/timing-assertions-baseline.txt",
     "crates/holon-integration-tests/hand-authored-regressions/*",
     "crates/holon-integration-tests/src/pbt/transitions/mod.rs",
     "assets/*",
@@ -48,6 +47,8 @@ TRIGGERS = [
     "*.wasm",
 ]
 
+# Files outside docs/ that only non-skipped steps read; test-gate-skip.py pins each reader.
+NOT_REACHING = ["scripts/timing-assertions-baseline.txt"]
 
 class Workspace:
     def __init__(self, metadata, step_sources, timing_profile):
@@ -107,7 +108,7 @@ def blocker(path, ws):
     member = ws.owner(p)
     if member is not None and p.relative_to(ws.dirs[member]).parts[0] != "tests":
         return f"lib src of {member}" + (f", in the {CLOSURE_ROOT} closure" if member in ws.closure else "")
-    if p.parts[0] == "docs":
+    if p.parts[0] == "docs" or path in NOT_REACHING:
         return None
     if member is None:
         return "unknown path"

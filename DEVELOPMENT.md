@@ -719,9 +719,10 @@ Notes:
 `scripts/gate-skip.py --base <rev> --tip <rev>` reads the batch diff and prints
 `full` or `skip: 3 4 5 6 11 12 13 14 15 16 18` (the landing gate's release-shape
 and wasm checks and its test-running steps). It skips only when every changed
-path is a doc or one test binary that no skipped step names, and no path is a
-trigger (manifests, toolchain, justfile, nextest config, files the skipped steps
-or their tests read). It prints each blocking path and its reason on stderr. Its self-check is
+path is a doc, a file only non-skipped steps read, or one test binary that no
+skipped step names, and no path is a trigger (manifests, toolchain, justfile,
+nextest config, files the skipped steps or their tests read). It prints each
+blocking path and its reason on stderr. Its self-check is
 `python3 scripts/test-gate-skip.py`.
 
 ## iOS live-MCP E2E gate (`general_e2e_composed_pbt_live_mcp`)
