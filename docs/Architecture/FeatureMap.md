@@ -386,6 +386,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `ref-diverge-content-text-drift`
 - `ref-diverge-parent-reparent`
 - `shopping-mapping-cost-slo`
+- `slo-probe-arm-refusal-caught-panic`
 - `slot-withdrawn-last-claim-no-retraction`
 - `task-state-clear-lost-across-cut-paste`
 - `text-undo-manager-load`
@@ -394,12 +395,14 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `tui-inline-row-mount-unsettled-frame`
 - `turso-block-query-source-round-trip`
 - `two-instance-loro-docs-no-common-state`
+- `two-instance-one-way-share-receiver-org-missing`
 - `typechars-sql-reads-budget`
 - `undo-prod-session-source-block-marks`
 - `undo-prod-session-stale-dropped`
 - `vault-scale-main-panel-delivery`
 - `wb-d6-stall-resurrects-deleted-line`
 - `wb-d7-stall-splits-edited-line`
+- `wide-e2e-shrinker-list-app-item-missing`
 - `windowed-clickblock-bounds-under-load`
 - `windowed-splitblock-no-editable-surface`
 - `writeorgfile-sql-reads-budget`
