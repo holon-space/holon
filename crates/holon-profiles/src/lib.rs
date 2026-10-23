@@ -261,33 +261,49 @@ pub struct ParsedProfile {
 ///     tier: computed_persisted
 ///     expr: 'role + " — " + email'
 /// ```
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(from = "ComputedFieldDeclRepr")]
+#[derive(Debug, Clone)]
 pub struct ComputedFieldDecl {
     pub expr: String,
     pub tier: ComputedTier,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum ComputedFieldDeclRepr {
-    Bare(String),
-    Tiered {
-        expr: String,
-        #[serde(default)]
-        tier: ComputedTier,
-    },
-}
-
-impl From<ComputedFieldDeclRepr> for ComputedFieldDecl {
-    fn from(repr: ComputedFieldDeclRepr) -> Self {
-        match repr {
-            ComputedFieldDeclRepr::Bare(expr) => ComputedFieldDecl {
-                expr,
-                tier: ComputedTier::default(),
-            },
-            ComputedFieldDeclRepr::Tiered { expr, tier } => ComputedFieldDecl { expr, tier },
+impl<'de> serde::Deserialize<'de> for ComputedFieldDecl {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Dispatch on the YAML shape, so a malformed mapping names its bad
+        // key instead of serde's untagged-enum message.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Tiered {
+            expr: String,
+            #[serde(default)]
+            tier: ComputedTier,
         }
+        struct DeclVisitor;
+        impl<'de> serde::de::Visitor<'de> for DeclVisitor {
+            type Value = ComputedFieldDecl;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(
+                    "a computed field: an expression string, or `{ expr: <string>, tier: \
+                     computed_persisted | computed_live }`",
+                )
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<ComputedFieldDecl, E> {
+                Ok(ComputedFieldDecl {
+                    expr: s.to_string(),
+                    tier: ComputedTier::default(),
+                })
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<ComputedFieldDecl, A::Error> {
+                let Tiered { expr, tier } = serde::Deserialize::deserialize(
+                    serde::de::value::MapAccessDeserializer::new(map),
+                )?;
+                Ok(ComputedFieldDecl { expr, tier })
+            }
+        }
+        deserializer.deserialize_any(DeclVisitor)
     }
 }
 
@@ -1787,6 +1803,66 @@ pub fn is_profile_block_by_source_language(source_language: Option<&str>) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computed_field_decl_loads_every_valid_shape() {
+        let cases = [
+            (
+                "'task_state != ()'",
+                "task_state != ()",
+                ComputedTier::ComputedLive,
+            ),
+            ("'= a + b'", "= a + b", ComputedTier::ComputedLive),
+            ("{ expr: a }", "a", ComputedTier::ComputedLive),
+            (
+                "{ tier: computed_persisted, expr: a }",
+                "a",
+                ComputedTier::ComputedPersisted,
+            ),
+            (
+                "{ expr: a, tier: computed_live }",
+                "a",
+                ComputedTier::ComputedLive,
+            ),
+        ];
+        for (yaml, expr, tier) in cases {
+            let decl: ComputedFieldDecl =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("`{yaml}` must load: {e}"));
+            assert_eq!((decl.expr.as_str(), decl.tier), (expr, tier), "`{yaml}`");
+        }
+    }
+
+    #[test]
+    fn computed_field_decl_refuses_every_malformed_shape_by_name() {
+        let cases = [
+            (
+                "{ expr: a, teir: computed_persisted }",
+                "unknown field `teir`",
+            ),
+            (
+                "{ expr: a, tier: computed_persisted, extra: 1 }",
+                "unknown field `extra`",
+            ),
+            ("{ exp: a }", "unknown field `exp`"),
+            ("{ tier: computed_live }", "missing field `expr`"),
+            ("{ expr: a, tier: bogus }", "unknown variant `bogus`"),
+            ("{ expr: [a] }", "sequence"),
+            ("5", "integer `5`, expected a computed field"),
+        ];
+        let wrong: Vec<String> = cases
+            .into_iter()
+            .filter_map(
+                |(yaml, needle)| match serde_yaml::from_str::<ComputedFieldDecl>(yaml) {
+                    Ok(d) => Some(format!("`{yaml}` loaded as {d:?}")),
+                    Err(e) if !e.to_string().contains(needle) => {
+                        Some(format!("`{yaml}`: error must contain `{needle}`: {e}"))
+                    }
+                    Err(_) => None,
+                },
+            )
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
 
     /// The block profile is its own renderer on the render seat.
     fn entity_dispatch() -> holon_api::render_requirements::RenderRequirements {

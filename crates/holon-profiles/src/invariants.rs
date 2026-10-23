@@ -61,11 +61,47 @@ pub(crate) struct InvariantRepr {
     on_violation: OnViolationRepr,
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 enum OnViolationRepr {
     Keyword(String),
     Repair(RepairRepr),
+}
+
+impl<'de> serde::Deserialize<'de> for OnViolationRepr {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Dispatch on the YAML shape, so a malformed repair names its bad key
+        // instead of serde's untagged-enum message.
+        struct PolicyVisitor;
+        impl<'de> serde::de::Visitor<'de> for PolicyVisitor {
+            type Value = OnViolationRepr;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(
+                    "an on_violation policy: `disclose` or `{ repair: <name>, set: { <field>: \
+                     <constant> } }`",
+                )
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<OnViolationRepr, E> {
+                Ok(OnViolationRepr::Keyword(s.to_string()))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<OnViolationRepr, A::Error> {
+                serde::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(OnViolationRepr::Repair)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                _: A,
+            ) -> Result<OnViolationRepr, A::Error> {
+                Err(serde::de::Error::custom(
+                    "a positional `on_violation` list is refused: write it keyed, as `{ repair: \
+                     <name>, target: subject, set: { <field>: <constant> }, delete: false }`",
+                ))
+            }
+        }
+        deserializer.deserialize_any(PolicyVisitor)
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]

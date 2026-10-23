@@ -237,13 +237,50 @@ fn default_ops() -> Vec<String> {
 
 /// A URI template parameter value — either static, dynamic (required from
 /// WHERE), or dynamic with a enumeration enumeration from another entity.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum UriParamValue {
     /// Structured: dynamic param with enumeration enumeration.
     Dynamic(DynamicUriParam),
     /// Plain string: empty = required from WHERE, non-empty = static.
     Static(String),
+}
+
+impl<'de> Deserialize<'de> for UriParamValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Dispatch on the YAML shape, so a malformed mapping names its bad
+        // key instead of loading as, or failing as, the other variant.
+        struct ParamVisitor;
+        impl<'de> serde::de::Visitor<'de> for ParamVisitor {
+            type Value = UriParamValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(
+                    "a URI param: a string (empty = required from WHERE) or `{ enumerate_from: \
+                     { entity, field | fields, ... } }`",
+                )
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<UriParamValue, E> {
+                Ok(UriParamValue::Static(s.to_string()))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<UriParamValue, A::Error> {
+                DynamicUriParam::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(UriParamValue::Dynamic)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                _: A,
+            ) -> Result<UriParamValue, A::Error> {
+                Err(serde::de::Error::custom(
+                    "a positional `uri_params` list is refused: write it keyed, as `{ \
+                     enumerate_from: { entity: <entity>, field: <field> } }`",
+                ))
+            }
+        }
+        deserializer.deserialize_any(ParamVisitor)
+    }
 }
 
 impl UriParamValue {
@@ -265,6 +302,7 @@ impl UriParamValue {
 /// Dynamic URI param with a enumeration: when WHERE doesn't provide the value,
 /// enumerate all values from the referenced entity's field.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DynamicUriParam {
     pub enumerate_from: EnumerateFrom,
 }
@@ -1996,6 +2034,138 @@ mod tests {
         assert_eq!(parse_constraint_op(">="), Some(ConstraintOp::Ge));
         assert_eq!(parse_constraint_op("like"), Some(ConstraintOp::Like));
         assert_eq!(parse_constraint_op("unknown"), None);
+    }
+
+    #[test]
+    fn uri_param_value_loads_every_valid_shape() {
+        let cases = [
+            ("''", serde_json::json!("")),
+            ("abc", serde_json::json!("abc")),
+            (
+                "{ enumerate_from: { entity: project, field: id } }",
+                serde_json::json!({ "enumerate_from": { "entity": "project", "field": "id" } }),
+            ),
+            (
+                "{ enumerate_from: { entity: repo, fields: { owner: owner }, where: 'x > 1', \
+                 order_by: x DESC, limit: 5 } }",
+                serde_json::json!({ "enumerate_from": {
+                    "entity": "repo", "fields": { "owner": "owner" }, "where": "x > 1",
+                    "order_by": "x DESC", "limit": 5 } }),
+            ),
+        ];
+        for (yaml, expected) in cases {
+            let value: UriParamValue =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("`{yaml}` must load: {e}"));
+            assert_eq!(serde_json::to_value(&value).unwrap(), expected, "`{yaml}`");
+            assert_eq!(
+                value.is_dynamic(),
+                !expected.as_str().is_some_and(|s| !s.is_empty()),
+                "`{yaml}`"
+            );
+        }
+    }
+
+    #[test]
+    fn uri_param_value_refuses_every_malformed_shape_by_name() {
+        let cases = [
+            (
+                "{ enumerate_from: { entity: project, field: id }, limit: 5 }",
+                "unknown field `limit`",
+            ),
+            (
+                "{ enumerate_frm: { entity: project, field: id } }",
+                "unknown field `enumerate_frm`",
+            ),
+            ("{}", "missing field `enumerate_from`"),
+            ("5", "integer `5`, expected a URI param"),
+            ("[a]", "positional `uri_params` list is refused"),
+            (
+                "[{ entity: project, field: id }]",
+                "positional `uri_params` list is refused: write it keyed, as `{ enumerate_from: \
+                 { entity: <entity>, field: <field> } }`",
+            ),
+            ("{ enumerate_from: project }", "string \"project\""),
+        ];
+        let wrong: Vec<String> = cases
+            .into_iter()
+            .filter_map(
+                |(yaml, needle)| match serde_yaml::from_str::<UriParamValue>(yaml) {
+                    Ok(v) => Some(format!("`{yaml}` loaded as {v:?}")),
+                    Err(e) if !e.to_string().contains(needle) => {
+                        Some(format!("`{yaml}`: error must contain `{needle}`: {e}"))
+                    }
+                    Err(_) => None,
+                },
+            )
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The loader refuses the file that spells a URI param positionally and
+    /// discloses it by path, while the keyed file next to it still runs.
+    #[test]
+    fn a_positional_uri_param_refuses_its_file_and_spares_the_keyed_one() {
+        let sidecar = |param: &str| {
+            format!(
+                "schema_version: {}\ntransport:\n  child_process:\n    command: echo\n\
+                 entities:\n  task:\n    vtable:\n      list_resource: \"x://{{project}}\"\n      \
+                 uri_params:\n        project: {param}\ntools: {{}}\n",
+                crate::SIDECAR_SCHEMA_VERSION
+            )
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let files = [
+            (
+                "keyed",
+                "{ enumerate_from: { entity: project, field: id } }",
+            ),
+            ("positional", "[{ entity: project, field: id }]"),
+        ];
+        for (name, param) in files {
+            std::fs::write(dir.path().join(format!("{name}.yaml")), sidecar(param)).unwrap();
+        }
+        let store = crate::IntegrationConfigStore::load(dir.path()).unwrap();
+        for (name, _) in files {
+            store
+                .set(
+                    name,
+                    crate::integration_state::IntegrationState {
+                        enabled: true,
+                        configuration: crate::integration_state::Configuration::Unconfigured,
+                    },
+                )
+                .unwrap();
+        }
+        let store = crate::IntegrationConfigStore::load(dir.path()).unwrap();
+        let loaded = crate::load_integration_configs(
+            dir.path(),
+            &store,
+            &crate::CredentialRoot::new(dir.path()),
+        )
+        .expect("a refused file must not fail the load");
+
+        let running: Vec<&str> = loaded.configs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(running, ["keyed"]);
+        let [ignored] = loaded.ignored.as_slice() else {
+            panic!(
+                "exactly the positional file must be disclosed: {:?}",
+                loaded.ignored
+            );
+        };
+        assert_eq!(ignored.installed_path, dir.path().join("positional.yaml"));
+        let crate::IgnoredReason::Unusable { why } = &ignored.reason else {
+            panic!("expected an unusable file, got {:?}", ignored.reason);
+        };
+        for needle in [
+            "uri_params.project",
+            "positional `uri_params` list is refused",
+            "{ enumerate_from: { entity: <entity>, field: <field> } }",
+        ] {
+            assert!(
+                why.contains(needle),
+                "the disclosure must contain `{needle}`: {why}"
+            );
+        }
     }
 
     #[test]

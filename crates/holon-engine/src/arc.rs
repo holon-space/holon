@@ -265,18 +265,56 @@ pub struct OutputArc {
 
 /// How a create-arc attribute value is produced when the arc fires.
 ///
-/// `Expr` is a Rhai expression string evaluated against the bound-token scope
-/// (the historical behaviour, and what YAML nets deserialize to via the
-/// untagged string form). `Literal` carries a pre-typed [`Value`] passed
+/// `Expr` is a Rhai expression string evaluated against the bound-token scope;
+/// every string in a YAML net deserializes to it, and one that does not
+/// compile is refused. `Literal` carries a pre-typed [`Value`] passed
 /// straight through as data — never assembled into, or parsed as, Rhai source.
 /// Programmatic net builders MUST use `Literal` for any user-derived text so a
 /// `"` or `\\` in a name can never break out of a string literal or inject
 /// Rhai (parse-don't-validate).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum AttrInit {
     Expr(PostcondExpr),
     Literal(Value),
+}
+
+impl<'de> Deserialize<'de> for AttrInit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // A string is always an expression, so a malformed one is refused
+        // instead of loading as a literal string.
+        struct AttrVisitor;
+        impl<'de> serde::de::Visitor<'de> for AttrVisitor {
+            type Value = AttrInit;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str(
+                    "a create-arc attr: a Rhai expression or `$placeholder` string, a number, a \
+                     bool or null",
+                )
+            }
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<AttrInit, E> {
+                s.parse().map(AttrInit::Expr).map_err(E::custom)
+            }
+            fn visit_bool<E: serde::de::Error>(self, b: bool) -> Result<AttrInit, E> {
+                Ok(AttrInit::Literal(Value::Bool(b)))
+            }
+            fn visit_i64<E: serde::de::Error>(self, i: i64) -> Result<AttrInit, E> {
+                Ok(AttrInit::Literal(Value::Int(i)))
+            }
+            fn visit_u64<E: serde::de::Error>(self, u: u64) -> Result<AttrInit, E> {
+                Ok(AttrInit::Literal(
+                    i64::try_from(u).map_or(Value::Float(u as f64), Value::Int),
+                ))
+            }
+            fn visit_f64<E: serde::de::Error>(self, f: f64) -> Result<AttrInit, E> {
+                Ok(AttrInit::Literal(Value::Float(f)))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<AttrInit, E> {
+                Ok(AttrInit::Literal(Value::Null))
+            }
+        }
+        deserializer.deserialize_any(AttrVisitor)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -326,5 +364,55 @@ mod tests {
         }
         let err = "= done".parse::<PrecondSpec>().unwrap_err();
         assert!(err.contains("=="), "error must list valid operators: {err}");
+    }
+
+    #[test]
+    fn attr_init_loads_every_valid_shape() {
+        let expr = |s: &str| AttrInit::Expr(s.parse().unwrap());
+        let cases = [
+            ("'\"draft\"'", expr("\"draft\"")),
+            ("doc.state", expr("doc.state")),
+            ("'1.0 / 0.0'", expr("1.0 / 0.0")),
+            ("'5'", expr("5")),
+            ("$who", expr("$who")),
+            ("5", AttrInit::Literal(Value::Int(5))),
+            ("-3", AttrInit::Literal(Value::Int(-3))),
+            (
+                "18446744073709551615",
+                AttrInit::Literal(Value::Float(u64::MAX as f64)),
+            ),
+            ("1.5", AttrInit::Literal(Value::Float(1.5))),
+            ("true", AttrInit::Literal(Value::Bool(true))),
+            ("null", AttrInit::Literal(Value::Null)),
+            ("~", AttrInit::Literal(Value::Null)),
+        ];
+        for (yaml, expected) in cases {
+            let value: AttrInit =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("`{yaml}` must load: {e}"));
+            assert_eq!(value, expected, "`{yaml}`");
+        }
+    }
+
+    #[test]
+    fn attr_init_refuses_every_malformed_shape_by_name() {
+        let cases = [
+            ("'foo +'", "foo +"),
+            ("'$'", "'$'"),
+            ("{ a: 1 }", "map, expected a create-arc attr"),
+            ("[1]", "sequence"),
+        ];
+        let wrong: Vec<String> = cases
+            .into_iter()
+            .filter_map(
+                |(yaml, needle)| match serde_yaml::from_str::<AttrInit>(yaml) {
+                    Ok(v) => Some(format!("`{yaml}` loaded as {v:?}")),
+                    Err(e) if !e.to_string().contains(needle) => {
+                        Some(format!("`{yaml}`: error must contain `{needle}`: {e}"))
+                    }
+                    Err(_) => None,
+                },
+            )
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }
