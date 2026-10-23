@@ -714,6 +714,16 @@ Notes:
 - Timings assume a **warm build cache**; the first run after a rebase that
   touches many crates pays the compile cost once.
 
+### Which landing steps a batch may skip
+
+`scripts/gate-skip.py --base <rev> --tip <rev>` reads the batch diff and prints
+`full` or `skip: 3 4 5 6 11 12 13 14 15 16 18` (the landing gate's release-shape
+and wasm checks and its test-running steps). It skips only when every changed
+path is a doc or one test binary that no skipped step names, and no path is a
+trigger (manifests, toolchain, justfile, nextest config, files tests read at run
+time). It prints each blocking path and its reason on stderr. Its self-check is
+`python3 scripts/test-gate-skip.py`.
+
 ## iOS live-MCP E2E gate (`general_e2e_composed_pbt_live_mcp`)
 
 The out-of-process twin of the headless keystone: the SAME transitions +
