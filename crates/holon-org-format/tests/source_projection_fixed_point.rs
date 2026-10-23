@@ -62,6 +62,16 @@ fn is_question_without_text(task_state: Option<&TaskState>, content: &str) -> bo
     task_state.is_some_and(|s| asks_nothing(&s.keyword, content))
 }
 
+/// Content the state can project: a `QuestionWithoutText` pair is a refusal,
+/// so its content becomes non-blank; every other pair is unchanged.
+fn projectable_content(task_state: Option<&TaskState>, content: String) -> String {
+    if is_question_without_text(task_state, &content) {
+        "x".to_string()
+    } else {
+        content
+    }
+}
+
 proptest! {
     /// THE FIXED POINT. For every block state whose projection is accepted,
     /// parsing that projection reproduces the state exactly — same keyword,
@@ -78,7 +88,7 @@ proptest! {
             let kw = &all[keyword_index % all.len()];
             TaskState::from_keyword_with_done_list(kw, vocabulary.done_keywords())
         });
-        prop_assume!(!is_question_without_text(task_state.as_ref(), &content));
+        let content = projectable_content(task_state.as_ref(), content);
 
         let projected = source_projection(task_state.as_ref(), &content, &vocabulary);
         let SourceProjection::Text(text) = projected else {
@@ -118,7 +128,7 @@ proptest! {
         let all = vocabulary.all_keywords();
         let task_state =
             TaskState::from_keyword_with_done_list(&all[0], vocabulary.done_keywords());
-        prop_assume!(!is_question_without_text(Some(&task_state), &content));
+        let content = projectable_content(Some(&task_state), content);
         let SourceProjection::Text(text) =
             source_projection(Some(&task_state), &content, &vocabulary)
         else {
@@ -244,4 +254,24 @@ fn an_untasked_block_projects_to_its_content() {
         source_projection(None, "", &vocabulary),
         SourceProjection::Text(String::new())
     );
+}
+
+proptest! {
+    /// `projectable_content` leaves every projectable pair as drawn, so the
+    /// properties above still see all of them.
+    #[test]
+    fn projectable_content_only_changes_refused_pairs(
+        vocabulary in declared_vocabulary(),
+        keyword_index in 0usize..8,
+        content in content(),
+    ) {
+        let all = vocabulary.all_keywords();
+        let kw = &all[keyword_index % all.len()];
+        let task_state = TaskState::from_keyword_with_done_list(kw, vocabulary.done_keywords());
+        let fixed = projectable_content(Some(&task_state), content.clone());
+        prop_assert!(!is_question_without_text(Some(&task_state), &fixed));
+        if !is_question_without_text(Some(&task_state), &content) {
+            prop_assert_eq!(fixed, content);
+        }
+    }
 }

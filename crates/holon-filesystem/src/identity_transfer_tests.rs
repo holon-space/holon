@@ -337,6 +337,15 @@ fn ambiguous(case: &Case) -> bool {
     })
 }
 
+/// The first unambiguous case at or after `seed`, so an unambiguous seed
+/// yields its own case and no draw is discarded.
+fn unambiguous_case(seed: u64, shape: Shape) -> Case {
+    (0..1000u64)
+        .map(|i| gen_case(&mut Rng(seed.wrapping_add(i)), shape))
+        .find(|case| !ambiguous(case))
+        .expect("an unambiguous case within 1000 seeds")
+}
+
 /// The store matcher's content-unique tier, run on what transfer left unbound.
 fn bind_unique_text(base: &[BaseHeadline], parsed: &mut [ParsedHeadline]) -> Vec<usize> {
     let claimed: HashSet<EntityUri> = parsed.iter().filter_map(|p| p.id.clone()).collect();
@@ -526,7 +535,7 @@ proptest! {
         for (_, strategy) in strategies() {
             run(&case, strategy);
         }
-        prop_assume!(!ambiguous(&case));
+        let case = unambiguous_case(seed, SHAPES[shape]);
         let s = run(&case, recommended());
         prop_assert_eq!(s.lost_untouched, 0, "untouched line lost its id: {:#?}", case);
         if SHAPES[shape] == Shape::InPlaceEdit {
@@ -548,6 +557,21 @@ proptest! {
             for (got, want) in p.iter().zip(&parsed).filter(|(_, w)| w.id.is_some()) {
                 prop_assert_eq!(&got.id, &want.id);
             }
+        }
+    }
+}
+
+proptest! {
+    #[test]
+    fn an_unambiguous_seed_yields_its_own_case(seed in any::<u64>(), shape in 0..SHAPES.len()) {
+        let own = gen_case(&mut Rng(seed), SHAPES[shape]);
+        let got = unambiguous_case(seed, SHAPES[shape]);
+        prop_assert!(!ambiguous(&got));
+        if !ambiguous(&own) {
+            prop_assert_eq!(
+                format!("{:?}{:?}", got.base, got.edited),
+                format!("{:?}{:?}", own.base, own.edited)
+            );
         }
     }
 }

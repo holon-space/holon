@@ -433,7 +433,32 @@ fn keys_of(raw: Vec<String>) -> Vec<OptionKey> {
         .collect()
 }
 
-fn command(shape: &Shape) -> impl Strategy<Value = Command> {
+/// Which commands a decision in some status accepts.
+#[derive(Debug, Clone, Copy)]
+enum Phase {
+    Any,
+    Open,
+    Decided,
+    Withdrawn,
+}
+
+impl Phase {
+    fn of(status: &Status) -> Self {
+        match status {
+            Status::Open => Phase::Open,
+            Status::Decided(_) => Phase::Decided,
+            Status::Withdrawn { .. } => Phase::Withdrawn,
+        }
+    }
+}
+
+fn command(shape: &Shape) -> BoxedStrategy<Command> {
+    command_in(shape, Phase::Any)
+}
+
+/// A command `apply` accepts for a decision of this shape in `phase`.
+/// `Phase::Any` draws commands without regard to status or decider rights.
+fn command_in(shape: &Shape, phase: Phase) -> BoxedStrategy<Command> {
     let keys = shape.keys.clone();
     let n = keys.len();
     let bounds = shape.bounds;
@@ -442,6 +467,12 @@ fn command(shape: &Shape) -> impl Strategy<Value = Command> {
         pool.extend(HAZARD_ANSWERERS);
     }
     let answerer = prop::sample::select(pool).prop_map(|a| Answerer::parse(a).unwrap());
+    let decider_pool = match phase {
+        Phase::Any => answerer.clone().boxed(),
+        _ => prop::sample::select(DECIDERS)
+            .prop_map(|a| Answerer::parse(a).unwrap())
+            .boxed(),
+    };
     let note_text = if shape.hazard {
         lines(true)
     } else {
@@ -463,24 +494,34 @@ fn command(shape: &Shape) -> impl Strategy<Value = Command> {
             })
     };
     let per_key_cap = 300 / n as u32;
-    let body = prop_oneof![
-        subset(&shape.keys, bounds).prop_map(|k| AnswerInput::Pick(keys_of(k))),
-        probabilities(per_key_cap).prop_map(AnswerInput::Categorical),
-        probabilities(300).prop_map(AnswerInput::Marginals),
-    ];
-    prop_oneof![
-        3 => (answerer.clone(), body, rationale).prop_map(|(by, body, rationale)| {
-            Command::Answer { by, body, rationale }
-        }),
-        2 => (subset(&shape.keys, bounds), answerer.clone(), note).prop_map(
-            |(chosen, decider, note)| Command::Decide {
+    let pick = subset(&shape.keys, bounds).prop_map(|k| AnswerInput::Pick(keys_of(k)));
+    let marginals = probabilities(300).prop_map(AnswerInput::Marginals);
+    let body = if bounds.1 == 1 {
+        let categorical = probabilities(per_key_cap).prop_map(AnswerInput::Categorical);
+        prop_oneof![pick, categorical, marginals].boxed()
+    } else {
+        prop_oneof![pick, marginals].boxed()
+    };
+    let answer =
+        (answerer.clone(), body, rationale).prop_map(|(by, body, rationale)| Command::Answer {
+            by,
+            body,
+            rationale,
+        });
+    let decide =
+        (subset(&shape.keys, bounds), decider_pool, note).prop_map(|(chosen, decider, note)| {
+            Command::Decide {
                 chosen: keys_of(chosen),
                 decider,
                 note,
             }
-        ),
-        1 => answerer.prop_map(|by| Command::Withdraw { by }),
-    ]
+        });
+    let withdraw = answerer.prop_map(|by| Command::Withdraw { by });
+    match phase {
+        Phase::Any | Phase::Open => prop_oneof![3 => answer, 2 => decide, 1 => withdraw].boxed(),
+        Phase::Decided => prop_oneof![3 => answer, 2 => decide].boxed(),
+        Phase::Withdrawn => answer.boxed(),
+    }
 }
 
 /// A legal decision: asked, then the legal ones of a few random commands.
@@ -590,6 +631,17 @@ enum OddAnswer {
     NoAnswerer,
 }
 
+/// The headline re-reads the question's own first word as a keyword, or its
+/// trailing `:y:` as a tag group, so the breach would not read as its name.
+fn is_masked(breach: Breach, d: &Decision) -> bool {
+    let first_word = d.question().split(' ').next().unwrap_or_default();
+    match breach {
+        Breach::NoKeyword => PLAIN_QUESTIONS.iter().any(|q| q.starts_with(first_word)),
+        Breach::NoTag => holon_api::types::Tags::org_tag_group_start(d.question()).is_some(),
+        _ => false,
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: ProptestConfig::default().cases.max(512),
@@ -610,13 +662,14 @@ proptest! {
         (d, shape, c) in (decision_with(false), any::<bool>())
             .prop_flat_map(|((d, mut shape), hazard)| {
                 shape.hazard = hazard;
-                (Just(d), Just(shape.clone()), command(&shape))
+                let c = command_in(&shape, Phase::of(d.status()));
+                (Just(d), Just(shape), c)
             }),
         millis in 0..1000u32,
     ) {
-        let change = d.apply(c, instant(99, millis), &allowed());
-        prop_assume!(change.is_ok());
-        let change = change.unwrap();
+        let change = d
+            .apply(c, instant(99, millis), &allowed())
+            .expect("a command drawn for the decision's status applies");
         let mut vault = stored(&d);
         let (_, children) = vault.decision();
         let mint = vault.mint();
@@ -636,17 +689,7 @@ proptest! {
         (d, _shape) in decision_with(false),
         breach in prop::sample::select(Breach::ALL),
     ) {
-        let first_word = d.question().split(' ').next().unwrap_or_default();
-        prop_assume!(
-            !matches!(breach, Breach::NoKeyword)
-                || !PLAIN_QUESTIONS.iter().any(|q| q.starts_with(first_word)),
-            "without its own keyword the headline reads the question's first word as one"
-        );
-        prop_assume!(
-            !matches!(breach, Breach::NoTag)
-                || holon_api::types::Tags::org_tag_group_start(d.question()).is_none(),
-            "without its own tag group the headline reads the question's trailing :y: as one"
-        );
+        prop_assume!(!is_masked(breach, &d));
         let mut vault = stored(&d);
         breach.apply(&mut vault);
         let got = vault.read();
@@ -1054,4 +1097,36 @@ fn an_option_label_ending_in_a_tab_separated_tag_group_is_refused() {
         "{:?}",
         got.map(|v| v.read())
     );
+}
+
+/// `is_masked` is the one remaining filter. Its rejections stay below this
+/// share of draws, so at least 95% of the cases still run.
+const MAX_MASKED_SHARE: f64 = 0.05;
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1))]
+
+    #[test]
+    fn few_breach_draws_are_masked(seed in any::<u64>()) {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        let mut rng_seed = [0u8; 32];
+        rng_seed[..8].copy_from_slice(&seed.to_le_bytes());
+        let mut runner = TestRunner::new_with_rng(
+            Config::default(),
+            TestRng::from_seed(RngAlgorithm::ChaCha, &rng_seed),
+        );
+        let strategy = (decision_with(false), prop::sample::select(Breach::ALL));
+        let n = 5_000;
+        let masked = (0..n)
+            .filter(|_| {
+                let ((d, _), breach) = strategy.new_tree(&mut runner).unwrap().current();
+                is_masked(breach, &d)
+            })
+            .count();
+        prop_assert!(
+            (masked as f64) < MAX_MASKED_SHARE * f64::from(n),
+            "{masked} of {n} breach draws are masked"
+        );
+    }
 }

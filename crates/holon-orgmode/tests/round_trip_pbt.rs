@@ -168,10 +168,7 @@ fn corpus_document_from_index_org() -> CompleteDocument {
 
     let root_headlines = blocks
         .iter()
-        .filter(|b| {
-            (b.parent_id.is_sentinel() || b.parent_id.is_no_parent())
-                && b.content_type == ContentType::Text
-        })
+        .filter(|b| b.parent_id == doc.id && b.content_type == ContentType::Text)
         .map(|root_block| block_to_headline_spec(root_block, &blocks))
         .collect();
 
@@ -672,7 +669,7 @@ proptest! {
             .into_iter()
             .filter(|t| seen.insert(t.clone()))
             .collect();
-        prop_assume!(!unique_tags.is_empty());
+        assert!(!unique_tags.is_empty(), "the tag strategy draws at least one tag");
 
         let block_id = EntityUri::block(&Uuid::new_v4().to_string());
         let doc_id = EntityUri::block(&format!("test-{}", Uuid::new_v4()));
@@ -1383,7 +1380,10 @@ proptest! {
             .map(|(i, _)| i)
             .collect();
 
-        prop_assume!(!text_block_indices.is_empty());
+        assert!(
+            !text_block_indices.is_empty(),
+            "every complete document holds a text headline"
+        );
 
         // Step 2: Apply mutation
         match &mutation {
@@ -1402,11 +1402,12 @@ proptest! {
                 let idx = target_idx.index(text_block_indices.len());
                 let block_idx = text_block_indices[idx];
 
-                // Constrain task state mutations to default keywords only
                 if let BlockMutation::SetTaskState(Some(ts)) = other {
-                    let is_default = DEFAULT_ACTIVE_KEYWORDS.contains(&ts.keyword.as_str())
-                        || DEFAULT_DONE_KEYWORDS.contains(&ts.keyword.as_str());
-                    prop_assume!(is_default);
+                    assert!(
+                        DEFAULT_ACTIVE_KEYWORDS.contains(&ts.keyword.as_str())
+                            || DEFAULT_DONE_KEYWORDS.contains(&ts.keyword.as_str()),
+                        "the mutation strategy draws default task keywords only"
+                    );
                 }
 
                 apply_mutation(&mut baseline_blocks[block_idx], other);
@@ -1480,7 +1481,7 @@ proptest! {
 
         // Find headline sections in the stable org text
         let sections = find_headline_sections(&stable_org);
-        prop_assume!(!sections.is_empty());
+        assert!(!sections.is_empty(), "every complete document renders a headline");
 
         let section_count = sections.len();
         let idx = target_idx.index(section_count);
