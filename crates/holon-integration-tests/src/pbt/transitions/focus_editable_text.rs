@@ -116,12 +116,15 @@ impl<
 
         check(!candidates.is_empty(), Reason::NoFocusableBlocks).map(|_| {
             let last = state.last_transition_kind();
+            // Weighed against the copies-window arms (hundreds each): at half
+            // these weights almost no case focused, and typing coverage fell
+            // with it (`MIN_SQLONLY_TYPING_CASE_SHARE`).
             let weight = match last {
                 Some("StartApp")
                 | Some("NavigateFocus")
                 | Some("NavigateSidebar")
-                | Some("ClickBlock") => 5,
-                _ => 2,
+                | Some("ClickBlock") => 10,
+                _ => 4,
             };
 
             let strat = proptest::sample::select(candidates)

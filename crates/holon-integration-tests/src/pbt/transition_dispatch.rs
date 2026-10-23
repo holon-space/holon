@@ -482,6 +482,26 @@ macro_rules! declare_e2e_transitions {
             state: &$crate::pbt::reference_state::ReferenceState,
         ) -> ::proptest::strategy::BoxedStrategy<$enum_name> {
             use ::proptest::strategy::{Strategy, Union};
+
+            let arms = transition_arms(state);
+            assert!(
+                !arms.is_empty(),
+                "declare_e2e_transitions!: no transition applicable in state {state:?} \
+                 — at least one variant must be unconditionally enabled."
+            );
+            Union::new_weighted(arms.into_iter().map(|(_, weight, arm)| (weight, arm)).collect())
+                .boxed()
+        }
+
+        /// The weighted arms `aggregate_transitions` draws from, named, in
+        /// declaration order.
+        $vis fn transition_arms(
+            state: &$crate::pbt::reference_state::ReferenceState,
+        ) -> ::std::vec::Vec<(
+            &'static str,
+            u32,
+            ::proptest::strategy::BoxedStrategy<$enum_name>,
+        )> {
             use $crate::pbt::transition_dispatch::variant_weight_multiplier;
 
             // The block-interaction generators each enumerate every block and
@@ -491,7 +511,7 @@ macro_rules! declare_e2e_transitions {
             // nothing can mutate it under the hold.
             let _rendered_set = state.hold_rendered_set();
 
-            let mut arms: Vec<(u32, ::proptest::strategy::BoxedStrategy<$enum_name>)> = Vec::new();
+            let mut arms = ::std::vec::Vec::new();
 
             $(
                 // ADR 0007 item 3: derive the alphabet from the manifest.
@@ -527,9 +547,9 @@ macro_rules! declare_e2e_transitions {
                         variant_weight_multiplier(stringify!($variant)),
                         |v| $enum_name::from(v),
                     ) {
-                        ::validated::Validated::Good(Some(arm)) => {
+                        ::validated::Validated::Good(Some((weight, arm))) => {
                             $crate::pbt::alphabet_coverage::note_offered(stringify!($variant));
-                            arms.push(arm)
+                            arms.push((stringify!($variant), weight, arm))
                         }
                         ::validated::Validated::Good(None) => {}
                         ::validated::Validated::Fail(reasons) => {
@@ -545,13 +565,7 @@ macro_rules! declare_e2e_transitions {
                     }
                 }
             )*
-
-            assert!(
-                !arms.is_empty(),
-                "declare_e2e_transitions!: no transition applicable in state {state:?} \
-                 — at least one variant must be unconditionally enabled."
-            );
-            Union::new_weighted(arms).boxed()
+            arms
         }
 
         /// Every declared variant's drawability gate: `(name, required_wiring,

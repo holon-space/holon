@@ -1990,14 +1990,14 @@ pub const MIN_SQL_CRUD_DRAW_SHARE: f64 = 1.0 / 8.0;
 /// this proves the mode can be TYPED in, which is the coverage both the
 /// post-split sibling-order and the stale-marks prod bugs escaped through.
 ///
-/// A COLLAPSE DETECTOR, not a target — set well below the measurement so
-/// binomial noise cannot flake it. Measured over 64 cases × 40 steps: SqlOnly
-/// 0.109 against a Loro control of 0.094, i.e. the two modes are at parity and
-/// ~10% is simply what the SHARED generator offers (a case must draw
-/// `FocusEditableText` and then `TypeChars` before anything blurs the editor).
-/// Raising the rate is a generator question, not a mode question; this floor
-/// only catches a return to the zero SqlOnly had.
-pub const MIN_SQLONLY_TYPING_CASE_SHARE: f64 = 1.0 / 32.0;
+/// A DRIFT DETECTOR, a third below the 0.109 first measured over 64 cases ×
+/// 40 steps; every run prints the current SqlOnly and Loro-control shares as
+/// `[keystone-typing-share]`. The modes are at parity: the rate is what the
+/// SHARED generator offers (a case must draw `FocusEditableText` and then
+/// `TypeChars` before anything blurs the editor). The draw is deterministic,
+/// so only a generator change moves it: a red means a change starved typing,
+/// typically a new high-weight arm, and the fix is in the generator weights.
+pub const MIN_SQLONLY_TYPING_CASE_SHARE: f64 = 0.07;
 
 /// Resolve a drawn manifest into the `ComponentSet` the composed SUT boots.
 ///
@@ -3467,6 +3467,51 @@ mod tests {
             .collect()
     }
 
+    // Cases × steps mirror the live keystone's `sequential_strategy(1..40)`.
+    const TYPING_CASES: usize = 64;
+    const TYPING_STEPS: usize = 40;
+
+    /// Share of generated cases in which a drawn `TypeChars` actually
+    /// CHANGED reference block content.
+    fn committed_typing_share(base: &ReferenceState) -> (usize, f64) {
+        use proptest::strategy::Strategy;
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        use crate::pbt::transitions::aggregate_transitions;
+
+        let mut runner = TestRunner::deterministic();
+        let mut typed_cases = 0usize;
+        for _ in 0..TYPING_CASES {
+            let mut state = base.clone();
+            let mut committed = false;
+            for _ in 0..TYPING_STEPS {
+                let transition = aggregate_transitions(&state)
+                    .new_tree(&mut runner)
+                    .expect("aggregate_transitions must produce a value")
+                    .current();
+                if !<_ as holon_pbt_core::TransitionRef<ReferenceState>>::preconditions(
+                    &transition,
+                    &state,
+                )
+                .is_good()
+                {
+                    continue;
+                }
+                let typing = transition.variant_name() == "TypeChars";
+                let before = typing.then(|| ref_block_contents(&state));
+                transition.apply_to_ref(&mut state);
+                if let Some(before) = before {
+                    committed |= ref_block_contents(&state) != before;
+                }
+            }
+            if committed {
+                typed_cases += 1;
+            }
+        }
+        (typed_cases, typed_cases as f64 / TYPING_CASES as f64)
+    }
+
     /// **Tasks #20 / #52 — the SqlOnly mode must be TYPEABLE, per case.**
     ///
     /// The keystone's alphabet is narrowed by the composed SUT's cap set
@@ -3487,51 +3532,6 @@ mod tests {
     /// `sqlonly_typing_commits_through_the_editor_sink_into_block_raw`.
     #[test]
     fn sqlonly_generated_cases_commit_typed_edits_into_block_content() {
-        use proptest::strategy::Strategy;
-        use proptest::strategy::ValueTree;
-        use proptest::test_runner::TestRunner;
-
-        use crate::pbt::transitions::aggregate_transitions;
-
-        // Cases × steps mirror the live keystone's `sequential_strategy(1..40)`.
-        const CASES: usize = 64;
-        const STEPS: usize = 40;
-
-        /// Share of generated cases in which a drawn `TypeChars` actually
-        /// CHANGED reference block content.
-        fn committed_typing_share(base: &ReferenceState) -> (usize, f64) {
-            let mut runner = TestRunner::deterministic();
-            let mut typed_cases = 0usize;
-            for _ in 0..CASES {
-                let mut state = base.clone();
-                let mut committed = false;
-                for _ in 0..STEPS {
-                    let transition = aggregate_transitions(&state)
-                        .new_tree(&mut runner)
-                        .expect("aggregate_transitions must produce a value")
-                        .current();
-                    if !<_ as holon_pbt_core::TransitionRef<ReferenceState>>::preconditions(
-                        &transition,
-                        &state,
-                    )
-                    .is_good()
-                    {
-                        continue;
-                    }
-                    let typing = transition.variant_name() == "TypeChars";
-                    let before = typing.then(|| ref_block_contents(&state));
-                    transition.apply_to_ref(&mut state);
-                    if let Some(before) = before {
-                        committed |= ref_block_contents(&state) != before;
-                    }
-                }
-                if committed {
-                    typed_cases += 1;
-                }
-            }
-            (typed_cases, typed_cases as f64 / CASES as f64)
-        }
-
         let wiring = sqlonly_wiring();
         assert!(
             !set_for_wiring(&wiring).has_projection(Projection::EditorState),
@@ -3540,16 +3540,37 @@ mod tests {
         // Boots one composed SqlOnly SUT to read its real cap set (cached).
         let (sql_cases, sql_share) = committed_typing_share(&wide_e2e_ref_for(&wiring));
         eprintln!(
-            "[sqlonly-typing-engagement] {sql_cases}/{CASES} ({sql_share:.3}) cases committed a \
-             typed edit into block content"
+            "[keystone-typing-share] SqlOnly {sql_cases}/{TYPING_CASES} ({sql_share:.3}) floor \
+             {MIN_SQLONLY_TYPING_CASE_SHARE:.3} — cases that committed a typed edit into block \
+             content"
         );
         assert!(
             sql_share >= MIN_SQLONLY_TYPING_CASE_SHARE,
-            "SqlOnly TYPING coverage floor: only {sql_cases}/{CASES} ({sql_share:.3}) \
+            "SqlOnly TYPING coverage floor: only {sql_cases}/{TYPING_CASES} ({sql_share:.3}) \
              generated SqlOnly cases committed a typed edit into block content, below the \
              {MIN_SQLONLY_TYPING_CASE_SHARE:.3} floor — the keystone cannot type with \
              `crdt.enabled = false`, so no property covers its \
              editor→`set_field(\"content\")` write path"
+        );
+    }
+
+    /// The parity control of the SqlOnly typing share: the same draw under a
+    /// Loro wiring, disclosed beside it, so a drift reads as a mode gap or as
+    /// a generator-wide one.
+    #[test]
+    fn loro_control_typing_share_is_disclosed() {
+        let (cases, share) = committed_typing_share(&wide_e2e_ref_for(&Wiring::custom(
+            vec![
+                StorageAdapter::Org,
+                StorageAdapter::Loro,
+                StorageAdapter::Turso,
+            ],
+            vec![],
+            vec![],
+        )));
+        eprintln!(
+            "[keystone-typing-share] Loro control {cases}/{TYPING_CASES} ({share:.3}) — cases \
+             that committed a typed edit into block content"
         );
     }
 

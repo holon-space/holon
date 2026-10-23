@@ -474,13 +474,38 @@ fn swap_design_probe_generated_alphabet() {
     use proptest::test_runner::TestRunner;
 
     use crate::pbt::transitions::aggregate_transitions;
+    use crate::pbt::transitions::transition_arms;
+
+    const REQUIRED: [&str; 5] = [
+        "SplitBlock",
+        "NavigateFocus",
+        "SwitchView",
+        "EmitMcpData",
+        "SetupWatch",
+    ];
 
     let state = wide_e2e_ref();
+
+    // Enough draws that the lightest required arm is missed with probability
+    // below 1e-9: (1 - w/total)^n <= e^(-n·w/total).
+    let arms = transition_arms(&state);
+    let total: u64 = arms.iter().map(|(_, weight, _)| u64::from(*weight)).sum();
+    let lightest = REQUIRED
+        .iter()
+        .map(|required| {
+            arms.iter()
+                .find(|(name, _, _)| name == required)
+                .unwrap_or_else(|| panic!("swap alphabet does not offer {required}"))
+                .1
+        })
+        .min()
+        .expect("REQUIRED is not empty");
+    let draws = (1e9f64.ln() * total as f64 / f64::from(lightest)).ceil() as usize;
 
     let strat = aggregate_transitions(&state);
     let mut runner = TestRunner::deterministic();
     let mut names: BTreeSet<&'static str> = BTreeSet::new();
-    for _ in 0..4000 {
+    for _ in 0..draws {
         names.insert(
             strat
                 .new_tree(&mut runner)
@@ -490,6 +515,7 @@ fn swap_design_probe_generated_alphabet() {
         );
     }
     eprintln!("\n=== SWAP DESIGN PROBE: aggregate_transitions over the swap ref ===");
+    eprintln!("DRAWS: {draws} (total weight {total}, lightest required arm {lightest})");
     eprintln!("GENERATED ({}): {:?}", names.len(), names);
     eprintln!("=== end ===\n");
 
@@ -504,13 +530,7 @@ fn swap_design_probe_generated_alphabet() {
     // converged, the `.without(SutWatchRegister)` narrowing dropped). `RemoveWatch`
     // unlocks only after a watch exists, so it is not asserted from the initial
     // state (like `Join`/`MoveCursor`/`Redo`).
-    for required in [
-        "SplitBlock",
-        "NavigateFocus",
-        "SwitchView",
-        "EmitMcpData",
-        "SetupWatch",
-    ] {
+    for required in REQUIRED {
         assert!(
             names.contains(required),
             "swap alphabet missing {required} — generated only {names:?}"
