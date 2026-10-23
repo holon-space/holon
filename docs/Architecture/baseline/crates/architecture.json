@@ -7913,6 +7913,23 @@
           {
             "name": "tests",
             "path": "holon-orgmode/tests",
+            "dirs": [
+              {
+                "name": "org_vault_double",
+                "path": "holon-orgmode/tests/org_vault_double",
+                "c4_level": "unknown",
+                "description": "An org vault of one document on a real directory, driven through the real `FileSyncController`, with store doubles that apply every write.",
+                "pattern_status": "planned",
+                "content": "An org vault of one document on a real directory, driven through the real\n`FileSyncController`, with store doubles that apply every write.",
+                "source_file": "holon-orgmode/tests/org_vault_double/mod.rs",
+                "parent": "holon-orgmode",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "delete_during_first_ingest.rs"
@@ -7991,6 +8008,9 @@
               },
               {
                 "name": "template_block_roundtrip.rs"
+              },
+              {
+                "name": "vault_file_emptied_disclosure.rs"
               },
               {
                 "name": "vault_path_escape.rs"
