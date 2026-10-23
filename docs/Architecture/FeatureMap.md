@@ -348,6 +348,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `blur-rung-vacuous-no-cell-leg`
 - `bulk-add-sibling-order`
 - `catalog-advice-step6-weave-dismiss`
+- `cmd-click-open-tab-integration-state-write`
 - `concurrent-keystroke-undo-steps-load`
 - `convert-block-to-page-journals-planning-failed`
 - `cook-vault-ingest-layout-seed-timeout`
