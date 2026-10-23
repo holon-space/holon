@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print the landing-gate steps a combined diff cannot reach.
 
-    gate-skip.py --base <rev> --tip <rev>     paths from `jj diff --name-only -r '<base>..<tip>'`
+    gate-skip.py --base <rev> --tip <rev>     paths from `jj diff --summary -r '<base>..<tip>'`
     gate-skip.py --paths-from <file>          one path per line
 
 stdout is one line: `skip: 3 4 5 6 11 12 13 14 15 16 18` or `full`. stderr names,
@@ -180,6 +180,21 @@ def step_sources(root, justfile):
     return "\n".join(texts)
 
 
+def summary_paths(summary):
+    """Every path a `jj diff --summary` names: a rename or copy gives its source and its destination."""
+    paths = []
+    for line in summary.splitlines():
+        status, path = re.fullmatch(r"([MADRC]) (.+)", line).groups()
+        moved = re.fullmatch(r"(.*)\{(.*) => (.*)\}(.*)", path)
+        if status in "RC":
+            assert moved, f"jj diff --summary: rename without {{old => new}}: {line!r}"
+            pre, old, new, post = moved.groups()
+            paths += [re.sub("/+", "/", pre + old + post), re.sub("/+", "/", pre + new + post)]
+        else:
+            paths.append(path)
+    return paths
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base")
@@ -191,7 +206,7 @@ def main():
         text = Path(a.paths_from).read_text()
     else:
         assert a.base and a.tip, "give --base and --tip, or --paths-from"
-        text = run(["jj", "diff", "--name-only", "-r", f"{a.base}..{a.tip}"])
+        text = "\n".join(summary_paths(run(["jj", "diff", "--summary", "-r", f"{a.base}..{a.tip}"])))
     paths = [line.strip() for line in text.splitlines() if line.strip()]
     verdict, blocked = decide(paths, load_workspace())
     for path, why in blocked:

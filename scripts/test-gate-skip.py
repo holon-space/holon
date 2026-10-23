@@ -4,6 +4,7 @@
 Run: `python3 scripts/test-gate-skip.py`. Exits non-zero on the first violation.
 """
 import ast
+import shutil
 import importlib.util
 import json
 import subprocess
@@ -53,6 +54,13 @@ def check_scan():
     assert ws.named_pkgs == {"holon-net"}, f"a bare test(=module::) row names the crate holding tests/module: {ws.named_pkgs}"
 
 
+def check_summary_paths():
+    g = load_module()
+    got = g.summary_paths("R docs/Testing/{ => registry}/KeystoneKnownReds.md\nC {a => b}/x.rs\nM justfile\nD old.md")
+    assert got == ["docs/Testing/KeystoneKnownReds.md", "docs/Testing/registry/KeystoneKnownReds.md",
+                   "a/x.rs", "b/x.rs", "justfile", "old.md"], f"a rename or copy gives both paths, got {got}"
+
+
 def check_baseline_readers():
     """timing-assertions-baseline.txt is allowed because only `assertions` (step 7) reads it."""
     timing_split = (REPO / "scripts" / "timing-split.py").read_text()
@@ -69,9 +77,29 @@ def check_baseline_readers():
                     "a skipped step may now read the baseline, so put it back on gate-skip.py's TRIGGERS"
 
 
+def check_renamed_trigger():
+    """A trigger moved to an allowed path is still a changed trigger path."""
+    with tempfile.TemporaryDirectory() as d:
+        copy = Path(d)
+        for f in subprocess.run(["jj", "file", "list", "--ignore-working-copy"], cwd=REPO,
+                                capture_output=True, text=True, check=True).stdout.splitlines():
+            if (REPO / f).is_file():
+                (copy / f).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(REPO / f, copy / f)
+        jj = lambda *a: subprocess.run(["jj", *a], cwd=copy, capture_output=True, text=True, check=True)
+        jj("git", "init", ".")
+        jj("commit", "-m", "base")
+        (copy / "docs/Testing/registry").mkdir()
+        (copy / "docs/Testing/KeystoneKnownReds.md").rename(copy / "docs/Testing/registry/KeystoneKnownReds.md")
+        jj("commit", "-m", "move")
+        r = gate_skip("--base", "@--", "--tip", "@-", cwd=copy)
+    assert r.stdout.strip() == "full", f"a moved trigger must be full, got {r.stdout!r}: {r.stderr}"
+
+
 def main():
     check_scan()
     check_baseline_readers()
+    check_renamed_trigger()
     out, err = on_paths("crates/holon-net/tests/net_load.rs")
     assert out == SKIP, f"a tests/-only diff of one binary must skip, got {out!r}: {err}"
     out, err = on_paths("docs/Plans/x.md", "crates/holon-net/tests/net_file.rs", "crates/holon-core/tests/shape_gate/claims.rs")
@@ -124,6 +152,7 @@ def main():
     assert r.returncode != 0 and "skip" not in r.stdout, f"a failed cargo metadata must fail: {r.returncode} {r.stdout!r}"
     assert "cargo metadata" in r.stderr, r.stderr
 
+    check_summary_paths()
     print("test-gate-skip: OK")
 
 

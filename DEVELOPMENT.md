@@ -721,7 +721,8 @@ Notes:
 and wasm checks and its test-running steps). It skips only when every changed
 path is a doc, a file only non-skipped steps read, or one test binary that no
 skipped step names, and no path is a trigger (manifests, toolchain, justfile,
-nextest config, files the skipped steps or their tests read). It prints each
+nextest config, files the skipped steps or their tests read); a rename or copy
+counts its source and its destination. It prints each
 blocking path and its reason on stderr. Its self-check is
 `python3 scripts/test-gate-skip.py`.
 
