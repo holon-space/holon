@@ -295,10 +295,7 @@ cat >"$work/fail-leak-known-panic.log" <<'EOF'
  FAIL + LEAK [   6.486s] (197/682) holon-app::main integration_toggle_round_trip::a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
 EOF
 expect_outcome fail-leak-known-panic 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' "$work/fail-leak-known-panic.log"
-# D101.a: the cross-file move re-ingest signature (N+4 per-block reads) is a
-# known red. The run spent that draw and drew its full sample (hence
-# `verdict=OK`); the binary is FAILED on another test, so the log still reaches
-# the classifier.
+# A fixed-pending-soak row does not cover its signature, so its return is novel.
 cat >"$work/move-between-files-read-repeat.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
 thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
@@ -306,7 +303,7 @@ reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv
 test general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
-expect_outcome move-between-files-read-repeat 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
+expect_outcome move-between-files-read-repeat 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' \
     "$work/move-between-files-read-repeat.log"
 # The sample rules (`[keystone-sample]`) belong to the HEADLESS keystone, which
 # is the only test that discloses one. The windowed keystone's name contains the
@@ -323,6 +320,19 @@ cat >"$work/windowed-known-red.log" <<'EOF'
 EOF
 expect_outcome windowed-known-red-discloses-no-sample 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
     "$work/windowed-known-red.log"
+# A cargo build line names the keystone's test target without running it, so
+# it must not make a log a keystone run that owes a sample disclosure.
+cat >"$work/build-warning-names-keystone.log" <<'EOF'
+warning: `holon-integration-tests` (test "general_e2e_composed_pbt") generated 1 warning (1 duplicate)
+ FAIL + LEAK [   6.486s] (197/682) holon-app::main integration_toggle_round_trip::a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
+  stderr ───
+    thread 'a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection' (2) panicked at crates/holon-app/tests/integration_toggle_round_trip.rs:83:9:
+    the seeded Integrations section never showed 'todoist' as true — it is still false. The operation wrote the state file, so the break is between the store's signal and the mirror.
+     Summary [  25.469s] 682 tests run: 681 passed (1 leaky), 1 failed, 1 skipped
+ FAIL + LEAK [   6.486s] (197/682) holon-app::main integration_toggle_round_trip::a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
+EOF
+expect_outcome build-warning-names-keystone 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
+    "$work/build-warning-names-keystone.log"
 cat >"$work/sample-undisclosed.log" <<'EOF'
 thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
 assertion `left == right` failed: per-tick reconcile: one synthetic per minted real id (syn=[], real=[EntityUri("block:259a9a58-18bb-4559-a589-87aee571c59e")], HeldCreates { parked: 0 })
@@ -330,6 +340,15 @@ test general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome sample-undisclosed 1 '^SAMPLE: UNDISCLOSED' "$work/sample-undisclosed.log"
+cat >"$work/sample-undisclosed-nextest.log" <<'EOF'
+    FAIL [  31.004s] (1/19) holon-integration-tests::general_e2e_composed_pbt general_e2e_composed_pbt
+  stderr ───
+    thread 'main' (2) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+    assertion `left == right` failed: per-tick reconcile: one synthetic per minted real id (syn=[], real=[EntityUri("block:259a9a58-18bb-4559-a589-87aee571c59e")], HeldCreates { parked: 0 })
+     Summary [  31.004s] 19 tests run: 18 passed, 1 failed, 0 skipped
+    FAIL [  31.004s] (1/19) holon-integration-tests::general_e2e_composed_pbt general_e2e_composed_pbt
+EOF
+expect_outcome sample-undisclosed-nextest 1 '^SAMPLE: UNDISCLOSED' "$work/sample-undisclosed-nextest.log"
 cat >"$work/sample-floor-breach.log" <<'EOF'
 [keystone-sample] cases=16 attempted=4 completed=3 floor=8 known-red-hits=1 verdict=FLOOR-BREACH
 thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:

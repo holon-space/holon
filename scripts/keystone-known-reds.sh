@@ -124,10 +124,10 @@ is_sample_floor() {
 # disclosure and returns non-zero when the sample is below the floor or absent.
 check_sample() {
     local log="$1" line
-    # The HEADLESS keystone only: `general_e2e_composed_pbt_windowed` contains
-    # that name as a substring and discloses no sample, so a substring match
-    # would turn every registered windowed red into a gate failure.
-    grep -qE 'general_e2e_composed_pbt($|[^_[:alnum:]])' "$log" || return 0
+    # A run of the HEADLESS keystone only, read from the test runner's own
+    # lines: cargo build output names the target without running it, and
+    # `general_e2e_composed_pbt_windowed` discloses no sample.
+    grep -qE "^[[:space:]]*test general_e2e_composed_pbt |thread 'general_e2e_composed_pbt'|::general_e2e_composed_pbt general_e2e_composed_pbt\$" "$log" || return 0
     line=$(grep_selecting -hF '[keystone-sample] cases=' "$log" | tail -1)
     if [ -z "$line" ]; then
         echo "SAMPLE: UNDISCLOSED — this keystone run printed no [keystone-sample] line, so"
