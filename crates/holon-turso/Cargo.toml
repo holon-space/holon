@@ -49,6 +49,10 @@ web-time = "1"
 # defects the write guards exist for. Never enable outside tests: it is the one
 # door around the quoted-identifier and REPLACE-into-rowid-matview-base checks.
 unguarded-writes = []
+# `db_open::held_lock_seam`: a test makes a database file read as held by
+# another process. Never enable in a shipped binary; holon-architecture-tests
+# checks the frontends' graphs.
+held-lock-seam = []
 
 # Self-dev-dependency so THIS crate's integration tests (tests/*.rs, which do not
 # get the lib's `cfg(test)`) can reach `execute_unguarded`. Downstream crates are

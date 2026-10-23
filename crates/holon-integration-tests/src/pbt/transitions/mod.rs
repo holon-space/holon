@@ -182,6 +182,7 @@ mod place_under_own_descendant;
 mod press_key;
 mod reboot;
 mod reboot_after_upgrade;
+mod reboot_while_database_held;
 mod reboot_with_backlog_held;
 mod rebuild_views;
 pub mod receiver_create_block;
@@ -189,6 +190,7 @@ mod redo;
 pub mod register_entity_scheme;
 mod rehome_entity;
 mod release_backlog;
+mod release_database_and_restart;
 mod release_held;
 mod release_integration_peer;
 mod remote_list_sync;
@@ -317,6 +319,8 @@ pub use place_under_own_descendant::PlaceUnderOwnDescendant;
 pub use press_key::PressKey;
 pub use reboot::Reboot;
 pub use reboot_after_upgrade::RebootAfterUpgrade;
+pub use reboot_while_database_held::RebootWhileDatabaseHeld;
+pub use reboot_while_database_held::database_hold_message;
 pub use reboot_with_backlog_held::RebootWithBacklogHeld;
 pub use rebuild_views::RebuildViews;
 pub use receiver_create_block::ReceiverCreateBlock;
@@ -324,6 +328,7 @@ pub use redo::Redo;
 pub use register_entity_scheme::RegisterEntityScheme;
 pub use rehome_entity::RehomeEntity;
 pub use release_backlog::ReleaseBacklog;
+pub use release_database_and_restart::ReleaseDatabaseAndRestart;
 pub use release_held::ReleaseHeld;
 pub use release_integration_peer::ReleaseIntegrationPeer;
 pub use remote_list_sync::RemoteListSync;
@@ -415,6 +420,8 @@ crate::declare_e2e_transitions! {
         CrashRestart(CrashRestart),
         RebootAfterUpgrade(RebootAfterUpgrade),
         ReleaseBacklog(ReleaseBacklog),
+        RebootWhileDatabaseHeld(RebootWhileDatabaseHeld),
+        ReleaseDatabaseAndRestart(ReleaseDatabaseAndRestart),
         DeleteHeadlineWhileOff(DeleteHeadlineWhileOff),
         SecondWriterRefused(SecondWriterRefused),
         ExpandToggle(ExpandToggle),
@@ -794,6 +801,8 @@ mod required_caps_guard {
         one!(RebootWithBacklogHeld, lc::SutAppLifecycle);
         one!(RebootAfterUpgrade, lc::SutAppLifecycle);
         one!(ReleaseBacklog, lc::SutAppLifecycle);
+        one!(RebootWhileDatabaseHeld, lc::SutAppLifecycle);
+        one!(ReleaseDatabaseAndRestart, lc::SutAppLifecycle);
         one!(DeleteHeadlineWhileOff, lc::SutAppLifecycle);
         one!(SecondWriterRefused, lc::SutAppLifecycle);
         one!(Reboot, lc::SutAppLifecycle);

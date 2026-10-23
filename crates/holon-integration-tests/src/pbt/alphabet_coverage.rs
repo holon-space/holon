@@ -121,8 +121,10 @@ const EXPECTED_ABSENT: &[(&str, CoveredBy)] = &[
         ),
     ),
     ("HoldDispatch", CoveredBy::HandAuthored),
+    ("RebootWhileDatabaseHeld", CoveredBy::HandAuthored),
     ("RebootWithBacklogHeld", CoveredBy::HandAuthored),
     ("ReleaseBacklog", CoveredBy::HandAuthored),
+    ("ReleaseDatabaseAndRestart", CoveredBy::HandAuthored),
     ("ReleaseHeld", CoveredBy::HandAuthored),
     ("StructuralKeyBurst", CoveredBy::SelfAttestingSuite),
 ];

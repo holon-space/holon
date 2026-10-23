@@ -729,6 +729,53 @@ fn no_proptest_in_prod_graph() {
     }
 }
 
+/// A shipped frontend reaches a held database only through the engine's real
+/// file lock: `holon-turso`'s `held-lock-seam` feature, which lets a test
+/// declare a file held, is absent from every frontend's normal build graph.
+/// The browser and WaterUI frontends do not link `holon-turso`.
+#[test]
+fn no_held_lock_seam_in_shipped_frontends() {
+    let root = repo_root();
+    let graphs: [(&str, &[&str]); 4] = [
+        ("holon-gpui", &["-p", "holon-gpui"]),
+        ("holon-tui", &["-p", "holon-tui"]),
+        ("holon-mcp", &["-p", "holon-mcp"]),
+        (
+            "holon-worker",
+            &[
+                "--manifest-path",
+                "frontends/holon-worker/Cargo.toml",
+                "--offline",
+                "--locked",
+                "--target",
+                "all",
+            ],
+        ),
+    ];
+    for (frontend, selection) in graphs {
+        let output = Command::new(env!("CARGO"))
+            .arg("tree")
+            .args(selection)
+            .args(["-e", "normal,features", "-i", "holon-turso"])
+            .current_dir(&root)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn `cargo tree` for {frontend}: {e}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("holon-turso feature"),
+            "`cargo tree {selection:?} -i holon-turso` did not show holon-turso's features, so \
+             this check would pass for nothing.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n",
+        );
+        assert!(
+            !stdout.contains("feature \"held-lock-seam\""),
+            "{frontend} links holon-turso with `held-lock-seam`, so a shipped binary could declare \
+             its database held without the file lock. Only test crates may enable it.\n\n=== \
+             cargo tree {selection:?} -e normal,features -i holon-turso ===\n{stdout}\n",
+        );
+    }
+}
+
 /// A sidecar YAML has ONE parse boundary (ruling UFT-sidecar-boundary.a).
 ///
 /// `IntegrationFileConfig::from_yaml` parses the file text and hands its

@@ -393,7 +393,8 @@ mod reason_class_state_independence {
     /// state is not even bound — is state-INDEPENDENT by signature, so the
     /// kind never reaches the generated alphabet of this medium.
     /// `HandAuthoredOnly` is produced exactly that way by
-    /// `RebootWithBacklogHeld`, `ReleaseBacklog`, `ReleaseHeld`,
+    /// `RebootWithBacklogHeld`, `ReleaseBacklog`, `RebootWhileDatabaseHeld`,
+    /// `ReleaseDatabaseAndRestart`, `ReleaseHeld`,
     /// `StructuralKeyBurst`, `DelayAdmissions`, `FailNextDispatch` and
     /// `HoldDispatch`; `DeliverNotMeaningfulInBackendTests` by
     /// `DeliverBlockContent`.

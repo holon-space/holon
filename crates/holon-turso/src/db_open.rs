@@ -255,6 +255,62 @@ pub fn is_held(db_path: &Path) -> Result<bool> {
     }
 }
 
+/// Lets a test make a database file read as held by another process, so every
+/// open of it — the boot's and [`is_held`]'s — meets the engine's own lock
+/// error. A process can never contend with itself for the real lock, so this
+/// is the only way one process reaches the held path.
+#[cfg(all(feature = "held-lock-seam", target_family = "unix"))]
+pub mod held_lock_seam {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static HELD: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+    /// What asking for a file's lock answers.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum LockAnswer {
+        HeldByAnotherProcess,
+        /// The engine asks the file itself.
+        Acquired,
+    }
+
+    /// Another process holds `db_path` until this is dropped.
+    #[must_use = "the hold ends when this is dropped"]
+    pub struct AnotherProcessHolds {
+        path: PathBuf,
+    }
+
+    pub fn hold(db_path: &Path) -> AnotherProcessHolds {
+        let path = db_path.to_path_buf();
+        let fresh = HELD
+            .lock()
+            .expect("held-lock registry")
+            .insert(path.clone());
+        assert!(fresh, "{} is already held", path.display());
+        AnotherProcessHolds { path }
+    }
+
+    impl Drop for AnotherProcessHolds {
+        fn drop(&mut self) {
+            HELD.lock().expect("held-lock registry").remove(&self.path);
+        }
+    }
+
+    pub(super) fn answer(path: &str) -> LockAnswer {
+        if HELD
+            .lock()
+            .expect("held-lock registry")
+            .contains(Path::new(path))
+        {
+            LockAnswer::HeldByAnotherProcess
+        } else {
+            LockAnswer::Acquired
+        }
+    }
+}
+
 /// Where an engine error arose during an open.
 #[derive(Clone, Copy)]
 enum Leg {
@@ -373,6 +429,12 @@ fn admit(db: &Arc<Database>, path: &str, fns: &[ScalarFn]) -> Step<Option<OpenCh
 
 #[cfg(target_family = "unix")]
 fn open_file(path: &str, fns: &[ScalarFn]) -> Step<Arc<Database>> {
+    #[cfg(feature = "held-lock-seam")]
+    if held_lock_seam::answer(path) == held_lock_seam::LockAnswer::HeldByAnotherProcess {
+        return Err(engine("open")(LimboError::LockingError(format!(
+            "Failed locking file '{path}'. File is locked by another process"
+        ))));
+    }
     let io = turso_core::UnixIO::new().map_err(engine("create the file IO"))?;
     open_with_io(Arc::new(io), path, OpenFlags::default(), fns)
 }

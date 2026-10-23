@@ -4114,6 +4114,11 @@ pub trait SutAppLifecycle {
     async fn reboot_after_upgrade(&self);
     /// Release the held read-only reads and wait until the backlog drained.
     async fn release_backlog(&self);
+    /// [`Self::reboot`] while another process holds the database file.
+    async fn reboot_while_database_held(&self);
+    /// The other process lets go of the database; once the session says it
+    /// is free, [`Self::reboot`].
+    async fn release_database_and_restart(&self);
     /// A second session on the live vault is refused by the writer lock,
     /// names the holder, and leaves the vault's bytes unchanged.
     async fn assert_second_writer_refused(&self);

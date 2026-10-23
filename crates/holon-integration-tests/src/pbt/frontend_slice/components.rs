@@ -237,6 +237,10 @@ pub enum RebootGap {
     },
     /// Every `.cook` read is held from the shutdown on (D108.a).
     BacklogHeld,
+    /// Another process holds the database file from the shutdown on.
+    DatabaseHeld,
+    /// The other process lets go of the database before the shutdown.
+    DatabaseReleased,
     /// The database records another scalar-function set, as one an older
     /// binary built does.
     FunctionSetChanged,
@@ -351,6 +355,9 @@ pub struct HeadlessFrontendComponent {
     /// attempted nothing is distinguishable from a run whose refusals all
     /// fired.
     read_only_attempts: Mutex<(usize, usize)>,
+    /// The other process's hold on `test.db`, from a held reboot to its
+    /// release.
+    database_hold: Mutex<Option<holon_turso::db_open::held_lock_seam::AnotherProcessHolds>>,
     /// `(attempts, refusals)` for the ingest-origin compound rung — the
     /// constituent-provenance half of the same gate.
     read_only_ingest_compound: Mutex<(usize, usize)>,
@@ -914,6 +921,7 @@ impl HeadlessFrontendComponent {
             read_only_ingest: Mutex::new(None),
             pasted_copies: Mutex::new(HashMap::new()),
             read_only_attempts: Mutex::new((0, 0)),
+            database_hold: Mutex::new(None),
             shape_edit_outcomes: Mutex::new(Vec::new()),
             rerendered_operations: Arc::new(Mutex::new(HashMap::new())),
             read_only_ingest_compound: Mutex::new((0, 0)),
@@ -1233,6 +1241,48 @@ impl HeadlessFrontendComponent {
         self.reboot_through(RebootGap::Nothing).await;
     }
 
+    /// Ends the other process's hold and waits until the session discloses
+    /// the database as free, which its probe finds within a second.
+    async fn release_database_hold(&self) {
+        let held = self
+            .database_hold
+            .lock()
+            .expect("database_hold poisoned")
+            .take()
+            .expect("[release database] no held reboot came before");
+        drop(held);
+        let bus = self
+            .degraded_bus()
+            .expect("[release database] a held boot runs with Loro, which owns the bus");
+        let released = |bus: &holon_api::ConditionBus| {
+            bus.current().into_iter().any(|c| {
+                matches!(
+                    c.reason,
+                    holon_api::ConditionKind::DatabaseHeld {
+                        hold: holon_api::DatabaseHold::Released,
+                        ..
+                    }
+                )
+            })
+        };
+        // A quarter of the wedge, so a hold that outlives its release fails
+        // here, naming the conditions, rather than as a wedged reboot.
+        let within = crate::pbt::invariants::bodies::settle_budget::wedge_deadline() / 4;
+        tokio::time::timeout(within, async {
+            while !released(&bus) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "[release database] the session did not say the database is free within \
+                 {within:?}; conditions: {:?}",
+                bus.current()
+            )
+        });
+    }
+
     /// [`Self::reboot`], running `between` while no session holds the vault.
     pub(crate) async fn reboot_through(&self, between: RebootGap) {
         let before = self.store_block_ids().await;
@@ -1247,6 +1297,8 @@ impl HeadlessFrontendComponent {
             | RebootGap::EpochFlipRejected
             | RebootGap::BacklogHeld
             | RebootGap::FunctionSetChanged
+            | RebootGap::DatabaseHeld
+            | RebootGap::DatabaseReleased
             | RebootGap::Crashed { .. } => None,
         };
         // Same reason: the doc's file path is only resolvable while a session
@@ -1255,6 +1307,9 @@ impl HeadlessFrontendComponent {
             RebootGap::Crashed { doc, .. } => Some(self.doc_file(doc, "reboot/crashed").await),
             _ => None,
         };
+        if matches!(between, RebootGap::DatabaseReleased) {
+            self.release_database_hold().await;
+        }
 
         // Drop CDC consumers before the actor goes away (mirrors
         // `TestEnvironment::stop_app`, which this is the composed analogue of).
@@ -1306,7 +1361,16 @@ impl HeadlessFrontendComponent {
         );
         let backlog_held = matches!(between, RebootGap::BacklogHeld);
         match between {
-            RebootGap::Nothing => {}
+            RebootGap::Nothing | RebootGap::DatabaseReleased => {}
+            RebootGap::DatabaseHeld => {
+                let held = holon_turso::db_open::held_lock_seam::hold(&self.store.db_path());
+                let earlier = self
+                    .database_hold
+                    .lock()
+                    .expect("database_hold poisoned")
+                    .replace(held);
+                assert!(earlier.is_none(), "[reboot] the database is already held");
+            }
             RebootGap::BacklogHeld => self.store.org_fs.hold_reads_with_extension("cook"),
             RebootGap::FunctionSetChanged => record_foreign_function_set(&self.store.db_path()),
             RebootGap::EpochFlipRejected => {
@@ -6103,6 +6167,14 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         self.reboot_through(RebootGap::FunctionSetChanged).await;
     }
 
+    async fn reboot_while_database_held(&self) {
+        self.reboot_through(RebootGap::DatabaseHeld).await;
+    }
+
+    async fn release_database_and_restart(&self) {
+        self.reboot_through(RebootGap::DatabaseReleased).await;
+    }
+
     async fn release_backlog(&self) {
         self.org_fs().release_reads_with_extension("cook");
         let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
@@ -8820,6 +8892,9 @@ impl holon_pbt_core::capabilities::SutConditions for HeadlessFrontendComponent {
                         Some(message.clone())
                     }
                     holon_api::ConditionKind::VaultFileEmptied { seen } => Some(seen.clone()),
+                    holon_api::ConditionKind::DatabaseHeld { hold, .. } => {
+                        Some(crate::pbt::transitions::database_hold_message(*hold))
+                    }
                     _ => None,
                 },
                 subject: c.subject,

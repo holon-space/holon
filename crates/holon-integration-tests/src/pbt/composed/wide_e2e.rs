@@ -2482,6 +2482,8 @@ impl ComposedSlice for WideE2E {
                 | E2ETransition::RebootWithBacklogHeld(_)
                 | E2ETransition::RebootAfterUpgrade(_)
                 | E2ETransition::CrashRestart(_)
+                | E2ETransition::RebootWhileDatabaseHeld(_)
+                | E2ETransition::ReleaseDatabaseAndRestart(_)
         )
     }
 
@@ -2499,6 +2501,8 @@ impl ComposedSlice for WideE2E {
             E2ETransition::EpochFlipRejected(_) => RebootGap::EpochFlipRejected,
             E2ETransition::RebootWithBacklogHeld(_) => RebootGap::BacklogHeld,
             E2ETransition::RebootAfterUpgrade(_) => RebootGap::FunctionSetChanged,
+            E2ETransition::RebootWhileDatabaseHeld(_) => RebootGap::DatabaseHeld,
+            E2ETransition::ReleaseDatabaseAndRestart(_) => RebootGap::DatabaseReleased,
             E2ETransition::CrashRestart(t) => RebootGap::Crashed {
                 doc: t.doc.clone(),
                 retitle: t.retitle_while_down.clone(),

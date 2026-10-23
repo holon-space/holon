@@ -151,6 +151,8 @@ impl ReferenceState {
                 | "RebootWithBacklogHeld"
                 | "RebootAfterUpgrade"
                 | "CrashRestart"
+                | "RebootWhileDatabaseHeld"
+                | "ReleaseDatabaseAndRestart"
         );
         let base_forgotten = self.files.copies.values().any(|copy| !copy.base_known);
         check(

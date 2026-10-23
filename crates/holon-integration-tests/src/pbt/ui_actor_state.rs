@@ -257,6 +257,20 @@ pub struct UIActorState {
 
     /// Per-user UI state (pins, active view) — future sync-adapter seam.
     pub user: UIUserState,
+
+    /// The database file's UI rows while a boot runs on an in-memory database.
+    pub rows_of_held_database: Option<Box<DatabaseUiRows>>,
+}
+
+/// The UI state only the database file holds: an in-memory boot starts
+/// without it and the next boot on the file finds it again.
+#[derive(Debug, Clone)]
+pub struct DatabaseUiRows {
+    navigation_history: HashMap<Region, NavigationHistory>,
+    next_history_id: i64,
+    focused_entity_id: HashMap<Region, EntityUri>,
+    focused_block: Option<EntityUri>,
+    open_pins: HashMap<Region, Vec<OpenPinEntry>>,
 }
 
 impl UIActorState {
@@ -264,7 +278,44 @@ impl UIActorState {
         Self {
             tab: UITabState::new(),
             user: UIUserState::new(),
+            rows_of_held_database: None,
         }
+    }
+
+    pub fn boot_on_memory_while_database_held(&mut self) {
+        let fresh = UITabState::new();
+        let rows = DatabaseUiRows {
+            navigation_history: std::mem::replace(
+                &mut self.tab.navigation_history,
+                fresh.navigation_history,
+            ),
+            next_history_id: std::mem::replace(
+                &mut self.tab.next_history_id,
+                fresh.next_history_id,
+            ),
+            focused_entity_id: std::mem::replace(
+                &mut self.tab.focused_entity_id,
+                fresh.focused_entity_id,
+            ),
+            focused_block: self.tab.focused_block.take(),
+            open_pins: std::mem::take(&mut self.user.open_pins),
+        };
+        assert!(
+            self.rows_of_held_database.replace(Box::new(rows)).is_none(),
+            "a boot on memory while the database is already held"
+        );
+    }
+
+    pub fn boot_on_released_database(&mut self) {
+        let rows = self
+            .rows_of_held_database
+            .take()
+            .expect("a release restart without a held database");
+        self.tab.navigation_history = rows.navigation_history;
+        self.tab.next_history_id = rows.next_history_id;
+        self.tab.focused_entity_id = rows.focused_entity_id;
+        self.tab.focused_block = rows.focused_block;
+        self.user.open_pins = rows.open_pins;
     }
 }
 
