@@ -406,6 +406,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `wb-d6-stall-resurrects-deleted-line`
 - `wb-d7-stall-splits-edited-line`
 - `wide-e2e-shrinker-list-app-item-missing`
+- `wide-e2e-sqlonly-typing-share-load-timeout`
+- `windowed-banner-toast-paint-load-flake`
 - `windowed-clickblock-bounds-under-load`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
