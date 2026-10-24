@@ -387,6 +387,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `metamorphic-undo-snapshot-missing`
 - `mirrored-entity-authority-ops-missing`
 - `no-proptest-regressions-seed-file-under-load`
+- `org-deep-text-ratio-under-load`
 - `orgmode-file-watcher-no-event`
 - `pairing-conflict-badge-long-copy-content-unpainted`
 - `pairing-conflict-badge-page-copy-unbadged`
@@ -427,6 +428,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-clickblock-bounds-under-load`
 - `windowed-entity-not-in-bounds-under-load`
 - `windowed-focus-not-in-bounds-under-load`
+- `windowed-keyword-surface-stale-done-text`
 - `windowed-previous-run-toast-box-under-load`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`

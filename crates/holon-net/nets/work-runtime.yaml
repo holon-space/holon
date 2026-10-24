@@ -15,6 +15,14 @@ places:
     capacity: single
   Stalled:
     capacity: single
+  JobRecord:
+    capacity: register
+  Process:
+    capacity: register
+  Disk:
+    capacity: register
+  Host:
+    capacity: register
 transitions:
   StartJob:
     trigger: auto
@@ -131,12 +139,12 @@ effects:
       - 1
       other: outcome_unknown
 probes:
-  agent_liveness:
+  registry_agents:
     command:
       argv:
       - bash
-      - -lc
-      - flow agents --json
+      - crates/holon-net/probes/registry.sh
+      - agents
       working_dir: /Users/martin/Workspaces/pkm/holon
       env_allow:
       - HOME
@@ -144,7 +152,61 @@ probes:
       timeout: 30s
     interval: 1m
     facts_into: Agent
-    subject_field: agent
+    subject_field: agentId
+  registry_jobs:
+    command:
+      argv:
+      - bash
+      - crates/holon-net/probes/registry.sh
+      - jobs
+      working_dir: /Users/martin/Workspaces/pkm/holon
+      env_allow:
+      - HOME
+      - PATH
+      timeout: 30s
+    interval: 1m
+    facts_into: JobRecord
+    subject_field: jobId
+  live_pids:
+    command:
+      argv:
+      - bash
+      - crates/holon-net/probes/pids.sh
+      working_dir: /Users/martin/Workspaces/pkm/holon
+      env_allow:
+      - HOME
+      - PATH
+      timeout: 30s
+    interval: 30s
+    facts_into: Process
+    subject_field: pid
+  free_disk:
+    command:
+      argv:
+      - bash
+      - crates/holon-net/probes/disk.sh
+      - .
+      working_dir: /Users/martin/Workspaces/pkm/holon
+      env_allow:
+      - HOME
+      - PATH
+      timeout: 30s
+    interval: 1m
+    facts_into: Disk
+    subject_field: mount
+  host_load:
+    command:
+      argv:
+      - bash
+      - crates/holon-net/probes/load.sh
+      working_dir: /Users/martin/Workspaces/pkm/holon
+      env_allow:
+      - HOME
+      - PATH
+      timeout: 30s
+    interval: 30s
+    facts_into: Host
+    subject_field: host
   board_cards:
     command:
       argv:

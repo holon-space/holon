@@ -164,10 +164,10 @@ fn the_example_net_carries_the_whole_schema() {
         "an unmapped exit code leaves the outcome unknown, never Done"
     );
 
-    let probe = &net.probes["agent_liveness"];
+    let probe = &net.probes["registry_agents"];
     assert_eq!(probe.interval.duration(), Duration::from_secs(60));
     assert_eq!(probe.facts_into, "Agent");
-    assert_eq!(probe.subject_field, "agent");
+    assert_eq!(probe.subject_field, "agentId");
 }
 
 #[test]

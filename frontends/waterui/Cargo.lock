@@ -3245,6 +3245,7 @@ dependencies = [
  "holon-rules",
  "indexmap",
  "serde",
+ "serde_json",
  "serde_yaml",
  "thiserror 2.0.21",
  "workspace-hack",

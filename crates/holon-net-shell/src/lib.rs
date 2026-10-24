@@ -6,9 +6,11 @@
 //! fire or a marking read from another task waits only for one step.
 //!
 //! [`effect`] is the one effect the shell runs itself: a net file's `shell`
-//! descriptor, as a child process group.
+//! descriptor, as a child process group. [`probe`] runs a probe's command
+//! the same way and hands back its stdout.
 
 pub mod effect;
+pub mod probe;
 
 use std::sync::Arc;
 use std::sync::Mutex;

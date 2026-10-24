@@ -16,8 +16,9 @@
 //! cannot go stale whether a caller pulls them on demand or holds them as a
 //! reactive var recomputed on source change.
 //!
-//! [`exec`] is the one module with runtime state: the executor of runtime nets
-//! (ADR 0032 §9), which owns a marking of process-class tokens.
+//! [`exec`] and [`probe`] hold runtime state: the executor of runtime nets
+//! (ADR 0032 §9), which owns a marking of process-class tokens, and the run
+//! state of the probes that feed facts into it.
 //!
 //! Petri-net vocabulary — transition, place, arc, marking — lives in this
 //! crate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one
@@ -33,6 +34,7 @@ pub mod guards;
 pub mod load;
 pub mod marking;
 pub mod net;
+pub mod probe;
 pub mod uft;
 pub mod view;
 

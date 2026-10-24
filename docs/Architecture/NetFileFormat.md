@@ -4,8 +4,10 @@
 (`crates/holon-net/src/file.rs`, pinned by
 `crates/holon-net/tests/net_file.rs`) and the loader builds the executor's net
 from it (`crates/holon-net/src/load.rs`, pinned by
-`crates/holon-net/tests/net_load.rs`). The shell effect
-and the probe host are still descriptors only.*
+`crates/holon-net/tests/net_load.rs`). Probes run through
+`crates/holon-net/src/probe.rs` (pinned by `crates/holon-net/tests/probe_facts.rs`)
+and `crates/holon-net-shell/src/probe.rs`; the host that schedules them is
+still to come.*
 
 A **net file** is one YAML file that holds one whole runtime net: its places,
 its transitions, the shell commands its firings run, and the probes that feed
@@ -26,8 +28,8 @@ coordinates our own agent work (holon-space/holon-work#363).
 ## A worked example
 
 Four agents may build at once, so the build slots are a pool of four
-interchangeable tokens. A probe asks the flow board who is alive, once a
-minute, and each line of its output becomes one fact.
+interchangeable tokens. A probe reads the agent records of the local runtime
+registry once a minute, and each line of its output becomes one fact.
 
 ```yaml
 name: work-runtime
@@ -85,12 +87,12 @@ effects:
       - 2
       other: outcome_unknown
 probes:
-  agent_liveness:
+  registry_agents:
     command:
       argv:
       - bash
-      - -lc
-      - flow agents --json
+      - crates/holon-net/probes/registry.sh
+      - agents
       working_dir: /Users/martin/Workspaces/pkm/holon
       env_allow:
       - HOME
@@ -98,7 +100,7 @@ probes:
       timeout: 30s
     interval: 1m
     facts_into: Agent
-    subject_field: agent
+    subject_field: agentId
 ```
 
 `StartJob` takes one waiting agent and one build slot, refuses to start while
@@ -204,6 +206,24 @@ stdout is one JSON object, and each object becomes one fact token in
 | `interval` | yes | how long the host waits between two runs |
 | `facts_into` | yes | the place the facts go into |
 | `subject_field` | yes | the field of each JSON line that names the subject |
+
+The subject field holds a string or an integer. The host runs every probe when
+it starts and then one `interval` after each run ends.
+
+- **A good run is the whole truth about its place.** Each line becomes one
+  fact; a subject the probe reported before and no longer reports is
+  retracted.
+- **A failed run deletes nothing.** A non-zero exit, a timeout, a command that
+  does not start, or stdout that is not facts (a line that is not a JSON
+  object, has no subject, or repeats one) changes no fact. The facts of the
+  last good run stay, and a `ProbeCondition` names the probe, the cause and
+  those facts as stale. The next good run clears it.
+- A timeout ends the probe's whole process group.
+
+The probes of the work-runtime net are scripts in `crates/holon-net/probes/`:
+`registry.sh` (the agent and job records of the local runtime registry),
+`pids.sh` (`ps`: the live pids), `disk.sh` (`df`: the free space of the
+checkout's volume) and `load.sh` (the load averages and swap use of the host).
 
 ## Durations
 

@@ -175,6 +175,7 @@ crates/holon-mcp-client/tests/oauth_bootstrap_flow.rs	timing	started.elapsed() <
 crates/holon-mcp-client/tests/subscribe_bounds.rs	virtual-clock	started.elapsed() <= REQUEST_TIMEOUT + Duration::from_secs(1),
 crates/holon-mcp-mock/tests/mcp_mock_e2e.rs	liveness	Instant::now() < deadline,
 crates/holon-mcp-mock/tests/mcp_mock_e2e.rs	lower-bound	start.elapsed() >= Duration::from_millis(250),
+crates/holon-net-shell/tests/probe_run.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-net-shell/tests/shell_effect.rs	liveness	assert!(Instant::now() < deadline, "the child never {what}");
 crates/holon-rows/tests/mapper_bounds.rs	timing	refused.is_err() && started.elapsed() < CEILING,
 crates/holon-turso/tests/stuck_actor_watch.rs	liveness	Instant::now() < deadline,

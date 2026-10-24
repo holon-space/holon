@@ -1868,6 +1868,24 @@ impl Executor {
         self.quiesced((), now)
     }
 
+    /// An outside removal of the token of `subject`, such as a probe that no
+    /// longer reports it.
+    pub fn retract(
+        &mut self,
+        place: &str,
+        subject: &str,
+        now: Duration,
+    ) -> Result<Quiesced<()>, ExecError> {
+        assert!(
+            matches!(self.net.place_def(place).kind, PlaceKind::Stored { .. }),
+            "an outside retraction from the derived place '{place}'"
+        );
+        self.advance(now);
+        self.tokens
+            .remove(&Place::new(place), &Subject::new(subject), None);
+        self.quiesced((), now)
+    }
+
     pub fn why_not(&self, transition: &str, subject: &str) -> Option<WhyNot> {
         let t = self.net.transition_def(transition);
         self.decide(t, &Subject::new(subject)).err()

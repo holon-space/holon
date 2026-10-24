@@ -251,7 +251,7 @@ pub async fn kill_group(pgid: Pgid) {
 /// SIGTERM to the whole group, then SIGKILL to it when a member is left at
 /// the end of the grace period. The grace period waits on the group, not on
 /// the child: a member that ignores SIGTERM outlives the child.
-async fn end_group(pgid: Pgid, mut child: Option<&mut Child>) -> io::Result<()> {
+pub(crate) async fn end_group(pgid: Pgid, mut child: Option<&mut Child>) -> io::Result<()> {
     signal_group(pgid, libc::SIGTERM);
     let deadline = tokio::time::Instant::now() + KILL_GRACE;
     loop {

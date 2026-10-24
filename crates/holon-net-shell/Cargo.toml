@@ -13,7 +13,7 @@ holon-net.workspace = true
 libc = "0.2"
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "process", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "sync", "time"] }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
