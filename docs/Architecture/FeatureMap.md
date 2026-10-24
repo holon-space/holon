@@ -426,6 +426,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-banner-toast-paint-load-flake`
 - `windowed-clickblock-bounds-under-load`
 - `windowed-entity-not-in-bounds-under-load`
+- `windowed-focus-not-in-bounds-under-load`
+- `windowed-previous-run-toast-box-under-load`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
 - `writeorgfile-sql-reads-budget`

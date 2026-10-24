@@ -228,7 +228,10 @@ These fail the load or the case and name it:
 The random keystone keeps the whole-catalog guards: the per-tick selection
 floor, the engagement ledger and the shape-gate reach (`assert_reached`). The
 replay runs none of them, because a narrowed check deselects most of the
-catalog by design.
+catalog by design. It prints the shape reach, and `just keystone-smoke` asserts
+an admitted edit, a refused edit and one simulator comparison for the case
+`shape-gate-refuses-then-admits-in-one-case`: its two shape locks pass
+vacuously on a case that draws no refused edit.
 
 ### Where the check runs
 

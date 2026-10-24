@@ -77,6 +77,14 @@ OWNER_RECIPES = {
     "package(holon-mcp-client) & test(=a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout)": "just timing-gate",
 }
 
+# Changed-path prefix -> the recipe that greps that code's output; the lane
+# package selector reads it by parsing this file.
+PATH_RECIPES = {
+    "crates/holon-integration-tests/src/pbt/": "keystone-smoke",
+    "crates/holon-integration-tests/tests/hand_authored_regressions.rs": "keystone-smoke",
+    "frontends/holon-worker/": "check-worker-wasm",
+}
+
 # ── the cap rule (docs/Testing/TimingCritical.md) ────────────────────
 K = 4
 CAP_FLOOR_S = 60

@@ -23,7 +23,8 @@
 //! `hand_authored::LOCK_FLOOR` run, and they run only just before and after the
 //! case's last transition and any it names in `also_check_after`
 //! (`hand_authored::replay`). The selection floor, the engagement ledger and
-//! the shape reach floor are the random keystone's.
+//! the shape reach floor are the random keystone's; the replay only prints the
+//! shape reach, which `just keystone-smoke` asserts for its shape case.
 //!
 //! ## `initial_state` is the drawn wiring; `environment` is the rest
 //!
@@ -91,6 +92,7 @@ use holon_integration_tests::pbt::hand_authored::parse_case;
 use holon_integration_tests::pbt::hand_authored::parse_replay_case;
 use holon_integration_tests::pbt::hand_authored::replay;
 use holon_integration_tests::pbt::hand_authored::sidecar_path;
+use holon_integration_tests::pbt::invariants::bodies::shape_sim_matches_authority;
 use holon_integration_tests::pbt::reference_state::ReferenceState;
 use holon_integration_tests::pbt::transitions::E2ETransition;
 use holon_integration_tests::pbt::transitions::UndoLastMutation;
@@ -147,6 +149,7 @@ fn hand_authored_keystone_regressions() {
         replay::<ComposedSut<WideE2E>>(initial_state, case.transitions, &checkpoints, &locks);
         eprintln!("[hand-authored regression] PASSED case {:?}", case.name);
     }
+    shape_sim_matches_authority::report_reach();
 }
 
 /// PARKED pin — echo-loop `BlockToPage` embedded-page child render-leak
