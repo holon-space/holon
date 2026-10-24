@@ -147,7 +147,8 @@ split_violations() {
                 announced = substr(msg[i], length("[inv-sql-budget] ") + 1) + 0
                 rest = substr(msg[i], RLENGTH + 1)
                 k = 0
-                while (match(rest, /\\n  [^ ]+\.sql_[a-z_]+: /)) {
+                # Every metric label, not only sql_*: the budget also writes wall, query and memory ceilings.
+                while (match(rest, /\\n  [^ ]+\.[a-z_]+: /)) {
                     one[++k] = substr(rest, 1, RSTART - 1)
                     rest = substr(rest, RSTART + 4)
                 }

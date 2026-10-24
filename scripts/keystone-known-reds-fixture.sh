@@ -168,7 +168,7 @@ expect_outcome() {
     shift 3
     local out code=0
     out=$("$repo_root/scripts/keystone-known-reds.sh" "$@" 2>&1) || code=$?
-    if [ "$code" -ne "$want_code" ] || ! printf '%s\n' "$out" | grep -q -- "$want_line"; then
+    if [ "$code" -ne "$want_code" ] || ! grep -q -- "$want_line" <<<"$out"; then
         echo "[fixture] FAIL outcome/$label: want exit $want_code and a line matching"
         echo "          '$want_line'; got exit $code:"
         printf '%s\n' "$out" | tail -20 | sed 's/^/          | /'
@@ -364,6 +364,15 @@ test general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/page-without-own-file 0 '^PRIMARY: \[known-red:page-without-own-file\]' "$work/violation-page-without-own-file.log"
+# A budget message also carries the non-SQL ceilings (wall, query, memory).
+cat >"$work/violation-known-plus-novel-memory-budget.log" <<'EOF'
+[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 2 budget violation(s):\n  OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]\n  OpenTabViaModifierClick.rss_delta: +60.2MB exceeds limit 50MB (before=300MB, after=360MB)")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome violation/known-plus-novel-memory-budget 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-known-plus-novel-memory-budget.log"
 # The sample rules (`[keystone-sample]`) belong to the HEADLESS keystone, which
 # is the only test that discloses one. The windowed keystone's name contains the
 # headless name as a substring, so these three cases pin which log each rule
@@ -417,6 +426,30 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 EOF
 expect_outcome sample-floor-breach 1 '^SAMPLE: cases=16 attempted=4 completed=3 floor=8 known-red-hits=1 verdict=FLOOR-BREACH$' \
     "$work/sample-floor-breach.log"
+# One case per budget metric (the labels transition_budgets.rs `build_samples`
+# writes): a known sql_writes violation joined with that metric's violation
+# splits into the known piece and that metric's piece alone as the novel one.
+known_budget_piece='OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]'
+while IFS='|' read -r metric piece; do
+    log="$work/violation-budget-metric-$metric.log"
+    cat >"$log" <<EOF
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 2 budget violation(s):\n  $known_budget_piece\n  OpenTabViaModifierClick.$metric: $piece")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+    expect_outcome "violation/budget-metric-$metric" 1 "^ *1 .*\[inv-sql-budget\] 1 budget violation(s):\\\\n  OpenTabViaModifierClick\\.$metric: " "$log"
+done <<'EOF'
+sql_reads|40 exceeds expected 10 + tolerance 2 = 12
+sql_read_repeat|one binding-set of `SELECT id FROM block WHERE parent_id = ?` re-executed 3x, limit 1
+sql_writes|3 exceeds expected 1 + tolerance 0 = 1; writes: [`INSERT INTO block (id) VALUES (?)` origin=<no-parent>]
+sql_ddl|1 exceeds expected 0 + tolerance 0 = 0
+single_query|2400ms exceeds limit 2000ms
+wall_time|31000ms exceeds limit 30000ms
+settle|2600ms exceeds limit 2500ms (Loro→SQL convergence slow)
+rss_delta|+60.2MB exceeds limit 50MB (before=300MB, after=360MB)
+rss_cumulative|+520.0MB total growth exceeds limit 500MB (baseline=300MB, current=820MB)
+EOF
 # A test that returned `Err` printed no panic: its status line stands in, with
 # the `Error:` it returned, so two root causes in one binary stay apart.
 cat >"$work/fail-leak-no-panic.log" <<'EOF'
@@ -648,7 +681,7 @@ expect_sut_order() {
     } >"$log"
     local out
     out=$("$repo_root/scripts/keystone-known-reds.sh" "$log" 2>&1 || true)
-    if ! printf '%s\n' "$out" | grep -q -- "^PRIMARY: \[$want\]"; then
+    if ! grep -q -- "^PRIMARY: \[$want\]" <<<"$out"; then
         echo "[fixture] FAIL sut-order/$label: want PRIMARY [$want]; got:"
         printf '%s\n' "$out" | tail -5 | sed 's/^/          | /'
         outcome_fail=1
