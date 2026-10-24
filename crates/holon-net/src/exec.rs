@@ -92,6 +92,9 @@ macro_rules! name {
 name!(Place);
 name!(Subject);
 
+/// The one row of a pool place: every subject takes from it and returns to it.
+pub const POOL_SUBJECT: &str = "pool";
+
 impl Place {
     /// `<T>.Running`: where a take moves the inputs of a firing of `T`.
     pub fn running(transition: &str) -> Self {
@@ -221,6 +224,9 @@ pub struct PlaceDef {
     pub class: Class,
     pub kind: PlaceKind,
     pub capacity: Capacity,
+    /// `N` interchangeable tokens shared by every subject, on a
+    /// [`Capacity::Fifo`] place.
+    pub pool: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -413,6 +419,7 @@ impl NetDef {
                 class,
                 kind: PlaceKind::Stored { candidate: None },
                 capacity: Capacity::Single,
+                pool: None,
             },
         );
         self
@@ -428,6 +435,7 @@ impl NetDef {
                 class,
                 kind: PlaceKind::Stored { candidate: None },
                 capacity: Capacity::Register,
+                pool: None,
             },
         );
         self
@@ -442,8 +450,18 @@ impl NetDef {
                 class,
                 kind: PlaceKind::Stored { candidate: None },
                 capacity: Capacity::Fifo,
+                pool: None,
             },
         );
+        self
+    }
+
+    /// A [`fifo`](Self::fifo) place that starts with `size` interchangeable
+    /// tokens, shared by every subject: a firing that consumes it takes the
+    /// oldest, and a put returns one.
+    pub fn pool(mut self, name: &str, class: Class, size: u32) -> Self {
+        self = self.fifo(name, class);
+        self.places.get_mut(name).expect("just inserted").pool = Some(size);
         self
     }
 
@@ -457,6 +475,7 @@ impl NetDef {
                     candidate: Some(Place::new(candidate)),
                 },
                 capacity: Capacity::Single,
+                pool: None,
             },
         );
         self
@@ -469,6 +488,7 @@ impl NetDef {
                 class: Class::Process,
                 kind: PlaceKind::Derived(derive),
                 capacity: Capacity::Single,
+                pool: None,
             },
         );
         self
@@ -548,6 +568,7 @@ impl NetDef {
                         class: Class::Process,
                         kind: PlaceKind::Stored { candidate: None },
                         capacity: Capacity::Single,
+                        pool: None,
                     },
                 );
             }
@@ -562,6 +583,7 @@ impl NetDef {
                 class: Class::Process,
                 kind: PlaceKind::Stored { candidate: None },
                 capacity: Capacity::Single,
+                pool: None,
             },
         );
         for (name, def) in &self.places {
@@ -720,6 +742,10 @@ pub struct Tokens {
     slots: BTreeMap<Place, BTreeMap<Subject, Slot>>,
     next_id: u64,
     fifo: BTreeSet<Place>,
+    /// Pool places and their size: one shared row, whatever the subject.
+    pools: BTreeMap<Place, u32>,
+    /// Pool tokens a running firing holds; they count against the size.
+    lent: BTreeMap<Place, u32>,
 }
 
 impl Tokens {
@@ -733,6 +759,11 @@ impl Tokens {
         self.slot(place, subject).map_or_else(Vec::new, |s| {
             s.tokens.iter().map(|t| t.content.clone()).collect()
         })
+    }
+
+    /// How many tokens of a pool are free: not held by a running firing.
+    pub fn free(&self, place: &str) -> usize {
+        self.contents(place, POOL_SUBJECT).len()
     }
 
     pub fn version(&self, place: &str, subject: &str) -> u64 {
@@ -755,14 +786,24 @@ impl Tokens {
     }
 
     fn slot(&self, place: &str, subject: &str) -> Option<&Slot> {
+        let subject = if self.pools.contains_key(place) {
+            POOL_SUBJECT
+        } else {
+            subject
+        };
         self.slots.get(place).and_then(|m| m.get(subject))
     }
 
     fn slot_mut(&mut self, place: &Place, subject: &Subject) -> &mut Slot {
+        let subject = if self.pools.contains_key(place) {
+            Subject::new(POOL_SUBJECT)
+        } else {
+            subject.clone()
+        };
         self.slots
             .entry(place.clone())
             .or_default()
-            .entry(subject.clone())
+            .entry(subject)
             .or_default()
     }
 
@@ -772,7 +813,15 @@ impl Tokens {
     fn put(&mut self, place: &Place, subject: &Subject, content: Content, by: Writer) {
         let id = self.next_id;
         let fifo = self.fifo.contains(place);
+        let size = self.pools.get(place).copied();
+        let lent = self.lent.get(place).copied().unwrap_or(0) as usize;
         let slot = self.slot_mut(place, subject);
+        if let Some(size) = size {
+            assert!(
+                slot.tokens.len() + lent < size as usize,
+                "a put into the pool {place} of {size} tokens, none of which is taken"
+            );
+        }
         if fifo {
             slot.tokens.push_back(Token { id, content });
         } else if slot.tokens.front().is_some_and(|t| t.content == content) {
@@ -789,6 +838,7 @@ impl Tokens {
     /// where it was taken from. A single-token place that holds a token
     /// written meanwhile keeps it and the taken one is dropped.
     fn restore(&mut self, place: &Place, subject: &Subject, token: &Token) {
+        self.unlend(place);
         let fifo = self.fifo.contains(place);
         let slot = self.slot_mut(place, subject);
         slot.reserved = false;
@@ -799,6 +849,20 @@ impl Tokens {
             slot.tokens.push_front(token.clone());
         } else if slot.tokens.is_empty() {
             slot.tokens.push_back(token.clone());
+        }
+    }
+
+    fn lend(&mut self, place: &Place) {
+        if self.pools.contains_key(place) {
+            *self.lent.entry(place.clone()).or_default() += 1;
+        }
+    }
+
+    fn unlend(&mut self, place: &Place) {
+        if self.pools.contains_key(place) {
+            let lent = self.lent.entry(place.clone()).or_default();
+            assert!(*lent > 0, "pool {place} gets back a token it never lent");
+            *lent -= 1;
         }
     }
 
@@ -906,6 +970,13 @@ impl Reader<'_> {
                 value
             }
         }
+    }
+
+    /// The free tokens of a pool, for a guard such as "start only while
+    /// `cpu > 0`". The read lands in the trace like any other.
+    pub fn free(&mut self, place: &str) -> usize {
+        self.trace.row(self.tokens, place, POOL_SUBJECT);
+        self.tokens.free(place)
     }
 
     pub fn present(&mut self, place: &str, subject: &str) -> bool {
@@ -1426,12 +1497,24 @@ impl Executor {
             .filter(|(_, d)| d.capacity == Capacity::Fifo)
             .map(|(p, _)| p.clone())
             .collect();
+        let pools: BTreeMap<_, _> = net
+            .places
+            .iter()
+            .filter_map(|(p, d)| Some((p.clone(), d.pool?)))
+            .collect();
+        let mut tokens = Tokens {
+            fifo,
+            pools: pools.clone(),
+            ..Tokens::default()
+        };
+        for (place, size) in &pools {
+            for _ in 0..*size {
+                tokens.put(place, &Subject::new(POOL_SUBJECT), Content::new(), None);
+            }
+        }
         Ok(Self {
             net,
-            tokens: Tokens {
-                fifo,
-                ..Tokens::default()
-            },
+            tokens,
             marks: BTreeMap::new(),
             runs: BTreeMap::new(),
             in_flight: BTreeMap::new(),
@@ -2211,12 +2294,27 @@ impl Executor {
         }
     }
 
-    fn subjects(&self, t: &TransitionDef) -> BTreeSet<Subject> {
-        t.consumes
+    /// The subjects `t` may fire for. A firing that takes from a pool serves
+    /// the subject with the oldest waiting token first.
+    fn subjects(&self, t: &TransitionDef) -> Vec<Subject> {
+        let all: BTreeSet<_> = t
+            .consumes
             .iter()
             .chain(&t.reads)
             .flat_map(|p| self.tokens.subjects(p))
-            .collect()
+            .collect();
+        let mut subjects: Vec<_> = all.into_iter().collect();
+        if t.consumes.iter().any(|p| self.tokens.pools.contains_key(p)) {
+            subjects.sort_by_key(|s| {
+                t.consumes
+                    .iter()
+                    .filter(|p| !self.tokens.pools.contains_key(*p))
+                    .filter_map(|p| self.tokens.token(p, s))
+                    .map(|token| token.id)
+                    .min()
+            });
+        }
+        subjects
     }
 
     fn available(&self, place: &Place, subject: &Subject) -> bool {
@@ -2340,6 +2438,7 @@ impl Executor {
                 slot.tokens.pop_front()
             }
             .expect("decide checked every consumed token");
+            self.tokens.lend(&p);
             taken.push((p, token));
         }
         self.runs
@@ -2708,6 +2807,7 @@ impl Executor {
     /// newer version; on a FIFO place every token left behind is younger than
     /// the consumed one, so the row did change.
     fn commit_consumption(&mut self, place: &Place, subject: &Subject, by: &Arc<str>) {
+        self.tokens.unlend(place);
         let fifo = self.tokens.fifo.contains(place);
         let slot = self.tokens.slot_mut(place, subject);
         if slot.reserved {

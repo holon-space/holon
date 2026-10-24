@@ -4,8 +4,7 @@
 //!
 //! The arcs, the capacities and the ports come from the file; the guard and
 //! the body of a firing are Rust the file cannot hold, so the caller hands
-//! them in. What the file cannot yet express the loader refuses rather than
-//! dropping: a pool of interchangeable tokens has no executable form.
+//! them in.
 
 use std::sync::Arc;
 
@@ -21,10 +20,6 @@ use holon_net::load::net_def;
 
 const REPLAY_PATH: &str = "nets/work-runtime-replay.yaml";
 const REPLAY: &str = include_str!("../nets/work-runtime-replay.yaml");
-
-/// The effectful net of the board, whose build slots are a pool.
-const POOL_PATH: &str = "nets/work-runtime.yaml";
-const POOL: &str = include_str!("../nets/work-runtime.yaml");
 
 /// A guard that binds nothing and a body that writes nothing: the loader
 /// builds the net's shape, which these tests read, and never calls them.
@@ -139,15 +134,30 @@ fn the_executor_checks_a_loaded_net_too() {
 }
 
 #[test]
-fn a_pool_of_interchangeable_tokens_is_refused_not_dropped() {
-    let err = refusal(POOL_PATH, POOL);
-    assert_eq!(
-        err,
-        format!(
-            "{POOL_PATH}:{}: place `Cpu`: a `pool` of interchangeable tokens has no executable form; the executor holds one token per subject",
-            line_of(POOL, "Cpu")
-        )
-    );
+fn a_declared_pool_loads_with_all_its_tokens_free() {
+    let text = "\
+name: slots
+places:
+  Waiting:
+    capacity: fifo
+  Cpu:
+    capacity: fifo
+    pool: 4
+  Held:
+    capacity: single
+transitions:
+  Take:
+    trigger: auto
+    priority: 0
+    consumes:
+    - Waiting
+    - Cpu
+    produces:
+    - Held
+";
+    let net = net_def("slots.yaml", text, inert).expect("the net loads");
+    let ex = Executor::new(net).expect("the net checks");
+    assert_eq!(ex.tokens().free("Cpu"), 4);
 }
 
 /// A net whose one transition runs a shell effect, with the keyed receiver

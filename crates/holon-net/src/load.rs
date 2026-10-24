@@ -8,10 +8,6 @@
 //! `produces` is the file's declaration of a transition's outputs. The
 //! executor takes the outputs from the firing itself, so the loader builds
 //! nothing from it; the format checks that each one names a declared place.
-//!
-//! What the format can express and this executor cannot, the loader refuses
-//! rather than dropping: a `pool` of interchangeable tokens has no form in an
-//! executor that holds one token per subject.
 
 use std::fs;
 use std::path::Path;
@@ -76,16 +72,11 @@ pub fn net_def(
     })?;
     let mut net = NetDef::default();
     for (place, spec) in &file.places {
-        if spec.pool.is_some() {
-            return Err(NetLoadError::Pool {
-                at: at(path, text, Some((Section::Places, place))),
-                place: place.clone(),
-            });
-        }
-        net = match spec.capacity {
-            PlaceCapacity::Single => net.place(place, Class::Process),
-            PlaceCapacity::Register => net.register(place, Class::Process),
-            PlaceCapacity::Fifo => net.fifo(place, Class::Process),
+        net = match (spec.capacity, spec.pool) {
+            (_, Some(size)) => net.pool(place, Class::Process, size),
+            (PlaceCapacity::Single, None) => net.place(place, Class::Process),
+            (PlaceCapacity::Register, None) => net.register(place, Class::Process),
+            (PlaceCapacity::Fifo, None) => net.fifo(place, Class::Process),
         };
     }
     // The executor fires in declaration order, so the authored priority — the
@@ -223,8 +214,4 @@ pub enum NetLoadError {
         #[source]
         source: NetFileError,
     },
-    #[error(
-        "{at}: place `{place}`: a `pool` of interchangeable tokens has no executable form; the executor holds one token per subject"
-    )]
-    Pool { at: String, place: String },
 }

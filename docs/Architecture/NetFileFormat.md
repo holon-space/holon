@@ -116,13 +116,14 @@ decides (ADR 0032 §9.2). After two attempts the count bound stops it.
 
 - `single` holds one token per subject and **refuses a second put loudly**. It
   is the default choice: a silent replacement is a lost update.
-- `fifo` is a queue per subject — candidates, waiting work, a pool of slots.
+- `fifo` is a queue per subject — candidates, waiting work.
 - `register` holds one token per subject that a fact put **replaces**, for a
   value that is re-derived rather than accumulated: a hash, a probe's fact.
-- `pool: N` needs `capacity: fifo`, because the N tokens queue. The format
-  only declares the pool; the executor does not implement it yet, so the
-  loader refuses a net that declares one rather than loading it as a plain
-  queue.
+- `pool: N` needs `capacity: fifo`, because the N tokens queue. The place
+  starts with N tokens that every subject shares: a transition that consumes
+  it takes one for any subject, a put returns one, the subject with the oldest
+  waiting input takes a returned token first, and a put beyond N fails. A guard
+  reads the free count with `Reader::free`.
 
 ## Transitions
 
