@@ -1126,20 +1126,10 @@ impl ReactiveViewModel {
         }
     }
 
-    /// Extract entity name from the data row's ID scheme.
+    /// The entity the data row belongs to; see
+    /// [`crate::view_model::row_entity_name`].
     pub fn entity_name(&self) -> Option<EntityName> {
-        let data = self.data.get_cloned();
-        // ALLOW(raw_row_id_column): key — reads the SCHEME only, to name the entity the
-        // row belongs to
-        if let Some(Value::String(id)) = data.get("id") {
-            if let Some(scheme) = id.split_once(':').map(|(s, _)| s) {
-                return Some(EntityName::Named(scheme.to_string()));
-            }
-        }
-        if let Some(Value::String(s)) = data.get("entity_name") {
-            return Some(EntityName::Named(s.to_string()));
-        }
-        None
+        crate::view_model::row_entity_name(&self.data.get_cloned())
     }
 
     /// The row's `id` column, classified. A caller that only needs the entity
@@ -2265,6 +2255,22 @@ mod tests {
     use holon_api::Value;
 
     use super::*;
+
+    #[test]
+    fn a_row_text_that_names_no_entity_gives_no_entity_name() {
+        let named = |key: &str, text: &str| {
+            let row = DataRow::from([(key.to_string(), Value::String(text.to_string()))]);
+            ReactiveViewModel::leaf("text", Value::Null)
+                .with_entity(Arc::new(row))
+                .entity_name()
+        };
+        assert_eq!(named("id", "has space:1"), None);
+        assert_eq!(named("entity_name", "has space"), None);
+        assert_eq!(
+            named("id", "todoist_task:1"),
+            Some(EntityName::parse_named("todoist-task").unwrap())
+        );
+    }
 
     #[test]
     #[should_panic(expected = "not a registered collection layout")]

@@ -1768,19 +1768,10 @@ impl ViewModel {
     }
 
     /// Extract the entity name from this node's ID scheme (e.g. `"block:uuid"`
-    /// → `"block"`), falling back to an explicit `entity_name` field.
+    /// → `"block"`), falling back to an explicit `entity_name` field; see
+    /// [`row_entity_name`].
     pub fn entity_name(&self) -> Option<EntityName> {
-        // ALLOW(raw_row_id_column): key — reads the SCHEME only, or collects the id
-        // TEXT for a driver lookup
-        if let Some(Value::String(id)) = self.entity.get("id") {
-            if let Some(scheme) = id.split_once(':').map(|(s, _)| s) {
-                return Some(EntityName::Named(scheme.to_string()));
-            }
-        }
-        if let Some(Value::String(s)) = self.entity.get("entity_name") {
-            return Some(EntityName::Named(s.to_string()));
-        }
-        None
+        row_entity_name(&self.entity)
     }
 
     /// This node's entity-data `id` column, classified. A caller that only
@@ -1836,9 +1827,103 @@ pub(crate) fn naming_the_builder(widget: &str, message: String) -> String {
     }
 }
 
+/// The entity a data row belongs to: its `id` scheme, else its `entity_name`
+/// column. Row text that names no entity gives `None` and a warning, so the
+/// node renders without entity operations and the bad row is disclosed.
+pub fn row_entity_name(row: &DataRow) -> Option<EntityName> {
+    // ALLOW(raw_row_id_column): key — reads the SCHEME only, to name the entity the
+    // row belongs to
+    let id = match row.get("id") {
+        Some(Value::String(id)) => Some(id.as_str()),
+        _ => None,
+    };
+    let raw = match (id.and_then(|id| id.split_once(':')), row.get("entity_name")) {
+        (Some((scheme, _)), _) => scheme,
+        (None, Some(Value::String(s))) => s.as_str(),
+        (None, _) => return None,
+    };
+    match EntityName::parse_named(raw) {
+        Ok(name) => Some(name),
+        Err(err) => {
+            tracing::warn!(row_id = ?id, raw, %err, "a data row names no entity");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_row_that_names_no_entity_is_disclosed_with_its_raw_text() {
+        use std::sync::Mutex;
+
+        use tracing_subscriber::layer::Context;
+        use tracing_subscriber::layer::Layer;
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Clone, Default)]
+        struct Warnings(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> Layer<S> for Warnings {
+            fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+                struct Fields(String);
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        write!(self.0, " {}={value:?}", field.name()).unwrap();
+                    }
+                }
+                if *event.metadata().level() == tracing::Level::WARN {
+                    let mut fields = Fields(String::new());
+                    event.record(&mut fields);
+                    self.0.lock().unwrap().push(fields.0);
+                }
+            }
+        }
+
+        let row = |pairs: &[(&str, &str)]| -> DataRow {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+                .collect()
+        };
+        let warnings = Warnings::default();
+        let names = tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(warnings.clone()),
+            || {
+                [
+                    row(&[("id", "has space:1")]),
+                    row(&[("id", "plain"), ("entity_name", "a/b")]),
+                    row(&[("id", "block:1")]),
+                ]
+                .map(|r| row_entity_name(&r))
+            },
+        );
+
+        assert_eq!(
+            names,
+            [None, None, Some(EntityName::parse_named("block").unwrap())]
+        );
+        let warnings = warnings.0.lock().unwrap();
+        assert_eq!(
+            warnings.len(),
+            2,
+            "one warning per refused row: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("raw=\"has space\"")
+                && warnings[0].contains("row_id=Some(\"has space:1\")"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[1].contains("raw=\"a/b\"") && warnings[1].contains("row_id=Some(\"plain\")"),
+            "{warnings:?}"
+        );
+    }
 
     #[test]
     fn drawer_mode_default_open() {

@@ -730,8 +730,9 @@ mod backend {
         let runtime = state.runtime.clone();
         drop(guard);
 
-        let entity_name =
-            EntityName::parse_named(&entity).map_err(|e| super::nerr("execute_operation", e))?;
+        let entity_name = entity
+            .parse::<EntityName>()
+            .map_err(|e| super::nerr("execute_operation", e))?;
         let result = runtime
             .block_on(async { session.execute_operation(&entity_name, &op, params).await })
             .map_err(|e| super::nerr("execute_operation", e))?;
@@ -1641,7 +1642,8 @@ mod backend {
 
     fn req_entity(args: &serde_json::Value) -> anyhow::Result<EntityName> {
         let raw = req_str(args, "entity_name")?;
-        EntityName::parse_named(&raw).map_err(|e| anyhow::anyhow!("`entity_name`: {e}"))
+        raw.parse::<EntityName>()
+            .map_err(|e| anyhow::anyhow!("`entity_name`: {e}"))
     }
 
     fn parse_params(args: &serde_json::Value) -> anyhow::Result<HashMap<String, Value>> {

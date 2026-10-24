@@ -2514,7 +2514,7 @@ fn reject_operation_control_key(key: &str) -> Result<(), rmcp::ErrorData> {
 
 /// An entity name an agent sent: refused before it reaches any dispatch.
 pub(crate) fn parse_entity_param(raw: &str) -> Result<EntityName, rmcp::ErrorData> {
-    EntityName::parse_named(raw)
+    raw.parse::<EntityName>()
         .map_err(|e| rmcp::ErrorData::invalid_params(format!("`entity_name`: {e}"), None))
 }
 
@@ -11203,5 +11203,17 @@ mod entity_name_param_tests {
             before,
             "a refusal writes nothing"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_wildcard_entity_runs_a_broadcast_operation() {
+        server(fresh_engine().await)
+            .execute_operation(Parameters(ExecuteOperationParams {
+                entity_name: "*".to_string(),
+                operation: "rebuild_views".to_string(),
+                params: HashMap::new(),
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("`*` rebuild_views: {}", e.message));
     }
 }

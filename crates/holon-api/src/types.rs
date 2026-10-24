@@ -83,11 +83,9 @@ impl Serialize for EntityName {
 
 impl<'de> Deserialize<'de> for EntityName {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        if s == "*" {
-            return Ok(Self::Wildcard);
-        }
-        Self::parse_named(&s).map_err(serde::de::Error::custom)
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -108,10 +106,14 @@ impl fmt::Display for EntityName {
     }
 }
 
+/// An untrusted entity name: the `*` wildcard, or a name `parse_named` accepts.
 impl FromStr for EntityName {
     type Err = InvalidEntityName;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "*" {
+            return Ok(Self::Wildcard);
+        }
         Self::parse_named(s)
     }
 }
@@ -1337,10 +1339,11 @@ mod tests {
 
     #[test]
     fn entity_name_from_str_refuses_what_names_no_entity() {
-        for raw in ["", "a/b", "9lives", "a b", "*"] {
+        for raw in ["", "a/b", "9lives", "a b", "**"] {
             let err = raw.parse::<EntityName>().expect_err(raw);
             assert_eq!(err.raw, raw);
         }
+        assert!("*".parse::<EntityName>().unwrap().is_wildcard());
         let name: EntityName = "todoist_task".parse().unwrap();
         assert_eq!(name.as_str(), "todoist-task");
         assert_eq!(name.as_str().parse::<EntityName>().unwrap(), name);
@@ -1362,6 +1365,7 @@ mod tests {
         fn entity_name_parse_accepts_exactly_uri_schemes(raw in "[a-zA-Z0-9_+.\\- /\"*]{0,8}") {
             let normalized = raw.replace('_', "-");
             match raw.parse::<EntityName>() {
+                Ok(name) if raw == "*" => proptest::prop_assert!(name.is_wildcard()),
                 Ok(name) => {
                     proptest::prop_assert!(is_valid_uri_scheme(&normalized));
                     proptest::prop_assert_eq!(name.as_str(), normalized.as_str());

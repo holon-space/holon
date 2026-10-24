@@ -313,7 +313,8 @@ impl OperationIntent {
             .ok_or_else(|| anyhow::anyhow!("intent 'op' is not text: {item}"))?;
         let params: HashMap<String, Value> = serde_json::from_value(field("params")?.clone())
             .map_err(|e| anyhow::anyhow!("parse intent params of {item}: {e}"))?;
-        let entity = EntityName::parse_named(entity)
+        let entity = entity
+            .parse::<EntityName>()
             .map_err(|e| anyhow::anyhow!("intent 'entity' of {item}: {e}"))?;
         Ok(Self::new(entity, op.to_string(), params))
     }
@@ -337,7 +338,12 @@ pub fn parse_action_expr(
     {
         let parts: Vec<&str> = name.split('.').collect();
         if parts.len() == 2 {
-            let entity_name = EntityName::Named(parts[0].to_string());
+            let entity_name = EntityName::parse_named(parts[0]).map_err(|source| {
+                holon_api::computation::ComputeError::InvalidActionEntity {
+                    action: name.clone(),
+                    source,
+                }
+            })?;
             let op_name = parts[1].to_string();
 
             let fns = services.value_fn_lookup(ctx);
