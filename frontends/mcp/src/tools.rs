@@ -2512,6 +2512,12 @@ fn reject_operation_control_key(key: &str) -> Result<(), rmcp::ErrorData> {
     Ok(())
 }
 
+/// An entity name an agent sent: refused before it reaches any dispatch.
+pub(crate) fn parse_entity_param(raw: &str) -> Result<EntityName, rmcp::ErrorData> {
+    EntityName::parse_named(raw)
+        .map_err(|e| rmcp::ErrorData::invalid_params(format!("`entity_name`: {e}"), None))
+}
+
 fn json_map_to_storage_entity(
     map: HashMap<String, serde_json::Value>,
 ) -> Result<StorageEntity, rmcp::ErrorData> {
@@ -3056,7 +3062,7 @@ impl HolonMcpServer {
         let response = self
             .service()
             .execute_operation(
-                &EntityName::new(&params.entity_name),
+                &parse_entity_param(&params.entity_name)?,
                 &params.operation,
                 storage_entity,
             )
@@ -3135,10 +3141,8 @@ impl HolonMcpServer {
         &self,
         Parameters(params): Parameters<ListOperationsParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ops = self
-            .service()
-            .available_operations(&params.entity_name)
-            .await;
+        let entity = parse_entity_param(&params.entity_name)?;
+        let ops = self.service().available_operations(entity.as_str()).await;
 
         // Convert OperationDescriptor to JSON
         let json_ops: Vec<serde_json::Value> = ops
@@ -3581,7 +3585,7 @@ impl HolonMcpServer {
         let response = self
             .service()
             .execute_operation(
-                &EntityName::new(&params.entity_name),
+                &parse_entity_param(&params.entity_name)?,
                 &params.command_name,
                 storage_entity,
             )
@@ -11085,5 +11089,119 @@ mod dense_patch_sibling_work_tests {
             }))
             .await
             .unwrap_or_else(|e| panic!("a move within the bound applies: {}", e.message));
+    }
+}
+
+#[cfg(test)]
+mod entity_name_param_tests {
+    use std::collections::HashMap;
+
+    use rmcp::handler::server::wrapper::Parameters;
+    use rmcp::model::ErrorCode;
+
+    use super::engine_harness::fresh_engine;
+    use super::engine_harness::server;
+    use crate::types::CreateEntityTypeParams;
+    use crate::types::ExecuteCommandParams;
+    use crate::types::ExecuteOperationParams;
+    use crate::types::ListOperationsParams;
+
+    const UNNAMEABLE: &str = "a b";
+
+    async fn schema_and_blocks(engine: &holon::api::BackendEngine) -> (String, String) {
+        let count = |sql: &'static str| async move {
+            format!(
+                "{:?}",
+                engine
+                    .db_handle()
+                    .query(sql, HashMap::new())
+                    .await
+                    .expect(sql)
+            )
+        };
+        (
+            count("SELECT COUNT(*) AS n FROM sqlite_schema").await,
+            count("SELECT COUNT(*) AS n FROM block").await,
+        )
+    }
+
+    fn assert_refused(what: &str, result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>) {
+        let err = result.expect_err(what);
+        assert_eq!(
+            err.code,
+            ErrorCode::INVALID_PARAMS,
+            "{what}: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("is not a valid entity name"),
+            "{what}: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unnameable_entity_name_is_refused_before_any_write() {
+        let engine = fresh_engine().await;
+        let server = server(engine.clone());
+        let before = schema_and_blocks(&engine).await;
+        let block_params = || {
+            HashMap::from([
+                ("id".to_string(), serde_json::json!("block:refused")),
+                ("parent_id".to_string(), serde_json::json!("block:root")),
+                ("content".to_string(), serde_json::json!("x")),
+            ])
+        };
+
+        assert_refused(
+            "execute_operation",
+            server
+                .execute_operation(Parameters(ExecuteOperationParams {
+                    entity_name: UNNAMEABLE.to_string(),
+                    operation: "create".to_string(),
+                    params: block_params(),
+                }))
+                .await,
+        );
+        assert_refused(
+            "execute_command",
+            server
+                .execute_command(Parameters(ExecuteCommandParams {
+                    block_id: "block:refused".to_string(),
+                    command_name: "create".to_string(),
+                    entity_name: UNNAMEABLE.to_string(),
+                    params: block_params(),
+                }))
+                .await,
+        );
+        assert_refused(
+            "list_operations",
+            server
+                .list_operations(Parameters(ListOperationsParams {
+                    entity_name: UNNAMEABLE.to_string(),
+                }))
+                .await,
+        );
+        let err = server
+            .create_entity_type(Parameters(CreateEntityTypeParams {
+                type_definition: serde_json::json!({
+                    "name": "t\" (id TEXT); DROP TABLE block; --",
+                    "fields": [{"name": "id", "sql_type": "TEXT", "primary_key": true}],
+                }),
+            }))
+            .await
+            .expect_err("a type name that holds a quote");
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{}", err.message);
+        assert!(
+            err.message.contains("is not a valid entity name"),
+            "{}",
+            err.message
+        );
+
+        assert_eq!(
+            schema_and_blocks(&engine).await,
+            before,
+            "a refusal writes nothing"
+        );
     }
 }

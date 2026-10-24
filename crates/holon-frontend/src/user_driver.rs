@@ -1106,7 +1106,7 @@ impl UserDriver for ReactiveEngineDriver {
         op: &str,
         params: HashMap<String, Value>,
     ) -> Result<()> {
-        let intent = OperationIntent::new(entity.into(), op.into(), params);
+        let intent = OperationIntent::new(EntityName::parse_named(entity)?, op.into(), params);
         self.engine.dispatch_intent_sync(intent).await
     }
 

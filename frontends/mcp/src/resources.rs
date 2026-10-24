@@ -117,7 +117,11 @@ impl HolonMcpServer {
             })
         } else if uri.starts_with("holon://operations/") {
             let entity = uri.strip_prefix("holon://operations/").unwrap();
-            let ops = self.resources_engine()?.available_operations(entity).await;
+            let entity = crate::tools::parse_entity_param(entity)?;
+            let ops = self
+                .resources_engine()?
+                .available_operations(entity.as_str())
+                .await;
 
             // Serialize ops to JSON
             let json_ops: Vec<serde_json::Value> = ops

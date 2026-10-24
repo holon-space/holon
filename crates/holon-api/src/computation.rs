@@ -464,6 +464,11 @@ pub enum ComputeError {
         call: String,
         place: Option<String>,
     },
+    /// A render-DSL action whose entity part names no entity.
+    InvalidActionEntity {
+        action: String,
+        source: crate::InvalidEntityName,
+    },
 }
 
 impl ComputeError {
@@ -527,6 +532,9 @@ impl fmt::Display for ComputeError {
                  a widget's child or a template arg (in `{call}`)",
                 place.as_deref().unwrap_or("an operand or condition")
             ),
+            ComputeError::InvalidActionEntity { action, source } => {
+                write!(f, "action `{action}`: {source}")
+            }
         }
     }
 }

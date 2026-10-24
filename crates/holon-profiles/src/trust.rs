@@ -156,7 +156,11 @@ impl TrustPolicy {
             .map(|r| {
                 Ok(TrustRule {
                     origin: OriginClass::parse(&r.origin)?,
-                    entity: r.entity.map(EntityName::new),
+                    entity: r
+                        .entity
+                        .as_deref()
+                        .map(EntityName::parse_named)
+                        .transpose()?,
                     operation: r.operation,
                     decision: TrustDecision::parse(&r.decision)?,
                 })
@@ -174,6 +178,8 @@ pub enum TrustPolicyParseError {
     UnknownOrigin { origin: String },
     #[error("unknown trust decision '{decision}' (expected trusted|propose)")]
     UnknownDecision { decision: String },
+    #[error("trust rule `entity`: {0}")]
+    InvalidEntity(#[from] holon_api::InvalidEntityName),
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,6 +258,18 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, TrustPolicyParseError::UnknownDecision { .. }),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn unnameable_entity_is_a_loud_error() {
+        let err = TrustPolicy::parse_yaml(
+            "rules:\n  - origin: agent\n    entity: a b\n    decision: propose\n",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, TrustPolicyParseError::InvalidEntity(_)),
             "got {err}"
         );
     }

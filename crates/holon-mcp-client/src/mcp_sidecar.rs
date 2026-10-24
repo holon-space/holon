@@ -696,7 +696,7 @@ pub fn canonical_entity_name(
 pub fn parse_entity_name(
     entity_prefix: Option<&str>,
     entity_key: &str,
-) -> Result<holon_api::EntityName, String> {
+) -> Result<holon_api::EntityName, holon_api::InvalidEntityName> {
     holon_api::EntityName::parse_named(&raw_entity_name(entity_prefix, entity_key))
 }
 
@@ -1023,20 +1023,22 @@ impl McpSidecar {
         Ok(())
     }
 
-    /// Every entity key, with `entity_prefix` applied, must be a name the
-    /// system can route and store under. This runs before every other check:
-    /// those canonicalize the keys, and canonicalization of an unnameable key
-    /// is what used to panic.
+    /// Every entity key and view name, with `entity_prefix` applied, must be
+    /// a name the system can route and store under. This runs before every
+    /// other check: those canonicalize the names, and canonicalization of an
+    /// unnameable one panics.
     fn validate_entity_names(&self) -> anyhow::Result<()> {
         let applied = match &self.entity_prefix {
             Some(prefix) => format!(" with `entity_prefix: {prefix}` applied"),
             None => String::new(),
         };
-        for key in self.entities.keys() {
-            parse_entity_name(self.entity_prefix.as_deref(), key).map_err(|why| {
+        let keys = self.entities.keys().map(|key| ("`entities` key", key));
+        let views = self.views.iter().map(|view| ("`views` name", &view.name));
+        for (field, name) in keys.chain(views) {
+            parse_entity_name(self.entity_prefix.as_deref(), name).map_err(|why| {
                 anyhow::anyhow!(
-                    "sidecar `entities` key `{key}`: {why}{applied} — an entity name must start \
-                     with a letter and hold only letters, digits, `+`, `-` or `.`"
+                    "sidecar {field} `{name}`: {why}{applied} — an entity name must start with a \
+                     letter and hold only letters, digits, `+`, `-` or `.`"
                 )
             })?;
         }

@@ -379,8 +379,8 @@ pub use type_services::TypeServices;
 pub use type_services::UnusableField;
 // Re-export typed domain types
 pub use types::{
-    ContentType, DependsOn, EntityName, NavigationOp, Priority, QueryLanguage, Region,
-    SourceLanguage, StateCategory, Tags, TaskState, TaskStateWrite, Timestamp, UiInfo,
+    ContentType, DependsOn, EntityName, InvalidEntityName, NavigationOp, Priority, QueryLanguage,
+    Region, SourceLanguage, StateCategory, Tags, TaskState, TaskStateWrite, Timestamp, UiInfo,
 };
 // Re-export widget meta types
 // Note: StaticParam and WidgetMeta use &'static str which FRB wraps as unsized `str`.

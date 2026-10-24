@@ -346,7 +346,8 @@ mod backend {
         let (engine, shutdown) = runtime
             .block_on(async {
                 create_backend_engine_with_extras(
-                    path, holon::di::DatabaseRole::DurableStore,
+                    path,
+                    holon::di::DatabaseRole::DurableStore,
                     std::sync::Arc::new(holon_api::ConditionBus::new()),
                     |injector| {
                         use fluxdi::Module as _;
@@ -729,7 +730,8 @@ mod backend {
         let runtime = state.runtime.clone();
         drop(guard);
 
-        let entity_name = EntityName::from(entity.as_str());
+        let entity_name =
+            EntityName::parse_named(&entity).map_err(|e| super::nerr("execute_operation", e))?;
         let result = runtime
             .block_on(async { session.execute_operation(&entity_name, &op, params).await })
             .map_err(|e| super::nerr("execute_operation", e))?;
@@ -1298,8 +1300,8 @@ mod backend {
             }
 
             "list_operations" => {
-                let entity_name = req_str(&args, "entity_name")?;
-                let ops = runtime.block_on(service.available_operations(&entity_name));
+                let entity_name = req_entity(&args)?;
+                let ops = runtime.block_on(service.available_operations(entity_name.as_str()));
                 Ok(serde_json::to_value(&ops)?)
             }
 
@@ -1374,13 +1376,13 @@ mod backend {
             "execute_command" => {
                 let block_id = req_str(&args, "block_id")?;
                 let command_name = req_str(&args, "command_name")?;
-                let entity_name = req_str(&args, "entity_name")?;
+                let entity_name = req_entity(&args)?;
                 let mut storage_entity = parse_storage_entity(&args)?;
                 storage_entity
                     .entry("id".into())
                     .or_insert_with(|| Value::String(block_id.clone()));
                 let result = runtime.block_on(service.execute_operation(
-                    &EntityName::from(entity_name.as_str()),
+                    &entity_name,
                     &command_name,
                     storage_entity,
                 ))?;
@@ -1635,6 +1637,11 @@ mod backend {
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .ok_or_else(|| anyhow::anyhow!("missing required field '{}'", field))
+    }
+
+    fn req_entity(args: &serde_json::Value) -> anyhow::Result<EntityName> {
+        let raw = req_str(args, "entity_name")?;
+        EntityName::parse_named(&raw).map_err(|e| anyhow::anyhow!("`entity_name`: {e}"))
     }
 
     fn parse_params(args: &serde_json::Value) -> anyhow::Result<HashMap<String, Value>> {

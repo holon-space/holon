@@ -243,7 +243,12 @@ pub fn row_field_references(type_def: &TypeDefinition) -> Result<Vec<OperationPa
                 ));
             } else {
                 TypeHint::EntityId {
-                    entity_name: EntityName::new(target),
+                    entity_name: EntityName::parse_named(target).map_err(|e| {
+                        format!(
+                            "field '{}' of '{}' references '{target}': {e}",
+                            field.name, type_def.name
+                        )
+                    })?,
                 }
             };
             Ok(OperationParam {
@@ -613,5 +618,18 @@ mod tests {
         assert!(err.contains("'project' of 'task'"), "{err}");
         assert!(create_references(&task).is_err());
         assert!(set_field_value_hint(&task).is_err());
+    }
+    #[test]
+    fn an_unnameable_target_is_refused() {
+        let task = TypeDefinition::new(
+            "task",
+            vec![
+                crate::FieldSchema::new("id", "TEXT").primary_key(),
+                crate::FieldSchema::new("project", "TEXT").reference_target("my project"),
+            ],
+        );
+        let err = row_field_references(&task).expect_err("`my project` names no entity");
+        assert!(err.contains("'project' of 'task'"), "{err}");
+        assert!(err.contains("is not a valid entity name"), "{err}");
     }
 }

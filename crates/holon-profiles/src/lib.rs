@@ -351,8 +351,10 @@ impl ParsedProfile {
         let computed_fields = parse_and_sort_computed_fields(&engine, &sources)?;
         let variants = profile_variants_to_stored(&self.variants)
             .with_context(|| format!("profile '{}'", self.entity_name))?;
+        let entity_name =
+            EntityName::parse_named(&self.entity_name).context("profile `entity_name`")?;
         Ok(EntityProfile {
-            entity_name: EntityName::new(&self.entity_name),
+            entity_name,
             variants,
             computed_fields,
             virtual_child: self.virtual_child,
@@ -2351,6 +2353,14 @@ mod tests {
         let sorted = topo_sort_computed_fields(fields);
         assert_eq!(sorted[0].name(), "a");
         assert_eq!(sorted[1].name(), "b");
+    }
+
+    #[test]
+    fn a_profile_for_an_unnameable_entity_is_refused() {
+        let err = parse_entity_profile("entity_name: a b\n").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("`entity_name`"), "{msg}");
+        assert!(msg.contains("is not a valid entity name"), "{msg}");
     }
 
     #[test]

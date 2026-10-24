@@ -660,6 +660,16 @@ impl std::fmt::Display for MalformedTypeProfile {
 
 impl std::error::Error for MalformedTypeProfile {}
 
+/// A type name becomes a quoted SQL identifier and a [`crate::EntityName`], so
+/// one read from outside must already be a valid entity name.
+fn deserialize_type_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    crate::EntityName::parse_named(&name).map_err(serde::de::Error::custom)?;
+    Ok(name)
+}
+
 /// The canonical entity schema. Every entity in Holon — whether hard-coded
 /// (Block), pre-configured (Person), user-defined, or MCP-sourced — is
 /// represented by a `TypeDefinition`.
@@ -670,6 +680,7 @@ impl std::error::Error for MalformedTypeProfile {}
 #[serde(deny_unknown_fields)]
 pub struct TypeDefinition {
     /// Entity/table name (e.g. "block", "person", "todoist_task").
+    #[serde(deserialize_with = "deserialize_type_name")]
     pub name: String,
     /// Default lifetime for fields that don't declare one explicitly.
     #[serde(default)]
@@ -1389,6 +1400,26 @@ mod mutation_gap_tests {
             .expect_err("a field entry with no name must be refused")
             .to_string();
             assert!(err.contains("name"), "{fields}: got: {err}");
+        }
+    }
+
+    #[test]
+    fn a_type_name_that_is_no_entity_name_is_refused() {
+        let quoted = r#"t\" (id TEXT); DROP TABLE block; --"#;
+        for name in [quoted, "", "9lives", "a b"] {
+            let json =
+                format!(r#"{{"name":"{name}","fields":[{{"name":"id","sql_type":"TEXT"}}]}}"#);
+            let err = match serde_json::from_str::<TypeDefinition>(&json) {
+                Ok(td) => panic!(
+                    "{name:?} must be refused, got DDL: {}",
+                    td.to_create_table_sql()
+                ),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                err.contains("is not a valid entity name"),
+                "{name:?}: got: {err}"
+            );
         }
     }
 

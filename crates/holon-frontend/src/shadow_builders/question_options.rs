@@ -43,7 +43,7 @@ fn parse_offered(raw: &str) -> anyhow::Result<Vec<OfferedAnswer>> {
 /// multi-select. One button is one selection, so it dispatches a one-element
 /// array; a scalar is refused by the tool.
 fn answer_wiring(
-    entity_name: &str,
+    entity_name: &EntityName,
     op_name: &str,
     bound: &std::collections::HashMap<String, Value>,
     answers_param: &str,
@@ -57,7 +57,7 @@ fn answer_wiring(
     OperationWiring {
         modified_param: String::new(),
         descriptor: OperationDescriptor {
-            entity_name: EntityName::new(entity_name.to_string()),
+            entity_name: entity_name.clone(),
             name: op_name.to_string(),
             trigger: Some(Trigger::Click {
                 modifiers: ClickModifiers::none(),
@@ -112,10 +112,12 @@ fn forced_labels(bound: &Value) -> Vec<String> {
     }
 }
 
-fn dotted(name: &str) -> Result<(&str, &str), String> {
-    name.split_once('.').ok_or_else(|| {
+fn dotted(name: &str) -> Result<(EntityName, &str), String> {
+    let (entity, op) = name.split_once('.').ok_or_else(|| {
         format!("`action:` must name an entity operation in dot form (`entity.op`), got `{name}`")
-    })
+    })?;
+    let entity = EntityName::parse_named(entity).map_err(|e| format!("`action:` `{name}`: {e}"))?;
+    Ok((entity, op))
 }
 
 // Renders the answers a pending question offers, one clickable button each,
@@ -206,7 +208,7 @@ holon_macros::widget_builder! {
                 let mut bound = resolved.named.clone();
                 bound.insert(id_param.clone(), Value::String(question_id.clone()));
                 let wiring =
-                    answer_wiring(entity_name, op_name, &bound, &answers_param, &answer.label);
+                    answer_wiring(&entity_name, op_name, &bound, &answers_param, &answer.label);
                 answer_button(&question_id, &answer.label, wiring)
             })
             .collect();

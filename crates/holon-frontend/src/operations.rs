@@ -313,7 +313,9 @@ impl OperationIntent {
             .ok_or_else(|| anyhow::anyhow!("intent 'op' is not text: {item}"))?;
         let params: HashMap<String, Value> = serde_json::from_value(field("params")?.clone())
             .map_err(|e| anyhow::anyhow!("parse intent params of {item}: {e}"))?;
-        Ok(Self::new(EntityName::from(entity), op.to_string(), params))
+        let entity = EntityName::parse_named(entity)
+            .map_err(|e| anyhow::anyhow!("intent 'entity' of {item}: {e}"))?;
+        Ok(Self::new(entity, op.to_string(), params))
     }
 }
 
@@ -451,6 +453,16 @@ pub fn get_row_id(ctx: &RenderContext) -> Option<holon_api::EntityUri> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wire_intent_with_an_unnameable_entity_is_refused() {
+        let wire = serde_json::json!({"entity": "a b", "op": "create", "params": {}});
+        let err = OperationIntent::from_wire(&wire).expect_err("`a b` names no entity");
+        assert!(
+            err.to_string().contains("is not a valid entity name"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn set_field_intent_over_a_structural_field_is_refused() {

@@ -24,6 +24,12 @@ fn submit_wiring(
         Some((e, o)) => (e.to_string(), o.to_string()),
         None => ("block".to_string(), name.to_string()),
     };
+    let entity_name = EntityName::parse_named(&entity_name).map_err(|source| {
+        holon_api::computation::ComputeError::InvalidActionEntity {
+            action: name.to_string(),
+            source,
+        }
+    })?;
     let resolved = ba.services.resolve_args(args, ba.ctx)?;
     let mut bound_params: std::collections::HashMap<String, Value> =
         std::collections::HashMap::new();
@@ -44,7 +50,7 @@ fn submit_wiring(
     Ok(OperationWiring {
         modified_param,
         descriptor: OperationDescriptor {
-            entity_name: EntityName::new(entity_name),
+            entity_name,
             name: op_name,
             trigger: Some(Trigger::KeyChord {
                 chord: KeyChord::new(&[Key::Enter]),

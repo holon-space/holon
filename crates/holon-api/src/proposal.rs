@@ -166,7 +166,8 @@ impl ProposalRecord {
             }
         };
         let status = ProposalStatus::parse(&get_str(KEY_STATUS)?)?;
-        let entity = EntityName::new(get_str(KEY_ENTITY)?);
+        let entity = EntityName::parse_named(&get_str(KEY_ENTITY)?)
+            .map_err(|e| anyhow::anyhow!("proposal record '{KEY_ENTITY}': {e}"))?;
         let op_name = get_str(KEY_OP)?;
         let params = match map.get(KEY_PARAMS) {
             Some(Value::Object(m)) => m.clone(),
@@ -233,6 +234,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains(KEY_OP), "got: {err}");
+    }
+
+    #[test]
+    fn from_value_fails_loud_on_an_unnameable_entity() {
+        let mut value = sample().to_value();
+        let Value::Object(map) = &mut value else {
+            unreachable!("a proposal record is an object")
+        };
+        map.insert(KEY_ENTITY.to_string(), Value::String("a b".to_string()));
+        let err = ProposalRecord::from_value(&value).unwrap_err().to_string();
+        assert!(err.contains(KEY_ENTITY), "got: {err}");
+        assert!(err.contains("is not a valid entity name"), "got: {err}");
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use futures_signals::signal::Mutable;
 use holon_api::Value;
+use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
 use holon_frontend::RenderContext;
 use holon_frontend::StubBuilderServices;
@@ -14,9 +15,13 @@ use holon_frontend::reactive::BuilderServices;
 fn render_json_over(dsl: &str, row: DataRow) -> serde_json::Value {
     let expr = holon_api::render_dsl::parse_render_dsl(dsl)
         .unwrap_or_else(|e| panic!("{dsl} does not parse: {e:#}"));
+    render_expr_json(&expr, row)
+}
+
+fn render_expr_json(expr: &RenderExpr, row: DataRow) -> serde_json::Value {
     let services = StubBuilderServices::new();
     let ctx = RenderContext::for_row(Arc::new(row));
-    let vm = services.interpret(&expr, &ctx).snapshot();
+    let vm = services.interpret(expr, &ctx).snapshot();
     serde_json::to_value(&vm).expect("ViewModel serializes")
 }
 
@@ -313,4 +318,40 @@ fn section_stack_gap_not_a_number() {
         no_row(),
         &["section_stack", "gap", "number"],
     );
+}
+
+/// `dsl` with its `action:` call renamed to `action`: a stored expression
+/// reaches the builders without the parser's closed set of dotted names.
+fn with_action(dsl: &str, action: &str) -> RenderExpr {
+    let mut expr = holon_api::render_dsl::parse_render_dsl(dsl)
+        .unwrap_or_else(|e| panic!("{dsl} does not parse: {e:#}"));
+    let RenderExpr::FunctionCall { args, .. } = &mut expr else {
+        panic!("{dsl} is a call")
+    };
+    let Some(RenderExpr::FunctionCall { name, .. }) = args
+        .iter_mut()
+        .find(|arg| arg.name.as_deref() == Some("action"))
+        .map(|arg| &mut arg.value)
+    else {
+        panic!("{dsl} has an `action:` call")
+    };
+    *name = action.to_string();
+    expr
+}
+
+#[test]
+fn an_action_whose_entity_names_no_entity_draws_an_error() {
+    for dsl in [
+        r#"selectable(text("x"), #{action: navigation_focus(#{region: "main"})})"#,
+        r#"input_box(#{action: set_content(#{})})"#,
+        r#"question_options(#{options: "[{\"label\":\"Yes\"}]", action: answer_question(#{})})"#,
+    ] {
+        let json = render_expr_json(&with_action(dsl, "_bad.op"), no_row());
+        let message = error_message(&json)
+            .unwrap_or_else(|| panic!("`{dsl}` must draw an error node, got: {json}"));
+        assert!(
+            message.contains("_bad.op") && message.contains("is not a valid entity name"),
+            "`{dsl}`: {message:?}"
+        );
+    }
 }

@@ -84,7 +84,10 @@ impl Serialize for EntityName {
 impl<'de> Deserialize<'de> for EntityName {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        Ok(Self::new(s))
+        if s == "*" {
+            return Ok(Self::Wildcard);
+        }
+        Self::parse_named(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -106,10 +109,10 @@ impl fmt::Display for EntityName {
 }
 
 impl FromStr for EntityName {
-    type Err = std::convert::Infallible;
+    type Err = InvalidEntityName;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self::new(s))
+        Self::parse_named(s)
     }
 }
 
@@ -152,13 +155,21 @@ impl From<String> for EntityName {
 impl EntityName {
     /// Parse a stored entity name: a valid URI scheme after normalization,
     /// never the wildcard.
-    pub fn parse_named(raw: &str) -> Result<Self, String> {
+    pub fn parse_named(raw: &str) -> Result<Self, InvalidEntityName> {
         let normalized = raw.replace('_', "-");
         if !is_valid_uri_scheme(&normalized) {
-            return Err(format!("{raw:?} is not a valid entity name"));
+            return Err(InvalidEntityName {
+                raw: raw.to_string(),
+            });
         }
         Ok(Self::Named(normalized))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{raw:?} is not a valid entity name")]
+pub struct InvalidEntityName {
+    pub raw: String,
 }
 
 impl From<EntityName> for Value {
@@ -1323,6 +1334,43 @@ impl Default for UiInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entity_name_from_str_refuses_what_names_no_entity() {
+        for raw in ["", "a/b", "9lives", "a b", "*"] {
+            let err = raw.parse::<EntityName>().expect_err(raw);
+            assert_eq!(err.raw, raw);
+        }
+        let name: EntityName = "todoist_task".parse().unwrap();
+        assert_eq!(name.as_str(), "todoist-task");
+        assert_eq!(name.as_str().parse::<EntityName>().unwrap(), name);
+    }
+
+    #[test]
+    fn entity_name_deserialize_parses_and_keeps_the_wildcard() {
+        let wildcard: EntityName = serde_json::from_str(r#""*""#).unwrap();
+        assert!(wildcard.is_wildcard());
+        let err = serde_json::from_str::<EntityName>(r#""a b""#).unwrap_err();
+        assert!(
+            err.to_string().contains("is not a valid entity name"),
+            "{err}"
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn entity_name_parse_accepts_exactly_uri_schemes(raw in "[a-zA-Z0-9_+.\\- /\"*]{0,8}") {
+            let normalized = raw.replace('_', "-");
+            match raw.parse::<EntityName>() {
+                Ok(name) => {
+                    proptest::prop_assert!(is_valid_uri_scheme(&normalized));
+                    proptest::prop_assert_eq!(name.as_str(), normalized.as_str());
+                    proptest::prop_assert_eq!(name.as_str().parse::<EntityName>().unwrap(), name);
+                }
+                Err(_) => proptest::prop_assert!(!is_valid_uri_scheme(&normalized)),
+            }
+        }
+    }
 
     #[test]
     fn content_type_round_trip() {

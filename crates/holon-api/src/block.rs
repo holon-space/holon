@@ -924,7 +924,9 @@ pub fn parse_stored_block_type(raw: &str) -> Result<Option<EntityName>, String> 
     if raw == LEGACY_UNTYPED_BLOCK_TYPE {
         return Ok(None);
     }
-    EntityName::parse_named(raw).map(Some)
+    EntityName::parse_named(raw)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 impl TryFrom<crate::StorageEntity> for Block {

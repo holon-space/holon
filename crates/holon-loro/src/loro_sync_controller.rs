@@ -1681,11 +1681,8 @@ impl LoroProjection {
                  projection has no typed-entity sink"
             )
         })?;
-        let rows = collab.with_read(|doc| {
-            Ok(crate::loro_entity_operations::read_changed_rows(
-                doc, changed,
-            ))
-        })?;
+        let rows = collab
+            .with_read(|doc| crate::loro_entity_operations::read_changed_rows(doc, changed))?;
         for (entity, rows) in rows {
             sink.project(&entity, rows)
                 .await

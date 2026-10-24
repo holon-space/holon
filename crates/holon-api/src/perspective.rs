@@ -193,24 +193,13 @@ impl PerspectiveSpec {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| block.content.clone());
 
-        let profile_override = match block.get_property_str(P_PROFILE) {
-            Some(raw) => {
-                // EntityName normalizes `_` → `-`; validate the normalized form is
-                // a legal profile-cache key (URI-scheme shape) and fail loud.
-                let normalized = raw.replace('_', "-");
-                let mut chars = normalized.chars();
-                let valid = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-                    && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
-                if !valid {
-                    anyhow::bail!(
-                        "perspective {perspective_id}: {P_PROFILE} {raw:?} is not a valid profile \
-                         name (must be alphanumeric with '-'/'_'/'.'/'+', starting with a letter)"
-                    );
-                }
-                Some(EntityName::new(raw))
-            }
-            None => None,
-        };
+        let profile_override =
+            match block.get_property_str(P_PROFILE) {
+                Some(raw) => Some(EntityName::parse_named(&raw).map_err(|e| {
+                    anyhow::anyhow!("perspective {perspective_id}: {P_PROFILE}: {e}")
+                })?),
+                None => None,
+            };
 
         let hide_completed = match block.properties.get(P_CONCEAL_COMPLETED) {
             Some(v) => parse_bool(v).ok_or_else(|| {
@@ -823,7 +812,7 @@ mod tests {
         bad.set_property(P_PROFILE, "9 not a name".to_string());
         let err = PerspectiveSpec::parse(&EntityUri::block("q"), &[bad]).unwrap_err();
         assert!(
-            err.to_string().contains("not a valid profile name"),
+            err.to_string().contains("is not a valid entity name"),
             "got: {err}"
         );
     }

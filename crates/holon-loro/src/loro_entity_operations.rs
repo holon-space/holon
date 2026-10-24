@@ -606,25 +606,29 @@ pub fn changed_entities(event: &loro::event::DiffEvent) -> BTreeSet<(String, Str
     out
 }
 
+pub type ChangedRows = HashMap<EntityName, Vec<(String, Option<StorageEntity>)>>;
+
 /// The current row of each changed entity, per type: `None` when the store
-/// holds it no longer (purged, or under the store's own tombstone).
+/// holds it no longer (purged, or under the store's own tombstone). A peer
+/// names the type roots, so a root that names no entity refuses the batch.
 pub fn read_changed_rows(
     doc: &LoroDoc,
     changed: &BTreeSet<(String, String)>,
-) -> HashMap<EntityName, Vec<(String, Option<StorageEntity>)>> {
-    let mut out: HashMap<EntityName, Vec<(String, Option<StorageEntity>)>> = HashMap::new();
+) -> anyhow::Result<ChangedRows> {
+    let mut out = ChangedRows::new();
     for (root, key) in changed {
-        let entity = EntityName::new(
-            root.strip_prefix(ENTITY_ROOT_PREFIX)
-                .expect("changed_entities yields type roots only"),
-        );
+        let raw = root
+            .strip_prefix(ENTITY_ROOT_PREFIX)
+            .expect("changed_entities yields type roots only");
+        let entity = EntityName::parse_named(raw)
+            .map_err(|e| anyhow::anyhow!("typed-entity root `{root}`: {e}"))?;
         let row = read_entity(doc, root, &entity, key)
             .filter(|stored| stored.live)
             .map(|stored| stored.fields);
         let uri = format!("{}:{key}", entity.as_str());
         out.entry(entity).or_default().push((uri, row));
     }
-    out
+    Ok(out)
 }
 
 /// Where the projector lands typed-entity rows: the Turso table of the type.
@@ -637,4 +641,20 @@ pub trait TypedEntitySink: Send + Sync {
         entity: &EntityName,
         rows: Vec<(String, Option<StorageEntity>)>,
     ) -> anyhow::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_root_that_names_no_entity_refuses_the_batch() {
+        let changed = BTreeSet::from([(format!("{ENTITY_ROOT_PREFIX}bad name"), "k".to_string())]);
+        let err = read_changed_rows(&LoroDoc::new(), &changed).unwrap_err();
+        assert!(err.to_string().contains("`entity:bad name`"), "{err}");
+        assert!(
+            err.to_string().contains("is not a valid entity name"),
+            "{err}"
+        );
+    }
 }
