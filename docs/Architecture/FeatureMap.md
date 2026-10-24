@@ -407,6 +407,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `wb-d7-stall-splits-edited-line`
 - `wide-e2e-shrinker-list-app-item-missing`
 - `windowed-clickblock-bounds-under-load`
+- `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
 - `writeorgfile-sql-reads-budget`
 

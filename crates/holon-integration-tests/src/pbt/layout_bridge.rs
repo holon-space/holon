@@ -86,10 +86,9 @@ impl LayoutRefState for ReferenceState {
         }
     }
 
-    /// Deferred `live_block` placeholders are a fast-UI test concern
-    /// (the GPUI layout PBT's `arb_deferred_live_block_scenario`). The
-    /// integration-tests PBT runs a real backend that always returns
-    /// real data — no deferred placeholders to deliver.
+    /// The real backend always returns real data, so this PBT renders no
+    /// deferred `live_block` placeholders; the windowed
+    /// `deliver_block_content_windowed_pbt` draws `DeliverBlockContent`.
     fn deferred_block_ids(&self) -> Vec<String> {
         Vec::new()
     }

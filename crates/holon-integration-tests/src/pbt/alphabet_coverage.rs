@@ -102,14 +102,7 @@ enum CoveredBy {
 const EXPECTED_ABSENT: &[(&str, CoveredBy)] = &[
     ("CrashRestart", CoveredBy::HandAuthored),
     ("DelayAdmissions", CoveredBy::HandAuthored),
-    (
-        "DeliverBlockContent",
-        CoveredBy::Nowhere(
-            "the GPUI layout PBT that drew it is gone (no `arb_deferred_live_block_scenario` in \
-             the tree) and `layout_bridge` reports no deferred blocks, so the deferred-live-block \
-             axis is uncovered",
-        ),
-    ),
+    ("DeliverBlockContent", CoveredBy::SelfAttestingSuite),
     (
         "FailNextDispatch",
         CoveredBy::Nowhere(
@@ -161,7 +154,11 @@ const EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS: &[(&str, CoveredBy)] = &[
 /// `every_claim_this_process_cannot_measure_is_reported` pins the list against
 /// those two variants in both directions.
 const ACCOUNTED_ELSEWHERE: &[(&str, &str)] = &[
-    ("DeliverBlockContent", "holon-work#280"),
+    (
+        "DeliverBlockContent",
+        "frontends/gpui/tests/deliver_block_content_windowed_pbt.rs, whose own run calls \
+         `attest_drew`",
+    ),
     ("FailNextDispatch", "holon-work#280"),
     (
         "StructuralKeyBurst",
