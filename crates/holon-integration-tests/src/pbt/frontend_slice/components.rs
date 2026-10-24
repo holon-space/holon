@@ -5629,6 +5629,22 @@ impl holon_pbt_core::capabilities::SutEditorSaves for HeadlessFrontendComponent 
             .get(&(path, block_bare.to_string()))
             .cloned()
     }
+
+    async fn conflict_copies(&self) -> Vec<(String, String)> {
+        self.disk_org_contents()
+            .await
+            .into_iter()
+            .filter(|(path, _)| holon_core::conflict_copy::is_conflict_copy(path))
+            .map(|(path, text)| {
+                let name = path
+                    .file_name()
+                    .unwrap_or_else(|| panic!("conflict copy {path:?} has no file name"))
+                    .to_string_lossy()
+                    .into_owned();
+                (name, text)
+            })
+            .collect()
+    }
 }
 
 /// Strip every block `:ID:` drawer entry (and `:id X` src-header arg) from

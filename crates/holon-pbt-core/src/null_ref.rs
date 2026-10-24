@@ -222,6 +222,10 @@ impl crate::capabilities::RefCopies for NullRef {
     fn write_held(&self) -> crate::capabilities::WriteHeld {
         panic!("class-2: invariant read RefCopies::write_held")
     }
+
+    fn crash_restore_copies(&self) -> std::collections::BTreeMap<String, Vec<Vec<String>>> {
+        panic!("class-2: invariant read RefCopies::crash_restore_copies")
+    }
 }
 
 #[allow(unused_variables)]

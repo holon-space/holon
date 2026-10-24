@@ -61,6 +61,10 @@ impl holon_pbt_core::capabilities::RefCopies for ReferenceState {
                 .collect(),
         }
     }
+
+    fn crash_restore_copies(&self) -> std::collections::BTreeMap<String, Vec<Vec<String>>> {
+        self.files.crash_restore_copies.clone()
+    }
 }
 
 impl ReferenceState {

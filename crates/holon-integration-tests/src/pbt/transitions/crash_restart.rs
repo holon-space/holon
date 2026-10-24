@@ -26,6 +26,8 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::docs_tolerance;
 
+const CRASH_RESTORE_AMBIGUOUS: &str = "crash-restore-ambiguous";
+
 /// Crash-restart over a document whose write-back is owed: the store holds an
 /// edit, `doc`'s file does not (a churning writer stalled the write), and the
 /// process ends there. The churn dies with it, so the next boot meets a healthy
@@ -37,6 +39,13 @@ use crate::pbt::transition_budgets::docs_tolerance;
 /// reverting the store — the file is older than the store, not newer. The model
 /// therefore only drops in-memory state and ends the churn; every block and
 /// every field stays as the store had it.
+///
+/// The one exception is a file that boots equal to its merge base while its
+/// write-back was owed: the boot cannot tell a write that never landed from
+/// one the crash undid. The store still wins, and the boot raises
+/// `crash-restore-ambiguous` and keeps the file's bytes as a conflict copy.
+/// A file the user edited while the app was down is out of that window, and
+/// its edit lifts an earlier such condition.
 ///
 /// Hand-authored only (`HOLON_PBT_WRITEBACK_FAULTS` gates the churn alphabet it
 /// needs, and a reboot costs a whole boot).
@@ -91,8 +100,28 @@ impl TransitionRef<ReferenceState> for CrashRestart {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
+        let file = crate::pbt::copies_model::file_name_of(state, &self.doc);
+        let boots_equal_to_base =
+            self.retitle_while_down.is_none() && state.write_back_owed(&self.doc);
+        let base_texts: Vec<String> = state.files.merge_base[&self.doc]
+            .blocks
+            .iter()
+            .filter(|block| block.id != self.doc)
+            .map(|block| block.content.clone())
+            .collect();
         state.reboot_drops_in_memory_state();
         state.files.write_churn.remove(&self.doc);
+        let copies = state
+            .files
+            .crash_restore_copies
+            .entry(file.clone())
+            .or_default();
+        if boots_equal_to_base {
+            copies.push(base_texts);
+            state.conditions.raise(file, CRASH_RESTORE_AMBIGUOUS);
+        } else if self.retitle_while_down.is_some() {
+            state.conditions.clear(&file, CRASH_RESTORE_AMBIGUOUS);
+        }
         if let Some(retitle) = &self.retitle_while_down {
             // The boot reads the file, so the retitle lands in the store like
             // any external edit.

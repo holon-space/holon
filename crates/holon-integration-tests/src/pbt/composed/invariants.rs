@@ -82,6 +82,7 @@ pub mod wheel_two_mode_motion_law;
 pub mod conditions_match_ref;
 pub mod copies_stay_on_disk;
 pub mod crash_history_matches_ref;
+pub mod crash_restore_copies_match_ref;
 pub mod net_totality;
 pub mod no_errors;
 pub mod no_machine_keychain_access;

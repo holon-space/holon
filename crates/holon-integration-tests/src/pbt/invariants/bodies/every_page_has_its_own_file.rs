@@ -203,6 +203,9 @@ mod tests {
         fn write_held(&self) -> holon_pbt_core::capabilities::WriteHeld {
             Default::default()
         }
+        fn crash_restore_copies(&self) -> std::collections::BTreeMap<String, Vec<Vec<String>>> {
+            Default::default()
+        }
     }
 
     struct OrgRenderStub {

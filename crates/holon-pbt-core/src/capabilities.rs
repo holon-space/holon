@@ -2567,6 +2567,9 @@ pub trait SutEditorSaves {
     /// The subtree of block `block_bare` as the external editor last wrote it
     /// into the file of document `doc`; `None` when it wrote none there.
     async fn pasted_copy(&self, doc: &EntityUri, block_bare: &str) -> Option<String>;
+    /// Every conflict copy in the vault, by final path component, with its
+    /// text.
+    async fn conflict_copies(&self) -> Vec<(String, String)>;
 }
 
 /// A block the model says is on disk in a second file (D229.b).
@@ -2592,6 +2595,10 @@ pub type CopiesByFile = BTreeMap<String, BTreeSet<String>>;
 pub trait RefCopies {
     fn model_copies(&self) -> Vec<ModelCopy>;
     fn write_held(&self) -> WriteHeld;
+    /// The conflict copies a crash-restore left beside each file the model
+    /// judges, by the file's final path component, each as the block texts
+    /// it holds.
+    fn crash_restore_copies(&self) -> BTreeMap<String, Vec<Vec<String>>>;
 }
 
 /// The org files whose write-back an armed churn holds off: their disk lags

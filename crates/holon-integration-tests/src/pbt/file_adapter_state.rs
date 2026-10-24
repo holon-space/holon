@@ -83,6 +83,23 @@ pub struct FileAdapterState {
     /// ingest until the user accepts the removal or rewrites the file from
     /// the store, with the document's blocks at the refusal.
     pub refused: BTreeMap<EntityUri, Vec<Block>>,
+
+    /// Each document's file as the last landed write-back or ingest of it
+    /// recorded it: the base the next boot merges the file against.
+    pub merge_base: BTreeMap<EntityUri, MergeBase>,
+
+    /// The conflict copies a crash-restore left beside each file, by the
+    /// file's final path component, each as the block texts it holds.
+    pub crash_restore_copies: BTreeMap<String, Vec<Vec<String>>>,
+}
+
+/// A document's file as a landed write-back or ingest recorded it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeBase {
+    /// The document's blocks, timestamps cleared: the file holds none.
+    pub blocks: Vec<Block>,
+    /// An ingest of an id-less file leaves the ids to a write-back.
+    pub ids_on_disk: bool,
 }
 
 impl FileAdapterState {
@@ -145,5 +162,61 @@ pub struct CopyOnDisk {
 impl FileAdapterState {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+impl crate::pbt::reference_state::ReferenceState {
+    /// `doc`'s blocks as a landed write-back puts them into its file.
+    pub fn file_blocks(&self, doc: &EntityUri) -> Vec<Block> {
+        self.doc_rows(doc)
+            .into_iter()
+            .map(|mut block| {
+                block.created_at = 0;
+                block.updated_at = 0;
+                block
+            })
+            .collect()
+    }
+
+    /// Every write-back no churn holds lands, and records its file as the
+    /// merge base.
+    pub fn record_landed_write_backs(&mut self) {
+        let landed: Vec<EntityUri> = self
+            .files
+            .documents
+            .keys()
+            .filter(|doc| !self.files.write_churn.contains(*doc))
+            .cloned()
+            .collect();
+        for doc in landed {
+            let base = MergeBase {
+                blocks: self.file_blocks(&doc),
+                ids_on_disk: true,
+            };
+            self.files.merge_base.insert(doc, base);
+        }
+    }
+
+    /// The ingest of `doc`'s id-less file while a churn holds its write-back:
+    /// the base is the file without ids, and stamping them is owed.
+    pub fn record_held_id_less_ingest(&mut self, doc: &EntityUri) {
+        if !self.files.write_churn.contains(doc) {
+            return;
+        }
+        let base = MergeBase {
+            blocks: self.file_blocks(doc),
+            ids_on_disk: false,
+        };
+        self.files.merge_base.insert(doc.clone(), base);
+    }
+
+    /// Whether `doc`'s file is behind the store: a write-back of it is owed.
+    pub fn write_back_owed(&self, doc: &EntityUri) -> bool {
+        let base = self
+            .files
+            .merge_base
+            .get(doc)
+            .unwrap_or_else(|| panic!("{doc} has no merge base in the model"));
+        !base.ids_on_disk || base.blocks != self.file_blocks(doc)
     }
 }

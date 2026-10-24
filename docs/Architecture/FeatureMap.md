@@ -358,6 +358,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `cook-vault-rename-refusal-load-flake`
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
+- `crash-restore-boot-drops-owed-outdent`
 - `create-sql-read-repeat-budget`
 - `deletebackward-sql-reads-budget`
 - `dense-patch-cross-document-session-temp-dir-gone`
