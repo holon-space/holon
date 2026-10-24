@@ -8676,7 +8676,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn owning_page_types_a_missing_mount_and_an_unloaded_share() {
-        use holon_api::repository::CoreOperations;
         use holon_core::ChainBreak;
         use holon_core::OwningPage;
         let (b, _d) = make_backend();
@@ -8693,9 +8692,23 @@ mod tests {
             })
         );
 
-        let reads = reads_of(&b, b.global_doc().await.unwrap());
+        let global = b.global_doc().await.unwrap();
+        let reads = reads_of(&b, global.clone());
         assert_eq!(page_id(reads.owning_page("block:gamma").unwrap()), m1);
-        reads.delete_block("block:host").await.unwrap();
+        // A local delete of the host exits the share; only a paired device's
+        // delete, imported, leaves the share loaded without its mount.
+        let (peer, host) = global
+            .with_read(|doc| {
+                let host = find_tree_id_by_stable_id(doc, &EntityUri::block("host")).unwrap();
+                Ok((doc.fork(), host))
+            })
+            .unwrap();
+        peer.set_peer_id(7).unwrap();
+        crate::multi_peer::delete_block(&peer, host);
+        let update = global
+            .with_read(|doc| Ok(peer.export(loro::ExportMode::updates(&doc.oplog_vv()))?))
+            .unwrap();
+        global.apply_update(&update).unwrap();
         assert_eq!(
             reads.owning_page("block:gamma").unwrap(),
             OwningPage::Broken(ChainBreak::OrphanedShare {
