@@ -61,20 +61,55 @@ def check_summary_paths():
                    "a/x.rs", "b/x.rs", "justfile", "old.md"], f"a rename or copy gives both paths, got {got}"
 
 
+BASELINE_READERS = {"cmd_assertions", "read_baseline"}
+
+
+def baseline_violations(source):
+    """Lines of a timing-split.py source where something other than `assertions` (step 7) may reach the baseline."""
+    found = []
+    for node in ast.parse(source).body:
+        scope = node.name if isinstance(node, ast.FunctionDef) else None
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                if n.id in ("BASELINE", "read_baseline") and scope not in BASELINE_READERS:
+                    found.append((n.lineno, n.id))
+                if n.id == "cmd_assertions" and scope != "main":
+                    found.append((n.lineno, n.id))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and "timing-assertions-baseline" in n.value:
+                assigns_baseline = isinstance(node, ast.Assign) and [t.id for t in node.targets] == ["BASELINE"]
+                if not assigns_baseline and scope != "cmd_assertions":
+                    found.append((n.lineno, "literal baseline path"))
+    return found
+
+
+BASELINE_PROBES = {
+    "cmd_record calls cmd_assertions()": "def cmd_record():\n    cmd_assertions()\n",
+    "literal baseline path in cmd_record":
+        'def cmd_record():\n    open(REPO / "scripts/timing-assertions-baseline.txt")\n',
+    "literal baseline path assigned to another name": 'PATH = "scripts/timing-assertions-baseline.txt"\n',
+    "BASELINE read in cmd_record": "def cmd_record():\n    BASELINE.read_text()\n",
+}
+
+BASELINE_ALLOWED = {
+    "BASELINE assignment alone": 'BASELINE = REPO / "scripts/timing-assertions-baseline.txt"\n',
+    "cmd_assertions called from main alone": "def main(argv):\n    return cmd_assertions()\n",
+    "baseline named inside cmd_assertions": 'def cmd_assertions():\n    print("see scripts/timing-assertions-baseline.txt")\n    BASELINE.read_text()\n',
+}
+
+
 def check_baseline_readers():
     """timing-assertions-baseline.txt is allowed because only `assertions` (step 7) reads it."""
     timing_split = (REPO / "scripts" / "timing-split.py").read_text()
     g = load_module()
     other_steps = g.step_sources(REPO, (REPO / "justfile").read_text()).replace(timing_split, "")
     assert "timing-assertions-baseline" not in other_steps, "a skipped step outside timing-split.py names the baseline"
-    tree = ast.parse(timing_split)
-    readers = {"cmd_assertions", "read_baseline"}
-    for node in tree.body:
-        scope = node.name if isinstance(node, ast.FunctionDef) else None
-        for n in ast.walk(node):
-            if isinstance(n, ast.Name) and n.id in ("BASELINE", "read_baseline") and isinstance(n.ctx, ast.Load):
-                assert scope in readers, f"timing-split.py:{n.lineno}: {n.id} used in {scope or 'module scope'}; " \
-                    "a skipped step may now read the baseline, so put it back on gate-skip.py's TRIGGERS"
+    for name, source in BASELINE_PROBES.items():
+        assert baseline_violations(source), f"the guard must report: {name}"
+    for name, source in BASELINE_ALLOWED.items():
+        assert not baseline_violations(source), f"the guard must not report: {name}"
+    found = baseline_violations(timing_split)
+    assert not found, f"timing-split.py: {found}; a skipped step may now read the baseline, " \
+        "so put it back on gate-skip.py's TRIGGERS"
 
 
 def check_renamed_trigger():
