@@ -1227,19 +1227,18 @@ fn the_org_profile_declares_only_restrictions_that_are_real() {
 
     println!("{}", report.render());
 
-    // The run's machine-readable half. Written under `target/` — never under
-    // `docs/` — so a test can never dirty the source tree. A human turns it
-    // into ledger entries with `scripts/capability-ledger.py sync`.
-    //
-    // `HOLON_CAPABILITY_REPORT_DIR` sends it elsewhere. The flip sweep uses
-    // that: a sweep run writing here would leave the ledger's input describing
-    // a deliberately broken profile, and `capability-ledger.py diff` would then
-    // accuse the honest profile of a prompt no honest run raises.
-    let dir = std::env::var_os("HOLON_CAPABILITY_REPORT_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/capability-certification")
-        });
+    // The run's machine-readable half, written to `HOLON_CAPABILITY_REPORT_DIR`
+    // — `scripts/capability-cert.sh` points it at the ledger's input, the flip
+    // sweep at its own folder. Unset, it goes to a temp dir removed when the
+    // test ends, so a plain test run leaves no file behind.
+    let scratch;
+    let dir = match std::env::var_os("HOLON_CAPABILITY_REPORT_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => {
+            scratch = tempfile::tempdir().expect("a temp dir for the report");
+            scratch.path().to_path_buf()
+        }
+    };
     let written = report
         .write_report(format.profile().id(), &dir)
         .expect("the certification report must be writable");

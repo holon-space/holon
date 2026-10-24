@@ -121,7 +121,6 @@ pub use ui_actor_state::UITabState;
 pub use ui_actor_state::UIUserState;
 pub use ui_harness::DEFAULT_FRONTEND_MEMORY_MULTIPLIER;
 pub use ui_harness::install_rejection_histogram_panic_hook;
-pub use ui_harness::screenshot_dir;
 pub use ui_harness::set_loro_peer_id_if_unset;
 pub use ui_harness::set_memory_multiplier_if_unset;
 pub use ui_harness::spawn_quit_on_pbt_finish;

@@ -10,7 +10,6 @@
 //! TUI composed runner in `frontends/tui/tests/common/pbt_main.rs`):
 //!
 //! - bumping `PBT_MEMORY_MULTIPLIER` to budget for an extra frontend
-//! - building a per-frontend `target/pbt-screenshots/<subdir>` path
 //! - optionally booting an embedded MCP server for live inspection
 //! - polling the frontend's `GeometryProvider` until real content lands
 //! - watching the PBT thread and signalling quit when it finishes
@@ -22,7 +21,6 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
@@ -127,18 +125,6 @@ pub fn standard_pbt_config(
         failure_persistence: None,
         ..Config::default()
     }
-}
-
-/// Build `<cwd>/target/pbt-screenshots/<subdir>`.
-///
-/// The directory itself is created lazily by
-/// `GeometryDriver::with_screenshots`, not by this helper.
-pub fn screenshot_dir(subdir: &str) -> PathBuf {
-    std::env::current_dir()
-        .expect("current_dir failed")
-        .join("target")
-        .join("pbt-screenshots")
-        .join(subdir)
 }
 
 /// Boot the embedded MCP server on `env_var`'s port if the env var is set.

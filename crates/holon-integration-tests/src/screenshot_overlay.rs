@@ -414,16 +414,20 @@ mod tests {
     use super::*;
 
     /// Render the three overlay variants onto a synthetic dark frame and save
-    /// PNGs to `target/overlay-smoke/`. Run with
-    /// `cargo test -p holon-integration-tests --features pbt -- --nocapture
-    ///  screenshot_overlay::tests::smoke` and inspect the output by eye.
+    /// PNGs to `HOLON_OVERLAY_SMOKE_DIR`, or to a temp dir removed when the
+    /// test ends. To inspect them by eye, run
+    /// `HOLON_OVERLAY_SMOKE_DIR=<dir> cargo test -p holon-integration-tests
+    ///  --features pbt -- --nocapture screenshot_overlay::tests::smoke`.
     #[test]
     fn smoke() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("target")
-            .join("overlay-smoke");
+        let scratch;
+        let dir = match std::env::var_os("HOLON_OVERLAY_SMOKE_DIR") {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                scratch = tempfile::tempdir().unwrap();
+                scratch.path().to_path_buf()
+            }
+        };
         std::fs::create_dir_all(&dir).unwrap();
 
         let make_canvas = || -> image::RgbaImage {

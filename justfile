@@ -1451,6 +1451,7 @@ gate-arch:
     set -euo pipefail
     mkdir -p target/gate-logs
     ./scripts/test-admission-sites-count.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites-count.log
+    ./scripts/test-check-target-leftovers.sh 2>&1 | tee target/gate-logs/gate-arch-check-target-leftovers.log
     ./scripts/check-admission-sites.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites.log
     ./scripts/check-regression-descriptions.sh 2>&1 | tee target/gate-logs/gate-arch-regression-descriptions.log
     # The duration-assertion ratchet, the generated nextest split and the timing
@@ -1639,11 +1640,13 @@ load-tolerant-nextest *FLAGS:
     LOAD_START=$(sysctl -n vm.loadavg | awk '{print $2}')
     ( while :; do sysctl -n vm.loadavg | awk '{print $2}'; sleep 30; done ) \
         > target/gate-logs/load-tolerant-load.txt & SAMPLER=$!
-    trap 'kill $SAMPLER 2>/dev/null || true' EXIT
+    MARK=$(mktemp)
+    trap 'kill $SAMPLER 2>/dev/null || true; rm -f "$MARK"' EXIT
     rc=0
     cargo nextest run {{CANON}} --profile load-tolerant --no-fail-fast {{FLAGS}} \
         2>&1 | tee -a "$L" || rc=$?
     kill $SAMPLER 2>/dev/null || true
+    ./scripts/check-target-leftovers.sh "$MARK" 2>&1 | tee -a "$L" || rc=1
     LOAD_MAX=$(sort -g target/gate-logs/load-tolerant-load.txt | tail -1)
     echo "load over the run: start=$LOAD_START max=$LOAD_MAX" | tee -a "$L"
     # Record BEFORE resolve: the JUnit is the calibration data the caps are

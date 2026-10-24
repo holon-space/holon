@@ -654,11 +654,17 @@ async fn the_native_profile_declares_only_restrictions_that_are_real() -> anyhow
 
     println!("{}", report.render());
 
-    let dir = std::env::var_os("HOLON_CAPABILITY_REPORT_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/capability-certification")
-        });
+    // Unset, the report goes to a temp dir removed when the test ends, so a
+    // plain test run leaves no file behind; `scripts/capability-cert-native.sh`
+    // sets it to the ledger's input.
+    let scratch;
+    let dir = match std::env::var_os("HOLON_CAPABILITY_REPORT_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => {
+            scratch = tempfile::tempdir()?;
+            scratch.path().to_path_buf()
+        }
+    };
     let written = report.write_report(format.profile().id(), &dir)?;
     println!("report: {}", written.display());
 
