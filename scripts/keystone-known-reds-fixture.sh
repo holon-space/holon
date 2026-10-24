@@ -305,6 +305,65 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 EOF
 expect_outcome move-between-files-read-repeat 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' \
     "$work/move-between-files-read-repeat.log"
+# A row names ONE violation: the signature is known only when each of its
+# violations is, and a pattern starts where its violation starts.
+cat >"$work/violation-one-known.log" <<'EOF'
+[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 1 budget violation(s):\n  OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome violation/one-known 0 '^PRIMARY: \[known-red:cmd-click-open-tab-integration-state-write\]' "$work/violation-one-known.log"
+cat >"$work/violation-longer-transition-name.log" <<'EOF'
+[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 1 budget violation(s):\n  ReOpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome violation/longer-transition-name 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-longer-transition-name.log"
+cat >"$work/violation-known-plus-novel-budget.log" <<'EOF'
+[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 2 budget violation(s):\n  OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]\n  SplitBlock.sql_writes: 3 exceeds expected 1 + tolerance 0 = 1; writes: [`INSERT INTO block (id, parent_id, content) VALUES (?, ?, ?)` origin=<no-parent>]")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome violation/known-plus-novel-budget 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-known-plus-novel-budget.log"
+cat >"$work/violation-second-novel-invariant.log" <<'EOF'
+[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/loro", "[inv-blocks-match-ref/loro] fields diverge from reference"), ("inv-sql-budget", "[inv-sql-budget] 1 budget violation(s):\n  OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome violation/second-novel-invariant 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-second-novel-invariant.log"
+# A companion counts only beside its row's own violation.
+cat >"$work/violation-companions-beside-their-row.log" <<'EOF'
+[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  inv-blocks-match-ref/org: 14 blocks, reference: 14 blocks\n  only in inv-blocks-match-ref/org (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:wbi7-a: content: sut=\"Buy milk\" ref=\"Buy milk oat\"\n"), ("inv-blocks-match-ref/loro", "[inv-blocks-match-ref/loro] fields diverge from reference\n  inv-blocks-match-ref/loro: 17 blocks, reference: 17 blocks\n  only in inv-blocks-match-ref/loro (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:wbi7-a: content: sut=\"Buy milk\" ref=\"Buy milk oat\"\n"), ("inv-blocks-match-ref/block_raw", "[inv-blocks-match-ref/block_raw] block block:wbi7-a diverges from reference on Content\n  inv-blocks-match-ref/block_raw: Block {\n    id: EntityUri(\"block:wbi7-a\"),\n    parent_id: EntityUri(\"block:ref-doc-0\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    contributes_to: [],\n    content: \"Buy milk\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: None,\n    collapsed: false,\n    widget_only: false,\n    block_type: None,\n    created_at: 0,\n    updated_at: 0,\n}\n  reference: Block {\n    id: EntityUri(\"block:wbi7-a\"),\n    parent_id: EntityUri(\"block:ref-doc-0\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    contributes_to: [],\n    content: \"Buy milk oat\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: None,\n    collapsed: false,\n    widget_only: false,\n    block_type: None,\n    created_at: 0,\n    updated_at: 0,\n}"), ("inv-blocks-match-ref/matview", "[inv-blocks-match-ref/matview] fields diverge from reference\n  inv-blocks-match-ref/matview: 17 blocks, reference: 17 blocks\n  only in inv-blocks-match-ref/matview (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:wbi7-a: content: sut=\"Buy milk\" ref=\"Buy milk oat\"\n"), ("inv-block-content/block_raw", "[inv-block-content/block_raw] block block:wbi7-a content diverges:\n  ref:       \"Buy milk oat\"\n  block_raw: \"Buy milk\""), ("inv-block-content/sql", "[inv-block-content/sql] block block:wbi7-a content diverges:\n  ref: \"Buy milk oat\"\n  sql: \"Buy milk\"")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome violation/companions-beside-their-row 0 '^PRIMARY: \[known-red:ref-diverge-content-text-drift\]' "$work/violation-companions-beside-their-row.log"
+cat >"$work/violation-companions-alone.log" <<'EOF'
+[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/block_raw", "[inv-blocks-match-ref/block_raw] block block:wbi7-a diverges from reference on Content\n  inv-blocks-match-ref/block_raw: Block {\n    id: EntityUri(\"block:wbi7-a\"),\n    parent_id: EntityUri(\"block:ref-doc-0\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    contributes_to: [],\n    content: \"Buy milk\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: None,\n    collapsed: false,\n    widget_only: false,\n    block_type: None,\n    created_at: 0,\n    updated_at: 0,\n}\n  reference: Block {\n    id: EntityUri(\"block:wbi7-a\"),\n    parent_id: EntityUri(\"block:ref-doc-0\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    contributes_to: [],\n    content: \"Buy milk oat\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: None,\n    collapsed: false,\n    widget_only: false,\n    block_type: None,\n    created_at: 0,\n    updated_at: 0,\n}"), ("inv-block-content/block_raw", "[inv-block-content/block_raw] block block:wbi7-a content diverges:\n  ref:       \"Buy milk oat\"\n  block_raw: \"Buy milk\""), ("inv-block-content/sql", "[inv-block-content/sql] block block:wbi7-a content diverges:\n  ref: \"Buy milk oat\"\n  sql: \"Buy milk\"")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome violation/companions-alone 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-companions-alone.log"
+cat >"$work/violation-page-without-own-file.log" <<'EOF'
+[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-every-page-has-its-own-file", "[inv-every-page-has-its-own-file] 1 page(s) not homed to exactly one own file: [\"page `61133fe7-d4d5-ab1c-24e4-110da5f42293` owns NO file (fileless — content lives only in the store; writeback must MATERIALIZE it into `…/61133fe7-d4d5-ab1c-24e4-110da5f42293.org`)\"]")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome violation/page-without-own-file 0 '^PRIMARY: \[known-red:page-without-own-file\]' "$work/violation-page-without-own-file.log"
 # The sample rules (`[keystone-sample]`) belong to the HEADLESS keystone, which
 # is the only test that discloses one. The windowed keystone's name contains the
 # headless name as a substring, so these three cases pin which log each rule

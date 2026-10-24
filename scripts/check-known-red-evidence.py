@@ -9,6 +9,10 @@ with the workspace that held it.
 
   check-known-red-evidence.py [REGISTRY.md ...]   default: docs/Testing/KeystoneKnownReds.md
   check-known-red-evidence.py --self-check        prove each rule fails a bad citation
+  check-known-red-evidence.py --rows REGISTRY.md  print the `known-red` rows the classifier
+                                                  reads, one per line: key, pattern, site,
+                                                  companions (separated by \x1f, so an empty
+                                                  cell stays a field)
 
 An evidence citation is a backticked path that ends in an evidence extension or
 lies under a lane, scratch or temp location. Source paths (`.rs`, `.org`, ...)
@@ -23,6 +27,10 @@ cite sites, not evidence, and are not checked here. Per citation:
                      zstd-decoded for `.zst`, contain the snippet verbatim. A
                      line spec without `quotes` fails: a range proves nothing
                      unless it says what it holds.
+
+A registry table whose header ends in `Companions` gives each row a last cell
+of `—` or a code span of comma-separated invariant ids, `inv-x/*` naming every
+view of `inv-x`. A `known-red` row must sit in such a table.
 """
 
 import functools
@@ -42,6 +50,7 @@ SCRATCH_DIRS = {"lane-logs", ".lane-logs", ".lane-tmp", "scratchpad", "target"}
 NOT_A_PATH = re.compile(r"[\s\\^$()\[\]|*+?]")
 LINE_SPEC = re.compile(r"(?P<path>.+?)(?::(?P<lines>\d+(?:[-,]\d+)*)(?::\d+)?)?")
 QUOTES = re.compile(r"\s+quotes\s+$")
+COMPANION = re.compile(r"inv-[a-z0-9-]+(/([a-z0-9_]+|\*))?")
 
 
 def code_spans(line):
@@ -134,8 +143,54 @@ def check_citation(path, lines, snippet):
     return None
 
 
+def unticked(cell):
+    return cell.strip().removeprefix("`").removesuffix("`")
+
+
+def registry_rows(registry):
+    """Yield (lineno, key, status, pattern, site, companions) per registry row,
+    or (lineno, key, error) for a row whose Companions cell does not parse.
+
+    Cells split on every `|`, as the classifier always has, so the companions
+    are the LAST cell: a prose cell holding a stray `|` cannot shift them.
+    """
+    companions_table = False
+    for lineno, line in enumerate(registry.read_text().splitlines(), 1):
+        if not line.startswith("|"):
+            companions_table = False
+            continue
+        cells = line.split("|")
+        if cells[1].strip() == "Key":
+            companions_table = cells[-2].strip() == "Companions"
+            continue
+        if not cells[1].strip().startswith("`") or len(cells) < 4:
+            continue
+        key, status, pattern = unticked(cells[1]), cells[2].strip(), unticked(cells[3]).replace("&#124;", "|")
+        if not key or not pattern:
+            continue
+        if not companions_table:
+            if status == "known-red":
+                yield lineno, key, "is a known-red row in a table without a Companions column"
+            continue
+        site = unticked(cells[4]).replace("&#124;", "|")
+        # A site is one whitespace-free ERE; `—` leaves the row unpinned.
+        if site == "—" or re.search(r"\s", site):
+            site = ""
+        cell = cells[-2].strip()
+        if cell == "—":
+            companions = []
+        else:
+            companions = [c.strip() for c in unticked(cell).split(",")] if cell.startswith("`") and cell.endswith("`") else None
+            if not companions or not all(COMPANION.fullmatch(c) for c in companions):
+                yield lineno, key, f"Companions cell {cell!r} is not `—` or a code span of invariant ids"
+                continue
+        yield lineno, key, status, pattern, site, companions
+
+
 def lint(registry):
-    failures = []
+    failures = [
+        f"{registry.name}:{row[0]} [{row[1]}] {row[2]}" for row in registry_rows(registry) if len(row) == 3
+    ]
     for lineno, line in enumerate(registry.read_text().splitlines(), 1):
         row = re.match(r"\|\s*`([^`]+)`", line)
         where = f"{registry.name}:{lineno}" + (f" [{row.group(1)}]" if row else "")
@@ -154,6 +209,7 @@ def lint(registry):
 
 
 def self_check():
+    companions_header = "| Key | Status | Match pattern | Site | Companions |\n| --- | --- | --- | --- | --- |\n"
     good = "docs/Testing/known-red-evidence/slot-withdrawn-last-claim-no-retraction/green.log.zst"
     quote = "the slot of 'journals' differs between the devices"
     cases = {
@@ -163,6 +219,11 @@ def self_check():
         "an ignored path": ("| `k` | `target/known-red-evidence-probe.log` |", 1),
         "a range without a snippet": (f"| `k` | `{good}:166-168` |", 1),
         "a range without the snippet": (f"| `k` | `{good}:1-2` quotes `{quote}` |", 1),
+        "a known-red row with companions": (f"{companions_header}| `k` | known-red | `p` | — | `inv-a/*, inv-b/sql` |", 0),
+        "a known-red row without companions": (f"{companions_header}| `k` | known-red | `p` | — | — |", 0),
+        "a known-red row outside a companions table": ("| `k` | known-red | `p` | — | — |", 1),
+        "a companion that is no invariant id": (f"{companions_header}| `k` | known-red | `p` | — | `inv-a, block_raw` |", 1),
+        "a companions cell without a code span": (f"{companions_header}| `k` | known-red | `p` | — | inv-a |", 1),
     }
     ignored = REPO / "target/known-red-evidence-probe.log"
     ignored.parent.mkdir(exist_ok=True)
@@ -180,7 +241,22 @@ def self_check():
     return wrong
 
 
+def print_rows(registry):
+    rows = list(registry_rows(registry))
+    errors = [row for row in rows if len(row) == 3]
+    for lineno, key, error in errors:
+        print(f"[known-red-evidence] {registry.name}:{lineno} [{key}] {error}", file=sys.stderr)
+    if errors:
+        return 1
+    for _, key, status, pattern, site, companions in rows:
+        if status == "known-red":
+            print("\x1f".join([key, pattern, site, " ".join(companions)]))
+    return 0
+
+
 def main(argv):
+    if len(argv) == 2 and argv[0] == "--rows":
+        return print_rows(Path(argv[1]))
     if argv == ["--self-check"]:
         wrong = self_check()
         if wrong:

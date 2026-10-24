@@ -349,6 +349,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `bulk-add-sibling-order`
 - `catalog-advice-step6-weave-dismiss`
 - `cmd-click-open-tab-integration-state-write`
+- `composed-boot-timeout-under-load`
 - `concurrent-keystroke-undo-steps-load`
 - `convert-block-to-page-journals-planning-failed`
 - `cook-vault-ingest-layout-seed-timeout`
@@ -396,6 +397,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `toggle-state-sql-read-repeat-budget`
 - `tour-spike-advance-cursor-not-visible`
 - `tui-inline-row-mount-unsettled-frame`
+- `tui-refused-write-back-missing-from-log`
 - `turso-block-query-source-round-trip`
 - `two-instance-loro-docs-no-common-state`
 - `two-instance-one-way-share-receiver-org-missing`
@@ -409,6 +411,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `wide-e2e-sqlonly-typing-share-load-timeout`
 - `windowed-banner-toast-paint-load-flake`
 - `windowed-clickblock-bounds-under-load`
+- `windowed-entity-not-in-bounds-under-load`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
 - `writeorgfile-sql-reads-budget`

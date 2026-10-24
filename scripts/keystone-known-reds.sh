@@ -51,41 +51,34 @@ if [ ! -f "$registry" ]; then
     exit 2
 fi
 
-# Registry rows: | `key` | status | `pattern` | `site` | ... — only `known-red`
-# rows classify. A cell cannot hold a literal `|` (the table separator), so a
-# pattern writes alternation as `&#124;`, decoded here after the split.
+# Registry rows come from scripts/check-known-red-evidence.py, the one parser of
+# the table (it also lints it); only `known-red` rows classify. A cell cannot
+# hold a literal `|` (the table separator), so a pattern writes alternation as
+# `&#124;`, decoded by that parser.
 #
 # `site` is an ERE over `<file>:<line>:<col>` listing every MEASURED site that
 # reports the row's root cause — one row per root cause, so the ERE alternates
 # over the asserting site and each harness that re-raises its verdict (the
 # windowed GPUI loop re-reports the composed keystone's verdict at its own
-# site). `—` means the row is not pinned yet (no evidence log on this machine to
-# measure it from) and is not site-checked. A pinned row whose wording matches a
-# signature from ANOTHER site is a cross-family match: the run fails loudly
-# rather than re-attributing the signature (Martin, 2026-10-13).
+# site). Empty means the row is not pinned yet (no evidence log on this machine
+# to measure it from) and is not site-checked. A pinned row whose wording
+# matches a signature from ANOTHER site is a cross-family match: the run fails
+# loudly rather than re-attributing the signature (Martin, 2026-10-13).
+#
+# `companions` are invariant-id globs the row's root cause also trips; see the
+# matching loop for when they count.
 keys=()
 patterns=()
 sites=()
-while IFS=$'\t' read -r key status pattern site; do
+companions=()
+rows=$(python3 "$repo_root/scripts/check-known-red-evidence.py" --rows "$registry")
+while IFS=$'\x1f' read -r key pattern site companion; do
     [ -z "$key" ] && continue
-    [ "$status" = "known-red" ] || continue
     keys+=("$key")
     patterns+=("$pattern")
-    # A site is one whitespace-free ERE. Anything else — `—`, or a table whose
-    # 5th column is prose because it predates this column — is UNPINNED, so a
-    # registry without the column classifies exactly as it did before.
-    case "$site" in
-        "" | "—" | *[[:space:]]*) sites+=("") ;;
-        *) sites+=("$site") ;;
-    esac
-done < <(awk -F'|' '
-    /^\| *`/ {
-        gsub(/^ *`|` *$/, "", $2); gsub(/^ *| *$/, "", $3)
-        gsub(/^ *`|` *$/, "", $4)
-        gsub(/^ *| *$/, "", $5); gsub(/^`|`$/, "", $5)
-        gsub(/&#124;/, "|", $4); gsub(/&#124;/, "|", $5)
-        if ($2 != "" && $4 != "") print $2 "\t" $3 "\t" $4 "\t" $5
-    }' "$registry")
+    sites+=("$site")
+    companions+=("$companion")
+done <<<"$rows"
 
 if [ "${#keys[@]}" -eq 0 ]; then
     echo "[known-reds] registry has no known-red rows — every failure is novel."
@@ -101,6 +94,71 @@ normalize_sig() {
         -e 's/\bId\([0-9]+\)/Id(N)/g' \
         -e 's/Mapped: \[[^]]*\]/Mapped: [...]/g' \
         -e 's/split-[0-9]+/split-N/g'
+}
+
+# A registry row names ONE violation, so a signature is known only when each of
+# its violations is. Prints one signature per violation, each shaped as the
+# panic would read had that violation fired alone: an oracle verdict
+# `…diverged from the oracle: [("inv-a", "…"), ("inv-b", "…")]…` splits per
+# invariant, and an `inv-sql-budget` message of N violations splits into N
+# `1 budget violation(s)` messages. Any other signature prints unchanged.
+# Exit 3 when a budget message holds a different number of violations than it
+# announces: the split cannot be trusted, so neither can a verdict.
+split_violations() {
+    printf '%s\n' "$1" | awk '
+        function whole() { print sig; exit }
+        # The end of the Debug-escaped string that opens at s[p], or 0.
+        function string_end(s, p,    c) {
+            for (p++; p <= length(s); p++) {
+                c = substr(s, p, 1)
+                if (c == "\\") p++
+                else if (c == "\"") return p
+            }
+            return 0
+        }
+        {
+            sig = $0
+            at = index(sig, "diverged from the oracle: [(")
+            if (at == 0) whole()
+            at += length("diverged from the oracle: ")
+            prefix = substr(sig, 1, at - 1)
+            n = 0; p = at + 1
+            while (1) {
+                if (substr(sig, p, 2) != "(\"") whole()
+                id_end = string_end(sig, p + 1)
+                if (!id_end || substr(sig, id_end, 3) != "\", ") whole()
+                msg_end = string_end(sig, id_end + 3)
+                if (!msg_end || substr(sig, msg_end + 1, 1) != ")") whole()
+                n++
+                head[n] = substr(sig, p, id_end + 4 - p)
+                msg[n] = substr(sig, id_end + 4, msg_end - id_end - 4)
+                p = msg_end + 2
+                if (substr(sig, p, 2) == ", ") { p += 2; continue }
+                if (substr(sig, p, 1) == "]") break
+                whole()
+            }
+            suffix = substr(sig, p + 1)
+            budget_head = "[inv-sql-budget] 1 budget violation(s):\\n  "
+            for (i = 1; i <= n; i++) {
+                if (!match(msg[i], /^\[inv-sql-budget\] [0-9]+ budget violation\(s\):\\n  /)) {
+                    print prefix "[" head[i] msg[i] "\")]" suffix
+                    continue
+                }
+                announced = substr(msg[i], length("[inv-sql-budget] ") + 1) + 0
+                rest = substr(msg[i], RLENGTH + 1)
+                k = 0
+                while (match(rest, /\\n  [^ ]+\.sql_[a-z_]+: /)) {
+                    one[++k] = substr(rest, 1, RSTART - 1)
+                    rest = substr(rest, RSTART + 4)
+                }
+                one[++k] = rest
+                if (k != announced) {
+                    printf "[known-reds] ERROR: an inv-sql-budget message announces %d violation(s) but splits into %d: %s\n", announced, k, msg[i] >"/dev/stderr"
+                    exit 3
+                }
+                for (j = 1; j <= k; j++) print prefix "[" head[i] budget_head one[j] "\")]" suffix
+            }
+        }'
 }
 
 # A panic is collateral (unwind noise from a thread tearing down after some
@@ -440,37 +498,79 @@ for log in "$@"; do
             class="collateral"
             collateral=$((collateral + 1))
         else
-            hit=-1
-            for i in "${!keys[@]}"; do
-                if printf '%s\n' "$norm" | grep -qE -- "${patterns[$i]}"; then
-                    hit=$i
-                    break
+            pieces=$(split_violations "$norm") \
+                || { rc=$?; rm -f "$sigs_file" "$tail_file" "$novel_file"; exit "$rc"; }
+            # Each violation is matched on its own; ` i j ` holds the distinct
+            # rows hit. A violation no pattern knows is still known when its
+            # invariant is a companion of a row hit by ANOTHER violation of
+            # the same signature: alone, a companion is novel.
+            hits=" "
+            cross_hit=-1
+            unmatched=()
+            while IFS= read -r piece; do
+                hit=-1
+                for i in "${!keys[@]}"; do
+                    if printf '%s\n' "$piece" | grep -qE -- "${patterns[$i]}"; then
+                        hit=$i
+                        break
+                    fi
+                done
+                if [ "$hit" -ge 0 ] && [ -n "${sites[$hit]}" ] \
+                    && ! printf '%s\n' "$loc" | grep -qE -- "${sites[$hit]}"; then
+                    [ "$cross_hit" -lt 0 ] && cross_hit=$hit
+                elif [ "$hit" -ge 0 ]; then
+                    [[ "$hits" == *" $hit "* ]] || hits="$hits$hit "
+                else
+                    unmatched+=("$piece")
                 fi
+            done <<<"$pieces"
+            novel_pieces=""
+            for piece in ${unmatched[@]+"${unmatched[@]}"}; do
+                invariant=${piece#*diverged from the oracle: \[(\"}
+                if [ "$invariant" = "$piece" ]; then
+                    invariant=""
+                else
+                    invariant=${invariant%%\"*}
+                fi
+                claimed=0
+                for hit in $hits; do
+                    read -r -a globs <<<"${companions[$hit]}"
+                    for glob in ${globs[@]+"${globs[@]}"}; do
+                        # shellcheck disable=SC2254 # a registry glob, matched as one
+                        case "$invariant" in $glob) claimed=1 ;; esac
+                    done
+                done
+                [ "$claimed" -eq 1 ] \
+                    || novel_pieces="$novel_pieces$(printf '%.240s' "$piece")"$'\n'
             done
-            if [ "$hit" -ge 0 ] && [ -n "${sites[$hit]}" ] \
-                && ! printf '%s\n' "$loc" | grep -qE -- "${sites[$hit]}"; then
-                echo "[known-reds] FAIL: cross-family match: ${keys[$hit]} at $loc"
+            if [ "$cross_hit" -ge 0 ]; then
+                echo "[known-reds] FAIL: cross-family match: ${keys[$cross_hit]} at $loc"
                 echo "             The row's wording matched, but it asserts from"
-                echo "             ${sites[$hit]} — so this signature belongs to another family."
+                echo "             ${sites[$cross_hit]} — so this signature belongs to another family."
                 echo "             Triage it (bug-gap-triage). Add this site to the row ONLY if"
                 echo "             the log shows the SAME root cause re-raised there (an outer"
                 echo "             harness re-reporting the inner verdict); never to silence it."
-                class="cross-family:${keys[$hit]}"
+                class="cross-family:${keys[$cross_hit]}"
                 cross=$((cross + 1))
-            elif [ "$hit" -ge 0 ]; then
-                class="known-red:${keys[$hit]}"
-                counts[$hit]=$(( ${counts[$hit]} + 1 ))
-                [ -z "${examples[$hit]}" ] && examples[$hit]="$base @ $loc: $(printf '%.240s' "$norm")"
-                matched=$((matched + 1))
-            else
+            elif [ -n "$novel_pieces" ]; then
                 class="novel"
                 # Grouped by normalized message only, not location: the same
                 # bug's panic site and proptest's own terminal re-report of it
                 # are two locations for one signature (see normalize_sig's
                 # Test-failed-wrapper strip) and must count as one novel hit,
-                # the same way known-red counts already ignore location.
-                printf '%.240s\n' "$norm" >>"$novel_file"
+                # the same way known-red counts already ignore location. Only
+                # the violations no row knows are listed.
+                printf '%s' "$novel_pieces" >>"$novel_file"
                 novel=$((novel + 1))
+            else
+                class="known-red:"
+                for hit in $hits; do
+                    class="$class${keys[$hit]}+"
+                    counts[$hit]=$(( ${counts[$hit]} + 1 ))
+                    [ -z "${examples[$hit]}" ] && examples[$hit]="$base @ $loc: $(printf '%.240s' "$norm")"
+                done
+                class="${class%+}"
+                matched=$((matched + 1))
             fi
         fi
 
