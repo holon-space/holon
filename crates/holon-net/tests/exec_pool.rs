@@ -239,3 +239,33 @@ fn a_failed_firing_gives_its_token_back_once() {
     );
     assert_eq!(ex.tokens().free("Slots"), 1);
 }
+
+/// Two effectful firings start while a guard sees a free token; the first
+/// completion moves the pool row the second firing's guard read.
+#[test]
+fn concurrent_effects_behind_a_free_guard_both_land() {
+    let free: Read = Arc::new(|r, _| (r.free("Slots") > 0).then(Content::new));
+    let net = NetDef::default()
+        .fifo("Waiting", Class::Process)
+        .pool("Slots", Class::Process, 2)
+        .place("Held", Class::Process)
+        .transition(
+            TransitionDef::new("Take", Trigger::Auto, free, Body::Effectful(Receiver::None))
+                .consumes("Waiting")
+                .consumes("Slots"),
+        );
+    let mut ex = Executor::new(net).unwrap();
+    let mut attempts = Vec::new();
+    for s in ["a", "b"] {
+        let q = ex.write("Waiting", s, Content::new(), NOW).unwrap();
+        attempts.push((s, q.requests[0].attempt));
+    }
+    for (s, attempt) in attempts {
+        let held = Output::new("Held", &Subject::new(s), Content::new());
+        drop(
+            ex.complete(attempt, EffectResult::Done(vec![held]), NOW)
+                .unwrap(),
+        );
+    }
+    assert_eq!(held(&ex), ["a", "b"]);
+}

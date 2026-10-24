@@ -973,7 +973,8 @@ impl Reader<'_> {
     }
 
     /// The free tokens of a pool, for a guard such as "start only while
-    /// `cpu > 0`". The read lands in the trace like any other.
+    /// `cpu > 0`". The guard decides when the firing starts, so a later change
+    /// of the pool does not make the firing stale.
     pub fn free(&mut self, place: &str) -> usize {
         self.trace.row(self.tokens, place, POOL_SUBJECT);
         self.tokens.free(place)
@@ -2581,6 +2582,7 @@ impl Executor {
             .rows
             .iter()
             .filter(|((p, s), _)| *s != a.subject || a.taken.iter().all(|(held, _)| held != p))
+            .filter(|((p, _), _)| !self.tokens.pools.contains_key(p))
             .find(|((p, s), r)| self.tokens.version(p, s) != r.version)
             .map(|(k, _)| k.clone())
     }
