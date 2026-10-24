@@ -84,8 +84,9 @@ pub struct FileAdapterState {
     /// the store, with the document's blocks at the refusal.
     pub refused: BTreeMap<EntityUri, Vec<Block>>,
 
-    /// Each document's file as the last landed write-back or ingest of it
-    /// recorded it: the base the next boot merges the file against.
+    /// Each held document's file as the last landed write-back or ingest of
+    /// it recorded it: the base the next boot merges the file against. Only a
+    /// held document's base is read, so it is taken when the hold starts.
     pub merge_base: BTreeMap<EntityUri, MergeBase>,
 
     /// The conflict copies a crash-restore left beside each file, by the
@@ -178,23 +179,18 @@ impl crate::pbt::reference_state::ReferenceState {
             .collect()
     }
 
-    /// Every write-back no churn holds lands, and records its file as the
-    /// merge base.
-    pub fn record_landed_write_backs(&mut self) {
-        let landed: Vec<EntityUri> = self
-            .files
-            .documents
-            .keys()
-            .filter(|doc| !self.files.write_churn.contains(*doc))
-            .cloned()
-            .collect();
-        for doc in landed {
+    /// A fault starts holding `doc`'s write-backs. Every earlier one landed,
+    /// so the file as the store has it now is the merge base; a doc already
+    /// held keeps its base.
+    pub fn hold_write_backs(&mut self, doc: &EntityUri) {
+        if self.files.write_churn.insert(doc.clone()) {
             let base = MergeBase {
-                blocks: self.file_blocks(&doc),
+                blocks: self.file_blocks(doc),
                 ids_on_disk: true,
             };
-            self.files.merge_base.insert(doc, base);
+            self.files.merge_base.insert(doc.clone(), base);
         }
+        self.files.write_churn_ran = true;
     }
 
     /// The ingest of `doc`'s id-less file while a churn holds its write-back:
@@ -218,5 +214,59 @@ impl crate::pbt::reference_state::ReferenceState {
             .get(doc)
             .unwrap_or_else(|| panic!("{doc} has no merge base in the model"));
         !base.ids_on_disk || base.blocks != self.file_blocks(doc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use holon_api::EntityUri;
+    use holon_api::block::Block;
+
+    use crate::pbt::reference_state::ReferenceState;
+
+    fn state_with_one_block_doc() -> (ReferenceState, EntityUri, EntityUri) {
+        let interp = Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new());
+        let mut state = ReferenceState::new(holon_pbt_core::Wiring::full(), interp);
+        let doc = EntityUri::block("doc");
+        let child = EntityUri::block("child");
+        state.files.documents.insert(doc.clone(), "doc.org".into());
+        let blocks = &mut state.domain.block_state.blocks;
+        blocks.insert(
+            doc.clone(),
+            Block::new_text(doc.clone(), EntityUri::block("root"), "Doc"),
+        );
+        blocks.insert(
+            child.clone(),
+            Block::new_text(child.clone(), doc.clone(), "before"),
+        );
+        (state, doc, child)
+    }
+
+    fn edit(state: &mut ReferenceState, block: &EntityUri, text: &str) {
+        let blocks = &mut state.domain.block_state.blocks;
+        blocks.get_mut(block).unwrap().content = text.into();
+    }
+
+    #[test]
+    fn a_held_write_back_is_owed_until_the_file_matches_its_base_again() {
+        let (mut state, doc, child) = state_with_one_block_doc();
+        state.hold_write_backs(&doc);
+        assert!(!state.write_back_owed(&doc));
+        edit(&mut state, &child, "after");
+        assert!(state.write_back_owed(&doc));
+        edit(&mut state, &child, "before");
+        assert!(!state.write_back_owed(&doc));
+    }
+
+    #[test]
+    fn a_write_back_that_lands_between_two_holds_moves_the_merge_base() {
+        let (mut state, doc, child) = state_with_one_block_doc();
+        state.hold_write_backs(&doc);
+        state.files.write_churn.remove(&doc);
+        edit(&mut state, &child, "after");
+        state.hold_write_backs(&doc);
+        assert!(!state.write_back_owed(&doc));
     }
 }

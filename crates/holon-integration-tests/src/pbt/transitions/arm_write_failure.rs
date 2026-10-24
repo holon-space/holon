@@ -80,8 +80,7 @@ impl TransitionRef<ReferenceState> for ArmWriteFailure {
         // A refused write leaves the file behind its store, which is exactly
         // what `write_churn` means to the oracle — the end state is the one
         // without the fault, reached once the fault ends.
-        state.files.write_churn.insert(self.doc.clone());
-        state.files.write_churn_ran = true;
+        state.hold_write_backs(&self.doc);
     }
 }
 

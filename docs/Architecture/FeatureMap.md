@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 128 transitions; the repo declares 100 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 128 transitions; the repo declares 101 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -312,6 +312,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-conditions-match-ref` — a transition that fails on purpose must leave a condition raised, not merely decline to write
 - `inv-copies-stay-on-disk` — the state between the two saves of a cut & paste, where both files hold the block, with Holon writing to both (D229.b)
 - `inv-crash-history-matches-ref` — the records a prior crash or a task panic leave, before and after a restart moves this run's record among the unshown ones (D-crash-history.a)
+- `inv-crash-restore-copies-match-ref` — the store wins the restore, so the copy is the only place the file's version from before the save survives
 - `inv-decompiled-rows-rendered`
 - `inv-editable-text-has-draggable` — every editable_text/rendered_text in a block-profile subtree paired with a same-id draggable
 - `inv-editor-caret-matches-ref`

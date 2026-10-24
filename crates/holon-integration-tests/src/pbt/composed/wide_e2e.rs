@@ -2430,7 +2430,6 @@ impl ReferenceStateMachine for WideE2EMachine {
 
     fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
         transition.apply_to_ref(&mut state);
-        state.record_landed_write_backs();
         if let E2ETransition::StaleExternalRewrite(t) = transition {
             state.record_held_id_less_ingest(&t.doc_uri);
         }

@@ -81,8 +81,7 @@ impl TransitionRef<ReferenceState> for ArmWriteChurn {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
-        state.files.write_churn.insert(self.doc.clone());
-        state.files.write_churn_ran = true;
+        state.hold_write_backs(&self.doc);
     }
 }
 
