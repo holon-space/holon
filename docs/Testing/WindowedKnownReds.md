@@ -41,7 +41,6 @@ The 5 skipped tests are excluded by the default filter or `#[ignore]`
 | Test | Signature | Class | Registry key |
 | --- | --- | --- | --- |
 | `gpui_compose_sut_windowed windowed_split_then_clickblock_resolves_minted_id` | `[SplitBlock/keystroke] cannot place the caret … editable surface not projected by this driver` | see registry row | `windowed-splitblock-no-editable-surface` (known-red) |
-| `holon-loro loro_share_backend::tests::owning_page_types_a_missing_mount_and_an_unloaded_share` | `block:host is or holds a share (…), so this op cannot remove it` | see registry row | `loro-owning-page-types-share-removal` (known-red) |
 | `task_keyword_blur_windowed promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly` | `vacuity guard: the blur dispatched NO operation (6 history rows before and after), …` (`win-r2-fixed.log:402`, `windowed-subset-run1.log:424`) | see registry row | `blur-rung-vacuous-no-cell-leg` (known-red): the #99 rung is vacuous on the D113.a no-cell leg |
 | `gpui_composed_windowed_loop general_e2e_composed_pbt_windowed` | same SplitBlock signature as the first row: 11 panics in this test (`win-r2-fixed.log` lines 1342–2958: 10 at `op_write_cap.rs:382`, then the shrunk re-report at `gpui_composed_windowed_loop.rs:270`) | see registry row | `windowed-splitblock-no-editable-surface` (known-red); red in 2 of 3 runs (table above) |
 

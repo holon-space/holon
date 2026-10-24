@@ -376,7 +376,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `logseq-parity-slash-menu-offers-no-delete`
 - `loro-backend-change-count`
 - `loro-move-false-cycle-duplicate-id`
-- `loro-owning-page-types-share-removal`
 - `metamorphic-undo-facet-unchanged`
 - `metamorphic-undo-snapshot-missing`
 - `mirrored-entity-authority-ops-missing`
