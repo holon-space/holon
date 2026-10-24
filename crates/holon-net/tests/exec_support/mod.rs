@@ -384,6 +384,8 @@ pub struct Driver {
     exec: Executor,
     model: Model,
     spec: Spec,
+    /// False for [`Driver::unchecked`]: no comparison with the model.
+    compare: bool,
     pub now: Duration,
     /// Effect requests returned and not yet completed, oldest first.
     pub pending: VecDeque<EffectRequest>,
@@ -404,10 +406,21 @@ fn agree<T: Debug + PartialEq>(op: &str, what: &str, sut: T, model: T) -> T {
 
 impl Driver {
     pub fn new(spec: Spec) -> Self {
+        Self::build(spec, true)
+    }
+
+    /// A driver that compares nothing with the model, for a test whose own
+    /// check must be the one that fails.
+    pub fn unchecked(spec: Spec) -> Self {
+        Self::build(spec, false)
+    }
+
+    fn build(spec: Spec, compare: bool) -> Self {
         let mut d = Self {
             exec: executor(spec.netdef()),
             model: Model::new(spec.clone()),
             spec,
+            compare,
             now: Duration::ZERO,
             pending: VecDeque::new(),
             requests: Vec::new(),
@@ -429,9 +442,14 @@ impl Driver {
         sut: Result<Quiesced<T>, E>,
         model: Result<Quiesced<T>, E>,
     ) -> Result<T, E> {
-        self.properties(op);
-        let r = agree(op, "answer", sut, model);
-        self.check(op);
+        let r = if self.compare {
+            self.properties(op);
+            let r = agree(op, "answer", sut, model);
+            self.check(op);
+            r
+        } else {
+            sut
+        };
         r.map(|q| {
             self.requests.extend(q.requests.iter().cloned());
             self.pending.extend(q.requests);
@@ -452,9 +470,14 @@ impl Driver {
         let op = format!("step at {:?}", self.now);
         let sut = self.exec.step(self.now);
         let model = self.model.step(self.now);
-        self.properties(&op);
-        let new = agree(&op, "effect requests", sut, model);
-        self.check(&op);
+        let new = if self.compare {
+            self.properties(&op);
+            let new = agree(&op, "effect requests", sut, model);
+            self.check(&op);
+            new
+        } else {
+            sut
+        };
         let new = new?;
         self.requests.extend(new.iter().cloned());
         self.pending.extend(new);

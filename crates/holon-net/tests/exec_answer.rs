@@ -3,7 +3,9 @@
 //! answer is a new failure mark key, and undo never fires the work again.
 //!
 //! Twins: `HOLON_NET_TWIN=value-before-bind`, `occurrence-not-in-trace`,
-//! `undo-restores-answered`, `settled-from-answer`.
+//! `undo-restores-answered`, `settled-from-answer`; `no-quiescence` and
+//! `keep-work-failed` break quiescence, which
+//! `idle_rule_and_quiescence_hold` names without the model comparison.
 //!
 //! The net shape is drawn, not fixed (#195): the downstream consumer of
 //! `Accepted` is part of the generated case, so an undo that finds a firing
@@ -179,6 +181,8 @@ struct Sut {
     /// Answers whose work overwrote an `Accepted` row that was already there.
     overwrote: BTreeSet<String>,
     held: Reach,
+    /// The auto transitions of the drawn net.
+    autos: Vec<String>,
 }
 
 /// How often `undo` reported a row a later firing holds, over the whole run.
@@ -226,6 +230,19 @@ fn offered_asks_have_their_answer_enabled(d: &Driver, op: &str) {
     }
 }
 
+/// Quiescence: an external call returns only after every auto transition it
+/// enabled has fired, so none is enabled between calls (NET-rev1).
+fn no_auto_transition_is_enabled(sut: &Sut, op: &str) {
+    for t in &sut.autos {
+        for s in SUBJECTS {
+            assert!(
+                sut.d.exec().why_not(t, s).is_some(),
+                "not quiescent: the auto '{t}' is enabled for {s} after {op}"
+            );
+        }
+    }
+}
+
 /// Each answer fires its work at most once, with its own value.
 fn work_fired_once_with_its_value(sut: &Sut) {
     let mut seen = BTreeMap::new();
@@ -269,6 +286,24 @@ fn undo_and_count(sut: &mut Sut, id: &str) {
     }
 }
 
+fn init_sut(spec: &Spec, d: Driver) -> Sut {
+    Sut {
+        d,
+        autos: spec
+            .transitions
+            .iter()
+            .filter(|t| t.trigger == Trigger::Auto)
+            .map(|t| t.name.clone())
+            .collect(),
+        values: BTreeMap::new(),
+        newest: None,
+        overwrote: BTreeSet::new(),
+        held: Reach::default(),
+    }
+}
+
+/// The full oracle: the driver's model comparison, the idle rule,
+/// quiescence and the work of each answer.
 struct Test;
 
 impl StateMachineTest for Test {
@@ -276,13 +311,8 @@ impl StateMachineTest for Test {
     type Reference = Ref;
 
     fn init_test(shape: &Shape) -> Sut {
-        Sut {
-            d: Driver::new(spec_of(shape)),
-            values: BTreeMap::new(),
-            newest: None,
-            overwrote: BTreeSet::new(),
-            held: Reach::default(),
-        }
+        let spec = spec_of(shape);
+        init_sut(&spec, Driver::new(spec.clone()))
     }
 
     fn teardown(sut: Sut, _: Shape) {
@@ -301,72 +331,98 @@ impl StateMachineTest for Test {
         }
     }
 
-    fn apply(mut sut: Sut, _: &Shape, op: Op) -> Sut {
-        let d = &mut sut.d;
-        let op_text = format!("{op:?}");
-        match op {
-            Op::WriteItem { s, n } => {
-                d.write("Item", s, content(&[("n", Value::Integer(n))]))
-                    .expect("the net quiesces");
-            }
-            Op::Answer {
-                s,
-                id,
-                stale,
-                value,
-            } => {
-                let c = answer_call(d, s, id, stale, value);
-                if d.answer(c).is_ok() {
-                    sut.values
-                        .insert(id.to_string(), value.map_or(Value::Null, text));
-                    sut.newest = Some(id);
-                }
-            }
-            Op::Undo(id) => undo_and_count(&mut sut, id),
-            Op::UndoNewest => {
-                if let Some(id) = sut.newest {
-                    undo_and_count(&mut sut, id);
-                }
-            }
-            Op::CompleteDone => {
-                if let Some(OccurrenceId::Work { answer, .. }) = d
-                    .pending
-                    .front()
-                    .filter(|req| {
-                        &*req.transition == "Accept"
-                            && d.exec()
-                                .tokens()
-                                .token("Accepted", req.subject.as_str())
-                                .is_some()
-                    })
-                    .map(|req| req.occurrence.clone())
-                {
-                    sut.overwrote.insert(answer.to_string());
-                }
-                // The drawn `Consume` has an empty input: only the work reads `n`.
-                d.complete_oldest(|req| {
-                    if &*req.transition != "Accept" {
-                        return EffectResult::Done(Vec::new());
-                    }
-                    let n = Value::Integer(int(&req.input, "n"));
-                    EffectResult::Done(vec![
-                        Output::new("Accepted", &req.subject, content(&[("n", n.clone())])),
-                        Output::new("Out", &req.subject, content(&[("n", n)])),
-                    ])
-                })
-                .expect("the net quiesces");
-            }
-            Op::CompleteFailed => d
-                .complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
-                .expect("the net quiesces"),
-            Op::CompleteUnknown => d
-                .complete_oldest(|_| EffectResult::Unknown(Cause::definite("reset")))
-                .expect("the net quiesces"),
-        }
-        offered_asks_have_their_answer_enabled(&sut.d, &op_text);
+    fn apply(sut: Sut, _: &Shape, op: Op) -> Sut {
+        let sut = apply_op(sut, op);
         work_fired_once_with_its_value(&sut);
         sut
     }
+}
+
+/// Drives the same ops with no model comparison and checks only the idle
+/// rule and quiescence, so a twin that breaks one is red for it here.
+struct IdleOnly;
+
+impl StateMachineTest for IdleOnly {
+    type SystemUnderTest = Sut;
+    type Reference = Ref;
+
+    fn init_test(shape: &Shape) -> Sut {
+        let spec = spec_of(shape);
+        init_sut(&spec, Driver::unchecked(spec.clone()))
+    }
+
+    fn apply(sut: Sut, _: &Shape, op: Op) -> Sut {
+        apply_op(sut, op)
+    }
+}
+
+/// Runs `op` and checks the idle rule and quiescence, the checks both tests
+/// share.
+fn apply_op(mut sut: Sut, op: Op) -> Sut {
+    let d = &mut sut.d;
+    let op_text = format!("{op:?}");
+    match op {
+        Op::WriteItem { s, n } => {
+            d.write("Item", s, content(&[("n", Value::Integer(n))]))
+                .expect("the net quiesces");
+        }
+        Op::Answer {
+            s,
+            id,
+            stale,
+            value,
+        } => {
+            let c = answer_call(d, s, id, stale, value);
+            if d.answer(c).is_ok() {
+                sut.values
+                    .insert(id.to_string(), value.map_or(Value::Null, text));
+                sut.newest = Some(id);
+            }
+        }
+        Op::Undo(id) => undo_and_count(&mut sut, id),
+        Op::UndoNewest => {
+            if let Some(id) = sut.newest {
+                undo_and_count(&mut sut, id);
+            }
+        }
+        Op::CompleteDone => {
+            if let Some(OccurrenceId::Work { answer, .. }) = d
+                .pending
+                .front()
+                .filter(|req| {
+                    &*req.transition == "Accept"
+                        && d.exec()
+                            .tokens()
+                            .token("Accepted", req.subject.as_str())
+                            .is_some()
+                })
+                .map(|req| req.occurrence.clone())
+            {
+                sut.overwrote.insert(answer.to_string());
+            }
+            // The drawn `Consume` has an empty input: only the work reads `n`.
+            d.complete_oldest(|req| {
+                if &*req.transition != "Accept" {
+                    return EffectResult::Done(Vec::new());
+                }
+                let n = Value::Integer(int(&req.input, "n"));
+                EffectResult::Done(vec![
+                    Output::new("Accepted", &req.subject, content(&[("n", n.clone())])),
+                    Output::new("Out", &req.subject, content(&[("n", n)])),
+                ])
+            })
+            .expect("the net quiesces");
+        }
+        Op::CompleteFailed => d
+            .complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
+            .expect("the net quiesces"),
+        Op::CompleteUnknown => d
+            .complete_oldest(|_| EffectResult::Unknown(Cause::definite("reset")))
+            .expect("the net quiesces"),
+    }
+    offered_asks_have_their_answer_enabled(&sut.d, &op_text);
+    no_auto_transition_is_enabled(&sut, &op_text);
+    sut
 }
 
 prop_state_machine! {
@@ -377,6 +433,9 @@ prop_state_machine! {
 
     #[test]
     fn answers_follow_the_model(sequential 1..30 => Test);
+
+    #[test]
+    fn idle_rule_and_quiescence_hold(sequential 1..30 => IdleOnly);
 }
 
 /// The held arm with `before = Some`: the parked work of `a0` holds the `Item`
