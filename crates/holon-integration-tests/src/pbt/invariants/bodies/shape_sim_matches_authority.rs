@@ -90,19 +90,6 @@ pub fn assert_reached(cases: u32, edits_off: bool) {
     );
 }
 
-/// Print the run's shape reach and fail unless the shape gate admitted one
-/// tagged-subtree edit, refused one, and its simulator was compared on one.
-/// For a replay of fixed cases, whose reach is fixed too.
-pub fn assert_fully_reached() {
-    let (admitted, refused, compared, _) = report_reach();
-    assert!(
-        admitted >= 1 && refused >= 1 && compared >= 1,
-        "[shape reach] NOT REACHED: admitted={admitted} refused={refused} \
-         comparisons={compared}; inv-shape-gate-refuses-illegal-writes and \
-         inv-shape-sim-matches-authority need an admitted and a refused edit and one comparison"
-    );
-}
-
 /// Print and return (admitted, refused, compared, decision cases).
 pub fn report_reach() -> (usize, usize, usize, usize) {
     let admitted = ADMITTED.load(std::sync::atomic::Ordering::SeqCst);

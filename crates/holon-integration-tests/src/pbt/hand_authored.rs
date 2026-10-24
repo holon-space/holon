@@ -21,6 +21,8 @@ use proptest_state_machine::StateMachineTest;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::pbt::composed::harness::ComposedSut;
+use crate::pbt::composed::wide_e2e::WideE2E;
 use crate::pbt::composed::wide_e2e::wide_e2e_ref_for;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::E2ETransition;
@@ -100,15 +102,93 @@ pub const KNOWN_CASE_KEYS: &[&str] = &[
     "initial_state",
     "transitions",
     ALSO_CHECK_AFTER_KEY,
+    LOCKS_KEY,
 ];
 
 /// The replay-only key naming extra checkpoints; see [`Checkpoints`].
 pub const ALSO_CHECK_AFTER_KEY: &str = "also_check_after";
 
+/// The replay-only key naming the invariants a case locks; see [`Locks`].
+pub const LOCKS_KEY: &str = "locks";
+
+/// Judged by every case on top of its [`Locks`]; the reason for each member is
+/// in `docs/Testing/HandAuthoredRegressions.md`.
+pub const LOCK_FLOOR: &[&str] = &[
+    "inv-no-observed-errors",
+    "inv-no-errors",
+    "inv-no-parent-cycles",
+    "inv-no-orphan-blocks",
+];
+
+/// Invariants that judge what a transition costs. Their budgets are measured
+/// after a whole-catalog sweep, whose reads warm the views the transition would
+/// otherwise build, so a case that locks one sweeps the whole catalog.
+pub const COST_LOCKS: &[&str] = &["inv-sql-budget"];
+
+/// What one sweep of [`replay`] runs and judges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckScope {
+    pub judged: BTreeSet<String>,
+    /// Runs every catalog invariant but judges only `judged`.
+    pub runs_whole_catalog: bool,
+}
+
+/// The catalog invariant ids a case's bug breaks: [`replay`] judges these plus
+/// [`LOCK_FLOOR`] and nothing else, and each must produce a non-`Skipped`
+/// verdict at one checkpoint at least.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Locks(BTreeSet<String>);
+
+impl Locks {
+    pub fn ids(&self) -> &BTreeSet<String> {
+        &self.0
+    }
+
+    /// Judges the locks plus [`LOCK_FLOOR`].
+    pub fn scope(&self) -> CheckScope {
+        CheckScope {
+            judged: self
+                .0
+                .iter()
+                .cloned()
+                .chain(LOCK_FLOOR.iter().map(|id| id.to_string()))
+                .collect(),
+            runs_whole_catalog: COST_LOCKS.iter().any(|id| self.0.contains(*id)),
+        }
+    }
+
+    fn parse(raw: Option<&serde_json::Value>, provenance: &str) -> Self {
+        let raw = raw.unwrap_or_else(|| {
+            panic!(
+                "{provenance} has no `{LOCKS_KEY}` field: name the catalog invariant id(s) its \
+                 bug breaks (docs/Testing/HandAuthoredRegressions.md)"
+            )
+        });
+        let named = raw.as_array().unwrap_or_else(|| {
+            panic!("{provenance}: `{LOCKS_KEY}` must be an array of invariant ids, got {raw}")
+        });
+        assert!(
+            !named.is_empty(),
+            "{provenance}: `{LOCKS_KEY}` is empty; a case locks one invariant at least"
+        );
+        let mut ids = BTreeSet::new();
+        for value in named {
+            let id = value.as_str().unwrap_or_else(|| {
+                panic!("{provenance}: `{LOCKS_KEY}` holds {value}, not an invariant id")
+            });
+            assert!(
+                ids.insert(id.to_string()),
+                "{provenance}: `{LOCKS_KEY}` names {id:?} twice"
+            );
+        }
+        Self(ids)
+    }
+}
+
 /// The transitions [`replay`] judges, as the 1-based numbers `Applying
 /// transition k/N` prints: always the last one, plus any the case names in
 /// `also_check_after` because its bug shows mid-sequence and a later transition
-/// heals it. The catalog also runs just BEFORE each judged transition (`0` is
+/// heals it. The check also runs just BEFORE each judged transition (`0` is
 /// after boot): its sweep warms views a drawn run's sweeps warm, so the judged
 /// transition's SQL budget window measures the same work as in a drawn run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,34 +232,84 @@ impl Checkpoints {
     }
 }
 
-/// A sidecar case together with where its replay runs the invariant catalog.
+/// A sidecar case together with where and what its replay judges.
 pub struct ReplayCase {
     pub case: HandAuthoredCase,
     pub checkpoints: Checkpoints,
+    pub locks: Locks,
 }
 
-/// The keystone's `test_sequential`, except that the invariant catalog runs
-/// only around the transitions in `checkpoints`: a hand-authored case locks one
-/// known bug, so sweeping after every transition buys nothing but wall time.
-pub fn replay<M: StateMachineTest>(
+/// A [`StateMachineTest`] whose check can be narrowed to part of the catalog.
+pub trait LockedReplay: StateMachineTest {
+    /// Judges `scope`; returns the judged ids with a non-`Skipped` verdict.
+    fn check_locked(
+        sut: &Self::SystemUnderTest,
+        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        scope: &CheckScope,
+    ) -> BTreeSet<&'static str>;
+
+    /// [`StateMachineTest::teardown`] with [`Self::check_locked`] as its check.
+    fn teardown_locked(
+        sut: Self::SystemUnderTest,
+        ref_state: <Self::Reference as ReferenceStateMachine>::State,
+        scope: &CheckScope,
+    ) -> BTreeSet<&'static str>;
+}
+
+impl LockedReplay for ComposedSut<WideE2E> {
+    fn check_locked(
+        sut: &Self,
+        ref_state: &ReferenceState,
+        scope: &CheckScope,
+    ) -> BTreeSet<&'static str> {
+        sut.check_scoped(ref_state, scope)
+    }
+
+    fn teardown_locked(
+        sut: Self,
+        ref_state: ReferenceState,
+        scope: &CheckScope,
+    ) -> BTreeSet<&'static str> {
+        sut.teardown_scoped(ref_state, scope)
+    }
+}
+
+/// The keystone's `test_sequential`, except that it judges only the case's
+/// [`Locks`] plus [`LOCK_FLOOR`], and only around the transitions in
+/// `checkpoints`: a hand-authored case locks one known bug, and the random
+/// keystone judges the rest.
+pub fn replay<M: LockedReplay>(
     mut ref_state: <M::Reference as ReferenceStateMachine>::State,
     transitions: Vec<<M::Reference as ReferenceStateMachine>::Transition>,
     checkpoints: &Checkpoints,
+    locks: &Locks,
 ) {
+    let scope = locks.scope();
+    let mut engaged = BTreeSet::new();
     let total = transitions.len();
     let mut sut = M::init_test(&ref_state);
     if checkpoints.after(0) {
-        M::check_invariants(&sut, &ref_state);
+        engaged.extend(M::check_locked(&sut, &ref_state, &scope));
     }
     for (ix, transition) in transitions.into_iter().enumerate() {
         eprintln!("\nApplying transition {}/{total}: {transition:?}", ix + 1);
         ref_state = M::Reference::apply(ref_state, &transition);
         sut = M::apply(sut, &ref_state, transition);
         if checkpoints.after(ix + 1) {
-            M::check_invariants(&sut, &ref_state);
+            engaged.extend(M::check_locked(&sut, &ref_state, &scope));
         }
     }
-    M::teardown(sut, ref_state);
+    engaged.extend(M::teardown_locked(sut, ref_state, &scope));
+    let unengaged: Vec<&String> = locks
+        .ids()
+        .iter()
+        .filter(|id| !engaged.contains(id.as_str()))
+        .collect();
+    assert!(
+        unengaged.is_empty(),
+        "locked invariant(s) {unengaged:?} were `Skipped` at every checkpoint: the case never \
+         reaches the state they judge, so it locks nothing (engaged: {engaged:?})"
+    );
 }
 
 pub fn sidecar_path() -> PathBuf {
@@ -237,11 +367,31 @@ pub fn skip_filter() -> Vec<String> {
 /// different starting state than the one that failed is worse than no case at
 /// all, so this is a panic, not a warning.
 pub fn parse_case(path: &std::path::Path, lineno: usize, line: &str) -> HandAuthoredCase {
-    parse_replay_case(path, lineno, line).case
+    parse_raw(path, lineno, line).0
 }
 
-/// [`parse_case`] plus the case's [`Checkpoints`].
+/// [`parse_case`] plus the case's [`Checkpoints`] and [`Locks`].
 pub fn parse_replay_case(path: &std::path::Path, lineno: usize, line: &str) -> ReplayCase {
+    let (case, raw, provenance) = parse_raw(path, lineno, line);
+    let provenance = format!("{provenance} case {:?}", case.name);
+    let checkpoints = Checkpoints::parse(
+        raw.get(ALSO_CHECK_AFTER_KEY),
+        case.transitions.len(),
+        &provenance,
+    );
+    let locks = Locks::parse(raw.get(LOCKS_KEY), &provenance);
+    ReplayCase {
+        case,
+        checkpoints,
+        locks,
+    }
+}
+
+fn parse_raw(
+    path: &std::path::Path,
+    lineno: usize,
+    line: &str,
+) -> (HandAuthoredCase, serde_json::Value, String) {
     let provenance = format!("hand-authored regression {path:?}:{lineno}");
     let case = serde_json::from_str::<HandAuthoredCase>(line).unwrap_or_else(|e| {
         panic!("{provenance} failed to parse: {e}\n  line: {line}");
@@ -268,12 +418,7 @@ pub fn parse_replay_case(path: &std::path::Path, lineno: usize, line: &str) -> R
          value differ, so replaying this case would start from a DIFFERENT state than the run it \
          pins"
     );
-    let checkpoints = Checkpoints::parse(
-        raw.get(ALSO_CHECK_AFTER_KEY),
-        case.transitions.len(),
-        &format!("{provenance} case {:?}", case.name),
-    );
-    ReplayCase { case, checkpoints }
+    (case, raw, provenance)
 }
 
 /// Parse the sidecar, failing loud on the FIRST malformed line (file:line +

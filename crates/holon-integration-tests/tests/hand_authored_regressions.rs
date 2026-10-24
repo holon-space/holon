@@ -17,11 +17,13 @@
 //! [`CapturedInitialState`]. It then drives each case through the EXACT
 //! keystone harness (`ComposedSut::<WideE2E>`): the same SUT boot, the same
 //! production transition `apply`, and the same composed invariant catalog the
-//! random keystone runs. Two things differ from the random keystone: the
+//! random keystone runs. Three things differ from the random keystone: the
 //! `(initial_state, transitions)` pair comes from the JSONL instead of a
-//! `proptest` draw, and the catalog runs only just before and after the case's
-//! last transition and any it names in `also_check_after`
-//! (`hand_authored::replay`).
+//! `proptest` draw, only the invariants the case names in `locks` plus
+//! `hand_authored::LOCK_FLOOR` run, and they run only just before and after the
+//! case's last transition and any it names in `also_check_after`
+//! (`hand_authored::replay`). The selection floor, the engagement ledger and
+//! the shape reach floor are the random keystone's.
 //!
 //! ## `initial_state` is the drawn wiring; `environment` is the rest
 //!
@@ -71,6 +73,8 @@
 //! See `docs/Testing/HandAuthoredRegressions.md` for the authoring procedure
 //! and the limits of what a hand-authored regression can express.
 
+use std::collections::BTreeSet;
+
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::span_metrics::ComposedBudget;
 use holon_integration_tests::pbt::composed::span_metrics::ComposedSpanMetrics;
@@ -78,16 +82,15 @@ use holon_integration_tests::pbt::composed::span_metrics::SutMetricsLifecycle;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::hand_authored::CapturedInitialState;
+use holon_integration_tests::pbt::hand_authored::CheckScope;
 use holon_integration_tests::pbt::hand_authored::HandAuthoredCase;
+use holon_integration_tests::pbt::hand_authored::LockedReplay;
 use holon_integration_tests::pbt::hand_authored::ReplayCase;
-use holon_integration_tests::pbt::hand_authored::SIDECAR_ENV;
-use holon_integration_tests::pbt::hand_authored::case_filter;
 use holon_integration_tests::pbt::hand_authored::load_replay_cases;
 use holon_integration_tests::pbt::hand_authored::parse_case;
 use holon_integration_tests::pbt::hand_authored::parse_replay_case;
 use holon_integration_tests::pbt::hand_authored::replay;
 use holon_integration_tests::pbt::hand_authored::sidecar_path;
-use holon_integration_tests::pbt::invariants::bodies::shape_sim_matches_authority;
 use holon_integration_tests::pbt::reference_state::ReferenceState;
 use holon_integration_tests::pbt::transitions::E2ETransition;
 use holon_integration_tests::pbt::transitions::UndoLastMutation;
@@ -107,9 +110,15 @@ fn hand_authored_keystone_regressions() {
         sidecar_path()
     );
 
-    for ReplayCase { case, checkpoints } in cases {
+    for ReplayCase {
+        case,
+        checkpoints,
+        locks,
+    } in cases
+    {
         eprintln!(
-            "[hand-authored regression] running case {:?} ({} transitions, {checkpoints:?})",
+            "[hand-authored regression] running case {:?} ({} transitions, {checkpoints:?}, \
+             {locks:?})",
             case.name,
             case.transitions.len()
         );
@@ -135,15 +144,8 @@ fn hand_authored_keystone_regressions() {
                  starting state differs from the one this case pins:\n{report}"
             );
         }
-        replay::<ComposedSut<WideE2E>>(initial_state, case.transitions, &checkpoints);
+        replay::<ComposedSut<WideE2E>>(initial_state, case.transitions, &checkpoints, &locks);
         eprintln!("[hand-authored regression] PASSED case {:?}", case.name);
-    }
-    // Another sidecar or a name filter may hold no decision edit, so only the
-    // whole committed sidecar owes shape reach.
-    if case_filter().is_none() && std::env::var_os(SIDECAR_ENV).is_none() {
-        shape_sim_matches_authority::assert_fully_reached();
-    } else {
-        shape_sim_matches_authority::report_reach();
     }
 }
 
@@ -321,16 +323,33 @@ impl StateMachineTest for CountingSut {
     }
 }
 
+/// Engages the inline cases' lock at every checkpoint.
+impl LockedReplay for CountingSut {
+    fn check_locked(sut: &(), applied: &usize, _: &CheckScope) -> BTreeSet<&'static str> {
+        Self::check_invariants(sut, applied);
+        BTreeSet::from(["inv-x"])
+    }
+
+    fn teardown_locked(_: (), _: usize, _: &CheckScope) -> BTreeSet<&'static str> {
+        BTreeSet::new()
+    }
+}
+
 fn four_transition_case(extra: &str) -> String {
     let create = r#"{"CreateBlockUnderFocus": {"content": "c", "id": "block:c"}}"#;
-    format!(r#"{{"name": "n", "transitions": [{create}, {create}, {create}, {create}]{extra}}}"#)
+    format!(
+        r#"{{"name": "n", "locks": ["inv-x"], "transitions": [{create}, {create}, {create}, {create}]{extra}}}"#
+    )
 }
 
 fn sweeps_of_replay(line: &str) -> Vec<usize> {
-    let ReplayCase { case, checkpoints } =
-        parse_replay_case(std::path::Path::new("<inline>"), 1, line);
+    let ReplayCase {
+        case,
+        checkpoints,
+        locks,
+    } = parse_replay_case(std::path::Path::new("<inline>"), 1, line);
     SWEPT.with(|swept| swept.borrow_mut().clear());
-    replay::<CountingSut>(0, vec![(); case.transitions.len()], &checkpoints);
+    replay::<CountingSut>(0, vec![(); case.transitions.len()], &checkpoints, &locks);
     SWEPT.with(|swept| swept.take())
 }
 
@@ -350,7 +369,7 @@ fn replay_also_sweeps_around_each_named_transition() {
 #[test]
 fn replay_of_a_case_without_transitions_sweeps_once_after_boot() {
     assert_eq!(
-        sweeps_of_replay(r#"{"name": "n", "transitions": []}"#),
+        sweeps_of_replay(r#"{"name": "n", "locks": ["inv-x"], "transitions": []}"#),
         vec![0]
     );
 }
@@ -398,18 +417,34 @@ impl StateMachineTest for BudgetWindowSut {
     }
 }
 
+impl LockedReplay for BudgetWindowSut {
+    fn check_locked(
+        sut: &ComposedSpanMetrics,
+        applied: &usize,
+        _: &CheckScope,
+    ) -> BTreeSet<&'static str> {
+        Self::check_invariants(sut, applied);
+        BTreeSet::from(["inv-x"])
+    }
+
+    fn teardown_locked(_: ComposedSpanMetrics, _: usize, _: &CheckScope) -> BTreeSet<&'static str> {
+        BTreeSet::new()
+    }
+}
+
 /// `inv-sql-budget` skips exactly the windows that started unswept, so every
 /// judged transition must start swept and only the pre-sweeps may not.
 #[test]
 fn judged_windows_start_swept_and_only_pre_sweeps_do_not() {
     let line = format!(
-        r#"{{"name": "n", "transitions": [{0}, {0}, {0}, {0}, {0}, {0}], "also_check_after": [2]}}"#,
+        r#"{{"name": "n", "locks": ["inv-x"], "transitions": [{0}, {0}, {0}, {0}, {0}, {0}], "also_check_after": [2]}}"#,
         r#"{"CreateBlockUnderFocus": {"content": "c", "id": "block:c"}}"#
     );
-    let ReplayCase { checkpoints, .. } =
-        parse_replay_case(std::path::Path::new("<inline>"), 1, &line);
+    let ReplayCase {
+        checkpoints, locks, ..
+    } = parse_replay_case(std::path::Path::new("<inline>"), 1, &line);
     STARTED_SWEPT.with(|log| log.borrow_mut().clear());
-    replay::<BudgetWindowSut>(0, vec![(); 6], &checkpoints);
+    replay::<BudgetWindowSut>(0, vec![(); 6], &checkpoints, &locks);
     assert_eq!(
         STARTED_SWEPT.with(|log| log.take()),
         vec![(1, false), (2, true), (5, false), (6, true)]
@@ -434,4 +469,63 @@ fn malformed_also_check_after_is_refused() {
         1,
         &four_transition_case(r#", "also_check_after": ["2"]"#),
     );
+}
+
+#[test]
+#[should_panic(expected = "case \"no-locks\" has no `locks` field")]
+fn a_case_without_locks_is_refused_by_name() {
+    parse_replay_case(
+        std::path::Path::new("<inline>"),
+        1,
+        r#"{"name": "no-locks", "transitions": []}"#,
+    );
+}
+
+#[test]
+#[should_panic(expected = "case \"n\": `locks` is empty")]
+fn empty_locks_are_refused() {
+    parse_replay_case(
+        std::path::Path::new("<inline>"),
+        1,
+        r#"{"name": "n", "locks": [], "transitions": []}"#,
+    );
+}
+
+/// Engaged at no checkpoint, so the case judges nothing it locks.
+struct VacuousSut;
+
+impl StateMachineTest for VacuousSut {
+    type SystemUnderTest = ();
+    type Reference = CountingRef;
+
+    fn init_test(_: &usize) {}
+
+    fn apply(sut: (), _: &usize, _: ()) {
+        sut
+    }
+
+    fn check_invariants(_: &(), _: &usize) {}
+}
+
+impl LockedReplay for VacuousSut {
+    fn check_locked(_: &(), _: &usize, _: &CheckScope) -> BTreeSet<&'static str> {
+        BTreeSet::from(["inv-no-errors"])
+    }
+
+    fn teardown_locked(_: (), _: usize, _: &CheckScope) -> BTreeSet<&'static str> {
+        BTreeSet::new()
+    }
+}
+
+#[test]
+#[should_panic(expected = "locked invariant(s) [\"inv-x\"] were `Skipped` at every checkpoint")]
+fn a_lock_skipped_at_every_checkpoint_is_refused() {
+    let ReplayCase {
+        checkpoints, locks, ..
+    } = parse_replay_case(
+        std::path::Path::new("<inline>"),
+        1,
+        r#"{"name": "n", "locks": ["inv-x"], "transitions": []}"#,
+    );
+    replay::<VacuousSut>(0, Vec::new(), &checkpoints, &locks);
 }

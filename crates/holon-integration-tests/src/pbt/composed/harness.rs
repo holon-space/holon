@@ -83,6 +83,7 @@ use holon_api::EntityUri;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutLayout;
 use holon_pbt_core::capabilities::SutLoroLog;
+use holon_pbt_core::composition::CapInvariant;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::InvariantId;
 use holon_pbt_core::composition::RunReport;
@@ -92,6 +93,7 @@ use proptest_state_machine::StateMachineTest;
 
 use crate::pbt::composed::composed_invariant_catalog;
 use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
+use crate::pbt::hand_authored::CheckScope;
 use crate::pbt::is_synthetic_ref_id;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
@@ -434,41 +436,63 @@ pub trait ComposedSlice: 'static {
         scaffold_ids: &BTreeSet<EntityUri>,
         ref_state: &ReferenceState,
     ) -> RunReport {
-        let map = resolver.lock().expect("resolver lock").clone();
-        let mut resolved = ref_state.with_resolved_doc_uris(&map);
-        inject_scaffold_seed(&mut resolved, scaffold_ids);
-        // C2 provenance oracle: stash the id-reconcile map's expectation into the
-        // resolved ref so `RefHistoryExpectation` can surface it. `ever_created`
-        // = every real id the oracle minted (phantom-history anchor).
-        // `min_op_groups` counts only synthetic→real reconciled (UI-driven)
-        // creates — born-equal external/peer ids (key == value) are excluded, as
-        // their org-ingest / Loro path records no engine history.
-        {
-            let inner = resolved.inner_mut();
-            inner.history_ever_created = map
-                .values()
-                .chain(burned.iter().map(|(_, real)| real))
-                .cloned()
-                .collect();
-            inner.history_min_op_groups = map.iter().filter(|(k, v)| k != v).count()
-                + burned.iter().filter(|(syn, real)| syn != real).count();
-            // Undo→redo round-trip oracle: the real ids a `Redo` re-minted away
-            // from — the REDO-GATED set, not the cumulative existence-divergence
-            // one. `inv-undo-redo-reference-heal` asserts no SUT reference site
-            // still points at one.
-            inner.undo_redo_burned_ids = redo_burned.clone();
-        }
-        // Freeze the budget window for `inv-sql-budget` (if a span-metrics provider is
-        // wired): everything up to this check is the transition's cost; the invariant
-        // bodies below must not count against it. Hands the host the post-transition
-        // oracle its `expected_sql` inspects. Mirrors the native runner's
-        // `freeze_at_check_start`. No-op when no `SutMetricsLifecycle` is present.
-        #[cfg(feature = "otel-testing")]
-        if let Some(m) = caps.get::<dyn crate::pbt::composed::span_metrics::SutMetricsLifecycle>() {
-            m.freeze_for_check(resolved.get());
-        }
-        run_with_seeded_ref(&composed_invariant_catalog(), caps, resolved).await
+        catalog_report(
+            &composed_invariant_catalog(),
+            caps,
+            resolver,
+            burned,
+            redo_burned,
+            scaffold_ids,
+            ref_state,
+        )
+        .await
     }
+}
+
+/// [`ComposedSlice::run_report`]'s default over any part of the catalog.
+async fn catalog_report(
+    catalog: &[Box<dyn CapInvariant>],
+    caps: &CapMap,
+    resolver: &IdResolver,
+    burned: &BurnedPairs,
+    redo_burned: &BTreeSet<EntityUri>,
+    scaffold_ids: &BTreeSet<EntityUri>,
+    ref_state: &ReferenceState,
+) -> RunReport {
+    let map = resolver.lock().expect("resolver lock").clone();
+    let mut resolved = ref_state.with_resolved_doc_uris(&map);
+    inject_scaffold_seed(&mut resolved, scaffold_ids);
+    // C2 provenance oracle: stash the id-reconcile map's expectation into the
+    // resolved ref so `RefHistoryExpectation` can surface it. `ever_created`
+    // = every real id the oracle minted (phantom-history anchor).
+    // `min_op_groups` counts only synthetic→real reconciled (UI-driven)
+    // creates — born-equal external/peer ids (key == value) are excluded, as
+    // their org-ingest / Loro path records no engine history.
+    {
+        let inner = resolved.inner_mut();
+        inner.history_ever_created = map
+            .values()
+            .chain(burned.iter().map(|(_, real)| real))
+            .cloned()
+            .collect();
+        inner.history_min_op_groups = map.iter().filter(|(k, v)| k != v).count()
+            + burned.iter().filter(|(syn, real)| syn != real).count();
+        // Undo→redo round-trip oracle: the real ids a `Redo` re-minted away
+        // from — the REDO-GATED set, not the cumulative existence-divergence
+        // one. `inv-undo-redo-reference-heal` asserts no SUT reference site
+        // still points at one.
+        inner.undo_redo_burned_ids = redo_burned.clone();
+    }
+    // Freeze the budget window for `inv-sql-budget` (if a span-metrics provider is
+    // wired): everything up to this check is the transition's cost; the invariant
+    // bodies below must not count against it. Hands the host the post-transition
+    // oracle its `expected_sql` inspects. Mirrors the native runner's
+    // `freeze_at_check_start`. No-op when no `SutMetricsLifecycle` is present.
+    #[cfg(feature = "otel-testing")]
+    if let Some(m) = caps.get::<dyn crate::pbt::composed::span_metrics::SutMetricsLifecycle>() {
+        m.freeze_for_check(resolved.get());
+    }
+    run_with_seeded_ref(catalog, caps, resolved).await
 }
 
 /// Drive one MASKED transition through the fire-and-forget door and prove the
@@ -1314,6 +1338,261 @@ impl<S: ComposedSlice> ComposedSut<S> {
     pub fn cap_set(&self) -> holon_pbt_core::composition::CapSet {
         self.caps.cap_set()
     }
+
+    /// One tick's verdict over the invariants `report_of` runs: panics on a
+    /// hard divergence, and is `None` while a parked run defers the store
+    /// check to its release.
+    fn judge(
+        sut: &Self,
+        ref_state: &ReferenceState,
+        report_of: impl Fn(&Self, &BTreeSet<EntityUri>) -> RunReport,
+    ) -> Option<RunReport> {
+        // Pump an attached gpui window to a fixed point so the geometry/text/focus caps
+        // read the post-transition frame (no-op headlessly — see `SettleHook`). Mirrors
+        // the sim windowed per-tick hook's `settle_to_fixed_point` before its check.
+        (sut.settle)();
+        // A parked run is a write the reference already applied but the test
+        // holds out of the store, so the tick's store state is judged at the
+        // release instead.
+        let parked = sut
+            .caps
+            .get::<dyn holon_pbt_core::capabilities::SutDispatchHold>()
+            .map_or(0, |hold| hold.parked_dispatch_names().len());
+        // Swallowed errors are still judged on this tick: the next transition
+        // resets their window.
+        if parked > 0 {
+            let problems: Vec<String> = crate::test_tracing::SpanCollector::global()
+                .captured_problems()
+                .iter()
+                .map(|p| p.to_string())
+                .collect();
+            assert!(
+                problems.is_empty(),
+                "reconciled composed sequence diverged from the oracle: \
+                 [(\"inv-no-observed-errors\", \"{} swallowed problem(s) while {parked} run(s) \
+                 parked: {}\")]",
+                problems.len(),
+                problems.join(" | ")
+            );
+            // The editor never waits for a write, so what the user typed must
+            // stay on screen while the write is held.
+            const EDITOR_INVARIANTS: [&str; 2] =
+                ["inv-editor-text/mirror", "inv-editor-caret/mirror"];
+            let report = report_of(sut, &sut.unmodeled_ids());
+            let editor: Vec<(&str, &str)> = report
+                .failures()
+                .into_iter()
+                .filter(|(id, _)| EDITOR_INVARIANTS.contains(id))
+                .collect();
+            assert!(
+                editor.is_empty(),
+                "reconciled composed sequence diverged from the oracle: {editor:?} \
+                 (while {parked} run(s) parked)"
+            );
+            let engaged: Vec<&str> = report
+                .ran
+                .iter()
+                .filter(|(id, result)| {
+                    EDITOR_INVARIANTS.contains(&id.0)
+                        && !matches!(result, InvariantResult::Skipped(_))
+                })
+                .map(|(id, _)| id.0)
+                .collect();
+            eprintln!(
+                "[dispatch hold] {parked} run(s) parked: editor judged by {engaged:?}, store \
+                 state check deferred to the release"
+            );
+            return None;
+        }
+        let unmodeled = sut.unmodeled_ids();
+        let report = report_of(sut, &unmodeled);
+        let selected: BTreeSet<&'static str> = report.ran_ids().into_iter().collect();
+        if sut.reboot_pending.replace(false)
+            && let Some(before) = sut.last_selected.borrow().as_ref()
+        {
+            let lost: Vec<&&'static str> = before.difference(&selected).collect();
+            assert!(
+                lost.is_empty(),
+                "[reboot] the Reboot deselected {lost:?}: every invariant selected before a \
+                 reboot must stay selected after it (the rebuilt cap map lost its caps)"
+            );
+        }
+        *sut.last_selected.borrow_mut() = Some(selected);
+        // `HOLON_PBT_INVARIANTS` disclosed softening: a matched `warn`/`skip` failure
+        // is logged loudly and made non-fatal (a DISCLOSED degraded run, not a
+        // clean pass); unmatched failures stay fatal. The composed home of the
+        // knob relocated from the deleted native runner core. The panic prefix
+        // is unchanged so `bisect_driver`'s `reproduction_signature()` still
+        // recognizes a composed divergence.
+        use crate::pbt::invariant_mode_override::ModeOverride;
+        use crate::pbt::invariant_mode_override::invariant_mode_override;
+        // Softened ids are RETAINED (not dropped) — their layer ran and went
+        // red, so the coverage verdict must never call it green.
+        let mut softened_out: Vec<&'static str> = Vec::new();
+        let hard: Vec<(&str, &str)> = report
+            .failures()
+            .into_iter()
+            .filter(|(id, msg)| match invariant_mode_override(id) {
+                Some(ModeOverride::Warn | ModeOverride::Skip) => {
+                    eprintln!(
+                        "[HOLON_PBT_INVARIANTS] softened (DISCLOSED degraded run) {id}: {msg}"
+                    );
+                    softened_out.push(*id);
+                    false
+                }
+                _ => true,
+            })
+            .collect();
+        // Env-gated failure-tick DB dump (`HOLON_PBT_DUMP_DB=1`): on a hard
+        // divergence, dump the `block` matview vs `block_raw` base per-id
+        // row-counts so the Turso IVM over-count signature (a matview id with
+        // more rows than the PK-unique base) is captured BEFORE teardown drops
+        // the DB. Off by default — the run stays byte-identical.
+        if !hard.is_empty() && std::env::var_os("HOLON_PBT_DUMP_DB").is_some() {
+            dump_matview_vs_base(sut);
+        }
+        // FIRST-DIVERGENT-LAYER verdict: several invariants across the stack
+        // usually red at once (a store divergence re-projects into the matview,
+        // re-derives into the viewmodel, re-renders…), so name the EARLIEST
+        // (most upstream) layer + its wiring source to start triage at the root.
+        // Kept AFTER the unchanged `reconciled composed sequence diverged from
+        // the oracle` prefix so `bisect_driver::reproduction_signature()` still
+        // matches (substring). Every id arrives attributed by its wiring, so no
+        // layer is ever guessed.
+        // Built ONLY on the failure path — a green tick pays nothing (the walk
+        // is inside `inv-sql-budget`'s wall window).
+        if !hard.is_empty() {
+            let coverage = crate::pbt::composed::first_divergent::RunCoverage::from_report(
+                &report,
+                softened_out,
+            );
+            let verdict =
+                crate::pbt::composed::first_divergent::first_divergent_verdict(&hard, &coverage);
+            // Disclose the RESOLVED execution-authority routing (who actually
+            // executes runtime block writes for this draw), single-sourced from
+            // the same `set_for_wiring` resolution the SUT boots with — so a
+            // reader is not misled by the wiring line into thinking Turso
+            // executes the writes when `EditorState` ⇒ Loro is the block-CRUD
+            // authority. Prefix kept verbatim so `bisect_driver`'s
+            // `reproduction_signature()` still matches (substring).
+            let authority = crate::pbt::composed::wide_e2e::authority_routing_disclosure(
+                &ref_state.harness.wiring,
+            );
+            panic!(
+                "reconciled composed sequence diverged from the oracle: {hard:?}\n{authority}\n{verdict}"
+            );
+        }
+        Some(report)
+    }
+
+    /// The end of a case shared by every check scope: no run may stay parked,
+    /// and an armed churn ends so `check` judges its file once more.
+    fn end_case(
+        sut: Self,
+        ref_state: ReferenceState,
+        check: impl Fn(&Self, &ReferenceState),
+    ) -> (Self, ReferenceState) {
+        // A parked run defers the state check, so a case may not end on one.
+        if let Some(hold) = sut
+            .caps
+            .get::<dyn holon_pbt_core::capabilities::SutDispatchHold>()
+        {
+            let parked = hold.parked_dispatch_names();
+            assert!(
+                parked.is_empty(),
+                "[dispatch hold] the case ended with parked run(s) {parked:?}: their state was \
+                 never checked; end the case with ReleaseHeld"
+            );
+        }
+        // A churn still armed holds its file out of the org oracles, so it
+        // ends here and the oracles judge that file once more.
+        let disarms: Vec<S::Transition> = ref_state
+            .files
+            .churning_docs()
+            .map(|doc| S::disarm_write_churn(doc.clone()))
+            .collect();
+        let (sut, ref_state) =
+            disarms
+                .into_iter()
+                .fold((sut, ref_state), |(sut, ref_state), transition| {
+                    eprintln!("\nEnding the case's churn: {transition:?}");
+                    let ref_state = S::Machine::apply(ref_state, &transition);
+                    let sut = Self::apply(sut, &ref_state, transition);
+                    check(&sut, &ref_state);
+                    (sut, ref_state)
+                });
+        super::schedule_signature::assert_coverage();
+        (sut, ref_state)
+    }
+}
+
+impl ComposedSut<super::wide_e2e::WideE2E> {
+    /// Judges only the catalog invariants named in `scope`, through the default
+    /// [`ComposedSlice::run_report`] path `WideE2E` keeps. Returns the judged
+    /// ids that produced a non-`Skipped` verdict.
+    pub fn check_scoped(
+        &self,
+        ref_state: &ReferenceState,
+        scope: &CheckScope,
+    ) -> BTreeSet<&'static str> {
+        let judged = &scope.judged;
+        let catalog: Vec<Box<dyn CapInvariant>> = composed_invariant_catalog()
+            .into_iter()
+            .filter(|inv| scope.runs_whole_catalog || judged.contains(inv.id().0))
+            .collect();
+        let found: BTreeSet<&str> = catalog.iter().map(|inv| inv.id().0).collect();
+        let unknown: Vec<&String> = judged
+            .iter()
+            .filter(|id| !found.contains(id.as_str()))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "the check scope names {unknown:?}, absent from the composed invariant catalog"
+        );
+        let Some(report) = Self::judge(self, ref_state, |sut, unmodeled| {
+            let mut report = sut.rt.block_on(catalog_report(
+                &catalog,
+                &sut.caps,
+                &sut.resolver,
+                &sut.burned,
+                &sut.redo_burned,
+                unmodeled,
+                ref_state,
+            ));
+            report.ran.retain(|(id, _)| judged.contains(id.0));
+            report.deselected.retain(|id| judged.contains(id.0));
+            report
+        }) else {
+            return BTreeSet::new();
+        };
+        let deselected: Vec<&str> = report.deselected.iter().map(|id| id.0).collect();
+        assert!(
+            deselected.is_empty(),
+            "this wiring deselects {deselected:?} from the check scope, so the case cannot \
+             judge them"
+        );
+        report
+            .ran
+            .iter()
+            .filter(|(_, result)| !matches!(result, InvariantResult::Skipped(_)))
+            .map(|(id, _)| id.0)
+            .collect()
+    }
+
+    /// [`StateMachineTest::teardown`] with [`Self::check_scoped`] as the check.
+    pub fn teardown_scoped(
+        self,
+        ref_state: ReferenceState,
+        scope: &CheckScope,
+    ) -> BTreeSet<&'static str> {
+        let engaged = std::cell::RefCell::new(BTreeSet::new());
+        Self::end_case(self, ref_state, |sut, ref_state| {
+            engaged
+                .borrow_mut()
+                .extend(sut.check_scoped(ref_state, scope))
+        });
+        engaged.into_inner()
+    }
 }
 
 /// Invariants for which "selected every tick but `Skipped` every tick" is a
@@ -1426,155 +1705,18 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     }
 
     fn check_invariants(sut: &Self, ref_state: &ReferenceState) {
-        // Pump an attached gpui window to a fixed point so the geometry/text/focus caps
-        // read the post-transition frame (no-op headlessly — see `SettleHook`). Mirrors
-        // the sim windowed per-tick hook's `settle_to_fixed_point` before its check.
-        (sut.settle)();
-        // A parked run is a write the reference already applied but the test
-        // holds out of the store, so the tick's store state is judged at the
-        // release instead.
-        let parked = sut
-            .caps
-            .get::<dyn holon_pbt_core::capabilities::SutDispatchHold>()
-            .map_or(0, |hold| hold.parked_dispatch_names().len());
-        // Swallowed errors are still judged on this tick: the next transition
-        // resets their window.
-        if parked > 0 {
-            let problems: Vec<String> = crate::test_tracing::SpanCollector::global()
-                .captured_problems()
-                .iter()
-                .map(|p| p.to_string())
-                .collect();
-            assert!(
-                problems.is_empty(),
-                "reconciled composed sequence diverged from the oracle: \
-                 [(\"inv-no-observed-errors\", \"{} swallowed problem(s) while {parked} run(s) \
-                 parked: {}\")]",
-                problems.len(),
-                problems.join(" | ")
-            );
-            // The editor never waits for a write, so what the user typed must
-            // stay on screen while the write is held.
-            const EDITOR_INVARIANTS: [&str; 2] =
-                ["inv-editor-text/mirror", "inv-editor-caret/mirror"];
-            let report = sut.rt.block_on(S::run_report(
+        let Some(report) = Self::judge(sut, ref_state, |sut, unmodeled| {
+            sut.rt.block_on(S::run_report(
                 &sut.caps,
                 &sut.resolver,
                 &sut.burned,
                 &sut.redo_burned,
-                &sut.unmodeled_ids(),
+                unmodeled,
                 ref_state,
-            ));
-            let editor: Vec<(&str, &str)> = report
-                .failures()
-                .into_iter()
-                .filter(|(id, _)| EDITOR_INVARIANTS.contains(id))
-                .collect();
-            assert!(
-                editor.is_empty(),
-                "reconciled composed sequence diverged from the oracle: {editor:?} \
-                 (while {parked} run(s) parked)"
-            );
-            let engaged: Vec<&str> = report
-                .ran
-                .iter()
-                .filter(|(id, result)| {
-                    EDITOR_INVARIANTS.contains(&id.0)
-                        && !matches!(result, InvariantResult::Skipped(_))
-                })
-                .map(|(id, _)| id.0)
-                .collect();
-            eprintln!(
-                "[dispatch hold] {parked} run(s) parked: editor judged by {engaged:?}, store \
-                 state check deferred to the release"
-            );
+            ))
+        }) else {
             return;
-        }
-        let unmodeled = sut.unmodeled_ids();
-        let report = sut.rt.block_on(S::run_report(
-            &sut.caps,
-            &sut.resolver,
-            &sut.burned,
-            &sut.redo_burned,
-            &unmodeled,
-            ref_state,
-        ));
-        let selected: BTreeSet<&'static str> = report.ran_ids().into_iter().collect();
-        if sut.reboot_pending.replace(false)
-            && let Some(before) = sut.last_selected.borrow().as_ref()
-        {
-            let lost: Vec<&&'static str> = before.difference(&selected).collect();
-            assert!(
-                lost.is_empty(),
-                "[reboot] the Reboot deselected {lost:?}: every invariant selected before a \
-                 reboot must stay selected after it (the rebuilt cap map lost its caps)"
-            );
-        }
-        *sut.last_selected.borrow_mut() = Some(selected);
-        // `HOLON_PBT_INVARIANTS` disclosed softening: a matched `warn`/`skip` failure
-        // is logged loudly and made non-fatal (a DISCLOSED degraded run, not a
-        // clean pass); unmatched failures stay fatal. The composed home of the
-        // knob relocated from the deleted native runner core. The panic prefix
-        // is unchanged so `bisect_driver`'s `reproduction_signature()` still
-        // recognizes a composed divergence.
-        use crate::pbt::invariant_mode_override::ModeOverride;
-        use crate::pbt::invariant_mode_override::invariant_mode_override;
-        // Softened ids are RETAINED (not dropped) — their layer ran and went
-        // red, so the coverage verdict must never call it green.
-        let mut softened_out: Vec<&'static str> = Vec::new();
-        let hard: Vec<(&str, &str)> = report
-            .failures()
-            .into_iter()
-            .filter(|(id, msg)| match invariant_mode_override(id) {
-                Some(ModeOverride::Warn | ModeOverride::Skip) => {
-                    eprintln!(
-                        "[HOLON_PBT_INVARIANTS] softened (DISCLOSED degraded run) {id}: {msg}"
-                    );
-                    softened_out.push(*id);
-                    false
-                }
-                _ => true,
-            })
-            .collect();
-        // Env-gated failure-tick DB dump (`HOLON_PBT_DUMP_DB=1`): on a hard
-        // divergence, dump the `block` matview vs `block_raw` base per-id
-        // row-counts so the Turso IVM over-count signature (a matview id with
-        // more rows than the PK-unique base) is captured BEFORE teardown drops
-        // the DB. Off by default — the run stays byte-identical.
-        if !hard.is_empty() && std::env::var_os("HOLON_PBT_DUMP_DB").is_some() {
-            dump_matview_vs_base(sut);
-        }
-        // FIRST-DIVERGENT-LAYER verdict: several invariants across the stack
-        // usually red at once (a store divergence re-projects into the matview,
-        // re-derives into the viewmodel, re-renders…), so name the EARLIEST
-        // (most upstream) layer + its wiring source to start triage at the root.
-        // Kept AFTER the unchanged `reconciled composed sequence diverged from
-        // the oracle` prefix so `bisect_driver::reproduction_signature()` still
-        // matches (substring). Every id arrives attributed by its wiring, so no
-        // layer is ever guessed.
-        // Built ONLY on the failure path — a green tick pays nothing (the walk
-        // is inside `inv-sql-budget`'s wall window).
-        if !hard.is_empty() {
-            let coverage = crate::pbt::composed::first_divergent::RunCoverage::from_report(
-                &report,
-                softened_out,
-            );
-            let verdict =
-                crate::pbt::composed::first_divergent::first_divergent_verdict(&hard, &coverage);
-            // Disclose the RESOLVED execution-authority routing (who actually
-            // executes runtime block writes for this draw), single-sourced from
-            // the same `set_for_wiring` resolution the SUT boots with — so a
-            // reader is not misled by the wiring line into thinking Turso
-            // executes the writes when `EditorState` ⇒ Loro is the block-CRUD
-            // authority. Prefix kept verbatim so `bisect_driver`'s
-            // `reproduction_signature()` still matches (substring).
-            let authority = crate::pbt::composed::wide_e2e::authority_routing_disclosure(
-                &ref_state.harness.wiring,
-            );
-            panic!(
-                "reconciled composed sequence diverged from the oracle: {hard:?}\n{authority}\n{verdict}"
-            );
-        }
+        };
         // Per-tick SELECTION floor: every required invariant must be selected
         // (present in `report.ran`) at every tick — a silent deselect fails
         // loud HERE. Selection alone, however, is not proof of exercise: a body
@@ -1643,36 +1785,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     /// accumulator, deferred (see the audit's "validate on the two F1
     /// invariants first, then sweep").
     fn teardown(sut: Self, ref_state: ReferenceState) {
-        // A parked run defers the state check, so a case may not end on one.
-        if let Some(hold) = sut
-            .caps
-            .get::<dyn holon_pbt_core::capabilities::SutDispatchHold>()
-        {
-            let parked = hold.parked_dispatch_names();
-            assert!(
-                parked.is_empty(),
-                "[dispatch hold] the case ended with parked run(s) {parked:?}: their state was \
-                 never checked; end the case with ReleaseHeld"
-            );
-        }
-        // A churn still armed holds its file out of the org oracles, so it
-        // ends here and the oracles judge that file once more.
-        let disarms: Vec<S::Transition> = ref_state
-            .files
-            .churning_docs()
-            .map(|doc| S::disarm_write_churn(doc.clone()))
-            .collect();
-        let (sut, ref_state) =
-            disarms
-                .into_iter()
-                .fold((sut, ref_state), |(sut, ref_state), transition| {
-                    eprintln!("\nEnding the case's churn: {transition:?}");
-                    let ref_state = S::Machine::apply(ref_state, &transition);
-                    let sut = Self::apply(sut, &ref_state, transition);
-                    Self::check_invariants(&sut, &ref_state);
-                    (sut, ref_state)
-                });
-        super::schedule_signature::assert_coverage();
+        let (sut, ref_state) = Self::end_case(sut, ref_state, Self::check_invariants);
         let ledger = sut.engaged.borrow();
         // Weights-spike telemetry: one machine-parseable per-case line
         // (`[pbt-telemetry] {json}`) from the accumulated transitions + this

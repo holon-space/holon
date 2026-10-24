@@ -62,7 +62,8 @@ cases leave defaulted:
 | `transitions: Vec<T>` | the repro, as the production `E2ETransition` enum |
 | `initial_state: Option<CapturedInitialState>` (`#[serde(default)]`) | the drawn wiring of the run being reproduced; omit to replay over `wide_e2e_ref()` |
 | `environment: CaptureEnvironment` (`#[serde(default)]`) | omitted — the wiring/env-flag capture is for generator-captured fixtures |
-| `also_check_after: [usize]` (replay-only, optional) | 1-based transition numbers whose state the catalog also judges; see [Where the catalog runs](#where-the-catalog-runs) |
+| `locks: [String]` (replay-only, required) | the catalog invariant ids the case's bug breaks; see [What a case checks](#what-a-case-checks-its-locks-plus-the-floor) |
+| `also_check_after: [usize]` (replay-only, optional) | 1-based transition numbers whose state the check also judges; see [Where the check runs](#where-the-check-runs) |
 
 Because `initial_state`/`environment` are `#[serde(default)]`, a JSONL line that
 names only `name`/`description`/`transitions` deserializes losslessly and
@@ -181,35 +182,76 @@ proptest-state-machine's `test_sequential`:
 1. `init_test(&ref_state)` — boot the composed SUT from the base's wiring.
 2. For each transition: `Reference::apply` (the model), then `Self::apply` (the
    production SUT).
-3. The **full composed invariant catalog** runs only at the checkpoints below.
+3. The case's **check** — its `locks` plus the floor — runs only at the
+   checkpoints below.
 
-Same SUT, same production transition `apply`, same invariants, same reporting
-as the random keystone. Only the source of `(initial_state, transitions)` and
-the checkpoints differ. Shrinking is irrelevant: the case is already the
+Same SUT, same production transition `apply`, same invariant bodies, same
+reporting as the random keystone. The source of `(initial_state, transitions)`,
+the invariants judged and the checkpoints differ. Shrinking is irrelevant: the case is already the
 minimal repro.
 
-### Where the catalog runs
+### What a case checks: its `locks` plus the floor
+
+A case locks one known bug, so it judges only the invariants that bug breaks.
+Its `locks` field names them; the replay builds the check from those catalog
+entries plus a fixed floor (`LOCK_FLOOR` in `src/pbt/hand_authored.rs`) and
+runs no other invariant. Example: `"locks": ["inv-main-panel-rows-match-focus"]`
+judges that invariant and the four floor members, nothing else.
+
+The floor holds the structural checks every wiring engages and that any bug can
+break:
+
+| floor member | why every case judges it |
+|---|---|
+| `inv-no-observed-errors` | a bug that surfaces as a logged error or a failed operation is red in any case, whatever it locks |
+| `inv-no-errors` | an error row in the store is corruption every later case would inherit |
+| `inv-no-parent-cycles` | a parent cycle breaks every tree walk, so it hides the locked symptom behind a hang or a panic |
+| `inv-no-orphan-blocks` | an orphan is invisible to every tree view, so the locked view invariants cannot see it |
+
+A cost invariant (`COST_LOCKS`: `inv-sql-budget`) is the one exception. Its
+budgets are measured after a whole-catalog sweep, whose reads build the views
+the next transition would otherwise build in its own window. A case that locks
+it therefore runs the whole catalog at each sweep, but still judges only its
+locks and the floor. Example: without the whole-catalog sweep, `PinBlock` in
+`watch-bearing-click-nav-sql-budget` builds two views itself and issues 23 reads
+against its pinned 17.
+
+These fail the load or the case and name it:
+
+- a case without `locks`, `locks` that is not an array of strings, an empty or a
+  repeated entry
+- an id absent from the composed invariant catalog
+- a locked or floor id the case's wiring deselects (the case cannot judge it)
+- a locked id that is `Skipped` at every checkpoint: the case never reaches the
+  state the invariant judges, so it locks nothing
+
+The random keystone keeps the whole-catalog guards: the per-tick selection
+floor, the engagement ledger and the shape-gate reach (`assert_reached`). The
+replay runs none of them, because a narrowed check deselects most of the
+catalog by design.
+
+### Where the check runs
 
 A case locks one known bug, so the replay judges only the transitions that
 show it:
 
 - **Judged transitions:** always the last one, plus each number in
-  `also_check_after`. The catalog runs after each judged transition.
-- **Pre-sweeps:** the catalog also runs just before each judged transition
-  (after boot when transition 1 is judged). A sweep renders every view and so
-  creates their matviews. Without it, the judged transition's SQL budget window
+  `also_check_after`. The check runs after each judged transition.
+- **Pre-sweeps:** the check also runs just before each judged transition
+  (after boot when transition 1 is judged). A sweep renders the views the check
+  reads and so creates their matviews. Without it, the judged transition's SQL budget window
   would hold that first-use view creation, and the pinned ceilings are
   calibrated on windows that start from a swept state, as in every drawn run.
-- A case without transitions runs the catalog once, after boot.
+- A case without transitions runs the check once, after boot.
 
-Example: 6 transitions with `"also_check_after": [2]` run the catalog after
+Example: 6 transitions with `"also_check_after": [2]` run the check after
 transitions 1, 2, 5 and 6. Transitions 2 and 6 are judged; 1 and 5 are
 pre-sweeps.
 
 `inv-sql-budget` does not judge a window that started from an unswept state
 (the window of a pre-sweep). It reports `Skipped` with the reason and prints
 `[inv-sql-budget] <kind>: not judged — started from an unswept state`. All
-other invariants judge every sweep.
+other checked invariants judge every sweep.
 
 **Trade-off:** a divergence at a transition that is not swept, and that a later
 transition heals, is not caught. Give `also_check_after` to every case whose
@@ -289,8 +331,7 @@ case, none of which read the sidecar.
 `keystone.jsonl` ships two cases:
 
 - **`create-block-smoke`** — a lone clean create. Proves the harness runs green
-  cases faithfully (it is not rigged to panic): the full invariant catalog
-  engages `2/2` and the case PASSES.
+  cases faithfully (it is not rigged to panic): its check engages `2/2` and the case PASSES.
 - **`block-to-page-slash-content-empty-segment`** — the dogfood 2026-07-20 bug
   (a1): create a block whose content has a trailing `/`, then convert it to a
   page. Goes RED.
@@ -385,8 +426,8 @@ cannot:**
 
 - **End-to-end, cross-projection.** The transition runs through the real op
   dispatch and every wired projection (Turso CDC matviews, Loro CRDT, org
-  writeback, ViewModel), then the full composed invariant catalog checks that
-  they all agree after the judged transitions. A unit test asserts one
+  writeback, ViewModel), then the case's locked invariants check that
+  they agree after the judged transitions. A unit test asserts one
   function's return; this asserts *system
   convergence* after the action.
 - **Oracle-checked, not assertion-checked.** You don't hand-write the expected
