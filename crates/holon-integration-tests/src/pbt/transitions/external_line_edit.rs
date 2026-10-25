@@ -201,9 +201,12 @@ impl TransitionRef<ReferenceState> for ExternalLineEdit {
                 state.apply_content_mutation(&Mutation::Delete { id: block.clone() }, true);
                 state.clear_focus_if_deleted(block);
             }
-            ExternalFileEdit::StripDocId => {}
+            ExternalFileEdit::StripDocId => {
+                state.ingest_id_less_into_held_merge_base(&self.doc, None)
+            }
             ExternalFileEdit::AddIdlessHeadline { title } => {
                 let id = state.create_block_under_outside_history(&self.doc, title);
+                state.ingest_id_less_into_held_merge_base(&self.doc, Some(&id));
                 state.files.ingest_origin_blocks.insert(id);
             }
             ExternalFileEdit::Empty { whitespace } => {

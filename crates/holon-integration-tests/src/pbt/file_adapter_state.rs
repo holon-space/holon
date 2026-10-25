@@ -25,6 +25,9 @@ use std::collections::BTreeSet;
 
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
+use holon_pbt_core::types::Mutation;
+
+use crate::pbt::types::MutationApply;
 
 /// File-adapter file-state extracted from `ReferenceState` (ADR 0004 Phase 5).
 ///
@@ -206,6 +209,63 @@ impl crate::pbt::reference_state::ReferenceState {
         self.files.merge_base.insert(doc.clone(), base);
     }
 
+    /// Holon ingests an external write of a file: a held document's base
+    /// follows the disk, which is its base with the write applied.
+    pub fn ingest_into_held_merge_base(&mut self, mutation: &Mutation) {
+        let target = match mutation {
+            Mutation::Create { parent_id, .. } => parent_id,
+            Mutation::Update { id, .. } | Mutation::Delete { id } | Mutation::Move { id, .. } => id,
+            Mutation::RestartApp => return,
+        };
+        for (doc, base) in self.files.merge_base.iter_mut() {
+            if !self.files.write_churn.contains(doc)
+                || !base.blocks.iter().any(|block| block.id == *target)
+            {
+                continue;
+            }
+            mutation.apply_to(&mut base.blocks);
+            // The document's own siblings are other files, absent from its base.
+            let (mut tree, root): (Vec<Block>, Vec<Block>) = std::mem::take(&mut base.blocks)
+                .into_iter()
+                .partition(|block| block.id != *doc);
+            crate::org_utils::assign_reference_sequences_canonical(&mut tree);
+            base.blocks = tree;
+            base.blocks.extend(root);
+            for block in &mut base.blocks {
+                if let Mutation::Create { id, .. } | Mutation::Update { id, .. } = mutation
+                    && block.id == *id
+                {
+                    crate::pbt::types::apply_org_headline_tag_split(block);
+                }
+                block.created_at = 0;
+                block.updated_at = 0;
+            }
+            base.blocks.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+    }
+
+    /// Holon ingests an external write that leaves `doc`'s file short of ids,
+    /// `added` being a headline the write added: stamping them is owed.
+    pub fn ingest_id_less_into_held_merge_base(
+        &mut self,
+        doc: &EntityUri,
+        added: Option<&EntityUri>,
+    ) {
+        if !self.files.write_churn.contains(doc) {
+            return;
+        }
+        let added = added.map(|id| {
+            let mut block = self.domain.block_state.blocks[id].clone();
+            block.created_at = 0;
+            block.updated_at = 0;
+            block
+        });
+        let base = self.files.merge_base.get_mut(doc).unwrap();
+        base.ids_on_disk = false;
+        base.blocks.extend(added);
+        base.blocks.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+
     /// Whether `doc`'s file is behind the store: a write-back of it is owed.
     pub fn write_back_owed(&self, doc: &EntityUri) -> bool {
         let base = self
@@ -223,6 +283,9 @@ mod tests {
 
     use holon_api::EntityUri;
     use holon_api::block::Block;
+    use holon_orgmode::models::OrgBlockExt;
+    use holon_pbt_core::capabilities::RefApplyMutationMut;
+    use holon_pbt_core::types::Mutation;
 
     use crate::pbt::reference_state::ReferenceState;
 
@@ -233,10 +296,14 @@ mod tests {
         let child = EntityUri::block("child");
         state.files.documents.insert(doc.clone(), "doc.org".into());
         let blocks = &mut state.domain.block_state.blocks;
+        let sibling = EntityUri::block("another-doc");
         blocks.insert(
-            doc.clone(),
-            Block::new_text(doc.clone(), EntityUri::block("root"), "Doc"),
+            sibling.clone(),
+            Block::new_text(sibling, EntityUri::block("root"), "Another doc"),
         );
+        let mut doc_block = Block::new_text(doc.clone(), EntityUri::block("root"), "Doc");
+        doc_block.set_sequence(1);
+        blocks.insert(doc.clone(), doc_block);
         blocks.insert(
             child.clone(),
             Block::new_text(child.clone(), doc.clone(), "before"),
@@ -267,6 +334,33 @@ mod tests {
         state.files.write_churn.remove(&doc);
         edit(&mut state, &child, "after");
         state.hold_write_backs(&doc);
+        assert!(!state.write_back_owed(&doc));
+    }
+
+    #[test]
+    fn an_external_edit_of_a_held_file_moves_the_merge_base() {
+        let (mut state, doc, child) = state_with_one_block_doc();
+        state.hold_write_backs(&doc);
+        state.apply_content_mutation(&Mutation::Delete { id: child }, true);
+        assert!(!state.write_back_owed(&doc));
+    }
+
+    #[test]
+    fn an_external_edit_of_a_held_file_keeps_a_store_edit_owed() {
+        let (mut state, doc, child) = state_with_one_block_doc();
+        state.hold_write_backs(&doc);
+        edit(&mut state, &child, "after");
+        let added = Mutation::Create {
+            id: EntityUri::block("added"),
+            parent_id: doc.clone(),
+            fields: std::collections::HashMap::from([(
+                "content".to_string(),
+                holon_api::Value::String("added".into()),
+            )]),
+        };
+        state.apply_content_mutation(&added, true);
+        assert!(state.write_back_owed(&doc));
+        edit(&mut state, &child, "before");
         assert!(!state.write_back_owed(&doc));
     }
 }

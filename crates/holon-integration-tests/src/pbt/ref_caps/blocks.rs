@@ -539,6 +539,9 @@ impl RefApplyMutationMut for ReferenceState {
     ) {
         use holon_pbt_core::types::Mutation;
 
+        if crosses_org_boundary {
+            self.ingest_into_held_merge_base(mutation);
+        }
         if let Mutation::Create { id, parent_id, .. } = mutation {
             let doc_uri = if parent_id.is_no_parent() || parent_id.is_sentinel() {
                 parent_id.clone()
