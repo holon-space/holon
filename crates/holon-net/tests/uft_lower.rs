@@ -43,6 +43,7 @@ use holon_net::exec::ExecError;
 use holon_net::exec::Executor;
 use holon_net::exec::FireError;
 use holon_net::exec::HASH_FIELD;
+use holon_net::exec::LoadError;
 use holon_net::exec::NetDef;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
@@ -188,47 +189,51 @@ fn pbt_descriptor(m: &Model) -> TransitionDescriptor {
     }
 }
 
+/// `d` lowered into `base` with native parts `p`; `UFT_LOWER_TWIN` may name
+/// a lowering twin.
 #[cfg(feature = "naive-twins")]
-fn lowered(d: &TransitionDescriptor, p: NativeParts) -> NetDef {
-    use holon_net::uft::LowerTwin;
-    use holon_net::uft::lower_twin;
-    let twin = match std::env::var("UFT_LOWER_TWIN").ok().as_deref() {
-        None => return lower(base_net(), d, Some(p)).expect("lowers"),
-        Some("no-ask-hash") => LowerTwin::NoAskHash,
-        Some("no-answer-inhibitor") => LowerTwin::NoAnswerInhibitor,
-        Some("double-answer") => LowerTwin::DoubleAnswer,
-        Some("no-expire") => LowerTwin::NoExpire,
-        Some("ask-while-in-flight") => LowerTwin::AskWhileInFlight,
-        Some(name) if twin_names::executor_twin(name).is_some() => {
-            return lower(base_net(), d, Some(p)).expect("lowers");
-        }
-        Some("ask-while-retry-pending") => LowerTwin::AskWhileRetryPending,
-        Some("ask-while-outcome-unknown") => LowerTwin::AskWhileOutcomeUnknown,
-        Some(other) => panic!("UFT_LOWER_TWIN={other} names no twin"),
+fn lowered(base: NetDef, d: &TransitionDescriptor, p: NativeParts) -> NetDef {
+    let Ok(name) = std::env::var("UFT_LOWER_TWIN") else {
+        return lower(base, d, Some(p)).expect("lowers");
     };
-    lower_twin(base_net(), d, Some(p), twin).expect("lowers")
+    match twin_names::lower_twin_by_name(&name) {
+        Some(twin) => holon_net::uft::lower_twin(base, d, Some(p), twin).expect("lowers"),
+        None => {
+            assert!(
+                twin_names::executor_twin(&name).is_some(),
+                "UFT_LOWER_TWIN={name} names no twin"
+            );
+            lower(base, d, Some(p)).expect("lowers")
+        }
+    }
 }
 
 #[cfg(not(feature = "naive-twins"))]
-fn lowered(d: &TransitionDescriptor, p: NativeParts) -> NetDef {
+fn lowered(base: NetDef, d: &TransitionDescriptor, p: NativeParts) -> NetDef {
     assert!(
         std::env::var("UFT_LOWER_TWIN").is_err(),
         "UFT_LOWER_TWIN needs --features naive-twins"
     );
-    lower(base_net(), d, Some(p)).expect("lowers")
+    lower(base, d, Some(p)).expect("lowers")
+}
+
+/// `net` loaded on the executor twin `UFT_LOWER_TWIN` names, if any; `Err`
+/// is the load's refusal.
+fn load(net: NetDef) -> Result<Executor, LoadError> {
+    let exec = Executor::new(net)?;
+    #[cfg(feature = "naive-twins")]
+    if let Ok(name) = std::env::var("UFT_LOWER_TWIN")
+        && let Some(twin) = twin_names::executor_twin(&name)
+    {
+        return Ok(exec.with_twin(twin));
+    }
+    Ok(exec)
 }
 
 /// The executor of the net lowered from `d` with native parts `p`;
 /// `UFT_LOWER_TWIN` selects a lowering or an executor twin.
 fn executor_with(d: &TransitionDescriptor, p: NativeParts) -> Executor {
-    let exec = Executor::new(lowered(d, p)).expect("the lowered net loads");
-    #[cfg(feature = "naive-twins")]
-    if let Ok(name) = std::env::var("UFT_LOWER_TWIN")
-        && let Some(twin) = twin_names::executor_twin(&name)
-    {
-        return exec.with_twin(twin);
-    }
-    exec
+    load(lowered(base_net(), d, p)).expect("the lowered net loads")
 }
 
 fn executor(d: &TransitionDescriptor) -> Executor {
@@ -713,33 +718,100 @@ prop_state_machine! {
 
 // ------------------------------------------------- structural checks
 
-/// A test that lowers and loads a net itself skips the twin factory, so
-/// every twin stays green there.
+/// The functions that load a net and apply the twin under test: a test that
+/// loads a net anywhere else stays green under every twin.
+const TWIN_FACTORIES: &[(&str, &str)] =
+    &[("uft_lower.rs", "load"), ("exec_support/mod.rs", "load")];
+
+/// Every file under `dir` whose name ends in `suffix`, at any depth.
+fn sources(dir: &std::path::Path, suffix: &str) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("a test directory reads") {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            found.extend(sources(&path, suffix));
+        } else if path.to_string_lossy().ends_with(suffix) {
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The test sources a twin env var reaches: the uft_lower test with its
+/// support files, and every test that runs on the exec_support driver.
+fn twin_run(tests: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let driver = ["mod exec_support", ";"].concat();
+    sources(tests, ".rs")
+        .into_iter()
+        .filter(|f| {
+            let rel = f
+                .strip_prefix(tests)
+                .expect("under tests")
+                .to_string_lossy();
+            rel.starts_with("uft_lower")
+                || rel.starts_with("exec_support/")
+                || std::fs::read_to_string(f)
+                    .expect("a test source reads")
+                    .contains(&driver)
+        })
+        .collect()
+}
+
+/// `file:line` of every executor load in `file` outside the twin factories.
+fn bypasses(tests: &std::path::Path, file: &std::path::Path) -> Vec<String> {
+    let needle = ["Executor", "::new("].concat();
+    let rel = file
+        .strip_prefix(tests)
+        .expect("under tests")
+        .to_string_lossy();
+    let src = std::fs::read_to_string(file).expect("a test source reads");
+    let mut in_fn = "";
+    let mut found = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let decl = line.trim_start().trim_start_matches("pub ");
+        if let Some(rest) = decl.strip_prefix("fn ") {
+            in_fn = rest.split(['(', '<']).next().expect("a fn name");
+        }
+        if line.contains(&needle) && !TWIN_FACTORIES.contains(&(rel.as_ref(), in_fn)) {
+            found.push(format!("{rel}:{}", i + 1));
+        }
+    }
+    found
+}
+
 #[test]
 fn no_test_bypasses_the_twin_factory() {
     let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let mut files = vec![tests.join("uft_lower.rs")];
-    for dir in [tests.clone(), tests.join("exec_support")] {
-        for entry in std::fs::read_dir(&dir).expect("the tests directory reads") {
-            let path = entry.expect("a directory entry").path();
-            let name = path.file_name().expect("a file name").to_string_lossy();
-            let exec_test = dir == tests && name.starts_with("exec_");
-            if path.extension().is_some_and(|e| e == "rs") && (exec_test || dir != tests) {
-                files.push(path);
-            }
-        }
-    }
-    let needle = ["Executor::new(", "lower("].concat();
-    let bypassing: Vec<_> = files
+    let files = twin_run(&tests);
+    let names: Vec<_> = files
         .iter()
-        .filter(|f| {
-            let src = std::fs::read_to_string(f).expect("a test source reads");
-            src.split_whitespace().collect::<String>().contains(&needle)
-        })
+        .map(|f| f.strip_prefix(&tests).expect("under tests"))
         .collect();
+    println!("twin-run test sources: {names:#?}");
+    let found: Vec<_> = files.iter().flat_map(|f| bypasses(&tests, f)).collect();
     assert!(
-        bypassing.is_empty(),
-        "construct the executor with executor_with / the exec_support factory, not {needle}: {bypassing:?}"
+        found.is_empty(),
+        "load the net through a twin factory {TWIN_FACTORIES:?}, not directly: {found:?}"
+    );
+}
+
+/// The fixture holds near-miss bypasses; the check must name every one, in a
+/// support directory too.
+#[test]
+fn the_bypass_check_names_every_near_miss() {
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let found: Vec<_> = sources(&tests, ".rs.txt")
+        .iter()
+        .flat_map(|f| bypasses(&tests, f))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "uft_lower_support/bypass_probe.rs.txt:5",
+            "uft_lower_support/bypass_probe.rs.txt:11",
+            "uft_lower_support/bypass_probe.rs.txt:16",
+        ]
     );
 }
 
@@ -1140,13 +1212,12 @@ fn undoing_parts() -> NativeParts {
 /// the work it undoes is in flight, and runs once that work ended.
 #[test]
 fn an_undo_waits_while_the_work_it_undoes_runs() {
-    let net = lower(
-        lower(base_net(), &descriptor(), Some(parts())).expect("lowers"),
+    let net = lowered(
+        lowered(base_net(), &descriptor(), parts()),
         &undoing_descriptor(),
-        Some(undoing_parts()),
-    )
-    .expect("lowers");
-    let mut exec = Executor::new(net).expect("the lowered net loads");
+        undoing_parts(),
+    );
+    let mut exec = load(net).expect("the lowered net loads");
     assert!(situation(&mut exec).is_empty(), "no answer, so no work");
     let accept = answer_and_start(&mut exec, "1");
     let seen = get(
@@ -1189,9 +1260,8 @@ fn an_undo_waits_while_the_work_it_undoes_runs() {
 }
 #[test]
 fn undoes_a_transition_absent_from_the_net_is_refused() {
-    let net = lower(base_net(), &undoing_descriptor(), Some(undoing_parts()))
-        .expect("the undo lowers on its own");
-    let Err(err) = Executor::new(net) else {
+    let net = lowered(base_net(), &undoing_descriptor(), undoing_parts());
+    let Err(err) = load(net) else {
         panic!("a dangling undoes loaded")
     };
     assert!(

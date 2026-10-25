@@ -255,7 +255,7 @@ fn hashing_executor() -> Executor {
             ]))
         }),
     );
-    Executor::new(net).expect("the net loads")
+    exec_support::executor(net)
 }
 
 #[test]

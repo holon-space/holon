@@ -30,12 +30,13 @@ fail=0
 
 # Self-maintaining: a twin the test accepts but the table does not name would
 # be skipped silently — the rot this guard exists to prevent.
-suite=crates/holon-net/tests/uft_lower.rs
-named=$(grep -oE 'Some\("[^)]*"\)' "$suite" | grep -oE '"[a-z-]+"' | tr -d '"' | sort -u)
+names=crates/holon-net/tests/exec_support/twin_names.rs
+named=$(grep -oE '\("[a-z-]+", LowerTwin::' "$names" | grep -oE '"[a-z-]+"' | tr -d '"' | sort -u)
+[ -n "$named" ] || { echo "FAIL $names: no lowering twin name found"; exit 2; }
 listed=$(printf '%s\n' "$TABLE" | sed -n 's/|.*//p' | grep . | sort -u)
 missing=$(comm -23 <(echo "$named") <(echo "$listed"))
 if [ -n "$missing" ]; then
-    echo "FAIL $suite accepts twins the table does not name: $(echo "$missing" | tr '\n' ' ')"
+    echo "FAIL $names names lowering twins the table does not name: $(echo "$missing" | tr '\n' ' ')"
     fail=1
 fi
 
@@ -47,7 +48,7 @@ while IFS='|' read -r twin marker; do
     fi
     log="target/twin-own-red-$twin.log"
     UFT_LOWER_TWIN="$twin" cargo nextest run -p holon-net --features naive-twins \
-        --test uft_lower >"$log" 2>&1
+        --no-fail-fast --test uft_lower >"$log" 2>&1
     if [ $? -eq 0 ]; then
         echo "FAIL $twin: green — the twin no longer breaks anything ($log)"
         fail=1

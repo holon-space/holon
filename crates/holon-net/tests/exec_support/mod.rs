@@ -32,6 +32,7 @@ use holon_net::exec::EffectResult;
 use holon_net::exec::ExecError;
 use holon_net::exec::Executor;
 use holon_net::exec::FireError;
+use holon_net::exec::LoadError;
 use holon_net::exec::NetDef;
 use holon_net::exec::OUTCOME_UNKNOWN;
 use holon_net::exec::OccurrenceId;
@@ -359,11 +360,16 @@ pub fn twin_name() -> Option<String> {
 }
 
 pub fn executor(net: NetDef) -> Executor {
-    let exec = Executor::new(net).expect("the test net loads");
-    match twin_name().as_deref() {
+    load(net).expect("the test net loads")
+}
+
+/// `net` loaded on the twin under test; `Err` is the load's refusal.
+pub fn load(net: NetDef) -> Result<Executor, LoadError> {
+    let exec = Executor::new(net)?;
+    Ok(match twin_name().as_deref() {
         None | Some("inhibitor-net") => exec,
         Some(name) => with_twin(exec, name),
-    }
+    })
 }
 
 #[cfg(feature = "naive-twins")]

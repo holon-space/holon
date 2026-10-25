@@ -301,7 +301,7 @@ fn a_consume_arc_on_a_data_place_is_refused() {
         .consumes("Doc"),
     );
     assert!(matches!(
-        holon_net::exec::Executor::new(spec.netdef()),
+        exec_support::load(spec.netdef()),
         Err(holon_net::exec::LoadError::ConsumesData { .. })
     ));
 }
@@ -457,7 +457,7 @@ fn a_candidate_place_that_is_not_fifo_is_refused() {
         .place_with_candidate("DocA", "DocA.Candidate")
         .place("DocA.Candidate", Class::Process);
     assert!(matches!(
-        holon_net::exec::Executor::new(spec.netdef()),
+        exec_support::load(spec.netdef()),
         Err(holon_net::exec::LoadError::CandidateNotFifo { .. })
     ));
 }

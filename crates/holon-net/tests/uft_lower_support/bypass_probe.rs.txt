@@ -1,0 +1,17 @@
+// Near-miss twin bypasses, read as text by `the_bypass_check_names_every_near_miss`
+// in uft_lower.rs: each load below skips the twin factory.
+
+fn lowering_twin(d: &TransitionDescriptor, p: NativeParts) -> Executor {
+    Executor::new(lower_twin(base_net(), d, Some(p), LowerTwin::NoAskHash).expect("lowers"))
+        .expect("loads")
+}
+
+fn bound(d: &TransitionDescriptor, p: NativeParts) -> Executor {
+    let n = lower(base_net(), d, Some(p)).expect("lowers");
+    Executor::new(n).expect("loads")
+}
+
+// A factory name outside the factory files is no factory.
+fn load(net: NetDef) -> Result<Executor, LoadError> {
+    Executor::new(net)
+}
