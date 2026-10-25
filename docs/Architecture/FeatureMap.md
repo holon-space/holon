@@ -425,10 +425,12 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `wide-e2e-sqlonly-typed-edits-load-timeout`
 - `wide-e2e-sqlonly-typing-share-load-timeout`
 - `windowed-banner-toast-paint-load-flake`
+- `windowed-block-focus-outline-zero-rows-under-load`
 - `windowed-clickblock-bounds-under-load`
 - `windowed-entity-not-in-bounds-under-load`
 - `windowed-focus-not-in-bounds-under-load`
 - `windowed-keyword-surface-stale-done-text`
+- `windowed-nested-page-no-chevron-under-load`
 - `windowed-previous-run-toast-box-under-load`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
