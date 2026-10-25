@@ -263,35 +263,7 @@ impl RefLayoutMutate for ReferenceState {
     }
 
     fn bulk_add_blocks(&mut self, doc_uri: &EntityUri, blocks: &[Block]) {
-        for block in blocks {
-            let mut block = block.clone();
-            // Mirror the org round-trip normalization `Mutation::apply_to` does.
-            // Parse order: tag split off the raw headline first, THEN mark
-            // extraction (see write_org_file ingest above).
-            crate::pbt::types::apply_org_headline_tag_split(&mut block);
-            let (content, marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
-                &block.content,
-                block.content_type,
-            );
-            block.content = content;
-            block.marks = marks;
-            let id = block.id.clone();
-            self.domain.block_state.blocks.insert(id.clone(), block);
-            self.domain
-                .block_state
-                .block_documents
-                .insert(id.clone(), doc_uri.clone());
-            // An external bulk add lands as an org-file rewrite the watcher
-            // re-ingests — INGEST-origin, so it survives prod's undo and must
-            // survive the oracle's snapshot restore too.
-            self.files.ingest_origin_blocks.insert(id);
-        }
-        let mut all_blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
-        crate::org_utils::assign_reference_sequences_canonical(&mut all_blocks);
-        self.domain.block_state.blocks =
-            all_blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
-        self.rebuild_profile_tracking();
-        self.domain.block_state.next_id += blocks.len();
+        self.ingest_external_write(|state| state.add_blocks_to_store(doc_uri, blocks));
     }
 
     fn create_block_under(&mut self, parent: &EntityUri, content: &str) {
@@ -409,5 +381,39 @@ impl holon_pbt_core::capabilities::RefPageIdentity for ReferenceState {
 
     fn apply_create_page_at_path(&mut self, path: &str) {
         ReferenceState::apply_create_page_at_path(self, path);
+    }
+}
+
+impl ReferenceState {
+    fn add_blocks_to_store(&mut self, doc_uri: &EntityUri, blocks: &[Block]) {
+        for block in blocks {
+            let mut block = block.clone();
+            // Mirror the org round-trip normalization `Mutation::apply_to` does.
+            // Parse order: tag split off the raw headline first, THEN mark
+            // extraction (see write_org_file ingest above).
+            crate::pbt::types::apply_org_headline_tag_split(&mut block);
+            let (content, marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
+                &block.content,
+                block.content_type,
+            );
+            block.content = content;
+            block.marks = marks;
+            let id = block.id.clone();
+            self.domain.block_state.blocks.insert(id.clone(), block);
+            self.domain
+                .block_state
+                .block_documents
+                .insert(id.clone(), doc_uri.clone());
+            // An external bulk add lands as an org-file rewrite the watcher
+            // re-ingests — INGEST-origin, so it survives prod's undo and must
+            // survive the oracle's snapshot restore too.
+            self.files.ingest_origin_blocks.insert(id);
+        }
+        let mut all_blocks: Vec<Block> = self.domain.block_state.blocks.values().cloned().collect();
+        crate::org_utils::assign_reference_sequences_canonical(&mut all_blocks);
+        self.domain.block_state.blocks =
+            all_blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+        self.rebuild_profile_tracking();
+        self.domain.block_state.next_id += blocks.len();
     }
 }

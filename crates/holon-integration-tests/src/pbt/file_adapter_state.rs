@@ -25,9 +25,7 @@ use std::collections::BTreeSet;
 
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
-use holon_pbt_core::types::Mutation;
-
-use crate::pbt::types::MutationApply;
+use holon_orgmode::models::OrgBlockExt;
 
 /// File-adapter file-state extracted from `ReferenceState` (ADR 0004 Phase 5).
 ///
@@ -209,61 +207,58 @@ impl crate::pbt::reference_state::ReferenceState {
         self.files.merge_base.insert(doc.clone(), base);
     }
 
-    /// Holon ingests an external write of a file: a held document's base
-    /// follows the disk, which is its base with the write applied.
-    pub fn ingest_into_held_merge_base(&mut self, mutation: &Mutation) {
-        let target = match mutation {
-            Mutation::Create { parent_id, .. } => parent_id,
-            Mutation::Update { id, .. } | Mutation::Delete { id } | Mutation::Move { id, .. } => id,
-            Mutation::RestartApp => return,
-        };
-        for (doc, base) in self.files.merge_base.iter_mut() {
-            if !self.files.write_churn.contains(doc)
-                || !base.blocks.iter().any(|block| block.id == *target)
-            {
-                continue;
-            }
-            mutation.apply_to(&mut base.blocks);
+    /// Holon ingests an external write, which `ingest` applies to the store:
+    /// a held document's base takes every block the write changed in its file.
+    pub fn ingest_external_write<T>(&mut self, ingest: impl FnOnce(&mut Self) -> T) -> T {
+        let held: Vec<(EntityUri, BTreeMap<EntityUri, Block>)> = self
+            .files
+            .merge_base
+            .keys()
+            .filter(|doc| self.files.write_churn.contains(*doc))
+            .map(|doc| (doc.clone(), unsequenced(self.file_blocks(doc))))
+            .collect();
+        let out = ingest(self);
+        for (doc, before) in held {
+            let after_blocks = self.file_blocks(&doc);
+            let after = unsequenced(after_blocks.clone());
+            // Canonical re-sequencing moves the sequences of untouched
+            // siblings, so only a block's other fields tell what the write changed.
+            let changed: BTreeSet<&EntityUri> = before
+                .keys()
+                .chain(after.keys())
+                .filter(|id| before.get(*id) != after.get(*id))
+                .collect();
+            let base = self.files.merge_base.get_mut(&doc).expect("held above");
+            base.blocks.retain(|block| !changed.contains(&block.id));
+            base.blocks.extend(
+                after_blocks
+                    .into_iter()
+                    .filter(|block| changed.contains(&block.id)),
+            );
             // The document's own siblings are other files, absent from its base.
             let (mut tree, root): (Vec<Block>, Vec<Block>) = std::mem::take(&mut base.blocks)
                 .into_iter()
-                .partition(|block| block.id != *doc);
+                .partition(|block| block.id != doc);
             crate::org_utils::assign_reference_sequences_canonical(&mut tree);
             base.blocks = tree;
             base.blocks.extend(root);
             for block in &mut base.blocks {
-                if let Mutation::Create { id, .. } | Mutation::Update { id, .. } = mutation
-                    && block.id == *id
-                {
-                    crate::pbt::types::apply_org_headline_tag_split(block);
-                }
-                block.created_at = 0;
                 block.updated_at = 0;
             }
             base.blocks.sort_by(|a, b| a.id.cmp(&b.id));
         }
+        out
     }
 
-    /// Holon ingests an external write that leaves `doc`'s file short of ids,
-    /// `added` being a headline the write added: stamping them is owed.
-    pub fn ingest_id_less_into_held_merge_base(
-        &mut self,
-        doc: &EntityUri,
-        added: Option<&EntityUri>,
-    ) {
-        if !self.files.write_churn.contains(doc) {
-            return;
+    /// An external write left `doc`'s file short of ids: stamping them is owed.
+    pub fn ids_missing_from_held_file(&mut self, doc: &EntityUri) {
+        if self.files.write_churn.contains(doc) {
+            self.files
+                .merge_base
+                .get_mut(doc)
+                .expect("a held document has a merge base")
+                .ids_on_disk = false;
         }
-        let added = added.map(|id| {
-            let mut block = self.domain.block_state.blocks[id].clone();
-            block.created_at = 0;
-            block.updated_at = 0;
-            block
-        });
-        let base = self.files.merge_base.get_mut(doc).unwrap();
-        base.ids_on_disk = false;
-        base.blocks.extend(added);
-        base.blocks.sort_by(|a, b| a.id.cmp(&b.id));
     }
 
     /// Whether `doc`'s file is behind the store: a write-back of it is owed.
@@ -275,6 +270,20 @@ impl crate::pbt::reference_state::ReferenceState {
             .unwrap_or_else(|| panic!("{doc} has no merge base in the model"));
         !base.ids_on_disk || base.blocks != self.file_blocks(doc)
     }
+}
+
+/// `blocks` by id, with the sequence every block takes from its siblings
+/// cleared.
+fn unsequenced(blocks: Vec<Block>) -> BTreeMap<EntityUri, Block> {
+    blocks
+        .into_iter()
+        .map(|mut block| {
+            block.set_sequence(0);
+            // Setting a property stamps the clock.
+            block.updated_at = 0;
+            (block.id.clone(), block)
+        })
+        .collect()
 }
 
 #[cfg(test)]

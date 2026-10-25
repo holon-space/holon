@@ -359,7 +359,9 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `cook-vault-rename-refusal-load-flake`
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
+- `crash-restart-row-vouches-unstamped-base`
 - `crash-restore-boot-drops-owed-outdent`
+- `crash-restore-window-not-disclosed`
 - `create-sql-read-repeat-budget`
 - `deletebackward-sql-reads-budget`
 - `dense-patch-cross-document-session-temp-dir-gone`
@@ -442,6 +444,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-keyword-surface-stale-done-text`
 - `windowed-nested-page-no-chevron-under-load`
 - `windowed-previous-run-toast-box-under-load`
+- `windowed-reboot-misses-observability-caps`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
 - `writeorgfile-sql-reads-budget`

@@ -537,11 +537,22 @@ impl RefApplyMutationMut for ReferenceState {
         mutation: &holon_pbt_core::types::Mutation,
         crosses_org_boundary: bool,
     ) {
+        if crosses_org_boundary {
+            self.ingest_external_write(|state| state.apply_mutation_to_store(mutation, true));
+        } else {
+            self.apply_mutation_to_store(mutation, false);
+        }
+    }
+}
+
+impl ReferenceState {
+    fn apply_mutation_to_store(
+        &mut self,
+        mutation: &holon_pbt_core::types::Mutation,
+        crosses_org_boundary: bool,
+    ) {
         use holon_pbt_core::types::Mutation;
 
-        if crosses_org_boundary {
-            self.ingest_into_held_merge_base(mutation);
-        }
         if let Mutation::Create { id, parent_id, .. } = mutation {
             let doc_uri = if parent_id.is_no_parent() || parent_id.is_sentinel() {
                 parent_id.clone()

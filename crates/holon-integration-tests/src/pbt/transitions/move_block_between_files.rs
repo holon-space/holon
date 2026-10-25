@@ -200,21 +200,23 @@ pub fn move_in_ref(
     target_doc: &EntityUri,
     placement: &Placement,
 ) {
-    state
-        .domain
-        .block_state
-        .move_subtree_to_document(block_id, target_doc, placement);
-    for snapshot in state
-        .action
-        .undo_stack
-        .iter_mut()
-        .chain(state.action.redo_stack.iter_mut())
-    {
-        snapshot
-            .blocks
+    state.ingest_external_write(|state| {
+        state
+            .domain
+            .block_state
             .move_subtree_to_document(block_id, target_doc, placement);
-    }
-    state.rebuild_profile_tracking();
+        for snapshot in state
+            .action
+            .undo_stack
+            .iter_mut()
+            .chain(state.action.redo_stack.iter_mut())
+        {
+            snapshot
+                .blocks
+                .move_subtree_to_document(block_id, target_doc, placement);
+        }
+        state.rebuild_profile_tracking();
+    });
 }
 
 /// Whether the page that owns `id` is `doc` itself, whose file holds it, and
