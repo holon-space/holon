@@ -2430,6 +2430,10 @@ fn previous_run_probe(
                     vm_node: None,
                     painted_fg: None,
                     painted_bg: None,
+                    clip: holon_frontend::geometry::Clip {
+                        layout: crate::geometry::rect(rect),
+                        content_area: crate::geometry::rect(window.content_mask().bounds),
+                    },
                 },
             );
             if let Some(state) = acknowledge.filter(|_| seen) {

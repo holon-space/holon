@@ -647,8 +647,7 @@ impl UserDriver for SimUserDriver {
         self.pump();
         self.bounds
             .find_by_entity_id(entity_id.as_str())
-            .filter(|info| info.area() > 0.0)
-            .is_some()
+            .is_some_and(|info| info.shows_full_line())
     }
 
     fn is_in_region(&self, entity_id: &EntityUri, _: Region) -> bool {

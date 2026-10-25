@@ -253,6 +253,12 @@ fn fake(
             vm_node: None,
             painted_fg: None,
             painted_bg: None,
+            clip: holon_frontend::geometry::Clip::unclipped(holon_frontend::geometry::Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            }),
         },
     )
 }

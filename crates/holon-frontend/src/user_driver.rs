@@ -305,8 +305,9 @@ pub trait UserDriver: Send + Sync {
     // peek into geometry or VM trees directly, so the medium difference
     // stays inside the driver.
 
-    /// True if `entity_id` is currently visible to the user — has rendered
-    /// bounds with non-zero area (screen drivers) or appears in the
+    /// True if `entity_id` is currently visible to the user — its full line
+    /// lies inside its content area (screen drivers,
+    /// [`crate::geometry::ElementInfo::shows_full_line`]) or it appears in the
     /// rendered ViewModel tree (headless).
     ///
     /// Sync — observation verbs are point-in-time reads of state the

@@ -16,8 +16,10 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use holon_frontend::geometry::Clip;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::geometry::Rect;
 
 use crate::render::RenderRegistry;
 use crate::render::SelectableRegion;
@@ -84,11 +86,17 @@ impl TuiGeometry {
 fn to_element_info(region: &SelectableRegion) -> ElementInfo {
     let cols = region.cols.max(1);
     let rows = region.rows.max(1);
-    ElementInfo {
+    let rect = Rect {
         x: region.start_col as f32 * CELL_W,
         y: region.start_row as f32 * CELL_H,
         width: cols as f32 * CELL_W,
         height: rows as f32 * CELL_H,
+    };
+    ElementInfo {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
         widget_type: std::sync::Arc::from(region.widget_type.as_str()),
         entity_id: Some(std::sync::Arc::from(region.entity_id.as_str())),
         // `has_content` mirrors GPUI's "this tracked element actually got laid
@@ -108,6 +116,7 @@ fn to_element_info(region: &SelectableRegion) -> ElementInfo {
         vm_node: None,
         painted_fg: None,
         painted_bg: None,
+        clip: Clip::unclipped(rect),
     }
 }
 

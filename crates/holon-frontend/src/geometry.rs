@@ -26,6 +26,34 @@ pub struct VmNode {
     pub entity: Option<Arc<str>>,
 }
 
+/// An on-screen rectangle in window pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The box an element was laid out in, before clipping, and the content area
+/// that clipped it. `ElementInfo`'s own rect is their intersection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Clip {
+    pub layout: Rect,
+    pub content_area: Rect,
+}
+
+impl Clip {
+    /// For a recorder that clips nothing: the element fills its own content
+    /// area.
+    pub fn unclipped(rect: Rect) -> Self {
+        Self {
+            layout: rect,
+            content_area: rect,
+        }
+    }
+}
+
 /// Metadata about a rendered UI element: bounds, widget type, entity binding.
 #[derive(Debug, Clone)]
 pub struct ElementInfo {
@@ -92,6 +120,7 @@ pub struct ElementInfo {
     /// `None` where no tracked ancestor declared one.
     pub painted_fg: Option<crate::theme::Rgba8>,
     pub painted_bg: Option<crate::theme::Rgba8>,
+    pub clip: Clip,
 }
 
 impl ElementInfo {
@@ -121,8 +150,48 @@ impl ElementInfo {
     /// wrong-block click_entity family, 2026-06-11). Bounds-waits and click
     /// resolution must treat degenerate rects as "not rendered" so the
     /// scroll-into-view path fires instead.
+    ///
+    /// Clickable is not readable: a row with one pixel left inside the content
+    /// area passes. Visibility asks [`Self::shows_full_line`].
     pub fn has_visible_area(&self) -> bool {
         self.width > 0.0 && self.height > 0.0
+    }
+
+    /// True when the element's whole laid-out height lies inside its content
+    /// area, so no part of the line hides under the top inset (the content
+    /// area's top edge) or past the bottom. A line whose top sits exactly on
+    /// the inset edge is visible: its first pixel row is the area's first row.
+    pub fn shows_full_line(&self) -> bool {
+        let Clip {
+            layout,
+            content_area,
+        } = self.clip;
+        self.has_visible_area()
+            && layout.y >= content_area.y
+            && layout.y + layout.height <= content_area.y + content_area.height
+    }
+
+    /// The geometry a visibility verdict rests on, for failure messages.
+    pub fn visibility_geometry(&self) -> String {
+        let Clip {
+            layout,
+            content_area,
+        } = self.clip;
+        format!(
+            "laid out at y={:.1} h={:.1} (x={:.1} w={:.1}); visible rect y={:.1} h={:.1}; \
+             content area y={:.1}..{:.1} (x={:.1} w={:.1}); top inset y={:.1}",
+            layout.y,
+            layout.height,
+            layout.x,
+            layout.width,
+            self.y,
+            self.height,
+            content_area.y,
+            content_area.y + content_area.height,
+            content_area.x,
+            content_area.width,
+            content_area.y,
+        )
     }
 }
 
@@ -448,4 +517,98 @@ pub fn disclosure_halo_id_for(target_id: &str) -> String {
 /// against the row's first text line.
 pub fn tree_bullet_id_for(target_id: &str) -> String {
     format!("tree_bullet::{}", bare_target(target_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CONTENT_AREA: Rect = Rect {
+        x: 0.0,
+        y: 40.0,
+        width: 300.0,
+        height: 200.0,
+    };
+    const LINE_HEIGHT: f32 = 20.0;
+
+    /// A line laid out at `top`, recorded the way the GPUI tracker records it:
+    /// its rect clipped to the content area.
+    fn line_at(top: f32) -> ElementInfo {
+        let layout = Rect {
+            x: 0.0,
+            y: top,
+            width: 300.0,
+            height: LINE_HEIGHT,
+        };
+        let y = layout.y.max(CONTENT_AREA.y);
+        let bottom = (layout.y + layout.height).min(CONTENT_AREA.y + CONTENT_AREA.height);
+        ElementInfo {
+            x: layout.x,
+            y,
+            width: layout.width,
+            height: (bottom - y).max(0.0),
+            widget_type: Arc::from("rendered_text"),
+            entity_id: Some(Arc::from("block:line")),
+            has_content: true,
+            parent_id: None,
+            displayed_text: None,
+            focused: None,
+            styled_runs: None,
+            opacity: None,
+            expected_size: SizeBounds::default(),
+            vm_node: None,
+            painted_fg: None,
+            painted_bg: None,
+            clip: Clip {
+                layout,
+                content_area: CONTENT_AREA,
+            },
+        }
+    }
+
+    #[test]
+    fn a_line_half_under_the_top_inset_is_not_visible() {
+        let line = line_at(CONTENT_AREA.y - LINE_HEIGHT / 2.0);
+        assert!(
+            line.area() > 0.0,
+            "the half-hidden line must keep a clipped extent, else the area rule \
+             would reject it too and this test could not tell the two rules apart: {}",
+            line.visibility_geometry()
+        );
+        assert!(
+            !line.shows_full_line(),
+            "a line half under the top inset counts as visible: {}",
+            line.visibility_geometry()
+        );
+    }
+
+    #[test]
+    fn a_line_fully_inside_the_content_area_is_visible() {
+        let line = line_at(CONTENT_AREA.y + 50.0);
+        assert!(
+            line.shows_full_line(),
+            "a line inside the content area counts as hidden: {}",
+            line.visibility_geometry()
+        );
+    }
+
+    #[test]
+    fn a_line_touching_the_top_inset_edge_is_visible() {
+        let line = line_at(CONTENT_AREA.y);
+        assert!(
+            line.shows_full_line(),
+            "a line whose top sits on the inset edge counts as hidden: {}",
+            line.visibility_geometry()
+        );
+    }
+
+    #[test]
+    fn a_line_cut_by_the_bottom_edge_is_not_visible() {
+        let line = line_at(CONTENT_AREA.y + CONTENT_AREA.height - LINE_HEIGHT / 2.0);
+        assert!(
+            !line.shows_full_line(),
+            "a line cut by the content area's bottom edge counts as visible: {}",
+            line.visibility_geometry()
+        );
+    }
 }

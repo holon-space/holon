@@ -10,8 +10,10 @@
 
 use std::sync::Arc;
 
+use holon_frontend::geometry::Clip;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::geometry::Rect;
 use holon_frontend::geometry::SharedBoundsRegistry;
 use holon_frontend::geometry::VmNode;
 use holon_mcp::describe_ui_geometry::annotate_json;
@@ -37,6 +39,12 @@ fn info(widget: &str, entity: &str, rect: (f32, f32, f32, f32)) -> ElementInfo {
         vm_node: None,
         painted_fg: None,
         painted_bg: None,
+        clip: Clip::unclipped(Rect {
+            x: rect.0,
+            y: rect.1,
+            width: rect.2,
+            height: rect.3,
+        }),
     }
 }
 

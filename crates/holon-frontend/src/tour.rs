@@ -21,15 +21,7 @@ use holon_api::Value;
 use holon_api::block::Block;
 
 use crate::geometry::GeometryProvider;
-
-/// A resolved on-screen rectangle (subset of `ElementInfo`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
+pub use crate::geometry::Rect;
 
 /// Well-known UI regions a step can point at. These need stable ids registered
 /// in the geometry registry — the G1 gap in the proposal (regions are render
@@ -337,6 +329,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::geometry::Clip;
     use crate::geometry::ElementInfo;
 
     /// Minimal in-memory `GeometryProvider` — same trait the real GPUI
@@ -375,6 +368,12 @@ mod tests {
             vm_node: None,
             painted_fg: None,
             painted_bg: None,
+            clip: Clip::unclipped(Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 40.0,
+            }),
         }
     }
 

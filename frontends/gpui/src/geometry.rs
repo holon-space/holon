@@ -38,8 +38,10 @@ use gpui::IntoElement;
 use gpui::LayoutId;
 use gpui::Pixels;
 use gpui::Window;
+use holon_frontend::geometry::Clip;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::geometry::Rect;
 use holon_frontend::geometry::VmNode;
 use holon_frontend::size_expectation::SizeBounds;
 use holon_frontend::theme::Rgba8;
@@ -322,6 +324,15 @@ fn visible_bounds(
     bounds.intersect(&window.content_mask().bounds)
 }
 
+pub(crate) fn rect(bounds: gpui::Bounds<gpui::Pixels>) -> Rect {
+    Rect {
+        x: f32::from(bounds.origin.x),
+        y: f32::from(bounds.origin.y),
+        width: f32::from(bounds.size.width),
+        height: f32::from(bounds.size.height),
+    }
+}
+
 fn push_parent(id: Arc<str>) {
     RENDER_PATH.with(|p| p.borrow_mut().push(id));
 }
@@ -567,6 +578,10 @@ impl Element for TransparentTracker {
                 vm_node: self.vm_node.clone(),
                 painted_fg: colors.fg,
                 painted_bg: colors.bg,
+                clip: Clip {
+                    layout: rect(bounds),
+                    content_area: rect(window.content_mask().bounds),
+                },
             },
         );
         push_parent(Arc::clone(&self.el_id));
@@ -614,6 +629,12 @@ mod tests {
             vm_node: None,
             painted_fg: None,
             painted_bg: None,
+            clip: Clip::unclipped(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 20.0,
+            }),
         }
     }
 
