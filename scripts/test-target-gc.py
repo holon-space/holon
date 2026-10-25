@@ -100,6 +100,21 @@ def check_marker_sweep():
         shutil.rmtree(target)
 
 
+def check_marker_keeps_dirs_beyond_keep():
+    target, p = fake_target()
+    newer = p["used_prev"].parent / "holon-3usedlast"
+    plant(newer / "s-d" / "query-cache.bin", MARK + 20)
+    os.utime(newer / "s-d", (OLD, OLD))
+    os.utime(newer, (OLD, OLD))
+    try:
+        r = gc(target, "--incremental", "--apply", "--keep", "1")
+        assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}{r.stderr}"
+        assert p["used_prev"].exists(), "a dir the previous marker build used was swept once it fell beyond --keep"
+        assert not p["stale"].exists(), "an incremental dir older than both markers survived"
+    finally:
+        shutil.rmtree(target)
+
+
 def check_nothing_outside():
     target, p = fake_target()
     try:
@@ -218,7 +233,8 @@ def check_supersession():
 def main():
     checks = [check_marker_sweep, check_nothing_outside, check_refuses_while_open,
               check_dry_run, check_needs_marker, check_keep_newest_per_name,
-              check_incremental_only_under_disk_pressure, check_mark_rotates, check_supersession]
+              check_incremental_only_under_disk_pressure, check_mark_rotates, check_supersession,
+              check_marker_keeps_dirs_beyond_keep]
     for check in checks:
         check()
         print(f"ok {check.__name__}")
