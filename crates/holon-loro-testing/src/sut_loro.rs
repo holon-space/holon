@@ -53,6 +53,9 @@ pub struct LoroSut {
     /// Reference-model stable-id → resolved-UUID map, shared live with
     /// `E2ESut` so resolution sees ids minted after `LoroSut` construction.
     doc_uri_map: DocUriMap,
+    /// The Loro peer ids forked peers take, in fork order; the harness hands
+    /// over the ref's drawn ids so each SUT peer and its shadow share one.
+    peer_ids: std::cell::RefCell<Vec<u64>>,
 }
 
 impl LoroSut {
@@ -66,7 +69,67 @@ impl LoroSut {
             peers: std::cell::RefCell::new(Vec::new()),
             sync_handle,
             doc_uri_map,
+            peer_ids: std::cell::RefCell::new(crate::ref_ext::DEFAULT_PEER_IDS.to_vec()),
         }
+    }
+
+    pub fn set_peer_ids(&self, ids: Vec<u64>) {
+        assert!(
+            self.peers.borrow().is_empty(),
+            "peer ids change only before the first fork"
+        );
+        *self.peer_ids.borrow_mut() = ids;
+    }
+
+    /// The global doc's own peer id, and the peers with at least one op in
+    /// its history.
+    pub async fn primary_authors(&self) -> (u64, std::collections::BTreeSet<u64>) {
+        let store = self.doc_store.read().await;
+        let global_doc = store
+            .get_doc(DocScope::Global)
+            .await
+            .expect("Failed to get global doc for its peer set");
+        global_doc
+            .with_read(|doc| {
+                Ok((
+                    doc.peer_id(),
+                    crate::shadow_mesh::authoring_peers(&doc.oplog_vv()),
+                ))
+            })
+            .expect("Failed to read the global doc's version")
+    }
+
+    /// The primary doc's Lamport height and the stable ids of its alive
+    /// blocks. Blocks of the separate layout doc are not in it: their writes
+    /// never advance this height.
+    pub async fn primary_clock(&self) -> (u32, std::collections::BTreeSet<String>) {
+        let store = self.doc_store.read().await;
+        let global_doc = store
+            .get_doc(DocScope::Global)
+            .await
+            .expect("Failed to get global doc for its clock");
+        global_doc
+            .with_read(|doc| {
+                Ok((
+                    holon_loro::multi_peer::lamport_height(doc),
+                    alive_stable_ids(doc),
+                ))
+            })
+            .expect("Failed to read the global doc's clock")
+    }
+
+    /// The SUT's stable id for a reference-model block; `None` for a split
+    /// tail the reconcile has not paired yet, because the SUT has not minted
+    /// it.
+    pub fn sut_stable_id(&self, stable_id: &str) -> Option<String> {
+        let paired = self
+            .doc_uri_map
+            .lock()
+            .unwrap()
+            .contains_key(&EntityUri::block(stable_id));
+        let unminted = !paired
+            && holon_pbt_core::observables::is_synthetic_ref_id(&EntityUri::block(stable_id));
+        (!unminted).then(|| self.resolve_stable_id(stable_id))
     }
 
     /// Resolve a reference-model stable_id to the actual stable_id used in the
@@ -232,7 +295,12 @@ impl SutLoro for LoroSut {
         let snapshot = global_doc
             .export_snapshot()
             .expect("Failed to export snapshot for AddPeer");
-        let peer_id = (self.peers.borrow().len() as u64) + 100;
+        let idx = self.peers.borrow().len();
+        let peer_id = *self
+            .peer_ids
+            .borrow()
+            .get(idx)
+            .unwrap_or_else(|| panic!("AddPeer #{idx} has no peer id"));
         let peer_doc = holon_loro::multi_peer::init_doc(peer_id);
         peer_doc
             .import(&snapshot)
@@ -453,8 +521,40 @@ impl SutLoro for LoroSut {
 /// adapter.
 impl CapProvider for LoroSut {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(Arc::clone(&self));
         caps.insert(self as Arc<dyn SutLoro>);
     }
+}
+
+/// The concrete handle is a cap too: the harness reaches the SUT's peer ids
+/// and peer set through it, which the `SutLoro` transition surface lacks.
+impl holon_pbt_core::composition::CapName for LoroSut {
+    const NAME: &'static str = "LoroSut";
+}
+
+/// The stable ids of the doc's alive tree nodes, read for membership only.
+fn alive_stable_ids(doc: &loro::LoroDoc) -> std::collections::BTreeSet<String> {
+    use holon_loro::multi_peer::STABLE_ID;
+    use holon_loro::multi_peer::TREE_NAME;
+    let tree = doc.get_tree(TREE_NAME);
+    tree.get_nodes(false)
+        .into_iter()
+        .filter(|node| {
+            !matches!(
+                node.parent,
+                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+            )
+        })
+        .filter_map(|node| {
+            let meta = tree.get_meta(node.id).unwrap_or_else(|e| {
+                panic!("Failed to read the meta of tree node {:?}: {e}", node.id)
+            });
+            match meta.get(STABLE_ID)? {
+                loro::ValueOrContainer::Value(val) => val.as_string().map(|s| s.to_string()),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Import `peer`'s changes the primary lacks the way peer sync does: through

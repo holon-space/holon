@@ -6,11 +6,12 @@
 //!   same engine as SUT ⇒ a pure Loro merge-ordering bug is in the blind spot).
 //!
 //! A `ShadowMesh` is a fresh Loro universe (primary doc, peer id 1, matching
-//! the PBT-pinned production primary; shadow peers at `100 + idx`, matching
-//! `LoroSut::apply_add_peer`) that the reference model drives through the SAME
-//! `multi_peer`/`peer_ops` helpers the SUT uses. It PREDICTS CRDT-arbitrary
-//! outcomes (fractional-index tie-breaks = op-id order, concurrent-text
-//! interleaving) instead of adopting them from the SUT at check time.
+//! the PBT-pinned production primary; shadow peers at the per-case drawn ids
+//! `LoroSut::apply_add_peer` forks under too) that the reference model drives
+//! through the SAME `multi_peer`/`peer_ops` helpers the SUT uses. It PREDICTS
+//! CRDT-arbitrary outcomes (fractional-index tie-breaks = op-id order,
+//! concurrent-text interleaving) instead of adopting them from the SUT at check
+//! time.
 //!
 //! The only value that ever crosses SUT→oracle is a **scalar Lamport height**
 //! (`SutLoroLog::loro_lamport_height`, fed through
@@ -23,7 +24,10 @@
 //! production boot in `structural_pbt::teeth::shadow_mesh_predicts_*`.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use holon_api::Block;
 use holon_api::EntityUri;
@@ -32,6 +36,9 @@ use holon_loro::multi_peer::{self};
 use loro::LoroDoc;
 
 use crate::peer_ops;
+
+/// The SUT primary's Loro peer id, pinned by the PBT harness.
+pub const PRIMARY_PEER_ID: u64 = 1;
 
 /// One shadow Loro doc pinned to a fixed peer id.
 ///
@@ -90,36 +97,54 @@ impl fmt::Debug for ShadowDoc {
 pub struct ShadowMesh {
     pub primary: ShadowDoc,
     pub peers: Vec<ShadowDoc>,
+    padded_step: PaddedStep,
+}
+
+/// The last fed step the primary was padded at; `Sync` because the ref state
+/// is, and a deep fork copies it.
+#[derive(Debug, Default)]
+struct PaddedStep(AtomicU64);
+
+impl Clone for PaddedStep {
+    fn clone(&self) -> Self {
+        Self(AtomicU64::new(self.0.load(Ordering::Relaxed)))
+    }
 }
 
 impl ShadowMesh {
-    /// Build a mesh whose primary holds exactly the ref's block map (bare
-    /// stable ids, `content_text()` strings). Base op *shapes* don't matter —
-    /// only base strings and the peers' own op ids do (spike s8) — so a
-    /// one-shot seed is as good as replaying the production boot.
-    pub fn seeded_from_blocks(blocks: &BTreeMap<EntityUri, Block>) -> Self {
+    /// Build a mesh whose primary holds the ref's block map minus `unheld`
+    /// (bare stable ids, `content_text()` strings). Base op *shapes* don't
+    /// matter — only base strings and the peers' own op ids do (spike s8) — so
+    /// a one-shot seed is as good as replaying the production boot.
+    pub fn seeded_from_blocks(
+        blocks: &BTreeMap<EntityUri, Block>,
+        unheld: &BTreeSet<String>,
+    ) -> Self {
         let mesh = Self {
-            primary: ShadowDoc::new(1),
+            primary: ShadowDoc::new(PRIMARY_PEER_ID),
             peers: Vec::new(),
+            padded_step: PaddedStep::default(),
         };
-        mesh.catch_up_primary(blocks);
+        mesh.catch_up_primary(blocks, unheld);
         mesh
     }
 
-    /// Clock-pad the shadow primary up to `target`. Lenient: a `target` at or
-    /// below the current height is a no-op — generation-phase ref evolutions
-    /// read a stale (cross-case shared) clock feed and are discarded before
-    /// execution, which re-evolves the ref against fresh, monotonic heights.
-    pub fn pad_primary_to(&self, target: u32) {
-        if target > multi_peer::lamport_height(self.primary.doc()) {
-            multi_peer::pad_to_height(self.primary.doc(), target);
+    /// Clock-pad the shadow primary up to the SUT's fed height `target`.
+    /// Panics when the shadow is already above it: the shadow never writes
+    /// more than the SUT, so that is a stale feed or a SUT write the ref
+    /// never saw. Only the first pad of a fed `step` runs: a later pad site
+    /// in the same ref step follows the step's own merge, not a boundary.
+    pub fn pad_primary_to(&self, target: u32, step: u64) {
+        // Fed steps count from 1, so the default 0 never matches one.
+        if self.padded_step.0.swap(step, Ordering::Relaxed) == step {
+            return;
         }
+        multi_peer::pad_to_height(self.primary.doc(), target);
     }
 
     /// Fork a new shadow peer off the (already padded, already caught-up)
-    /// primary. Peer id `100 + idx` — identical to `LoroSut::apply_add_peer`.
-    pub fn fork_peer(&mut self) -> u64 {
-        let peer_id = 100 + self.peers.len() as u64;
+    /// primary, under the id the SUT forks its peer under.
+    pub fn fork_peer(&mut self, peer_id: u64) {
         let doc = multi_peer::init_doc(peer_id);
         doc.import(
             &self
@@ -130,21 +155,29 @@ impl ShadowMesh {
         )
         .expect("import shadow primary snapshot into shadow peer");
         self.peers.push(ShadowDoc { doc, peer_id });
-        peer_id
+    }
+
+    /// The peers that authored an op in the shadow primary's history.
+    pub fn primary_peers(&self) -> BTreeSet<u64> {
+        authoring_peers(&self.primary.doc().oplog_vv())
     }
 
     /// Make the shadow primary's alive tree (membership, parent, content
-    /// string) match the ref block map — the centralized primary mirror.
-    /// Runs after every ref transition (padded first), so primary edits land
-    /// lamport-exact inside peer-concurrency windows, new transitions are
-    /// auto-covered, and a missed site self-heals at the next catch-up.
+    /// string) match the ref block map minus the `unheld` blocks — the
+    /// centralized primary mirror. Runs after every ref transition (padded
+    /// first), so primary edits land lamport-exact inside peer-concurrency
+    /// windows, new transitions are auto-covered, and a missed site
+    /// self-heals at the next catch-up.
     /// Multiple edits in one transition collapse to one diff (accepted).
-    pub fn catch_up_primary(&self, blocks: &BTreeMap<EntityUri, Block>) {
+    /// `unheld` names the ref blocks the SUT primary doc lacks; the shadow
+    /// leaves them out so it never outgrows the SUT clock.
+    pub fn catch_up_primary(&self, blocks: &BTreeMap<EntityUri, Block>, unheld: &BTreeSet<String>) {
         let doc = self.primary.doc();
 
+        let held = |id: &EntityUri| blocks.contains_key(id) && !unheld.contains(id.id());
         let mut want: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
-        for b in blocks.values() {
-            let parent = if blocks.contains_key(&b.parent_id) {
+        for b in blocks.values().filter(|b| held(&b.id)) {
+            let parent = if held(&b.parent_id) {
                 Some(b.parent_id.id().to_string())
             } else {
                 None
@@ -311,4 +344,12 @@ impl ShadowMesh {
             })
             .collect()
     }
+}
+
+/// The peers with at least one op in `vv`.
+pub fn authoring_peers(vv: &loro::VersionVector) -> BTreeSet<u64> {
+    vv.iter()
+        .filter(|(_, counter)| **counter > 0)
+        .map(|(peer, _)| *peer)
+        .collect()
 }

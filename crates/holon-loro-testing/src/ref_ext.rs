@@ -32,33 +32,41 @@
 //! `ReferenceState`.
 //!
 //! ## `clock_feed` Clone seam (preserved from the pre-split home)
-//! [`LoroRefExt::clock_feed`] is `Arc<Mutex<Option<u32>>>`: `Clone` SHARES the
-//! cell — it is a harness seam, not model state. proptest clones the reference
-//! per step and per case; the composed harness writes the SUT's scalar Lamport
-//! height into this cell after boot and after every apply+settle
+//! [`LoroRefExt::clock_feed`] is `Arc<Mutex<Option<SutClock>>>`: `Clone` SHARES
+//! the cell — it is a harness seam, not model state. proptest clones the
+//! reference per step and per case; the composed harness writes the SUT's
+//! scalar Lamport height into this cell after boot and after every apply+settle
 //! (`composed::harness::feed_sut_clock`), and the shadow primary is padded to
 //! that height at each fork/sync/merge/primary-edit boundary. Because every
 //! clone shares the same `Arc`, the height the harness feeds is visible to the
-//! ref no matter which cloned generation reads it. Empty/stale during
-//! proptest's generation phase, which is harmless (generation consumes no
-//! clock-dependent predictions; execution re-evolves the ref fresh). Do NOT
-//! replace the `Arc` with a plain value — that silently breaks the seam.
+//! ref no matter which cloned generation reads it. The cell holds a height only
+//! while a SUT is alive (see [`ClockFeedLease`]), so proptest's generation and
+//! shrink replays, which run the ref alone, pad nothing. Do NOT replace the
+//! `Arc` with a plain value — that silently breaks the seam.
 //!
 //! ## `ShadowMesh` Clone cost (preserved)
 //! [`LoroRefExt::shadow_mesh`] deep-forks every shadow Loro doc on `Clone`
 //! (proptest clones per step and per case). This cost is unchanged by the move.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use holon_api::Block;
 use holon_api::EntityUri;
 
 use crate::peer_ops::PeerBlock;
+use crate::shadow_mesh::PRIMARY_PEER_ID;
 use crate::shadow_mesh::ShadowMesh;
+
+/// The ids forked peers take when a machine draws none: one per peer the
+/// `AddPeer` limit admits.
+pub const DEFAULT_PEER_IDS: [u64; 3] = [100, 101, 102];
 
 /// Reference state for a Loro-only peer.
 #[derive(Debug, Clone)]
@@ -114,10 +122,73 @@ pub struct LoroRefExt {
     /// (and once after build); the ref pads the shadow primary to it before
     /// boundary ops. `Clone` SHARES the cell — it is a harness seam, not
     /// model state (see module docs). Empty/stale during proptest's
-    /// generation phase, which is harmless: generation consumes no
-    /// clock-dependent predictions and execution re-evolves the ref fresh
-    /// (padding is lenient — see `ShadowMesh::pad_primary_to`).
-    pub clock_feed: Arc<Mutex<Option<u32>>>,
+    /// generation phase and shrink replays: no SUT is alive then, so the
+    /// [`ClockFeedLease`] has emptied the cell and nothing is padded.
+    pub clock_feed: Arc<Mutex<Option<SutClock>>>,
+
+    /// The Loro peer ids forked peers take, in fork order — the SAME ids for
+    /// the SUT's peers and their shadows.
+    pub peer_ids: Vec<u64>,
+}
+
+/// The lowest forked peer id: 1 is the primary's, 2 a second instance's.
+const FIRST_FORKED_PEER_ID: u64 = 3;
+
+/// Distinct per-case ids for the forked peers, none equal to an instance's.
+pub fn peer_ids_strategy() -> proptest::strategy::BoxedStrategy<Vec<u64>> {
+    use proptest::strategy::Strategy;
+    proptest::collection::vec(
+        FIRST_FORKED_PEER_ID..u64::from(u32::MAX),
+        DEFAULT_PEER_IDS.len(),
+    )
+    .prop_filter("peer ids are distinct", |ids| {
+        ids.iter().collect::<HashSet<_>>().len() == ids.len()
+    })
+    .boxed()
+}
+
+/// Holds the clock feed open for one live SUT and empties it on drop, so a
+/// height never outlives the SUT that produced it — also when the case
+/// panics, because the SUT drops while unwinding.
+pub struct ClockFeedLease(Arc<Mutex<Option<SutClock>>>);
+
+impl ClockFeedLease {
+    pub fn feed(&self, height: u32, unheld: BTreeSet<String>) {
+        // Process-wide, so a step id never repeats across SUTs or cases.
+        static STEPS: AtomicU64 = AtomicU64::new(1);
+        *self.0.lock().expect("clock_feed lock") = Some(SutClock {
+            height,
+            unheld,
+            step: STEPS.fetch_add(1, Ordering::Relaxed),
+        });
+    }
+}
+
+/// What the harness reads off the live SUT primary doc after a step.
+#[derive(Clone, Debug)]
+pub struct SutClock {
+    pub height: u32,
+    /// The ref's blocks (bare stable ids) that the SUT primary doc does not
+    /// hold at that step. Blocks the ref creates later are not in it, so the
+    /// shadow mirrors them at the step the SUT writes them.
+    pub unheld: BTreeSet<String>,
+    /// Names this feed; the shadow pads once per fed step.
+    pub step: u64,
+}
+
+impl SutClock {
+    /// No SUT (a ref-only replay) leaves nothing out.
+    fn unheld_of(clock: &Option<SutClock>) -> &BTreeSet<String> {
+        static NONE: BTreeSet<String> = BTreeSet::new();
+        clock.as_ref().map_or(&NONE, |c| &c.unheld)
+    }
+}
+
+impl Drop for ClockFeedLease {
+    fn drop(&mut self) {
+        // A poisoned lock means a pad site panicked; emptying it still matters.
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 }
 
 impl Default for LoroRefExt {
@@ -126,11 +197,34 @@ impl Default for LoroRefExt {
             peers: Vec::new(),
             shadow_mesh: None,
             clock_feed: Arc::new(Mutex::new(None)),
+            peer_ids: DEFAULT_PEER_IDS.to_vec(),
         }
     }
 }
 
 impl LoroRefExt {
+    fn sut_clock(&self) -> Option<SutClock> {
+        self.clock_feed.lock().expect("clock_feed lock").clone()
+    }
+
+    /// Open the clock feed for a SUT that was just built.
+    pub fn lease_clock_feed(&self) -> ClockFeedLease {
+        ClockFeedLease(Arc::clone(&self.clock_feed))
+    }
+
+    /// The forked peers that must have authored an op in the SUT primary's
+    /// history: the shadow primary's, which merges exactly what the SUT merges.
+    pub fn expected_forked_authors(&self) -> std::collections::BTreeSet<u64> {
+        match &self.shadow_mesh {
+            Some(mesh) => {
+                let mut authors = mesh.primary_peers();
+                authors.remove(&PRIMARY_PEER_ID);
+                authors
+            }
+            None => std::collections::BTreeSet::new(),
+        }
+    }
+
     // ─── RefPeers read side (thin field reads; delegated from ref_caps/peers.rs)
     // ──
 
@@ -182,7 +276,7 @@ impl LoroRefExt {
     /// primary block data through parameters; `is_layout_block` reports whether
     /// a block id is layout/query machinery (excluded from the peer model, same
     /// as the UI mutation arms' `no_content_update` exclusion). Returns the new
-    /// peer id (`100 + idx`).
+    /// peer id (the next of [`Self::peer_ids`]).
     pub fn add_peer_from_primary_snapshot(
         &mut self,
         primary_blocks: &BTreeMap<EntityUri, Block>,
@@ -194,33 +288,35 @@ impl LoroRefExt {
         // SUT's snapshot export sees), THEN fork — so the shadow peer's base
         // clock matches the SUT peer's (clock_parity_spike s3/s7: staggered
         // fork heights are exactly what an unpadded shadow gets wrong).
+        let clock = self.sut_clock();
+        let unheld = SutClock::unheld_of(&clock);
         if self.shadow_mesh.is_none() {
-            let mesh = ShadowMesh::seeded_from_blocks(primary_blocks);
+            let mesh = ShadowMesh::seeded_from_blocks(primary_blocks, unheld);
             // The seeding BUILDS the shadow primary, so its whole height is
             // what this step spent; there is no earlier height to subtract.
             crate::atom_counts::record("add_peer:seed", "primary", mesh.primary.lamport_height());
             self.shadow_mesh = Some(mesh);
         }
-        let feed = *self.clock_feed.lock().expect("clock_feed lock");
         let mesh = self.shadow_mesh.as_mut().expect("just seeded");
         {
             let doc = &mesh.primary;
             crate::atom_counts::measure("add_peer:edit", "primary", doc, || {
-                mesh.catch_up_primary(primary_blocks)
+                mesh.catch_up_primary(primary_blocks, unheld)
             });
             crate::atom_counts::measure("add_peer:pad", "primary", doc, || {
-                if let Some(h) = feed {
-                    mesh.pad_primary_to(h);
+                if let Some(c) = &clock {
+                    mesh.pad_primary_to(c.height, c.step);
                 }
             });
         }
-        let shadow_peer_id = mesh.fork_peer();
-
-        let peer_id = (self.peers.len() as u64) + 100;
-        assert_eq!(
-            shadow_peer_id, peer_id,
-            "shadow peer id must match the ref/SUT peer id scheme (100 + idx)"
-        );
+        let peer_id = *self.peer_ids.get(self.peers.len()).unwrap_or_else(|| {
+            panic!(
+                "AddPeer #{} has no drawn peer id (drawn: {:?})",
+                self.peers.len(),
+                self.peer_ids
+            )
+        });
+        mesh.fork_peer(peer_id);
         // Layout-classified source blocks (query/render machinery like
         // `journals::src::0` / `journals::render::0`) are excluded from the
         // peer model, mirroring the UI mutation arms' `no_content_update`
@@ -387,14 +483,15 @@ impl LoroRefExt {
                 .shadow_mesh
                 .as_ref()
                 .expect("shadow mesh exists once peers do");
-            let feed = *self.clock_feed.lock().expect("clock_feed lock");
+            let clock = self.sut_clock();
+            let unheld = SutClock::unheld_of(&clock);
             let doc = &mesh.primary;
             crate::atom_counts::measure("sync:edit", "primary", doc, || {
-                mesh.catch_up_primary(primary_blocks)
+                mesh.catch_up_primary(primary_blocks, unheld)
             });
             crate::atom_counts::measure("sync:pad", "primary", doc, || {
-                if let Some(h) = feed {
-                    mesh.pad_primary_to(h);
+                if let Some(c) = &clock {
+                    mesh.pad_primary_to(c.height, c.step);
                 }
             });
             crate::atom_counts::measure("sync:merge", "primary", doc, || {
@@ -416,14 +513,15 @@ impl LoroRefExt {
                 .shadow_mesh
                 .as_ref()
                 .expect("shadow mesh exists once peers do");
-            let feed = *self.clock_feed.lock().expect("clock_feed lock");
+            let clock = self.sut_clock();
+            let unheld = SutClock::unheld_of(&clock);
             let doc = &mesh.primary;
             crate::atom_counts::measure("merge:edit", "primary", doc, || {
-                mesh.catch_up_primary(primary_blocks)
+                mesh.catch_up_primary(primary_blocks, unheld)
             });
             crate::atom_counts::measure("merge:pad", "primary", doc, || {
-                if let Some(h) = feed {
-                    mesh.pad_primary_to(h);
+                if let Some(c) = &clock {
+                    mesh.pad_primary_to(c.height, c.step);
                 }
             });
             crate::atom_counts::measure("merge:merge", "primary", doc, || {
@@ -496,15 +594,16 @@ impl LoroRefExt {
         let Some(mesh) = &self.shadow_mesh else {
             return;
         };
-        let feed = *self.clock_feed.lock().expect("clock_feed lock");
+        let clock = self.sut_clock();
+        let unheld = SutClock::unheld_of(&clock);
         let doc = &mesh.primary;
         crate::atom_counts::measure("catch_up:pad", "primary", doc, || {
-            if let Some(h) = feed {
-                mesh.pad_primary_to(h);
+            if let Some(c) = &clock {
+                mesh.pad_primary_to(c.height, c.step);
             }
         });
         crate::atom_counts::measure("catch_up:edit", "primary", doc, || {
-            mesh.catch_up_primary(primary_blocks)
+            mesh.catch_up_primary(primary_blocks, unheld)
         });
     }
 }

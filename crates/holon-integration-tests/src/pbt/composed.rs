@@ -88,6 +88,9 @@ pub mod harness;
 #[cfg(any(test, feature = "pbt"))]
 pub mod interleave;
 
+/// The exact SUT Lamport advance of each transition kind with a constant one.
+pub mod lamport_delta;
+
 /// `inv-schedule-coverage`: which dispatch/completion interleavings the armed
 /// axis actually reached, accumulated across the process.
 #[cfg(any(test, feature = "pbt"))]

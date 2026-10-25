@@ -843,29 +843,81 @@ pub fn check_invariants<D: std::fmt::Debug>(ref_state: &GroupState<D>) {
 
 // ─── Lamport clock helpers (E-solid oracle clock-sync seam) ──────────────────
 
-/// A doc's Lamport height: 1 + the max lamport of any applied op, computed
-/// from public API only (frontiers + `ChangeMeta`). This scalar is the ONLY
-/// value the E-solid shadow-mesh oracle reads from the SUT (clock sync at
-/// fork/sync boundaries); see `clock_parity_spike` for the parity proof and
-/// the negative control showing the padding is load-bearing.
+/// A doc's Lamport height: the Lamport a change built on the oplog frontiers
+/// would get. This scalar is the ONLY value the E-solid shadow-mesh oracle
+/// reads from the SUT (clock sync at fork/sync boundaries); see
+/// `clock_parity_spike` for the parity proof and the negative control showing
+/// the padding is load-bearing. Panics on uncommitted ops: their ids sit in
+/// the frontiers before the DAG holds them.
 pub fn lamport_height(doc: &LoroDoc) -> u32 {
-    crate::loro_backend::doc_lamport_height(doc)
+    doc.with_oplog(|oplog| {
+        let dag = oplog.dag();
+        dag.get_change_lamport_from_deps(dag.frontiers())
+            .expect("lamport_height: every frontier id is in the DAG (no uncommitted ops)")
+    })
 }
 
-/// Advance `doc`'s Lamport clock to exactly `target` via 1-atom ops in a
-/// scratch container. Query-driven — no assumption that N ops advance the
-/// clock by N; each step re-reads the height, and overshoot panics loudly
-/// (it would falsify the whole clock-padding approach).
+/// Advance `doc`'s Lamport clock from its height `h` to exactly `target` with
+/// ONE `target - h`-char insert into a scratch container. A target below the
+/// height panics: the clock cannot go back, so the caller fed a stale height.
 pub fn pad_to_height(doc: &LoroDoc, target: u32) {
-    let pad = doc.get_text("clock_pad");
-    loop {
-        let h = lamport_height(doc);
-        assert!(h <= target, "shadow clock overshot: {h} > {target}");
-        if h == target {
-            return;
-        }
-        pad.insert(0, "x").unwrap();
-        doc.commit();
+    let h = lamport_height(doc);
+    assert!(
+        h <= target,
+        "shadow clock is ahead of the fed height: {h} > {target}"
+    );
+    if h == target {
+        return;
+    }
+    doc.get_text("clock_pad")
+        .insert(0, &"x".repeat((target - h) as usize))
+        .expect("clock_pad insert");
+    doc.commit();
+    let after = lamport_height(doc);
+    assert_eq!(
+        after,
+        target,
+        "one {}-char insert must advance the clock by its length",
+        target - h
+    );
+}
+
+#[cfg(test)]
+mod lamport_helpers {
+    use super::*;
+
+    #[test]
+    fn pad_by_n_adds_n_and_pad_by_zero_is_a_no_op() {
+        let doc = init_doc(7);
+        create_block_with_id(&doc, None, "abc", "a");
+        let h = lamport_height(&doc);
+        assert!(h > 0);
+        let vv = doc.oplog_vv();
+        pad_to_height(&doc, h);
+        assert_eq!(lamport_height(&doc), h);
+        assert_eq!(doc.oplog_vv(), vv, "pad by 0 writes nothing");
+        pad_to_height(&doc, h + 5);
+        assert_eq!(lamport_height(&doc), h + 5);
+        assert_eq!(doc.get_text("clock_pad").len_unicode(), 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "shadow clock is ahead of the fed height")]
+    fn pad_below_the_height_panics() {
+        let doc = init_doc(7);
+        create_block_with_id(&doc, None, "abc", "a");
+        pad_to_height(&doc, lamport_height(&doc) - 1);
+    }
+
+    #[test]
+    fn height_agrees_with_the_change_meta_reading() {
+        let doc = init_doc(7);
+        assert_eq!(lamport_height(&doc), 0);
+        create_block_with_id(&doc, None, "abc", "a");
+        assert_eq!(
+            lamport_height(&doc),
+            crate::loro_backend::doc_lamport_height(&doc)
+        );
     }
 }
 

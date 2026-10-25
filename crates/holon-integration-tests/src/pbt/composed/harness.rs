@@ -80,9 +80,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use holon_api::EntityUri;
+use holon_loro_testing::LoroSut;
+use holon_loro_testing::ref_ext::ClockFeedLease;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutLayout;
 use holon_pbt_core::capabilities::SutLoroLog;
+use holon_pbt_core::capabilities::SutTwoInstance;
 use holon_pbt_core::composition::CapInvariant;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::InvariantId;
@@ -166,30 +169,102 @@ pub(crate) async fn sut_ids(caps: &CapMap) -> BTreeSet<EntityUri> {
         .collect()
 }
 
-/// E-solid clock side-channel: write the SUT's scalar Lamport height into the
-/// oracle's shared `clock_feed` cell. Called after boot and after every
-/// apply+settle, so the value the NEXT ref transition pads the shadow primary
-/// to is exactly the height that transition's SUT write will land at
-/// (proptest-state-machine interleaves ref-apply N → sut-apply N). The height
-/// is the ONLY observable that ever flows SUT→oracle. Keeps the last-known
-/// height when the cap is absent or the doc is not live yet.
-pub(crate) async fn feed_sut_clock(caps: &CapMap, ref_state: &ReferenceState) {
-    if let Some(log) = caps.get::<dyn SutLoroLog>()
-        && let Some(h) = log.loro_lamport_height().await
-    {
-        *ref_state.loro.clock_feed.lock().expect("clock_feed lock") = Some(h);
+/// E-solid clock side-channel: write the SUT primary's Lamport height and the
+/// ref blocks it lacks into the oracle's shared `clock_feed` cell. Called
+/// after boot and after every apply+settle, so the value the NEXT ref
+/// transition pads the shadow primary to is exactly the height that
+/// transition's SUT write will land at (proptest-state-machine interleaves
+/// ref-apply N → sut-apply N). These two are the ONLY observables that flow
+/// SUT→oracle. Keeps the last-known clock when the cap is absent or the doc is
+/// not live yet. The lease opens on the first feed and clears the cell when
+/// the SUT drops, so a ref-only replay never pads to a height of a SUT that is
+/// gone.
+async fn feed_sut_clock(
+    caps: &CapMap,
+    lease: &mut Option<ClockFeedLease>,
+    ref_state: &ReferenceState,
+) {
+    let Some(height) = sut_lamport_height(caps).await else {
+        return;
+    };
+    // Only `LoroSut` forks peers, so without it no pad site ever runs.
+    let Some(loro) = caps.get::<LoroSut>() else {
+        return;
+    };
+    let (primary_height, held) = loro.primary_clock().await;
+    assert_eq!(
+        primary_height, height,
+        "the SUT Loro log's height and the primary doc's height come from different docs"
+    );
+    let unheld = ref_state
+        .domain
+        .block_state
+        .blocks
+        .keys()
+        .map(|id| id.id().to_string())
+        .filter(|id| {
+            !loro
+                .sut_stable_id(id)
+                .is_some_and(|sut_id| held.contains(&sut_id))
+        })
+        .collect();
+    lease
+        .get_or_insert_with(|| ref_state.loro.lease_clock_feed())
+        .feed(height, unheld);
+}
+
+/// The SUT primary doc's Lamport height. `None` when the drawn wiring exposes
+/// no Loro log (SqlOnly) or the doc is not live yet.
+async fn sut_lamport_height(caps: &CapMap) -> Option<u32> {
+    caps.get::<dyn SutLoroLog>()?.loro_lamport_height().await
+}
+
+/// The SUT takes its forked peers' ids from the ref's per-case draw, starting
+/// at the ref's next unforked peer, so a SUT peer and its shadow share one id.
+fn hand_over_peer_ids(caps: &CapMap, ref_state: &ReferenceState) {
+    if let Some(loro) = caps.get::<LoroSut>() {
+        loro.set_peer_ids(ref_state.loro.peer_ids[ref_state.loro.peers.len()..].to_vec());
     }
 }
 
-/// The SUT primary doc's Lamport height, for the atom-count recorder.
-/// `None` when the recorder is off, the drawn wiring exposes no Loro log
-/// (SqlOnly), or the doc is not live yet.
-async fn atom_counts_height(caps: &CapMap) -> Option<u32> {
-    if !holon_loro_testing::atom_counts::enabled() {
-        return None;
+/// The forked peers that authored ops on the SUT primary are exactly the
+/// model's. Every boot gives the SUT primary a fresh random peer id, so the
+/// ids seen at the boots are the primary's own and are left out, as are the
+/// two instances' ids when a second instance syncs in.
+async fn assert_sut_peers(
+    caps: &CapMap,
+    ref_state: &ReferenceState,
+    primary_ids: &mut BTreeSet<u64>,
+    after: &str,
+) {
+    let Some(loro) = caps.get::<LoroSut>() else {
+        return;
+    };
+    let (own, authors) = loro.primary_authors().await;
+    if after == BOOT {
+        primary_ids.insert(own);
     }
-    caps.get::<dyn SutLoroLog>()?.loro_lamport_height().await
+    assert!(
+        primary_ids.contains(&own),
+        "[clock-peers] after '{after}' the SUT primary writes as peer {own}, not as one of its \
+         boot ids {primary_ids:?}"
+    );
+    let mut own_ids = primary_ids.clone();
+    if let Some(two) = caps.get::<dyn SutTwoInstance>() {
+        let (owner, receiver) = two.instance_peer_ids().await;
+        own_ids.extend([owner, receiver]);
+    }
+    let sut: BTreeSet<u64> = authors.difference(&own_ids).copied().collect();
+    let model = ref_state.loro.expected_forked_authors();
+    assert_eq!(
+        sut, model,
+        "[clock-peers] after '{after}' the SUT primary holds ops of forked peers {sut:?}, the \
+         model's are {model:?}"
+    );
 }
+
+/// The `after` label of the peer-set check that runs right after a boot.
+const BOOT: &str = "boot";
 
 /// Inject `scaffold_ids` into the oracle as `block_documents[id]=no_parent` so
 /// they join `seed_block_ids()` and filter out of the SUT-side block
@@ -317,6 +392,12 @@ pub trait ComposedSlice: 'static {
     /// (`WideE2E` returns `E2ETransition::variant_name`).
     fn transition_kind(t: &Self::Transition) -> String {
         action_label(t)
+    }
+
+    /// The exact Lamport advance `t` leaves on the SUT primary doc, read off
+    /// the ref state after `t`; `None` leaves the kind unchecked.
+    fn lamport_delta(_: &Self::Transition, _: &ReferenceState) -> Option<u32> {
+        None
     }
 
     /// Apply one transition through the FIRE-AND-FORGET dispatch door — the
@@ -766,6 +847,10 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// deselects must fail the run, not vanish from it.
     last_selected: std::cell::RefCell<Option<BTreeSet<&'static str>>>,
     reboot_pending: std::cell::Cell<bool>,
+    /// Keeps the oracle's clock feed live while this SUT exists.
+    clock_feed: Option<ClockFeedLease>,
+    /// The SUT primary's peer id of every boot so far.
+    primary_peer_ids: BTreeSet<u64>,
     _slice: PhantomData<S>,
 }
 
@@ -810,12 +895,23 @@ impl<S: ComposedSlice> ComposedSut<S> {
         let tick = sut.tick.get();
         sut.tick.set(tick + 1);
         let plan = super::interleave::plan_for(&kind, tick);
+        if sut.primary_peer_ids.is_empty() {
+            // A SUT from `from_parts` booted outside this harness.
+            hand_over_peer_ids(&sut.caps, ref_state);
+            let (caps, clock_feed, ids) =
+                (&sut.caps, &mut sut.clock_feed, &mut sut.primary_peer_ids);
+            sut.rt.block_on(async {
+                feed_sut_clock(caps, clock_feed, ref_state).await;
+                assert_sut_peers(caps, ref_state, ids, BOOT).await;
+            });
+        }
         let (before, after, action_us) = {
             // Split the borrow: `settle_after_apply` reads `&sut.handle` while the apply
             // writes `&mut sut.caps` — disjoint fields, so borrow each separately before
             // the `block_on` (both are captured by the `async move`).
             let caps = &mut sut.caps;
             let handle = &sut.handle;
+            let primary_peer_ids = &mut sut.primary_peer_ids;
             sut.rt.block_on(async move {
                 let before = sut_ids(caps).await;
                 // Drop the SUT's per-tick render memo BEFORE mutating, so the
@@ -830,7 +926,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
                 // minutes — must become a red, not a hung suite. Slow-but-
                 // progressing transitions stay well inside this and are reported
                 // with their real measured duration by the invariant below.
-                let atoms_before = atom_counts_height(caps).await;
+                let height_before = sut_lamport_height(caps).await;
                 let progressed = tokio::time::timeout(wedge, async {
                     match plan {
                         // UNMASKED — the same two statements, in the same order,
@@ -895,18 +991,25 @@ impl<S: ComposedSlice> ComposedSut<S> {
                     total_ms = t_action.elapsed().as_millis() as u64,
                     "holon_latency",
                 );
-                feed_sut_clock(caps, ref_state).await;
+                let height_after = sut_lamport_height(caps).await;
                 if holon_loro_testing::atom_counts::enabled() {
-                    let delta = atoms_before
-                        .zip(atom_counts_height(caps).await)
+                    let delta = height_before
+                        .zip(height_after)
                         .map(|(b, a)| a.saturating_sub(b));
                     holon_loro_testing::atom_counts::note_tick(&kind, delta);
                 }
+                super::lamport_delta::assert_delta(
+                    &kind,
+                    S::lamport_delta(&transition, ref_state),
+                    height_before,
+                    height_after,
+                );
+                assert_sut_peers(caps, ref_state, primary_peer_ids, &kind).await;
                 let after = sut_ids(caps).await;
                 (before, after, action_us)
             })
         };
-        Self::post_apply(
+        let mut sut = Self::post_apply(
             sut,
             ref_state,
             is_redo,
@@ -914,7 +1017,11 @@ impl<S: ComposedSlice> ComposedSut<S> {
             after,
             action_us,
             record_label,
-        )
+        );
+        // After the reconcile: it pairs the ids this tick minted with the SUT's.
+        let (caps, clock_feed) = (&sut.caps, &mut sut.clock_feed);
+        sut.rt.block_on(feed_sut_clock(caps, clock_feed, ref_state));
+        sut
     }
 
     /// Everything a tick does AFTER its measured apply+settle window:
@@ -1138,6 +1245,8 @@ impl<S: ComposedSlice> ComposedSut<S> {
             tick,
             last_selected,
             reboot_pending,
+            mut clock_feed,
+            mut primary_peer_ids,
             _slice,
         } = self;
         reboot_pending.set(true);
@@ -1146,52 +1255,63 @@ impl<S: ComposedSlice> ComposedSut<S> {
         tick.set(tick.get() + 1);
         let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
         let resolver_ref = &resolver;
-        let (before, after, caps, handle, action_us) = rt.block_on(async move {
-            let before = sut_ids(&caps).await;
-            S::invalidate_render_caches(&handle);
-            let t_action = std::time::Instant::now();
-            let rebuilt = tokio::time::timeout(
-                wedge,
-                S::reboot(handle, caps, resolver_ref, ref_state, transition),
-            )
-            .await;
-            let (caps, handle) = rebuilt
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "[inv-settle-budget] WEDGED: 'Reboot' did not finish shutting down and \
+        let (before, after, caps, handle, action_us, clock_feed, primary_peer_ids) =
+            rt.block_on(async move {
+                let before = sut_ids(&caps).await;
+                S::invalidate_render_caches(&handle);
+                let t_action = std::time::Instant::now();
+                let rebuilt = tokio::time::timeout(
+                    wedge,
+                    S::reboot(handle, caps, resolver_ref, ref_state, transition),
+                )
+                .await;
+                let (caps, handle) = rebuilt
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "[inv-settle-budget] WEDGED: 'Reboot' did not finish shutting down and \
                          booting again within {wedge:?} (HOLON_PBT_LATENCY_WEDGE_MS)"
-                    )
-                })
-                .expect(
-                    "a reboot transition reached a slice with no reboot seam \
+                        )
+                    })
+                    .expect(
+                        "a reboot transition reached a slice with no reboot seam \
                      (`ComposedSlice::reboot` returned None) — the slice must narrow the \
                      transition out of its alphabet instead of applying it as a no-op",
+                    );
+                let action_us = t_action.elapsed().as_micros() as u64;
+                if let Some(l) =
+                    caps.get::<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>()
+                {
+                    l.note_boot(&action, std::time::Duration::from_micros(action_us));
+                }
+                tracing::info!(
+                    target: "holon_latency",
+                    stage = "action_total",
+                    action = %action,
+                    total_ms = t_action.elapsed().as_millis() as u64,
+                    "holon_latency",
                 );
-            let action_us = t_action.elapsed().as_micros() as u64;
-            if let Some(l) =
-                caps.get::<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>()
-            {
-                l.note_boot(&action, std::time::Duration::from_micros(action_us));
-            }
-            tracing::info!(
-                target: "holon_latency",
-                stage = "action_total",
-                action = %action,
-                total_ms = t_action.elapsed().as_millis() as u64,
-                "holon_latency",
-            );
-            feed_sut_clock(&caps, ref_state).await;
-            let after = sut_ids(&caps).await;
-            // Open the measurement window LAST. It must be opened (the window
-            // the previous transition left open would otherwise bill this
-            // boot's `ensure_schema` DDL and re-projection reads to that
-            // transition — measured as NavigateFocus.sql_ddl=76), and opened
-            // here rather than before the restart because a boot's cost is not
-            // an interaction's cost: the FIRST boot is outside every budget
-            // window for the same reason.
-            S::note_tick_start(transition, &caps).await;
-            (before, after, caps, handle, action_us)
-        });
+                hand_over_peer_ids(&caps, ref_state);
+                feed_sut_clock(&caps, &mut clock_feed, ref_state).await;
+                assert_sut_peers(&caps, ref_state, &mut primary_peer_ids, BOOT).await;
+                let after = sut_ids(&caps).await;
+                // Open the measurement window LAST. It must be opened (the window
+                // the previous transition left open would otherwise bill this
+                // boot's `ensure_schema` DDL and re-projection reads to that
+                // transition — measured as NavigateFocus.sql_ddl=76), and opened
+                // here rather than before the restart because a boot's cost is not
+                // an interaction's cost: the FIRST boot is outside every budget
+                // window for the same reason.
+                S::note_tick_start(transition, &caps).await;
+                (
+                    before,
+                    after,
+                    caps,
+                    handle,
+                    action_us,
+                    clock_feed,
+                    primary_peer_ids,
+                )
+            });
         let sut = Self {
             caps,
             handle,
@@ -1208,6 +1328,8 @@ impl<S: ComposedSlice> ComposedSut<S> {
             tick,
             last_selected,
             reboot_pending,
+            clock_feed,
+            primary_peer_ids,
             _slice,
         };
         // The same post-apply path every transition takes. The id reconcile is a
@@ -1248,6 +1370,8 @@ impl<S: ComposedSlice> ComposedSut<S> {
         // harness constructs the SUT through this entry point instead).
         crate::test_tracing::begin_test_scope();
         crate::test_tracing::SpanCollector::global().reset();
+        let clock_feed = None;
+        let primary_peer_ids = BTreeSet::new();
         Self {
             caps,
             handle,
@@ -1264,6 +1388,8 @@ impl<S: ComposedSlice> ComposedSut<S> {
             tick: std::cell::Cell::new(0),
             last_selected: std::cell::RefCell::new(None),
             reboot_pending: std::cell::Cell::new(false),
+            clock_feed,
+            primary_peer_ids,
             _slice: PhantomData,
         }
     }
@@ -1673,7 +1799,13 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let (caps, handle, scaffold_ids) = rt.block_on(S::build(&resolver, ref_state));
         S::align_ids(&handle, ref_state);
-        rt.block_on(feed_sut_clock(&caps, ref_state));
+        hand_over_peer_ids(&caps, ref_state);
+        let mut clock_feed = None;
+        let mut primary_peer_ids = BTreeSet::new();
+        rt.block_on(async {
+            feed_sut_clock(&caps, &mut clock_feed, ref_state).await;
+            assert_sut_peers(&caps, ref_state, &mut primary_peer_ids, BOOT).await;
+        });
         Self {
             caps,
             handle,
@@ -1690,6 +1822,8 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             tick: std::cell::Cell::new(0),
             last_selected: std::cell::RefCell::new(None),
             reboot_pending: std::cell::Cell::new(false),
+            clock_feed,
+            primary_peer_ids,
             _slice: PhantomData,
         }
     }

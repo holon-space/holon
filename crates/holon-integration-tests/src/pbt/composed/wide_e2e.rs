@@ -2151,6 +2151,7 @@ pub fn cap_ids_for_wiring(wiring: &Wiring) -> Vec<CapId> {
             ids.extend(cap_ids![SutEdgeFieldWrite, SutTypedEntityWrite]);
         }
         ids.extend(cap_ids![SutTypedEntityLoro, SutLoro]);
+        ids.push(CapId::of::<holon_loro_testing::LoroSut>());
     }
     if has_editor && !has_frontend {
         // No frontend session to host the real headless editor mirror, so the
@@ -2393,9 +2394,11 @@ impl ReferenceStateMachine for WideE2EMachine {
             wired,
             integration_connect_timing(),
             crate::pbt::composed::boot_fault::boot_fault_strategy(),
+            holon_loro_testing::ref_ext::peer_ids_strategy(),
         )
-            .prop_map(|(mut state, timing, fault)| {
+            .prop_map(|(mut state, timing, fault, peer_ids)| {
                 state.integration.timing = timing;
+                state.loro.peer_ids = peer_ids;
                 // A boot fault is disclosed on the session's bus, so only a
                 // wiring that boots a session can draw one.
                 let fault = if set_for_wiring(&state.harness.wiring)
@@ -2527,6 +2530,10 @@ impl ComposedSlice for WideE2E {
     /// nothing.
     fn transition_kind(t: &E2ETransition) -> String {
         t.variant_name().to_string()
+    }
+
+    fn lamport_delta(t: &E2ETransition, post: &ReferenceState) -> Option<u32> {
+        crate::pbt::composed::lamport_delta::predict(t, post)
     }
 
     /// Arm this session's engine for the fire-and-forget dispatch door, apply,
