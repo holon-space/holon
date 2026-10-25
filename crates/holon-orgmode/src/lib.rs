@@ -53,6 +53,7 @@ pub use block_params::build_block_params;
 pub use di::AssetSeedGate;
 #[cfg(feature = "di")]
 pub use di::BootSeedAnswer;
+#[cfg(feature = "di")]
 pub use di::BootSeedGate;
 #[cfg(feature = "di")]
 pub use di::FileWatcherReadySignal;

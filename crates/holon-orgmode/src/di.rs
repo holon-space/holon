@@ -652,6 +652,7 @@ impl OrgModeConfig {
 /// Write each of `config.seed_assets` whose `#+ID` no org file in the vault
 /// declares, through the `FileSystem` port. Keyed on the id, not the file name,
 /// so a page the user moved into another file is not written a second time.
+/// Never writes over an existing file at the asset's path.
 /// Reads each file only up to its first headline, where the id carriers end.
 /// Must finish before anything scans the vault (the initial
 /// `OrgModeSyncProvider::sync` and the controller's initial scan).
@@ -706,7 +707,16 @@ pub async fn seed_default_org_assets(
         if declared.contains(&id) {
             continue;
         }
-        fs.write(&root.join(filename), content.as_bytes())
+        let path = root.join(filename);
+        if fs.exists(&path) {
+            tracing::warn!(
+                file = %path.display(),
+                "a file at the bundled asset's path declares no `#+ID: {id}`; the seed keeps \
+                 that file and does not write the asset"
+            );
+            continue;
+        }
+        fs.write(&path, content.as_bytes())
             .await
             .with_context(|| format!("writing {filename}"))?;
     }
