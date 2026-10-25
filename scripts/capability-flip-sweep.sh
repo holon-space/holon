@@ -55,7 +55,7 @@ export HOLON_CAPABILITY_REPORT_DIR="$ROOT/$WORK/reports"
 # (measured: ~6s per flip, then ~10 MINUTES per flip under contention).
 echo "building the certification binary (once)…"
 BUILD_JSON="$WORK/build.json"
-/opt/homebrew/opt/parallel/bin/parallel --semaphore --id "holon-build-$(hostname -s)" -j4 --fg -- \
+/opt/homebrew/opt/parallel/bin/parallel --semaphore --id holon-build -j4 --fg -- \
     cargo test -p holon-org-format --test profile_certification --no-run --message-format=json \
     >"$BUILD_JSON" 2>"$WORK/build.err" || {
     echo "FATAL: building the certification binary failed — see $WORK/build.err"
@@ -292,7 +292,7 @@ echo "SWEEP: $total flips, $defects silent-defect(s), $surprises surprise(s)"
 # the in-tree yaml, whatever the last flip did.
 echo "restoring the ledger's input with a clean certification…"
 unset HOLON_CAPABILITY_PROFILE HOLON_CAPABILITY_REPORT_DIR
-/opt/homebrew/opt/parallel/bin/parallel --semaphore --id "holon-build-$(hostname -s)" -j4 --fg -- \
+/opt/homebrew/opt/parallel/bin/parallel --semaphore --id holon-build -j4 --fg -- \
     ./scripts/capability-cert.sh >"$WORK/clean-cert.txt" 2>&1 || {
     echo "FATAL: the closing clean certification failed — see $WORK/clean-cert.txt"
     exit 94
