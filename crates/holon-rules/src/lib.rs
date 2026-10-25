@@ -128,18 +128,33 @@ pub struct Emit {
 ///   (`journals` → `block:journals`), so the page's name-chain is `[Journals,
 ///   {today}]` — the very chain the guard's `block_exists("Journals/{today}")`
 ///   matches.
+/// - `place: $context_page_id` (or `page($context_page_id)`) — under the page
+///   that holds the rule ([`PlaceParent::OwnPage`]).
 /// - `place: display(under: x)` — the advice/maintained side, **not** parsed
 ///   here (ADR 0024 — stays ADR 0022).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
-    /// The scheme-free parent block id root (e.g. `journals` →
-    /// `block:journals`).
-    root: String,
+    parent: PlaceParent,
     /// Whether the emitted block is `Page`-tagged (own page-file) vs an inline
     /// child. `place: page(<root>)` sets this; a bare `place: <root>` leaves it
     /// false.
     is_page: bool,
 }
+
+/// The parent an emission creates under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceParent {
+    /// A named block, as its schemed id (`journals` → `block:journals`).
+    Block(String),
+    /// The nearest page ancestor of the rule block, spelled
+    /// [`SELF_PAGE_PARAM`] with a `$` sigil. Resolved per firing, so the rule
+    /// follows its page through a rename.
+    OwnPage,
+}
+
+/// The parameter name, without its `$` sigil, that names the page holding a
+/// `holon_sql` or `holon_rule` block.
+pub const SELF_PAGE_PARAM: &str = "context_page_id";
 
 impl Place {
     /// Parse a canonical place. Rejects the `display(...)` form loudly
@@ -172,19 +187,21 @@ impl Place {
         })
     }
 
-    /// Build from a (possibly `block:`-scheme-prefixed) root, or `None` if the
-    /// stripped root is not a valid slug.
+    /// Build from the self-page reference or a (possibly
+    /// `block:`-scheme-prefixed) root, or `None` if the stripped root is
+    /// not a valid slug.
     fn from_root(raw: &str, is_page: bool) -> Option<Self> {
+        if raw.strip_prefix('$') == Some(SELF_PAGE_PARAM) {
+            return Some(Self {
+                parent: PlaceParent::OwnPage,
+                is_page,
+            });
+        }
         let root = raw.strip_prefix("block:").unwrap_or(raw);
         is_slug(root).then(|| Self {
-            root: root.to_string(),
+            parent: PlaceParent::Block(format!("block:{root}")),
             is_page,
         })
-    }
-
-    /// The scheme-free placement root (e.g. `journals`).
-    pub fn as_str(&self) -> &str {
-        &self.root
     }
 
     /// Whether the emitted block is `Page`-tagged — placed in its own page-file
@@ -193,9 +210,9 @@ impl Place {
         self.is_page
     }
 
-    /// The parent block id the emit creates under (`block:journals`).
-    pub fn parent_id(&self) -> String {
-        format!("block:{}", self.root)
+    /// The parent the emit creates under.
+    pub fn parent(&self) -> &PlaceParent {
+        &self.parent
     }
 }
 
@@ -447,6 +464,10 @@ mod tests {
 
     use super::*;
 
+    fn journals() -> PlaceParent {
+        PlaceParent::Block("block:journals".to_string())
+    }
+
     const SUGAR: &str = r#"
 name: daily_journal
 when: 'not block_exists("Journals/{today}")'
@@ -491,7 +512,7 @@ advise:
             "the two effect forms must agree"
         );
         let emit = sugar.emit.expect("operate rule carries an emit");
-        assert_eq!(emit.place.parent_id(), "block:journals");
+        assert_eq!(emit.place.parent(), &journals());
         assert_eq!(emit.name.render("2026-07-10"), "2026-07-10");
     }
 
@@ -513,8 +534,7 @@ emit:
         );
         // Parent resolution is identical to a bare root: the page's name-chain is
         // `[Journals, {today}]` — the chain the guard's block_exists matches.
-        assert_eq!(emit.place.parent_id(), "block:journals");
-        assert_eq!(emit.place.as_str(), "journals");
+        assert_eq!(emit.place.parent(), &journals());
         assert_eq!(emit.name.render("2026-07-10"), "2026-07-10");
     }
 
@@ -531,7 +551,25 @@ emit:
     fn page_placement_accepts_block_scheme_in_root() {
         let p = Place::parse("page(block:journals)").expect("scheme in root parses");
         assert!(p.is_page());
-        assert_eq!(p.as_str(), "journals");
+        assert_eq!(p.parent(), &journals());
+    }
+
+    #[test]
+    fn self_page_reference_parses_to_own_page() {
+        let inline = Place::parse("$context_page_id").expect("inline self-page parses");
+        assert_eq!(inline.parent(), &PlaceParent::OwnPage);
+        assert!(!inline.is_page());
+        let page = Place::parse("page($context_page_id)").expect("page self-page parses");
+        assert_eq!(page.parent(), &PlaceParent::OwnPage);
+        assert!(page.is_page());
+    }
+
+    #[test]
+    fn other_dollar_names_are_not_a_place() {
+        assert!(matches!(
+            Place::parse("$context_id").unwrap_err(),
+            HolonRuleParseError::Place { .. }
+        ));
     }
 
     #[test]
@@ -553,7 +591,7 @@ emit:
         let yaml = "name: r\nwhen: 'not block_exists(\"A/{today}\")'\nemit:\n  place: \
                     \"block:journals\"\n  name: \"{today}\"\n";
         let rule = parse_holon_rule(yaml).expect("scheme-prefixed place parses");
-        assert_eq!(rule.emit.unwrap().place.as_str(), "journals");
+        assert_eq!(rule.emit.unwrap().place.parent(), &journals());
     }
 
     #[test]

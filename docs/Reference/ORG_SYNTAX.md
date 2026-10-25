@@ -430,6 +430,22 @@ emit:
   as query content. A malformed body surfaces a loud `RuleStatus::ParseError` on
   the card. The parser is `holon_advice::holon_rule::parse_holon_rule`.
 
+### Self-page reference (`$context_page_id`)
+
+`$context_page_id` names the page that holds the block: its nearest
+`Page`-tagged ancestor. It is resolved each time the query runs or the rule
+fires, so it follows the page through a rename. A `holon_sql` query uses it as
+a parameter, a `holon_rule` as its `emit.place` (`place: $context_page_id`
+or `place: page($context_page_id)`):
+
+```org
+#+BEGIN_SRC holon_sql :id notes::src::0
+SELECT * FROM block WHERE parent_id = $context_page_id
+#+END_SRC
+```
+
+A query or rule that names it with no page above it fails with an error.
+
 ### Image blocks
 
 An image child block renders as a single `[[file:…]]` link line inside its

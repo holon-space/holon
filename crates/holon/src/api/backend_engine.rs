@@ -973,6 +973,37 @@ impl BackendEngine {
         );
     }
 
+    /// Bind `$context_page_id` to the nearest page ancestor of the context
+    /// block, only when `sql` names it: the walk costs a read per query.
+    async fn bind_page_param(
+        &self,
+        sql: &str,
+        params: &mut HashMap<String, Value>,
+        context: &QueryContext,
+    ) -> Result<()> {
+        let mut names_page = false;
+        holon_turso::sql_utils::rewrite_named_params(sql, &mut |name| {
+            names_page |= name == holon_rules::SELF_PAGE_PARAM;
+            None
+        });
+        if !names_page {
+            return Ok(());
+        }
+        let start = context.current_block_id.as_ref().with_context(|| {
+            format!(
+                "${} names the page of the block that holds the query, but this query runs \
+                 without a block context",
+                holon_rules::SELF_PAGE_PARAM
+            )
+        })?;
+        let page = super::page_ref::PageRef::nearest(&self.db_handle, start).await?;
+        params.insert(
+            holon_rules::SELF_PAGE_PARAM.into(),
+            Value::String(page.id().as_str().to_string()),
+        );
+        Ok(())
+    }
+
     /// Execute a SQL query and return the result set
     ///
     /// Supports parameter binding by replacing `$param_name` placeholders with
@@ -995,6 +1026,7 @@ impl BackendEngine {
         // without context.
         let ctx = context.unwrap_or_else(QueryContext::root);
         self.bind_context_params(&mut params, &ctx);
+        self.bind_page_param(&sql, &mut params, &ctx).await?;
 
         query_retrying_schema_change(&self.db_handle, &sql, params)
             .await
@@ -1078,6 +1110,7 @@ impl BackendEngine {
     ) -> Result<RowChangeStream> {
         let ctx = context.unwrap_or_else(QueryContext::root);
         self.bind_context_params(&mut params, &ctx);
+        self.bind_page_param(&sql, &mut params, &ctx).await?;
 
         let sql_with_params = Self::inline_parameters(&sql, &params)?;
         // Same diagnostic as `query_and_watch`: without it this path's views are
@@ -1125,6 +1158,8 @@ impl BackendEngine {
         // Inline params to get the final SQL for the matview
         let mut params_with_context = params.clone();
         self.bind_context_params(&mut params_with_context, &ctx);
+        self.bind_page_param(&transformed_sql, &mut params_with_context, &ctx)
+            .await?;
         let sql_with_params = Self::inline_parameters(&transformed_sql, &params_with_context)?;
 
         // Shapes the fork's DBSP IVM cannot maintain (subquery predicates —

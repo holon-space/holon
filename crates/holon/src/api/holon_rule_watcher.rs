@@ -55,12 +55,14 @@ use holon_api::streaming::Change;
 use holon_core::storage::types::StorageEntity;
 use holon_net::RuleAcceptance;
 use holon_rules::Emit;
+use holon_rules::PlaceParent;
 use holon_rules::parse_holon_rule;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tracing::info;
 
 use crate::api::backend_engine::BackendEngine;
+use crate::api::page_ref::PageRef;
 use crate::api::rule_status::RuleStatus;
 use crate::api::rule_status::RuleStatusHandle;
 
@@ -342,7 +344,17 @@ async fn fire_emit(
     };
 
     let content = emit.name.render(&today);
-    let parent_id = emit.place.parent_id();
+    let parent_id = match own_parent(engine, rule_id, emit.place.parent()).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(
+                "[holon_rule_watcher] {} place resolution failed: {e:#}",
+                rule_id.as_str()
+            );
+            status.set(rule_id.as_str(), RuleStatus::ExecError(format!("{e:#}")));
+            return;
+        }
+    };
 
     // Inhibitor arc, evaluated as a direct read (never a matview): if the place
     // already holds this block, the guard is FALSE — do nothing. This is the
@@ -575,6 +587,24 @@ async fn current_title_of(engine: &BackendEngine, id: &str) -> Result<Option<Str
         .and_then(|r| r.get("content"))
         .and_then(|v| v.as_string())
         .map(str::to_string))
+}
+
+/// The schemed id an emission creates under; the self-page reference resolves
+/// against the rule block at each firing, so it follows a renamed or moved
+/// page.
+async fn own_parent(
+    engine: &BackendEngine,
+    rule_id: &RuleId,
+    parent: &PlaceParent,
+) -> Result<String> {
+    match parent {
+        PlaceParent::Block(id) => Ok(id.clone()),
+        PlaceParent::OwnPage => {
+            let rule_block = holon_api::EntityUri::parse(rule_id.as_str())?;
+            let page = PageRef::nearest(engine.db_handle(), &rule_block).await?;
+            Ok(page.id().as_str().to_string())
+        }
+    }
 }
 
 /// The `/`-joined page-title chain of `block_id`, walking up `parent_id` while
@@ -837,7 +867,10 @@ emit:
         let rule = parse_holon_rule(JOURNAL_RULE).unwrap();
         assert_eq!(rule.guard.subject, Subject::Clock);
         let emit = rule.emit.expect("operate rule");
-        assert_eq!(emit.place.parent_id(), "block:journals");
+        assert_eq!(
+            emit.place.parent(),
+            &PlaceParent::Block("block:journals".to_string())
+        );
         assert!(
             emit.place.is_page(),
             "page-file journal rule places the day-block as its own page-file"
@@ -991,7 +1024,10 @@ emit:
             place: Place::parse("journals").unwrap(),
             name: NameTemplate::parse("{today}").unwrap(),
         };
-        assert_eq!(emit.place.parent_id(), "block:journals");
+        assert_eq!(
+            emit.place.parent(),
+            &PlaceParent::Block("block:journals".to_string())
+        );
     }
 
     async fn _wait(engine: &BackendEngine, n: usize, timeout: Duration) {

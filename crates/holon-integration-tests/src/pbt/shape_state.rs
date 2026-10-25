@@ -55,6 +55,7 @@ const NOT_JUDGED: &[&str] = &[
     "WriteOrgFile",
     "ApplyMutation",
     "BulkExternalAdd",
+    "AuthorSelfPageRule",
     "StaleExternalRewrite",
     "PasteBlockCopy",
     "EditBlockCopy",

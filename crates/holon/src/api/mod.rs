@@ -37,6 +37,7 @@ pub mod layout_seed;
 pub mod net_guard;
 pub mod operation_dispatcher;
 pub mod operation_engine;
+pub mod page_ref;
 pub mod query_engine;
 pub mod rule_status;
 pub(crate) mod running_write;

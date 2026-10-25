@@ -35,6 +35,7 @@ pub mod matview_recompute_matches;
 pub mod operation_surfaces_agree;
 pub mod overlay_placement_local;
 pub mod paint_text_styling;
+pub mod self_page_ref_resolves;
 pub mod share_mount_carries_page_identity;
 pub mod two_instance_convergence;
 pub mod two_writer_peer_writes_land;

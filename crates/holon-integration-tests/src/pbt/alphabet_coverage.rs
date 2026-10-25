@@ -100,6 +100,7 @@ enum CoveredBy {
 /// `the_by_construction_declines_are_exactly_the_listed_kinds`, so a kind that
 /// joins or leaves it is a test diff, never silent.
 const EXPECTED_ABSENT: &[(&str, CoveredBy)] = &[
+    ("AuthorSelfPageRule", CoveredBy::HandAuthored),
     ("CrashRestart", CoveredBy::HandAuthored),
     ("DelayAdmissions", CoveredBy::HandAuthored),
     ("DeliverBlockContent", CoveredBy::SelfAttestingSuite),

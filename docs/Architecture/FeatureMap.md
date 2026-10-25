@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 127 transitions; the repo declares 99 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 128 transitions; the repo declares 100 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -252,6 +252,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `AttemptReadOnlyEdit` — the write the dispatcher must refuse, without which `inv-read-only-home-refuses-writes` can only prove that nothing tried
 - `AuthorMalformedRender` — a render source that does not parse draws an error naming the block and the parse error, never a silent `table()`
 - `AuthorRenderOnlyBlock` — a block whose only source child is a render draws that render, not a bare entity leaf
+- `AuthorSelfPageRule` — a rule names the page that holds it, resolved to the nearest page ancestor when it fires
 - `BreakIngestedRecipe` — a file that ingested and is then refused joins its format's group like a file that never ingested (D71.b)
 - `CrashRestart` — a crash must not let a stale file revert what the store already holds
 - `CreateBlockUnderFocus` — creation-slot gesture mint under focus root
@@ -326,6 +327,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-remote-list-mirror-matches-ref` — the `RemoteListSync` transition runs the production round over the fixture peer and writes the local intents into the real mirror table; this compares that table, projected to the peer-authoritative columns, against the peer's list in the reference model.
 - `inv-remote-list-peer-matches-ref` — the `RemoteListSync` transition runs the production round against the fake list app; this compares the app's stored entries against the reference model's app.
 - `inv-render-only-block-draws-its-render` — a block whose only source child is a render draws that render, not a bare entity leaf
+- `inv-self-page-ref-resolves` — a query block that names its own page yields exactly that page: the nearest page ancestor of the block that holds the query, also after the page is renamed.
 - `inv-shape-gate-refuses-illegal-writes` — a Holon-side edit of a `decision` subtree, legal or not, one gesture at a time
 - `inv-shape-sim-matches-authority` — every block write any transition makes near a tagged block, through any op the dispatcher routes
 - `inv-shows-source-when-no-query`

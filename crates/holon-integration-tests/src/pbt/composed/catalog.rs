@@ -92,6 +92,7 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // (`HOLON_PBT_ADVANCE_DAY`). Vacuously green (boot day only) until the
         // clock advances, so it adds no false RED to the default keystone.
         invariants::journal_one_per_day::wire(),
+        invariants::self_page_ref_resolves::wire(),
         // Sidebar page-tag preservation: a ref `Page` doc-root must keep its
         // `Page` tag in the SUT projection (folder-companion demotion class,
         // dogfood 2026-07-12). Needs `SutBackend` + `RefBlockTree`.

@@ -68,6 +68,7 @@ pub mod paint_text_styling;
 pub mod remote_list_mirror_matches_ref;
 pub mod remote_list_peer_matches_ref;
 pub mod reseed_leak;
+pub mod self_page_ref_resolves;
 pub mod sticky_accordion_spec;
 pub mod typed_loro_matches_ref;
 pub mod typed_matview_matches_ref;
