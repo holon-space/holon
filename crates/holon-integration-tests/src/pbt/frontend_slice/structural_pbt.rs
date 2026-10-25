@@ -629,7 +629,7 @@ fn editor_ref() -> ReferenceState {
         .documents
         .insert(page.clone(), "structural-page.org".to_string());
     state.files.documents.insert(
-        EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id"),
+        crate::pbt::journals_asset::page_id(),
         "Journals.org".to_string(),
     );
 

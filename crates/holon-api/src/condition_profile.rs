@@ -781,6 +781,15 @@ const DELETION_ENDED_BY_EDIT: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const COMPANION_PAGE_ID_OVERRULED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A folder's page `#+ID` was not applied",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const FILE_EDIT_OVERRULED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "A file edit was not applied",
@@ -1067,6 +1076,7 @@ impl ConditionKind {
             Self::DeletedBlockKeptInFile { .. } => DELETED_BLOCK_KEPT_IN_FILE,
             Self::DeletionUndoneBlockInOtherFile { .. } => DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
             Self::DeletionEndedByEdit { .. } => DELETION_ENDED_BY_EDIT,
+            Self::CompanionPageIdOverruled { .. } => COMPANION_PAGE_ID_OVERRULED,
             Self::FileEditOverruled { .. } => FILE_EDIT_OVERRULED,
             Self::HolonEditOverruled { .. } => HOLON_EDIT_OVERRULED,
             Self::VaultSyncNotStarted { .. } => VAULT_SYNC_NOT_STARTED,

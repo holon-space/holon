@@ -911,7 +911,7 @@ pub fn structural_ref_wired(
     // The journals page owns a file too: `boot_and_seed_wide` always seeds a
     // `Journals.org` shell, so every block under the page is org-homed.
     state.files.documents.insert(
-        EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id"),
+        crate::pbt::journals_asset::page_id(),
         "Journals.org".to_string(),
     );
 
@@ -1482,9 +1482,8 @@ pub async fn boot_and_seed_wide_with_peer_id(
             .expect("[boot seed] the org boot did not end within 30s")
             .expect("[boot seed] the org boot failed");
         let present = sut_ids(&caps).await;
-        let lost: Vec<EntityUri> = holon_frontend::journals_page_blocks()
+        let lost: Vec<EntityUri> = crate::pbt::journals_asset::blocks()
             .into_iter()
-            .chain(holon_frontend::journals_auto_create_blocks())
             .map(|b| b.id)
             .filter(|id| !present.contains(id))
             .collect();
@@ -1615,11 +1614,8 @@ pub async fn boot_and_seed_wide_with_peer_id(
         .into_iter()
         .chain(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block))
         .chain(DECISION_IDS.into_iter().map(EntityUri::block))
-        .chain([
-            EntityUri::parse(holon_frontend::JOURNALS_AUTO_CREATE_ID).expect("auto-create id"),
-            EntityUri::parse(holon_frontend::JOURNALS_ACTION_ID).expect("holon_rule id"),
-            crate::pbt::frontend_slice::components::keystone_boot_journal_id(),
-        ])
+        .chain(crate::pbt::journals_asset::rule_ids())
+        .chain([crate::pbt::frontend_slice::components::keystone_boot_journal_id()])
         .collect();
     let booted = sut_ids(&caps).await;
     let ref_ids: BTreeSet<EntityUri> = ref_state
@@ -2263,11 +2259,7 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
         // neither compares nor targets it. The page-display layer
         // (`journals`/`src::0`/`render::0`) stays modeled — it is scaffold-filtered
         // and never a mutation/peer target.
-        for id in [
-            holon_frontend::JOURNALS_AUTO_CREATE_ID,
-            holon_frontend::JOURNALS_ACTION_ID,
-        ] {
-            let uri = EntityUri::parse(id).expect("journals rule id");
+        for uri in crate::pbt::journals_asset::rule_ids() {
             state.domain.block_state.blocks.remove(&uri);
             state.domain.block_state.block_documents.remove(&uri);
             state.domain.layout_blocks.headline_ids.remove(&uri);

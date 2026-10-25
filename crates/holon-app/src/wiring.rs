@@ -396,7 +396,7 @@ impl FrontendInjectorExt for Injector {
             use crate::turso_seams::OrgModeModule;
 
             // Ensure the org root exists on the real disk so the config-time
-            // canonicalize below resolves. The empty-vault default-document
+            // canonicalize below resolves. The default-document
             // seeding happens later through the FileSystem port (ADR 0011) —
             // see `seed_assets` and OrgModeModule's factory. "index.org" is
             // deliberately excluded from the sidebar query, so the seed uses

@@ -313,14 +313,11 @@ pub fn resolve_creation_parent(
             //    rowset filters out (BugFunnel #67: a subdir page-file
             //    `Journals/2026-07-10.org` roots the date page under the `journals`
             //    folder-page). CORRECTION (Fork B B1 senior review, 2026-07-13, Finding C):
-            //    `block:journals` IS itself a `Page` (unconditional assertion,
-            //    `holon-frontend/src/lib.
-            //    rs::journals_page_blocks_shell_owns_query_and_render`, `parent_id ==
-            //    no_parent()`) — the original comment here claiming it is "not itself a
-            //    Page" was wrong. The real reason a nested date's parent can still be
-            //    absent from a `WHERE tag='Page'` rowset is a QUERY-SCOPE filter (e.g. a
-            //    per-folder or single-level listing) excluding the ancestor row, not the
-            //    ancestor lacking the tag. Per the links-ruling nested pages are a
+            //    `block:journals` IS itself a root `Page` (the `#+ID` of
+            //    `assets/default/Journals.org`). The real reason a nested date's parent can
+            //    still be absent from a `WHERE tag='Page'` rowset is a QUERY-SCOPE filter
+            //    (e.g. a per-folder or single-level listing) excluding the ancestor row,
+            //    not the ancestor lacking the tag. Per the links-ruling nested pages are a
             //    REPRESENTABLE state (anchored by id), so a mixed forest — some roots at
             //    the sentinel, some dangling to an absent-but-real (scope-filtered) parent
             //    — is legal data, NOT a corrupt rowset. Per the 2026-07-13 page-hierarchy

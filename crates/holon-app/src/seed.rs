@@ -69,8 +69,9 @@ pub async fn seed_default_layout(
     }
 
     // Build the seed entries from the bundled Org assets. `reseed_default`
-    // gates the `__default__` page + parsed `index.org` layout; the journals
-    // machinery is seeded regardless (see `build_default_layout_blocks`).
+    // gates the `__default__` page + parsed `index.org` layout; every
+    // `DEFAULT_ASSETS` file is seeded regardless (see
+    // `build_default_layout_blocks`).
     let mut entries = FrontendSession::<()>::build_default_layout_blocks(reseed_default)?;
 
     // Parse the bundled index.org layout (root-layout + sidebars + sources).
@@ -261,7 +262,7 @@ mod routing_tests {
     /// their parent is the `block:journals` Page; this asserts the agreement.
     #[test]
     fn every_seed_block_routes_to_its_page_ancestor() {
-        // `fresh` seeds the full layout (journals page + `__default__` +
+        // `fresh` seeds the full layout (the bundled assets + `__default__` +
         // index.org sidebars/sources) — the widest entry set.
         let entries = FrontendSession::<()>::build_default_layout_blocks(true)
             .expect("build default layout blocks");
@@ -300,28 +301,6 @@ mod routing_tests {
                 reached,
                 "routing doc {doc} is not an ancestor of {} — cross-page misroute",
                 block.id
-            );
-        }
-    }
-
-    /// The specific dogfood #5 blocks: the journals view definition routes to
-    /// the `block:journals` page, NOT `block:__default__`.
-    #[test]
-    fn journals_view_blocks_route_to_journals_not_default() {
-        let entries = FrontendSession::<()>::build_default_layout_blocks(true)
-            .expect("build default layout blocks");
-        let by_id: HashMap<&EntityUri, &Block> = entries.iter().map(|b| (&b.id, b)).collect();
-
-        for id in ["block:journals::src::0", "block:journals::render::0"] {
-            let uri = EntityUri::parse(id).expect("parse id");
-            let block = by_id
-                .get(&uri)
-                .unwrap_or_else(|| panic!("{id} missing from seed set"));
-            let doc = seed_routing_doc(block, &by_id).expect("route journals view block");
-            assert_eq!(
-                doc.as_str(),
-                "block:journals",
-                "{id} must route to the journals page, not {doc}"
             );
         }
     }

@@ -21,11 +21,16 @@ pub const DOC_ID: &str = "20260908T090000";
 
 pub type Store = Arc<Mutex<HashMap<EntityUri, Block>>>;
 
+/// Child ids by parent, so a document's blocks are found without a walk over
+/// every stored block of a many-file vault.
+type Children = Arc<Mutex<HashMap<EntityUri, Vec<EntityUri>>>>;
+
 /// Applies creates, updates AND deletes. The delete leg is the point: it is the
 /// operation a 0-byte parse emits for every block of the document.
 #[derive(Clone, Default)]
 struct ApplyingOrdering {
     store: Store,
+    children: Children,
 }
 
 fn params_id(params: &holon_api::StorageEntity) -> EntityUri {
@@ -60,13 +65,12 @@ impl BlockOrdering for ApplyingOrdering {
     }
     async fn children(&self, parent: &EntityUri) -> OrderingResult<Vec<EntityUri>> {
         Ok(self
-            .store
+            .children
             .lock()
             .unwrap()
-            .values()
-            .filter(|b| b.parent_id == *parent)
-            .map(|b| b.id.clone())
-            .collect())
+            .get(parent)
+            .cloned()
+            .unwrap_or_default())
     }
     async fn create_in_tree(
         &self,
@@ -84,7 +88,15 @@ impl BlockOrdering for ApplyingOrdering {
         );
         block.properties = properties.clone();
         edges.apply_to(&mut block);
-        self.store.lock().unwrap().insert(id.clone(), block);
+        if let Some(old) = self.store.lock().unwrap().insert(id.clone(), block) {
+            self.unlink(&old);
+        }
+        self.children
+            .lock()
+            .unwrap()
+            .entry(parent_id.clone())
+            .or_default()
+            .push(id.clone());
         Ok(false)
     }
     async fn update_in_tree(&self, params: holon_api::StorageEntity) -> OrderingResult<()> {
@@ -98,24 +110,38 @@ impl BlockOrdering for ApplyingOrdering {
         Ok(())
     }
     async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> OrderingResult<()> {
-        self.store.lock().unwrap().remove(&params_id(&params));
+        let removed = self.store.lock().unwrap().remove(&params_id(&params));
+        if let Some(old) = removed {
+            self.unlink(&old);
+        }
         Ok(())
     }
 }
 
-struct StoreReader(Store);
+impl ApplyingOrdering {
+    fn unlink(&self, block: &Block) {
+        if let Some(siblings) = self.children.lock().unwrap().get_mut(&block.parent_id) {
+            siblings.retain(|id| *id != block.id);
+        }
+    }
+}
+
+struct StoreReader(Store, Children);
 
 #[async_trait]
 impl BlockReader for StoreReader {
     async fn get_blocks(&self, doc_id: &EntityUri) -> anyhow::Result<Vec<Block>> {
-        Ok(self
-            .0
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|b| b.id != *doc_id)
-            .cloned()
-            .collect())
+        let store = self.0.lock().unwrap();
+        let children = self.1.lock().unwrap();
+        let mut blocks = Vec::new();
+        let mut open = vec![doc_id.clone()];
+        while let Some(parent) = open.pop() {
+            for id in children.get(&parent).into_iter().flatten() {
+                blocks.push(store[id].clone());
+                open.push(id.clone());
+            }
+        }
+        Ok(blocks)
     }
     async fn doc_block_topology(
         &self,
@@ -253,6 +279,13 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
 
     fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
     fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+    fn companion_page_id_overruled(
+        &self,
+        _: &str,
+        _: &holon_api::EntityUri,
+        _: &holon_api::EntityUri,
+    ) {
+    }
     fn file_edit_overruled(
         &self,
         _: &holon_api::EntityUri,
@@ -320,25 +353,11 @@ pub fn vault() -> Vault {
     let docs = PageStore::default();
     docs.by_id.lock().unwrap().insert(uri, page);
 
-    let ordering = ApplyingOrdering::default();
-    let store = ordering.store.clone();
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let path = root.join("Notes.org");
     std::fs::write(&path, full_content()).unwrap();
-
-    let disclosures = Arc::new(Disclosures::default());
-    let net = holon_net_shell::Shell::new(holon_filesystem::writeback_net::net())
-        .expect("the write-back net loads");
-    let controller = new_org_sync_controller(
-        Arc::new(StoreReader(store.clone())),
-        Arc::new(docs.clone()),
-        root,
-        Arc::new(ordering),
-        Arc::new(RealFileSystem),
-    )
-    .with_writeback_disclosure(disclosures.clone())
-    .with_writeback_net(net.clone());
+    let (controller, store, disclosures, net) = controller_at(root, &docs);
     Vault {
         controller,
         store,
@@ -348,4 +367,32 @@ pub fn vault() -> Vault {
         net,
         _tmp: tmp,
     }
+}
+
+/// The real controller over `root`, with store doubles that apply every write.
+pub fn controller_at(
+    root: std::path::PathBuf,
+    docs: &PageStore,
+) -> (
+    holon_filesystem::FileSyncController,
+    Store,
+    Arc<Disclosures>,
+    holon_net_shell::Shell,
+) {
+    let ordering = ApplyingOrdering::default();
+    let store = ordering.store.clone();
+    let children = ordering.children.clone();
+    let disclosures = Arc::new(Disclosures::default());
+    let net = holon_net_shell::Shell::new(holon_filesystem::writeback_net::net())
+        .expect("the write-back net loads");
+    let controller = new_org_sync_controller(
+        Arc::new(StoreReader(store.clone(), children)),
+        Arc::new(docs.clone()),
+        root,
+        Arc::new(ordering),
+        Arc::new(RealFileSystem),
+    )
+    .with_writeback_disclosure(disclosures.clone())
+    .with_writeback_net(net.clone());
+    (controller, store, disclosures, net)
 }

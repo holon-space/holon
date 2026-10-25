@@ -629,8 +629,9 @@ pub struct OrgModeConfig {
     /// Runs in root_directory with HOLON_FILE env var set to the written path.
     pub post_write_hook: Option<String>,
     /// `(filename, content)` documents seeded through the `FileSystem` port
-    /// when the vault contains no .org files (ADR 0011). Filled by the app
-    /// wiring from `holon_frontend::DEFAULT_ASSETS`; empty = no seeding.
+    /// when no org file in the vault declares their `#+ID` (ADR 0011). Filled
+    /// by the app wiring from `holon_frontend::DEFAULT_ASSETS`; empty = no
+    /// seeding.
     pub seed_assets: Vec<(String, String)>,
 }
 
@@ -648,38 +649,93 @@ impl OrgModeConfig {
     }
 }
 
-/// Seed `config.seed_assets` into an empty vault (no .org files) through the
-/// `FileSystem` port. Must run before anything scans the vault (the initial
-/// `OrgModeSyncProvider::sync` and the controller's initial scan). Panics on
-/// write failure — a half-seeded vault on first launch is a startup error.
+/// Write each of `config.seed_assets` whose `#+ID` no org file in the vault
+/// declares, through the `FileSystem` port. Keyed on the id, not the file name,
+/// so a page the user moved into another file is not written a second time.
+/// Reads each file only up to its first headline, where the id carriers end.
+/// Must finish before anything scans the vault (the initial
+/// `OrgModeSyncProvider::sync` and the controller's initial scan).
 pub async fn seed_default_org_assets(
     fs: &dyn holon_filesystem::FileSystem,
     config: &OrgModeConfig,
-) {
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use holon_core::FileFormatAdapter;
+
     if config.seed_assets.is_empty() {
-        return;
+        return Ok(());
     }
     let root = &config.root_directory;
-    // Seeding is an ORG concern — it ships org assets — so emptiness is judged
-    // over org files alone. A vault holding only foreign-format documents has
-    // no org page yet and still wants the shipped layout.
+    let org = crate::file_format::OrgFormatAdapter::new();
     let scanned = crate::file_watcher::scan_directory(
         fs,
         root,
         &crate::file_sync_controller::org_only_format_registry(),
     )
     .await
-    .unwrap_or_else(|e| panic!("Failed to scan org root {}: {e}", root.display()));
-    if !scanned.files.is_empty() {
-        return;
+    .with_context(|| format!("scanning {}", root.display()))?;
+    let headers = futures::future::try_join_all(scanned.files.iter().map(|path| async move {
+        fs.read_lines_until(path, holon_org_format::is_headline)
+            .await
+            .map(|header| (path, header))
+    }))
+    .await?;
+    let mut declared = std::collections::HashSet::new();
+    for (path, header) in headers {
+        match org.doc_id_from_content(&header) {
+            Ok(Some(id)) => {
+                declared.insert(id);
+            }
+            Ok(None) => {}
+            // The scan that follows raises this file's error where the user sees it.
+            Err(e) => tracing::warn!(
+                file = %path.display(),
+                "the seed cannot read this file's `#+ID`, so it does not count as holding a \
+                 seeded page: {e:#}"
+            ),
+        }
     }
     fs.create_dir_all(root)
         .await
-        .unwrap_or_else(|e| panic!("Failed to create org root {}: {e}", root.display()));
+        .with_context(|| format!("creating {}", root.display()))?;
     for (filename, content) in &config.seed_assets {
+        let id = org
+            .doc_id_from_content(content)
+            .with_context(|| format!("bundled asset {filename}"))?
+            .with_context(|| format!("bundled asset {filename} declares no `#+ID`"))?;
+        if declared.contains(&id) {
+            continue;
+        }
         fs.write(&root.join(filename), content.as_bytes())
             .await
-            .unwrap_or_else(|e| panic!("Failed to write {filename}: {e}"));
+            .with_context(|| format!("writing {filename}"))?;
+    }
+    Ok(())
+}
+
+/// Answered once the bundled assets are on disk, so the controller's initial
+/// scan never reads a vault the asset seed is still writing. A container that
+/// seeds assets in the background registers it and answers it exactly once.
+#[derive(Clone)]
+pub struct AssetSeedGate(GateSlot);
+
+impl AssetSeedGate {
+    pub fn new() -> Self {
+        Self(tokio::sync::watch::channel(None).0)
+    }
+
+    pub fn answer(&self, outcome: Result<(), String>) {
+        self.0.send_replace(Some(outcome));
+    }
+
+    async fn wait(&self, shutdown: &holon_api::lifecycle::SessionShutdown) -> Result<(), String> {
+        BootSeedGate::wait(&self.0, shutdown, "the asset seed").await
+    }
+}
+
+impl Default for AssetSeedGate {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -915,6 +971,11 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                             scan_answer: gate.scan_report(),
                             gate: (*gate).clone(),
                         });
+
+                let asset_seed = resolver
+                    .optional_resolve_async::<AssetSeedGate>()
+                    .await
+                    .map(|gate| (*gate).clone());
 
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
 
@@ -1170,6 +1231,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                         rerender_rx,
                         (ready_sender, drained_sender),
                         seed_handover,
+                        asset_seed,
                         fs,
                         change_source,
                         formats_for_loop,
@@ -1689,6 +1751,7 @@ async fn run_file_sync_controller(
     mut rerender_rx: tokio::sync::mpsc::UnboundedReceiver<RerenderMsg>,
     (ready_sender, drained_sender): (FileWatcherReadySender, FileWatcherReadySender),
     mut seed_handover: Option<SeedHandover>,
+    asset_seed: Option<AssetSeedGate>,
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
     formats: Arc<holon_core::FormatRegistry>,
@@ -1698,6 +1761,15 @@ async fn run_file_sync_controller(
     use tracing::Instrument;
     use tracing::error;
     use tracing::info;
+
+    if let Some(gate) = asset_seed {
+        if let Err(e) = gate.wait(&shutdown).await {
+            controller.disclose_start_incomplete(
+                "writing the default pages into the vault",
+                &anyhow::anyhow!(e),
+            );
+        }
+    }
 
     let disclose_sync_not_started = controller.sync_not_started_disclosure();
     let init_result = async { controller.initialize().await }
@@ -2355,6 +2427,13 @@ mod writeback_panic_tests {
         }
         fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
         fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+        fn companion_page_id_overruled(
+            &self,
+            _: &str,
+            _: &holon_api::EntityUri,
+            _: &holon_api::EntityUri,
+        ) {
+        }
         fn file_edit_overruled(
             &self,
             _: &holon_api::EntityUri,

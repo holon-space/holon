@@ -1015,6 +1015,7 @@ impl holon_filesystem::WritebackDisclosure for Degradations {
     fn deletion_undone(&self, _: &EntityUri, _: &std::path::Path, _: &[&std::path::Path]) {}
     fn undone_deletion_resolved(&self, _: &EntityUri) {}
     fn deletion_ended_by_edit(&self, _: &EntityUri, _: &std::path::Path) {}
+    fn companion_page_id_overruled(&self, _: &str, _: &EntityUri, _: &EntityUri) {}
     fn file_edit_overruled(
         &self,
         _: &EntityUri,

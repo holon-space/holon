@@ -1112,6 +1112,13 @@ impl holon_filesystem::WritebackDisclosure for DisclosureLog {
 
     fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
     fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+    fn companion_page_id_overruled(
+        &self,
+        _: &str,
+        _: &holon_api::EntityUri,
+        _: &holon_api::EntityUri,
+    ) {
+    }
     fn file_edit_overruled(
         &self,
         _: &holon_api::EntityUri,

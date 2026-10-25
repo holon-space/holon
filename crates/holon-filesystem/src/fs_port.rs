@@ -103,6 +103,17 @@ pub enum WriteBack {
 pub trait FileSystem: Send + Sync {
     async fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+    /// The lines of `path` before the first line `stop` accepts, each with its
+    /// line ending. Reads no further than that line, so a caller that needs
+    /// only a file's header does not pay for its body.
+    async fn read_lines_until(
+        &self,
+        path: &Path,
+        stop: for<'s> fn(&'s str) -> bool,
+    ) -> std::io::Result<String> {
+        let content = self.read_to_string(path).await?;
+        Ok(lines_before(content.split_inclusive('\n'), stop))
+    }
     /// Read `path` as text together with the [`FileStamp`] of the file the
     /// text came from. An absent file is not an error.
     async fn read_stamped(&self, path: &Path) -> std::io::Result<StampedRead>;
@@ -167,6 +178,27 @@ pub struct RealFileSystem;
 /// the information exists. Also says whether the parent directory is there,
 /// which separates "the vault went away" from "this document's folder was
 /// never created".
+fn lines_before<'a>(lines: impl Iterator<Item = &'a str>, stop: fn(&str) -> bool) -> String {
+    lines.take_while(|line| !stop(line)).collect()
+}
+
+fn read_lines_until_blocking(path: &Path, stop: fn(&str) -> bool) -> std::io::Result<String> {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut out = String::new();
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? > 0 {
+        let text = std::str::from_utf8(&line)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if stop(text) {
+            break;
+        }
+        out.push_str(text);
+        line.clear();
+    }
+    Ok(out)
+}
+
 fn at_path(op: &str, path: &Path, e: std::io::Error) -> std::io::Error {
     let parent = path.parent();
     std::io::Error::new(
@@ -195,6 +227,18 @@ impl FileSystem for RealFileSystem {
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         tokio::fs::read(path)
             .await
+            .map_err(|e| at_path("reading", path, e))
+    }
+
+    async fn read_lines_until(
+        &self,
+        path: &Path,
+        stop: for<'s> fn(&'s str) -> bool,
+    ) -> std::io::Result<String> {
+        let owned = path.to_path_buf();
+        tokio::task::spawn_blocking(move || read_lines_until_blocking(&owned, stop))
+            .await
+            .map_err(|e| std::io::Error::other(format!("read join error: {e}")))?
             .map_err(|e| at_path("reading", path, e))
     }
 
@@ -794,5 +838,32 @@ mod tests {
                 .collect();
             assert!(debris.is_empty(), "temp left behind: {debris:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_header_read_stops_before_the_first_stop_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("page.org");
+        let header = "#+ID: page\r\n:PROPERTIES:\n:END:\n";
+        std::fs::write(&file, format!("{header}* Heading\nbody\n")).unwrap();
+        let headline: fn(&str) -> bool = |line| line.starts_with("* ");
+
+        assert_eq!(
+            RealFileSystem
+                .read_lines_until(&file, headline)
+                .await
+                .unwrap(),
+            header
+        );
+        let whole = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(lines_before(whole.split_inclusive('\n'), headline), header);
+        std::fs::write(&file, "#+ID: page").unwrap();
+        assert_eq!(
+            RealFileSystem
+                .read_lines_until(&file, headline)
+                .await
+                .unwrap(),
+            "#+ID: page"
+        );
     }
 }

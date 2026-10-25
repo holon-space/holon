@@ -248,18 +248,14 @@ pub async fn seed_default_layout(engine: &Arc<BackendEngine>) -> anyhow::Result<
         db.execute(&sql, vec![]).await?;
     }
 
-    // Journals page + auto-create rule: the SAME blocks the native seed builds
-    // (`build_default_layout_blocks` → `journals_page_blocks` shell + display
-    // query + render, PLUS `journals_auto_create_blocks` trigger + action),
-    // translated to the worker's hand-rolled SQL. Sharing one block spec keeps the
-    // journals infrastructure identical across the browser and native frontends.
-    // The `block:journals` page parents under the no-parent sentinel, matching
-    // this module's DOC_ID convention for the other bundled pages.
-    for (i, block) in holon_frontend::journals_page_blocks()
-        .into_iter()
-        .chain(holon_frontend::journals_auto_create_blocks())
-        .enumerate()
-    {
+    // The bundled assets: the SAME blocks the native seed builds
+    // (`build_default_layout_blocks`), translated to the worker's hand-rolled SQL,
+    // so the browser and native frontends seed identical pages.
+    let mut asset_blocks = Vec::new();
+    for asset in holon_frontend::DEFAULT_ASSETS {
+        asset_blocks.extend(asset.blocks()?);
+    }
+    for (i, block) in asset_blocks.into_iter().enumerate() {
         let content_escaped = block.content.replace('\'', "''");
         let (lang_col, lang_val) = match block.source_language.as_ref() {
             Some(lang) => (", source_language".to_string(), format!(", '{lang}'")),

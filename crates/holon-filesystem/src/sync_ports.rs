@@ -727,6 +727,17 @@ pub trait WritebackDisclosure: Send + Sync {
     /// Sticky for the rest of the process.
     fn deletion_ended_by_edit(&self, block_id: &EntityUri, file: &Path);
 
+    /// Signal that `folder`, a vault-relative folder path, already resolves to
+    /// the page `existing_id`, so its folder companion's `companion_id` is NOT
+    /// adopted for that page position. Sticky for the rest of the process:
+    /// only the companion file can end it.
+    fn companion_page_id_overruled(
+        &self,
+        folder: &str,
+        existing_id: &EntityUri,
+        companion_id: &EntityUri,
+    );
+
     /// Signal that `block_id` in `file` was edited after Holon `change`d the
     /// block: Holon's change stands and `file_text`, the block as the file
     /// holds it, is not ingested. `conflict_copy` holds the whole file as it

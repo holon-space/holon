@@ -421,6 +421,7 @@ impl WritebackDisclosure for Disclosures {
     fn deletion_undone(&self, _: &EntityUri, _: &Path, _: &[&Path]) {}
     fn undone_deletion_resolved(&self, _: &EntityUri) {}
     fn deletion_ended_by_edit(&self, _: &EntityUri, _: &Path) {}
+    fn companion_page_id_overruled(&self, _: &str, _: &EntityUri, _: &EntityUri) {}
     fn file_edit_overruled(
         &self,
         _: &EntityUri,

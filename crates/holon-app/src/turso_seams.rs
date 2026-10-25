@@ -33,6 +33,7 @@ use holon_core::SyncableProvider;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::File;
+use holon_orgmode::AssetSeedGate;
 use holon_orgmode::OrgModeSyncProvider;
 use holon_orgmode::di::FileSyncStarted;
 use holon_orgmode::di::OrgModeConfig;
@@ -882,6 +883,8 @@ impl Module for OrgModeModule {
             ))
         }));
 
+        injector.provide::<AssetSeedGate>(Provider::root(|_| Shared::new(AssetSeedGate::new())));
+
         // Register SyncableProvider trait implementation
         injector.provide_into_set::<dyn SyncableProvider>(Provider::root(|resolver| {
             let sync_provider = resolver.resolve::<OrgModeSyncProvider>();
@@ -940,17 +943,6 @@ impl Module for OrgModeModule {
                 let _file_cache = resolver.resolve_async::<QueryableCache<File>>().await;
                 let _block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
                 let sync_provider = resolver.resolve_async::<OrgModeSyncProvider>().await;
-
-                // Resolve remaining services
-                let config = resolver.resolve::<OrgModeConfig>();
-
-                // Seed default documents into an empty vault through the
-                // FileSystem port BEFORE the initial sync task and the
-                // controller's initial scan below — both consume the vault.
-                {
-                    let seed_fs = resolver.resolve::<dyn holon_filesystem::FileSystem>();
-                    seed_default_org_assets(seed_fs.as_ref(), &config).await;
-                }
 
                 // Resolve the block-CRUD authority — registered at the app
                 // composition root as the Loro provider when a CRDT backend is
@@ -1034,10 +1026,21 @@ impl Module for OrgModeModule {
 
                 // Initial sync task
                 // The DatabaseActor serializes all operations, eliminating race conditions.
+                // The asset seed runs first, here and not on the boot path: it
+                // reads the vault, and the boot never waits on a vault read.
+                // The controller's initial scan waits on the same gate.
                 {
                     let sync_provider_clone = sync_provider.clone();
+                    let seed_fs = resolver.resolve::<dyn holon_filesystem::FileSystem>();
+                    let asset_seed = resolver.resolve::<AssetSeedGate>();
+                    let config = resolver.resolve::<OrgModeConfig>();
                     tokio::spawn(async move {
                         use holon_core::SyncableProvider;
+                        let seeded = seed_default_org_assets(seed_fs.as_ref(), &config).await;
+                        if let Err(e) = &seeded {
+                            error!("[OrgMode] Seeding the default pages failed: {e:#}");
+                        }
+                        asset_seed.answer(seeded.map_err(|e| format!("{e:#}")));
                         if let Err(e) = sync_provider_clone
                             .sync(holon_api::StreamPosition::Beginning)
                             .await

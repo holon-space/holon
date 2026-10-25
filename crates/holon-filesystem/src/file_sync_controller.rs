@@ -4084,6 +4084,13 @@ impl FileSyncController {
                     // third; a one-time dedup migration reconciles legacy rows.
                     if let Some(comp) = &companion_id {
                         if comp != &existing.id {
+                            if let Some(disclosure) = &self.writeback_disclosure {
+                                disclosure.companion_page_id_overruled(
+                                    &accumulated,
+                                    &existing.id,
+                                    comp,
+                                );
+                            }
                             tracing::warn!(
                                 folder = %accumulated,
                                 existing_page_id = %existing.id,

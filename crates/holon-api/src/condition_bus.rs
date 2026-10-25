@@ -517,6 +517,16 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     DeletionEndedByEdit { file: String },
+    /// `subject`, a vault folder, already resolves to the page `existing_id`,
+    /// and its folder companion declares `companion_id` for the same position.
+    /// The existing page stands: adopting the companion's id would leave that
+    /// page position with two pages.
+    ///
+    /// All-clear: none in this process — the companion file has to change.
+    CompanionPageIdOverruled {
+        existing_id: String,
+        companion_id: String,
+    },
     /// `subject`, a block id, was edited in `file` after Holon `change`d it.
     /// Holon's change stands; the block as the file holds it, `file_text`
     /// (text, properties, tags, state), is not ingested, and the next
@@ -804,6 +814,7 @@ impl ConditionKind {
     pub const DELETION_UNDONE_BLOCK_IN_OTHER_FILE: &'static str =
         "deletion-undone-block-in-other-file";
     pub const DELETION_ENDED_BY_EDIT: &'static str = "deletion-ended-by-edit";
+    pub const COMPANION_PAGE_ID_OVERRULED: &'static str = "companion-page-id-overruled";
     pub const FILE_EDIT_OVERRULED: &'static str = "file-edit-overruled";
     pub const HOLON_EDIT_OVERRULED: &'static str = "holon-edit-overruled";
     pub const VAULT_SYNC_NOT_STARTED: &'static str = "vault-sync-not-started";
@@ -896,6 +907,7 @@ impl ConditionKind {
                 Self::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
             }
             Self::DeletionEndedByEdit { .. } => Self::DELETION_ENDED_BY_EDIT,
+            Self::CompanionPageIdOverruled { .. } => Self::COMPANION_PAGE_ID_OVERRULED,
             Self::FileEditOverruled { .. } => Self::FILE_EDIT_OVERRULED,
             Self::HolonEditOverruled { .. } => Self::HOLON_EDIT_OVERRULED,
             Self::VaultSyncNotStarted { .. } => Self::VAULT_SYNC_NOT_STARTED,

@@ -63,7 +63,7 @@ impl RefSharedView for ReferenceState {
     }
 
     fn shareable_pages(&self) -> Vec<EntityUri> {
-        let journals = EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id");
+        let journals = crate::pbt::journals_asset::page_id();
         self.files
             .documents
             .keys()

@@ -6,6 +6,7 @@ mod convert_block_to_page_inherits_the_source_ring;
 mod convert_block_to_page_materializes_child_file;
 mod doc_id_writeback_stability;
 mod idless_external_reedit_dup;
+mod journals_folder_is_the_seeded_page;
 mod journals_seed_file_collision;
 mod local_vault_fidelity;
 mod logseq_org_vault_ingest;

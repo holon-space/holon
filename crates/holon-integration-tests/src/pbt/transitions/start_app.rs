@@ -173,33 +173,44 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
     let default_doc_uri = EntityUri::no_parent();
     let default_doc_id = EntityUri::block("__default__");
 
-    // The `block:journals` page + its display query/render, seeded programmatically
-    // by prod's `build_default_layout_blocks` regardless of freshness — prod
-    // repairs the page idempotently. Model the SAME blocks here so
-    // `inv-blocks-match-ref` sees the identical booted set. The page block
-    // documents itself (`block_documents[journals]=journals`, NON-seed: the
-    // wide oracle asserts the user-visible first-boot page); its children
-    // belong to the journals page document. The auto-create RULE is modeled
-    // just after this loop (also seeded by `build_default_layout_blocks`); the
-    // boot-FIRED journal day-block is modeled only for the composed frontend
-    // arm (see `wide_e2e`), since EVERY Turso frontend boot fires it — the
-    // rule-firing machinery runs unconditionally on any non-wasm Turso boot, not
-    // behind the `Actor::ActionEngine` label.
-    let journals_uri = EntityUri::parse(holon_frontend::JOURNALS_PAGE_ID).expect("journals id");
-    for block in holon_frontend::journals_page_blocks() {
+    // The shipped `Journals.org` asset: its page, display query/render and the
+    // auto-create rule, seeded on every boot by prod's
+    // `build_default_layout_blocks`. The page documents itself (NON-seed: the
+    // wide oracle asserts the user-visible first-boot page); every other block
+    // belongs to the page document. The boot-FIRED journal day-block is modeled
+    // only for the composed frontend arm (see `wide_e2e`).
+    //
+    // The rule blocks' per-parent `sequence` follows the asset's order, as the
+    // seed creates them, so the oracle's `(sibling_order_group, sequence, id)` sort
+    // (ADR 0005) reproduces the SUT's fractional-index order.
+    let mut asset = crate::pbt::journals_asset::blocks().into_iter();
+    let journals_page = asset.next().expect("the asset's page");
+    let journals_uri = journals_page.id.clone();
+    state
+        .domain
+        .block_state
+        .block_documents
+        .insert(journals_uri.clone(), journals_uri.clone());
+    state
+        .domain
+        .block_state
+        .blocks
+        .insert(journals_uri.clone(), journals_page);
+    let mut seq_by_parent: std::collections::HashMap<EntityUri, i64> =
+        std::collections::HashMap::new();
+    for mut block in asset {
         let block_id = block.id.clone();
-        let doc = if block_id == journals_uri {
-            block_id.clone()
+        if block.content_type == ContentType::Source && block.parent_id == journals_uri {
+            // The file-tail placement compares sequences across ranks, so the
+            // display sources stay at 0, below the page's first heading.
+            block.set_sequence(0);
         } else {
-            journals_uri.clone()
-        };
-        // Classify the query/render source children into layout_blocks so PBT
-        // mutation transitions leave them alone and the render tracks its expr,
-        // mirroring the index.org layout handling below.
-        if block.content_type == ContentType::Source
-            && let Some(sl) = block.source_language.as_ref()
-        {
-            if sl.as_query().is_some() {
+            let seq = seq_by_parent.entry(block.parent_id.clone()).or_insert(0);
+            block.set_sequence(*seq);
+            *seq += 1;
+        }
+        match (&block.content_type, block.source_language.as_ref()) {
+            (ContentType::Source, Some(sl)) if sl.as_query().is_some() => {
                 state
                     .domain
                     .layout_blocks
@@ -210,7 +221,8 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
                     .layout_blocks
                     .headline_ids
                     .insert(block.parent_id.clone());
-            } else if matches!(sl, SourceLanguage::Render) {
+            }
+            (ContentType::Source, Some(SourceLanguage::Render)) => {
                 state
                     .domain
                     .layout_blocks
@@ -228,42 +240,15 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
                         .insert(block_id.clone(), expr);
                 }
             }
-        }
-        state
-            .domain
-            .block_state
-            .block_documents
-            .insert(block_id.clone(), doc);
-        state.domain.block_state.blocks.insert(block_id, block);
-    }
-
-    // The auto-create RULE (`journals_auto_create_blocks`: `Journal Auto-Create`
-    // heading + `holon_sql` trigger + `holon_rule` action), also seeded on every
-    // boot by prod's `build_default_layout_blocks`. Modeled as NON-seed children of
-    // the journals page (`block_documents=journals`) so the block-comparison
-    // invariants expect them in the SUT projection. The trigger/action are program
-    // (`is_program`) blocks — never display-evaluated — so they are NOT classified
-    // as query/render layout sources; the heading hosts them.
-    //
-    // Assign a per-parent `sequence` matching the boot seed order so the oracle's
-    // `(sibling_order_group, sequence, id)` sort (ADR 0005) reproduces the SUT's
-    // fractional-index order — otherwise the trigger/action tie-break by id
-    // (`action` < `trigger`) and diverge `inv-{live,loro}-children-match-ref` +
-    // `inv-blocks-match-ref/org` under `block:journals::auto-create`.
-    let mut seq_by_parent: std::collections::HashMap<EntityUri, i64> =
-        std::collections::HashMap::new();
-    for mut block in holon_frontend::journals_auto_create_blocks() {
-        let block_id = block.id.clone();
-        let seq = seq_by_parent.entry(block.parent_id.clone()).or_insert(0);
-        block.set_sequence(*seq);
-        *seq += 1;
-        if block.content_type == ContentType::Text {
-            // The `Journal Auto-Create` heading hosts the rule pair.
-            state
-                .domain
-                .layout_blocks
-                .headline_ids
-                .insert(block_id.clone());
+            // The rule heading hosts its program block.
+            (ContentType::Text, _) => {
+                state
+                    .domain
+                    .layout_blocks
+                    .headline_ids
+                    .insert(block_id.clone());
+            }
+            _ => {}
         }
         state
             .domain

@@ -23,6 +23,7 @@ pub mod generators;
 pub mod hand_authored;
 pub mod invariant_mode_override;
 pub mod invariants;
+pub mod journals_asset;
 pub mod known_reds;
 pub mod layered_field;
 pub mod layout_bridge;

@@ -498,6 +498,20 @@ impl ConditionKind {
                 vec![file.clone()],
             ),
 
+            // Both ids are BODY lines: the user compares them against the
+            // `#+ID` line they wrote, so neither may be cut.
+            Self::CompanionPageIdOverruled {
+                existing_id,
+                companion_id,
+            } => ConditionDetail::with_body(
+                format!(
+                    "{subject} already belongs to a page, so the `#+ID` of its companion file is \
+                     not applied and the folder keeps that page. Remove the `#+ID` line, or set it \
+                     to the page's id. The page's id and the one in the file:"
+                ),
+                vec![existing_id.clone(), companion_id.clone()],
+            ),
+
             Self::FileEditOverruled {
                 file,
                 file_text,

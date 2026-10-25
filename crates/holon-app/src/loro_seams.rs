@@ -860,6 +860,21 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         });
     }
 
+    fn companion_page_id_overruled(
+        &self,
+        folder: &str,
+        existing_id: &EntityUri,
+        companion_id: &EntityUri,
+    ) {
+        self.bus.emit(holon_api::Condition {
+            subject: folder.to_string(),
+            reason: holon_api::ConditionKind::CompanionPageIdOverruled {
+                existing_id: existing_id.as_str().to_string(),
+                companion_id: companion_id.as_str().to_string(),
+            },
+        });
+    }
+
     fn file_edit_overruled(
         &self,
         block_id: &EntityUri,

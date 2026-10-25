@@ -101,18 +101,6 @@ pub fn shipped_render_strings() -> Vec<(String, String)> {
             holon_api::perspective::ACTION_BAR_GLOBAL_OPS.to_string(),
         ),
     ]);
-    out.extend(
-        holon_frontend::journals_page_blocks()
-            .into_iter()
-            .filter(|b| matches!(b.source_language, Some(SourceLanguage::Render)))
-            .enumerate()
-            .map(|(i, b)| {
-                (
-                    format!("rust/holon-frontend::journals_page_blocks#{i}"),
-                    b.content,
-                )
-            }),
-    );
     let mut files = Vec::new();
     files_under(&assets.join("default"), &mut files);
     files_under(&assets.join("integrations"), &mut files);

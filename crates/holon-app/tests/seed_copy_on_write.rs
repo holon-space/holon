@@ -137,7 +137,15 @@ fn present_default_file_suppresses_default_layout_seed() {
             "the __default__ page itself must NOT be re-seeded when its file wins"
         );
         assert!(
-            has_block(&engine, holon_frontend::JOURNALS_PAGE_ID).await,
+            has_block(
+                &engine,
+                holon_frontend::DEFAULT_ASSETS[0]
+                    .blocks()
+                    .expect("parse the asset")[0]
+                    .id
+                    .as_str()
+            )
+            .await,
             "the journals machinery seeds regardless of the default-layout gate"
         );
     });

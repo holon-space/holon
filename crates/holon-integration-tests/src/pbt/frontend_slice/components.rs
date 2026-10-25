@@ -2081,7 +2081,7 @@ impl HeadlessFrontendComponent {
     /// Create a `Page`-tagged block. A plain page renders its descendants as an
     /// outline, which is what a graft root has to do: `block:journals` — the
     /// boot Main focus root — renders `SELECT * FROM journal_feed`
-    /// (`holon_frontend::journals_page_blocks`), whose rows are only its
+    /// (the shipped `Journals.org` asset), whose rows are only its
     /// `Page`-tagged children, so plain rows grafted there never reach the
     /// ViewModel. Same root the windowed slice's `focused_graft_root` creates.
     pub async fn create_page_block(&self, id: &str, parent_id: &str, content: &str) {
@@ -6888,19 +6888,21 @@ mod tests {
         );
 
         // Journal day-blocks are ORDINARY content (WP3): not source/program blocks.
-        // The boot seed's display machinery (`journals_page_blocks`: `::src::0` +
-        // `::render::0`) legitimately lives as source children of the shell —
-        // exclude those fixed ids; anything ELSE source-typed under journals is a
-        // rule output gone wrong.
+        // The asset's display query and render legitimately live as source
+        // children of the page — exclude those ids; anything ELSE source-typed
+        // under journals is a rule output gone wrong.
+        let display = crate::pbt::journals_asset::display_ids()
+            .iter()
+            .map(|id| format!("'{}'", id.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
         let program_rows = comp
             .engine()
             .db_handle()
             .query(
                 &format!(
                     "SELECT id FROM block_raw WHERE parent_id = 'block:journals' AND content_type \
-                     = 'source' AND id != '{src}' AND id != '{render}'",
-                    src = holon_frontend::JOURNALS_SRC_ID,
-                    render = holon_frontend::JOURNALS_RENDER_ID,
+                     = 'source' AND id NOT IN ({display})"
                 ),
                 std::collections::HashMap::new(),
             )

@@ -58,140 +58,45 @@ pub mod cell {
     pub use holon_core::cell_registry::EntityCellRegistryExt;
 }
 
-/// A default org file bundled with the app, seeded to disk on first launch
-/// (empty vault). The journals page is NOT seeded this way — it is built
-/// programmatically as blocks (see [`journals_page_blocks`]) so its
-/// query/render/ auto-create machinery lives directly under the fixed
-/// `block:journals` shell with no separate org document (which would mint a
-/// duplicate "Journals" page).
+/// A default org file bundled with the app. Its `#+ID` and every block's `:ID:`
+/// are fixed in the file, so seeding it again is a no-op per block: the seed
+/// skips the blocks that exist and creates the missing ones.
 pub struct DefaultAsset {
     pub filename: &'static str,
     pub content: &'static str,
-    /// Fixed document block ID. Enables org content to reference its own
-    /// document (e.g., `parent_id == 'block:journals'`). `None` means
-    /// random UUID.
-    pub fixed_doc_id: Option<&'static str>,
 }
 
-/// Org files seeded to disk when the vault has no `.org` files. Empty: the sole
-/// former entry (`Journals.org`) is now seeded programmatically via
-/// [`journals_page_blocks`] to avoid the duplicate-page defect (a disk
-/// `Journals.org` with no `#+ID:` parsed to a second `file:` page carrying the
-/// machinery, while `build_default_layout_blocks` minted a bare
-/// `block:journals` shell — two "Journals" Pages). Retained as a seam for
-/// future disk-seeded assets.
-pub const DEFAULT_ASSETS: &[DefaultAsset] = &[];
-
-/// Deterministic block ids for the journals page. Seeded on every boot so
-/// re-seeding is a no-op (never a duplicate).
-pub const JOURNALS_PAGE_ID: &str = "block:journals";
-pub const JOURNALS_SRC_ID: &str = "block:journals::src::0";
-pub const JOURNALS_RENDER_ID: &str = "block:journals::render::0";
-pub const JOURNALS_AUTO_CREATE_ID: &str = "block:journals::auto-create";
-/// The single-block `holon_rule` (ADR 0024 §7.2) that auto-creates today's
-/// journal. Named `::action::0` to match the ratified
-/// `assets/default/Journals.org` asset (and so its `RuleId` — the block id — is
-/// stable across the disk/programmatic seed paths).
-pub const JOURNALS_ACTION_ID: &str = "block:journals::action::0";
-
-/// The `block:journals` page, as programmatic blocks (no org document). The
-/// shell page owns, directly, its display query (`::src::0`, holon_prql listing
-/// the journal day-entries) and render (`::render::0`). All ids are
-/// deterministic, so seeding this on every boot is idempotent: create-if-absent
-/// never duplicates and never clobbers user edits.
-///
-/// The auto-create RULE (trigger + action) is intentionally NOT here — see
-/// [`journals_auto_create_blocks`] for why it cannot yet be co-located on the
-/// journals landing page.
-pub fn journals_page_blocks() -> Vec<holon_api::block::Block> {
-    use holon_api::block::Block;
-
-    let uri = |raw: &str| EntityUri::parse(raw).expect("static journals block id");
-    let journals = uri(JOURNALS_PAGE_ID);
-
-    let mut page = Block::new_text(journals.clone(), EntityUri::no_parent(), "Journals");
-    page.set_page(true);
-
-    // holon_sql read off the boot-owned `journal_feed` matview (the journal-feed
-    // chain: block matview → `journal_day_pages` detection → `journal_feed`; see
-    // docs/Plans/JournalFeed-2026-07-18.md). Day-page detection and the
-    // `expand_default` marker (which routes every feed row to the
-    // `embedded_page_expanded` default-expanded profile variant) are maintained
-    // O(delta) by IVM in the chain, so this read is just a projection + order.
-    // Newest-first via `content DESC` (ordering is the read's job, not the
-    // matview's).
-    let src = Block::new_source(
-        uri(JOURNALS_SRC_ID),
-        journals.clone(),
-        "holon_sql",
-        "SELECT * FROM journal_feed ORDER BY content DESC",
-    );
-
-    // LogSeq-style feed: each day-entry rendered as a default-EXPANDED embedded
-    // page (via the `embedded_page_expanded` variant, keyed on `expand_default`),
-    // separated by a `divider()`. `render_entity()` per row keeps the embedded
-    // page-boundary + lazy-descendant semantics (children load on materialise).
-    let render = Block::new_source(
-        uri(JOURNALS_RENDER_ID),
-        journals,
-        "render",
-        r#"list(#{sortkey: "-content", item_template: column(render_entity(), divider())})"#,
-    );
-
-    vec![page, src, render]
+impl DefaultAsset {
+    /// The asset's page (from its `#+ID`) followed by its blocks, in document
+    /// order.
+    pub fn blocks(&self) -> Result<Vec<holon_api::block::Block>> {
+        let parsed = holon_org_format::parse_org_file(
+            std::path::Path::new(self.filename),
+            self.content,
+            &EntityUri::no_parent(),
+            std::path::Path::new(""),
+        )
+        .with_context(|| format!("parse the bundled asset {}", self.filename))?;
+        anyhow::ensure!(
+            parsed.headlines_needing_ids.is_empty(),
+            "bundled asset {} has headlines without an :ID: ({:?}); a re-seed would duplicate \
+             them",
+            self.filename,
+            parsed.headlines_needing_ids
+        );
+        let mut blocks = vec![parsed.document];
+        blocks.extend(parsed.blocks);
+        Ok(blocks)
+    }
 }
 
-/// The journal auto-create RULE: a "Journal Auto-Create" heading owning a
-/// SINGLE `holon_rule` YAML block (ADR 0024 §7.2 ratified form — guard + emit
-/// in one block, matching `assets/default/Journals.org`). The
-/// `holon_rule_watcher` discovers it (the legacy `holon_sql`-trigger +
-/// `block.create`-action pairing is gone — no sibling source, so the old
-/// `action_watcher` leaves it alone), reads the `clock` day for its `{today}`
-/// binding, evaluates the `when:` inhibitor, and emits today's journal under
-/// the journals page via a WP2 deterministic id.
-///
-/// Seeded on every boot by [`FrontendSession::build_default_layout_blocks`]
-/// (dogfood #4 fix, 2026-07-12): the clock-day trigger fires the action so real
-/// vaults get today's journal. The prior render-panic blocker is resolved — the
-/// trigger/action are `is_program` blocks (fork-A: `rule_sibling` profile
-/// exclusion + `RowIdentity`-keyed reactive rows), so they are never
-/// display-evaluated as a collection and the id-less trigger row no longer
-/// panics the render worker. The end-to-end firing (clock scheduler seeds the
-/// `clock` day row → trigger matview → action watcher → deterministic-id
-/// `block.create`) is pinned by the directed capstone
-/// `advance_day_fires_one_journal_per_distinct_day_idempotently` and, in the
-/// composed keystone, by the fixed-clock boot-journal model in `wide_e2e`.
-pub fn journals_auto_create_blocks() -> Vec<holon_api::block::Block> {
-    use holon_api::block::Block;
+/// The org files the seed writes into every vault that lacks them, and into
+/// the store by id.
+pub const DEFAULT_ASSETS: &[DefaultAsset] = &[DefaultAsset {
+    filename: "Journals.org",
+    content: include_str!("../../../assets/default/Journals.org"),
+}];
 
-    let uri = |raw: &str| EntityUri::parse(raw).expect("static journals block id");
-    let journals = uri(JOURNALS_PAGE_ID);
-    let auto_create = uri(JOURNALS_AUTO_CREATE_ID);
-
-    let auto = Block::new_text(auto_create.clone(), journals, "Journal Auto-Create");
-
-    // Single-block holon_rule (sugar form): `when:` = clock-day inhibitor arc
-    // (`not block_exists("Journals/{today}")`), `emit:` = ratcheted create of the
-    // `{today}` block as a PAGE-file child of the journals page (`place:
-    // page(journals)`, LogSeq-parity daily-note ruling 2026-07-19): the day block
-    // is `Page`-tagged, becomes a first-class `[[{today}]]` link target, and
-    // materializes into its own `Journals/{today}.org`; the day's bullets nest
-    // UNDER it (no longer flat siblings of the journals shell). Byte-identical to
-    // the ratified `assets/default/Journals.org` rule so the disk and programmatic
-    // seeds agree.
-    let rule = Block::new_source(
-        uri(JOURNALS_ACTION_ID),
-        auto_create,
-        "holon_rule",
-        // No trailing newline: the block store normalizes it away (like every
-        // other seed block), so the reference — which models this exact content —
-        // must match `block_raw`/sql without one.
-        "name: daily_journal\nwhen: 'not block_exists(\"Journals/{today}\")'\nemit:\n  place: \
-         page(journals)\n  name: \"{today}\"",
-    );
-
-    vec![auto, rule]
-}
 pub mod command_provider;
 pub mod config;
 pub mod creation_slot;
@@ -1005,8 +910,8 @@ impl<T> FrontendSession<T> {
     /// Uses raw SQL via db_handle because OperationProviders may not be
     /// registered (e.g. TUI without orgmode). This is a bootstrap operation
     /// that doesn't need events, undo, or observers.
-    /// Build the default-layout seed blocks — the fixed-document-page shells
-    /// (e.g. `block:journals`) and the `__default__` page. Always returns
+    /// Build the default-layout seed blocks — the blocks of every
+    /// [`DEFAULT_ASSETS`] file and the `__default__` page. Always returns
     /// these. Callers that want the full `index.org` layout must append the
     /// parsed org blocks separately (see `holon-app/src/seed.rs`).
     pub fn build_default_layout_blocks(fresh: bool) -> Result<Vec<holon_api::block::Block>> {
@@ -1015,18 +920,11 @@ impl<T> FrontendSession<T> {
         let default_doc_uri = Self::default_doc_uri();
         let mut entries: Vec<Block> = Vec::new();
 
-        // The `block:journals` page and its machinery, seeded programmatically
-        // (no org document). Always built so both an empty AND an already-seeded
-        // vault get the journal auto-create infrastructure; persisting is
-        // idempotent (deterministic ids), so a re-seed never duplicates the page
-        // and never clobbers user-created journal entries.
-        entries.extend(crate::journals_page_blocks());
-        // The auto-create RULE (trigger + action). Seeded on every boot so the
-        // clock-day trigger fires `block.create` and the vault gets today's
-        // journal (dogfood #4: real vaults never got one). The trigger/action are
-        // `is_program` blocks — profile routing keeps them out of display-query
-        // evaluation, so they never render as a collection (fork-A safeguards).
-        entries.extend(crate::journals_auto_create_blocks());
+        // Every bundled asset, on every boot: the ids are fixed in the asset,
+        // so a block that exists is skipped and a missing one is created.
+        for asset in crate::DEFAULT_ASSETS {
+            entries.extend(asset.blocks()?);
+        }
 
         if fresh {
             // The `__default__` page that owns the 3-column layout.
@@ -1236,152 +1134,55 @@ impl<T> FrontendSession<T> {
 }
 
 #[cfg(test)]
-mod journals_seed_tests {
-    use holon_api::ContentType;
-    use holon_api::SourceLanguage;
-    use holon_api::block::Block;
-
+mod default_asset_tests {
     use super::*;
 
-    fn find<'a>(blocks: &'a [Block], id: &str) -> &'a Block {
-        blocks
-            .iter()
-            .find(|b| b.id.as_str() == id)
-            .unwrap_or_else(|| panic!("block {id} missing from {:?}", ids(blocks)))
-    }
-
-    fn ids(blocks: &[Block]) -> Vec<String> {
+    fn ids(blocks: &[holon_api::block::Block]) -> Vec<String> {
         blocks.iter().map(|b| b.id.as_str().to_string()).collect()
     }
 
     #[test]
-    fn journals_page_blocks_shell_owns_query_and_render() {
-        let blocks = journals_page_blocks();
-
-        // The page shell + its display query/render, owned directly by the shell
-        // (no separate org document) — the fix for the duplicate-page defect.
-        let page = find(&blocks, JOURNALS_PAGE_ID);
-        assert!(page.is_page(), "block:journals is the Page shell");
-        assert_eq!(page.parent_id, EntityUri::no_parent());
-
-        // Display query + render are DIRECT children of the shell so the render
-        // system resolves them for the journals page.
-        for id in [JOURNALS_SRC_ID, JOURNALS_RENDER_ID] {
+    fn every_asset_parses_to_one_root_page_with_fixed_ids() {
+        for asset in DEFAULT_ASSETS {
+            let blocks = asset.blocks().expect("parse asset");
             assert_eq!(
-                find(&blocks, id).parent_id.as_str(),
-                JOURNALS_PAGE_ID,
-                "{id} is a direct child of block:journals"
+                ids(&blocks),
+                ids(&asset.blocks().expect("parse asset again")),
+                "{}: a re-seed must name the same ids",
+                asset.filename
+            );
+            let page = &blocks[0];
+            assert!(
+                page.is_page(),
+                "{}: the first block is its page",
+                asset.filename
+            );
+            assert_eq!(page.parent_id, EntityUri::no_parent(), "{}", asset.filename);
+            assert_eq!(
+                blocks.iter().filter(|b| b.is_page()).count(),
+                1,
+                "{}: one page per asset",
+                asset.filename
             );
         }
-        let src = find(&blocks, JOURNALS_SRC_ID);
-        assert_eq!(
-            src.source_language,
-            Some(SourceLanguage::Query(holon_api::QueryLanguage::HolonSql))
-        );
-        // The feed surface reads the boot-owned `journal_feed` matview (the
-        // journal-feed chain), not an inline JOIN — so day-page detection is
-        // IVM-maintained and reliable on every platform (ruling 2026-07-18).
-        assert!(
-            src.content.contains("FROM journal_feed"),
-            "journals feed reads the journal_feed matview: {:?}",
-            src.content
-        );
-        assert!(matches!(
-            find(&blocks, JOURNALS_RENDER_ID).source_language,
-            Some(SourceLanguage::Render)
-        ));
-
-        // `journals_page_blocks` is the page-display spec only: the auto-create
-        // rule is a separate spec (`journals_auto_create_blocks`), both seeded by
-        // `build_default_layout_blocks`. The page-display spec carries no rule.
-        assert!(
-            !blocks.iter().any(|b| b.id.as_str() == JOURNALS_ACTION_ID),
-            "the page-display spec carries no rule (it lives in the rule spec)"
-        );
     }
 
     #[test]
-    fn journals_auto_create_is_a_single_block_holon_rule() {
-        let blocks = journals_auto_create_blocks();
-        // A "Journal Auto-Create" heading hosting ONE self-contained holon_rule
-        // block (ADR 0024 §7.2) — no legacy holon_sql trigger sibling.
-        let auto = find(&blocks, JOURNALS_AUTO_CREATE_ID);
-        assert_eq!(auto.parent_id.as_str(), JOURNALS_PAGE_ID);
-        // Exactly two blocks: the heading + the rule. No holon_sql trigger sibling.
-        assert_eq!(
-            blocks.len(),
-            2,
-            "single-block rule: heading + one holon_rule"
-        );
-        assert!(
-            blocks
-                .iter()
-                .filter(|b| b.content_type == ContentType::Source)
-                .all(|b| b.source_language == Some(SourceLanguage::HolonRule)),
-            "the only source block is the holon_rule (no holon_sql trigger)"
-        );
-        let rule = find(&blocks, JOURNALS_ACTION_ID);
-        assert_eq!(rule.parent_id.as_str(), JOURNALS_AUTO_CREATE_ID);
-        assert!(matches!(
-            rule.source_language,
-            Some(SourceLanguage::HolonRule)
-        ));
-        // The ratified sugar form: `when:` guard + `emit:` place/name.
-        assert!(rule.content.contains("when:") && rule.content.contains("emit:"));
-        // LogSeq-parity daily-note ruling (2026-07-19): the day block is a
-        // PAGE-file child of the journals shell (`place: page(journals)`), so it is
-        // `Page`-tagged, a `[[{today}]]` link target, and owns `Journals/{today}.org`.
-        assert!(rule.content.contains("place: page(journals)"));
-    }
-
-    #[test]
-    fn journals_page_blocks_are_deterministic_and_idempotent() {
-        // Same ids on every call — so seeding on every boot upserts (never
-        // duplicates) the journal infrastructure.
-        assert_eq!(ids(&journals_page_blocks()), ids(&journals_page_blocks()));
-    }
-
-    #[test]
-    fn default_layout_includes_journal_machinery_on_every_boot() {
-        // Defect 2 (partial): a non-empty (already-seeded / org) vault boots with
-        // fresh=false but MUST still get the journals page + its display query, so
-        // no vault is left without journal infrastructure. Both the fresh and the
-        // non-fresh layout carry the page.
+    fn default_layout_carries_every_asset_block_on_every_boot() {
+        let wanted: Vec<String> = DEFAULT_ASSETS
+            .iter()
+            .flat_map(|a| ids(&a.blocks().expect("parse asset")))
+            .collect();
         for fresh in [true, false] {
             let entries =
                 FrontendSession::<()>::build_default_layout_blocks(fresh).expect("build layout");
-            let entry_ids: std::collections::HashSet<String> =
-                entries.iter().map(|b| b.id.as_str().to_string()).collect();
-            for id in [
-                JOURNALS_PAGE_ID,
-                JOURNALS_SRC_ID,
-                JOURNALS_RENDER_ID,
-                JOURNALS_AUTO_CREATE_ID,
-                JOURNALS_ACTION_ID,
-            ] {
+            let have = ids(&entries);
+            for id in &wanted {
                 assert!(
-                    entry_ids.contains(id),
-                    "fresh={fresh}: journals block {id} must be seeded"
+                    have.contains(id),
+                    "fresh={fresh}: asset block {id} not seeded"
                 );
             }
-            // Exactly ONE Journals page shell — never a duplicate.
-            let page_count = entries
-                .iter()
-                .filter(|b| b.is_page() && b.content == "Journals")
-                .count();
-            assert_eq!(page_count, 1, "fresh={fresh}: exactly one Journals page");
         }
-    }
-
-    #[test]
-    fn journals_disk_assets_are_empty_no_duplicate_page_source() {
-        // The journals page is NOT a disk-seeded asset anymore (a disk Journals.org
-        // with no `#+ID:` parsed to a SECOND `file:` page). Guard the regression.
-        assert!(
-            DEFAULT_ASSETS.is_empty(),
-            "journals must be seeded programmatically, not written to disk"
-        );
-        // ContentType round-trips through the worker's string SQL path.
-        assert_eq!(ContentType::Source.to_string(), "source");
     }
 }
