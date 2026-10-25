@@ -74,8 +74,9 @@ struct State {
     running: bool,
     /// The subjects the last good run wrote.
     subjects: BTreeSet<Subject>,
-    /// Subjects a good run dropped while a running firing held their token:
-    /// retracted once the token is back, forgotten once no firing runs on them.
+    /// Subjects a good run dropped while a firing (running or parked) held
+    /// their token: retracted once the token is back, forgotten once no
+    /// firing holds it.
     held: BTreeSet<Subject>,
     failure: Option<(String, Duration)>,
 }
@@ -158,7 +159,7 @@ impl Probes {
         for gone in gone {
             if exec.tokens().token(place, &gone).is_some() {
                 requests.extend(exec.retract(place, &gone, now)?.requests);
-            } else if exec.in_flight().any(|(_, _, s, _)| *s == gone) {
+            } else if exec.holder(&Place::new(place), &gone).is_some() {
                 state.held.insert(gone);
             }
         }

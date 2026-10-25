@@ -2342,7 +2342,7 @@ impl Executor {
             .is_some_and(|s| !s.tokens.is_empty() && !s.reserved)
     }
 
-    fn holder(&self, place: &Place, subject: &Subject) -> Option<Holder> {
+    pub(crate) fn holder(&self, place: &Place, subject: &Subject) -> Option<Holder> {
         let holds = |a: &Attempt| &a.subject == subject && a.taken.iter().any(|(p, _)| p == place);
         if let Some(a) = self.in_flight.values().find(|a| holds(a)) {
             return Some(Holder::Running(a.transition.clone()));
