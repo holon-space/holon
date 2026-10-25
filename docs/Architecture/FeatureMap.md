@@ -380,6 +380,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `journal-feed-main-panel-still-loading`
 - `lib-type-chars-home-profile-derived`
 - `logseq-parity-caret-fold-lost-loro`
+- `logseq-parity-corpus-replay-load-timeout`
 - `logseq-parity-slash-menu-offers-no-delete`
 - `loro-backend-change-count`
 - `loro-move-false-cycle-duplicate-id`
@@ -388,7 +389,9 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `mirrored-entity-authority-ops-missing`
 - `no-proptest-regressions-seed-file-under-load`
 - `org-deep-text-ratio-under-load`
+- `org-suite-backward-sync-ui-delete-load-timeout`
 - `orgmode-file-watcher-no-event`
+- `overlay-sidebar-pre-warm-timeout-unpainted`
 - `pairing-conflict-badge-long-copy-content-unpainted`
 - `pairing-conflict-badge-page-copy-unbadged`
 - `paste-block-copy-sql-read-repeat-budget`
@@ -403,6 +406,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `shopping-mapping-cost-slo`
 - `slo-probe-arm-refusal-caught-panic`
 - `slot-withdrawn-last-claim-no-retraction`
+- `split-doc-root-setup-org-sync-under-load`
 - `task-state-clear-lost-across-cut-paste`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
@@ -410,6 +414,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `tour-spike-create-op-not-observable-load`
 - `tui-inline-row-mount-unsettled-frame`
 - `tui-refused-write-back-missing-from-log`
+- `tui-ui-pbt-load-timeout`
 - `turso-block-query-source-round-trip`
 - `two-instance-loro-docs-no-common-state`
 - `two-instance-one-way-share-receiver-org-missing`
