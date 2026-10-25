@@ -77,6 +77,7 @@ else
   run() { "$@"; }
 fi
 
+run /usr/bin/python3 "$(dirname "$0")/target-gc.py" target --mark
 step 1 fmt cargo fmt --all -- --check
 step 2 deny just deny
 step 3 gate-compile just gate-compile
@@ -114,4 +115,5 @@ trap - EXIT
 
 echo "== information only: org_suite (compare its reds with the known reds) =="
 run cargo nextest run -p holon-integration-tests --test org_suite --no-fail-fast --features pbt,web-arm || echo "ORG_SUITE RED"
+run /usr/bin/python3 "$(dirname "$0")/target-gc.py" target --apply --incremental-below "$DISK_FLOOR_GIB" || echo "TARGET-GC NOT RUN (exit $?), see above"
 [ -z "$extra_red" ]

@@ -1,22 +1,32 @@
 #!/usr/bin/env python3
-"""Collect superseded directories from cargo's per-crate build tree.
+"""Collect unused directories from cargo's per-unit build tree.
 
-Cargo lays intermediate artifacts out as
-``target/<profile>/build/<crate>/<metadata-hash>/{fingerprint,out}``. The
+Two collectors, both dry runs unless --apply:
+
+Build hash dirs, ``target/<profile>/build/<crate>/<metadata-hash>/``. The
 metadata hash covers the resolved feature set, so two gates that unify features
 differently mint two directories for the SAME target and neither is ever
-reclaimed: this workspace reached 76 directories for one ``lib-reqwest`` and 878
-for ``holon-app``'s 34 test targets, at ~238 MB apiece once a test binary links.
+reclaimed. A directory is garbage when ``--keep`` newer directories for the same
+(profile, crate, target) exist. Grouping is by the target identity cargo writes
+into ``fingerprint/`` (``lib-reqwest``, ``test-integration-test-loro_suite``,
+...); a directory whose identity cannot be read forms its own group and is never
+collected. Age alone never condemns a hash dir: cargo writes nothing into the
+dir of a fresh unit, so a dir the last build used can look years old.
 
-A directory is garbage exactly when a newer directory for the same (crate,
-target) exists. Grouping is by the target identity cargo itself writes into
-``fingerprint/`` (``lib-reqwest``, ``test-integration-test-loro_suite``, ...);
-a directory whose identity cannot be read forms its own group and is never
-collected.
+Incremental dirs, ``target/debug/incremental/<crate>-<hash>/`` (``--incremental``).
+Mark and sweep: ``--mark`` at the start of a build moves ``.gc-mark`` to
+``.gc-mark.prev`` and touches a new ``.gc-mark``; the sweep after the build
+deletes every dir whose newest entry is older than ``.gc-mark.prev`` and that is
+not among the ``--keep`` newest dirs of its unit name, so what the last two
+builds compiled survives. Deleting one costs a non-incremental compile of that
+unit the next time it changes, never a stale build. Known limit: a fresh unit
+writes nothing into its dir, so the markers do not protect it; at keep 2 the
+first CANON one-line edit after a seed sweep measured about +170 s (test
+profile, 3 noisy runs: +318, +1, +192 s). So the incremental sweep runs only
+under disk pressure (``--incremental-below``) or at a seed refresh
+(``--incremental``).
 
-``deps/`` is deliberately out of scope. One ``deps/`` entry is shared by every
-target that links it, so supersession is not decidable from the entry alone --
-cargo-sweep prunes there by age instead.
+Refuses with exit 3 while any process holds a file open under a profile dir.
 """
 
 import argparse
@@ -25,29 +35,30 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 
 
 PROFILES = ("debug", "release")
 HASH_SUFFIX = re.compile(r"-[0-9a-f]{8,}$")
+MARK = ".gc-mark"
+PREV_MARK = ".gc-mark.prev"
 
 EXIT_BUSY = 3
 
 
 class Unit:
-    """One <crate>/<hash> directory: what it is, when it was built, how big."""
+    """One <crate>/<hash> directory: what it is and when it was built."""
 
-    def __init__(self, crate, path):
+    def __init__(self, profile, crate, path):
+        self.profile = profile
         self.crate = crate
         self.path = path
         self.hash = os.path.basename(path)
         self.target = _target_identity(path) or self.hash
         self.mtime = _built_at(path)
-        self.size = _tree_size(path)
 
     @property
     def group(self):
-        return (self.crate, self.target)
+        return (self.profile, self.crate, self.target)
 
 
 def _target_identity(unit_dir):
@@ -88,15 +99,25 @@ def _built_at(unit_dir):
     return max(times)
 
 
-def _tree_size(path):
-    total = 0
-    for root, _dirs, files in os.walk(path):
-        for name in files:
-            try:
-                total += os.lstat(os.path.join(root, name)).st_size
-            except OSError:
-                pass
-    return total
+def tree_usage(path):
+    """(bytes, files) under path."""
+    total = files = 0
+    for root, _dirs, names in os.walk(path):
+        for name in names:
+            total += os.lstat(os.path.join(root, name)).st_size
+            files += 1
+    return total, files
+
+
+def used_since(path, cutoff):
+    """True when path or any entry below it was modified at or after cutoff."""
+    if os.lstat(path).st_mtime >= cutoff:
+        return True
+    for root, dirs, names in os.walk(path):
+        for name in dirs + names:
+            if os.lstat(os.path.join(root, name)).st_mtime >= cutoff:
+                return True
+    return False
 
 
 def collect_units(target_dir):
@@ -112,7 +133,7 @@ def collect_units(target_dir):
             for entry in sorted(os.listdir(crate_dir)):
                 unit_dir = os.path.join(crate_dir, entry)
                 if os.path.isdir(unit_dir):
-                    units.append(Unit(crate, unit_dir))
+                    units.append(Unit(profile, crate, unit_dir))
     return units
 
 
@@ -130,27 +151,71 @@ def plan(units, keep):
     return out
 
 
-def busy_pids(target_dir):
-    """PIDs of build processes that name this target dir in their argv."""
-    probe = subprocess.run(
-        ["pgrep", "-f", os.path.abspath(target_dir)],
-        capture_output=True,
-        text=True,
+def mark(target_dir):
+    current = os.path.join(target_dir, MARK)
+    if os.path.exists(current):
+        os.replace(current, os.path.join(target_dir, PREV_MARK))
+    with open(current, "w"):
+        pass
+
+
+def sweep_cutoff(target_dir):
+    """mtime of the older of the two markers; the sweep keeps what is newer."""
+    for name in (PREV_MARK, MARK):
+        path = os.path.join(target_dir, name)
+        if os.path.exists(path):
+            return os.stat(path).st_mtime
+    raise SystemExit(
+        "no %s in %s: run `target-gc.py %s --mark` at the start of the build"
+        % (MARK, target_dir, target_dir)
     )
-    mine = {os.getpid(), os.getppid()}
+
+
+def incremental_dirs(target_dir):
+    root = os.path.join(target_dir, "debug", "incremental")
+    if not os.path.isdir(root):
+        return []
+    paths = (os.path.join(root, name) for name in sorted(os.listdir(root)))
+    return [p for p in paths if os.path.isdir(p)]
+
+
+def newest_entry(path):
+    newest = os.lstat(path).st_mtime
+    for root, dirs, names in os.walk(path):
+        for name in dirs + names:
+            newest = max(newest, os.lstat(os.path.join(root, name)).st_mtime)
+    return newest
+
+
+def incremental_beyond_keep(dirs, keep):
+    """Dirs that are not among the newest ``keep`` of their unit name (``<name>-<hash>``)."""
+    by_name = {}
+    for path in dirs:
+        by_name.setdefault(os.path.basename(path).rsplit("-", 1)[0], []).append(path)
+    out = []
+    for members in by_name.values():
+        if len(members) > keep:
+            out += sorted(members, key=newest_entry, reverse=True)[keep:]
+    return sorted(out)
+
+
+def holders(target_dir):
+    """(pid, command, path) of every open file under a profile dir of target_dir."""
+    roots = tuple(os.path.join(os.path.realpath(target_dir), p) + os.sep for p in PROFILES)
+    # -F pcn prints pid, command name and file name only; never argv or environment.
+    probe = subprocess.run(["lsof", "-w", "-n", "-P", "-F", "pcn"], capture_output=True, text=True)
+    if probe.returncode != 0:
+        raise SystemExit("lsof failed (exit %d): %s" % (probe.returncode, probe.stderr.strip()))
     found = []
-    for line in probe.stdout.split():
-        pid = int(line)
-        if pid in mine:
-            continue
-        comm = subprocess.run(
-            ["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True
-        ).stdout.strip()
-        # comm only -- never `pgrep -fl` or `ps -o args`, which print the
-        # process environment and have leaked API keys into transcripts before.
-        base = os.path.basename(comm)
-        if base.startswith(("cargo", "rustc", "sccache", "clang", "cc", "ld", "lld")):
-            found.append((pid, base))
+    pid = comm = None
+    for line in probe.stdout.splitlines():
+        tag, value = line[:1], line[1:]
+        if tag == "p":
+            pid = int(value)
+        elif tag == "c":
+            comm = value
+        elif tag == "n" and value.startswith(roots) and pid != os.getpid():
+            found.append((pid, comm, value))
     return found
 
 
@@ -161,107 +226,94 @@ def human(n):
         n /= 1024.0
 
 
-def run(target_dir, keep, apply_):
+def remove(path, apply_):
+    size, files = tree_usage(path)
+    if apply_:
+        shutil.rmtree(path)
+    return size, files
+
+
+def free_gib(path):
+    return shutil.disk_usage(path).free / 1024 ** 3
+
+
+def run(target_dir, keep, incremental, below_gib, apply_):
     if not os.path.isdir(target_dir):
         raise SystemExit("no such target dir: %s" % target_dir)
+    if incremental or below_gib is not None:
+        sweep_cutoff(target_dir)
 
-    busy = busy_pids(target_dir)
+    busy = holders(target_dir)
     if busy:
-        listing = ", ".join("%s(%d)" % (comm, pid) for pid, comm in busy)
-        sys.stderr.write(
-            "refusing to run: a build is using %s -- %s\n" % (target_dir, listing)
-        )
+        sys.stderr.write("refusing to run: files under %s are open:\n" % target_dir)
+        for pid, comm, path in busy[:20]:
+            sys.stderr.write("  %s(%d) %s\n" % (comm, pid, path))
         return EXIT_BUSY
+
+    verb = "rm" if apply_ else "--"
+    totals = {}
 
     units = collect_units(target_dir)
     groups = plan(units, keep)
-
-    freed = 0
-    for (crate, target), survivors, doomed in groups:
-        group_bytes = sum(u.size for u in doomed)
-        freed += group_bytes
-        print(
-            "%-34s %-46s %2d superseded  %10s"
-            % (crate, target, len(doomed), human(group_bytes))
-        )
+    freed = files = 0
+    for (profile, crate, target), survivors, doomed in groups:
+        print("%s/%-30s %-46s %2d superseded" % (profile, crate, target, len(doomed)))
         newest = survivors[0].mtime if survivors else 0
         for unit in doomed:
+            size, n = remove(unit.path, apply_)
+            freed += size
+            files += n
             behind = (newest - unit.mtime) / 3600.0
-            print(
-                "    %s %s  %8s  %6.1fh behind newest"
-                % ("rm" if apply_ else "--", unit.hash, human(unit.size), behind)
-            )
-            if apply_:
-                shutil.rmtree(unit.path)
+            print("    %s %s  %8s  %6.1fh behind newest" % (verb, unit.hash, human(size), behind))
         for unit in survivors:
-            print("    keep %s  %8s" % (unit.hash, human(unit.size)))
+            print("    keep %s" % unit.hash)
+    totals["build hash dirs"] = (sum(len(d) for _g, _s, d in groups), len(units), freed, files)
+
+    if below_gib is not None:
+        free = free_gib(target_dir)
+        incremental = free < below_gib
+        print("incremental sweep: %s, %.0f GiB free, threshold %g GiB" % ("runs" if incremental else "skipped", free, below_gib))
+    if incremental:
+        cutoff = sweep_cutoff(target_dir)
+        dirs = incremental_dirs(target_dir)
+        stale = [path for path in incremental_beyond_keep(dirs, keep) if not used_since(path, cutoff)]
+        freed = files = 0
+        for path in stale:
+            size, n = remove(path, apply_)
+            freed += size
+            files += n
+            print("%s %s  %8s" % (verb, path, human(size)))
+        totals["incremental dirs"] = (len(stale), len(dirs), freed, files)
 
     print()
-    print("units scanned : %d" % len(units))
-    print("groups pruned : %d" % len(groups))
-    print(
-        "%-14s: %s%s"
-        % (
-            "freed" if apply_ else "would free",
-            human(freed),
-            "" if apply_ else "  (dry run -- pass --apply to delete)",
+    for kind, (dirs, scanned, size, n) in totals.items():
+        print(
+            "%-17s: %s %d of %d dirs, %s (%d B) in %d files"
+            % (kind, "freed" if apply_ else "would free", dirs, scanned, human(size), size, n)
         )
-    )
-    return 0
-
-
-def self_test():
-    """Two hash dirs for one target, keep=1: exactly the older must go."""
-    root = tempfile.mkdtemp(prefix="target-gc-selftest-")
-    try:
-        crate = os.path.join(root, "debug", "build", "holon-app")
-        old = os.path.join(crate, "aaaaaaaaaaaaaaaa")
-        new = os.path.join(crate, "bbbbbbbbbbbbbbbb")
-        for unit, when in ((old, 1_000_000), (new, 2_000_000)):
-            os.makedirs(os.path.join(unit, "fingerprint"))
-            os.makedirs(os.path.join(unit, "out"))
-            ident = os.path.join(unit, "fingerprint", "test-integration-test-loro_suite")
-            with open(ident, "w") as fh:
-                fh.write("x" * 16)
-            stamp = os.path.join(unit, "fingerprint", "invoked.timestamp")
-            open(stamp, "w").close()
-            os.utime(stamp, (when, when))
-            os.utime(unit, (when, when))
-
-        units = collect_units(root)
-        assert len(units) == 2, units
-        assert {u.target for u in units} == {"test-integration-test-loro_suite"}, units
-
-        groups = plan(units, keep=1)
-        assert len(groups) == 1, groups
-        (_group, survivors, doomed) = groups[0]
-        assert [u.hash for u in survivors] == ["bbbbbbbbbbbbbbbb"], survivors
-        assert [u.hash for u in doomed] == ["aaaaaaaaaaaaaaaa"], doomed
-
-        rc = run(root, keep=1, apply_=True)
-        assert rc == 0, rc
-        assert not os.path.exists(old), "older dir survived"
-        assert os.path.exists(new), "newer dir was collected"
-
-        # Idempotent: a second pass finds nothing left to supersede.
-        assert plan(collect_units(root), keep=1) == []
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-    print("self-test PASS")
+    if not apply_:
+        print("dry run -- pass --apply to delete")
     return 0
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("target_dir", nargs="?", default="target")
-    ap.add_argument("--keep", type=int, default=2, help="newest dirs kept per group")
+    ap.add_argument("--keep", type=int, default=2, help="newest dirs kept per build target and per incremental unit name")
+    ap.add_argument("--incremental", action="store_true",
+                    help="also sweep debug/incremental dirs older than the markers")
+    ap.add_argument("--incremental-below", type=float, metavar="GIB",
+                    help="sweep debug/incremental only when less than GIB is free after the build hash sweep")
+    ap.add_argument("--mark", action="store_true", help="rotate the markers and exit")
     ap.add_argument("--apply", action="store_true", help="delete (default: dry run)")
-    ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
-    if args.self_test:
-        return self_test()
-    return run(args.target_dir, args.keep, args.apply)
+    if args.mark:
+        mark(args.target_dir)
+        return 0
+    if args.incremental and args.incremental_below is not None:
+        ap.error("--incremental and --incremental-below exclude each other")
+    return run(args.target_dir, args.keep, args.incremental, args.incremental_below, args.apply)
 
 
 if __name__ == "__main__":

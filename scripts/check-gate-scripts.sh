@@ -96,6 +96,9 @@ expect "the marker holds the gate's pid in the timing steps and is empty in ever
 expect "six timing calls among the calls" [ "$(grep -cE "^($timing)" "$probe")" = 6 ]
 expect "the org_suite information run comes after the release" grep -q 'org_suite.* | quiet=$' "$probe"
 expect "the marker is gone after the gate" [ ! -s "$home/.cache/holon-build/quiet" ]
+expect "marks the target for the sweep" [ -f "$integ/target/.gc-mark" ]
+expect "sweeps the build hash dirs last" [ "$(grep -E '^(== information only|build hash dirs)' "$scratch/gate.out" | tail -1 | cut -c1-15)" = "build hash dirs" ]
+expect "skips the incremental sweep above the disk floor" grep -q '^incremental sweep: skipped' "$scratch/gate.out"
 
 echo "== the gate run outside a build slot"
 : > "$probe"
