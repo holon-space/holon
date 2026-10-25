@@ -366,7 +366,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `external-rewrite-drops-page-body`
 - `failed-slot-create-loro-dispatch-keystrokes-run-anyway`
 - `failed-slot-create-sqlonly-keystrokes-run-anyway`
-- `focus-roots-feed-outstanding-sql-stamp`
 - `folder-companion-subdir-fileless-page-not-homed-load`
 - `fs-watcher-arm-no-event-agent-session`
 - `fs-watcher-no-events-agent-session`

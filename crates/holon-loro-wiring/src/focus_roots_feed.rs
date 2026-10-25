@@ -396,7 +396,10 @@ mod tests {
             .collect()
     }
 
-    fn every_stamp_is_fed(clock: &CommitClock) {
+    /// The engine feeds the clock on its own thread and serves requests in
+    /// order, so the clock is read after a snapshot answer, running or stopped.
+    fn every_stamp_is_fed(engine: &ViewEngine, clock: &CommitClock) {
+        let _running_or_stopped = engine.snapshot_and_subscribe(View::FocusRoots);
         assert_eq!(
             clock.low_watermark().get(),
             clock.high_water().get() + 1,
@@ -535,7 +538,7 @@ mod tests {
         w.execute("INSERT INTO navigation_cursor (region, history_id) VALUES ('main', 3)")
             .await;
 
-        every_stamp_is_fed(&w.clock);
+        every_stamp_is_fed(&w.engine, &w.clock);
         assert_eq!(w.clock.high_water().get(), start.below.get() - 1 + 4);
         let (state, _) = w.engine.snapshot_and_subscribe(View::FocusRoots).unwrap();
         let belows: Vec<u64> = versions.try_iter().map(|v| v.below.get()).collect();
@@ -592,7 +595,7 @@ mod tests {
         };
         assert_eq!(stop_error(&w.engine), error);
         assert_eq!(stops(&w.conditions), vec![error.to_string()]);
-        every_stamp_is_fed(&w.clock);
+        every_stamp_is_fed(&w.engine, &w.clock);
 
         w.navigate("main", "block:b").await;
         assert_eq!(
@@ -626,7 +629,7 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(stops(&conditions), vec![error.to_string()]);
-        every_stamp_is_fed(&clock);
+        every_stamp_is_fed(&engine, &clock);
     }
 
     #[test]
@@ -660,7 +663,7 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(stops(&conditions), vec![error.to_string()]);
-        every_stamp_is_fed(&clock);
+        every_stamp_is_fed(&engine, &clock);
 
         feed.on_event(CommitEvent::new(&event(RELATION, 8, 0, 1)));
         assert_eq!(clock.high_water(), open, "a stopped listener mints nothing");
@@ -704,7 +707,19 @@ mod tests {
             BTreeSet::from([main_root("block:c", 1), main_root("block:x", 2)])
         );
         assert!(stops(&conditions).is_empty());
-        every_stamp_is_fed(&clock);
+        every_stamp_is_fed(&engine, &clock);
+    }
+
+    #[test]
+    fn the_fed_check_waits_for_the_engine_to_take_every_feed_posted_before_it() {
+        let (clock, _conditions, engine, feed) = unstarted();
+        for commit in 1..=100 {
+            feed.on_event(CommitEvent::new(&focus_commit(
+                commit,
+                &[(Change::Insert, "block:a", commit as i64)],
+            )));
+        }
+        every_stamp_is_fed(&engine, &clock);
     }
 
     #[test]
@@ -730,6 +745,6 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(stops(&conditions), vec![error.to_string()]);
-        every_stamp_is_fed(&clock);
+        every_stamp_is_fed(&engine, &clock);
     }
 }
