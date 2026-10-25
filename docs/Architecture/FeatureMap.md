@@ -374,6 +374,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `hand-authored-hm4-reboot-settle-load-timeout`
 - `identity-transfer-in-place-edit-misbound-load`
 - `integration-toggle-load`
+- `invite-refusal-unmapped-focus-root`
 - `iroh-accept-drain-recv-stream`
 - `iroh-nat-traversal-address-set`
 - `iroh-pairing-refusal-reads-as-io-failure`
