@@ -67,7 +67,8 @@ impl Shell {
         })
     }
 
-    fn now(&self) -> Duration {
+    /// The shell's clock: the time since it started.
+    pub fn now(&self) -> Duration {
         self.inner.epoch.elapsed()
     }
 
@@ -104,6 +105,21 @@ impl Shell {
         self.queue(quiesced.requests);
     }
 
+    /// Runs `f` on the executor at [`Shell::now`]: a write, a retraction, a
+    /// probe's facts. The effects it returns wait for the next
+    /// [`Shell::drive`], and [`Shell::fired`] wakes the owner for them.
+    pub fn apply<E>(
+        &self,
+        f: impl FnOnce(&mut Executor, Duration) -> Result<Vec<EffectRequest>, E>,
+    ) -> Result<(), E> {
+        let now = self.now();
+        let requests = f(&mut self.exec(), now)?;
+        self.queue(requests);
+        self.inner.progress.send_modify(|n| *n += 1);
+        self.inner.fired.notify_one();
+        Ok(())
+    }
+
     /// A manual fire, answered at bind. The owner's next [`Shell::drive`]
     /// runs its effect; [`Shell::fired`] wakes the owner for it.
     pub fn fire(
@@ -122,7 +138,8 @@ impl Shell {
         Ok(accepted.value)
     }
 
-    /// Completes when a manual fire left an effect for [`Shell::drive`].
+    /// Completes when a manual fire or an [`Shell::apply`] left an effect for
+    /// [`Shell::drive`].
     pub async fn fired(&self) {
         self.inner.fired.notified().await;
     }

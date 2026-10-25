@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.holon.netd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@NETD@</string>
+        <string>--listen</string>
+        <string>127.0.0.1:@PORT@</string>
+        <string>--state-dir</string>
+        <string>@STATE_DIR@</string>
+        <string>@NET_FILE@</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@STATE_DIR@/netd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>@STATE_DIR@/netd.err.log</string>
+</dict>
+</plist>

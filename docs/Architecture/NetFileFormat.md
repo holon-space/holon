@@ -6,8 +6,8 @@
 from it (`crates/holon-net/src/load.rs`, pinned by
 `crates/holon-net/tests/net_load.rs`). Probes run through
 `crates/holon-net/src/probe.rs` (pinned by `crates/holon-net/tests/probe_facts.rs`)
-and `crates/holon-net-shell/src/probe.rs`; the host that schedules them is
-still to come.*
+and `crates/holon-net-shell/src/probe.rs`; netd hosts a net file and
+schedules them ([NetHost.md](NetHost.md)).*
 
 A **net file** is one YAML file that holds one whole runtime net: its places,
 its transitions, the shell commands its firings run, and the probes that feed

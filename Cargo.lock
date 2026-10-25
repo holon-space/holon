@@ -6121,6 +6121,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-netd"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "clap",
+ "holon-net",
+ "holon-net-shell",
+ "holon-pattern",
+ "libc",
+ "proptest 1.11.0",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-oracles"
 version = "0.1.0"
 dependencies = [

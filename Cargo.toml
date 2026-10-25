@@ -11,6 +11,7 @@ members = [
   "crates/holon-net",
   "crates/holon-net-layout",
   "crates/holon-net-shell",
+  "crates/holon-netd",
   "crates/holon-pattern",
   "crates/holon-rules",
   "crates/holon-loro-wiring",

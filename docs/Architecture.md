@@ -255,6 +255,7 @@ Detailed documentation lives in `docs/Architecture/`:
 | [replication.md](Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |
 | [archlint.md](Architecture/Archlint.md) | Architecture linter (ast-grep YAML + ripgrep smells + dylint cdylib), Claude Code PostToolUse hook, ALLOW protocol, cargo arch-test wrapper |
 | [NetFileFormat.md](Architecture/NetFileFormat.md) | The standalone net file: places and their capacity, transitions with read and inhibitor arcs, priority and timers, shell effect descriptors, probe descriptors, the canonical byte-stable form, every named load error, and the loader that builds the executor's net from one file |
+| [NetHost.md](Architecture/NetHost.md) | netd, the long-running local host of net files: its MCP tools on the loopback (put, fire, marking, why_not, await), the logic it gives every transition, and the marking it rebuilds from probes on start |
 
 See also [wiki/overview.md](../wiki/overview.md) for the navigational layer and [wiki/index.md](../wiki/index.md) for per-crate / per-concept pages.
 

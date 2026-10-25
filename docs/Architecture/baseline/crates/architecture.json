@@ -246,6 +246,9 @@
                     "name": "operation_engine.rs"
                   },
                   {
+                    "name": "page_ref.rs"
+                  },
+                  {
                     "name": "query_engine.rs"
                   },
                   {
@@ -415,9 +418,6 @@
                 "path": "holon/src/storage",
                 "files": [
                   {
-                    "name": "TODO.md"
-                  },
-                  {
                     "name": "backend.rs"
                   },
                   {
@@ -476,18 +476,6 @@
                 "parent": "holon",
                 "files": [
                   {
-                    "name": "HANDOFF_GENERAL_E2E_PBT.md"
-                  },
-                  {
-                    "name": "HANDOFF_GENERAL_E2E_PBT_REVIEW.md"
-                  },
-                  {
-                    "name": "HANDOFF_MULTI_VIEW_E2E_PBT.md"
-                  },
-                  {
-                    "name": "IMPLEMENTATION_SUMMARY.md"
-                  },
-                  {
                     "name": "clock_guard.rs"
                   },
                   {
@@ -526,7 +514,7 @@
                     "name": "loro_backend_pbt.rs"
                   },
                   {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   }
                 ]
               },
@@ -541,10 +529,7 @@
                     "name": "entity_macro_test.rs"
                   },
                   {
-                    "name": "loro_backend_pbt.rs"
-                  },
-                  {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   }
                 ]
               },
@@ -560,7 +545,7 @@
                     "name": "fork_at_test.rs"
                   },
                   {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   },
                   {
                     "name": "sync_pbt.rs"
@@ -572,7 +557,7 @@
                 "path": "holon/tests/turso_storage_pbt",
                 "files": [
                   {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   },
                   {
                     "name": "pbt_tests.rs"
@@ -587,7 +572,7 @@
                     "name": "cdc_base_vs_matview_repro.rs"
                   },
                   {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   },
                   {
                     "name": "navigation_focus_refuses_unresolvable_target.rs"
@@ -739,6 +724,9 @@
               },
               {
                 "name": "loro_binary_benchmark.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "malformed_reference_engine_route.rs"
@@ -1302,6 +1290,9 @@
                 "name": "storage_error.rs"
               },
               {
+                "name": "storage_provider.rs"
+              },
+              {
                 "name": "streaming.rs"
               },
               {
@@ -1381,6 +1372,9 @@
               },
               {
                 "name": "render_dsl_colour_refusal.rs"
+              },
+              {
+                "name": "render_dsl_corpus.rs"
               },
               {
                 "name": "row_source_parse_refusals.rs"
@@ -1702,6 +1696,9 @@
               },
               {
                 "name": "loro_write_origins.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "malformed_type_profile_boots_degraded.rs"
@@ -3208,6 +3205,9 @@
                 "name": "unknown_function_call_is_an_error_node.rs"
               },
               {
+                "name": "untrusted_entity_names_in_frontend_are_parsed.rs"
+              },
+              {
                 "name": "value_fn_panic_degrades_only_its_widget.rs"
               },
               {
@@ -3645,6 +3645,9 @@
                           },
                           {
                             "name": "reseed_leak.rs"
+                          },
+                          {
+                            "name": "self_page_ref_resolves.rs"
                           },
                           {
                             "name": "settle_budget.rs"
@@ -4090,6 +4093,9 @@
                             "name": "render_only_block_draws_its_render.rs"
                           },
                           {
+                            "name": "self_page_ref_resolves.rs"
+                          },
+                          {
                             "name": "settle_budget.rs"
                           },
                           {
@@ -4407,6 +4413,9 @@
                         "name": "author_render_only_block.rs"
                       },
                       {
+                        "name": "author_self_page_rule.rs"
+                      },
+                      {
                         "name": "block_to_page.rs"
                       },
                       {
@@ -4611,6 +4620,9 @@
                         "name": "reboot_after_upgrade.rs"
                       },
                       {
+                        "name": "reboot_while_database_held.rs"
+                      },
+                      {
                         "name": "reboot_with_backlog_held.rs"
                       },
                       {
@@ -4630,6 +4642,9 @@
                       },
                       {
                         "name": "release_backlog.rs"
+                      },
+                      {
+                        "name": "release_database_and_restart.rs"
                       },
                       {
                         "name": "release_held.rs"
@@ -4765,6 +4780,9 @@
                     "name": "advice_expectation.rs"
                   },
                   {
+                    "name": "alphabet_coverage.rs"
+                  },
+                  {
                     "name": "bisect_driver.rs"
                   },
                   {
@@ -4892,6 +4910,9 @@
                   },
                   {
                     "name": "sut_row_parsing.rs"
+                  },
+                  {
+                    "name": "timing_mode.rs"
                   },
                   {
                     "name": "transition_budgets.rs"
@@ -5378,6 +5399,9 @@
                     "name": "loro_root_deliveries_are_guarded.rs"
                   },
                   {
+                    "name": "loro_sibling_tie_rule.rs"
+                  },
+                  {
                     "name": "loro_snapshot_durability.rs"
                   },
                   {
@@ -5601,6 +5625,9 @@
                 "name": "hop_step_cost.rs"
               },
               {
+                "name": "keystone_atom_counts.rs"
+              },
+              {
                 "name": "latency_scale_gate.rs"
               },
               {
@@ -5664,6 +5691,9 @@
                 "name": "single_read_attribution.rs"
               },
               {
+                "name": "slot_convergence_pbt.rs"
+              },
+              {
                 "name": "stale_rewrite_sibling_order.rs"
               },
               {
@@ -5697,9 +5727,6 @@
           }
         ],
         "files": [
-          {
-            "name": "CUCUMBER.md"
-          },
           {
             "name": "Cargo.toml"
           }
@@ -5910,7 +5937,7 @@
         "description": "Reading a LogSeq DB-version graph into Holon, and pushing edits back.",
         "pattern": "Anti-Corruption Layer",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Anti-Corruption Layer\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n\nReading a LogSeq DB-version graph into Holon, and pushing edits back.\n\nA LogSeq DB graph is a standard SQLite file whose `kvs` table holds a\npersistent DataScript B+-tree, each node a self-contained Transit-JSON\ndocument. This crate decodes that tree into deduped datoms, projects the\ndatoms into Holon [`Block`]s, and enters them through `BlockOrdering` via\nthe `ingest` boundary.\n\nIt also WRITES: [`kvs_writer::push`] turns the difference between two\nobserved bases into the tail transactions LogSeq's own transactor would\nwrite, flushing them through the B+-trees when the tail overflows. The\nwrite scope is the title and `:block/tags`; every other shape is refused by\nname. See docs/Testing/LogseqDbPush.md.\n\nStage 1 scope and the identity-based acceptance gate are described in\n`plan-lsqdb-import.md`; the fixture-driven amendments are its §9b.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Anti-Corruption Layer\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n\nReading a LogSeq DB-version graph into Holon, and pushing edits back.\n\nA LogSeq DB graph is a standard SQLite file whose `kvs` table holds a\npersistent DataScript B+-tree, each node a self-contained Transit-JSON\ndocument. This crate decodes that tree into deduped datoms, projects the\ndatoms into Holon [`Block`]s, and enters them through `BlockOrdering` via\nthe `ingest` boundary.\n\nIt also WRITES: [`kvs_writer::push`] turns the difference between two\nobserved bases into the tail transactions LogSeq's own transactor would\nwrite, flushing them through the B+-trees when the tail overflows. The\nwrite scope is the title and `:block/tags`; every other shape is refused by\nname. See docs/Testing/LogseqDbPush.md.\n\nStage 1 scope and the identity-based acceptance gate are described in\n`docs/Plans/plan-lsqdb-import.md`; the fixture-driven amendments are its\n§9b.",
         "source_file": "holon-logseq-db/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -6352,6 +6379,9 @@
                 "name": "shape_gate_cost.rs"
               },
               {
+                "name": "slot_loro_mechanics.rs"
+              },
+              {
                 "name": "snapshot_write_is_durable.rs"
               },
               {
@@ -6491,6 +6521,9 @@
               }
             ],
             "files": [
+              {
+                "name": "atom_counts.rs"
+              },
               {
                 "name": "component.rs"
               },
@@ -7123,6 +7156,9 @@
                 "name": "credential_confinement.rs"
               },
               {
+                "name": "dup_key_probe.rs"
+              },
+              {
                 "name": "enablement_cutover.rs"
               },
               {
@@ -7195,6 +7231,9 @@
                 "name": "sidecar_id_column_is_text.rs"
               },
               {
+                "name": "sidecar_view_names.rs"
+              },
+              {
                 "name": "subscribe_bounds.rs"
               },
               {
@@ -7215,9 +7254,6 @@
         "files": [
           {
             "name": "Cargo.toml"
-          },
-          {
-            "name": "HANDOFF_MCP_OAUTH.md"
           },
           {
             "name": "gmailcal_mcp_operations.yaml"
@@ -7340,7 +7376,7 @@
         "description": "The derived Petri-net projection (ADR 0032 §2): rule blocks and operation descriptors compiled into one read-only net, plus the conflict and cycle analyses that run over it.",
         "pattern": "Projection",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Engine\nPattern: Projection\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-net-layout \"viewer geometry & wire contract\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n\nThe derived Petri-net projection (ADR 0032 §2): rule blocks and operation\ndescriptors compiled into one read-only net, plus the conflict and cycle\nanalyses that run over it.\n\nThe projection modules are pure functions of their sources, which is what\nmakes the net a derived artifact and never a second authority (ADR 0032 §2,\nADR 0024 P1a). They carry no state beyond the current derivation, so they\ncannot go stale whether a caller pulls them on demand or holds them as a\nreactive var recomputed on source change.\n\n[`exec`] is the one module with runtime state: the executor of runtime nets\n(ADR 0032 §9), which owns a marking of process-class tokens.\n\nPetri-net vocabulary — transition, place, arc, marking — lives in this\ncrate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one\nplace the two vocabularies meet (ADR 0032 §8).",
+        "content": "@c4 component\n@c4 layer Engine\nPattern: Projection\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-net-layout \"viewer geometry & wire contract\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n@c4 uses holon-rules \"holon_rule YAML front-end\" \"Rust\"\n\nThe derived Petri-net projection (ADR 0032 §2): rule blocks and operation\ndescriptors compiled into one read-only net, plus the conflict and cycle\nanalyses that run over it.\n\nThe projection modules are pure functions of their sources, which is what\nmakes the net a derived artifact and never a second authority (ADR 0032 §2,\nADR 0024 P1a). They carry no state beyond the current derivation, so they\ncannot go stale whether a caller pulls them on demand or holds them as a\nreactive var recomputed on source change.\n\n[`exec`] and [`probe`] hold runtime state: the executor of runtime nets\n(ADR 0032 §9), which owns a marking of process-class tokens, and the run\nstate of the probes that feed facts into it.\n\nPetri-net vocabulary — transition, place, arc, marking — lives in this\ncrate only. Dispatch keeps its `Operation*` names; [`bridge`] is the one\nplace the two vocabularies meet (ADR 0032 §8).",
         "source_file": "holon-net/src/lib.rs",
         "layer": "Engine",
         "relationships": [
@@ -7376,6 +7412,36 @@
             ]
           },
           {
+            "name": "nets",
+            "path": "holon-net/nets",
+            "files": [
+              {
+                "name": "work-runtime-replay.yaml"
+              },
+              {
+                "name": "work-runtime.yaml"
+              }
+            ]
+          },
+          {
+            "name": "probes",
+            "path": "holon-net/probes",
+            "files": [
+              {
+                "name": "disk.sh"
+              },
+              {
+                "name": "load.sh"
+              },
+              {
+                "name": "pids.sh"
+              },
+              {
+                "name": "registry.sh"
+              }
+            ]
+          },
+          {
             "name": "src",
             "path": "holon-net/src",
             "dirs": [
@@ -7406,16 +7472,25 @@
                 "name": "exec.rs"
               },
               {
+                "name": "file.rs"
+              },
+              {
                 "name": "guards.rs"
               },
               {
                 "name": "lib.rs"
               },
               {
+                "name": "load.rs"
+              },
+              {
                 "name": "marking.rs"
               },
               {
                 "name": "net.rs"
+              },
+              {
+                "name": "probe.rs"
               },
               {
                 "name": "uft.rs"
@@ -7444,8 +7519,15 @@
                   },
                   {
                     "name": "model.rs"
+                  },
+                  {
+                    "name": "twin_names.rs"
                   }
                 ]
+              },
+              {
+                "name": "fixtures",
+                "path": "holon-net/tests/fixtures"
               },
               {
                 "name": "uft_lower_support",
@@ -7492,6 +7574,9 @@
                 "name": "exec_order.rs"
               },
               {
+                "name": "exec_pool.rs"
+              },
+              {
                 "name": "exec_receivers.rs"
               },
               {
@@ -7510,7 +7595,34 @@
                 "name": "hop_predicate_agreement.rs"
               },
               {
+                "name": "net_file.rs"
+              },
+              {
+                "name": "net_load.rs"
+              },
+              {
+                "name": "net_load_key_comment.rs"
+              },
+              {
+                "name": "net_load_line.rs"
+              },
+              {
+                "name": "net_load_probe.rs"
+              },
+              {
+                "name": "net_rev2_storage.rs"
+              },
+              {
                 "name": "net_view.rs"
+              },
+              {
+                "name": "probe_facts.rs"
+              },
+              {
+                "name": "probe_retract_held.rs"
+              },
+              {
+                "name": "probe_retract_parked.rs"
               },
               {
                 "name": "refinement_agreement.rs"
@@ -7520,6 +7632,9 @@
               },
               {
                 "name": "uft_lower.rs"
+              },
+              {
+                "name": "work_runtime_replay.rs"
               }
             ]
           }
@@ -7601,7 +7716,7 @@
         "c4_level": "unknown",
         "description": "A tokio shell over the sans-IO [`holon_net::exec::Executor`]: a monotonic clock, the effect loop, manual fires from other tasks and waiting for an occurrence to settle.",
         "pattern_status": "planned",
-        "content": "A tokio shell over the sans-IO [`holon_net::exec::Executor`]: a\nmonotonic clock, the effect loop, manual fires from other tasks and\nwaiting for an occurrence to settle.\n\nThe executor sits behind a lock that is never held across an effect, so a\nfire or a marking read from another task waits only for one step.",
+        "content": "A tokio shell over the sans-IO [`holon_net::exec::Executor`]: a\nmonotonic clock, the effect loop, manual fires from other tasks and\nwaiting for an occurrence to settle.\n\nThe executor sits behind a lock that is never held across an effect, so a\nfire or a marking read from another task waits only for one step.\n\n[`effect`] is the one effect the shell runs itself: a net file's `shell`\ndescriptor, as a child process group. [`probe`] runs a probe's command\nthe same way and hands back its stdout.",
         "source_file": "holon-net-shell/src/lib.rs",
         "dirs": [
           {
@@ -7609,7 +7724,25 @@
             "path": "holon-net-shell/src",
             "files": [
               {
+                "name": "effect.rs"
+              },
+              {
                 "name": "lib.rs"
+              },
+              {
+                "name": "probe.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-net-shell/tests",
+            "files": [
+              {
+                "name": "probe_run.rs"
+              },
+              {
+                "name": "shell_effect.rs"
               }
             ]
           }
@@ -7617,6 +7750,76 @@
         "files": [
           {
             "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-netd",
+        "path": "holon-netd",
+        "c4_level": "unknown",
+        "description": "netd: a long-running local host for standalone nets (`docs/Architecture/NetHost.md`). It loads net files, runs each net's executor with its shell effects and probes, and serves an MCP endpoint on the loopback that puts facts, fires transitions and reads the marking.",
+        "pattern_status": "planned",
+        "content": "netd: a long-running local host for standalone nets\n(`docs/Architecture/NetHost.md`). It loads net files, runs each net's\nexecutor with its shell effects and probes, and serves an MCP endpoint on\nthe loopback that puts facts, fires transitions and reads the marking.\n\nThe marking lives in memory only: a start runs every probe once before\nit serves, so after a restart the marking is what the probes report.",
+        "source_file": "holon-netd/src/lib.rs",
+        "dirs": [
+          {
+            "name": "launchd",
+            "path": "holon-netd/launchd"
+          },
+          {
+            "name": "src",
+            "path": "holon-netd/src",
+            "files": [
+              {
+                "name": "host.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "main.rs"
+              },
+              {
+                "name": "tools.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-netd/tests",
+            "dirs": [
+              {
+                "name": "common",
+                "path": "holon-netd/tests/common",
+                "c4_level": "unknown",
+                "description": "A client of netd over its MCP endpoint, as `mcpc` is one, and a netd process to talk to.",
+                "pattern_status": "planned",
+                "content": "A client of netd over its MCP endpoint, as `mcpc` is one, and a netd\nprocess to talk to.",
+                "source_file": "holon-netd/tests/common/mod.rs",
+                "parent": "holon-netd",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "netd.rs"
+              },
+              {
+                "name": "netd_differential.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          },
+          {
+            "name": "README.md"
           }
         ]
       },

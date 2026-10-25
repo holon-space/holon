@@ -123,6 +123,7 @@ exceptions = [
     { crate = "holon-net", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-net-layout", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-net-shell", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-netd", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-oracles", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-org-format", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-orgmode", allow = ["FSL-1.1-ALv2"] },
