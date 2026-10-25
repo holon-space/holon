@@ -16,7 +16,6 @@ use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
-use super::arm_write_churn::writeback_faults_enabled;
 use crate::pbt::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
@@ -35,9 +34,6 @@ impl TransitionFactory<ReferenceState> for TouchFile {
     type Reason = Reason;
 
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        if !writeback_faults_enabled() {
-            return Validated::fail(Reason::HandAuthoredOnly);
-        }
         let docs: Vec<EntityUri> = state.files.documents.keys().cloned().collect();
         check(
             state.action.app_started && !docs.is_empty(),
@@ -85,6 +81,29 @@ impl crate::pbt::transition_budgets::SqlBudget for TouchFile {
             writes: 0,
             ddl: 0,
             tolerance: 40,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// The generated keystone draws the no-op save on its own: any started
+    /// state with an org-homed document offers it, whatever the environment.
+    #[test]
+    fn a_started_state_with_a_document_offers_a_touch() {
+        let interp = Arc::new(holon_frontend::render_interpreter::RenderInterpreter::new());
+        let mut state = ReferenceState::new(holon_pbt_core::Wiring::full(), interp);
+        state.action.app_started = true;
+        state.files.documents.insert(
+            EntityUri::block("touched-page"),
+            "touched-page.org".to_string(),
+        );
+        if let Validated::Fail(reasons) = TouchFile::weighted_generator(&state) {
+            panic!("TouchFile is not offered in a started state with a document: {reasons:?}");
         }
     }
 }

@@ -37,7 +37,7 @@
 //! ([`ReasonClass::NotDrawnHere`]). Their alphabet is not gone — they are drawn
 //! by a hand-authored regression step or another medium's PBT — so they are
 //! named in `EXPECTED_ABSENT` with the [`CoveredBy`] claim that accounts for
-//! them, and that list is pinned against the generators by a test. Six of them
+//! them, and that list is pinned against the generators by a test. Five of them
 //! decline for a second reason — the `HOLON_PBT_WRITEBACK_FAULTS` gate is off —
 //! so they live in `EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS` and count as
 //! accepted holes only while that gate stays off.
@@ -137,13 +137,6 @@ const EXPECTED_ABSENT_WITHOUT_WRITEBACK_FAULTS: &[(&str, CoveredBy)] = &[
     ("DisarmWriteChurn", CoveredBy::HandAuthored),
     ("DropNextWatcherEvent", CoveredBy::HandAuthored),
     ("ExternalLineEdit", CoveredBy::HandAuthored),
-    (
-        "TouchFile",
-        CoveredBy::Nowhere(
-            "no hand-authored step draws it and the only generator is behind \
-             `HOLON_PBT_WRITEBACK_FAULTS`, which nothing sets — the no-op-save axis is uncovered",
-        ),
-    ),
 ];
 
 /// Every accepted hole this process cannot measure, each with WHERE it is
@@ -166,7 +159,6 @@ const ACCOUNTED_ELSEWHERE: &[(&str, &str)] = &[
         "crates/holon-integration-tests/tests/structural_burst_under_lag.rs, whose own run calls \
          `attest_drew`",
     ),
-    ("TouchFile", "holon-work#280"),
 ];
 
 /// The accepted holes for THIS process: the always-absent kinds, plus the
