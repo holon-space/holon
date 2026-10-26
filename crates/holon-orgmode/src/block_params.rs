@@ -617,40 +617,14 @@ mod tests {
     /// The refusal's claim to "falls back visibly" rather than "silently
     /// degrades" rests entirely on the WARN, so the WARN is pinned, not just
     /// the params shape — deleting it would turn this into a silent drop.
-    ///
-    /// Captured through a LOCAL subscriber (`with_default`) rather than the
-    /// `SpanCollector::global()` discipline: that collector lives in
-    /// `holon-integration-tests`, which this crate cannot depend on. A local
-    /// subscriber needs no touch-before-SUT ordering and leaks no global state.
-    ///
-    /// KNOWN INTERMITTENT under parallel test threads (measured 2/12 and 4/20;
-    /// 15/15 in isolation) — `tracing` caches callsite interest
-    /// PROCESS-globally, so a sibling thread running without a subscriber
-    /// can re-cache this WARN as "never" and the capture buffer comes back
-    /// empty. Pre-existing and not closed by the `rebuild_interest_cache()`
-    /// below. Run with `--test-threads=1` to confirm the LOGIC this test is
-    /// about. Real fix (a process-global test subscriber, or serializing
-    /// the capture tests) is tracked as an orchestrator follow-up,
-    /// IMPROVEMENTS 2026-08-22 "tracing interest-cache flake".
     #[test]
     fn the_refusal_is_disclosed_exactly_once_per_key() {
         let parent = EntityUri::no_parent();
         let block = parse_one("* P\n:PROPERTIES:\n:ID: p0\n:sort_key: zzz\n:keep: v\n:END:\n");
 
-        let captured = CaptureWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(captured.clone())
-            .with_max_level(tracing::Level::WARN)
-            .without_time()
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            // Does not fix the race; a sibling thread with no subscriber can
-            // re-cache the callsite as `never` between the rebuild and the call.
-            tracing::callsite::rebuild_interest_cache();
+        let logged = capture_warnings(|| {
             build_block_params(&block, &parent, &parent, Some(&block));
         });
-
-        let logged = captured.contents();
         assert!(
             logged.contains("sort_key"),
             "the refused key must be named in the WARN, or the drop is silent: {logged:?}"
@@ -667,34 +641,51 @@ mod tests {
         );
     }
 
-    /// Collects a local subscriber's output so a test can assert on it.
-    #[derive(Clone, Default)]
-    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl CaptureWriter {
-        fn contents(&self) -> String {
-            String::from_utf8(self.0.lock().expect("capture buffer").clone())
-                .expect("tracing output is UTF-8")
-        }
+    thread_local! {
+        static CAPTURED: std::cell::RefCell<Option<Vec<u8>>> =
+            const { std::cell::RefCell::new(None) };
     }
 
-    impl std::io::Write for CaptureWriter {
+    /// Runs `f` and returns the WARN-and-above output it logged on this thread.
+    ///
+    /// The subscriber is process-global and installed once: `tracing` caches
+    /// callsite interest per process, and while only one thread-scoped
+    /// subscriber exists, a sibling test that first hits a callsite without
+    /// it caches that callsite as `never` for every thread.
+    fn capture_warnings(f: impl FnOnce()) -> String {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(|| ThreadCapture)
+                .with_max_level(tracing::Level::WARN)
+                .without_time()
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("this test binary installs no other global subscriber");
+        });
+        CAPTURED.with(|c| *c.borrow_mut() = Some(Vec::new()));
+        f();
+        let bytes = CAPTURED
+            .with(|c| c.borrow_mut().take())
+            .expect("the capture started above");
+        String::from_utf8(bytes).expect("tracing output is UTF-8")
+    }
+
+    /// Appends to this thread's capture buffer, and discards output on a
+    /// thread that is not capturing.
+    struct ThreadCapture;
+
+    impl std::io::Write for ThreadCapture {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("capture buffer")
-                .extend_from_slice(buf);
+            CAPTURED.with(|c| {
+                if let Some(captured) = c.borrow_mut().as_mut() {
+                    captured.extend_from_slice(buf);
+                }
+            });
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-        type Writer = CaptureWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
         }
     }
 

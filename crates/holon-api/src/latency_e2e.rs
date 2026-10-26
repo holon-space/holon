@@ -1261,27 +1261,15 @@ mod tests {
         }
     }
 
-    struct CaptureLayer(Sink);
+    thread_local! {
+        static CAPTURING: std::cell::RefCell<Option<Sink>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Pushes every `holon_latency` event into the sink of the thread that
+    /// emits it, and drops it on a thread that is not capturing.
+    struct CaptureLayer;
     impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
-        // Register `holon_latency` callsites as ALWAYS-interested. Sibling
-        // latency tests in this binary hit the emit callsites with NO subscriber
-        // installed, which caches their process-global `Interest` as `never` —
-        // and a `never`-cached callsite is skipped before any thread-local
-        // subscriber is consulted, so a plain `enabled` override cannot rescue
-        // it. `always` (combined with `rebuild_interest_cache` below) pins the
-        // callsite open; the event then always dispatches to whatever
-        // thread-local default is active — our sink on this thread, a no-op
-        // elsewhere.
-        fn register_callsite(
-            &self,
-            metadata: &tracing::Metadata<'_>,
-        ) -> tracing::subscriber::Interest {
-            if metadata.target() == "holon_latency" {
-                tracing::subscriber::Interest::always()
-            } else {
-                tracing::subscriber::Interest::never()
-            }
-        }
         fn enabled(
             &self,
             metadata: &tracing::Metadata<'_>,
@@ -1297,31 +1285,41 @@ mod tests {
             if event.metadata().target() != "holon_latency" {
                 return;
             }
-            let mut c = Captured::default();
-            event.record(&mut c);
-            self.0.lock().unwrap().push(c);
+            CAPTURING.with(|sink| {
+                if let Some(sink) = sink.borrow().as_ref() {
+                    let mut c = Captured::default();
+                    event.record(&mut c);
+                    sink.lock().unwrap().push(c);
+                }
+            });
         }
     }
 
-    /// Run `f` under a scoped subscriber that captures every
-    /// `target="holon_latency"` event, and return what it captured. `f` gets
-    /// the live sink so a retry loop can watch for its own event.
+    /// Run `f` and return every `target="holon_latency"` event it emitted on
+    /// this thread. `f` gets the live sink so a retry loop can watch for its
+    /// own event.
     ///
     /// This asserts at the EMISSION layer: the `tracing` event a real
-    /// subscriber sees, not a return value. It needs no
-    /// `SpanCollector::global()` touch — that requirement belongs to the
-    /// ERROR-capture harness, which reads a process-global collector; here
-    /// the layer IS the subscriber, installed for the closure's duration.
+    /// subscriber sees, not a return value. The subscriber is process-global
+    /// and installed once: `tracing` caches callsite interest per process,
+    /// and while only one thread-scoped subscriber exists, a sibling test that
+    /// first hits an emit callsite without it caches that callsite as `never`
+    /// for every thread.
     fn capture_latency_events(f: impl FnOnce(&Sink)) -> Vec<Captured> {
         use tracing_subscriber::prelude::*;
-        let sink: Sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::registry().with(CaptureLayer(sink.clone()));
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::callsite::rebuild_interest_cache();
-            f(&sink);
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(CaptureLayer),
+            )
+            .expect("this test binary installs no other global subscriber");
         });
-        std::sync::Arc::try_unwrap(sink)
-            .unwrap_or_else(|s| std::sync::Mutex::new(s.lock().unwrap().drain(..).collect()))
+        let sink: Sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        CAPTURING.with(|c| *c.borrow_mut() = Some(sink.clone()));
+        f(&sink);
+        CAPTURING.with(|c| *c.borrow_mut() = None);
+        std::sync::Arc::into_inner(sink)
+            .expect("only this function holds the sink once `f` returned")
             .into_inner()
             .unwrap()
     }
@@ -2105,16 +2103,8 @@ mod tests {
     fn emitted_e2e_event_closes_at_projection_visible_stage() {
         let sink = capture_latency_events(|captured| {
             for _ in 0..100 {
-                // Re-register every callsite against THIS scoped dispatcher each
-                // iteration. A sibling latency test may register (or have
-                // registered) `rows_delivered`'s callsite as `never` while
-                // running under no subscriber — and that only becomes visible
-                // AFTER the callsite is first hit, which can happen after a
-                // one-time rebuild. Rebuilding in the loop re-flips it to our
-                // `always`; siblings never call rebuild, so once flipped it
-                // stays open and the next emit lands. Also covers the
-                // `PENDING_LEN` gate race (a lost dispatch→deliver retries).
-                tracing::callsite::rebuild_interest_cache();
+                // Retries a lost dispatch->delivery: `PENDING_LEN` is shared
+                // with sibling tests, which can empty it in between.
                 interaction_dispatched(
                     "navigate",
                     "block:proj-visible-lock",
@@ -2164,7 +2154,6 @@ mod tests {
     fn a_facade_clock_emits_a_facade_origin_sample() {
         let sink = capture_latency_events(|captured| {
             for _ in 0..100 {
-                tracing::callsite::rebuild_interest_cache();
                 interaction_dispatched(
                     "set_field",
                     "block:facade-origin-lock",
@@ -2348,7 +2337,6 @@ mod tests {
             waited_ms: 12,
         };
         let sink = capture_latency_events(|_| {
-            tracing::callsite::rebuild_interest_cache();
             disclose_evicted(&evicted, ClockOrigin::Facade);
         });
 
@@ -2495,7 +2483,6 @@ mod tests {
             waited_ms: 30_001,
         };
         let sink = capture_latency_events(|_| {
-            tracing::callsite::rebuild_interest_cache();
             disclose_expired(&expired);
         });
         let mine = sink
