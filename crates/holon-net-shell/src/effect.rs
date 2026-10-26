@@ -220,9 +220,11 @@ impl Runner {
             .expect("the shell effect's group lock is poisoned")
     }
 
+    /// Holds the group lock until the rename, so concurrent runs never share
+    /// the temporary file and the last rename carries the latest groups.
     fn write_pid_file(&self) -> Result<(), ShellError> {
-        let text: String = self
-            .live()
+        let groups = self.live();
+        let text: String = groups
             .values()
             .map(|live| {
                 let g = &live.group;

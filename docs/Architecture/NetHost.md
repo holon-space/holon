@@ -38,8 +38,9 @@ A net file holds no guards, so netd gives every transition the same logic:
 the arcs alone decide whether it is enabled, and one firing puts one empty
 token into each of its `produces` and `facts` places for the subject. An
 effect transition runs its shell effect and maps the exit code as the
-effect's `exit_codes` say; a run the runner kills on a timer has no outcome,
-and the net's own timers settle it.
+effect's `exit_codes` say. A run that its `command.timeout` or a signal
+ended has no exit code; it may have done part of its work, so its outcome is
+unknown and the transition's `receiver` decides.
 
 ## No durable marking
 

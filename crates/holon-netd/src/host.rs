@@ -130,9 +130,8 @@ impl HostedNet {
             for request in self.shell.step().map_err(|e| self.stopped(e))? {
                 let (net, ended) = (Arc::clone(&self), ended.clone());
                 tokio::spawn(async move {
-                    if let Some(result) = net.run_effect(&request).await {
-                        let _ = ended.send(RunEnded::Effect(request, result));
-                    }
+                    let result = net.run_effect(&request).await;
+                    let _ = ended.send(RunEnded::Effect(request, result));
                 });
             }
             let due = self.probes().due(self.shell.now());
@@ -157,9 +156,10 @@ impl HostedNet {
         }
     }
 
-    /// The result of one attempt, or `None` for a run one of the runner's
-    /// timers killed: the net's own timers settle that run.
-    async fn run_effect(&self, request: &EffectRequest) -> Option<EffectResult> {
+    /// The result of one attempt. A run without an exit code, killed by its
+    /// command timeout or a signal, may have done part of its work, so its
+    /// outcome is unknown and the transition's receiver decides.
+    async fn run_effect(&self, request: &EffectRequest) -> EffectResult {
         let spec = &self.file.transitions[&*request.transition];
         let effect = spec
             .effect
@@ -168,11 +168,11 @@ impl HostedNet {
         let EffectSpec::Shell(shell) = &self.file.effects[effect];
         let finished = match self.runner.run(shell, request).await {
             Ok(finished) => finished,
-            Err(e) => return Some(EffectResult::Failed(Cause::definite(e.to_string()))),
+            Err(e) => return EffectResult::Failed(Cause::definite(e.to_string())),
         };
         let log = finished.log_path.display();
         match finished.ended {
-            Ended::Exited { code, outcome } => Some(match outcome {
+            Ended::Exited { code, outcome } => match outcome {
                 Outcome::Done => EffectResult::Done(crate::outputs(spec)(&request.subject)),
                 Outcome::Failed => {
                     EffectResult::Failed(Cause::retryable(format!("exit {code}, log {log}")))
@@ -180,16 +180,10 @@ impl HostedNet {
                 Outcome::OutcomeUnknown => {
                     EffectResult::Unknown(Cause::definite(format!("exit {code}, log {log}")))
                 }
-            }),
-            ended => {
-                tracing::warn!(
-                    net = %self.file.name,
-                    "{} {} ended without an exit code: {ended:?}, log {log}",
-                    request.transition,
-                    request.subject
-                );
-                None
-            }
+            },
+            ended => EffectResult::Unknown(Cause::definite(format!(
+                "{ended:?} without an exit code, log {log}"
+            ))),
         }
     }
 }

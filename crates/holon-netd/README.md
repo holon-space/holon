@@ -8,7 +8,8 @@ What it does and its tools: [docs/Architecture/NetHost.md](../../docs/Architectu
 ```sh
 cargo build --release -p holon-netd
 target/release/netd --listen 127.0.0.1:7411 --state-dir ~/.local/state/netd path/to/net.yaml
-mcpc http://127.0.0.1:7411/mcp tools-call marking net:=<net name>
+mcpc connect http://127.0.0.1:7411/mcp @netd
+mcpc @netd tools-call marking net:=<net name>
 ```
 
 ## Install it as a launchd agent

@@ -257,3 +257,46 @@ async fn a_pid_file_round_trips_every_subject() {
         until("was killed", || !alive(left[0].pgid)).await;
     }
 }
+
+#[test]
+fn runs_on_many_threads_at_once_all_settle_by_their_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = runner(dir.path());
+    let effect = descriptor(&["/usr/bin/true"], "10s", dir.path());
+
+    let ended: Vec<_> = std::thread::scope(|s| {
+        let threads: Vec<_> = (0..16u64)
+            .map(|t| {
+                let (runner, effect) = (&runner, &effect);
+                s.spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    (0..8u64)
+                        .map(|i| rt.block_on(runner.run(effect, &request(t * 8 + i))))
+                        .map(|r| r.map(|f| f.ended).map_err(|e| e.to_string()))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .flat_map(|t| t.join().unwrap())
+            .collect()
+    });
+
+    let done = Ok(Ended::Exited {
+        code: 0,
+        outcome: Outcome::Done,
+    });
+    let wrong: Vec<_> = ended.iter().filter(|e| **e != done).collect();
+    assert_eq!(
+        wrong,
+        Vec::<&Result<Ended, String>>::new(),
+        "of {} runs",
+        ended.len()
+    );
+    let left = std::fs::read_to_string(dir.path().join("groups.pid")).unwrap();
+    assert_eq!(left, "", "the pid file names no group once every run ended");
+}

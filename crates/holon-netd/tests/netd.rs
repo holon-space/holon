@@ -344,3 +344,57 @@ async fn after_a_kill_the_marking_is_what_the_probes_report_and_nothing_else() {
         assert_eq!(tokens, &expected, "the place {place} after the restart");
     }
 }
+
+#[tokio::test]
+async fn an_effect_its_command_timeout_kills_still_settles() {
+    let dir = tempfile::tempdir().unwrap();
+    let shown = dir.path().display();
+    let text = format!(
+        r#"name: slow
+places:
+  In:
+    capacity: single
+  Out:
+    capacity: single
+transitions:
+  Hang:
+    trigger: manual
+    priority: 1
+    consumes:
+    - In
+    produces:
+    - Out
+    effect: hang
+    receiver: none
+effects:
+  hang:
+    kind: shell
+    command:
+      argv:
+      - /bin/sleep
+      - "30"
+      working_dir: {shown}
+      env_allow: []
+      timeout: 1s
+    log_path: {shown}/logs/{{transition}}-{{subject}}-{{attempt}}.log
+    exit_codes:
+      done:
+      - 0
+      failed: []
+      other: outcome_unknown
+"#
+    );
+    let net = dir.path().join("slow.yaml");
+    fs::write(&net, text).unwrap();
+    let netd = Process::start(dir.path(), &[&net]);
+    let cli = Cli::connect(&netd.url).await;
+    let put = json!({"net": "slow", "place": "In", "subject": "h", "content": {}});
+    cli.json("put", put).await;
+    let fire = json!({"net": "slow", "transition": "Hang", "subject": "h", "occurrence": "hang-1"});
+    cli.json("fire", fire).await;
+    let call = cli.json("await", json!({"net": "slow", "occurrence": "hang-1"}));
+    let settled = tokio::time::timeout(Duration::from_secs(15), call)
+        .await
+        .expect("a run its 1s command timeout killed settles within 15s");
+    assert_ne!(settled["settled"], "done", "{settled}");
+}

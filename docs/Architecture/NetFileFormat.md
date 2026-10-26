@@ -191,7 +191,8 @@ log of the attempt before it, and the evidence of the first failure is gone.
 what every code they do not name means — `done`, `failed` or
 `outcome_unknown`. A code whose meaning is unknown belongs in
 `outcome_unknown`, where the receiver decides, never in `failed`. A child
-killed by a signal has no exit code; the timers settle that run, not this map.
+killed by a signal or by `command.timeout` has no exit code, so this map does
+not apply; netd reports that run's outcome as unknown (NetHost.md).
 
 ## Probe descriptors
 
