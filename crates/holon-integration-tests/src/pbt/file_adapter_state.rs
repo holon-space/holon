@@ -209,7 +209,8 @@ impl crate::pbt::reference_state::ReferenceState {
 
     /// Holon ingests an external write, which `ingest` applies to the store:
     /// a held document's base takes every block of its file that the write
-    /// changed in the store or that the write names in `written`.
+    /// changed in the store or that the write names in `written`. A written
+    /// block the store holds in another file leaves this base alone.
     pub fn ingest_external_write<T>(
         &mut self,
         written: &[EntityUri],
@@ -229,12 +230,12 @@ impl crate::pbt::reference_state::ReferenceState {
             // Canonical re-sequencing moves the sequences of untouched
             // siblings, so only a block's other fields tell what the write changed.
             // A written value the store already holds (an owed edit) changes
-            // the disk but not the store, so `written` counts on its own.
+            // the disk but not the store, so a written block of this file counts.
             let changed: BTreeSet<&EntityUri> = before
                 .keys()
                 .chain(after.keys())
                 .filter(|id| before.get(*id) != after.get(*id))
-                .chain(written)
+                .chain(written.iter().filter(|id| after.contains_key(*id)))
                 .collect();
             let base = self.files.merge_base.get_mut(&doc).expect("held above");
             base.blocks.retain(|block| !changed.contains(&block.id));
@@ -379,5 +380,30 @@ mod tests {
         assert!(state.write_back_owed(&doc));
         edit(&mut state, &child, "before");
         assert!(!state.write_back_owed(&doc));
+    }
+
+    #[test]
+    fn an_external_edit_of_a_block_moved_out_of_a_held_file_keeps_the_move_owed() {
+        let (mut state, doc, child) = state_with_one_block_doc();
+        let other = EntityUri::block("another-doc");
+        state
+            .files
+            .documents
+            .insert(other.clone(), "another.org".into());
+        state.hold_write_backs(&doc);
+        state.move_block(&child, other, None);
+        assert!(state.write_back_owed(&doc));
+        let external = Mutation::Update {
+            id: child.clone(),
+            fields: std::collections::HashMap::from([(
+                "content".to_string(),
+                holon_api::Value::String("edited in another.org".into()),
+            )]),
+        };
+        state.apply_content_mutation(&external, true);
+        assert!(
+            state.write_back_owed(&doc),
+            "an edit of another.org leaves doc.org's file, and so its merge base, holding the child"
+        );
     }
 }
