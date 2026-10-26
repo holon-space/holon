@@ -31,7 +31,8 @@ fail=0
 # Self-maintaining: a twin the test accepts but the table does not name would
 # be skipped silently — the rot this guard exists to prevent.
 names=crates/holon-net/tests/exec_support/twin_names.rs
-named=$(grep -oE '\("[a-z-]+", LowerTwin::' "$names" | grep -oE '"[a-z-]+"' | tr -d '"' | sort -u)
+# rustfmt wraps long table rows, so match on the file without whitespace.
+named=$(tr -d '[:space:]' <"$names" | grep -oE '\("[a-z-]+",LowerTwin::' | grep -oE '"[a-z-]+"' | tr -d '"' | sort -u)
 [ -n "$named" ] || { echo "FAIL $names: no lowering twin name found"; exit 2; }
 listed=$(printf '%s\n' "$TABLE" | sed -n 's/|.*//p' | grep . | sort -u)
 missing=$(comm -23 <(echo "$named") <(echo "$listed"))
