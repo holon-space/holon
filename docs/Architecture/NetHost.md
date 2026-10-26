@@ -16,7 +16,9 @@ netd --listen 127.0.0.1:7411 --state-dir ~/.local/state/netd nets/work.yaml nets
 ## The endpoint
 
 netd speaks MCP over streamable HTTP at `http://<listen>/mcp` and listens on
-the loopback only: a `--listen` address off the loopback is refused. There is
+the loopback only: a `--listen` address off the loopback is refused. A request
+whose `Host` or `Origin` names anything but the loopback on that port gets 403
+before a session starts (the shared guard in `holon-loopback-guard`). There is
 no second protocol. The command line client is `mcpc`; a script calls the
 JSON-RPC endpoint directly.
 

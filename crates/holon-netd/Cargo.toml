@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.8"
 clap.workspace = true
+holon-loopback-guard.workspace = true
 holon-net.workspace = true
 holon-net-shell.workspace = true
 holon-pattern.workspace = true

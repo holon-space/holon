@@ -162,7 +162,12 @@ pub async fn start(config: Config) -> Result<Netd, NetdError> {
             cancellation_token: cancel.child_token(),
         },
     );
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let router = axum::Router::new().nest_service("/mcp", service).layer(
+        axum::middleware::from_fn_with_state(
+            holon_loopback_guard::AllowedAuthorities::for_bind(addr),
+            holon_loopback_guard::refuse_foreign_host_or_origin,
+        ),
+    );
     let stop = cancel.clone();
     tasks.spawn(async move {
         axum::serve(listener, router)
