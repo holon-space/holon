@@ -97,15 +97,15 @@ impl fmt::Debug for ShadowDoc {
 pub struct ShadowMesh {
     pub primary: ShadowDoc,
     pub peers: Vec<ShadowDoc>,
-    padded_step: PaddedStep,
+    padded_step: StepCell,
+    closed_step: StepCell,
 }
 
-/// The last fed step the primary was padded at; `Sync` because the ref state
-/// is, and a deep fork copies it.
+/// A fed step id; `Sync` because the ref state is, and a deep fork copies it.
 #[derive(Debug, Default)]
-struct PaddedStep(AtomicU64);
+struct StepCell(AtomicU64);
 
-impl Clone for PaddedStep {
+impl Clone for StepCell {
     fn clone(&self) -> Self {
         Self(AtomicU64::new(self.0.load(Ordering::Relaxed)))
     }
@@ -123,7 +123,8 @@ impl ShadowMesh {
         let mesh = Self {
             primary: ShadowDoc::new(PRIMARY_PEER_ID),
             peers: Vec::new(),
-            padded_step: PaddedStep::default(),
+            padded_step: StepCell::default(),
+            closed_step: StepCell::default(),
         };
         mesh.catch_up_primary(blocks, unheld);
         mesh
@@ -134,12 +135,26 @@ impl ShadowMesh {
     /// more than the SUT, so that is a stale feed or a SUT write the ref
     /// never saw. Only the first pad of a fed `step` runs: a later pad site
     /// in the same ref step follows the step's own merge, not a boundary.
+    /// Panics on a feed that an earlier ref step closed: the SUT ticked, but
+    /// nobody fed its clock.
     pub fn pad_primary_to(&self, target: u32, step: u64) {
+        assert_ne!(
+            self.closed_step.0.load(Ordering::Relaxed),
+            step,
+            "stale clock feed: fed step {step} was already used by an earlier ref step, so the \
+             SUT clock was not fed after the last tick"
+        );
         // Fed steps count from 1, so the default 0 never matches one.
         if self.padded_step.0.swap(step, Ordering::Relaxed) == step {
             return;
         }
         multi_peer::pad_to_height(self.primary.doc(), target);
+    }
+
+    /// End the ref step that padded at fed `step`; the next ref step needs a
+    /// fresh feed.
+    pub fn close_step(&self, step: u64) {
+        self.closed_step.0.store(step, Ordering::Relaxed);
     }
 
     /// Fork a new shadow peer off the (already padded, already caught-up)
@@ -352,4 +367,32 @@ pub fn authoring_peers(vv: &loro::VersionVector) -> BTreeSet<u64> {
         .filter(|(_, counter)| **counter > 0)
         .map(|(peer, _)| *peer)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_mesh() -> ShadowMesh {
+        ShadowMesh::seeded_from_blocks(&BTreeMap::new(), &BTreeSet::new())
+    }
+
+    #[test]
+    fn a_fresh_feed_pads_after_a_closed_step() {
+        let mesh = empty_mesh();
+        mesh.pad_primary_to(10, 1);
+        mesh.pad_primary_to(10, 1);
+        mesh.close_step(1);
+        mesh.pad_primary_to(20, 2);
+        assert_eq!(mesh.primary.lamport_height(), 20);
+    }
+
+    #[test]
+    #[should_panic(expected = "stale clock feed")]
+    fn a_feed_reused_by_the_next_ref_step_panics() {
+        let mesh = empty_mesh();
+        mesh.pad_primary_to(10, 1);
+        mesh.close_step(1);
+        mesh.pad_primary_to(10, 1);
+    }
 }

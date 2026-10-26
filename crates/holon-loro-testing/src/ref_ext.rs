@@ -600,6 +600,7 @@ impl LoroRefExt {
         crate::atom_counts::measure("catch_up:pad", "primary", doc, || {
             if let Some(c) = &clock {
                 mesh.pad_primary_to(c.height, c.step);
+                mesh.close_step(c.step);
             }
         });
         crate::atom_counts::measure("catch_up:edit", "primary", doc, || {
