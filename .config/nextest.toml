@@ -132,10 +132,21 @@ slow-timeout = { period = "60s", terminate-after = 5 }  # 5 min hard cap
 [test-groups]
 # A timing test never contends with another: a quiet host is the point.
 timing-critical = { max-threads = 1 }
+# Load-sensitive binaries: how many may share the parallel sweep at once.
+windowed = { max-threads = 4 }
+cost-sensitive = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = "(binary(latency_slo_gate)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)) + (test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)) + (package(holon-rows) & test(=a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work)) + (package(holon-loro) & test(=loro_sync_controller::boot_gate_tests::dropped_gate_is_observed_before_the_watchdog)) + (package(holon-loro) & test(=loro_share_backend::tests::settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer)) + (package(holon) & test(=api::backend_engine::tests::deriving_the_net_is_cheap_enough_for_the_tick_path)) + (package(holon) & test(=block_live_data_catch_up::wakes_when_blocks_arrive_via_cdc)) + (package(holon) & test(=watch_context_membership_leak::a_failed_watch_setup_leaves_no_membership_row)) + (package(holon-app) & test(=integration_set_field_op::dispatching_begin_oauth_returns_before_the_flow_finishes)) + (package(holon-app) & test(=quick_open_search_at_vault_scale::quick_open_search_at_vault_scale)) + (package(holon-loro) & test(=a_create_costs_the_same_in_a_large_tree_as_in_a_small_one)) + (package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)) + (package(holon-mcp) & test(=fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)) + (package(holon-mcp-client) & test(=a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout))"
 test-group = "timing-critical"
+
+[[profile.default.overrides]]
+filter = "(package(holon-gpui) & (binary(/windowed/) + binary(/_pbt$/)))"
+test-group = "windowed"
+
+[[profile.default.overrides]]
+filter = "(binary(/_cost/)) + (binary(latency_scale_gate)) + (binary(projector_lag_lock) + binary(/_under_lag$/)) + (binary_id(holon-integration-tests::loro_suite) & test(/^loro_block_type_invalid_values::/))"
+test-group = "cost-sensitive"
 
 # The quiet-hold step runs this profile, plus the `own-recipe` rows'
 # own recipes (`just latency-slo-gate`, `just org-deep-text-timing`),
@@ -144,10 +155,10 @@ test-group = "timing-critical"
 default-filter = "(test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)) + (package(holon-rows) & test(=a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work)) + (package(holon-loro) & test(=loro_sync_controller::boot_gate_tests::dropped_gate_is_observed_before_the_watchdog)) + (package(holon-loro) & test(=loro_share_backend::tests::settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer)) + (package(holon) & test(=api::backend_engine::tests::deriving_the_net_is_cheap_enough_for_the_tick_path)) + (package(holon) & test(=block_live_data_catch_up::wakes_when_blocks_arrive_via_cdc)) + (package(holon) & test(=watch_context_membership_leak::a_failed_watch_setup_leaves_no_membership_row)) + (package(holon-app) & test(=integration_set_field_op::dispatching_begin_oauth_returns_before_the_flow_finishes)) + (package(holon-app) & test(=quick_open_search_at_vault_scale::quick_open_search_at_vault_scale)) + (package(holon-loro) & test(=a_create_costs_the_same_in_a_large_tree_as_in_a_small_one)) + (package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)) + (package(holon-mcp) & test(=fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)) + (package(holon-mcp-client) & test(=a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout))"
 
 # Everything else, at whatever load the lanes produce: the complement of
-# the timing set, minus the binaries that have a recipe of their own and
-# that `[profile.default]` already excludes. Dropping that second term
-# would silently start running the 119-case hand-authored replay inside
-# the wide sweep, without its skip list.
+# the timing set, minus the binaries that have a recipe of their own
+# (`OWN_RECIPE_OWNERS` in scripts/timing-split.py). Dropping that second
+# term would silently start running the 119-case hand-authored replay
+# inside the wide sweep, without its skip list.
 [profile.load-tolerant]
 default-filter = "not ((binary(latency_slo_gate)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)) + (test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)) + (package(holon-rows) & test(=a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work)) + (package(holon-loro) & test(=loro_sync_controller::boot_gate_tests::dropped_gate_is_observed_before_the_watchdog)) + (package(holon-loro) & test(=loro_share_backend::tests::settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer)) + (package(holon) & test(=api::backend_engine::tests::deriving_the_net_is_cheap_enough_for_the_tick_path)) + (package(holon) & test(=block_live_data_catch_up::wakes_when_blocks_arrive_via_cdc)) + (package(holon) & test(=watch_context_membership_leak::a_failed_watch_setup_leaves_no_membership_row)) + (package(holon-app) & test(=integration_set_field_op::dispatching_begin_oauth_returns_before_the_flow_finishes)) + (package(holon-app) & test(=quick_open_search_at_vault_scale::quick_open_search_at_vault_scale)) + (package(holon-loro) & test(=a_create_costs_the_same_in_a_large_tree_as_in_a_small_one)) + (package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)) + (package(holon-mcp) & test(=fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)) + (package(holon-mcp-client) & test(=a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout))) & not (binary(latency_slo_gate) | binary(hand_authored_regressions) | package(holon-gpui) | binary(general_e2e_composed_pbt))"
 

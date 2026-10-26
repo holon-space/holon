@@ -216,6 +216,35 @@ one. It needs the test binaries built, so it runs inside
 | `split_block_stale_display_regression::split_block_stale_viewmodel_display_regression` | 121 s | 484 s | 6 completed runs, load 4.8-8.6, 2026-10-19 |
 | `convert_block_to_page_survives_a_lagging_projection` | 108 s | 432 s | 6 completed runs, load 5.5-9.9, 2026-10-19 |
 
+## Load-sensitive binaries
+
+The landing gate's workspace nextest leg runs in parallel at whatever load the
+lanes produce. Some binaries there are not timing-critical by the four classes
+above, yet red or time out when many of them share the machine: the windowed
+binaries drive a real GPUI window, and the cost binaries time their own work. A
+test group with `max-threads` caps how many of each run at once, so the leg
+stays parallel and stops making its own reds.
+
+`scripts/timing-split.py generate` writes one group and one override per
+group from the two tables below. A test holds one group, and the first
+matching override wins: the timing-critical override comes first, so a test
+that is in both tables stays timing-critical. `scripts/timing-split.py
+resolve` asks nextest for each row's tests and fails when a row selects none
+or when one of its tests is in no group.
+
+| Group | `max-threads` | Why this cap |
+| --- | --- | --- |
+| `windowed` | 4 | the concurrency `just windowed-gate` judges the windowed suite at: `--test-threads 1` per binary, `min(4, cpus / 4)` binaries at once (`scripts/windowed-gate.py:33`) |
+| `cost-sensitive` | 1 | the rule of the `timing-critical` group: a test that times its own work never contends with another |
+
+| Selector | Group | Evidence |
+| --- | --- | --- |
+| `package(holon-gpui) & (binary(/windowed/) + binary(/_pbt$/))` | `windowed` | `general_e2e_composed_pbt_windowed` passed alone in 379 s and timed out at 600 s inside the parallel workspace leg; known reds `windowed-focus-not-in-bounds-under-load`, `windowed-entity-not-in-bounds-under-load` (KeystoneKnownReds.md) |
+| `binary(/_cost/)` | `cost-sensitive` | most time their work against a ceiling or a large-vs-small ratio; `find_foreign_blocks_cost`, `stable_id_index_cost` and `home_authority_ancestor_walk_cost` count operations and join by the name rule only; known red `shopping-mapping-cost-slo`: ~5 s alone, red at load average 34 in a land leg |
+| `binary(latency_scale_gate)` | `cost-sensitive` | judged against `docs/Testing/latency-scale-ceilings.txt`; skips unless `HOLON_SOAK_SEED_BLOCKS` is set |
+| `binary(projector_lag_lock) + binary(/_under_lag$/)` | `cost-sensitive` | the lag locks the gate's quiet-hold step runs (`just projector-lag-lock`); `convert_block_to_page_survives_a_lagging_projection` measures p95_low 108 s (Current caps) |
+| `binary_id(holon-integration-tests::loro_suite) & test(/^loro_block_type_invalid_values::/)` | `cost-sensitive` | a 20 s wait for the edit to reach the file; red "the edit never reached the file" at load ~90 in a land leg |
+
 ## The enforced latency rung and its kind coverage
 
 The p95 < 200 ms interaction→projection-visible SLO is a project rule, so

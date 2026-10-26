@@ -197,6 +197,38 @@ def cap_rows():
     return rows
 
 
+def group_caps():
+    """{group: max_threads} per load-sensitive test group."""
+    caps = {}
+    for cells in _rows("## Load-sensitive binaries", "Group"):
+        group = _unbacktick(cells[0])
+        if group == "timing-critical" or group in caps:
+            die(f"load-sensitive group '{group}' is listed twice or shadows timing-critical")
+        caps[group] = int(cells[1])
+    return caps
+
+
+def group_rows():
+    """(selector, group, evidence) per load-sensitive row."""
+    caps = group_caps()
+    rows = []
+    for cells in _rows("## Load-sensitive binaries", "Selector"):
+        selector, group = _unbacktick(cells[0]), _unbacktick(cells[1])
+        if group not in caps:
+            die(f"row '{selector}' names group '{group}', which the groups table lacks")
+        if not cells[2]:
+            die(f"row '{selector}' names no evidence")
+        rows.append((selector, group, cells[2]))
+    empty = set(caps) - {g for _, g, _ in rows}
+    if empty:
+        die(f"load-sensitive group(s) {sorted(empty)} have no row")
+    return rows
+
+
+def group_filter(group):
+    return " + ".join(f"({s})" for s, g, _ in group_rows() if g == group)
+
+
 def _selectors(wanted):
     seen = []
     for selector, runs, _, _ in timing_rows():
@@ -273,11 +305,22 @@ def generated_block():
         "[test-groups]",
         "# A timing test never contends with another: a quiet host is the point.",
         "timing-critical = { max-threads = 1 }",
+        "# Load-sensitive binaries: how many may share the parallel sweep at once.",
+        *(f"{g} = {{ max-threads = {n} }}" for g, n in group_caps().items()),
         "",
         "[[profile.default.overrides]]",
         f'filter = "{f}"',
         'test-group = "timing-critical"',
         "",
+    ]
+    for g in group_caps():
+        lines += [
+            "[[profile.default.overrides]]",
+            f'filter = "{group_filter(g)}"',
+            f'test-group = "{g}"',
+            "",
+        ]
+    lines += [
         "# The quiet-hold step runs this profile, plus the `own-recipe` rows'",
         "# own recipes (`just latency-slo-gate`, `just org-deep-text-timing`),",
         "# which is why those rows are not selected here as well.",
@@ -285,10 +328,10 @@ def generated_block():
         f'default-filter = "{p}"',
         "",
         "# Everything else, at whatever load the lanes produce: the complement of",
-        "# the timing set, minus the binaries that have a recipe of their own and",
-        "# that `[profile.default]` already excludes. Dropping that second term",
-        "# would silently start running the 119-case hand-authored replay inside",
-        "# the wide sweep, without its skip list.",
+        "# the timing set, minus the binaries that have a recipe of their own",
+        "# (`OWN_RECIPE_OWNERS` in scripts/timing-split.py). Dropping that second",
+        "# term would silently start running the 119-case hand-authored replay",
+        "# inside the wide sweep, without its skip list.",
         "[profile.load-tolerant]",
         f'default-filter = "not ({f}) & not ({OWN_RECIPE_BINARIES})"',
         "",
@@ -438,7 +481,8 @@ def cmd_resolve(cargo_args):
     mechanism: the timing profile would run an empty set and report green, and
     a cap override would simply not apply. `test(=…)` is an exact match against
     the test's module path, which does NOT include the binary name, so a cap
-    row named after its binary matches nothing.
+    row named after its binary matches nothing. A load-sensitive row also reds
+    when nextest puts one of its tests in no test group.
 
     Needs the test binaries built, so this runs where they already are
     (`just load-tolerant-nextest`), not in `gate-arch`.
@@ -504,11 +548,22 @@ def cmd_resolve(cargo_args):
         n = by_filter(f"test(={test})")
         print(f"{'ok' if n else 'FAIL'}: cap row `{test}` selects {n} test(s)")
         fail |= n == 0
+    # `group(@global)` is nextest's name for "no test group": a load-sensitive
+    # test there runs at the sweep's full parallelism, which is what the group
+    # exists to stop.
+    for selector, group, _ev in group_rows():
+        n = by_filter(selector)
+        ungrouped = by_filter(f"({selector}) & group(@global)")
+        ok = n and not ungrouped
+        print(f"{'ok' if ok else 'FAIL'}: {group} row `{selector}` selects {n} "
+              f"test(s), {ungrouped} of them in no group")
+        fail |= not ok
 
     print()
     if fail:
         print("timing-split: resolve FAILED — a filter that selects nothing is "
-              "a cap or a whole profile that silently does not exist")
+              "a cap or a whole profile that silently does not exist, and a "
+              "load-sensitive test in no group runs uncapped")
         return 1
     print("timing-split: resolve PASS")
     return 0
