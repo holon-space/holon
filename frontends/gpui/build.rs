@@ -3,7 +3,12 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 fn main() {
-    let sha = git_short_sha();
+    // A pinned sha also drops the git rerun lines below: every workspace shares
+    // the repo's `.git`, so any git or jj call there would rebuild this crate.
+    let pinned_sha = std::env::var("HOLON_BUILD_SHA")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let sha = pinned_sha.clone().unwrap_or_else(git_short_sha);
     println!("cargo:rustc-env=HOLON_BUILD_SHA={sha}");
 
     let time = match std::env::var("HOLON_BUILD_TIME") {
@@ -16,10 +21,13 @@ fn main() {
     // `.git` may be a file or live at the repo root, so ask git for the common
     // dir instead of hardcoding a relative path. If resolution fails, skip the
     // rerun lines (provenance must never break the build).
-    if let Some(git_dir) = git_common_dir() {
-        println!("cargo:rerun-if-changed={git_dir}/HEAD");
-        println!("cargo:rerun-if-changed={git_dir}/index");
+    if pinned_sha.is_none() {
+        if let Some(git_dir) = git_common_dir() {
+            println!("cargo:rerun-if-changed={git_dir}/HEAD");
+            println!("cargo:rerun-if-changed={git_dir}/index");
+        }
     }
+    println!("cargo:rerun-if-env-changed=HOLON_BUILD_SHA");
     println!("cargo:rerun-if-env-changed=HOLON_BUILD_TIME");
 }
 

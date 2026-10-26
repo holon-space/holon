@@ -6,7 +6,8 @@
 # Rebases each head's lane, in order, onto main (the first) or onto the previous
 # head (the rest), then starts a fresh empty change on the result in the
 # integration workspace `.claude/worktrees/_sw_integ`, so its @- is the tip.
-# The tip's commit id goes to target/gate-tip there, for gate-run.sh's tree guard.
+# The tip's commit id goes to target/gate-tip there: the tip argument of
+# gate-integrate.sh and gate-timing.sh.
 #
 # Stdout's last line: the integration workspace's directory.
 # Exit 3: a head conflicts; every rebase of this run is reverted first.

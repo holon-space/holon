@@ -1627,6 +1627,13 @@ timing-gate:
          # missed; the hard red lives over the accumulated window.
          /usr/bin/python3 scripts/timing-split.py coverage "$K"'
 
+# Builds every binary `timing-gate` runs, with the same cargo shapes, so the
+# quiet hold times tests and never a compile. Keep in step with `timing-gate`.
+timing-gate-build:
+    cargo nextest run {{CANON}} --no-run
+    cargo test {{CANON}} --no-run
+    cargo test -p holon-org-format --test deep_authored_text_never_aborts --no-run
+
 # The wide nextest sweep at whatever load the lanes produce: the exact
 # complement of the timing group. JUnit is on, so every run feeds the
 # duration ledger the caps are derived from.

@@ -3,7 +3,10 @@
 The landing gate holds the machine quiet while it runs the steps that measure
 time, and only those: the hand-authored replay, the windowed gate and the wide
 nextest sweep assert no duration of their own, although the composed harness
-arms a latency oracle on every transition. This file is the source of truth for
+arms a latency oracle on every transition. So it runs as two scripts on one
+tip: `scripts/gate-integrate.sh` runs every other step at any load and builds
+the timing binaries, then `scripts/gate-timing.sh` runs `just timing-gate`
+under the hold and compiles nothing. This file is the source of truth for
 the split: which tests really do judge a duration, and what cap the others get.
 
 `scripts/timing-split.py` reads the two tables below and generates the
