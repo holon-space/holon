@@ -1295,25 +1295,25 @@ mod tests {
         }
     }
 
+    /// Installs the capturing subscriber before libtest starts any test thread.
+    ///
+    /// `tracing` caches callsite interest per process. A test thread that
+    /// registers a callsite while a subscriber is being installed computes that
+    /// interest against no subscriber, and caches it as `never` for good.
+    #[ctor::ctor]
+    fn install_capturing_subscriber() {
+        use tracing_subscriber::prelude::*;
+        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(CaptureLayer))
+            .expect("this test binary installs no other global subscriber");
+    }
+
     /// Run `f` and return every `target="holon_latency"` event it emitted on
     /// this thread. `f` gets the live sink so a retry loop can watch for its
     /// own event.
     ///
     /// This asserts at the EMISSION layer: the `tracing` event a real
-    /// subscriber sees, not a return value. The subscriber is process-global
-    /// and installed once: `tracing` caches callsite interest per process,
-    /// and while only one thread-scoped subscriber exists, a sibling test that
-    /// first hits an emit callsite without it caches that callsite as `never`
-    /// for every thread.
+    /// subscriber sees, not a return value.
     fn capture_latency_events(f: impl FnOnce(&Sink)) -> Vec<Captured> {
-        use tracing_subscriber::prelude::*;
-        static INSTALL: std::sync::Once = std::sync::Once::new();
-        INSTALL.call_once(|| {
-            tracing::subscriber::set_global_default(
-                tracing_subscriber::registry().with(CaptureLayer),
-            )
-            .expect("this test binary installs no other global subscriber");
-        });
         let sink: Sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         CAPTURING.with(|c| *c.borrow_mut() = Some(sink.clone()));
         f(&sink);

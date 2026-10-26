@@ -646,23 +646,24 @@ mod tests {
             const { std::cell::RefCell::new(None) };
     }
 
-    /// Runs `f` and returns the WARN-and-above output it logged on this thread.
+    /// Installs the capturing subscriber before libtest starts any test thread.
     ///
-    /// The subscriber is process-global and installed once: `tracing` caches
-    /// callsite interest per process, and while only one thread-scoped
-    /// subscriber exists, a sibling test that first hits a callsite without
-    /// it caches that callsite as `never` for every thread.
+    /// `tracing` caches callsite interest per process. A test thread that
+    /// registers a callsite while a subscriber is being installed computes that
+    /// interest against no subscriber, and caches it as `never` for good.
+    #[ctor::ctor]
+    fn install_capturing_subscriber() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(|| ThreadCapture)
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("this test binary installs no other global subscriber");
+    }
+
+    /// Runs `f` and returns the WARN-and-above output it logged on this thread.
     fn capture_warnings(f: impl FnOnce()) -> String {
-        static INSTALL: std::sync::Once = std::sync::Once::new();
-        INSTALL.call_once(|| {
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(|| ThreadCapture)
-                .with_max_level(tracing::Level::WARN)
-                .without_time()
-                .finish();
-            tracing::subscriber::set_global_default(subscriber)
-                .expect("this test binary installs no other global subscriber");
-        });
         CAPTURED.with(|c| *c.borrow_mut() = Some(Vec::new()));
         f();
         let bytes = CAPTURED

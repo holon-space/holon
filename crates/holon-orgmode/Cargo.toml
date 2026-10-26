@@ -36,6 +36,8 @@ fluxdi.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+# The lib tests install their capturing tracing subscriber before libtest starts.
+ctor = "0.4"
 holon-block-roundtrip-testing.workspace = true
 holon-markdown.workspace = true
 proptest.workspace = true

@@ -55,6 +55,8 @@ icu_normalizer = "=2.2.0"
 icu_casemap = "=2.2.0"
 
 [dev-dependencies]
+# The lib tests install their capturing tracing subscriber before libtest starts.
+ctor = "0.4"
 proptest.workspace = true
 serde_yaml.workspace = true
 tracing-subscriber.workspace = true
