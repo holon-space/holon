@@ -1203,9 +1203,8 @@ impl UserDriver for GpuiUserDriver {
     // right now" (visible, in-region, displayed text) this is the only
     // honest source: the registry records what the prepaint pipeline
     // actually placed, post-layout, post-cull. For "what could the user
-    // reach" (reachable set, click intent) we read the engine's
-    // ReactiveViewModel snapshot — same source the production click /
-    // list renders consult.
+    // reach" (reachable set, click intent) we read a fresh
+    // ReactiveViewModel snapshot of the engine's rows.
 
     fn is_widget_visible(&self, entity_id: &EntityUri) -> bool {
         self.geometry
@@ -1275,20 +1274,13 @@ impl UserDriver for GpuiUserDriver {
             .collect()
     }
 
-    /// The full data set the user could reach by scrolling — read from
-    /// the engine's snapshot of the panel block, walking the resulting
-    /// `ReactiveViewModel` until we hit its `collection` (the
-    /// `ReactiveView` backing the `list(...)`), then enumerating its
-    /// items. This is the same data source the panel's `ReactiveShell`
-    /// itself iterates, so the answer is consistent with what
-    /// `ListState::scroll_to_reveal_item(ix)` can address.
+    /// The full data set the user could reach by scrolling, see
+    /// [`derived_items`]. It is derived, not read from the window: a row
+    /// the window's list dropped is still in this set.
     fn reachable_entities_in_region(&self, region: holon_api::Region) -> Vec<holon_api::EntityUri> {
-        let panel_uri =
+        let panel =
             holon_api::EntityUri::parse(region_panel_block_id(region)).expect("static panel id");
-        let root = self.engine.snapshot_reactive(&panel_uri);
-        let mut out = Vec::new();
-        collect_collection_item_ids(&root, &mut out);
-        out
+        derived_items(&self.engine, &panel)
     }
 
     /// Scroll a panel's virtualized list so the named `entity_id` enters
@@ -1358,10 +1350,23 @@ fn region_panel_block_id(region: holon_api::Region) -> &'static str {
     }
 }
 
-/// Walk a `ReactiveViewModel` until we find its `collection`, then collect
-/// the items' `entity_id`s. Used by `reachable_entities_in_region` to
-/// enumerate the data behind a panel's `list(...)` widget.
-fn collect_collection_item_ids(
+/// Item entity ids of the top-level collections of the list `watcher` names
+/// (a panel block or a live query), from a fresh interpretation of its current
+/// render expression and rows. The `ReactiveView`s it walks are new
+/// instances, not the ones the window's shells hold.
+pub fn derived_items(
+    engine: &ReactiveEngine,
+    watcher: &holon_api::EntityUri,
+) -> Vec<holon_api::EntityUri> {
+    let root = engine.snapshot_reactive(watcher);
+    let mut out = Vec::new();
+    collect_collection_item_ids(&root, &mut out);
+    out
+}
+
+/// Collect the items' `entity_id`s of every collection reachable without
+/// passing through another collection.
+pub fn collect_collection_item_ids(
     node: &holon_frontend::reactive_view_model::ReactiveViewModel,
     out: &mut Vec<holon_api::EntityUri>,
 ) {
@@ -1375,6 +1380,10 @@ fn collect_collection_item_ids(
     }
     for child in &node.children {
         collect_collection_item_ids(child, out);
+    }
+    // A nested `live_query` is its own list under its own engine watcher.
+    if node.widget_name().as_deref() == Some("live_query") {
+        return;
     }
     if let Some(ref slot) = node.slot {
         let guard = slot.content.lock_ref();

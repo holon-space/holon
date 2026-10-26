@@ -331,6 +331,13 @@ impl ReactiveShell {
         self.block_id.as_deref()
     }
 
+    /// Block mode: the watched tree this shell renders, whose collections are
+    /// the live `ReactiveView`s the streaming driver fills. `None` in
+    /// collection mode.
+    pub fn current_tree(&self) -> Option<&ReactiveViewModel> {
+        self.current_tree.as_ref()
+    }
+
     /// Rows this shell currently holds — its own items in collection mode, and
     /// the item counts of every collection inside the watched tree in block
     /// mode. The streaming driver updates those `MutableVec`s in place, so a

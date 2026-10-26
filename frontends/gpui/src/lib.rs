@@ -2085,6 +2085,51 @@ impl RebindHandle {
         Some(view.read(cx).breadcrumb.read(cx).segments.len())
     }
 
+    /// The panel's lists as the window holds them: the panel shell's
+    /// top-level collections, then each nested `live_query` shell's, as
+    /// (engine watcher key, item entity ids) read from the live
+    /// `ReactiveView`s. Empty if the panel shell is not rendered.
+    pub fn live_panel_lists(
+        &self,
+        region: holon_api::Region,
+        cx: &App,
+    ) -> Vec<(holon_api::EntityUri, Vec<holon_api::EntityUri>)> {
+        let panel_id = match region {
+            holon_api::Region::LeftSidebar => "block:default-left-sidebar",
+            holon_api::Region::Main => "block:default-main-panel",
+            holon_api::Region::RightSidebar => "block:default-right-sidebar",
+        };
+        let mut lists = Vec::new();
+        let panel_key = entity_view_registry::CacheKey::LiveBlock(panel_id.to_string());
+        let Some(panel) = cached_shell(&self.entity_cache, &panel_key) else {
+            return lists;
+        };
+        let mut pending = vec![panel];
+        while let Some(shell) = pending.pop() {
+            let shell = shell.read(cx);
+            let tree = shell
+                .current_tree()
+                .expect("a panel or live_query shell is a block-mode shell");
+            let watcher = holon_api::EntityUri::parse(
+                shell.block_id().expect("a block-mode shell has a block id"),
+            )
+            .expect("a shell's block id is an engine watcher key");
+            let mut items = Vec::new();
+            user_driver::collect_collection_item_ids(tree, &mut items);
+            lists.push((watcher, items));
+            // A nested live_query shell lives in the cache of the shell that renders it.
+            let cache = shell.entity_cache_clone();
+            let mut nested = Vec::new();
+            collect_live_query_shell_keys(tree, &mut nested);
+            for key in nested {
+                pending.push(cached_shell(&cache, &key).unwrap_or_else(|| {
+                    panic!("{key:?}: a live_query node of a rendered shell has no shell")
+                }));
+            }
+        }
+        lists
+    }
+
     /// The block whose trail the title row is showing. `None` if the
     /// window never built a root view, or the bar has resolved nothing.
     pub fn breadcrumb_block(&self, cx: &App) -> Option<holon_api::EntityUri> {
@@ -3679,6 +3724,47 @@ fn scroll_reactive_shell_tree_to_top(
         shell.scroll_to_top();
         cx.notify();
     });
+}
+
+fn cached_shell(
+    cache: &entity_view_registry::EntityCache,
+    key: &entity_view_registry::CacheKey,
+) -> Option<Entity<views::ReactiveShell>> {
+    cache
+        .read()
+        .unwrap()
+        .get(key)
+        .and_then(|any| any.clone().downcast::<views::ReactiveShell>().ok()) // ALLOW(ok): a non-shell entry is a cache miss
+}
+
+/// Cache keys of the `live_query` shells nested in `node` outside any
+/// collection — the lists the window streams separately from `node`'s shell.
+fn collect_live_query_shell_keys(
+    node: &ReactiveViewModel,
+    out: &mut Vec<entity_view_registry::CacheKey>,
+) {
+    if node.widget_name().as_deref() == Some("live_query") {
+        assert!(
+            node.prop_str("source").is_none(),
+            "a named-source live_query has no engine watcher to derive its rows from"
+        );
+        let query = node
+            .prop_str("query")
+            .expect("a live_query node carries its query");
+        out.push(entity_view_registry::CacheKey::LiveQuery(
+            render::builders::live_query_key(&query, node.prop_str("query_context_id").as_deref()),
+        ));
+        return;
+    }
+    if node.collection.is_some() {
+        return;
+    }
+    for child in &node.children {
+        collect_live_query_shell_keys(child, out);
+    }
+    if let Some(ref slot) = node.slot {
+        collect_live_query_shell_keys(&slot.content.lock_ref(), out);
+    }
 }
 
 pub fn scroll_list_by(

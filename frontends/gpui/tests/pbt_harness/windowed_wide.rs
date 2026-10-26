@@ -16,11 +16,16 @@ use std::time::Instant;
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
+use holon_api::EntityUri;
+use holon_api::Region;
 use holon_frontend::geometry::GeometryProvider;
+use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::user_driver::UserDriver;
+use holon_gpui::RebindHandle;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
+use holon_gpui::user_driver::derived_items;
 use holon_integration_tests::pbt::ReferenceState;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::harness::SettleHook;
@@ -146,6 +151,56 @@ impl SendApp {
 /// `--test-threads=1` mandatory (gpui not parallel-safe).
 pub fn with_windowed_wide_sut(
     run: impl FnOnce(ComposedSut<WideE2E>, &ReferenceState, &FrameSink) -> Option<ComposedSut<WideE2E>>,
+) {
+    with_windowed_wide_sut_live(|sut, oracle, sink, _| run(sut, oracle, sink));
+}
+
+/// The rows the window's panels hold, for checks that must read what the
+/// window draws rather than re-derive it from the engine.
+pub struct LivePanels<'a> {
+    app_ptr: *const HeadlessAppContext,
+    rebind: &'a RebindHandle,
+    engine: Arc<ReactiveEngine>,
+}
+
+impl LivePanels<'_> {
+    pub fn lists(&self, region: Region) -> Vec<(EntityUri, Vec<EntityUri>)> {
+        // SAFETY: the gpui thread owns `app`, pinned for this value's life.
+        let app = unsafe { &mut *(self.app_ptr as *mut HeadlessAppContext) };
+        app.update(|cx| self.rebind.live_panel_lists(region, cx))
+    }
+
+    /// Panics when a list's live rows, as a multiset, differ from a fresh
+    /// derivation of its current rows: the window dropped or duplicated one.
+    pub fn assert_match_engine(&self) {
+        for region in [Region::LeftSidebar, Region::Main, Region::RightSidebar] {
+            for (watcher, live) in self.lists(region) {
+                let mut live: Vec<String> = live.iter().map(|u| u.to_string()).collect();
+                let mut derived: Vec<String> = derived_items(&self.engine, &watcher)
+                    .iter()
+                    .map(|u| u.to_string())
+                    .collect();
+                live.sort();
+                derived.sort();
+                assert_eq!(
+                    live, derived,
+                    "[inv-live-panel-items] {region:?} {watcher}: the window's list rows (left) \
+                     differ from a fresh derivation of the list's rows (right)"
+                );
+            }
+        }
+    }
+}
+
+/// [`with_windowed_wide_sut`], and `run` also gets the window's
+/// [`LivePanels`].
+pub fn with_windowed_wide_sut_live(
+    run: impl FnOnce(
+        ComposedSut<WideE2E>,
+        &ReferenceState,
+        &FrameSink,
+        &LivePanels,
+    ) -> Option<ComposedSut<WideE2E>>,
 ) {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
@@ -280,7 +335,13 @@ pub fn with_windowed_wide_sut(
 
     // Hand the live SUT to the caller to drive + check, then take it back for
     // teardown.
-    let sut = run(sut, &oracle, &sink);
+    let live = LivePanels {
+        app_ptr,
+        rebind: &rebind,
+        engine: engine.clone(),
+    };
+    let sut = run(sut, &oracle, &sink, &live);
+    drop(live);
 
     // Teardown (see the 3b tests): release window entities, shut down, leak the
     // !Send app

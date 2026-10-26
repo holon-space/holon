@@ -44,7 +44,9 @@ use proptest_state_machine::StateMachineTest;
 mod pbt_harness;
 use pbt_harness::capture::FrameSink;
 use pbt_harness::panic_message;
+use pbt_harness::windowed_wide::LivePanels;
 use pbt_harness::windowed_wide::with_windowed_wide_sut;
+use pbt_harness::windowed_wide::with_windowed_wide_sut_live;
 
 #[test]
 fn benchmark_windowed_per_case_boot_cost() {
@@ -114,6 +116,7 @@ fn drive_windowed_case(
     seen_counter: Option<Arc<AtomicUsize>>,
     out: &RefCell<Option<String>>,
     sink: &FrameSink,
+    live: &LivePanels,
 ) -> Option<ComposedSut<WideE2E>> {
     let mut ref_state = initial_ref;
 
@@ -158,7 +161,8 @@ fn drive_windowed_case(
         let s = &sut;
         let r = &ref_state;
         if let Err(p) = catch_unwind(AssertUnwindSafe(|| {
-            ComposedSut::<WideE2E>::check_invariants(s, r)
+            ComposedSut::<WideE2E>::check_invariants(s, r);
+            live.assert_match_engine();
         })) {
             let msg = panic_message(&p);
             sink.capture_fail(step_label, &msg);
@@ -239,7 +243,7 @@ fn general_e2e_composed_pbt_windowed() {
             kinds
         );
         let out: RefCell<Option<String>> = RefCell::new(None);
-        with_windowed_wide_sut(|sut, _default_oracle, sink| {
+        with_windowed_wide_sut_live(|sut, _default_oracle, sink, live| {
             drive_windowed_case(
                 sut,
                 initial_ref.clone(),
@@ -247,6 +251,7 @@ fn general_e2e_composed_pbt_windowed() {
                 seen_counter,
                 &out,
                 sink,
+                live,
             )
         });
         match out.into_inner() {
@@ -290,7 +295,7 @@ fn general_e2e_composed_pbt_windowed() {
 #[test]
 fn focused_task_block_shows_its_keyword_surface() {
     let out: RefCell<Option<String>> = RefCell::new(None);
-    with_windowed_wide_sut(|sut, _default_oracle, sink| {
+    with_windowed_wide_sut_live(|sut, _default_oracle, sink, live| {
         let oracle = wide_e2e_windowed_ref(narrow_to_windowed_alphabet(sut.cap_set()));
         // Keyword states first: `Clear` on the already-stateless block would be
         // a no-op toggle, which the driver refuses.
@@ -312,7 +317,7 @@ fn focused_task_block_shows_its_keyword_surface() {
             region: Region::Main,
             block_id: EntityUri::block("decision-page"),
         }));
-        drive_windowed_case(sut, oracle, transitions, None, &out, sink)
+        drive_windowed_case(sut, oracle, transitions, None, &out, sink, live)
     });
     if let Some(msg) = out.into_inner() {
         panic!("[keyword-surface-pin] windowed divergence:\n{msg}");
