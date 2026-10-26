@@ -29,6 +29,8 @@ A PBT decomposes into four reusable parts:
 3. **SUT abstractions** — traits that hide the differences between deployment shapes. `UserDriver` is the canonical one: it lets the same harness run against the headless reactive engine, a real GPUI window, or a TUI session.
 4. **Invariants** — assertions that hold over every reachable state of the system, irrespective of which transitions got us there.
 
+Where each part is registered in the keystone, and how to add one: [KeystoneMap.md](KeystoneMap.md).
+
 The win is multiplicative: every new PBT entry point picks a subset of generators, plugs in one driver, and chooses which invariants to enable. Adding a new transition or invariant lights up every PBT at once.
 
 ## Current state
