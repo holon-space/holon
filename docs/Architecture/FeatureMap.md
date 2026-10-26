@@ -377,6 +377,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `fts-query-block-watch-view-create-fails`
 - `hand-authored-hm4-reboot-settle-load-timeout`
 - `hand-authored-renamed-recipe-refusal-not-disclosed-load`
+- `hm4e-external-edit-lost-to-old-text`
 - `identity-transfer-in-place-edit-misbound-load`
 - `integration-toggle-load`
 - `invite-refusal-unmapped-focus-root`
