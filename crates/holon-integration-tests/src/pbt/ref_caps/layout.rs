@@ -263,7 +263,8 @@ impl RefLayoutMutate for ReferenceState {
     }
 
     fn bulk_add_blocks(&mut self, doc_uri: &EntityUri, blocks: &[Block]) {
-        self.ingest_external_write(|state| state.add_blocks_to_store(doc_uri, blocks));
+        let written: Vec<EntityUri> = blocks.iter().map(|block| block.id.clone()).collect();
+        self.ingest_external_write(&written, |state| state.add_blocks_to_store(doc_uri, blocks));
     }
 
     fn create_block_under(&mut self, parent: &EntityUri, content: &str) {

@@ -203,7 +203,7 @@ impl TransitionRef<ReferenceState> for ExternalLineEdit {
             }
             ExternalFileEdit::StripDocId => state.ids_missing_from_held_file(&self.doc),
             ExternalFileEdit::AddIdlessHeadline { title } => {
-                let id = state.ingest_external_write(|state| {
+                let id = state.ingest_external_write(&[], |state| {
                     state.create_block_under_outside_history(&self.doc, title)
                 });
                 state.ids_missing_from_held_file(&self.doc);

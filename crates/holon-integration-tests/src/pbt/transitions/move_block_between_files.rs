@@ -200,7 +200,7 @@ pub fn move_in_ref(
     target_doc: &EntityUri,
     placement: &Placement,
 ) {
-    state.ingest_external_write(|state| {
+    state.ingest_external_write(std::slice::from_ref(block_id), |state| {
         state
             .domain
             .block_state

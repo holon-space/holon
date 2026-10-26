@@ -208,8 +208,13 @@ impl crate::pbt::reference_state::ReferenceState {
     }
 
     /// Holon ingests an external write, which `ingest` applies to the store:
-    /// a held document's base takes every block the write changed in its file.
-    pub fn ingest_external_write<T>(&mut self, ingest: impl FnOnce(&mut Self) -> T) -> T {
+    /// a held document's base takes every block of its file that the write
+    /// changed in the store or that the write names in `written`.
+    pub fn ingest_external_write<T>(
+        &mut self,
+        written: &[EntityUri],
+        ingest: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         let held: Vec<(EntityUri, BTreeMap<EntityUri, Block>)> = self
             .files
             .merge_base
@@ -223,10 +228,13 @@ impl crate::pbt::reference_state::ReferenceState {
             let after = unsequenced(after_blocks.clone());
             // Canonical re-sequencing moves the sequences of untouched
             // siblings, so only a block's other fields tell what the write changed.
+            // A written value the store already holds (an owed edit) changes
+            // the disk but not the store, so `written` counts on its own.
             let changed: BTreeSet<&EntityUri> = before
                 .keys()
                 .chain(after.keys())
                 .filter(|id| before.get(*id) != after.get(*id))
+                .chain(written)
                 .collect();
             let base = self.files.merge_base.get_mut(&doc).expect("held above");
             base.blocks.retain(|block| !changed.contains(&block.id));

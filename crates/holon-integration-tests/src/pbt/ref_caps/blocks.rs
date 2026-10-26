@@ -538,7 +538,9 @@ impl RefApplyMutationMut for ReferenceState {
         crosses_org_boundary: bool,
     ) {
         if crosses_org_boundary {
-            self.ingest_external_write(|state| state.apply_mutation_to_store(mutation, true));
+            self.ingest_external_write(mutation.target_block_id().as_slice(), |state| {
+                state.apply_mutation_to_store(mutation, true)
+            });
         } else {
             self.apply_mutation_to_store(mutation, false);
         }
