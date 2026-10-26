@@ -608,3 +608,24 @@ impl LoroRefExt {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "stale clock feed")]
+    fn a_ref_step_after_a_tick_without_a_feed_panics() {
+        let ext = LoroRefExt {
+            shadow_mesh: Some(ShadowMesh::seeded_from_blocks(
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            )),
+            ..LoroRefExt::default()
+        };
+        let lease = ext.lease_clock_feed();
+        lease.feed(10, BTreeSet::new());
+        ext.shadow_catch_up_primary(&BTreeMap::new());
+        ext.shadow_catch_up_primary(&BTreeMap::new());
+    }
+}
