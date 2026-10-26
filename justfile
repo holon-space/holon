@@ -287,7 +287,11 @@ hand-authored *FLAGS:
     # `failed-slot-create-loro-dispatch-keystrokes-run-anyway`) until admission
     # Inc 2; `split-then-two-backspaces-caret-follows-second-join` is registered
     # known red `join-then-stale-second-join` until admission Inc 2.
-    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers,external-rewrite-keeps-a-promoted-pages-body,a-failed-create-cancels-its-keystrokes-with-one-disclosure,a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch,split-then-two-backspaces-caret-follows-second-join}
+    # The crash-restore cases below are registered known reds
+    # (`crash-restore-window-not-disclosed`, `crash-restore-boot-drops-owed-outdent`,
+    # `crash-restart-row-vouches-unstamped-base`); the replay stops at its first
+    # red, so each is judged on its own with `HOLON_HAND_AUTHORED_CASE`.
+    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers,external-rewrite-keeps-a-promoted-pages-body,a-failed-create-cancels-its-keystrokes-with-one-disclosure,a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch,split-then-two-backspaces-caret-follows-second-join,hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit,hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot,wbs-an-empty-org-block-survives-write-back-and-a-crash-restart,crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy,a-crash-after-an-external-add-to-a-held-file-while-an-editor-is-dirty-keeps-no-copy-of-the-file-without-it}
     cargo test \
         {{CANON}} --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee -a "$L"
