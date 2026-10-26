@@ -315,6 +315,35 @@ test general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/one-known 0 '^PRIMARY: \[known-red:cmd-click-open-tab-integration-state-write\]' "$work/violation-one-known.log"
+# The integration_state row takes an overshoot of exactly one write at expected
+# counts 0-8, and only beside its own `<no-parent>` status write.
+cmd_click_log() {
+    local name="$1" counts="$2" writes="$3"
+    {
+        printf '%s\n' "thread 'hand_authored_keystone_regressions' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1481:13:"
+        printf '%s\n' "reconciled composed sequence diverged from the oracle: [(\"inv-sql-budget\", \"[inv-sql-budget] 1 budget violation(s):\\n  OpenTabViaModifierClick.sql_writes: $counts; writes: [$writes]\")]"
+        printf '%s\n' 'test hand_authored_keystone_regressions ... FAILED'
+        printf '%s\n' 'test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s'
+    } >"$work/$name.log"
+}
+status_write='`UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>'
+unwatch_write='`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>'
+cmd_click_log cmd-click-overshoot-one-at-two "3 exceeds expected 2 + tolerance 0 = 2" \
+    "$unwatch_write; $status_write; $unwatch_write"
+expect_outcome violation/cmd-click-overshoot-one-at-two 0 '^PRIMARY: \[known-red:cmd-click-open-tab-integration-state-write\]' \
+    "$work/cmd-click-overshoot-one-at-two.log"
+cmd_click_log cmd-click-overshoot-two "3 exceeds expected 1 + tolerance 0 = 1" \
+    "$status_write; $unwatch_write; $unwatch_write"
+expect_outcome violation/cmd-click-overshoot-two 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' \
+    "$work/cmd-click-overshoot-two.log"
+cmd_click_log cmd-click-without-status-write "3 exceeds expected 2 + tolerance 0 = 2" \
+    "$unwatch_write; $unwatch_write; $unwatch_write"
+expect_outcome violation/cmd-click-without-status-write 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' \
+    "$work/cmd-click-without-status-write.log"
+cmd_click_log cmd-click-status-write-with-parent "3 exceeds expected 2 + tolerance 0 = 2" \
+    "$unwatch_write; \`UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  \` origin=sync_integration ▸ set_status; $unwatch_write"
+expect_outcome violation/cmd-click-status-write-with-parent 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' \
+    "$work/cmd-click-status-write-with-parent.log"
 cat >"$work/violation-longer-transition-name.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
 thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
