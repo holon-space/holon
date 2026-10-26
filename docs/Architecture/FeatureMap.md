@@ -355,6 +355,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `composed-boot-timeout-under-load`
 - `concurrent-keystroke-undo-steps-load`
 - `cook-vault-ingest-layout-seed-timeout`
+- `cook-vault-rename-refusal-load-flake`
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
 - `create-sql-read-repeat-budget`
@@ -371,6 +372,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `fs-watcher-rename-unpaired-agent-session`
 - `fts-query-block-watch-view-create-fails`
 - `hand-authored-hm4-reboot-settle-load-timeout`
+- `hand-authored-renamed-recipe-refusal-not-disclosed-load`
 - `identity-transfer-in-place-edit-misbound-load`
 - `integration-toggle-load`
 - `invite-refusal-unmapped-focus-root`
