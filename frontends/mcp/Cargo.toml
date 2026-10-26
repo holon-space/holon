@@ -30,6 +30,7 @@ holon-orgmode = { workspace = true, features = ["di"] }
 holon-org-format = { workspace = true }
 holon-filesystem = { workspace = true }
 holon-loro = { workspace = true }
+holon-loopback-guard = { workspace = true }
 holon-toon = { path = "../../crates/holon-toon", features = ["serde-json"] }
 fluxdi.workspace = true
 uuid = { workspace = true }

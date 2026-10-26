@@ -5806,6 +5806,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-loopback-guard"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-loro"
 version = "0.1.0"
 dependencies = [
@@ -5956,6 +5967,7 @@ dependencies = [
  "holon-core",
  "holon-filesystem",
  "holon-frontend",
+ "holon-loopback-guard",
  "holon-loro",
  "holon-loro-wiring",
  "holon-mcp-client",

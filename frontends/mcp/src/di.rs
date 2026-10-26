@@ -341,6 +341,10 @@ pub async fn serve_http_on(
 ) -> anyhow::Result<()> {
     use axum::Router;
     let bind_address = listener.local_addr()?;
+    let refuse_foreign_host_or_origin = axum::middleware::from_fn_with_state(
+        holon_loopback_guard::AllowedAuthorities::for_bind(bind_address),
+        holon_loopback_guard::refuse_foreign_host_or_origin,
+    );
     use axum::response::Html;
     use axum::routing::get;
     use rmcp::transport::StreamableHttpServerConfig;
@@ -370,7 +374,8 @@ pub async fn serve_http_on(
         let app = axum::Router::new()
             .route("/health", axum::routing::get(|| async { "OK" }))
             .nest_service("/mcp", mcp_service)
-            .layer(axum::middleware::from_fn(add_utf8_charset_to_content_type));
+            .layer(axum::middleware::from_fn(add_utf8_charset_to_content_type))
+            .layer(refuse_foreign_host_or_origin);
 
         tracing::info!(
             "[mcp] browser relay HTTP listening on http://{}",
@@ -470,7 +475,8 @@ pub async fn serve_http_on(
         .route("/", get(index))
         .route("/health", get(health_check))
         .nest_service("/mcp", mcp_service)
-        .layer(axum::middleware::from_fn(add_utf8_charset_to_content_type));
+        .layer(axum::middleware::from_fn(add_utf8_charset_to_content_type))
+        .layer(refuse_foreign_host_or_origin);
 
     tracing::info!("Holon MCP HTTP server listening on http://{}", bind_address);
 

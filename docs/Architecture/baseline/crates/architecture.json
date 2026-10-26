@@ -6039,6 +6039,33 @@
         ]
       },
       {
+        "name": "holon-loopback-guard",
+        "path": "holon-loopback-guard",
+        "c4_level": "component",
+        "description": "Host and Origin check for Holon's local HTTP servers.",
+        "pattern": "Adapter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Adapter\n\nHost and Origin check for Holon's local HTTP servers.\n\nA web page that rebinds its DNS name to 127.0.0.1 reaches a loopback server\nas a same-origin page, so the browser's CORS rules do not stop it. The page\nstill sends its own name in `Host` and `Origin`, and that is what this\ncheck refuses:\n\n```rust,ignore\nrouter.layer(axum::middleware::from_fn_with_state(\n    AllowedAuthorities::for_bind(listener.local_addr()?),\n    refuse_foreign_host_or_origin,\n))\n```",
+        "source_file": "holon-loopback-guard/src/lib.rs",
+        "layer": "Adapters",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-loopback-guard/src",
+            "files": [
+              {
+                "name": "lib.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
         "name": "holon-loro",
         "path": "holon-loro",
         "c4_level": "component",

@@ -34,6 +34,7 @@ members = [
   "crates/holon-oracles",
   "crates/holon-pbt-core",
   "crates/holon-integration-tests",
+  "crates/holon-loopback-guard",
   "crates/holon-mcp-client",
   "crates/holon-mcp-mock",
   "crates/holon-macros",
@@ -288,6 +289,7 @@ holon-pattern = { path = "crates/holon-pattern" }
 holon-petri = { path = "crates/holon-petri" }
 holon-rules = { path = "crates/holon-rules" }
 holon-loro-wiring = { path = "crates/holon-loro-wiring" }
+holon-loopback-guard = { path = "crates/holon-loopback-guard" }
 holon-profiles = { path = "crates/holon-profiles" }
 # default-features = false drops holon-loro's `iroh-sync` (iroh → QUIC/TLS/ring,
 # native-only, fatal on wasm). `holon-loro-wiring`'s own `iroh-sync` (on by

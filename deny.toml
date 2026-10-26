@@ -110,6 +110,7 @@ exceptions = [
     { crate = "holon-kitchen", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-layout-testing", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-logseq-db", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-loopback-guard", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-loro", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-loro-testing", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-loro-wiring", allow = ["FSL-1.1-ALv2"] },

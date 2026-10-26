@@ -1270,6 +1270,9 @@
                 "name": "describe_ui_geometry.rs"
               },
               {
+                "name": "foreign_host_or_origin_is_refused.rs"
+              },
+              {
                 "name": "sigterm_shuts_the_session_down.rs"
               }
             ]
