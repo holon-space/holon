@@ -360,7 +360,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -371,7 +371,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1142,7 +1142,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "lazy_static",
  "lazycell",
  "log",
@@ -2965,9 +2965,9 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "datasketches"
-version = "0.2.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c286de4e81ea2590afc24d754e0f83810c566f50a1388fa75ebd57928c0d9745"
+checksum = "11c0bd7d22989969a619bae09147b992a6aa7f31dd4f9d9af6345f533744781f"
 
 [[package]]
 name = "declarative_enum_dispatch"
@@ -3273,7 +3273,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3730,7 +3730,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4081,6 +4081,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "frostem"
+version = "1.20260821.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e2488a10218a17366ce6bd38b6d081b4387a9548d350029db9feddc9bb44d6d"
+
+[[package]]
 name = "fs2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4349,8 +4355,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -5101,6 +5107,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "equivalent",
+ "foldhash 0.2.0",
 ]
 
 [[package]]
@@ -6643,7 +6650,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -7223,7 +7230,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash 2.1.3",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
@@ -7265,9 +7272,9 @@ checksum = "f981dadd5a072a9e0efcd24bdcc388e570073f7e51b33505ceb1ef4668c80c86"
 dependencies = [
  "cfg_aliases 0.2.2",
  "libc",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7291,7 +7298,7 @@ dependencies = [
  "iroh-metrics",
  "iroh-quinn",
  "iroh-quinn-proto",
- "lru",
+ "lru 0.16.4",
  "n0-error",
  "n0-future",
  "num_enum",
@@ -7325,7 +7332,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8181,6 +8188,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.18.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8262,9 +8278,9 @@ dependencies = [
 
 [[package]]
 name = "lz4_flex"
-version = "0.13.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
 
 [[package]]
 name = "mac"
@@ -8612,9 +8628,9 @@ dependencies = [
 
 [[package]]
 name = "murmurhash32"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2195bf6aa996a481483b29d62a7663eed3fe39600c460e323f8ff41e90bdd89b"
+checksum = "a8afc6df942f4c022d70c5725e18df1a705773870e5b7f96fde94ca0334ce77a"
 
 [[package]]
 name = "n0-error"
@@ -9062,7 +9078,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "serde",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9220,7 +9236,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.21.7",
  "chrono",
  "getrandom 0.2.17",
  "http",
@@ -10374,7 +10390,7 @@ dependencies = [
  "futures-lite",
  "getrandom 0.4.3",
  "log",
- "lru",
+ "lru 0.16.4",
  "ntimestamp",
  "reqwest 0.13.5",
  "self_cell",
@@ -10860,7 +10876,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -10873,7 +10889,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -11043,7 +11059,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.3",
  "rustls",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -11082,9 +11098,9 @@ dependencies = [
  "cfg_aliases 0.2.2",
  "libc",
  "once_cell",
- "socket2 0.6.5",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -11888,16 +11904,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust-stemmers"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e46a2036019fdb888131db7a4c847a1063a7493f971ed94ea82c67eada63ca54"
-dependencies = [
- "serde",
- "serde_derive",
-]
-
-[[package]]
 name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11957,7 +11963,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -12016,7 +12022,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -12259,6 +12265,15 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-tuple-vec-map"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a04d0ebe0de77d7d445bb729a895dcb0a288854b267ca85f030ce51cdc578c82"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -12858,7 +12873,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -12986,7 +13001,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -13488,13 +13503,13 @@ checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
 
 [[package]]
 name = "tantivy"
-version = "0.26.2"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "861facfabd71044968f364837f9a083b56464ba5a59079f88706ee5c451ca069"
+checksum = "ad1ebacf6bc124b741ffbfb088f9835cb55e1e2ff57e182e9219e3efa1377b97"
 dependencies = [
  "aho-corasick",
  "arc-swap",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bitpacking",
  "bon",
  "byteorder",
@@ -13505,22 +13520,23 @@ dependencies = [
  "downcast-rs 2.0.2",
  "fastdivide",
  "fnv",
+ "frostem",
  "fs4",
  "htmlescape",
  "itertools 0.14.0",
  "levenshtein_automata",
  "log",
- "lru",
- "lz4_flex 0.13.1",
+ "lru 0.18.5",
+ "lz4_flex 0.14.0",
  "measure_time",
  "memmap2 0.9.11",
  "once_cell",
  "oneshot",
  "rayon",
  "regex",
- "rust-stemmers",
  "rustc-hash 2.1.3",
  "serde",
+ "serde-tuple-vec-map",
  "serde_json",
  "sketches-ddsketch",
  "smallvec",
@@ -13535,28 +13551,30 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "typetag",
+ "unwrap-infallible",
  "uuid",
  "winapi",
 ]
 
 [[package]]
 name = "tantivy-bitpacker"
-version = "0.10.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fed3d674429bcd2de5d0a6d1aa5495fed8afd9c5ecce993019caf7615f53fa4"
+checksum = "2c803ac72b3356f48fe4a399a03e058addd5c94e793e0bb7c6bcc224b238fcd7"
 dependencies = [
  "bitpacking",
 ]
 
 [[package]]
 name = "tantivy-columnar"
-version = "0.7.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c57166f5bcfd478f370ab8445afb4678dce44801fa5ce5c451aaf8595583c5dc"
+checksum = "95101fe3dd4a76156bdeff8d14ad41c547f2c1bce7ee0d23fdb6f95599f312ec"
 dependencies = [
  "downcast-rs 2.0.2",
  "fastdivide",
  "itertools 0.14.0",
+ "rand 0.9.5",
  "serde",
  "tantivy-bitpacker",
  "tantivy-common",
@@ -13566,9 +13584,9 @@ dependencies = [
 
 [[package]]
 name = "tantivy-common"
-version = "0.11.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbf10915aa75da3c3b0d58b58853d2e889efbaf32d4982a4c3715dde6bba23e5"
+checksum = "66d062ce97f2a26f2a7b2ed5d926a62241f762e4395ac110eb5c18f3b4a13b71"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -13590,9 +13608,9 @@ dependencies = [
 
 [[package]]
 name = "tantivy-query-grammar"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfadb8526b6da90704feb293b0701a6aae62ea14983143344be2dc5ce30f1d82"
+checksum = "2ef6729a14fc5c5a662ee549a176640743577ef35c70ae7e86f0ca07fa83d161"
 dependencies = [
  "fnv",
  "nom 7.1.3",
@@ -13603,9 +13621,9 @@ dependencies = [
 
 [[package]]
 name = "tantivy-sstable"
-version = "0.7.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a2cfc3ac5164cbadc28965ffb145a8f47582a60ae5897859ad8d4316596c606"
+checksum = "9d6b3567417750e8aeb6e7c9c5ae8701376c07c06d51991050825832c2f8c431"
 dependencies = [
  "futures-util",
  "itertools 0.14.0",
@@ -13617,9 +13635,9 @@ dependencies = [
 
 [[package]]
 name = "tantivy-stacker"
-version = "0.7.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cbb051742da9d53ca9e8fff43a9b10e319338b24e2c0e15d0372df19ffeb951"
+checksum = "c4213e34acf53de44ab4778aafec3c6800a781be6a7c1906579acdc23c114d94"
 dependencies = [
  "murmurhash32",
  "tantivy-common",
@@ -13676,10 +13694,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -13709,7 +13727,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -14571,19 +14589,19 @@ dependencies = [
 [[package]]
 name = "turso"
 version = "0.8.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "thiserror 2.0.21",
  "turso_core",
  "turso_sdk_kit",
  "turso_sync_sdk_kit",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd)",
 ]
 
 [[package]]
 name = "turso_core"
 version = "0.8.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "aegis",
  "aes",
@@ -14655,35 +14673,35 @@ dependencies = [
  "uncased",
  "uuid",
  "windows-sys 0.61.2",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd)",
 ]
 
 [[package]]
 name = "turso_ext"
 version = "0.8.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd)",
 ]
 
 [[package]]
 name = "turso_macros"
 version = "0.8.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd)",
 ]
 
 [[package]]
 name = "turso_parser"
 version = "0.8.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "bitflags 2.13.2",
  "memchr",
@@ -14693,13 +14711,13 @@ dependencies = [
  "strum_macros 0.26.4",
  "thiserror 2.0.21",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd)",
 ]
 
 [[package]]
 name = "turso_sdk_kit"
 version = "0.8.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger 0.11.11",
@@ -14710,24 +14728,24 @@ dependencies = [
  "turso_core",
  "turso_ext",
  "turso_sdk_kit_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd)",
 ]
 
 [[package]]
 name = "turso_sdk_kit_macros"
 version = "0.8.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd)",
 ]
 
 [[package]]
 name = "turso_sync_engine"
 version = "0.8.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -14744,13 +14762,13 @@ dependencies = [
  "turso_core",
  "turso_parser",
  "uuid",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd)",
 ]
 
 [[package]]
 name = "turso_sync_sdk_kit"
 version = "0.8.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger 0.11.11",
@@ -14762,7 +14780,7 @@ dependencies = [
  "turso_sdk_kit",
  "turso_sdk_kit_macros",
  "turso_sync_engine",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd)",
 ]
 
 [[package]]
@@ -14850,7 +14868,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset 0.9.1",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -14973,6 +14991,12 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
+
+[[package]]
+name = "unwrap-infallible"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e497bb1f828cc9fb236722c2eaa100dcf201563f38f4da6252357a59037adf31"
 
 [[package]]
 name = "url"
@@ -15884,7 +15908,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -16465,7 +16489,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -16630,7 +16654,7 @@ checksum = "beffa227304dbaea3ad6a06ac674f9bc83a3dec3b7f63eeb442de37e7cb6bb01"
 [[package]]
 name = "workspace-hack"
 version = "0.1.0"
-source = "git+https://github.com/nightscape/turso.git?rev=2d97bdfa53fa34adace480a2632c6fbfa3f80cb9#2d97bdfa53fa34adace480a2632c6fbfa3f80cb9"
+source = "git+https://github.com/nightscape/turso.git?rev=f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd#f34ccb3d4ee27b72fc4aede14bd05aee6ce070fd"
 dependencies = [
  "aho-corasick",
  "anstream 0.6.21",
@@ -17267,27 +17291,27 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.3.0"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.1.1+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeec9eaf2dffbbd09201e23bd0ffcbaa33bb8e9266a10734fd7ed90a85eca078"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",
