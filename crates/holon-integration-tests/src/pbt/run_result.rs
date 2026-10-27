@@ -126,19 +126,14 @@ fn disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// The checkout this test binary was built from: walk up from
-/// `CARGO_MANIFEST_DIR` to the ancestor containing `.git`, falling back to two
-/// levels up when none does (e.g. a copied tree).
+/// The workspace this test binary was built from. A `.git` marker cannot find
+/// it: a jj workspace has none, so a walk would reach an enclosing checkout.
 pub fn repo_root() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut cur = manifest.parent();
-    while let Some(dir) = cur {
-        if dir.join(".git").exists() {
-            return dir.to_path_buf();
-        }
-        cur = dir.parent();
-    }
-    manifest.join("..").join("..")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the crate lives two levels under the workspace root")
+        .to_path_buf()
 }
 
 /// Resolve the output directory: `HOLON_RESULT_DIR` if set, else
@@ -256,6 +251,17 @@ impl Drop for RunResultGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_root_is_the_workspace_that_compiled_this_crate() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        assert_eq!(repo_root().canonicalize().unwrap(), workspace);
+    }
 
     #[test]
     fn green_guard_writes_a_record() {
