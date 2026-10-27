@@ -220,7 +220,7 @@ one. It needs the test binaries built, so it runs inside
 
 The landing gate's workspace nextest leg runs in parallel at whatever load the
 lanes produce. Some binaries there are not timing-critical by the four classes
-above, yet red or time out when many of them share the machine: the windowed
+above, yet red or time out when many of them share the machine: the holon-gpui
 binaries drive a real GPUI window, and the cost binaries time their own work. A
 test group with `max-threads` caps how many of each run at once, so the leg
 stays parallel and stops making its own reds.
@@ -239,7 +239,7 @@ or when one of its tests is in no group.
 
 | Selector | Group | Evidence |
 | --- | --- | --- |
-| `package(holon-gpui) & (binary(/windowed/) + binary(/_pbt$/))` | `windowed` | `general_e2e_composed_pbt_windowed` passed alone in 379 s and timed out at 600 s inside the parallel workspace leg; known reds `windowed-focus-not-in-bounds-under-load`, `windowed-entity-not-in-bounds-under-load` (KeystoneKnownReds.md) |
+| `package(holon-gpui)` | `windowed` | the whole package, as `just windowed-gate` runs it (`scripts/windowed-gate.py` `build`): binaries outside any name rule open a real window too, and `gpui_rebind_reset_smoke` went red in a loaded run; `general_e2e_composed_pbt_windowed` passed alone in 379 s and timed out at 600 s inside the parallel workspace leg; known reds `windowed-focus-not-in-bounds-under-load`, `windowed-entity-not-in-bounds-under-load` (KeystoneKnownReds.md) |
 | `binary(/_cost/)` | `cost-sensitive` | most time their work against a ceiling or a large-vs-small ratio; `find_foreign_blocks_cost`, `stable_id_index_cost` and `home_authority_ancestor_walk_cost` count operations and join by the name rule only; known red `shopping-mapping-cost-slo`: ~5 s alone, red at load average 34 in a land leg |
 | `binary(latency_scale_gate)` | `cost-sensitive` | judged against `docs/Testing/latency-scale-ceilings.txt`; skips unless `HOLON_SOAK_SEED_BLOCKS` is set |
 | `binary(projector_lag_lock) + binary(/_under_lag$/)` | `cost-sensitive` | the lag locks the gate's quiet-hold step runs (`just projector-lag-lock`); `convert_block_to_page_survives_a_lagging_projection` measures p95_low 108 s (Current caps) |

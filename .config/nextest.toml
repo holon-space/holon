@@ -141,7 +141,7 @@ filter = "(binary(latency_slo_gate)) + (binary_id(holon-org-format::deep_authore
 test-group = "timing-critical"
 
 [[profile.default.overrides]]
-filter = "(package(holon-gpui) & (binary(/windowed/) + binary(/_pbt$/)))"
+filter = "(package(holon-gpui))"
 test-group = "windowed"
 
 [[profile.default.overrides]]
