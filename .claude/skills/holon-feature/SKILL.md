@@ -29,6 +29,12 @@ Before touching implementation code:
 4. **Run the same test GREEN.** Same transition, same invariant, now passing.
 5. **The red log is part of the PR** — paste the red assertion output and the
    subsequent green run. A feature PR with no red-then-green log is incomplete.
+   A red log committed under `docs/Testing/red-logs/` starts with a `BASE:` and
+   a `TREE:` line and cites the seed and the command that reproduce it, never a
+   `target/` path (ignored, purged with the workspace). Stamp the TREE id after a
+   plain `jj status` snapshot, never with `--ignore-working-copy` inside the lane:
+   that names the commit before the last edit. `just gate-arch` checks both
+   (`scripts/check-red-logs.py`).
 
 Model FIRST, then red-for-the-right-reason, then green (the standing
 `pbt-model-first-red-green` directive). A property that *cannot* be made to go

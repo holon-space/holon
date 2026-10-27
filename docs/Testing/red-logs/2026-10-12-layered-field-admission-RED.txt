@@ -1,6 +1,6 @@
 # Round-5 red log: the oracle read tier admission from the SUT, so three slot mutants and an inert HomeGainsField stayed green (FOLD-scope.a, holon-work#170).
 # M20/M21/M22 are the round-4 verifier's own mutants; M23 is mine. Each was green at 2000 cases before round 5.
-# Full gate: target/layers-r5/gate.log, script target/layers-r5/gate.sh.
+# Command: cargo nextest run -p holon-integration-tests --test layered_field_model_pbt, once per mutant (case count not recorded).
 
 === M20 integration home stores the field from boot
     running 1 test

@@ -102,7 +102,7 @@ Of the 33 tests the filter selects, exactly these 2 fail.
         PASS [   0.023s] holon di::guard_bindings::tests::an_existing_binding_wins_over_the_no_op
         PASS [   0.828s] holon::guard_resolve_fails_loud a_failing_net_guard_factory_stops_the_boot
         PASS [   1.208s] holon::guard_resolve_fails_loud a_container_that_names_no_guard_gets_the_explicit_no_ops
-        (25 further selected tests PASS — full run in target/lane-logs/guard-presence-pin-RED-nofailfast.txt)
+        (25 further selected tests PASS — full run: the Command above)
 ────────────
      Summary [   3.689s] 33 tests run: 31 passed, 2 failed, 702 skipped
         FAIL [   0.017s] ( 1/33) holon di::guard_bindings::tests::a_guard_bound_only_in_a_child_scope_is_still_missing

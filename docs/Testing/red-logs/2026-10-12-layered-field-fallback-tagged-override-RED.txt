@@ -1,7 +1,7 @@
 # Round 3 (FOLD-scope.a, holon-work#170): the oracle selects the hybrid rule.
 # Mutant M9: crates/holon-integration-tests/src/pbt/layered_field.rs, fallback branch of write(), Intent::Fallback -> Intent::Override.
 # Red because the fold, with no override gesture and a base slot, never reaches base. Mutant reverted after the run (cmp OK).
-# Command: PROPTEST_CASES=16 cargo nextest run -p holon-integration-tests --test layered_field_model_pbt (gate: target/layers-r3/gate.sh)
+# Command: PROPTEST_CASES=16 cargo nextest run -p holon-integration-tests --test layered_field_model_pbt
 === M9 fallback tagged Override
       left: None
      right: Some(false)

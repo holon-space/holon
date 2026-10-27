@@ -2,7 +2,7 @@ Round 9, FOLD-scope.a (holon-work#170): the round-8 fixture was a CHAIN — page
 src, no parent with two children — so sibling ORDER was unarmed. The renderer takes
 sibling order from the input vector per parent (crates/holon-org-format/src/org_renderer.rs
 `render_walk`), and with one child per parent a one-element slice has no order to lose:
-the round-8 verdict (target/layers-experiment-verify-r8.md, finding 2) showed a write-back
+the round-8 verdict (finding 2) showed a write-back
 `blocks.swap(1, 2)` GREEN at 200 cases. The seed now gives the page a SECOND child:
 
     ** Second child
@@ -13,12 +13,12 @@ the round-8 verdict (target/layers-experiment-verify-r8.md, finding 2) showed a 
 and `SEED_BLOCKS` asserts some parent has two children, so a fixture that slides back to
 a chain fails loudly instead of silently disarming order.
 
-=== P-NET2: the chain fixture trips the new net (target/layers-r9/gate.log)
+=== P-NET2: the chain fixture trips the new net (PROPTEST_CASES=200 cargo nextest run -p holon-integration-tests --test layered_field_model_pbt)
 
 Test failed: the seed is a chain: no sibling order to compare,
 {"block:layered-own-child": 1, "block:layered-own-page": 1, "file:own.org": 1}.
 
-=== M-ORDER: the write-back swaps the page's two siblings -> RED (target/layers-r9/gate2.log)
+=== M-ORDER: the write-back swaps the page's two siblings -> RED (same command)
 
 The mutant, in `DeviceState::write_back` before the render:
 
@@ -38,7 +38,7 @@ parse back to the page the gestures predict, `collapsed` and every other field; 
 Red on the own-page-drift assertion (layered_field_model_pbt.rs), not on a renderer panic
 — the oracle itself sees the reordering.
 
-=== C-CONTROL: the same mutant on the round-8 chain fixture -> GREEN (target/layers-r9/gate.log)
+=== C-CONTROL: the same mutant on the round-8 chain fixture -> GREEN (same command)
 
 With the second child removed (and the new net relaxed), the swap mutant is
 `1 passed` at 200 cases. That is the round-8 state the verdict reported: the teeth come
@@ -53,7 +53,7 @@ the typed slot speaks for the value, a property named `:block_type:` is NOT carr
 the write-back cannot damage what the file never held. `SEED_BLOCKS` now asserts it is
 `None` on every seed block, so the exclusion is self-reporting:
 
-P-NET1, the net negated to `is_some()` (target/layers-r9/gate.log):
+P-NET1, the net negated to `is_some()` (same command):
 
 Test failed: the org layer now carries block_type: arm it in the fixture instead of
 excluding it.

@@ -1,6 +1,6 @@
 # Round-4 red log: the override gesture and sync had no postcondition (FOLD-scope.a, holon-work#170).
 # Three mutants of crates/holon-integration-tests/src/pbt/layered_field.rs, each green before round 4, each red now.
-# Full gate: target/layers-r4/gate.log, script target/layers-r4/gate.sh.
+# Command: cargo nextest run -p holon-integration-tests --test layered_field_model_pbt, once per mutant (case count not recorded).
 
 === M12 override also writes base
      right: None

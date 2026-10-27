@@ -1,3 +1,5 @@
+BASE: f107c97bc81184e7d73efa6b1b7ec3f0a0e08c42
+TREE: b3c89349d1dbb0ca37ef18f1da19705068ed35af
 Red log: a planted stale write-back turns the keystone red on the clock-feed check
 Date: 2026-10-27
 Test: crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs (the keystone)
@@ -13,7 +15,7 @@ reads the edge key's value before the write, commits the new value, then writes 
 back in a second commit. The store ends on the older version.
 
 == plant 'stale', seed 2
--- probe log (target/c293-probe/stale.log), without the per-shrink-step repeats:
+-- probe log (plant 'stale', seeds 1-2, the command above), without the per-shrink-step repeats:
 BASE: f107c97bc81184e7d73efa6b1b7ec3f0a0e08c42
 TREE: b3c89349d1dbb0ca37ef18f1da19705068ed35af
 PLANT: stale in crates/holon-loro/src/loro_backend.rs
@@ -48,7 +50,7 @@ deleting probe leftover: ./.observability/runs/1793068914957-keystone-29748-0.re
 seed 2 unplanted: green
 [keystone-sample] cases=1 attempted=1 completed=1 floor=1 known-red-hits=0 verdict=OK
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.85s
--- final panic (target/c293-probe/stale-seed2.log):
+-- final panic (plant 'stale', PROPTEST_RNG_SEED=2):
 1193:Test failed: assertion `left == right` failed: [lamport-delta] 'SetEdgeField' advanced the SUT primary's Lamport clock by 2 (55 -> 57), the model predicts exactly 1: the SUT wrote extra Loro op(s) the model does not expect
 1194-  left: 2
 1195- right: 1.

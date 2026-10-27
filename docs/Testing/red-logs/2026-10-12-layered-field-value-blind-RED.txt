@@ -1,6 +1,6 @@
 # Round-6 red log: the oracle was VALUE-BLIND — it took the fold's value from the SUT, so a chevron that never toggles was green at 2000 cases (FOLD-scope.a, holon-work#170).
 # M30 is the round-5 verifier's own mutant; M31 and M24 are mine. All three were green before round 6.
-# Full gate: target/layers-r6/gate.log, script target/layers-r6/gate.sh.
+# Command: cargo nextest run -p holon-integration-tests --test layered_field_model_pbt, once per mutant (case count not recorded).
 
 === M30 fold never toggles
     assertion `left == right` failed: fold did not toggle: the chevron on IntegrationRow on A must flip the displayed false to true, wrote false

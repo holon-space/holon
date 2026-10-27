@@ -239,6 +239,17 @@ test mistyped_initial_state_key_is_loud - should panic ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 EOF
 expect_outcome should-panic-only 0 '^\[known-reds\] PASS: 1 green run' "$work/should-panic-only.log"
+# The output starts with the input log's BASE:/TREE: lines, wherever the log has them.
+{ echo "[flow] job c1"; echo "BASE: e213097550e6"; echo "TREE: 627b5fff5da2"; cat "$work/should-panic-only.log"; } >"$work/headed.log"
+headed_code=0
+headed_out=$("$repo_root/scripts/keystone-known-reds.sh" "$work/headed.log" 2>&1) || headed_code=$?
+if [ "$headed_code" -eq 0 ] && [ "$(head -2 <<<"$headed_out")" = $'BASE: e213097550e6\nTREE: 627b5fff5da2' ]; then
+    echo "[fixture] ok outcome/headed-log-keeps-header"
+else
+    echo "[fixture] FAIL outcome/headed-log-keeps-header: the output does not start with the log's BASE:/TREE: lines:"
+    { echo "exit $headed_code"; head -5 <<<"$headed_out"; } | sed 's/^/          | /'
+    outcome_fail=1
+fi
 # A second panic on the thread of a passing should_panic test is not the
 # expected one, whichever of the two it is.
 cat >"$work/should-panic-name-collision.log" <<'EOF'

@@ -5,8 +5,7 @@ cases. Invariant 3 is now whole-file: the reference holds the page's full conten
 block, field for field, on every device after every gesture.
 
 All runs: PROPTEST_CASES=16, `cargo nextest run -p holon-integration-tests --test
-layered_field_model_pbt`, test profile. Full log: target/layers-r7/gate.log; the
-content-mutant follow-ups in target/layers-r7/gate-content.log. The model is restored
+layered_field_model_pbt`, test profile, one run per mutant and per content-mutant follow-up. The model is restored
 by `cp` after every mutant (`model restored OK` plus `shasum -a 256 -c` OK).
 
 Normalized before the comparison, and only this: `created_at`/`updated_at` (the parser
@@ -50,7 +49,7 @@ from `Block::id` and level/sequence from the tree position, so clearing the prop
 bag of a parsed block changes no rendered byte. Not a tooth; an equivalent mutant.
 
 --- Every earlier tooth, still red at 16 cases, each on its own assertion
-(target/layers-r7/gate.log)
+(the command above, 16 cases)
   M30 fold never toggles            -> fold did not toggle
   M31 fold always collapses         -> fold did not toggle
   M20 home stores the field at boot -> admission drift (IntegrationRow)

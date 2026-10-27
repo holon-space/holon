@@ -51,6 +51,13 @@ if [ ! -f "$registry" ]; then
     exit 2
 fi
 
+# The input logs' `BASE:`/`TREE:` lines head the output, so a tee of it names
+# the tree it judged. An unreadable log is reported in the loop below.
+for log in "$@"; do
+    [ -f "$log" ] && [ -r "$log" ] || continue
+    awk '/^BASE: / && !b { print; b = 1 } /^TREE: / && !t { print; t = 1 } b && t { exit }' "$log"
+done | awk '!seen[$0]++'
+
 # Registry rows come from scripts/check-known-red-evidence.py, the one parser of
 # the table (it also lints it); only `known-red` rows classify. A cell cannot
 # hold a literal `|` (the table separator), so a pattern writes alternation as

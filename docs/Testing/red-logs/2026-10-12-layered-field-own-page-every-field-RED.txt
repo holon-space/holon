@@ -1,7 +1,7 @@
 Round 8, FOLD-scope.a (holon-work#170): the whole-file own-page invariant of round 7
 compared the parsed page "field for field", but the FIXTURE left 10 of `Block`'s fields
 at their `Default` on both sides, so the equality could not fail on any of them (round-7
-verdict, target/layers-experiment-verify-r7.md, finding 1). `seed_own_page_file()` now
+verdict, finding 1). `seed_own_page_file()` now
 authors every one of them away from its default:
 
     * Own page with *bold* text :home:pinned:
@@ -31,7 +31,7 @@ All runs: PROPTEST_CASES=200 unless stated, `cargo nextest run -p holon-integrat
 --test layered_field_model_pbt`, test profile. Each mutant is one statement injected after
 `let mut blocks = parse_own_page(&state.own_page_file);` in `rewrite_own_page_file`
 (crates/holon-integration-tests/src/pbt/layered_field.rs) and restored by `cp`.
-Full log: target/layers-r8/gate.log (`model restored OK` + `shasum -a 256 -c` OK).
+One run per mutant (`model restored OK` + `shasum -a 256 -c` OK).
 
 Every one of these was GREEN at 2000 cases before this round (the verifier proved V5b,
 V4b and V8; the rest are the same blindness, one field at a time). All are now RED with
@@ -53,7 +53,7 @@ V4b and V8; the rest are the same blindness, one field at a time). All are now R
                                                            0 passed, 1 failed
   V3   blocks.truncate(1) (the round-7 tooth)              0 passed, 1 failed
 
-Earlier teeth, still red with the richer fixture (target/layers-r8/gate-older.log):
+Earlier teeth, still red with the richer fixture (the command above, 200 cases):
   M30 fold never toggles             -> fold did not toggle
   M16 sync propagates nothing        -> sync did not propagate
   M20 home stores the field at boot  -> admission drift (IntegrationRow)
