@@ -13,6 +13,8 @@
 //!     that started on 2026-10-16 before the snapshot.
 //!   - `card_stage`: the steward's 11:46 stall table. `.flow/moves.jsonl` has
 //!     NO entry before the snapshot, so the move log cannot supply the stages.
+//!   - `lane-997` is written, not measured: an agent whose last turn ended 10 s
+//!     before the snapshot, so the stall threshold has one to reject.
 //!
 //! The net's shape — its places and arcs — is the file
 //! `nets/work-runtime-replay.yaml`, loaded through [`net_def`]. The guards and
@@ -33,6 +35,12 @@
 //!   - `no-resume-ceiling`: the policy publishes no 150k context ceiling, so a
 //!     hot agent of any size is resumed. The exclusion check of the ceiling
 //!     goes red on the injected 151k agent.
+//!   - `no-stall-threshold`: the policy publishes a stall threshold of 0 s, so
+//!     an agent counts as stalled the instant its turn ends. `lane-997` gets
+//!     marked.
+//!   - `no-fresh-threshold`: the policy publishes no 95k fresh threshold, so a
+//!     cold agent of any size is proposed `cold`. The injected 120k agent idle
+//!     2 h is no longer `fresh`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -430,21 +438,31 @@ fn apply(exec: &mut Executor, ev: &serde_json::Map<String, serde_json::Value>) {
     let at = i("at_s");
     match ev["kind"].as_str().expect("kind") {
         "policy" => {
-            // The `no-resume-ceiling` twin publishes no ceiling at all, so a
-            // hot agent of any context size is proposed for resume.
-            let ceiling = match twin().as_str() {
-                "no-resume-ceiling" => i64::MAX,
-                _ => i("resume_ctx_under"),
+            let threshold = |key: &str, twin_name: &str, twinned: i64| {
+                if twin() == twin_name { twinned } else { i(key) }
             };
             write(
                 exec,
                 P_BUDGET,
                 MACHINE,
                 content([
-                    ("stall_after_s", Value::Integer(i("stall_after_s"))),
+                    (
+                        "stall_after_s",
+                        Value::Integer(threshold("stall_after_s", "no-stall-threshold", 0)),
+                    ),
                     ("hot_idle_s", Value::Integer(i("hot_idle_s"))),
-                    ("fresh_ctx_over", Value::Integer(i("fresh_ctx_over"))),
-                    ("resume_ctx_under", Value::Integer(ceiling)),
+                    (
+                        "fresh_ctx_over",
+                        Value::Integer(threshold("fresh_ctx_over", "no-fresh-threshold", i64::MAX)),
+                    ),
+                    (
+                        "resume_ctx_under",
+                        Value::Integer(threshold(
+                            "resume_ctx_under",
+                            "no-resume-ceiling",
+                            i64::MAX,
+                        )),
+                    ),
                 ]),
                 at,
             )
@@ -603,6 +621,51 @@ fn marks_exactly_the_six_stalled_agents_with_their_idle_durations() {
     }
 }
 
+/// The stall threshold, shown to exclude: `lane-997` ended its turn 10 s before
+/// the snapshot, well inside the 600 s threshold.
+#[test]
+fn an_agent_ten_seconds_past_its_turn_is_not_stalled() {
+    let exec = replay();
+
+    assert!(
+        marking(&exec, P_AGENT).contains_key("lane-997"),
+        "the fixture's lane-997 reaches the Agent place",
+    );
+    assert!(
+        !marking(&exec, P_STALLED).contains_key("lane-997"),
+        "lane-997 idle 10s is under the 600s stall threshold",
+    );
+}
+
+/// A stalled agent that starts a build job is waiting, not stalled: its stored
+/// stall is retracted and its proposal dropped.
+#[test]
+fn a_stalled_agent_waiting_on_a_live_job_is_revived() {
+    let mut exec = replay();
+    assert!(marking(&exec, P_STALLED).contains_key("lane-261"));
+
+    write(
+        &mut exec,
+        P_JOB,
+        "lane-261#probe",
+        content([
+            ("ws", Value::String("lane-261".to_string())),
+            ("owner", Value::String("lane-261".to_string())),
+            ("start_s", Value::Integer(SNAPSHOT_S)),
+        ]),
+        SNAPSHOT_S,
+    );
+
+    assert!(
+        !marking(&exec, P_STALLED).contains_key("lane-261"),
+        "lane-261 waits on a live job",
+    );
+    assert!(
+        !marking(&exec, P_PROPOSAL).contains_key("lane-261"),
+        "a revived agent keeps no proposal",
+    );
+}
+
 /// Assertion 2: the real cargo at 11:46 is 1, not the 4 the board charged.
 /// The one hold belongs to the #280 A/B driver, whose lane agent is gone —
 /// none of the four cards the board charged holds a slot.
@@ -673,21 +736,64 @@ fn proposes_the_per_agent_decision_of_ruling_363_a3b() {
 #[test]
 fn the_resume_ceiling_excludes_a_hot_agent_over_150k() {
     let mut exec = replay();
+    inject_agent(&mut exec, "lane-999", "261", 1_800, 151_000);
+
+    assert_eq!(
+        text_of(&marking(&exec, P_PROPOSAL)["lane-999"], "action"),
+        "cold",
+        "idle 1800s with ctx 151000 is over the 150k resume ceiling",
+    );
+}
+
+/// The 95k fresh threshold of the per-agent decision rule: an agent idle 1 h or
+/// more with context over it is proposed `fresh`. No agent of the recorded day
+/// is, so the instance is written here; its card sits in a stage the board does
+/// not charge against cargo.
+#[test]
+fn a_cold_agent_over_95k_is_proposed_fresh() {
+    let mut exec = replay();
     write(
         &mut exec,
-        P_AGENT,
-        "lane-999",
+        P_CARD,
+        "998",
         content([
-            ("card", Value::String("261".to_string())),
+            ("stage", Value::String("queued".to_string())),
+            ("agent", Value::String("lane-998".to_string())),
+        ]),
+        SNAPSHOT_S,
+    );
+    inject_agent(&mut exec, "lane-998", "998", 7_200, 120_000);
+
+    assert_eq!(
+        marking(&exec, P_STALLED)["lane-998"].get("board_holds_cargo"),
+        Some(&Value::Boolean(false)),
+        "a queued card holds no cargo on the board",
+    );
+    assert_eq!(
+        text_of(&marking(&exec, P_PROPOSAL)["lane-998"], "action"),
+        "fresh",
+        "idle 7200s with ctx 120000 is over the 95k fresh threshold",
+    );
+}
+
+/// An agent of `card` whose last turn ended `idle_s` before the snapshot with
+/// `ctx_tokens` of context, stepped to quiescence at the snapshot.
+fn inject_agent(exec: &mut Executor, agent: &str, card: &str, idle_s: i64, ctx_tokens: i64) {
+    write(
+        exec,
+        P_AGENT,
+        agent,
+        content([
+            ("card", Value::String(card.to_string())),
             ("role", Value::String("build".to_string())),
-            ("started_s", Value::Integer(SNAPSHOT_S - 7_200)),
-            ("last_turn_end_s", Value::Integer(SNAPSHOT_S - 1_800)),
-            ("ctx_tokens", Value::Integer(151_000)),
+            ("started_s", Value::Integer(SNAPSHOT_S - 2 * idle_s)),
+            ("last_turn_end_s", Value::Integer(SNAPSHOT_S - idle_s)),
+            ("ctx_tokens", Value::Integer(ctx_tokens)),
         ]),
         SNAPSHOT_S,
     );
     write(
-        &mut exec,
+        exec,
         P_CLOCK,
         MACHINE,
         content([("now_s", Value::Integer(SNAPSHOT_S))]),
@@ -695,12 +801,6 @@ fn the_resume_ceiling_excludes_a_hot_agent_over_150k() {
     );
     exec.step(Duration::from_secs(SNAPSHOT_S as u64))
         .expect("a step on the injected agent");
-
-    assert_eq!(
-        text_of(&marking(&exec, P_PROPOSAL)["lane-999"], "action"),
-        "cold",
-        "idle 1800s with ctx 151000 is over the 150k resume ceiling",
-    );
 }
 
 /// Assertion 4: no auto transition fires twice on the same evidence. The three

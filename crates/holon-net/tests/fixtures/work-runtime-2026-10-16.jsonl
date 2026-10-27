@@ -1020,4 +1020,7 @@
 {"at_s": 121513, "job": "lane-280-ab-base#172", "kind": "job_start", "owner": "-", "sub": "nextest run", "ws": "lane-280-ab-base"}
 {"at_s": 121548, "exit": 0, "job": "lane-280-ab-base#172", "kind": "job_end", "owner": "-", "ws": "lane-280-ab-base"}
 {"at_s": 121548, "job": "lane-280-ab-base#173", "kind": "job_start", "owner": "-", "sub": "nextest run", "ws": "lane-280-ab-base"}
+{"agent": "lane-997", "at_s": 121550, "card": "997", "kind": "card_stage", "stage": "build"}
+{"agent": "lane-997", "at_s": 121550, "card": "997", "kind": "agent_started", "role": "build"}
+{"agent": "lane-997", "at_s": 121550, "ctx_tokens": 50000, "kind": "turn_end"}
 {"at_s": 121560, "kind": "snapshot"}
