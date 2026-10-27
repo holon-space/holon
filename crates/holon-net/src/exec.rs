@@ -137,7 +137,8 @@ pub enum Class {
 }
 
 /// Reads the marking through a [`Reader`], so every read lands in the trace.
-/// A closure (ruling 1.a), so a runtime IR lowers like Rust code.
+/// A closure (ruling 1.a), so a runtime IR lowers like Rust code. It reads
+/// nothing else: the executor decides it again only when a row it read changes.
 pub type Read = Arc<dyn Fn(&mut Reader<'_>, &Subject) -> Option<Content> + Send + Sync>;
 
 /// A pure firing: its outputs from its bound input, or a definite failure.
@@ -746,6 +747,8 @@ pub struct Tokens {
     pools: BTreeMap<Place, u32>,
     /// Pool tokens a running firing holds; they count against the size.
     lent: BTreeMap<Place, u32>,
+    /// Every row changed since the executor last looked: what it decides again.
+    touched: BTreeSet<(Place, Subject)>,
 }
 
 impl Tokens {
@@ -794,12 +797,21 @@ impl Tokens {
         self.slots.get(place).and_then(|m| m.get(subject))
     }
 
+    /// Whether `subjects(place)` lists `subject`.
+    fn holds(&self, place: &str, subject: &str) -> bool {
+        self.slots
+            .get(place)
+            .and_then(|m| m.get(subject))
+            .is_some_and(|s| !s.tokens.is_empty())
+    }
+
     fn slot_mut(&mut self, place: &Place, subject: &Subject) -> &mut Slot {
         let subject = if self.pools.contains_key(place) {
             Subject::new(POOL_SUBJECT)
         } else {
             subject.clone()
         };
+        self.touched.insert((place.clone(), subject.clone()));
         self.slots
             .entry(place.clone())
             .or_default()
@@ -1447,12 +1459,26 @@ pub struct Executor {
     deltas: BTreeMap<OccurrenceId, Delta>,
     conditions: Vec<Condition>,
     requests: Vec<EffectRequest>,
+    /// The auto transitions whose enabledness reads each place for the
+    /// subject it decides (its inputs, inhibitors and run state).
+    watchers: BTreeMap<Place, Vec<Arc<str>>>,
+    /// Who declined on a read of a row: decided again when the row changes.
+    waiters: BTreeMap<(Place, Subject), BTreeSet<Decision>>,
+    /// The (transition, subject) pairs to decide again. A pair outside it
+    /// decides as it did last time, because no row it read changed since.
+    pending: BTreeMap<Arc<str>, BTreeSet<Subject>>,
+    /// Transitions to decide again for every subject: a pool they take from
+    /// changed, which is one row shared by every subject.
+    pending_all: BTreeSet<Arc<str>>,
     now: Duration,
     next_attempt: u64,
     next_minted: u64,
     #[cfg(feature = "naive-twins")]
     twin: Option<Twin>,
 }
+
+/// A (transition, subject) pair: one enabledness decision.
+type Decision = (Arc<str>, Subject);
 
 /// What the commit of a work occurrence of an ask changed: the content before
 /// it and the version after it, per (place, subject).
@@ -1513,6 +1539,25 @@ impl Executor {
                 tokens.put(place, &Subject::new(POOL_SUBJECT), Content::new(), None);
             }
         }
+        let mut watchers: BTreeMap<Place, Vec<Arc<str>>> = BTreeMap::new();
+        for t in net
+            .transitions
+            .iter()
+            .filter(|t| t.trigger == Trigger::Auto)
+        {
+            let run_state = [t.running(), Place::retry_pending(&t.name)];
+            for p in (t
+                .consumes
+                .iter()
+                .chain(&t.reads)
+                .chain(&t.inhibits)
+                .cloned())
+            .chain(run_state)
+            .chain(net.answered_of(&t.name))
+            {
+                watchers.entry(p).or_default().push(t.name.clone());
+            }
+        }
         Ok(Self {
             net,
             tokens,
@@ -1527,6 +1572,10 @@ impl Executor {
             deltas: BTreeMap::new(),
             conditions: Vec::new(),
             requests: Vec::new(),
+            watchers,
+            waiters: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            pending_all: BTreeSet::new(),
             now: Duration::ZERO,
             next_attempt: 0,
             next_minted: 0,
@@ -1929,17 +1978,28 @@ impl Executor {
                     continue;
                 }
                 let name = t.name.clone();
-                for s in self.subjects(t) {
+                for s in self.due(i) {
                     let t = &self.net.transitions[i];
-                    if let Ok((trace, input)) = self.decide(t, &s) {
-                        let occurrence = match self.net.answered_of(&name) {
-                            Some(p) => match self.answered_field(&p, &s, ANSWER_ID_KEY) {
-                                Value::String(answer) => work_occurrence(&name, &answer),
-                                other => panic!("the {p} answer id of {s} is {other:?}"),
-                            },
-                            None => self.mint(&name),
-                        };
-                        started.push(self.start(&name, s, occurrence, trace, input, now));
+                    let mut trace = Trace::default();
+                    match self.decide_into(t, &s, &mut trace) {
+                        Ok(input) => {
+                            let occurrence = match self.net.answered_of(&name) {
+                                Some(p) => match self.answered_field(&p, &s, ANSWER_ID_KEY) {
+                                    Value::String(answer) => work_occurrence(&name, &answer),
+                                    other => panic!("the {p} answer id of {s} is {other:?}"),
+                                },
+                                None => self.mint(&name),
+                            };
+                            started.push(self.start(&name, s, occurrence, trace, input, now));
+                        }
+                        Err(_) => {
+                            for row in trace.rows.into_keys() {
+                                self.waiters
+                                    .entry(row)
+                                    .or_default()
+                                    .insert((name.clone(), s.clone()));
+                            }
+                        }
                     }
                 }
             }
@@ -2313,16 +2373,65 @@ impl Executor {
         }
     }
 
-    /// The subjects `t` may fire for. A firing that takes from a pool serves
-    /// the subject with the oldest waiting token first.
+    /// The subjects to decide `transitions[i]` for: those it may fire for
+    /// whose decision may have changed since it was last taken.
+    fn due(&mut self, i: usize) -> Vec<Subject> {
+        let t = &self.net.transitions[i];
+        for row in std::mem::take(&mut self.tokens.touched) {
+            let (place, subject) = &row;
+            for name in self.watchers.get(place).into_iter().flatten() {
+                if self.tokens.pools.contains_key(place) {
+                    self.pending_all.insert(name.clone());
+                } else {
+                    self.pending
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(subject.clone());
+                }
+            }
+            for (name, s) in self.waiters.remove(&row).into_iter().flatten() {
+                self.pending.entry(name).or_default().insert(s);
+            }
+        }
+        let pending = self.pending.remove(&t.name).unwrap_or_default();
+        if self.pending_all.remove(&t.name) {
+            return self.subjects(t);
+        }
+        let due = pending
+            .into_iter()
+            .filter(|s| {
+                t.consumes
+                    .iter()
+                    .chain(&t.reads)
+                    .any(|p| self.tokens.holds(p, s))
+            })
+            .collect();
+        self.in_pool_order(t, due)
+    }
+
+    /// Decides `(transition, subject)` again in the next quiescence.
+    fn redecide(&mut self, (transition, subject): &(Arc<str>, Subject)) {
+        self.pending
+            .entry(transition.clone())
+            .or_default()
+            .insert(subject.clone());
+    }
+
+    /// The subjects `t` may fire for.
     fn subjects(&self, t: &TransitionDef) -> Vec<Subject> {
-        let all: BTreeSet<_> = t
+        let all = t
             .consumes
             .iter()
             .chain(&t.reads)
             .flat_map(|p| self.tokens.subjects(p))
             .collect();
-        let mut subjects: Vec<_> = all.into_iter().collect();
+        self.in_pool_order(t, all)
+    }
+
+    /// A firing that takes from a pool serves the subject with the oldest
+    /// waiting token first.
+    fn in_pool_order(&self, t: &TransitionDef, subjects: BTreeSet<Subject>) -> Vec<Subject> {
+        let mut subjects: Vec<_> = subjects.into_iter().collect();
         if t.consumes.iter().any(|p| self.tokens.pools.contains_key(p)) {
             subjects.sort_by_key(|s| {
                 t.consumes
@@ -2356,6 +2465,19 @@ impl Executor {
     /// The enabledness check that decides a firing: its read trace and its
     /// bound input, or the first reason it cannot fire.
     fn decide(&self, t: &TransitionDef, s: &Subject) -> Result<(Trace, Content), WhyNot> {
+        let mut trace = Trace::default();
+        let input = self.decide_into(t, s, &mut trace)?;
+        Ok((trace, input))
+    }
+
+    /// [`decide`](Self::decide) that leaves in `trace` what a refusal read
+    /// beyond the transition's own rows of `s`.
+    fn decide_into(
+        &self,
+        t: &TransitionDef,
+        s: &Subject,
+        trace: &mut Trace,
+    ) -> Result<Content, WhyNot> {
         if self.tokens.token(&t.running(), s).is_some() {
             return Err(WhyNot::InFlight);
         }
@@ -2378,7 +2500,6 @@ impl Executor {
         if let Some(p) = t.inhibits.iter().find(|p| present(p)) {
             return Err(WhyNot::Inhibited(p.clone()));
         }
-        let mut trace = Trace::default();
         for p in t.consumes.iter().chain(&t.reads).chain(&t.inhibits) {
             trace.row(&self.tokens, p, s);
         }
@@ -2392,10 +2513,10 @@ impl Executor {
                 .fields
                 .insert(ANSWER_ID_KEY.to_string(), Some(answer));
         }
-        let mut input = (t.bind)(&mut self.reader(&mut trace), s).ok_or(WhyNot::Guard)?;
+        let mut input = (t.bind)(&mut self.reader(trace), s).ok_or(WhyNot::Guard)?;
         if t.trigger == Trigger::Auto
             && let Some(mark) = self.marks.get(&(t.name.clone(), s.clone()))
-            && mark.key == self.key(&trace)
+            && mark.key == self.key(trace)
         {
             return Err(WhyNot::FailedOnThisInput(mark.cause.clone()));
         }
@@ -2403,7 +2524,7 @@ impl Executor {
             let value = self.answered_field(p, s, ANSWER_INPUT_KEY);
             merge_value(&mut input, ANSWER_INPUT_KEY, value, &t.name);
         }
-        Ok((trace, input))
+        Ok(input)
     }
 
     /// A field of the `Answered` token a work firing consumes.
@@ -2695,6 +2816,7 @@ impl Executor {
             .is_some_and(|m| m.key != self.key(&a.trace))
         {
             self.marks.remove(&run_key);
+            self.redecide(&run_key);
         }
         let occurrence = a.occurrence.clone();
         // No kept row can bypass the compare-and-set: a candidate place is
@@ -2853,8 +2975,10 @@ impl Executor {
             return;
         }
         let key = self.key(&a.trace);
+        let run_key = (a.transition.clone(), a.subject.clone());
+        self.redecide(&run_key);
         self.marks.insert(
-            (a.transition.clone(), a.subject.clone()),
+            run_key,
             Mark {
                 key,
                 cause: cause.clone(),
@@ -2985,6 +3109,7 @@ impl Executor {
             } else if self.retry_due(&key.0, &key.1).is_some_and(|due| due <= now) {
                 self.set_retry_due(&key, None);
                 self.marks.remove(&key);
+                self.redecide(&key);
             }
         }
     }

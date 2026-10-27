@@ -12,7 +12,6 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use holon_filesystem::FileSystem;
 use holon_filesystem::RealFileSystem;
 use holon_orgmode::di::OrgModeConfig;
 use holon_orgmode::di::seed_default_org_assets;
@@ -61,34 +60,6 @@ async fn seed(dir: &tempfile::TempDir) -> Duration {
     start.elapsed()
 }
 
-/// The controller's initial scan as the file-sync task runs it: initialize, the
-/// whole-file read of every file, then one ingest per file.
-async fn initial_scan(dir: &tempfile::TempDir) -> Duration {
-    let root = std::fs::canonicalize(dir.path()).unwrap();
-    let (mut controller, _store, _disclosures, _net) =
-        org_vault_double::controller_at(root.clone(), &org_vault_double::PageStore::default());
-    let start = Instant::now();
-    controller.initialize().await.unwrap();
-    let files = RealFileSystem.scan_directory(&root).await.unwrap().files;
-    futures::future::try_join_all(files.iter().map(|p| RealFileSystem.read_to_string(p)))
-        .await
-        .unwrap();
-    controller.begin_initial_scan();
-    for path in &files {
-        let outcome = controller
-            .on_file_changed(path)
-            .await
-            .unwrap_or_else(|e| panic!("ingest {}: {e:#}", path.display()));
-        assert!(
-            matches!(outcome, holon_filesystem::IngestOutcome::Ingested),
-            "{} was not ingested: {outcome:?}",
-            path.display()
-        );
-    }
-    controller.finish_initial_scan(30_000).await.unwrap();
-    start.elapsed()
-}
-
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "a measurement; prints the seed's share of the initial scan per vault size"]
 async fn the_header_pass_share_of_the_initial_scan() {
@@ -109,7 +80,7 @@ async fn the_header_pass_share_of_the_initial_scan() {
         let mut scans: Vec<Duration> = Vec::new();
         for _ in 0..5 {
             passes.push(seed(&declared).await);
-            scans.push(initial_scan(&declared).await);
+            scans.push(org_vault_double::initial_scan(declared.path()).await);
         }
         assert!(
             !declared.path().join("Journals.org").exists(),

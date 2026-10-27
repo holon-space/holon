@@ -14,6 +14,7 @@ use holon_core::block_ordering::BlockOrdering;
 use holon_core::traits::Result as OrderingResult;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
+use holon_filesystem::FileSystem;
 use holon_filesystem::RealFileSystem;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
 
@@ -395,4 +396,32 @@ pub fn controller_at(
     .with_writeback_disclosure(disclosures.clone())
     .with_writeback_net(net.clone());
     (controller, store, disclosures, net)
+}
+
+/// The controller's initial scan as the file-sync task runs it: initialize, the
+/// whole-file read of every file, then one ingest per file.
+pub async fn initial_scan(dir: &std::path::Path) -> std::time::Duration {
+    let root = std::fs::canonicalize(dir).unwrap();
+    let (mut controller, _store, _disclosures, _net) =
+        controller_at(root.clone(), &PageStore::default());
+    let start = std::time::Instant::now();
+    controller.initialize().await.unwrap();
+    let files = RealFileSystem.scan_directory(&root).await.unwrap().files;
+    futures::future::try_join_all(files.iter().map(|p| RealFileSystem.read_to_string(p)))
+        .await
+        .unwrap();
+    controller.begin_initial_scan();
+    for path in &files {
+        let outcome = controller
+            .on_file_changed(path)
+            .await
+            .unwrap_or_else(|e| panic!("ingest {}: {e:#}", path.display()));
+        assert!(
+            matches!(outcome, holon_filesystem::IngestOutcome::Ingested),
+            "{} was not ingested: {outcome:?}",
+            path.display()
+        );
+    }
+    controller.finish_initial_scan(30_000).await.unwrap();
+    start.elapsed()
 }
