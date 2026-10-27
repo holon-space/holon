@@ -1,0 +1,75 @@
+Red log: a planted stale write-back turns the keystone red on the clock-feed check
+Date: 2026-10-27
+Test: crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs (the keystone)
+Check: crates/holon-integration-tests/src/pbt/composed/lamport_delta.rs assert_delta (exact predicted delta, lo = hi)
+Build profile: test (unoptimized + debuginfo)
+Command (per seed, planted, then unplanted on the same tree):
+  HOLON_PERF_BUDGET=1 HOLON_PBT_TIMING=measure PROPTEST_CASES=1 PROPTEST_RNG_SEED=<seed> \
+    cargo test --workspace --features holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt \
+    --test general_e2e_composed_pbt -- --nocapture --exact general_e2e_composed_pbt
+
+Plant (probe, restored afterwards): set_block_edge_field in crates/holon-loro/src/loro_backend.rs
+reads the edge key's value before the write, commits the new value, then writes the old value
+back in a second commit. The store ends on the older version.
+
+== plant 'stale', seed 2
+-- probe log (target/c293-probe/stale.log), without the per-shrink-step repeats:
+BASE: f107c97bc81184e7d73efa6b1b7ec3f0a0e08c42
+TREE: b3c89349d1dbb0ca37ef18f1da19705068ed35af
+PLANT: stale in crates/holon-loro/src/loro_backend.rs
+sha before: b5ea057b547c624693a77f72e110e104842ec568189e71860faa62848ed842ae  crates/holon-loro/src/loro_backend.rs
+--- planted diff:
+4344a4345
+>             let stale = meta.get(key); // PLANT: stale write-back
+4350a4352,4357
+>             match stale {
+>                 Some(loro::ValueOrContainer::Value(v)) => meta.insert(key, v)?,
+>                 None => meta.delete(key)?,
+>                 Some(other) => panic!("PLANT: edge key {key} holds a container {other:?}"),
+>             }
+>             doc.commit();
+warning: `holon-integration-tests` (test "general_e2e_composed_pbt") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19m 34s
+  Executable tests/general_e2e_composed_pbt.rs (target/debug/build/holon-integration-tests/647a9579ee287a4f/out/general_e2e_composed_pbt-647a9579ee287a4f)
+=== seed 1 (planted)
+seed 1: green
+[keystone-sample] cases=1 attempted=1 completed=1 floor=1 known-red-hits=0 verdict=OK
+=== seed 2 (planted)
+seed 2: RED
+sha after restore: b5ea057b547c624693a77f72e110e104842ec568189e71860faa62848ed842ae  crates/holon-loro/src/loro_backend.rs
+--- probe find check:
+./crates/holon-loro/src/loro_backend.rs
+./.observability/runs/1793068994236-keystone-61123-0.result.json
+./.observability/runs/1793068914957-keystone-29748-0.result.json
+deleting probe leftover: ./.observability/runs/1793068994236-keystone-61123-0.result.json
+deleting probe leftover: ./.observability/runs/1793068914957-keystone-29748-0.result.json
+=== seed 2 (unplanted, same tree)
+  Executable tests/general_e2e_composed_pbt.rs (target/debug/build/holon-integration-tests/647a9579ee287a4f/out/general_e2e_composed_pbt-647a9579ee287a4f)
+seed 2 unplanted: green
+[keystone-sample] cases=1 attempted=1 completed=1 floor=1 known-red-hits=0 verdict=OK
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.85s
+-- final panic (target/c293-probe/stale-seed2.log):
+1193:Test failed: assertion `left == right` failed: [lamport-delta] 'SetEdgeField' advanced the SUT primary's Lamport clock by 2 (55 -> 57), the model predicts exactly 1: the SUT wrote extra Loro op(s) the model does not expect
+1194-  left: 2
+1195- right: 1.
+-- minimal failing transitions:
+    [
+        SetEdgeField(
+            SetEdgeField {
+                block_id: EntityUri("block:c1"),
+                update: Tags(
+                    Tags(
+                        {
+                            "ctx",
+                        },
+                    ),
+                ),
+            },
+        ),
+    ],
+-- runner verdict:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 25.03s
+
+-- unplanted, same seed:
+[keystone-sample] cases=1 attempted=1 completed=1 floor=1 known-red-hits=0 verdict=OK
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.85s
