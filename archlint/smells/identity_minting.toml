@@ -26,6 +26,7 @@ exclude = [
     "**/tests/**",
     "**/*_test.rs",
     "**/*_tests.rs",
+    "**/tests.rs",
     "crates/holon/examples/**",
     "crates/holon-integration-tests/**",
     # Whole-file test modules not caught by the globs above (the only matches

@@ -358,6 +358,21 @@ def cfg_test_spans(lines: list[str]) -> list[tuple[int, int]]:
     return spans
 
 
+# A file that its parent module declares as `#[cfg(test)] mod <stem>;` is one
+# `#[cfg(test)]` item as a whole.
+def is_cfg_test_module_file(path: str) -> bool:
+    p = Path(path)
+    if p.name in ("lib.rs", "main.rs", "mod.rs"):
+        return False
+    decl = re.compile(rf"^\s*(pub(\([^)]*\))?\s+)?mod {re.escape(p.stem)};")
+    for parent in (p.parent.with_suffix(".rs"), p.parent / "mod.rs", p.parent / "lib.rs", p.parent / "main.rs"):
+        lines = read_lines(str(parent))
+        for lo, hi in cfg_test_spans(lines):
+            if any(decl.match(line) for line in lines[lo - 1:hi]):
+                return True
+    return False
+
+
 # A rule with `skip_test_mods` does not fire INSIDE a `#[cfg(test)]` item: a
 # test that builds a row and asserts on one of its columns is not the
 # production boundary the rule guards. Production code that merely sits after
@@ -374,7 +389,10 @@ def filter_test_mods(diags: list[dict], smells: list[dict]) -> list[dict]:
             continue
         path = d["file"]
         if path not in spans_by_path:
-            spans_by_path[path] = cfg_test_spans(read_lines(path))
+            lines = read_lines(path)
+            spans_by_path[path] = (
+                [(1, len(lines))] if is_cfg_test_module_file(path) else cfg_test_spans(lines)
+            )
         line = d["line"]
         if not any(lo <= line <= hi for lo, hi in spans_by_path[path]):
             kept.append(d)
