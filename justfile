@@ -1458,11 +1458,13 @@ gate-arch:
     ./scripts/test-check-target-leftovers.sh 2>&1 | tee target/gate-logs/gate-arch-check-target-leftovers.log
     ./scripts/check-admission-sites.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites.log
     ./scripts/check-regression-descriptions.sh 2>&1 | tee target/gate-logs/gate-arch-regression-descriptions.log
-    # The duration-assertion ratchet, the generated nextest split and the timing
-    # gate's verdict pin. All read the tree only, so they belong here rather
-    # than past the build.
+    # The duration-assertion ratchet, the generated nextest split, the timing
+    # gate's verdict pin and the long tests' timeout margins. All read the tree
+    # only, so they belong here rather than past the build.
     ./scripts/check-timing-assertions.sh 2>&1 | tee target/gate-logs/gate-arch-timing-assertions.log
     ./scripts/check-timing-gate-verdict.sh 2>&1 | tee target/gate-logs/gate-arch-timing-gate-verdict.log
+    { ./scripts/check-timeout-margins.py && ./scripts/check-timeout-margins.py --self-check; } \
+        2>&1 | tee target/gate-logs/gate-arch-timeout-margins.log
     { ./scripts/check-known-red-evidence.py && ./scripts/check-known-red-evidence.py --self-check; } \
         2>&1 | tee target/gate-logs/gate-arch-known-red-evidence.log
     { ./scripts/check-adr-net-names.py && ./scripts/check-adr-net-names.py --self-check; } \

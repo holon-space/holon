@@ -37,6 +37,12 @@ slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 filter = "binary(two_instance_composed_pbt)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 
+# The typing-share floor steps its draws on the reference under two cap sets.
+# It must precede the module override below, which would match it first. The cap is twice its standalone time (scripts/check-timeout-margins.py).
+[[profile.default.overrides]]
+filter = "binary_id(holon-integration-tests) & test(=pbt::composed::wide_e2e::tests::sqlonly_typing_share_meets_its_floor_beside_the_loro_control)"
+slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
+
 # The slice PBTs live in the LIB test binary, which the binary() filters above
 # cannot name, so they inherited the 2 min default while legitimately running
 # minutes. Measured 2026-08-12 on the `--features pbt --lib` run:
@@ -51,19 +57,24 @@ filter = "binary_id(holon-integration-tests) & (test(frontend_slice::navigation_
 slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 
 # The LogSeq-parity replay boots one composed SUT per un-`@wip`ed scenario, so
-# its runtime grows with every scenario the corpus turns into a live gate. It
-# crossed the 2 min default the moment the D21-D24 rulings landed (measured
-# 2026-08-26: ~10 replayed scenarios, >120s). A timeout there reads as "a
-# parity expectation broke", which is the opposite of what it means.
+# its runtime grows with every scenario the corpus turns into a live gate. A
+# timeout there reads as "a parity expectation broke", which is the opposite of
+# what it means. The cap is twice its standalone time (scripts/check-timeout-margins.py).
 [[profile.default.overrides]]
-filter = "binary_id(holon-integration-tests::catalog_suite) & test(logseq_parity)"
-slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
+filter = "binary_id(holon-integration-tests::catalog_suite) & test(=logseq_parity_replay::logseq_parity_corpus_replay)"
+slow-timeout = { period = "60s", terminate-after = 11 }  # 11 min hard cap
 
 # The dogfood-recorded replay boots one composed SUT per recorded scenario the
-# same way, and 17 of its scenarios already take more than the 2 min default.
+# same way. The cap is twice its standalone time (scripts/check-timeout-margins.py).
 [[profile.default.overrides]]
 filter = "binary_id(holon-integration-tests::catalog_suite) & test(=dogfood_recorded_replay::recorded_features_replay_over_the_composed_sut)"
-slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
+slow-timeout = { period = "60s", terminate-after = 17 }  # 17 min hard cap
+
+# Boots a vault with 500 recipes and waits for the whole backlog to ingest.
+# The cap is twice its standalone time (scripts/check-timeout-margins.py).
+[[profile.default.overrides]]
+filter = "binary_id(holon-integration-tests::cook_vault_ingest) & test(=the_default_layout_seed_does_not_wait_for_the_recipe_backlog)"
+slow-timeout = { period = "60s", terminate-after = 6 }  # 6 min hard cap
 
 # The two LogSeq-DB bisects walk N = 1..24 comparing Holon's writer against
 # LogSeq's, spawning an nbb oracle subprocess per prefix. Measured 2026-08-22:
