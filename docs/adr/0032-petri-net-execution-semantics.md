@@ -745,7 +745,7 @@ on other devices.
   of the bound `OnDisk` text the decision was made on.
 - **`Refused` is a sink.** It is left only by different file content
   (`OnDisk.hash != Refused.seen`, then Resume), by manual `AcceptRemoval`, or by
-  manual `RewriteFromStore`. `CatchUp` is not enabled from it.
+  manual `RewriteFromStore`. No catch-up is enabled from it.
   - `AcceptRemoval` accepts what the file says: the base merge with the removal
     applied. Blocks the file never held stay.
   - `RewriteFromStore` is a file write like any other: it advances the
@@ -761,7 +761,7 @@ on other devices.
 - **`Base` and `Writing` are process class (Q4.a).** Durability is the merge-base
   sidecar and the file row, not the marking. Boot emits `DiskChanged` for every
   tracked file, so a write the crash cut off is a file that is Behind again: the
-  next `CatchUp` ingests or writes it. No `StateProbe` exists for it.
+  next catch-up ingests or writes it. No `StateProbe` exists for it.
 - **Disk at the base, store ahead: the store wins (WB-restore.a).** Known
   limit: the crash window between a write and the stamp of its hash. A user
   restore of the exact pre-edit bytes inside that window equals the base, so
@@ -773,20 +773,23 @@ on other devices.
   (`crates/holon-filesystem/src/writeback_net.rs`). Places: `DiskChanged`,
   `OnDisk{hash}`, `Base{hash, authority}`, `Authority{hash}` (the hash
   of the store's render of the document), `Refused{seen, authority}`. `Behind`
-  and `InSync` are derived. `ReadDisk` and `Resume` are auto; `CatchUp` is auto
-  and effectful, one ingest XOR one compare-and-set write per firing, with a
-  retry timer and a count bound, and `Refused` inhibits it. `AcceptRemoval` and
+  and `InSync` are derived. `ReadDisk` and `Resume` are auto. The catch-up is two auto,
+  effectful transitions: `CatchUpIngest` ingests a file that left the base, and
+  `CatchUpWrite` makes one compare-and-set write of a store that left the base
+  over a file at its base. Each has its own retry timer and count bound, so a
+  write the disk refuses never holds back the ingest of new file content.
+  `Refused` inhibits both. `AcceptRemoval` and
   `RewriteFromStore` are manual with `()` input and answer
   `ACCEPTED(occurrence)` (ops `writeback.accept_removal`, `writeback.rewrite_from_store`).
   The hash is `BaseSidecars::hash`.
 - **Authority is written on every store change (Q3.a).** The compare-and-set
   and the row write of a record are not atomic: a store edit that lands in that
-  window is applied over changed inputs and caught up by the next `CatchUp`.
+  window is applied over changed inputs and caught up by the next `CatchUpWrite`.
   The record's own row write is not foreign: its render hashes to the recorded
   `Base.authority`, so it enables nothing.
 - **A write the disk refuses raises the file token's `tries` and `next_try`
   (Q6.a)**, disclosed as a stalled write-back. No poisoned place exists;
-  `CatchUp`'s guard bounds the tries and holds while `next_try` is ahead, and a
+  the catch-up's guard bounds the tries and holds while `next_try` is ahead, and a
   new file content starts from zero tries. The subnet in
   `crates/holon-filesystem/src/writeback_net.rs` still carries this as the
   executor's `retry(backoff, attempts)` attribute and a mark, which §9.1
@@ -988,8 +991,9 @@ after it.
     the place definition; (b) the unused `Class::Device`, which this executor
     refuses at load today. Until it is ruled, the rule is a review rule, not a
     load check.
-13. **Is `DiskChanged` a register?** (§9.6, 322/E3.b.) `CatchUp` inhibits the
-    place it writes, so its fact never meets a token; the manual transitions
+13. **Is `DiskChanged` a register?** (§9.6, 322/E3.b.) `CatchUpIngest` and
+    `CatchUpWrite` inhibit the place they write, so their fact never meets a
+    token; the manual transitions
     (`AcceptRemoval`, `RewriteFromStore`) do not, so a disk change that arrives
     before the user resolves the refusal makes their firing refuse loudly.
     Options: (a) declare `DiskChanged` a register — a second change notice says

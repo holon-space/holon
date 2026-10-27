@@ -46,7 +46,7 @@ a file's stamp churn, so the keystone cannot reach it.
 ## Remedy
 FIXED by the per-file write-back subnet (ADR 0032 §9,
 holon-space/holon-work#175). The owed render is held in the `Owed` record, and
-`CatchUp` retries the write until it lands; a partial pre-ingest is retried and
+`CatchUpWrite` retries the write until it lands; a partial pre-ingest is retried and
 does not take the file's text over the store. Pinned by:
 - keystone case `wb-d8-store-edit-whose-pre-ingest-stalls-stays-in-the-store`
   in `crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`

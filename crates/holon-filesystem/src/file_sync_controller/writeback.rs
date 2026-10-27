@@ -6,7 +6,7 @@
 //! The authority and the write are not atomic (Q3.a): a block change that
 //! reaches the store between the write and the `Base` record settles that
 //! firing over changed inputs, and the newer `Authority` makes the file
-//! `Behind` again, so the next `CatchUp` writes it.
+//! `Behind` again, so the next `CatchUpWrite` writes it.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -35,7 +35,7 @@ use crate::writeback_net as wn;
 use crate::writeback_net::field;
 use crate::writeback_net::output;
 
-/// A render of the store the next `CatchUp` writes to `home` instead of
+/// A render of the store the next `CatchUpWrite` writes to `home` instead of
 /// rendering again.
 #[derive(Debug)]
 pub(super) struct Owed {
@@ -149,7 +149,7 @@ impl FileSyncController {
     }
 
     /// The store rendered `doc` as `rendered`: the net's `Authority` moves to
-    /// it and the next `CatchUp` writes it.
+    /// it and the next `CatchUpWrite` writes it.
     pub(super) fn owe_render(
         &mut self,
         doc: &EntityUri,
@@ -194,44 +194,47 @@ impl FileSyncController {
         Ok(())
     }
 
-    /// The failure of `doc`'s `CatchUp` on its current input as an error:
+    /// The failure of `doc`'s catch-up on its current input as an error:
     /// its file does not hold the store's text. A pending retry is a
     /// disclosed stall.
     pub(super) fn catch_up_failure(&self, doc: &EntityUri) -> Result<()> {
-        let (why_not, mark) = self.net.read(|exec| {
-            (
-                exec.why_not(wn::CATCH_UP, doc.as_str()),
-                exec.mark(wn::CATCH_UP, doc.as_str()).cloned(),
-            )
-        });
-        match why_not {
-            Some(WhyNot::RetryPending { .. }) => {
-                let mark = mark.expect("a pending retry keeps its failure mark");
-                Err(
-                    anyhow::anyhow!("{}", mark.cause.text).context(super::AlreadyDisclosed(
-                        format!("write-back of {doc} not landed"),
-                    )),
+        for transition in wn::CATCH_UP {
+            let (why_not, mark) = self.net.read(|exec| {
+                (
+                    exec.why_not(transition, doc.as_str()),
+                    exec.mark(transition, doc.as_str()).cloned(),
                 )
+            });
+            match why_not {
+                Some(WhyNot::RetryPending { .. }) => {
+                    let mark = mark.expect("a pending retry keeps its failure mark");
+                    return Err(anyhow::anyhow!("{}", mark.cause.text).context(
+                        super::AlreadyDisclosed(format!("write-back of {doc} not landed")),
+                    ));
+                }
+                Some(WhyNot::FailedOnThisInput(cause)) => {
+                    return Err(anyhow::anyhow!(
+                        "write-back of {doc} failed: {}",
+                        cause.text
+                    ));
+                }
+                _ => {}
             }
-            Some(WhyNot::FailedOnThisInput(cause)) => Err(anyhow::anyhow!(
-                "write-back of {doc} failed: {}",
-                cause.text
-            )),
-            _ => Ok(()),
         }
+        Ok(())
     }
 
     async fn run_effect(&mut self, request: &EffectRequest) -> EffectResult {
         let doc = doc_of(&request.subject);
         match &*request.transition {
             wn::READ_DISK => self.read_disk(&request.subject, &doc).await,
-            wn::CATCH_UP => {
-                let input = &request.input;
-                if field(input, "disk") != field(input, "base") {
-                    self.catch_up_ingest(&request.subject, &doc, input).await
-                } else {
-                    self.catch_up_write(&request.subject, &doc, input).await
-                }
+            wn::CATCH_UP_INGEST => {
+                self.catch_up_ingest(&request.subject, &doc, &request.input)
+                    .await
+            }
+            wn::CATCH_UP_WRITE => {
+                self.catch_up_write(&request.subject, &doc, &request.input)
+                    .await
             }
             wn::ACCEPT_REMOVAL => {
                 self.accept_removal(&request.subject, &doc, &request.input)
@@ -529,12 +532,12 @@ impl FileSyncController {
             .insert(doc.clone(), (path.to_path_buf(), cause.to_string()));
     }
 
-    /// A stall whose `CatchUp` no longer carries a retryable mark landed or
+    /// A stall whose catch-up no longer carries a retryable mark landed or
     /// was superseded, so its condition is lifted.
     fn reconcile_stalls(&mut self) {
         let failing: Vec<String> = self.net.read(|exec| {
             exec.marks()
-                .filter(|(t, _, mark)| *t == wn::CATCH_UP && mark.cause.retryable)
+                .filter(|(t, _, mark)| wn::CATCH_UP.contains(t) && mark.cause.retryable)
                 .map(|(_, doc, _)| doc.to_string())
                 .collect()
         });

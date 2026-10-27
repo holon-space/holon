@@ -14,7 +14,9 @@
 //! - `Refused{seen, authority}`: the file holds no content while the store
 //!   holds the document. A sink, left by new file content or a manual fire.
 //! - `Behind` (derived): the file or the store moved away from the base.
-//!   `CatchUp` ingests the file or writes the render until it is not.
+//!   `CatchUpIngest` ingests a file that moved; `CatchUpWrite` writes the
+//!   render of a store that moved over a file at its base. Each keeps its own
+//!   retry, so a write the disk does not take never holds back an ingest.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,7 +42,9 @@ pub const REFUSED: &str = "Refused";
 pub const BEHIND: &str = "Behind";
 
 pub const READ_DISK: &str = "ReadDisk";
-pub const CATCH_UP: &str = "CatchUp";
+pub const CATCH_UP_INGEST: &str = "CatchUpIngest";
+pub const CATCH_UP_WRITE: &str = "CatchUpWrite";
+pub const CATCH_UP: [&str; 2] = [CATCH_UP_INGEST, CATCH_UP_WRITE];
 pub const RESUME: &str = "Resume";
 pub const ACCEPT_REMOVAL: &str = "AcceptRemoval";
 pub const REWRITE_FROM_STORE: &str = "RewriteFromStore";
@@ -49,7 +53,7 @@ pub const REWRITE_FROM_STORE: &str = "RewriteFromStore";
 pub const ABSENT: &str = "absent";
 
 /// `Base.authority` after an ingest: no `Authority` hash matches it, so the
-/// next `CatchUp` renders the store and writes or confirms the file.
+/// next `CatchUpWrite` renders the store and writes or confirms the file.
 pub const INGESTED: &str = "ingested";
 
 /// `Authority.hash` and `Base.authority` of a document whose store has not
@@ -58,14 +62,14 @@ pub const INGESTED: &str = "ingested";
 pub const SEED: &str = "seed";
 
 /// `Base.authority` after a read of the file the store refused: the next
-/// `CatchUp` tries the write, which the quarantine stops, so only new file
+/// `CatchUpWrite` tries the write, which the quarantine stops, so only new file
 /// content fires it again.
 pub const REFUSED_READ: &str = "refused-read";
 
 /// A write the disk does not take is tried again after this long, so the
 /// file is written within one backoff after the disk takes writes again.
 pub const CATCH_UP_BACKOFF: Duration = Duration::from_millis(100);
-/// The count bound of one `CatchUp` run: ten minutes of retries. After it,
+/// The count bound of one catch-up run: ten minutes of retries. After it,
 /// only a new input (a block change, a new file content) fires it again.
 pub const CATCH_UP_ATTEMPTS: u32 = 6000;
 
@@ -104,6 +108,14 @@ fn behind(r: &mut Reader<'_>, s: &Subject) -> Option<Content> {
     })
 }
 
+fn disk_moved(r: &mut Reader<'_>, s: &Subject) -> Option<Content> {
+    behind(r, s).filter(|c| field(c, "disk") != field(c, "base"))
+}
+
+fn store_moved(r: &mut Reader<'_>, s: &Subject) -> Option<Content> {
+    behind(r, s).filter(|c| field(c, "disk") == field(c, "base"))
+}
+
 fn disk_changed(r: &mut Reader<'_>, s: &Subject) -> Option<Content> {
     r.present(DISK_CHANGED, s).then(Content::new)
 }
@@ -130,6 +142,12 @@ fn refused(r: &mut Reader<'_>, s: &Subject) -> Option<Content> {
 }
 
 pub fn net() -> NetDef {
+    net_with_backoff(CATCH_UP_BACKOFF)
+}
+
+/// [`net`] with `backoff` between the tries of a catch-up the disk does not
+/// take, so a test can hold a retry pending for as long as it runs.
+pub fn net_with_backoff(backoff: Duration) -> NetDef {
     NetDef::default()
         .place(DISK_CHANGED, Class::Process)
         .register(ON_DISK, Class::Process)
@@ -147,26 +165,10 @@ pub fn net() -> NetDef {
             .consumes(DISK_CHANGED)
             .reads(ON_DISK)
             .fact(ON_DISK)
-            .retry(CATCH_UP_BACKOFF, 3),
+            .retry(backoff, 3),
         )
-        .transition(
-            TransitionDef::new(
-                CATCH_UP,
-                Trigger::Auto,
-                Arc::new(behind),
-                Body::Effectful(Receiver::Keyed),
-            )
-            .reads(ON_DISK)
-            .reads(BASE)
-            .reads(AUTHORITY)
-            .inhibits(REFUSED)
-            .inhibits(DISK_CHANGED)
-            .fact(BASE)
-            .fact(ON_DISK)
-            .fact(REFUSED)
-            .fact(DISK_CHANGED)
-            .retry(CATCH_UP_BACKOFF, CATCH_UP_ATTEMPTS),
-        )
+        .transition(catch_up(CATCH_UP_INGEST, disk_moved, backoff))
+        .transition(catch_up(CATCH_UP_WRITE, store_moved, backoff))
         .transition(
             TransitionDef::new(RESUME, Trigger::Auto, Arc::new(resume), Body::pure(resumed))
                 .consumes(REFUSED)
@@ -174,6 +176,29 @@ pub fn net() -> NetDef {
         )
         .transition(manual(ACCEPT_REMOVAL))
         .transition(manual(REWRITE_FROM_STORE))
+}
+
+fn catch_up(
+    name: &str,
+    guard: fn(&mut Reader<'_>, &Subject) -> Option<Content>,
+    backoff: Duration,
+) -> TransitionDef {
+    TransitionDef::new(
+        name,
+        Trigger::Auto,
+        Arc::new(guard),
+        Body::Effectful(Receiver::Keyed),
+    )
+    .reads(ON_DISK)
+    .reads(BASE)
+    .reads(AUTHORITY)
+    .inhibits(REFUSED)
+    .inhibits(DISK_CHANGED)
+    .fact(BASE)
+    .fact(ON_DISK)
+    .fact(REFUSED)
+    .fact(DISK_CHANGED)
+    .retry(backoff, CATCH_UP_ATTEMPTS)
 }
 
 /// A remedy the user fires on a refusal. It reads `Base` and `OnDisk` as well
@@ -221,7 +246,7 @@ pub fn is_behind(exec: &Executor, doc: &str) -> bool {
 }
 
 /// The documents whose file is not settled: a pending disk read, a running
-/// or retrying `CatchUp`, or `Behind` without a failure mark that stops it.
+/// or retrying catch-up, or `Behind` without a failure mark that stops it.
 pub fn unsettled(exec: &Executor) -> Vec<String> {
     let mut docs: Vec<String> = exec
         .tokens()
@@ -230,13 +255,15 @@ pub fn unsettled(exec: &Executor) -> Vec<String> {
         .filter(|doc| {
             exec.tokens().token(DISK_CHANGED, doc).is_some()
                 || exec.why_not(READ_DISK, doc).is_none()
-                || matches!(
-                    exec.why_not(CATCH_UP, doc),
-                    None | Some(
-                        holon_net::exec::WhyNot::InFlight
-                            | holon_net::exec::WhyNot::RetryPending { .. }
+                || CATCH_UP.iter().any(|t| {
+                    matches!(
+                        exec.why_not(t, doc),
+                        None | Some(
+                            holon_net::exec::WhyNot::InFlight
+                                | holon_net::exec::WhyNot::RetryPending { .. }
+                        )
                     )
-                )
+                })
         })
         .map(|doc| doc.to_string())
         .collect();
@@ -244,11 +271,11 @@ pub fn unsettled(exec: &Executor) -> Vec<String> {
     docs
 }
 
-/// Each document whose last `CatchUp` failed on a write the disk did not
-/// take, as `<doc> (<cause>)`: its file is behind the store.
+/// Each document whose last catch-up failed on a disk that did not take it,
+/// as `<doc> (<cause>)`: its file is behind the store.
 pub fn failed_writebacks(exec: &Executor) -> Vec<String> {
     exec.marks()
-        .filter(|(t, _, mark)| *t == CATCH_UP && mark.cause.retryable)
+        .filter(|(t, _, mark)| CATCH_UP.contains(t) && mark.cause.retryable)
         .map(|(_, doc, mark)| format!("{doc} ({})", mark.cause.text))
         .collect()
 }
@@ -350,7 +377,7 @@ mod tests {
         exec.write(AUTHORITY, DOC, content([("hash", "a2")]));
         let reqs = one(&mut exec, 0);
         assert_eq!(reqs.len(), 1);
-        assert_eq!(&*reqs[0].transition, CATCH_UP);
+        assert_eq!(&*reqs[0].transition, CATCH_UP_WRITE);
         exec.write(AUTHORITY, DOC, content([("hash", "a3")]));
         let doc = Subject::new(DOC);
         exec.complete(
@@ -405,7 +432,7 @@ mod tests {
         exec.write(AUTHORITY, DOC, content([("hash", "a2")]));
         assert!(
             one(&mut exec, 0).is_empty(),
-            "CatchUp is inhibited by Refused"
+            "the catch-up is inhibited by Refused"
         );
         exec.write(DISK_CHANGED, DOC, Content::new());
         let reqs = one(&mut exec, 1);
@@ -423,7 +450,7 @@ mod tests {
         exec.write(ON_DISK, DOC, content([("hash", "h3")]));
         let reqs = one(&mut exec, 4);
         assert!(refused_docs(&exec).is_empty(), "Resume consumed Refused");
-        assert_eq!(&*reqs[0].transition, CATCH_UP);
+        assert_eq!(&*reqs[0].transition, CATCH_UP_INGEST);
     }
 
     #[test]
@@ -446,7 +473,27 @@ mod tests {
         let backoff = CATCH_UP_BACKOFF.as_millis() as u64;
         let retry = one(&mut exec, 1 + backoff);
         assert_eq!(retry.len(), 1);
-        assert_eq!(&*retry[0].transition, CATCH_UP);
+        assert_eq!(&*retry[0].transition, CATCH_UP_WRITE);
+    }
+
+    /// A write the disk does not take keeps its retry pending; a new file
+    /// content is ingested at once, not after the write's backoff.
+    #[test]
+    fn a_pending_write_retry_does_not_hold_back_the_ingest_of_new_file_content() {
+        let mut exec = seeded();
+        exec.write(AUTHORITY, DOC, content([("hash", "a2")]));
+        let reqs = one(&mut exec, 0);
+        assert_eq!(&*reqs[0].transition, CATCH_UP_WRITE);
+        exec.complete(
+            reqs[0].attempt,
+            EffectResult::Failed(holon_net::exec::Cause::retryable("disk full")),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        exec.write(ON_DISK, DOC, content([("hash", "h2")]));
+        let reqs = one(&mut exec, 2);
+        assert_eq!(reqs.len(), 1, "the new file content fires at once");
+        assert_eq!(&*reqs[0].transition, CATCH_UP_INGEST);
     }
 
     /// 322/E3.b: a disk read replaces the `OnDisk` token, which the net
@@ -518,7 +565,7 @@ mod tests {
     /// against the token it read. While the effect is in flight the file
     /// vanishes and `forget_file_state` writes `OnDisk{hash: absent}`; the
     /// newer token wins, the fact is withheld and the occurrence settles
-    /// `OverChangedInputs`, so `CatchUp` does not rewrite a file the user
+    /// `OverChangedInputs`, so `CatchUpWrite` does not rewrite a file the user
     /// deleted.
     #[test]
     fn a_read_disk_fact_loses_to_the_absent_token_written_while_it_ran() {

@@ -77,7 +77,7 @@ An `AddIdlessLine` variant would narrow the repro; this lane did not build it.
 ## Remedy
 
 FIXED by the per-file write-back subnet (ADR 0032 §9,
-holon-space/holon-work#175): the id stamp is an owed write that `CatchUp`
+holon-space/holon-work#175): the id stamp is an owed write that `CatchUpWrite`
 retries until it lands, so it is never abandoned. The case below is now in
 `keystone.jsonl` and green.
 

@@ -6,7 +6,7 @@
 //! - The write-back net ([`crate::writeback_net`], ADR 0032 §9.5) owns each
 //!   document's write-back state: `Base`, `OnDisk`, `Authority`, `Refused`. The
 //!   controller runs its effects (`writeback` module): `ReadDisk` and
-//!   `CatchUp`'s ingest or compare-and-set write.
+//!   `CatchUpIngest` and `CatchUpWrite`, a compare-and-set write.
 //! - `last_projection`: the text of each file's `Base`, the merge base of the
 //!   next ingest. No ingest is skipped because the bytes equal it: Holon's own
 //!   write leaves `OnDisk` at `Base`, so it enables nothing. A registered mount
@@ -1094,7 +1094,7 @@ pub struct FileSyncController {
     /// The per-file write-back net: it owns each file's write-back state and
     /// decides when to read the disk and when to write it.
     net: holon_net_shell::Shell,
-    /// Renders the next `CatchUp` of a document writes.
+    /// Renders the next `CatchUpWrite` of a document writes.
     owed: HashMap<EntityUri, writeback::Owed>,
     /// Documents whose ingest owes a normalization write: their next `Base`
     /// records the `INGESTED` authority.
@@ -8923,7 +8923,7 @@ impl FileSyncController {
             }
             ingested += 1;
         }
-        // A `CatchUp` waiting out its retry backoff runs on this tick.
+        // A catch-up waiting out its retry backoff runs on this tick.
         self.drive_writeback_net().await?;
         Ok(ingested)
     }

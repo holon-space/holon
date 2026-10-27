@@ -15,7 +15,7 @@ summary: >-
 `OnDisk`. The file is deleted while that read is in flight, the controller
 records `OnDisk{hash: absent}`, and the completing firing then writes its own
 hash over it: `OnDisk` holds `h2` for a file that no longer exists, so
-`CatchUp` writes the store content back to a path the user removed.
+`CatchUpWrite` writes the store content back to a path the user removed.
 
 Found by the r4 verifier of lane exec-tokens (holon-space/holon-work#322,
 finding F3) while reviewing the register semantics of ruling 322/E3.b, not by

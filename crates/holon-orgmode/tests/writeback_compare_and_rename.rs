@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use holon_api::block::Block;
@@ -498,13 +499,18 @@ struct Harness {
 
 impl Harness {
     fn new(world: World) -> Self {
+        Self::with_backoff(world, holon_filesystem::writeback_net::CATCH_UP_BACKOFF)
+    }
+
+    fn with_backoff(world: World, backoff: Duration) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let path = root.join("Notes.org");
         let fs = Arc::new(InterferesBeforeWrite::new(path.clone()));
         let disclosed = Arc::new(Disclosures::default());
-        let refused = holon_net_shell::Shell::new(holon_filesystem::writeback_net::net())
-            .expect("the write-back net loads");
+        let refused =
+            holon_net_shell::Shell::new(holon_filesystem::writeback_net::net_with_backoff(backoff))
+                .expect("the write-back net loads");
         let controller = new_org_sync_controller(
             Arc::new(world.clone()),
             Arc::new(world.clone()),
@@ -528,7 +534,20 @@ impl Harness {
     /// A tracked `Notes.org` whose first ingest and normalization write-back
     /// already ran.
     async fn ingested() -> Self {
-        let mut h = Self::new(World::with_page("Notes"));
+        Self::ingested_with(Self::new(World::with_page("Notes"))).await
+    }
+
+    /// [`Self::ingested`] whose catch-up retries wait an hour, so a write
+    /// the disk did not take stays pending for the whole test.
+    async fn ingested_with_held_retry() -> Self {
+        Self::ingested_with(Self::with_backoff(
+            World::with_page("Notes"),
+            Duration::from_secs(3600),
+        ))
+        .await
+    }
+
+    async fn ingested_with(mut h: Self) -> Self {
         std::fs::write(&h.path, CONTENT).unwrap();
         let _ = h
             .controller
@@ -931,6 +950,70 @@ async fn ingest_normalization_discloses_a_file_that_keeps_rewriting_its_own_byte
     assert!(
         h.disk().contains("Buy oat milk"),
         "the next block edit never reached the file: {:?}",
+        h.disk()
+    );
+}
+
+/// The user's line edit on disk after a block write-back that did not land
+/// reaches the store at once, next to the store's edit.
+#[tokio::test]
+async fn an_external_edit_after_a_write_that_did_not_land_is_ingested_at_once() {
+    let mut h = Harness::ingested_with_held_retry().await;
+    h.fs.arm(Interference::KeepRewritingSame);
+    let block = h.edit_store();
+    h.block_changed(&block).await;
+    h.fs.assert_fired();
+    assert_eq!(
+        h.refused
+            .read(holon_filesystem::writeback_net::failed_writebacks)
+            .len(),
+        1,
+        "the block write-back landed, so nothing is pending"
+    );
+    h.fs.disarm();
+
+    std::fs::write(&h.path, format!("{}* Call dad\n", h.disk())).unwrap();
+    let _ = h
+        .controller
+        .on_file_changed(&h.path)
+        .await
+        .expect("the external edit is ingested");
+    assert!(
+        h.world.block_with_text("Call dad").is_some(),
+        "the external edit waits for the write's retry: {:?}",
+        h.world.texts(),
+    );
+    assert!(
+        h.world.block_with_text("Buy oat milk").is_some(),
+        "the ingest dropped the store's edit: {:?}",
+        h.world.texts(),
+    );
+}
+
+#[tokio::test]
+async fn an_external_edit_without_a_failed_write_back_is_ingested() {
+    let mut h = Harness::ingested_with_held_retry().await;
+    std::fs::write(&h.path, format!("{}* Call dad\n", h.disk())).unwrap();
+    let _ = h
+        .controller
+        .on_file_changed(&h.path)
+        .await
+        .expect("the external edit is ingested");
+    assert!(
+        h.world.block_with_text("Call dad").is_some(),
+        "the external edit did not reach the store: {:?}",
+        h.world.texts(),
+    );
+}
+
+#[tokio::test]
+async fn a_store_edit_without_an_external_edit_is_written_back() {
+    let mut h = Harness::ingested_with_held_retry().await;
+    let block = h.edit_store();
+    h.block_changed(&block).await;
+    assert!(
+        h.disk().contains("Buy oat milk"),
+        "the store edit did not reach disk: {:?}",
         h.disk()
     );
 }
