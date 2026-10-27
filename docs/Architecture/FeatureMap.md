@@ -423,6 +423,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `tour-spike-create-op-not-observable-load`
 - `tui-inline-row-mount-unsettled-frame`
 - `tui-refused-write-back-missing-from-log`
+- `tui-stderr-write-missing-from-log-load`
 - `tui-ui-pbt-load-timeout`
 - `turso-block-query-source-round-trip`
 - `two-instance-loro-docs-no-common-state`
