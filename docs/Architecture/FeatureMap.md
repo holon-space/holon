@@ -365,6 +365,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `deletebackward-sql-reads-budget`
 - `dense-patch-cross-document-session-temp-dir-gone`
 - `dense-patch-cross-document-write-back-late-load`
+- `dense-patch-org-file-misses-agent-text`
 - `dogfood-replay-load-timeout`
 - `external-rewrite-drops-page-body`
 - `failed-slot-create-loro-dispatch-keystrokes-run-anyway`

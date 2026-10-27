@@ -53,6 +53,9 @@ use holon_integration_tests::pbt::dense_text::new_row_place;
 use holon_integration_tests::pbt::dense_text::new_row_place_shape;
 use holon_integration_tests::pbt::dense_text::new_row_text;
 use holon_integration_tests::pbt::dense_text::row_text_edit;
+use holon_integration_tests::pbt::known_reds::KnownReds;
+use holon_integration_tests::pbt::known_reds::SampleTally;
+use holon_integration_tests::pbt::known_reds::completed_floor;
 use holon_integration_tests::pbt::reference_state::ReferenceState;
 use holon_integration_tests::pbt::transitions::E2ETransition;
 use holon_integration_tests::pbt::transitions::WriteOrgFile;
@@ -1807,6 +1810,8 @@ fn generated_dense_edits(session: Session) {
     const CASES: u32 = 96;
     let session = RefCell::new(Some(session));
     let counts: RefCell<BTreeMap<&'static str, usize>> = RefCell::new(BTreeMap::new());
+    let known_reds = KnownReds::load().expect("known-reds registry");
+    let tally = RefCell::new(SampleTally::default());
     // A seeded draw, so the reach floor below is a fixed property of the
     // generator and cannot flake.
     let mut runner = TestRunner::new_with_rng(
@@ -1891,7 +1896,9 @@ fn generated_dense_edits(session: Session) {
                 },
             );
         *session.borrow_mut() = Some(s);
-        let outcome = judged.map_err(TestCaseError::fail)?;
+        let Some(outcome) = draw_verdict(&known_reds, &tally, judged)? else {
+            return Ok(());
+        };
         println!("[case] {outcome}");
         let mut counts = counts.borrow_mut();
         if let Some(shape) = delete_shape {
@@ -1923,6 +1930,19 @@ fn generated_dense_edits(session: Session) {
     if let Err(e) = result {
         panic!("{e}");
     }
+    let tally = tally.into_inner();
+    println!(
+        "[sample] {} of {CASES} draws completed, {} spent on known reds",
+        tally.completed(),
+        tally.hits()
+    );
+    assert!(
+        tally.completed() >= completed_floor(CASES),
+        "only {} of {CASES} draws completed, below the floor of {}: a sample this small is \
+         not a pass",
+        tally.completed(),
+        completed_floor(CASES)
+    );
     for shape in [
         "retitle of a row with a body",
         "keyword-headed retitle",
@@ -1974,6 +1994,65 @@ fn generated_dense_edits(session: Session) {
             "{shape:?} was drawn fewer than 2 times: {counts:?}"
         );
     }
+}
+
+/// One draw's verdict. A broken contract fails the run, unless the panic it
+/// would end the run with matches a `known-red` row: then the draw is spent,
+/// `None`, and the run draws on.
+fn draw_verdict(
+    known_reds: &KnownReds,
+    tally: &RefCell<SampleTally>,
+    judged: Result<String, String>,
+) -> Result<Option<String>, TestCaseError> {
+    match judged {
+        Ok(outcome) => {
+            tally.borrow_mut().note_completed();
+            Ok(Some(outcome))
+        }
+        Err(broken) => match known_reds.classify(&format!("Test failed: {broken}")) {
+            Some(key) => {
+                tally.borrow_mut().note_known_red(key);
+                eprintln!("[known-red {key}] draw spent, run continued:\n{broken}");
+                Ok(None)
+            }
+            None => {
+                tally.borrow_mut().note_novel();
+                Err(TestCaseError::fail(broken))
+            }
+        },
+    }
+}
+
+/// The first line of the run's panic in a base run of
+/// [`a_generated_dense_edit_on_the_sql_authority_reads_back_exactly_or_is_refused`].
+const ORG_FILE_MISSES_AGENT_TEXT: &str =
+    "Test failed: the org file does not hold the text the agent wrote";
+
+#[test]
+fn a_known_red_signature_in_a_dedicated_pbt_costs_its_draw() {
+    let known_reds = KnownReds::load().expect("known-reds registry");
+    assert_eq!(
+        known_reds.classify(ORG_FILE_MISSES_AGENT_TEXT),
+        Some("dense-patch-org-file-misses-agent-text")
+    );
+    let tally = RefCell::new(SampleTally::default());
+    let broken = "the org file does not hold the text the agent wrote\nedited:\n* a\nfile:\n* b";
+    assert!(
+        matches!(
+            draw_verdict(&known_reds, &tally, Err(broken.to_string())),
+            Ok(None)
+        ),
+        "a registered known red must spend its draw, not fail the run"
+    );
+    assert_eq!((tally.borrow().completed(), tally.borrow().hits()), (0, 1));
+}
+
+#[test]
+fn an_unregistered_failure_in_a_dedicated_pbt_still_fails_its_run() {
+    let known_reds = KnownReds::load().expect("known-reds registry");
+    let tally = RefCell::new(SampleTally::default());
+    let broken = "the store does not read back as the edited text\nedited:\n* a\nre-queried:\n* b";
+    assert!(draw_verdict(&known_reds, &tally, Err(broken.to_string())).is_err());
 }
 
 /// The rings a generated document declares. `CLOSING` and `TRIAGE` share
