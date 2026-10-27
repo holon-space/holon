@@ -28,6 +28,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CLASSIFIER = REPO / "scripts" / "keystone-known-reds.sh"
+# The suite this gate runs; `timing-split.py resolve` reads it to check that
+# every one of these tests is in the `windowed` test group.
+INVENTORY = "package(holon-gpui)"
 
 
 def default_jobs() -> int:
@@ -55,7 +58,7 @@ def nextest_args(reuse: list[str], filt: str) -> list[str]:
 
 def inventory(reuse: list[str]) -> list[tuple[str, int]]:
     out = subprocess.run(
-        ["cargo", "nextest", "list", *reuse, "-E", "package(holon-gpui)",
+        ["cargo", "nextest", "list", *reuse, "-E", INVENTORY,
          "--message-format", "json"],
         cwd=REPO, check=True, stdout=subprocess.PIPE, text=True).stdout
     suites = json.loads(out)["rust-suites"]
