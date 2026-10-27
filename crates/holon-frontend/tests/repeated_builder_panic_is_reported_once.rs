@@ -37,6 +37,12 @@ fn build_frames(config_dir: &Path) {
     }
 }
 
+/// `--exact` matches the test's path below the crate root.
+fn exact(test: &str) -> String {
+    let (_crate_root, module) = module_path!().split_once("::").expect("a test module");
+    format!("{module}::{test}")
+}
+
 #[test]
 fn a_panic_repeated_every_frame_is_reported_in_full_once() {
     if let Ok(dir) = std::env::var(CHILD_ENV) {
@@ -48,7 +54,7 @@ fn a_panic_repeated_every_frame_is_reported_in_full_once() {
     let output = Command::new(std::env::current_exe().expect("test binary path"))
         .args([
             "--exact",
-            "a_panic_repeated_every_frame_is_reported_in_full_once",
+            &exact("a_panic_repeated_every_frame_is_reported_in_full_once"),
             "--nocapture",
             "--test-threads=1",
         ])

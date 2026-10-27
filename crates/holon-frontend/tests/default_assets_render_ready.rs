@@ -17,7 +17,7 @@ use holon_frontend::RenderContext;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::render_interpreter::RenderInterpreter;
 
-mod shipped_sources;
+use crate::shipped_sources;
 
 /// Services whose live queries start and stay empty, so a `live_query` in an
 /// asset renders as itself and any `error` node comes from the asset.

@@ -45,6 +45,12 @@ fn build(path: &Path) {
     exec(&db, "INSERT INTO t (id) VALUES (1)");
 }
 
+/// `--exact` matches the test's path below the crate root.
+fn exact(test: &str) -> String {
+    let (_crate_root, module) = module_path!().split_once("::").expect("a test module");
+    format!("{module}::{test}")
+}
+
 /// Process B: the production open of a file process A holds.
 fn run_as_child(path: &str) -> ! {
     match TursoBackend::open_database_reporting_outcome(path).map_err(StorageError::from) {
@@ -72,7 +78,7 @@ fn a_second_process_does_not_move_a_live_database_aside() {
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "a_second_process_does_not_move_a_live_database_aside",
+            &exact("a_second_process_does_not_move_a_live_database_aside"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -546,7 +552,7 @@ fn a_database_held_briefly_opens_once_released() {
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "a_database_held_briefly_opens_once_released",
+            &exact("a_database_held_briefly_opens_once_released"),
             "--nocapture",
             "--test-threads=1",
         ])

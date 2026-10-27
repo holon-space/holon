@@ -41,9 +41,20 @@ fn die_before_the_bus() {
     }
 }
 
+/// `--exact` matches the test's path below the crate root.
+fn exact(test: &str) -> String {
+    let (_crate_root, module) = module_path!().split_once("::").expect("a test module");
+    format!("{module}::{test}")
+}
+
 fn boot_and_die(test_name: &str, config_dir: &Path, death: &str) {
     let output = Command::new(std::env::current_exe().expect("test binary path"))
-        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            &exact(test_name),
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(DIR_ENV, config_dir)
         .env(DEATH_ENV, death)
         .output()

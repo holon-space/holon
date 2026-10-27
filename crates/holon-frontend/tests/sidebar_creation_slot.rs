@@ -9,7 +9,7 @@
 //! nested under its parent, which then desynced the tree provider from its
 //! `row_map` on every disclosure toggle and produced a breadcrumb red banner.
 //!
-//! Run: `cargo nextest run -p holon-frontend --test sidebar_creation_slot`
+//! Run: `cargo nextest run -p holon-frontend sidebar_creation_slot::`
 
 use std::collections::HashMap;
 use std::sync::Arc;

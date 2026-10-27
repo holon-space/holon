@@ -14,7 +14,7 @@ use holon_frontend::RenderContext;
 use holon_frontend::StubBuilderServices;
 use holon_frontend::reactive::BuilderServices;
 
-mod shipped_sources;
+use crate::shipped_sources;
 
 const UNKNOWN_BUILDER_MARKER: &str = "[unknown: ";
 

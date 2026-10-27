@@ -26,7 +26,7 @@ use holon_frontend::render_interpreter::resolve_props;
 use holon_frontend::view_model::ViewKind;
 use holon_frontend::view_model::ViewModel;
 
-mod shipped_sources;
+use crate::shipped_sources;
 
 /// `call`'s arguments, resolved as the interpreter and `resolve_props`
 /// resolve a widget's, and as an operation's params are resolved otherwise.

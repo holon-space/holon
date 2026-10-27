@@ -10,6 +10,12 @@ use holon_frontend::panic_record::RECORD_FILE;
 const CHILD_ENV: &str = "HOLON_PANIC_RECORD_CHILD_DIR";
 const CHILD_MESSAGE: &str = "panic-record child probe";
 
+/// `--exact` matches the test's path below the crate root.
+fn exact(test: &str) -> String {
+    let (_crate_root, module) = module_path!().split_once("::").expect("a test module");
+    format!("{module}::{test}")
+}
+
 /// In the child (`CHILD_ENV` set): install on that dir and die of a panic.
 /// In the parent: run `test_name` as that child on `config_dir` and return the
 /// record it left there.
@@ -20,7 +26,12 @@ fn record_of_a_child_that_panics(test_name: &str, config_dir: &Path) -> PanicRec
     }
 
     let output = Command::new(std::env::current_exe().expect("test binary path"))
-        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            &exact(test_name),
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env(CHILD_ENV, config_dir)
         .output()
         .expect("spawn the child test process");
