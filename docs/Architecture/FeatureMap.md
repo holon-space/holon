@@ -367,6 +367,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `dense-patch-cross-document-write-back-late-load`
 - `dense-patch-org-file-misses-agent-text`
 - `dogfood-replay-load-timeout`
+- `empty-created-file-header-never-written`
 - `external-rewrite-drops-page-body`
 - `failed-slot-create-loro-dispatch-keystrokes-run-anyway`
 - `failed-slot-create-sqlonly-keystrokes-run-anyway`

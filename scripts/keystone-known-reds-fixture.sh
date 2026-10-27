@@ -432,6 +432,32 @@ test general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/page-without-own-file 0 '^PRIMARY: \[known-red:page-without-own-file\]' "$work/violation-page-without-own-file.log"
+# An empty created file whose `#+ID:` header never reaches disk fires both
+# file invariants; the one-byte echo-loop shape beside a fileless page must not
+# be absorbed by that row.
+cat >"$work/violation-empty-created-file-header-never-written.log" <<'EOF'
+thread 'joining_a_received_page_away_is_refused_and_leaves_it_placed' (143066426) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13:
+reconciled composed sequence diverged from the oracle: [("inv-org-render-fixed-point", "[inv-org-render-fixed-point] render != disk PERSISTED for 5s — not a transient projection lag but a real echo-loop / oscillation: the next re_render_all_tracked would keep rewriting the file.\n--- disk (0 bytes) [/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpheOSSG/doc_0.org] ---\n\n--- rendered from SQL (43 bytes) ---\n#+ID: 317c2395-de93-fe93-d5fa-5db9c57da4db\n"), ("inv-every-page-has-its-own-file", "[inv-every-page-has-its-own-file] 1 page(s) not homed to exactly one own file: [\"page `317c2395-de93-fe93-d5fa-5db9c57da4db` owns NO file (fileless — content lives only in the store; writeback must MATERIALIZE it into `…/317c2395-de93-fe93-d5fa-5db9c57da4db.org`)\"]")]
+test joining_a_received_page_away_is_refused_and_leaves_it_placed ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out; finished in 33.21s
+EOF
+expect_outcome violation/empty-created-file-header-never-written 0 '^PRIMARY: \[known-red:empty-created-file-header-never-written' "$work/violation-empty-created-file-header-never-written.log"
+cat >"$work/violation-one-byte-echo-loop-beside-fileless-page.log" <<'EOF'
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13:
+reconciled composed sequence diverged from the oracle: [("inv-org-render-fixed-point", "[inv-org-render-fixed-point] render != disk PERSISTED for 5s — not a transient projection lag but a real echo-loop / oscillation: the next re_render_all_tracked would keep rewriting the file.\n--- disk (277 bytes) [/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpfaBZ5X/forward-edge-page.org] ---\n#+ID: forward-edge-page\n* fe-parent\n:PROPERTIES:\n:ID: fe-parent\n:END:\n* fe-blocked\n:PROPERTIES:\n:ID: fe-blocked\n:REQUIRES: fe-target\n:END:\n** rlJWtK\n:PROPERTIES:\n:ID: block-4\n:column-priority: L\n:END:\nfoVL623I188Qt\ndTL dC Nh8GfJ M\n* fe-target\n:PROPERTIES:\n:ID: fe-target\n:END:\n\n--- rendered from SQL (278 bytes) ---\n#+ID: forward-edge-page\n* fe-parent\n:PROPERTIES:\n:ID: fe-parent\n:END:\n* fe-blocked\n:PROPERTIES:\n:ID: fe-blocked\n:REQUIRES: fe-target\n:END:\n** rlJWtK\n:PROPERTIES:\n:ID: block-4\n:column-priority: L\n:END:\nfoVL623I188Qt\ndTL dC Nh8GfJ M\n\n* fe-target\n:PROPERTIES:\n:ID: fe-target\n:END:\n"), ("inv-every-page-has-its-own-file", "[inv-every-page-has-its-own-file] 1 page(s) not homed to exactly one own file: [\"page `61133fe7-d4d5-ab1c-24e4-110da5f42293` owns NO file (fileless — content lives only in the store; writeback must MATERIALIZE it into `…/61133fe7-d4d5-ab1c-24e4-110da5f42293.org`)\"]")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome violation/one-byte-echo-loop-beside-fileless-page 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-one-byte-echo-loop-beside-fileless-page.log"
+# A double-homed page is a different defect from a fileless one, so it stays
+# novel beside the empty-file render shape.
+cat >"$work/violation-empty-created-file-beside-double-homed-page.log" <<'EOF2'
+thread 'joining_a_received_page_away_is_refused_and_leaves_it_placed' (143066426) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13:
+reconciled composed sequence diverged from the oracle: [("inv-org-render-fixed-point", "[inv-org-render-fixed-point] render != disk PERSISTED for 5s — not a transient projection lag but a real echo-loop / oscillation: the next re_render_all_tracked would keep rewriting the file.\n--- disk (0 bytes) [/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpheOSSG/doc_0.org] ---\n\n--- rendered from SQL (43 bytes) ---\n#+ID: 317c2395-de93-fe93-d5fa-5db9c57da4db\n"), ("inv-every-page-has-its-own-file", "[inv-every-page-has-its-own-file] 1 page(s) not homed to exactly one own file: [\"page `317c2395-de93-fe93-d5fa-5db9c57da4db` is DOUBLE-HOMED across 2 files [\\\"doc_0.org\\\", \\\"317c2395-de93-fe93-d5fa-5db9c57da4db.org\\\"]\"]")]
+test joining_a_received_page_away_is_refused_and_leaves_it_placed ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out; finished in 33.21s
+EOF2
+expect_outcome violation/empty-created-file-beside-double-homed-page 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-empty-created-file-beside-double-homed-page.log"
 # A budget message also carries the non-SQL ceilings (wall, query, memory).
 cat >"$work/violation-known-plus-novel-memory-budget.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
