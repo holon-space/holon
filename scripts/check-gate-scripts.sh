@@ -58,21 +58,41 @@ rc=0; combine_in_repo "${heads##* }" >/dev/null || rc=$?
 expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 
 # `just` and `cargo` stubs append each call and the quiet marker's content to
-# $GATE_PROBE; `just timing-gate-build` prints $BUILD_OUT. HOME is a scratch
+# $GATE_PROBE; `just timing-gate-build` prints $BUILD_OUT and `just $STUB_RED`
+# exits 1. HOME is a scratch
 # dir, so the hold's marker, lock, log and slot walk are scratch files and no
 # real build is lowered.
 home="$scratch/home" stubs="$scratch/stubs" probe="$scratch/probe.log"
-mkdir -p "$home/.claude/skills/orchestrator" "$home/.cache/holon-build" "$stubs"
-ln -s "$HOME/.claude/skills/orchestrator/scripts" "$home/.claude/skills/orchestrator/scripts"
+orch="$home/.claude/skills/orchestrator/scripts"
+mkdir -p "$orch" "$home/.cache/holon-build" "$stubs"
+ln -s "$HOME"/.claude/skills/orchestrator/scripts/* "$orch/"
+# A track runs in this test's slot; the quiet hold is the real one.
+rm "$orch/with-build-slot.sh"
+cat > "$orch/with-build-slot.sh" <<EOF
+#!/usr/bin/env bash
+case "\$1" in --quiet-*) exec "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" "\$@" ;; esac
+HOLON_BUILD_SLOT_HOLDER=\$\$ exec "\$@"
+EOF
+chmod +x "$orch/with-build-slot.sh"
 for tool in just cargo; do
   cat > "$stubs/$tool" <<'EOF'
 #!/usr/bin/env bash
 echo "$(basename "$0") $* | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
+[ "$*" != "${STUB_RED:-}" ] || exit 1
 EOF
 done
 chmod +x "$stubs"/*
 tip=$(cat target/gate-tip)
+# "<n> <name> <exit>" per gate-steps.jsonl row of gate $1, by step number.
+rows_of() {
+  /usr/bin/python3 -c 'import json, sys
+for l in open(sys.argv[1]):
+    r = json.loads(l)
+    if r["gate"] == sys.argv[2]: print(r["step"], r["name"], r["exit"])' "$home/.cache/holon-build/gate-steps.jsonl" "$1" | sort -n
+}
+steps="1 20 2 13 11 19 12 14 15 17 7 3 4 5 6 8 9 10 18"
+sorted_steps=$(tr ' ' '\n' <<<"$steps" | sort -n | tr '\n' ' ')
 in_stubs() { env HOME="$home" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
 
 echo "== the integrate run"
@@ -81,10 +101,20 @@ expect "exits 0 with every step green (got $rc)" [ "$rc" = 0 ]
 [ "$rc" = 0 ] || tail -n 20 "$scratch/integrate.out"
 expect "its last line names the candidate tip" [ "$(tail -n1 "$scratch/integrate.out")" = "candidate tip: $tip" ]
 order=$(sed -n 's/^== landing \[\([0-9]*\)\].*/\1/p' "$scratch/integrate.out" | tr '\n' ' ')
-expect "runs the non-timing steps in order (got $order)" [ "$order" = "1 20 2 3 4 5 6 7 8 9 10 11 12 17 13 14 15 18 19 " ]
+expect "logs the non-timing steps in order (got $order)" [ "$order" = "$steps " ]
+expect "writes one gate-steps row per step" [ "$(rows_of g1 | cut -d' ' -f1 | tr '\n' ' ')" = "$sorted_steps" ]
 expect "never calls timing-gate" [ "$(grep -c '^just timing-gate |' "$probe")" = 0 ]
 expect "never takes the quiet hold" [ -z "$(grep -v ' | quiet=$' "$probe")" ]
 expect "marks the target for the sweep" [ -f "$integ/target/.gc-mark" ]
+
+echo "== the integrate run with one red step after gate-compile"
+rc=0; in_stubs STUB_RED=gate-arch "$integrate" g2 "1 2" "$tip" >"$scratch/integrate-red.out" 2>&1 || rc=$?
+expect "exits 1 (got $rc)" [ "$rc" = 1 ]
+expect "names the red step" grep -qx 'RED STEP \[7\] gate-arch: exit 1, log target/gate-logs/g2-step-7.log' "$scratch/integrate-red.out"
+expect "names no other step red" [ "$(grep -c '^RED ' "$scratch/integrate-red.out")" = 1 ]
+expect "runs every other step to a green row" [ "$(rows_of g2 | grep -v ' 0$')" = "7 gate-arch 1" ]
+expect "writes one gate-steps row per step" [ "$(rows_of g2 | cut -d' ' -f1 | tr '\n' ' ')" = "$sorted_steps" ]
+expect "names no candidate tip" [ -z "$(grep '^candidate tip' "$scratch/integrate-red.out")" ]
 
 echo "== the timing gate on the integrated tip"
 : > "$probe"

@@ -8,11 +8,17 @@
 #   scripts/gate-integrate.sh <gate-id> "<cards>" <tip>
 #   GATE_DISK_FLOOR_GIB  free disk the gate needs (default 130).
 #
+# After gate-compile the steps run at once in TRACKS, one build slot per track:
+# no step reads another step's output, and every one tolerates load. Each step
+# writes its own log and gate-steps.jsonl row; the logs follow in TRACKS order.
+#
 # Last stdout line on green: `candidate tip: <tip>`, the argument for
 # scripts/gate-timing.sh.
-# Exit 0: every step green. A red step stops the run with that step's exit
-# code; 9 = the checkout is not <tip>, 8 = free disk below the floor. A red
-# extra nextest exits 12 or 13 after the information step.
+# Exit 0: every step green. A red step before gate-compile stops the run with
+# its exit code; 9 = the checkout is not <tip>, 8 = free disk below the floor.
+# After gate-compile every step runs to its end, each red step is named, and
+# the run exits with the code of the first red one in TRACKS order; a red extra
+# nextest alone exits 12 or 13 after the information step.
 set -euo pipefail
 
 # Steps that are pipelines run as `"$0" --<name>`: `step` runs one command.
@@ -47,10 +53,38 @@ extra_nextest() {
   return $rc
 }
 PBT_FEATURES="holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt"
+
+# Balanced by step time, longest track first; the first track runs in the
+# gate's own slot. A step is <n>:<name>, its number in gate-steps.jsonl.
+TRACKS=(
+  "13:hand-authored"
+  "11:keystone-smoke 19:extra-nextest 12:loro-suite 14:projector-lag-lock 15:windowed-gate"
+  "17:timing-gate-build 7:gate-arch 3:check-release-shape 4:check-frontend-wasm 5:check-dioxus-web-wasm 6:check-worker-wasm 8:arch-validate 9:featuremap 10:analyze-arch 18:guests-verify"
+)
+read -ra STEPS <<<"${TRACKS[*]}"
+step_file() { echo "target/gate-logs/$GATE-step-$1.$2"; }
+track() {
+  local entry n name rc
+  for entry in ${TRACKS[$1]}; do
+    n=${entry%%:*} name=${entry#*:}
+    case $name in
+      featuremap) set -- /usr/bin/python3 scripts/featuremap.py check ;;
+      keystone-smoke | hand-authored | extra-nextest) set -- "$0" "--$name" ;;
+      *) set -- just "$name" ;;
+    esac
+    rc=0; step "$n" "$name" "$@" >"$(step_file "$n" log)" 2>&1 || rc=$?
+    echo "$rc" >"$(step_file "$n" rc)"
+    echo "step [$n] $name: exit $rc"
+  done
+}
+
+# shellcheck source=/dev/null
+source ~/.claude/skills/orchestrator/scripts/gate-step.sh
 case "${1:-}" in
   --keystone-smoke) keystone_smoke; exit ;;
   --hand-authored) hand_authored; exit ;;
   --extra-nextest) extra_nextest; exit ;;
+  --track) track "$2"; exit ;;
 esac
 
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
@@ -72,30 +106,35 @@ export RUST_FONTCONFIG_DLOPEN
 
 mkdir -p target/gate-logs
 echo "gate-integrate.sh: $GATE (pid $$), tip $tip, cards: $GATE_CARDS"
-# shellcheck source=/dev/null
-source ~/.claude/skills/orchestrator/scripts/gate-step.sh
 
 /usr/bin/python3 "$(dirname "$0")/target-gc.py" target --mark
 step 1 fmt cargo fmt --all -- --check
 step 20 deny just deny
 step 2 gate-compile just gate-compile
-step 3 check-release-shape just check-release-shape
-step 4 check-frontend-wasm just check-frontend-wasm
-step 5 check-dioxus-web-wasm just check-dioxus-web-wasm
-step 6 check-worker-wasm just check-worker-wasm
-step 7 gate-arch just gate-arch
-step 8 arch-validate just arch-validate
-step 9 featuremap /usr/bin/python3 scripts/featuremap.py check
-step 10 analyze-arch just analyze-arch
-step 11 keystone-smoke "$0" --keystone-smoke
-step 12 loro-suite just loro-suite
-step 17 timing-gate-build just timing-gate-build
-step 13 hand-authored "$0" --hand-authored
-step 14 projector-lag-lock just projector-lag-lock
-step 15 windowed-gate just windowed-gate
-step 18 guests-verify just guests-verify
-extra_red=""
-step 19 extra-nextest "$0" --extra-nextest || { extra_red=$?; echo "EXTRA NEXTEST NOVEL RED"; }
+rm -f target/gate-logs/"$GATE"-step-*
+pids=()
+"$0" --track 0 & pids+=($!)
+for t in $(seq 1 $((${#TRACKS[@]} - 1))); do
+  # A track of its own takes a slot of its own and writes its own job record.
+  env -u HOLON_BUILD_SLOT_HOLDER -u FLOW_JOB_STATUS -u FLOW_JOB_LOG FLOW_JOB_ID="${FLOW_JOB_ID:-$GATE}.track$t" \
+    ~/.claude/skills/orchestrator/scripts/with-build-slot.sh "$0" --track "$t" & pids+=($!)
+done
+red="" extra_red=""
+for t in "${!pids[@]}"; do
+  rc=0; wait "${pids[$t]}" || rc=$?
+  [ "$rc" = 0 ] || { echo "RED TRACK $t: exit $rc"; red=${red:-$rc}; }
+done
+
+for entry in "${STEPS[@]}"; do
+  n=${entry%%:*} name=${entry#*:}
+  [ ! -f "$(step_file "$n" log)" ] || cat "$(step_file "$n" log)"
+  rc=$(cat "$(step_file "$n" rc)" 2>/dev/null) || { echo "RED STEP [$n] $name: its track ended before it"; red=${red:-1}; continue; }
+  [ "$rc" = 0 ] && continue
+  echo "RED STEP [$n] $name: exit $rc, log $(step_file "$n" log)"
+  if [ "$name" = extra-nextest ]; then extra_red=$rc; echo "EXTRA NEXTEST NOVEL RED"
+  else red=${red:-$rc}; fi
+done
+[ -z "$red" ] || exit "$red"
 
 echo "== information only: org_suite (compare its reds with the known reds) =="
 cargo nextest run -p holon-integration-tests --test org_suite --no-fail-fast --features pbt,web-arm || echo "ORG_SUITE RED"
