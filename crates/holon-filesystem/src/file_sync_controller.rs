@@ -8014,14 +8014,38 @@ impl FileSyncController {
 
     /// The hash of the base `canonical` currently has: the bytes this session
     /// wrote, else the ones the previous run recorded. Empty for a file Holon
-    /// never wrote.
-    fn base_hash_for(&self, canonical: &CanonicalPath) -> String {
-        self.last_projection
+    /// never wrote. The bytes this session wrote are stored as the base first,
+    /// so the row that records the returned hash never vouches for a base
+    /// that is not on disk.
+    async fn store_base_for(&self, canonical: &CanonicalPath, rel_path: &Path) -> Result<String> {
+        let Some(last) = self
+            .last_projection
             .get(canonical)
             .filter(|last| !last.is_empty())
-            .map(|last| crate::base_sidecar::BaseSidecars::hash(last))
-            .or_else(|| self.booted_base_hash.get(canonical).cloned())
-            .unwrap_or_default()
+        else {
+            return Ok(self
+                .booted_base_hash
+                .get(canonical)
+                .cloned()
+                .unwrap_or_default());
+        };
+        let hash = crate::base_sidecar::BaseSidecars::hash(last);
+        if self
+            .empty_hash_rows
+            .get(canonical)
+            .is_some_and(|row| row.base_hash == hash)
+        {
+            return Ok(hash);
+        }
+        self.base_sidecars
+            .put(&EntityUri::file(&rel_path.to_string_lossy()), last)
+            .await
+            .with_context(|| {
+                format!(
+                    "store the merge base of {} in .holon/bases",
+                    rel_path.display()
+                )
+            })
     }
 
     /// Write the `file` row of `canonical`. A row this session already wrote
@@ -10511,7 +10535,10 @@ impl FileSyncController {
         // The merge BASE is kept, though — it still names the bytes the file
         // holds, and clearing it would make a crash after a write that never
         // landed diff the disk against the store again.
-        let base = self.base_hash_for(&canonical);
+        let base = self
+            .store_base_for(&canonical, rel_path)
+            .await
+            .with_context(|| format!("Holon did not write {}", path.display()))?;
         self.write_file_row(&canonical, rel_path, "", &base, doc_id, &[])
             .await
             .with_context(|| {

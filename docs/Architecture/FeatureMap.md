@@ -360,7 +360,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
 - `crash-restart-row-vouches-unstamped-base`
-- `crash-restore-boot-drops-owed-outdent`
 - `crash-restore-window-not-disclosed`
 - `create-sql-read-repeat-budget`
 - `deletebackward-sql-reads-budget`
