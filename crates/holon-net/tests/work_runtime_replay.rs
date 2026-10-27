@@ -776,6 +776,91 @@ fn a_cold_agent_over_95k_is_proposed_fresh() {
     );
 }
 
+fn budget(exec: &Executor, field: &str) -> i64 {
+    int_of(&marking(exec, P_BUDGET)[MACHINE], field)
+}
+
+fn proposed(exec: &Executor, agent: &str) -> String {
+    text_of(&marking(exec, P_PROPOSAL)[agent], "action")
+}
+
+#[test]
+fn the_stall_threshold_holds_at_its_boundary() {
+    let mut exec = replay();
+    let stall = budget(&exec, "stall_after_s");
+    inject_agent(&mut exec, "lane-996", "261", stall, 50_000);
+    inject_agent(&mut exec, "lane-995", "261", stall - 1, 50_000);
+
+    let stalled = marking(&exec, P_STALLED);
+    assert!(stalled.contains_key("lane-996"), "idle {stall}s is stalled");
+    assert!(
+        !stalled.contains_key("lane-995"),
+        "idle {}s is not stalled",
+        stall - 1
+    );
+}
+
+#[test]
+fn the_hot_idle_threshold_holds_at_its_boundary() {
+    let mut exec = replay();
+    let hot = budget(&exec, "hot_idle_s");
+    inject_agent(&mut exec, "lane-996", "261", hot, 50_000);
+    inject_agent(&mut exec, "lane-995", "261", hot - 1, 50_000);
+
+    assert_eq!(
+        proposed(&exec, "lane-996"),
+        "cold",
+        "idle {hot}s is not hot"
+    );
+    assert_eq!(
+        proposed(&exec, "lane-995"),
+        "resume",
+        "idle {}s is hot",
+        hot - 1
+    );
+}
+
+#[test]
+fn the_fresh_threshold_holds_at_its_boundary() {
+    let mut exec = replay();
+    let hot = budget(&exec, "hot_idle_s");
+    let over = budget(&exec, "fresh_ctx_over");
+    inject_agent(&mut exec, "lane-996", "261", hot, over);
+    inject_agent(&mut exec, "lane-995", "261", hot, over + 1);
+
+    assert_eq!(
+        proposed(&exec, "lane-996"),
+        "cold",
+        "ctx {over} is not over the fresh threshold"
+    );
+    assert_eq!(
+        proposed(&exec, "lane-995"),
+        "fresh",
+        "ctx {} is over the fresh threshold",
+        over + 1
+    );
+}
+
+#[test]
+fn the_resume_ceiling_holds_at_its_boundary() {
+    let mut exec = replay();
+    let ceiling = budget(&exec, "resume_ctx_under");
+    inject_agent(&mut exec, "lane-996", "261", 1_800, ceiling);
+    inject_agent(&mut exec, "lane-995", "261", 1_800, ceiling - 1);
+
+    assert_eq!(
+        proposed(&exec, "lane-996"),
+        "cold",
+        "ctx {ceiling} is not under the resume ceiling"
+    );
+    assert_eq!(
+        proposed(&exec, "lane-995"),
+        "resume",
+        "ctx {} is under the resume ceiling",
+        ceiling - 1
+    );
+}
+
 /// An agent of `card` whose last turn ended `idle_s` before the snapshot with
 /// `ctx_tokens` of context, stepped to quiescence at the snapshot.
 fn inject_agent(exec: &mut Executor, agent: &str, card: &str, idle_s: i64, ctx_tokens: i64) {
