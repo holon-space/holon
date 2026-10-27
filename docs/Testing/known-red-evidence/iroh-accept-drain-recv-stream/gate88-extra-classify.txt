@@ -1,0 +1,50 @@
+
+=== gate88-extra.log ===
+PRIMARY: [known-red:iroh-accept-drain-recv-stream] gate88-extra.log @ crates/holon-loro/src/multi_peer.rs:644:30: called `Result::unwrap()` on an `Err` value: [accept] drain recv stream
+  -- shrink tail (15 re-panics after the primary; may be a
+     different bug than the one that actually failed the run) --
+  [novel] gate88-extra.log @ /Users/martin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/proptest-1.11.0/src/test_runner/runner.rs:490:31: Test failed normally in child process.
+  [novel] gate88-extra.log @ crates/holon/tests/sync_suite/sync_pbt.rs:157:5: failed in other process
+  [known-red:identity-transfer-in-place-edit-misbound-load] gate88-extra.log @ crates/holon-filesystem/src/identity_transfer_tests.rs:524:1: Test failed: assertion failed: `(left == right)` 
+  [known-red:advice-gate-weave-row-missing] gate88-extra.log @ crates/holon-integration-tests/tests/advice_live_mcp_gate.rs:325:5: describe_ui: top lesson block:lesson-b must be woven under the anchor (it lives on a separate page, so a rendered row with this id is the weave). rendered ids={} ui={"widget":"view_mode_switcher","entity_uri":"block:default-main-panel#qsrc"
+  [known-red:mirrored-entity-authority-ops-missing] gate88-extra.log @ crates/holon-integration-tests/tests/boot_suite/mcp_mirrored_entity_write_authority.rs:103:9: [boot-1] the connector does not write 'fk_fake_shadow', so the authority derived from its columns must serve it; ops present: []
+  [known-red:no-proptest-regressions-seed-file-under-load] gate88-extra.log @ crates/holon-integration-tests/tests/catalog_suite/no_tracked_proptest_regressions.rs:67:5: proptest auto-persisted seed file(s) found on disk:
+  [known-red:catalog-advice-step6-weave-dismiss] gate88-extra.log @ crates/holon-integration-tests/tests/catalog_suite/advice_step4_red.rs:141:5: [post-dismiss] composed catalog must be GREEN post step-6; failures: [("inv-advice-rows-woven", "[inv-advice-rows-woven] woven advice row 'block:lesson-b' is not in the reference expectation (scored candidates: [(\"block:lesson-c\", 2), (\"
+  [known-red:cook-vault-rename-refusal-load-flake] gate88-extra.log @ crates/holon-integration-tests/tests/cook_vault_ingest.rs:1946:9: assertion `left == right` failed: the page title follows the file name even while the file's content is refused
+  [novel] gate88-extra.log @ crates/holon-integration-tests/tests/dense_patch_engine_exact.rs:2034:5: assertion `left == right` failed
+  [known-red:logseq-parity-slash-menu-offers-no-delete] gate88-extra.log @ crates/holon-integration-tests/src/pbt/fixtures/mod.rs:312:21: [fixtures:gherkin "The slash menu's vocabulary is derived from the operation registry   # log:8"] step 5: [slash-menu] expected block "block:c1"'s menu to offer "Delete", but it offers ["Indent", "Outdent", "Move Up", "Move Down", "Delete S
+  [known-red:fts-query-block-watch-view-create-fails] gate88-extra.log @ crates/holon-integration-tests/tests/store_suite/fts_query_block_e2e.rs:83:10: query_and_watch for fts_match holon_sql query: Failed to create materialized view watch_view_7e8c86120259bbb2: CREATE MATERIALIZED VIEW IF NOT EXISTS watch_view_7e8c86120259bbb2 AS SELECT id, content, block_raw._change_origin AS _change_ori
+  [known-red:two-instance-loro-docs-no-common-state] gate88-extra.log @ crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13: reconciled composed sequence diverged from the oracle: [("inv-two-instance-convergence", "[inv-two-instance-convergence] the two instances' Loro documents do NOT reach a common state under a pairwise fork-and-sync fixed point, although the 
+  [known-red:two-instance-loro-docs-no-common-state] gate88-extra.log @ crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13: reconciled composed sequence diverged from the oracle: [("inv-two-instance-convergence", "[inv-two-instance-convergence] the two instances' Loro documents do NOT reach a common state under a pairwise fork-and-sync fixed point, although the 
+  [known-red:two-instance-loro-docs-no-common-state] gate88-extra.log @ crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13: reconciled composed sequence diverged from the oracle: [("inv-two-instance-convergence", "[inv-two-instance-convergence] the two instances' Loro documents do NOT reach a common state under a pairwise fork-and-sync fixed point, although the 
+  [known-red:two-instance-loro-docs-no-common-state] gate88-extra.log @ crates/holon-integration-tests/tests/two_instance_composed_pbt.rs:46:1: Test failed: reconciled composed sequence diverged from the oracle: [("inv-two-instance-convergence", "[inv-two-instance-convergence] the two instances' Loro documents do NOT reach a common state under a pairwise fork-and-sync fixed point, 
+
+WARN known-red [iroh-accept-drain-recv-stream] x1
+     gate88-extra.log @ crates/holon-loro/src/multi_peer.rs:644:30: called `Result::unwrap()` on an `Err` value: [accept] drain recv stream
+WARN known-red [advice-gate-weave-row-missing] x1
+     gate88-extra.log @ crates/holon-integration-tests/tests/advice_live_mcp_gate.rs:325:5: describe_ui: top lesson block:lesson-b must be woven under the anchor (it lives on a separate page, so a rendered row with this id is the weave). rendered ids={} ui={"widget":"view_mode_switcher","entity_uri":"block:default-main-panel#qsrc"
+WARN known-red [catalog-advice-step6-weave-dismiss] x1
+     gate88-extra.log @ crates/holon-integration-tests/tests/catalog_suite/advice_step4_red.rs:141:5: [post-dismiss] composed catalog must be GREEN post step-6; failures: [("inv-advice-rows-woven", "[inv-advice-rows-woven] woven advice row 'block:lesson-b' is not in the reference expectation (scored candidates: [(\"block:lesson-c\", 2), (\"
+WARN known-red [fts-query-block-watch-view-create-fails] x1
+     gate88-extra.log @ crates/holon-integration-tests/tests/store_suite/fts_query_block_e2e.rs:83:10: query_and_watch for fts_match holon_sql query: Failed to create materialized view watch_view_7e8c86120259bbb2: CREATE MATERIALIZED VIEW IF NOT EXISTS watch_view_7e8c86120259bbb2 AS SELECT id, content, block_raw._change_origin AS _change_ori
+WARN known-red [mirrored-entity-authority-ops-missing] x1
+     gate88-extra.log @ crates/holon-integration-tests/tests/boot_suite/mcp_mirrored_entity_write_authority.rs:103:9: [boot-1] the connector does not write 'fk_fake_shadow', so the authority derived from its columns must serve it; ops present: []
+WARN known-red [logseq-parity-slash-menu-offers-no-delete] x1
+     gate88-extra.log @ crates/holon-integration-tests/src/pbt/fixtures/mod.rs:312:21: [fixtures:gherkin "The slash menu's vocabulary is derived from the operation registry   # log:8"] step 5: [slash-menu] expected block "block:c1"'s menu to offer "Delete", but it offers ["Indent", "Outdent", "Move Up", "Move Down", "Delete S
+WARN known-red [two-instance-loro-docs-no-common-state] x4
+     gate88-extra.log @ crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13: reconciled composed sequence diverged from the oracle: [("inv-two-instance-convergence", "[inv-two-instance-convergence] the two instances' Loro documents do NOT reach a common state under a pairwise fork-and-sync fixed point, although the 
+WARN known-red [cook-vault-rename-refusal-load-flake] x1
+     gate88-extra.log @ crates/holon-integration-tests/tests/cook_vault_ingest.rs:1946:9: assertion `left == right` failed: the page title follows the file name even while the file's content is refused
+WARN known-red [identity-transfer-in-place-edit-misbound-load] x1
+     gate88-extra.log @ crates/holon-filesystem/src/identity_transfer_tests.rs:524:1: Test failed: assertion failed: `(left == right)` 
+WARN known-red [no-proptest-regressions-seed-file-under-load] x1
+     gate88-extra.log @ crates/holon-integration-tests/tests/catalog_suite/no_tracked_proptest_regressions.rs:67:5: proptest auto-persisted seed file(s) found on disk:
+
+NOVEL signatures (distinct, with occurrence counts):
+     1 Test failed normally in child process.
+     1 failed in other process
+     1 assertion `left == right` failed
+
+[known-reds] FAIL: 3 novel panic(s), 13 known-red panic(s), 0 collateral (ignored).
+             A novel signature is a regression to triage (bug-gap-triage),
+             not a row to add to /Users/martin/Workspaces/pkm/holon/.claude/worktrees/_sw_integ/docs/Testing/KeystoneKnownReds.md.

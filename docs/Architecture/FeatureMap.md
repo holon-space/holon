@@ -383,6 +383,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `iroh-accept-drain-recv-stream`
 - `iroh-nat-traversal-address-set`
 - `iroh-pairing-refusal-reads-as-io-failure`
+- `iroh-proptest-fork-child-wrapper`
+- `iroh-proptest-fork-parent-wrapper`
 - `join-then-stale-second-join`
 - `journal-feed-main-panel-still-loading`
 - `lib-type-chars-home-profile-derived`
@@ -447,6 +449,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-reboot-misses-observability-caps`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
+- `writeback-churning-file-stall-disclosed-twice`
 - `writeorgfile-sql-reads-budget`
 
 ## Sources

@@ -1,0 +1,2 @@
+waiting for the 1-min load to drop below 16; no slot is held meanwhile
+job run --queued-as c763.nextest-lowload.20261027T213456Z: refused: the 1-min load stayed at or above 16 for 1800 s (now 95.2783); the command never ran
