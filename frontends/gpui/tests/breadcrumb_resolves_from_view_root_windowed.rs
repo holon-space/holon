@@ -8,7 +8,8 @@
 //! md`). The cold-boot leg is therefore the load-bearing one.
 //!
 //! Run: `cargo nextest run -p holon-gpui --test
-//! breadcrumb_resolves_from_view_root_windowed --features holon-gpui/pbt`
+//! main breadcrumb_resolves_from_view_root_windowed:: --features
+//! holon-gpui/pbt`
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,10 +29,9 @@ use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::window_slice::seed::graft_displayed_text_tree;
 use holon_integration_tests::test_environment::TestEnvironment;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 /// The row `graft_displayed_text_tree` hangs `c1`/`c2` under. Navigating Main
 /// onto it is a zoom-in: a view root that is NOT itself a page, so the trail
@@ -549,8 +549,3 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
     std::mem::forget(app);
     std::mem::forget(env);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-#[path = "test_init/mod.rs"]
-mod test_init;

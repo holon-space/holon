@@ -25,9 +25,7 @@
 //! harness. This rung covers the editor half of the contract — that the caret
 //! reported back after a commit is the one the next commit must use.
 //!
-//! Run: cargo test -p holon-gpui --test editor_ime_commit_sequence
-
-mod support;
+//! Run: cargo test -p holon-gpui --test main editor_ime_commit_sequence::
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -45,6 +43,8 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::navigation_state::NavigationState;
 use holon_gpui::views::EditorView;
 use support::TestServices;
+
+use crate::support;
 
 fn row(content: &str, write_seq: Option<i64>) -> Arc<DataRow> {
     let mut m = DataRow::new();
@@ -224,7 +224,3 @@ fn reported_caret_advances_past_each_commit(cx: &mut TestAppContext) {
     );
     assert_eq!(visible(vcx, &entity), "Hias");
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

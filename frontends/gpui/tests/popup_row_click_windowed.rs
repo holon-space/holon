@@ -14,9 +14,7 @@
 //! wired click leaves the block empty while a dead click leaves `/del` sitting
 //! in the content.
 //!
-//! Run: cargo test -p holon-gpui --test popup_row_click_windowed
-
-mod support;
+//! Run: cargo test -p holon-gpui --test main popup_row_click_windowed::
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -39,6 +37,8 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::navigation_state::NavigationState;
 use holon_gpui::views::EditorView;
 use support::TestServices;
+
+use crate::support;
 
 const ROW_ID: &str = "block:popup-click-test";
 
@@ -243,7 +243,3 @@ fn clicking_a_popup_row_runs_the_command_just_like_enter(cx: &mut TestAppContext
          key uses — not a second dispatch path, and not nothing at all."
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

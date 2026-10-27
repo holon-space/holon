@@ -23,9 +23,7 @@
 //! private fields. The SECOND push (`"foo"`, seq N) is the SQL-canonicalized
 //! echo whose handling is under test.
 //!
-//! Run: cargo test -p holon-gpui --test editor_trailing_space_echo
-
-mod support;
+//! Run: cargo test -p holon-gpui --test main editor_trailing_space_echo::
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -41,6 +39,8 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::navigation_state::NavigationState;
 use holon_gpui::views::EditorView;
 use support::TestServices;
+
+use crate::support;
 
 /// Build a per-row `DataRow` the way the projection feeds the editor's
 /// data-sync subscription: `content` plus (optionally) the `write_seq` ordering
@@ -202,7 +202,3 @@ fn same_seq_substantive_truncation_still_converges(cx: &mut TestAppContext) {
          write_seq) must still converge — the trailing-space fix must not swallow it"
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

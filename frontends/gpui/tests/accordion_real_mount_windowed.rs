@@ -16,7 +16,7 @@
 //! boot, so neither the mount seam nor frame one is observable there.
 //!
 //! Run: `cargo nextest run -p holon-gpui --features holon-gpui/pbt
-//! --test accordion_real_mount_windowed --no-fail-fast`
+//! --test main accordion_real_mount_windowed:: --no-fail-fast`
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,11 +33,10 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// Above both layout breakpoints — the width the dogfood pass called wide.
 const DESKTOP_WINDOW: &str = "1200x900";
@@ -308,7 +307,3 @@ fn the_header_paints_the_icon_through_the_icon_builder() {
         );
     });
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

@@ -4,11 +4,9 @@
 //! never unwind inside the URI constructor, which kills the whole window.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! render_spec_row_id_windowed -- --test-threads=1`
+//! main render_spec_row_id_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
-
-mod support;
 
 use std::sync::Arc;
 
@@ -24,6 +22,8 @@ use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::BoundsSnapshot;
 use support::render_reactive_fixture_quiescent_sized;
+
+use crate::support;
 
 /// The node the real shadow builder emits for `dsl`, bound to a row whose `id`
 /// column is what the vault's SQL chose.
@@ -82,5 +82,3 @@ fn an_editable_text_row_id_that_forms_no_uri_paints_the_error_banner(cx: &mut Te
             .collect::<Vec<_>>()
     );
 }
-
-mod test_init;

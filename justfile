@@ -1563,12 +1563,12 @@ prepush:
         2>&1 | tee target/gate-logs/prepush-keystone.log
     echo "== Tier 2 PASS =="
 
-# Details (D-gate-windowed.a): WINDOWED_GATE_JOBS binaries at a time (default
+# Details (D-gate-windowed.a): WINDOWED_GATE_JOBS units at a time (default
 # min(4, cores/4)), each `--test-threads=1`, killed and marked HUNG after
 # WINDOWED_GATE_TIMEOUT seconds (default 900). Reds whose signatures are all
 # registered (docs/Testing/WindowedKnownReds.md, via keystone-known-reds.sh) are
 # pass-with-note; any other red or HUNG fails. Logs: target/gate-logs/windowed/.
-# Windowed GPUI gate: each holon-gpui test binary alone, in parallel.
+# Windowed GPUI gate: each holon-gpui test binary (each module of `main`) alone, in parallel.
 windowed-gate:
     #!/usr/bin/env bash
     set -euo pipefail

@@ -16,7 +16,7 @@
 //! template interpretation, which needs the composed windowed harness.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! named_source_rows_windowed -- --test-threads=1`
+//! main named_source_rows_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
 //!
@@ -26,8 +26,6 @@
 //! the condition's profile declares
 //! @pbt slips-if-removed the named-source arm parses, resolves and yields rows
 //! while the window shows an empty region, with every headless rung green
-
-mod support;
 
 use std::sync::Arc;
 
@@ -42,6 +40,8 @@ use holon_api::row_source::RowSourceRegistry;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::TestServices;
 use support::render_reactive_fixture_quiescent_sized_with_services;
+
+use crate::support;
 
 /// Two integrations, both failing to connect: `Severity::Error`, and a label
 /// and detail the profile and the kind own.
@@ -177,7 +177,3 @@ fn a_named_source_paints_one_row_per_item(cx: &mut TestAppContext) {
         );
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

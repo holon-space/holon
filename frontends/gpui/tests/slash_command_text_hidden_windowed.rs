@@ -12,9 +12,8 @@
 //! hiding is a display decision, never a destructive edit the user can lose
 //! work to.
 //!
-//! Run: cargo test -p holon-gpui --test slash_command_text_hidden_windowed
-
-mod support;
+//! Run: cargo test -p holon-gpui --test main
+//! slash_command_text_hidden_windowed::
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -35,6 +34,8 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::navigation_state::NavigationState;
 use holon_gpui::views::EditorView;
 use support::TestServices;
+
+use crate::support;
 
 const ROW_ID: &str = "block:hidden-command-test";
 
@@ -427,7 +428,3 @@ fn a_key_queued_behind_the_picker_escape_survives_the_restore(cx: &mut TestAppCo
 
     assert_eq!(buffer(vcx, &rig), "/embprojx");
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

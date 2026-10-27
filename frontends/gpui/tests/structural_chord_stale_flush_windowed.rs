@@ -26,7 +26,7 @@
 //! arm is kept as a labelled control.
 //!
 //! Run: cargo test -p holon-gpui --features pbt --test
-//! structural_chord_stale_flush_windowed
+//! main structural_chord_stale_flush_windowed::
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,10 +46,9 @@ use holon_integration_tests::pbt::window_slice::seed::GRAFT_PAGE_ID;
 use holon_integration_tests::pbt::window_slice::seed::UNDO_EDIT_CONTENT;
 use holon_integration_tests::pbt::window_slice::seed::graft_undo_blur_pair;
 use holon_integration_tests::test_environment::TestEnvironment;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 /// The typed tail. Distinctive enough that a duplicate is unambiguous in a
 /// whole-store scan, and keyword-free so no task facet is involved.
@@ -428,7 +427,3 @@ fn structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro() 
         "Holon-TestPlatform-ChordFlush-Loro",
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

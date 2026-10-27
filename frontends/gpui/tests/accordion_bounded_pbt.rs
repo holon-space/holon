@@ -17,10 +17,7 @@
 //! History: in Inc 1 (inert passthrough, no cap) I1 failed as an assertion
 //! (red-run-inc1.log). Inc 2's flow-panel split + capped body turns it green.
 //!
-//! Run: `cargo test -p holon-gpui --test accordion_bounded_pbt`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main accordion_bounded_pbt::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,6 +41,8 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_gpui::geometry::BoundsRegistry;
 use support::ReactiveFixtureView;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 const EPS: f32 = 1.5;
 
@@ -363,7 +362,3 @@ fn accordion_visible_height(bounds: &BoundsRegistry) -> Option<f32> {
         .find(|(_, info)| info.widget_type.as_ref() == "accordion")
         .map(|(_, info)| info.height)
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

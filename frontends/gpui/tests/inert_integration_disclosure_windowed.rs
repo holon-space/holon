@@ -21,13 +21,13 @@
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone is headless and
 //! cannot see whether a node occupies pixels
 
-mod support;
-
 use std::sync::Arc;
 
 use gpui::TestAppContext;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::render_fixture;
+
+use crate::support;
 
 const DISCLOSURE: &str = "Claude History is not connected — status: Unavailable (binary \
                           'claude-history-mcp' not found on PATH)";
@@ -128,7 +128,3 @@ fn a_bespoke_widget_kind_lays_out_nothing(cx: &mut TestAppContext) {
         snap.dump()
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

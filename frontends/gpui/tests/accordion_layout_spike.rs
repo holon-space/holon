@@ -25,10 +25,7 @@
 //! (editor_view.rs:988) was NOT needed. See `cap_style()` below — flip it to
 //! the px branch if a future gpui bump regresses relative max-height.
 //!
-//! Run: `cargo test -p holon-gpui --test accordion_layout_spike`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main accordion_layout_spike::`
 
 use gpui::Div;
 use gpui::TestAppContext;
@@ -42,6 +39,8 @@ use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::geometry::TransparentTracker;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 const VIEWPORT_W: f32 = 600.0;
 const VIEWPORT_H: f32 = 400.0;
@@ -251,7 +250,3 @@ fn wheel_reveals_below_cap_row(cx: &mut TestAppContext) {
          viewport is not scrolling."
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

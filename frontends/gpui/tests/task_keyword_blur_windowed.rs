@@ -31,7 +31,7 @@
 //! finding. The Loro arm is kept as a labelled control.
 //!
 //! Run: cargo test -p holon-gpui --features pbt --test
-//! task_keyword_blur_windowed
+//! main task_keyword_blur_windowed::
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,10 +51,9 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::window_slice::seed::UNDO_EDIT_CONTENT;
 use holon_integration_tests::pbt::window_slice::seed::graft_undo_blur_pair;
 use holon_integration_tests::test_environment::TestEnvironment;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
@@ -389,7 +388,3 @@ fn promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly() {
 fn promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_loro() {
     drive_promote_then_blur(true, "kwblur-loro", "Holon-TestPlatform-KwBlur-Loro");
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

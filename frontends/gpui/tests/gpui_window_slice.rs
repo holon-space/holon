@@ -49,6 +49,7 @@ use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::reactive::BuilderServices;
+use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
@@ -80,11 +81,9 @@ use holon_pbt_core::capabilities::SutLayout;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::composition::run_selected;
 use holon_pbt_core::invariant::InvariantResult;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
-use holon_frontend::user_driver::UserDriver;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
@@ -1248,7 +1247,3 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
     std::mem::forget(app);
     std::mem::forget(page.env);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

@@ -21,10 +21,7 @@
 //! `view_mode_switcher`-wrapped drawer shape Martin's real vault renders
 //! (a block with ≥2 render variants — see `left_sidebar_scroll.rs`).
 //!
-//! Run: `cargo test -p holon-gpui --test sidebar_disclosure_affordance`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main sidebar_disclosure_affordance::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,6 +50,8 @@ use support::BlockTreeThunk;
 use support::BoundsSnapshot;
 use support::ReactiveFixtureView;
 use support::render_fixture;
+
+use crate::support;
 
 /// The two disclosure glyphs, as the spec states them (not imported from the
 /// builder — the test is the specification of what must be painted).
@@ -445,7 +444,3 @@ fn collapsed_halo_does_not_shift_layout(cx: &mut TestAppContext) {
         "collapsed halo must not change the chevron's box — it is background paint, not layout"
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

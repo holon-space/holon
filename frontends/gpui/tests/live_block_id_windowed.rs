@@ -11,11 +11,9 @@
 //!   the builder's own `error_banner`, which tracks as `error`.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! live_block_id_windowed -- --test-threads=1`
+//! main live_block_id_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
-
-mod support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,6 +28,8 @@ use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::BoundsSnapshot;
 use support::render_reactive_fixture_quiescent_sized;
+
+use crate::support;
 
 const UNPARSEABLE: &str = "my task";
 
@@ -87,5 +87,3 @@ fn a_live_block_prop_that_forms_no_uri_paints_the_error_banner(cx: &mut TestAppC
         "no painted error names the block_id the node carried. Painted: {texts:?}"
     );
 }
-
-mod test_init;

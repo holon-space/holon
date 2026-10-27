@@ -7,7 +7,7 @@
 //! `render_to_image` is pinned by `just check-release-shape`.
 //!
 //! Run: cargo nextest run -p holon-gpui --features holon-gpui/pbt --test
-//! screenshot_readback_windowed
+//! main screenshot_readback_windowed::
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -203,7 +203,3 @@ fn capture_screenshot_through_the_pump_returns_the_painted_frame() {
     std::mem::forget(app);
     std::mem::forget(env);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

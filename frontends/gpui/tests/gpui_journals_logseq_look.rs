@@ -66,10 +66,9 @@ use holon_integration_tests::pbt::window_slice::seed::graft_journal_days;
 use holon_integration_tests::test_environment::TestEnvironment;
 use holon_pbt_core::capabilities::RenderedElement;
 use holon_pbt_core::capabilities::SutLayout;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 /// A day header wider than this is an h2 HEADING, not body text. Height cannot
 /// discriminate — text elements carry a `min_h` floor, so both `style:"h2"`
@@ -506,7 +505,3 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
     std::mem::forget(app);
     std::mem::forget(env);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

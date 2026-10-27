@@ -42,8 +42,8 @@ def group_without_inventory_is_not_judged(t):
 
 
 def inventory_test_outside_its_group_is_named(t):
-    gaps, _ = asked(t, {"windowed": ["holon-gpui::gpui_rebind_reset_smoke a"]})
-    assert gaps == {"windowed": ["holon-gpui::gpui_rebind_reset_smoke a"]}, gaps
+    gaps, _ = asked(t, {"windowed": ["holon-gpui::main gpui_rebind_reset_smoke::a"]})
+    assert gaps == {"windowed": ["holon-gpui::main gpui_rebind_reset_smoke::a"]}, gaps
 
 
 def inventory_of_an_unknown_group_dies(t):

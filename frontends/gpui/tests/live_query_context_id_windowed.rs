@@ -4,11 +4,9 @@
 //! unwinding render kills the whole window rather than one region.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! live_query_context_id_windowed -- --test-threads=1`
+//! main live_query_context_id_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
-
-mod support;
 
 use std::sync::Arc;
 
@@ -21,6 +19,8 @@ use holon_api::render_types::RenderExpr;
 use holon_frontend::reactive_view_model::ReactiveSlot;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::render_reactive_fixture_quiescent_sized;
+
+use crate::support;
 
 /// `list(#{item_template: text(col("content"))})` — a template the builder's
 /// own render-expr validation passes, so the context id is what fails.
@@ -94,5 +94,3 @@ fn a_context_id_that_forms_no_uri_paints_the_error_banner(cx: &mut TestAppContex
         "no painted error names the value the vault wrote. Tracked: {painted:?}",
     );
 }
-
-mod test_init;

@@ -12,10 +12,8 @@
 //! 2. The row is still THERE — as tall as a one-line row of real content, so
 //!    the click target keeps its size and read → edit does not jump.
 //!
-//! Run: `cargo nextest run -p holon-gpui --test empty_block_hint_windowed`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo nextest run -p holon-gpui --test main
+//! empty_block_hint_windowed::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +25,8 @@ use holon_frontend::ReactiveViewModel;
 use holon_frontend::geometry::ElementInfo;
 use support::BoundsSnapshot;
 use support::render_fixture;
+
+use crate::support;
 
 const EMPTY_ROW: &str = "block:empty-row";
 const FILLED_ROW: &str = "block:filled-row";
@@ -115,7 +115,3 @@ fn an_empty_read_mode_block_keeps_a_full_row_box(cx: &mut TestAppContext) {
         empty.height,
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

@@ -11,8 +11,6 @@
 //! `LinkProvider` switched from `Arc<FrontendSession>` to
 //! `Arc<dyn BuilderServices>`, so these tests lock in the round-trip.
 
-mod support;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -24,6 +22,8 @@ use holon_frontend::editor_view_model::EditorViewModel;
 use holon_frontend::input_trigger::InputTrigger;
 use holon_frontend::reactive::BuilderServices;
 use support::TestServices;
+
+use crate::support;
 
 /// Build a LinkCandidate with the shape LinkProvider expects.
 fn row(id: &str, label: &str) -> holon_api::LinkCandidate {
@@ -466,7 +466,3 @@ mod windowed_caret {
         );
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

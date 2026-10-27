@@ -25,7 +25,7 @@
 //!    assertion that goes red on the defect rather than on a theme change.
 //!
 //! Run: `cargo nextest run -p holon-gpui --features pbt --test
-//! text_colour_windowed -- --test-threads=1`
+//! main text_colour_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
 //!
@@ -36,9 +36,6 @@
 //! @pbt slips-if-removed every resolver keeps its own catch-all, so
 //!   `color: "primary"` paints body foreground while every headless rung and
 //!   every geometry invariant stays green
-
-#[path = "support/mod.rs"]
-mod support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,6 +52,8 @@ use holon_frontend::theme::Rgba8;
 use holon_gpui::geometry::hsla_to_rgba8;
 use support::BoundsSnapshot;
 use support::render_fixture_sized;
+
+use crate::support;
 
 /// One row-bound `text` carrying `token` as its colour.
 ///
@@ -182,10 +181,6 @@ fn distinct_tokens_paint_distinct_colours_in_one_frame(cx: &mut TestAppContext) 
         "`color: \"primary\"` and `color: \"muted\"` painted the same colour ({primary:?})."
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;
 
 /// `accent` and `primary` read two DIFFERENT theme slots, and this pins that
 /// they stay that way.

@@ -11,10 +11,7 @@
 //! what Martin actually has. This rung stays PERMANENTLY: user-authored
 //! non-accordion layouts are a supported shape forever.
 //!
-//! Run: `cargo test -p holon-gpui --test plain_path_scroll`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main plain_path_scroll::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,6 +37,8 @@ use support::BlockTreeRegistry;
 use support::BlockTreeThunk;
 use support::ReactiveFixtureView;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 const ITEM_COUNT: usize = 56;
 const FAR_IX: usize = 50;
@@ -534,7 +533,3 @@ fn accordion_through_shell_renders_bounded_not_error(cx: &mut TestAppContext) {
         "accordion routed through the per-block shell should be a BOUNDED footer          (>100px), but was {acc_h}px — the placement-error div. The accordion          split in columns::render does not fire because the flow child is a          live_block, not a column."
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

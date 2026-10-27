@@ -15,10 +15,7 @@
 //! live_block(block:default-left-sidebar)), <main column>)` — and wheels over
 //! the SIDEBAR's x band.
 //!
-//! Run: `cargo test -p holon-gpui --test left_sidebar_scroll`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main left_sidebar_scroll::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,6 +37,8 @@ use support::BlockTreeRegistry;
 use support::BlockTreeThunk;
 use support::ReactiveFixtureView;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 const ITEM_COUNT: usize = 56;
 const FAR_IX: usize = 50;
@@ -228,7 +227,3 @@ fn left_sidebar_without_view_mode_switcher_scrolls(cx: &mut TestAppContext) {
         "plain (no switcher) sidebar must scroll: page-{FAR_IX} still clipped ({after})"
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

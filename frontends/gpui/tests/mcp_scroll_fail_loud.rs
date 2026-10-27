@@ -12,7 +12,7 @@
 //! `Ok(false)`, a malformed entity id → `Err`. (The pump/driver wiring that
 //! turns those into a surfaced error is exercised live.)
 //!
-//! Run: `cargo test -p holon-gpui --test mcp_scroll_fail_loud`
+//! Run: `cargo test -p holon-gpui --test main mcp_scroll_fail_loud::`
 
 use holon_gpui::entity_view_registry::EntityCache;
 use holon_gpui::scroll_list_by;
@@ -35,7 +35,3 @@ fn unreachable_target_reports_not_scrolled_never_fakes_success(cx: &mut gpui::Te
         );
     });
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

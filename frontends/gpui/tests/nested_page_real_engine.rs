@@ -18,13 +18,10 @@
 //! at its measured center. Every leaf therefore resolves through real block
 //! data and real profile resolution.
 //!
-//! Run: `cargo test -p holon-gpui --features pbt --test nested_page_real_engine
-//! -- --test-threads=1 --nocapture`
+//! Run: `cargo test -p holon-gpui --features pbt --test main
+//! nested_page_real_engine:: -- --test-threads=1 --nocapture`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -52,6 +49,8 @@ use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::SutFocusWrite;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 const GLYPH_COLLAPSED: &str = "\u{25B6}";
 const GLYPH_EXPANDED: &str = "\u{25BC}";
@@ -375,7 +374,3 @@ fn a_real_engine_nested_page_paints_its_children_when_opened() {
         engine.block_expanded_view(NESTED_PAGE),
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

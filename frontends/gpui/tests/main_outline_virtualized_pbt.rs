@@ -26,10 +26,7 @@
 //! visible, so the wheel/settle correctness contract the PBT drive layer relies
 //! on survives the change.
 //!
-//! Run: `cargo test -p holon-gpui --test main_outline_virtualized_pbt`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main main_outline_virtualized_pbt::`
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -47,6 +44,8 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_gpui::geometry::BoundsRegistry;
 use support::ReactiveFixtureView;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 const VIEWPORT_W: f32 = 600.0;
 const VIEWPORT_H: f32 = 600.0;
@@ -220,7 +219,3 @@ fn scrolling_reveals_below_fold_outline_row(cx: &mut TestAppContext) {
          and the PBT drive layer rely on must keep advancing the visible window."
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

@@ -8,8 +8,9 @@
 //! (`sim_windowed_replay`); the windowed random runner is the 4b loop in
 //! `gpui_composed_windowed_loop.rs`.
 //!
-//! Included via `#[path = "pbt_harness/mod.rs"] mod pbt_harness;` from each
-//! test binary (subdir modules aren't auto-discovered as tests).
+//! Declared once by `tests/main.rs`, and included via
+//! `#[path = "pbt_harness/mod.rs"] mod pbt_harness;` by each `harness = false`
+//! target.
 
 #![allow(dead_code)]
 

@@ -45,10 +45,7 @@
 //! cap is computed in Rust. Wheel isolation needs `.occlude()` on the overlay
 //! (without it the wheel scrolls both the footer and the outer scroller).
 //!
-//! Run: `cargo test -p holon-gpui --test sticky_footer_spike`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main sticky_footer_spike::`
 
 use std::ops::Range;
 
@@ -74,6 +71,8 @@ use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::geometry::TransparentTracker;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 // ── Shared geometry ────────────────────────────────────────────────────────
 const W: f32 = 600.0;
@@ -728,7 +727,3 @@ fn m2_wheel_over_footer_does_not_scroll_outer(cx: &mut TestAppContext) {
 // guards against here. A full nested-collection reproduction belongs in
 // `panel_scroll_spike.rs` (real `ReactiveShell` path), not this pure-layout
 // spike, so it is documented rather than re-implemented.
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

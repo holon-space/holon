@@ -37,9 +37,9 @@
 //! cannot see any of it. The windowed rung is the lowest one that can.
 //!
 //! Run: `cargo nextest run -p holon-gpui --test
-//! block_focus_keeps_outline_windowed --features holon-gpui/pbt --no-fail-fast`
-//! (nextest gives each test its own process, which the gpui test platform's
-//! thread-local state requires).
+//! main block_focus_keeps_outline_windowed:: --features holon-gpui/pbt
+//! --no-fail-fast` (nextest gives each test its own process, which the gpui
+//! test platform's thread-local state requires).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -60,10 +60,9 @@ use holon_integration_tests::pbt::window_slice::seed::graft_displayed_text_tree;
 use holon_integration_tests::test_environment::TestEnvironment;
 use holon_pbt_core::capabilities::SutLayout;
 use holon_pbt_core::composition::CapMap;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 /// The grafted outline: a page with a `parent` row owning `c1` and `c2`.
 /// `graft_displayed_text_tree` fixes these ids.
@@ -515,8 +514,3 @@ fn a_short_window_still_paints_the_outline() {
     std::mem::forget(app);
     std::mem::forget(env);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-#[path = "test_init/mod.rs"]
-mod test_init;

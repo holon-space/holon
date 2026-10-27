@@ -11,12 +11,9 @@
 //! The modal's one way in is the toolbar gear, so the rung clicks it.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! settings_integrations_ops_windowed -- --test-threads=1`
+//! main settings_integrations_ops_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -40,6 +37,8 @@ use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// The toolbar affordance that opens Settings. The modal has no command and no
 /// keybinding — this is the only door.
@@ -472,7 +471,3 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
          reuses the cached shell, and a stale one would offer an operation the guard refuses"
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

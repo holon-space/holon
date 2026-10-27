@@ -22,12 +22,9 @@
 //!      break opportunity) means broken mid-word.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! settings_integrations_table_fits_windowed -- --test-threads=1`
+//! main settings_integrations_table_fits_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -55,6 +52,8 @@ use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::resize_window;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// The modal has no command and no keybinding — the toolbar gear is its one
 /// door.
@@ -759,4 +758,3 @@ impl Sweep {
 
 // Installs the windowed capturing tracing subscriber before this binary's first
 // line of test code (see tests/test_init/mod.rs).
-mod test_init;

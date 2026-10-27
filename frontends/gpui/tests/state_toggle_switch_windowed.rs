@@ -13,7 +13,7 @@
 //! the requested appearance — is asserted in the same file's last case, which
 //! needs no window at all but belongs beside what it is the shadow of.
 //!
-//! Run: cargo test -p holon-gpui --test state_toggle_switch_windowed
+//! Run: cargo test -p holon-gpui --test main state_toggle_switch_windowed::
 //!
 //! @pbt kind windowed
 //! @pbt covers state-toggle-switch-appearance — `appearance: "switch"` paints
@@ -21,8 +21,6 @@
 //! @pbt slips-if-removed an integration row's enablement switch renders as the
 //! task-state glyph, identical in both states — the user cannot tell a
 //! switched-on integration from a switched-off one
-
-mod support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +40,8 @@ use holon_frontend::view_model::StateToggleAppearance;
 use holon_frontend::view_model::StateToggleBinding;
 use support::BoundsSnapshot;
 use support::render_fixture_sized;
+
+use crate::support;
 
 /// The shared switch geometry (`builders/switch_track.rs`). Restated here so
 /// the assertion says what a user must see rather than echoing the source.
@@ -275,7 +275,3 @@ fn the_snapshot_carries_the_requested_binding() {
         other => panic!("expected a StateToggle snapshot, got {other:?}"),
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

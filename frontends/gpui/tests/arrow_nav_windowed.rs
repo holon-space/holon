@@ -9,7 +9,7 @@
 //! `handle_cross_block_nav`.
 //!
 //! Run: cargo nextest run -p holon-gpui --features holon-gpui/pbt --test
-//! arrow_nav_windowed
+//! main arrow_nav_windowed::
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,10 +26,9 @@ use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::window_slice::seed::graft_undo_blur_pair;
 use holon_integration_tests::test_environment::TestEnvironment;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
@@ -253,7 +252,3 @@ fn drive(home_first: bool) {
     std::mem::forget(app);
     std::mem::forget(env);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

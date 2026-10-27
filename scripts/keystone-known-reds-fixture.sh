@@ -224,12 +224,12 @@ expect_outcome missing 3 '^\[known-reds\] UNREADABLE: ' "$work/does-not-exist.lo
 # nextest's summary counts a killed test as `timed out`, not `failed`, and the
 # test printed no panic: the status line is the only failure evidence.
 cat >"$work/timeout-only.log" <<'EOF'
-        PASS [   0.010s] (1/2) holon-gpui::layout_smoke a
-     TIMEOUT [ 120.034s] (2/2) holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed
+        PASS [   0.010s] (1/2) holon-gpui::main layout_smoke::a
+     TIMEOUT [ 120.034s] (2/2) holon-gpui::main gpui_composed_windowed_loop::general_e2e_composed_pbt_windowed
      Summary [ 120.355s] 2 tests run: 1 passed, 1 timed out, 0 skipped
-     TIMEOUT [ 120.034s] (2/2) holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed
+     TIMEOUT [ 120.034s] (2/2) holon-gpui::main gpui_composed_windowed_loop::general_e2e_composed_pbt_windowed
 EOF
-expect_outcome timeout-only 1 '^PRIMARY: \[novel\] .* TIMEOUT: holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed$' \
+expect_outcome timeout-only 1 '^PRIMARY: \[novel\] .* TIMEOUT: holon-gpui::main gpui_composed_windowed_loop::general_e2e_composed_pbt_windowed$' \
     "$work/timeout-only.log"
 # cargo test prints the expected panic of a passing `#[should_panic]` test.
 cat >"$work/should-panic-only.log" <<'EOF'
@@ -309,17 +309,17 @@ expect_outcome split-header-plain-failed 1 '^PRIMARY: \[novel\] .*unknown top-le
 # or leaking after a passing body printed no panic, so the status line is its
 # signature, under the long label; a log cut off before `Summary` still says so.
 cat >"$work/nextest-labels-truncated.log" <<'EOF'
-        PASS [   0.010s] (1/6) holon-gpui::layout_smoke a
-   LEAK-FAIL [   0.312s] (2/6) holon-gpui::layout_smoke leaky
-       XFAIL [   0.001s] (3/6) holon-gpui::layout_smoke unexecutable
-     SIGSEGV [   0.312s] (4/6) holon-gpui::layout_smoke boom
- ABORT SIG 9 [   0.312s] (5/6) holon-gpui::layout_smoke killed
+        PASS [   0.010s] (1/6) holon-gpui::main layout_smoke::a
+   LEAK-FAIL [   0.312s] (2/6) holon-gpui::main layout_smoke::leaky
+       XFAIL [   0.001s] (3/6) holon-gpui::main layout_smoke::unexecutable
+     SIGSEGV [   0.312s] (4/6) holon-gpui::main layout_smoke::boom
+ ABORT SIG 9 [   0.312s] (5/6) holon-gpui::main layout_smoke::killed
  TERMINATING [>120.000s] (─────────) holon-gpui::bin timed
      TIMEOUT [ 120.034s] (6/6) holon-gpui::bin timed
 Canceling due to test failure
 EOF
-for want in 'LEAK-FAIL: holon-gpui::layout_smoke leaky' 'XFAIL: holon-gpui::layout_smoke unexecutable' \
-    'SIGSEGV: holon-gpui::layout_smoke boom' 'ABORT SIG 9: holon-gpui::layout_smoke killed' \
+for want in 'LEAK-FAIL: holon-gpui::main layout_smoke::leaky' 'XFAIL: holon-gpui::main layout_smoke::unexecutable' \
+    'SIGSEGV: holon-gpui::main layout_smoke::boom' 'ABORT SIG 9: holon-gpui::main layout_smoke::killed' \
     'TIMEOUT: holon-gpui::bin timed'; do
     expect_outcome "nextest-label/${want%%:*}/${want##* }" 1 "^ *1 $want\$" "$work/nextest-labels-truncated.log"
 done
@@ -473,12 +473,12 @@ expect_outcome violation/known-plus-novel-memory-budget 1 '^\[known-reds\] FAIL:
 # reaches: a registered windowed red stays a pass-with-note, a headless run that
 # never disclosed its sample is a failure, and so is a disclosed breach.
 cat >"$work/windowed-known-red.log" <<'EOF'
-    FAIL [  31.004s] (1/19) holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed
+    FAIL [  31.004s] (1/19) holon-gpui::main gpui_composed_windowed_loop::general_e2e_composed_pbt_windowed
   stderr ───
-    thread 'general_e2e_composed_pbt_windowed' (2) panicked at crates/holon-gpui/tests/gpui_composed_windowed_loop.rs:120:9:
+    thread 'gpui_composed_windowed_loop::general_e2e_composed_pbt_windowed' (2) panicked at crates/holon-gpui/tests/gpui_composed_windowed_loop.rs:120:9:
     [SplitBlock/keystroke] cannot place the caret on block:abc — editable surface not projected by this driver
      Summary [  31.004s] 19 tests run: 18 passed, 1 failed, 0 skipped
-    FAIL [  31.004s] (1/19) holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed
+    FAIL [  31.004s] (1/19) holon-gpui::main gpui_composed_windowed_loop::general_e2e_composed_pbt_windowed
 EOF
 expect_outcome windowed-known-red-discloses-no-sample 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
     "$work/windowed-known-red.log"
@@ -583,7 +583,7 @@ expect_outcome fail-two-errors/second 1 '^ *1 FAIL: holon::main e2e_backend_engi
 # its status line. A `harness = false` binary panics on `main`, not on a thread
 # named after the test, and that panic still stands alone as the signature.
 cat >"$work/known-panic-on-main.log" <<'EOF'
-        PASS [  51.633s] (2807/6521) holon-gpui::gpui_compose_sut_windowed windowed_composed_sut_replays_a_fixture_via_replay_steps_green
+        PASS [  51.633s] (2807/6521) holon-gpui::main gpui_compose_sut_windowed::windowed_composed_sut_replays_a_fixture_via_replay_steps_green
         FAIL [  46.890s] (2808/6521) holon-gpui::gpui_sim_replay_capture gpui_sim_replay_capture
   stderr ───
     [Holon Sim Replay Capture] replaying "presskey_loro_split_backspace" (4 steps)
@@ -705,8 +705,8 @@ cat >"$work/retry-final-fail.log" <<'EOF'
   TRY 1 TRMNTG [>120.000s] (1/3) holon::main turso_block_query_source_round_trip_pbt::round_trip
    TRY 1 TMT [ 120.034s] (1/3) holon::main turso_block_query_source_round_trip_pbt::round_trip
    TRY 2 TMT [ 120.034s] (1/3) holon::main turso_block_query_source_round_trip_pbt::round_trip
-   TRY 1 LKFAIL [   0.312s] (2/3) holon-gpui::layout_smoke leaky
- TRY 2 SIG 9 [   0.312s] (2/3) holon-gpui::layout_smoke leaky
+   TRY 1 LKFAIL [   0.312s] (2/3) holon-gpui::main layout_smoke::leaky
+ TRY 2 SIG 9 [   0.312s] (2/3) holon-gpui::main layout_smoke::leaky
   TRY 1 FAIL [   0.120s] (3/3) holon::flaky_suite never
   stderr ───
     thread 'never' (2) panicked at crates/holon/tests/flaky_suite.rs:20:5:
@@ -719,7 +719,7 @@ cat >"$work/retry-final-fail.log" <<'EOF'
 EOF
 expect_outcome retry-final-fail/timeout 1 '^WARN known-red \[turso-block-query-source-round-trip\] x1$' \
     "$work/retry-final-fail.log"
-expect_outcome retry-final-fail/signal 1 '^ *1 ABORT SIG 9: holon-gpui::layout_smoke leaky$' \
+expect_outcome retry-final-fail/signal 1 '^ *1 ABORT SIG 9: holon-gpui::main layout_smoke::leaky$' \
     "$work/retry-final-fail.log"
 expect_outcome retry-final-fail/panic 1 '^ *2 REAL ON EVERY TRY: the race is lost every time$' \
     "$work/retry-final-fail.log"

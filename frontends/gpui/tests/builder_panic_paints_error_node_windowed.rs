@@ -2,11 +2,9 @@
 //! panic message and its location, between siblings that paint as usual.
 //!
 //! Run: `cargo test -p holon-gpui --test
-//! builder_panic_paints_error_node_windowed -- --test-threads=1`
+//! main builder_panic_paints_error_node_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
-
-mod support;
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -24,6 +22,8 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::render_interpreter::BuilderArgs;
 use holon_frontend::shadow_builders::build_shadow_interpreter;
 use support::render_reactive_fixture_quiescent_sized;
+
+use crate::support;
 
 const MESSAGE: &str = "injected builder panic";
 
@@ -91,5 +91,3 @@ fn a_panicking_builder_paints_an_error_between_its_siblings(cx: &mut TestAppCont
         snap.dump()
     );
 }
-
-mod test_init;

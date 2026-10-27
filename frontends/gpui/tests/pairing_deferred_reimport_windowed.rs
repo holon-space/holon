@@ -12,12 +12,9 @@
 //! instance the boot call used.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! pairing_deferred_reimport_windowed -- --test-threads=1`
+//! main pairing_deferred_reimport_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -53,6 +50,8 @@ use holon_loro::pairing_swap::PairingMarker;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// The archived content this device wrote before the pair: a page and a note
 /// under it. The page hangs under the bundled layout root, which the re-import
@@ -434,7 +433,3 @@ fn the_window_paints_the_deferred_reimport_banner_and_its_retry_completes_the_pa
     // gpui's leak detector runs on drop.
     std::mem::forget(app);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

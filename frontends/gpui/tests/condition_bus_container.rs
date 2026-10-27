@@ -175,7 +175,3 @@ async fn assert_a_panic_reaches(bus: &ConditionBus, message: &'static str) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

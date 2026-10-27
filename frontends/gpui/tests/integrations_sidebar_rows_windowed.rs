@@ -26,7 +26,7 @@
 //!      destination cannot satisfy it.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! integrations_sidebar_rows_windowed -- --test-threads=1`
+//! main integrations_sidebar_rows_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
 //!
@@ -35,9 +35,6 @@
 //! @pbt slips-if-removed the discovery list silently reverts to a ragged
 //! status column, or to an inert row, while every headless rung stays green
 //! because the template string still says otherwise
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -60,6 +57,8 @@ use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// One integration as the mirror holds it, which is the oracle for what its row
 /// must paint.
@@ -609,7 +608,3 @@ fn integration_rows_show_name_icon_aligned_status_and_open_their_view() {
         std::panic::resume_unwind(payload);
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

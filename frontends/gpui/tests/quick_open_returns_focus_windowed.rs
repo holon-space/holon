@@ -53,10 +53,9 @@ use holon_pbt_core::ComponentSet;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::run_selected;
 use holon_pbt_core::invariant::InvariantResult;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 const FOCUS_INVARIANT: &str = "inv-window-focus-matches-engine-focus";
 
@@ -660,10 +659,6 @@ fn quick_open_round_trip_without_a_focused_editor_is_neutral() {
     );
     f.shutdown();
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;
 
 /// Typing into a creation slot creates the node BEFORE the character is
 /// written, and the SQL row follows.

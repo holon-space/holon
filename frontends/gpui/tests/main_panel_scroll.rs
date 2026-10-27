@@ -26,10 +26,7 @@
 //! height until then) is revealed — which only happens if the flow panel is a
 //! working scroll viewport.
 //!
-//! Run: `cargo test -p holon-gpui --test main_panel_scroll`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main main_panel_scroll::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,6 +43,8 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_gpui::geometry::BoundsRegistry;
 use support::ReactiveFixtureView;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 const VIEWPORT_W: f32 = 600.0;
 const VIEWPORT_H: f32 = 400.0;
@@ -174,7 +173,3 @@ fn wheel_scrolls_eager_content_height_main_panel(cx: &mut TestAppContext) {
          wrapper (matching the shrink-drawer sidebar branch)."
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

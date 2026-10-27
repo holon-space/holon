@@ -17,7 +17,7 @@
 //! itself; this pins that the painted stack inherits it.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! toast_stack_order_windowed -- --test-threads=1`
+//! main toast_stack_order_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
 //!
@@ -25,9 +25,6 @@
 //! @pbt covers toast-stack-follows-raise-order
 //! @pbt slips-if-removed the stack silently reorders itself alphabetically by
 //! subject, so which failure looks most recent depends on its file name
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -49,6 +46,8 @@ use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 const WINDOW: &str = "1512x900";
 
@@ -179,7 +178,3 @@ fn the_toast_stack_follows_raise_order_not_subject_order() {
          degradations happened. Painted: {painted:?}"
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

@@ -14,8 +14,6 @@
 //! When one fails, the fixture label + full `BoundsSnapshot` dump tell you
 //! exactly which (container, content) combination collapsed.
 
-mod support;
-
 use std::sync::Arc;
 
 use gpui::TestAppContext;
@@ -28,6 +26,8 @@ use support::assert_layout_ok;
 use support::assert_no_sibling_overlap;
 use support::assert_nonempty;
 use support::render_fixture;
+
+use crate::support;
 
 // ── Widget property helper ────────────────────────────────────────────
 
@@ -350,7 +350,3 @@ fn sibling_overlap_ignores_unrelated_subtrees() {
     assert_no_sibling_overlap(&snap, "two-cards", &[]);
     assert_containment(&snap, "two-cards", &[]);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

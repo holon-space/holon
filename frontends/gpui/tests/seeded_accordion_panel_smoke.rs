@@ -43,10 +43,7 @@
 //! footer sizes itself against its row count is
 //! `accordion_sizes_to_content_windowed`'s subject.
 //!
-//! Run: `cargo test -p holon-gpui --test seeded_accordion_panel_smoke`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main seeded_accordion_panel_smoke::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,6 +60,8 @@ use holon_frontend::geometry::ElementInfo;
 use holon_frontend::reactive_view::ReactiveView;
 use holon_frontend::reactive_view_model::CollectionVariant;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
+
+use crate::support;
 
 /// The bundled seed, at compile time — the SAME asset `holon_app::seed` embeds
 /// via `include_str!`. Guarantees this test tracks the real seeded expression.
@@ -365,7 +364,3 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
         "at least some outline rows must sit ABOVE the pinned accordion footer (main region)."
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

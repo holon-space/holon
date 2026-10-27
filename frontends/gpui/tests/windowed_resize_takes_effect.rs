@@ -10,9 +10,6 @@
 //! `resize` really is inert, so the helper cannot be "simplified" back into the
 //! silent-pass shape.
 
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
-
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -30,6 +27,8 @@ use gpui::px;
 use gpui::size;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::resize_window;
+
+use crate::pbt_harness;
 
 const HEIGHT: f32 = 800.0;
 /// The same span the perception sweeps cover: the app's own `MIN_WIDTH` floor
@@ -125,4 +124,3 @@ fn a_bare_resize_is_inert_which_is_why_the_helper_exists() {
 
 // Installs the windowed capturing tracing subscriber before this binary's first
 // line of test code (see tests/test_init/mod.rs).
-mod test_init;

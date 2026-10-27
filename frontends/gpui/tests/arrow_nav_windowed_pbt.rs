@@ -57,14 +57,13 @@ use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::window_slice::seed::graft_undo_blur_pair;
 use holon_integration_tests::test_environment::TestEnvironment;
+use pbt_harness::sim_windowed_replay::SimUserDriver;
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
 
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
-use pbt_harness::sim_windowed_replay::SimUserDriver;
+use crate::pbt_harness;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
@@ -315,7 +314,3 @@ fn drive_case(start: usize, steps: u32) -> Result<(), String> {
 
     outcome
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

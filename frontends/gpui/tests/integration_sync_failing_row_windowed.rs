@@ -25,7 +25,7 @@
 //!      the three sync-adjacent states are three readings, not two.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! integration_sync_failing_row_windowed -- --test-threads=1`
+//! main integration_sync_failing_row_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
 //!
@@ -34,9 +34,6 @@
 //! @pbt slips-if-removed a failing sync paints the healthy glyph, or the
 //! unknown `?`, and every headless rung stays green because the mirror column
 //! still holds the right word
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -55,6 +52,8 @@ use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// The three rows under test: a provider, the word written into its mirror row,
 /// and the glyph a reader must see. The glyphs are written out here instead of
@@ -226,7 +225,3 @@ fn a_failing_sync_paints_its_own_glyph_not_the_healthy_one() {
         std::panic::resume_unwind(payload);
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

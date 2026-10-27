@@ -22,12 +22,9 @@
 //! that was missing.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! settings_introduced_connection_disclosure_windowed -- --test-threads=1`
-//! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
-//! parallel-safe).
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
+//! main settings_introduced_connection_disclosure_windowed:: --
+//! --test-threads=1` ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext`
+//! is not parallel-safe).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -50,6 +47,8 @@ use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// The toolbar affordance that opens Settings. The modal has no command and no
 /// keybinding — this is the only door.
@@ -242,4 +241,3 @@ fn an_introduced_connections_row_paints_its_origin_and_its_hosts() {
 
 // Installs the windowed capturing tracing subscriber before this binary's first
 // line of test code (see tests/test_init/mod.rs).
-mod test_init;

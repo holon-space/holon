@@ -141,5 +141,3 @@ fn banner_conditions_without_a_banner_surface_are_painted_as_one_toast_each() {
     std::mem::forget(app);
     std::mem::forget(env);
 }
-
-mod test_init;

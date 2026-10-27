@@ -1,17 +1,15 @@
 # Windowed GPUI gate — measured known reds
 
 The landing gate runs `just windowed-gate` (D-gate-windowed.a): every
-`holon-gpui` test binary as its own process, `--test-threads=1`, several at
-once, per-binary timeout (HUNG). A red whose signatures are all registered
-known-reds is pass-with-note; any other red fails the gate. The subset below is
-the older D48 selection, kept for the measured numbers that follow.
+`holon-gpui` test binary as its own process (the `main` binary as one unit per
+top-level module), `--test-threads=1`, several at once, per-unit timeout
+(HUNG). A red whose signatures are all registered known-reds is
+pass-with-note; any other red fails the gate. The subset below is the older D48
+selection, kept for the measured numbers that follow.
 
 ```
-cargo nextest run --no-fail-fast -p holon-gpui -p holon-loro --lib \
-  --test layout_editor --test layout_smoke --test windowed_log_capture \
-  --test nested_page_chevron_gate --test task_keyword_blur_windowed \
-  --test structural_chord_stale_flush_windowed --test gpui_compose_sut_windowed \
-  --test gpui_composed_windowed_loop
+cargo nextest run --no-fail-fast -p holon-gpui -p holon-loro --lib --test main \
+  -E 'kind(lib) | test(/^(layout_editor|layout_smoke|windowed_log_capture|nested_page_chevron_gate|task_keyword_blur_windowed|structural_chord_stale_flush_windowed|gpui_compose_sut_windowed|gpui_composed_windowed_loop)::/)'
 ```
 
 Classify a red run with `scripts/keystone-known-reds.sh <log>`. The patterns

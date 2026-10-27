@@ -23,7 +23,7 @@
 //!   the input still holds `window.focus`.
 //!
 //! Run: cargo test -p holon-gpui --features pbt --test
-//! soft_keyboard_survives_spurious_blur
+//! main soft_keyboard_survives_spurious_blur::
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -227,7 +227,3 @@ fn row_center(bounds: &BoundsRegistry, entity: &str) -> Option<gpui::Point<gpui:
             )
         })
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

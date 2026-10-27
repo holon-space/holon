@@ -1,8 +1,8 @@
 //! ★ Round-5 windowed repoint — foundational milestone.
 //!
 //! ✅ VERIFIED GREEN (macOS, 2026-07-01) — 2 passed:
-//!   `cargo test -p holon-gpui --features pbt --test gpui_compose_sut_windowed
-//! -- --test-threads=1`
+//!   `cargo test -p holon-gpui --features pbt --test main
+//! gpui_compose_sut_windowed:: -- --test-threads=1`
 //!   1. window rendered 68 elements (63 non-degenerate) over the
 //!      `compose_sut_windowed_base` session; base hosts `SutBackend` (13
 //!      blocks); driver rung deferred.
@@ -59,15 +59,14 @@ use holon_integration_tests::pbt::window_slice::builders::window_layout;
 use holon_pbt_core::ComponentSet;
 // Caps must be in scope to read them through the `CapMap` (capmap_adapter forwards).
 use holon_pbt_core::capabilities::{SutBackend, SutBlockInteract, SutDriver, SutLayout};
-use proptest_state_machine::ReferenceStateMachine;
-use proptest_state_machine::StateMachineTest;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 // The wide windowed per-case boot/teardown helper (extracted to the shared harness so the
 // 4b generated-sequence loop reuses ONE copy — see `pbt_harness/windowed_wide.rs`).
 use pbt_harness::windowed_wide::with_windowed_wide_sut;
+use proptest_state_machine::ReferenceStateMachine;
+use proptest_state_machine::StateMachineTest;
+
+use crate::pbt_harness;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
@@ -537,7 +536,3 @@ fn windowed_split_then_clickblock_resolves_minted_id() {
         Some(sut)
     });
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

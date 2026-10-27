@@ -12,9 +12,8 @@
 //! measure another `LIST_OVERDRAW_PX` of rows and reach the tail without the
 //! estimate.
 //!
-//! Run: cargo nextest run -p holon-gpui --test list_max_scroll_reaches_tail
-
-mod support;
+//! Run: cargo nextest run -p holon-gpui --test main
+//! list_max_scroll_reaches_tail::
 
 use std::sync::Arc;
 
@@ -27,6 +26,8 @@ use holon_frontend::reactive_view_model::CollectionVariant;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::ReactiveFixtureView;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 const VIEWPORT_W: f32 = 600.0;
 const VIEWPORT_H: f32 = 400.0;
@@ -119,7 +120,3 @@ fn max_scroll_shows_the_last_row_after_the_rows_are_replaced(cx: &mut TestAppCon
 fn max_scroll_shows_the_last_row_after_rows_are_pushed(cx: &mut TestAppContext) {
     max_scroll_shows_the_last_row(cx, LateRows::PushAfterFirstPaint);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

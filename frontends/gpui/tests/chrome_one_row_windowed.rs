@@ -18,7 +18,7 @@
 //! | `tab-list-new` | the new-tab action |
 //! | `tab-list-error` | the failure message, when the tabs could not be read |
 //!
-//! Run: `cargo nextest run -p holon-gpui --test chrome_one_row_windowed
+//! Run: `cargo nextest run -p holon-gpui --test main chrome_one_row_windowed::
 //! --features holon-gpui/pbt`
 
 use std::sync::Arc;
@@ -1197,7 +1197,4 @@ fn a_write_that_never_lands_says_the_count_is_waiting() {
     );
 }
 
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-#[path = "test_init/mod.rs"]
-mod test_init;
+use crate::test_init;

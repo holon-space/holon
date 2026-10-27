@@ -30,8 +30,6 @@
 //! the same snapshot (the icon's own `tag()` rect, the sibling's origin), so
 //! there are no pixel constants to re-tune when the theme changes.
 
-mod support;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -51,6 +49,8 @@ use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
 use support::BoundsSnapshot;
 use support::render_fixture_sized;
+
+use crate::support;
 
 /// Sub-pixel rounding slack, matching `size_expectation`'s tolerance.
 const EPS: f32 = 0.5;
@@ -264,7 +264,3 @@ fn tracked_wrapper_contributes_no_layout(cx: &mut TestAppContext) {
         })
         .expect("tracked() must be layout-neutral");
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

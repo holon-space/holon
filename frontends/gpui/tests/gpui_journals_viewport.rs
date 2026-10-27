@@ -39,10 +39,9 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use holon_pbt_core::capabilities::SutLayout;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::composition::run_selected;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
@@ -400,7 +399,3 @@ fn journals_feed_expands_only_the_day_pages_on_screen() {
     std::mem::forget(app);
     std::mem::forget(env);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

@@ -10,10 +10,8 @@
 //! `attest_drew`.
 //!
 //! Run: `cargo nextest run -p holon-gpui --test
-//! deliver_block_content_windowed_pbt` ⚠ `--test-threads=1` mandatory (gpui
-//! `TestAppContext` is not parallel-safe).
-
-mod support;
+//! main deliver_block_content_windowed_pbt::` ⚠ `--test-threads=1` mandatory
+//! (gpui `TestAppContext` is not parallel-safe).
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -58,6 +56,8 @@ use proptest::test_runner::TestRunner;
 use proptest_state_machine::ReferenceStateMachine;
 use support::ReactiveFixtureView;
 use validated::Validated;
+
+use crate::support;
 
 const KIND: &str = "DeliverBlockContent";
 const PLACEHOLDER_MODE: &str = "placeholder";
@@ -317,5 +317,3 @@ fn deferred_live_blocks_paint_exactly_the_delivered_content(cx: &mut TestAppCont
     }
     alphabet_coverage::attest_drew(KIND);
 }
-
-mod test_init;

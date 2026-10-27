@@ -33,10 +33,7 @@
 //! (no test drove the MCP tool primitive against a ScrollHandle region), it
 //! does not introduce new behavior.
 //!
-//! Run: `cargo test -p holon-gpui --test mcp_scroll_wheel_accordion`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main mcp_scroll_wheel_accordion::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -57,6 +54,8 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_mcp::server::InteractionEvent;
 use support::ReactiveFixtureView;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 const VIEWPORT_W: f32 = 600.0;
 const VIEWPORT_H: f32 = 400.0;
@@ -215,7 +214,3 @@ fn mcp_scroll_reveals_below_fold_backlink_in_accordion(cx: &mut TestAppContext) 
         "MCP ScrollWheel must lower to a single ScrollWheel PlatformInput, got {wheel:?}"
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

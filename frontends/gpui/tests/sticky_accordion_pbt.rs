@@ -15,10 +15,7 @@
 //! (red-run-stickyimpl.log). `render_sticky` (absolute `.occlude()` + px-cap +
 //! definite-height fail-loud) turns them green.
 //!
-//! Run: `cargo test -p holon-gpui --test sticky_accordion_pbt`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main sticky_accordion_pbt::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,6 +33,8 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::sticky_accordion as sa;
 use holon_gpui::geometry::BoundsRegistry;
 use support::ReactiveFixtureView;
+
+use crate::support;
 
 fn text_item(id: String, label: String) -> ReactiveViewModel {
     let mut data = HashMap::new();
@@ -467,7 +466,3 @@ fn journals_multi_section_engages_all_three_invariants(cx: &mut TestAppContext) 
         );
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

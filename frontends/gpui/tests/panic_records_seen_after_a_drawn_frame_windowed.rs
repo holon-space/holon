@@ -590,5 +590,3 @@ fn a_crash_loop_names_its_site_in_a_400px_tall_window() {
 fn a_crash_loop_fits_the_smallest_window() {
     records_are_seen_after_a_drawn_frame("300x200", a_crash_loop);
 }
-
-mod test_init;

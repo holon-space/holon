@@ -13,9 +13,7 @@
 //! point the OS calls for a real keystroke, into a real `EditorView` in a real
 //! window, in BOTH the no-cell (SqlOnly) and the cell-attached (Loro) arm.
 //!
-//! Run: cargo test -p holon-gpui --test editor_task_keyword_promotion
-
-mod support;
+//! Run: cargo test -p holon-gpui --test main editor_task_keyword_promotion::
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -33,6 +31,8 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::navigation_state::NavigationState;
 use holon_gpui::views::EditorView;
 use support::TestServices;
+
+use crate::support;
 
 const ROW_ID: &str = "block:task-keyword-promotion-test";
 
@@ -438,7 +438,3 @@ fn a_cell_attached_editor_commits_keyword_headed_text_as_source(cx: &mut TestApp
         Value::String(holon_api::SOURCE_TEXT_FIELD.into())
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

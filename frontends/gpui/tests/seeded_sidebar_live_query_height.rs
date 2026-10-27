@@ -23,10 +23,8 @@
 //! asserts RENDERED ROWS, not just the region box, which is exactly the
 //! assertion the BugFunnel COVERAGE row says nothing in the suite made.
 //!
-//! Run: `cargo test -p holon-gpui --test seeded_sidebar_live_query_height`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main
+//! seeded_sidebar_live_query_height::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,6 +38,8 @@ use holon_frontend::geometry::ElementInfo;
 use holon_frontend::reactive_view::ReactiveView;
 use holon_frontend::reactive_view_model::CollectionVariant;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
+
+use crate::support;
 
 /// The bundled seed, at compile time — the SAME asset `holon_app::seed` embeds.
 const SEED_ORG: &str = include_str!("../../../assets/default/index.org");
@@ -196,7 +196,3 @@ fn seeded_sidebar_live_query_paints_nonzero_height(cx: &mut TestAppContext) {
         snap.dump()
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

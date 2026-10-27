@@ -9,12 +9,9 @@
 //! means loading, failed means the vault did not load.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! vault_loading_placeholder_windowed -- --test-threads=1`
+//! main vault_loading_placeholder_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe), and the failure case arms a process-global crash point.
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +27,8 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
 use holon_integration_tests::test_environment::TestEnvironmentBuilder;
 use pbt_harness::windowed_wide::real_text_system;
+
+use crate::pbt_harness;
 
 const LOADING: &str = "Loading vault…";
 const FAILED: &str = "The vault could not be loaded";
@@ -302,4 +301,3 @@ fn the_window_turns_from_loading_to_failed_when_the_seed_fails_after_launch() {
 
 // Installs the windowed capturing tracing subscriber before this binary's first
 // line of test code (see tests/test_init/mod.rs).
-mod test_init;

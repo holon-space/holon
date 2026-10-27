@@ -334,7 +334,3 @@ fn an_enter_key_event_becomes_an_enter_keystroke() {
         );
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

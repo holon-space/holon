@@ -7,11 +7,9 @@
 //! the builder's `expect`.
 //!
 //! Run: `cargo test -p holon-gpui --test
-//! element_builder_panic_paints_error_windowed -- --test-threads=1`
+//! main element_builder_panic_paints_error_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe). Own test binary: the panic hook is process-global.
-
-mod support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +25,8 @@ use holon_api::Value;
 use holon_frontend::panic_record;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::render_reactive_fixture_quiescent_sized;
+
+use crate::support;
 
 const MESSAGE: &str = "view_mode_switcher requires a slot";
 const BUILDER_FILE: &str = "view_mode_switcher.rs";
@@ -103,5 +103,3 @@ fn a_panicking_element_builder_paints_an_error_between_its_siblings(cx: &mut Tes
         "a caught and shown panic must not be disclosed again as a crash at the next start"
     );
 }
-
-mod test_init;

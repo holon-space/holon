@@ -2,10 +2,7 @@
 //! both render paths: the virtualized `gpui::list` a panel-placed collection
 //! takes and the eager content-height div a nested one takes.
 //!
-//! Run: `cargo test -p holon-gpui --test collection_gap_windowed`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main collection_gap_windowed::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,6 +17,8 @@ use holon_frontend::reactive_view_model::CollectionVariant;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_gpui::geometry::BoundsRegistry;
 use support::ReactiveFixtureView;
+
+use crate::support;
 
 const ITEM_COUNT: usize = 4;
 /// Distinct from every layout's default gap and from the virtualized path's
@@ -109,5 +108,3 @@ fn a_nested_table_draws_its_gap(cx: &mut TestAppContext) {
     let spacings = row_spacings(nested_in_a_list_row(table()), cx);
     assert_gap(&spacings, "eager nested path");
 }
-
-mod test_init;

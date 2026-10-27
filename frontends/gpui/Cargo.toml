@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -35,13 +36,15 @@ required-features = ["desktop"]
 name = "rich_input_spike"
 required-features = ["desktop"]
 
+# Every test file is a module of this one binary except the `harness = false`
+# targets below, which run their own `main`.
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
 [[test]]
 name = "reactive_vm_test"
 harness = false
-
-[[test]]
-name = "chrome_one_row_windowed"
-required-features = ["pbt"]
 
 [[test]]
 name = "gpui_gherkin_replay"
@@ -67,20 +70,8 @@ name = "executor_bridge_test"
 harness = false
 
 [[test]]
-name = "test_platform_smoke"
-harness = true
-
-[[test]]
 name = "gpui_sim_replay_capture"
 harness = false
-required-features = ["pbt"]
-
-[[test]]
-name = "nested_page_real_engine"
-required-features = ["pbt"]
-
-[[test]]
-name = "soft_keyboard_survives_spurious_blur"
 required-features = ["pbt"]
 
 [features]

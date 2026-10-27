@@ -41,10 +41,9 @@ use holon_integration_tests::pbt::window_slice::seed::CHORD_TARGET_ID;
 use holon_integration_tests::pbt::window_slice::seed::graft_chord_decoy_row;
 use holon_integration_tests::pbt::window_slice::seed::graft_chord_target_row;
 use holon_integration_tests::test_environment::TestEnvironment;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
+
+use crate::pbt_harness;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
@@ -399,7 +398,3 @@ fn hovered_hit_subtitle_clears_the_body_text_contrast_floor() {
 
     f.shutdown();
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

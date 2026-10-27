@@ -17,9 +17,9 @@ slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 
 # The windowed composed loop boots a composed SUT per case in a real GPUI window:
 # 48-65s on a quiet host, so the 2 min default cap read as TIMEOUT whenever the
-# windowed gate shared the machine (`just windowed-gate`, 4 binaries at once).
+# windowed gate shared the machine (`just windowed-gate`, 4 units at once).
 [[profile.default.overrides]]
-filter = "binary(gpui_composed_windowed_loop)"
+filter = "binary_id(holon-gpui::main) & test(/^gpui_composed_windowed_loop::/)"
 slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 
 # The dense_patch exactness table and property seed one page per case into one

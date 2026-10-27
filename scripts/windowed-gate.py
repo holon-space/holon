@@ -4,10 +4,12 @@
 Usage: scripts/windowed-gate.py --features <cargo features> --log-dir <dir>
        [--jobs N] [--timeout SECONDS]
 
-The windowed suite is every test binary of the holon-gpui package (the lib and
-each `frontends/gpui/tests/*.rs` target; `windowed_log_capture` pins that each
-one declares the shared `test_init`). Each binary runs alone under
-`cargo nextest run --test-threads 1`, up to JOBS binaries at once, and is killed
+The windowed suite is every test binary of the holon-gpui package (the lib,
+the one `main` binary of `frontends/gpui/tests/*.rs` and the `harness = false`
+targets; `windowed_log_capture` pins that each one declares the shared
+`test_init`). The unit is a binary, except that a `main` binary splits into one
+unit per top-level module, the former per-file binary. Each unit runs alone under
+`cargo nextest run --test-threads 1`, up to JOBS units at once, and is killed
 (whole process group) after TIMEOUT seconds and reported HUNG.
 
 A failing binary's nextest log is classified by scripts/keystone-known-reds.sh
@@ -56,19 +58,30 @@ def nextest_args(reuse: list[str], filt: str) -> list[str]:
             "--test-threads", "1", "--color", "never"]
 
 
-def inventory(reuse: list[str]) -> list[tuple[str, int]]:
+def units(suites: dict) -> list[tuple[str, str, int]]:
+    """(unit, nextest filter, test count) per binary, or per top-level module of a
+    `main` binary."""
+    found: dict[str, list] = {}
+    for binary_id, suite in suites.items():
+        for name, tc in suite["testcases"].items():
+            if tc.get("ignored") or tc.get("filter-match", {}).get("status") != "matches":
+                continue
+            if suite["binary-name"] == "main":
+                module = name.split("::", 1)[0]
+                unit = f"{binary_id} {module}"
+                filt = f"binary_id(={binary_id}) & test(/^{module}::/)"
+            else:
+                unit, filt = binary_id, f"binary_id(={binary_id})"
+            found.setdefault(unit, [unit, filt, 0])[2] += 1
+    return sorted(tuple(u) for u in found.values())
+
+
+def inventory(reuse: list[str]) -> list[tuple[str, str, int]]:
     out = subprocess.run(
         ["cargo", "nextest", "list", *reuse, "-E", INVENTORY,
          "--message-format", "json"],
         cwd=REPO, check=True, stdout=subprocess.PIPE, text=True).stdout
-    suites = json.loads(out)["rust-suites"]
-    found = []
-    for binary_id, suite in suites.items():
-        n = sum(1 for tc in suite["testcases"].values()
-                if not tc.get("ignored") and tc.get("filter-match", {}).get("status") == "matches")
-        if n:
-            found.append((binary_id, n))
-    return sorted(found)
+    return units(json.loads(out)["rust-suites"])
 
 
 def descendants(root: int) -> list[int]:
@@ -126,11 +139,11 @@ def run_cmd(cmd: list[str], log: Path, timeout: int) -> tuple[int, bool, int]:
         return -9, True, len(tree)
 
 
-def run_one(binary_id: str, tests: int, reuse: list[str], log_dir: Path, timeout: int,
+def run_one(unit: str, filt: str, tests: int, reuse: list[str], log_dir: Path, timeout: int,
             suffix: str = "") -> dict:
-    log = log_dir / (binary_id.replace("::", "__").replace("/", "_") + suffix + ".log")
+    log = log_dir / (unit.replace("::", "__").replace(" ", "__").replace("/", "_") + suffix + ".log")
     start = time.monotonic()
-    rc, hung, killed = run_cmd(nextest_args(reuse, f"binary_id(={binary_id})"), log, timeout)
+    rc, hung, killed = run_cmd(nextest_args(reuse, filt), log, timeout)
     wall = time.monotonic() - start
     if hung:
         verdict = "HUNG"
@@ -141,8 +154,8 @@ def run_one(binary_id: str, tests: int, reuse: list[str], log_dir: Path, timeout
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         (log_dir / (log.stem + ".classified")).write_text(cls.stdout)
         verdict = "KNOWN-RED" if cls.returncode == 0 and "known-red:" in cls.stdout else "RED"
-    return {"binary": binary_id, "tests": tests, "wall": wall, "verdict": verdict, "log": log,
-            "orphans_killed": killed}
+    return {"binary": unit, "filter": filt, "tests": tests, "wall": wall, "verdict": verdict,
+            "log": log, "orphans_killed": killed}
 
 
 def settle(first: dict, rerun) -> dict:
@@ -200,14 +213,14 @@ def main() -> int:
     if not binaries:
         print("windowed-gate: the holon-gpui inventory is empty — the filter is wrong", file=sys.stderr)
         return 1
-    print(f"windowed-gate: {len(binaries)} binaries, {sum(n for _, n in binaries)} tests, "
-          f"jobs={args.jobs}, per-binary timeout={args.timeout}s", flush=True)
+    print(f"windowed-gate: {len(binaries)} units, {sum(n for *_, n in binaries)} tests, "
+          f"jobs={args.jobs}, per-unit timeout={args.timeout}s", flush=True)
 
     t0 = time.monotonic()
     results = []
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(run_one, b, n, reuse, args.log_dir, args.timeout)
-                   for b, n in binaries]
+        futures = [pool.submit(run_one, b, f, n, reuse, args.log_dir, args.timeout)
+                   for b, f, n in binaries]
         for fut in futures:
             r = fut.result()
             results.append(r)
@@ -218,7 +231,7 @@ def main() -> int:
         print(f"windowed-gate: re-running {len(suspects)} red/hung binaries alone, once", flush=True)
     settled = []
     for r in results:
-        r = settle(r, lambda f: run_one(f["binary"], f["tests"], reuse, args.log_dir,
+        r = settle(r, lambda f: run_one(f["binary"], f["filter"], f["tests"], reuse, args.log_dir,
                                         args.timeout, suffix=".rerun"))
         if "first" in r:
             print(f"{r['verdict']:<9} {r['binary']}  rerun wall={r['wall']:.1f}s  "

@@ -9,8 +9,6 @@
 //! the matrix breaks, the fixture label + size name make the failure
 //! immediately pinpointable.
 
-mod support;
-
 use std::sync::Arc;
 
 use gpui::Pixels;
@@ -21,6 +19,8 @@ use gpui::size;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::assert_layout_ok;
 use support::render_fixture_sized;
+
+use crate::support;
 
 // ── Widget property helper ────────────────────────────────────────────
 
@@ -292,7 +292,3 @@ fn layout_ok_realistic_trees(cx: &mut TestAppContext) {
         }
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

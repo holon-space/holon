@@ -25,7 +25,7 @@
 //! be a second, silently rotting model of the text system.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! integrations_row_narrow_window_windowed -- --test-threads=1`
+//! main integrations_row_narrow_window_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
 //!
@@ -34,9 +34,6 @@
 //! @pbt slips-if-removed the status glyph silently leaves the row for the
 //! longest-named integrations, and every other rung stays green because they
 //! all use names that happen to fit
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -55,6 +52,8 @@ use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// Narrow, but still wide enough that the left sidebar stays DOCKED — the
 /// hazard is the sidebar's own fixed width against a long name, not the
@@ -266,7 +265,3 @@ fn a_long_integration_name_does_not_push_the_status_out_of_its_row() {
         std::panic::resume_unwind(payload);
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

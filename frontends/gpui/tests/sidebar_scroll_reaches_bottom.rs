@@ -22,10 +22,7 @@
 //! windowed fixture mounts it as the whole window. That parity gap is closed
 //! here whether or not it is this bug's cause.
 //!
-//! Run: `cargo test -p holon-gpui --test sidebar_scroll_reaches_bottom`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main sidebar_scroll_reaches_bottom::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,6 +53,8 @@ use support::BlockTreeRegistry;
 use support::BlockTreeThunk;
 use support::ReactiveFixtureView;
 use support::simulate_wheel_at;
+
+use crate::support;
 
 /// The bundled seed, at compile time — the SAME asset `holon_app::seed` embeds.
 const SEED_ORG: &str = include_str!("../../../assets/default/index.org");
@@ -342,7 +341,3 @@ fn left_sidebar_scrolls_to_its_last_row(cx: &mut TestAppContext) {
             .collect::<Vec<_>>()
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

@@ -23,10 +23,7 @@
 //!   ] ) )
 //! ```
 //!
-//! Run: `cargo test -p holon-gpui --test nested_band_height_spike`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main nested_band_height_spike::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,6 +38,8 @@ use holon_frontend::reactive_view_model::CollectionVariant;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_gpui::geometry::BoundsRegistry;
 use support::ReactiveFixtureView;
+
+use crate::support;
 
 const VIEWPORT_W: f32 = 600.0;
 const VIEWPORT_H: f32 = 600.0;
@@ -273,7 +272,3 @@ fn outline_reserves_the_height_a_grown_band_paints(cx: &mut TestAppContext) {
 
     assert_band_and_sibling_disjoint(&bounds, BAND_ROWS, "after growth");
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

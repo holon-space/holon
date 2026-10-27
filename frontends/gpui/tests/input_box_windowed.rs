@@ -16,9 +16,7 @@
 //!   3. a failed dispatch KEEPS it — the user never loses typed text
 //!
 //! Run: cargo test -p holon-gpui --features pbt --test
-//! input_box_windowed -- --test-threads=1
-
-mod support;
+//! main input_box_windowed:: -- --test-threads=1
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -979,7 +977,3 @@ fn no_send_state_offers_a_retry(cx: &mut TestAppContext) {
         );
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

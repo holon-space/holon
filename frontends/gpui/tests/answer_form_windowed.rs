@@ -2,9 +2,7 @@
 //! renders one radio row per variant and answers with the clicked one; a text
 //! ask that fails to parse shows the refusal inline and fires nothing.
 //!
-//! Run: cargo nextest run -p holon-gpui --test answer_form_windowed
-
-mod support;
+//! Run: cargo nextest run -p holon-gpui --test main answer_form_windowed::
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -40,6 +38,8 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_gpui::render::builders::AnswerPort;
 use holon_gpui::render::builders::GpuiRenderContext;
 use holon_gpui::render::builders::{self};
+
+use crate::support;
 
 struct FakePort {
     answered: Mutex<Vec<AnswerCall>>,
@@ -241,5 +241,3 @@ fn a_parse_error_renders_inline_and_fires_nothing(cx: &mut TestAppContext) {
         "a parse error fired an answer"
     );
 }
-
-mod test_init;

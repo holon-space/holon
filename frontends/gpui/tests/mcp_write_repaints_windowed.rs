@@ -43,8 +43,8 @@
 //! * [`a_never_painted_entity_still_fails_loud_at_the_bounds_deadline`] — the
 //!   forced draws must not soften or extend the loud timeout arm.
 //!
-//! Run: `cargo nextest run -p holon-gpui --test mcp_write_repaints_windowed
-//! --features holon-gpui/pbt -j1`
+//! Run: `cargo nextest run -p holon-gpui --test main
+//! mcp_write_repaints_windowed:: --features holon-gpui/pbt -j1`
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -576,7 +576,3 @@ fn a_never_painted_entity_still_fails_loud_at_the_bounds_deadline() {
         );
     });
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

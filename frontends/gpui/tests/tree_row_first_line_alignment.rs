@@ -9,10 +9,8 @@
 //! and a marker with a hand-tuned `mt` lands near — but not on — the line even
 //! at one line.
 //!
-//! Run: `cargo nextest run -p holon-gpui --test tree_row_first_line_alignment`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo nextest run -p holon-gpui --test main
+//! tree_row_first_line_alignment::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,6 +27,8 @@ use holon_frontend::tree_bullet_id_for;
 use holon_gpui::render::builders::style::LayoutStyle;
 use support::BoundsSnapshot;
 use support::render_fixture_sized;
+
+use crate::support;
 
 /// Narrow enough that the row text below wraps onto a second line — a sidebar's
 /// real width.
@@ -205,7 +205,3 @@ fn sidebar_page_icon_centers_on_the_first_line_of_a_wrapped_row(cx: &mut TestApp
     });
     assert_on_first_line(&snap, icon, "sidebar page icon");
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

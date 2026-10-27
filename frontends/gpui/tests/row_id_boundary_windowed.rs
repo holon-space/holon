@@ -4,11 +4,9 @@
 //! one row.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! row_id_boundary_windowed -- --test-threads=1`
+//! main row_id_boundary_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe).
-
-mod support;
 
 use std::sync::Arc;
 
@@ -21,6 +19,8 @@ use holon_frontend::StubBuilderServices;
 use holon_frontend::reactive::interpret_pure;
 use support::BoundsSnapshot;
 use support::render_reactive_fixture_quiescent_sized;
+
+use crate::support;
 
 /// A collection over one query row, painted through the real GPUI builders.
 fn painted(cx: &mut TestAppContext, dsl: &str, id: &str) -> BoundsSnapshot {
@@ -156,5 +156,3 @@ fn painted_board(cx: &mut TestAppContext, id: &str) -> BoundsSnapshot {
     );
     snap
 }
-
-mod test_init;

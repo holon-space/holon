@@ -24,12 +24,9 @@
 //! test that forgot it would pass on an empty window.
 //!
 //! Run: `cargo test -p holon-gpui --features pbt --test
-//! secrets_in_memory_banner_windowed -- --test-threads=1`
+//! main secrets_in_memory_banner_windowed:: -- --test-threads=1`
 //! ⚠ `--test-threads=1` mandatory (gpui `HeadlessAppContext` is not
 //! parallel-safe), and this binary sets a process-global environment variable.
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,6 +41,8 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// The sentence the banner must carry. Taken from the fact that changes what a
 /// user does — that the credential does not survive the session — rather than
@@ -218,4 +217,3 @@ fn an_in_memory_secret_session_paints_the_banner_that_admits_it() {
 
 // Installs the windowed capturing tracing subscriber before this binary's first
 // line of test code (see tests/test_init/mod.rs).
-mod test_init;

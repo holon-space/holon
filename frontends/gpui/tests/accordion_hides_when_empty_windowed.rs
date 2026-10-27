@@ -15,10 +15,7 @@
 //! transitions are observed live rather than across two fresh renders.
 //!
 //! Run: `cargo nextest run -p holon-gpui --test
-//! accordion_hides_when_empty_windowed`
-
-#[path = "support/mod.rs"]
-mod support;
+//! main accordion_hides_when_empty_windowed::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,6 +37,8 @@ use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_gpui::geometry::BoundsRegistry;
 use support::BoundsSnapshot;
 use support::ReactiveFixtureView;
+
+use crate::support;
 
 const WINDOW_W: f32 = 1000.0;
 const WINDOW_H: f32 = 900.0;
@@ -509,7 +508,3 @@ fn hide_when_empty_over_static_content_paints_a_named_error(cx: &mut TestAppCont
          after all"
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

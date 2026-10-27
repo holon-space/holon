@@ -18,10 +18,7 @@
 //!   R5 survival:  a space change does not discard the reader's own expand.
 //!
 //! Run: `cargo nextest run -p holon-gpui --test
-//! accordion_sizes_to_content_windowed`
-
-#[path = "support/mod.rs"]
-mod support;
+//! main accordion_sizes_to_content_windowed::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,6 +36,8 @@ use holon_frontend::reactive_view::ReactiveView;
 use holon_frontend::reactive_view_model::CollectionVariant;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_frontend::shadow_builders::ACCORDION_MIN_EXPANDED_WIDTH_PX;
+
+use crate::support;
 
 const WINDOW_W: f32 = 1000.0;
 const WINDOW_H: f32 = 900.0;
@@ -393,7 +392,3 @@ fn a_space_change_keeps_the_readers_choice(_: &mut TestAppContext) {
          the fresh default instead of keeping the mounted node's state"
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

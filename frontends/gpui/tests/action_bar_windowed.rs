@@ -17,9 +17,9 @@
 //! the panel's flex allocation and the horizontal overflow are all painted
 //! geometry. The keystone has no window and structurally cannot see any of it.
 //!
-//! Run: `cargo nextest run -p holon-gpui --test action_bar_windowed --features
-//! holon-gpui/pbt --no-fail-fast` (nextest gives each test its own process,
-//! which the gpui test platform's thread-local state requires).
+//! Run: `cargo nextest run -p holon-gpui --test main action_bar_windowed::
+//! --features holon-gpui/pbt --no-fail-fast` (nextest gives each test its own
+//! process, which the gpui test platform's thread-local state requires).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,12 +40,11 @@ use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::window_slice::seed::graft_displayed_text_tree;
 use holon_integration_tests::test_environment::TestEnvironment;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::settle_to_fixed_point;
+
+use crate::pbt_harness;
 
 /// A phone-shaped window: narrower than the `if_space(600, …)` breakpoint, so
 /// the synthesized layout takes its `bottom_dock` branch. Tall enough that the
@@ -773,7 +772,3 @@ fn a_desktop_window_paints_no_action_bar() {
         );
     });
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

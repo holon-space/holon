@@ -7,10 +7,9 @@
 //!    degradation is observable, not fatal);
 //! 2. an `error!` emitted the same way lands in the problem window — the same
 //!    set `inv-no-observed-errors` reds on in the keystone;
-//! 3. every `frontends/gpui/tests/*.rs` target declares `mod test_init;`, so a
-//!    new windowed target cannot silently reintroduce the discard.
-
-mod test_init;
+//! 3. every `[[test]]` target of the package declares `mod test_init;`, so a
+//!    new windowed target cannot silently reintroduce the discard, and every
+//!    `tests/*.rs` file is compiled into one of them.
 
 use gpui::AppContext;
 use gpui::Bounds;
@@ -26,6 +25,8 @@ use gpui::WindowOptions;
 use gpui::div;
 use gpui::px;
 use gpui::size;
+
+use crate::test_init;
 
 /// Distinctive enough that a match cannot come from unrelated log traffic.
 const WARN_PROBE: &str = "windowed-log-capture-warn-probe";
@@ -101,27 +102,64 @@ fn error_emitted_during_render_lands_in_the_problem_window(cx: &mut TestAppConte
     );
 }
 
-/// Every root cargo autodiscovers as an integration-test target under
-/// `tests/`: a top-level `tests/<name>.rs` AND a `tests/<dir>/main.rs`. The
-/// second form is the one a "just scan `*.rs`" check misses — `test_init/`,
-/// `support/` and `pbt_harness/` are plain modules with no `main.rs` and are
-/// correctly excluded, but a future `tests/newthing/main.rs` would build, run,
-/// and install no subscriber.
-fn windowed_target_sources(tests_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut targets = Vec::new();
-    for entry in std::fs::read_dir(tests_dir).expect("windowed tests dir is readable") {
-        let path = entry.expect("dir entry readable").path();
-        if path.is_dir() {
-            let main = path.join("main.rs");
-            if main.is_file() {
-                targets.push(main);
-            }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            targets.push(path);
-        }
-    }
+/// Every integration-test target of the package: its `[[test]]` entries.
+/// `autotests = false`, so no other file under `tests/` builds as a target.
+fn windowed_target_sources(manifest_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let manifest: toml::Table = toml::from_str(
+        &std::fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("Cargo.toml is readable"),
+    )
+    .expect("Cargo.toml parses");
+    let mut targets: Vec<_> = manifest["test"]
+        .as_array()
+        .expect("the package lists its `[[test]]` targets")
+        .iter()
+        .map(|target| {
+            let path = match target.get("path") {
+                Some(path) => path
+                    .as_str()
+                    .expect("a `[[test]]` path is a string")
+                    .to_owned(),
+                None => format!(
+                    "tests/{}.rs",
+                    target["name"]
+                        .as_str()
+                        .expect("a `[[test]]` name is a string")
+                ),
+            };
+            manifest_dir.join(path)
+        })
+        .collect();
     targets.sort();
     targets
+}
+
+/// The `tests/*.rs` files that are neither a target nor a module of
+/// `tests/main.rs`: cargo compiles them nowhere, so their tests never run.
+fn unreached_test_files(manifest_dir: &std::path::Path) -> Vec<String> {
+    let tests_dir = manifest_dir.join("tests");
+    let targets = windowed_target_sources(manifest_dir);
+    let main =
+        std::fs::read_to_string(tests_dir.join("main.rs")).expect("tests/main.rs is readable");
+    let modules: Vec<&str> = main
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("mod ")?.strip_suffix(';'))
+        .collect();
+    let mut unreached = Vec::new();
+    for entry in std::fs::read_dir(&tests_dir).expect("windowed tests dir is readable") {
+        let path = entry.expect("dir entry readable").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") || targets.contains(&path) {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .expect("a .rs file has a stem")
+            .to_string_lossy();
+        if !modules.contains(&stem.as_ref()) {
+            unreached.push(stem.into_owned());
+        }
+    }
+    unreached.sort();
+    unreached
 }
 
 /// A LIVE declaration, not a mention. `source.contains("mod test_init;")` is
@@ -138,12 +176,11 @@ fn declares_test_init(source: &str) -> bool {
 /// rather than by review, because the failure mode is silence.
 #[test]
 fn every_windowed_target_declares_test_init() {
-    let tests_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let targets = windowed_target_sources(&tests_dir);
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let targets = windowed_target_sources(manifest_dir);
     assert!(
-        targets.len() > 40,
-        "the sweep found only {} windowed targets — it is scanning the wrong place",
-        targets.len()
+        targets.contains(&manifest_dir.join("tests/main.rs")),
+        "the sweep did not find tests/main.rs among {targets:?} — it is reading the wrong manifest"
     );
 
     let mut missing = Vec::new();
@@ -151,8 +188,8 @@ fn every_windowed_target_declares_test_init() {
         let source = std::fs::read_to_string(&path).expect("test source is readable");
         if !declares_test_init(&source) {
             missing.push(
-                path.strip_prefix(&tests_dir)
-                    .expect("target lives under tests/")
+                path.strip_prefix(manifest_dir)
+                    .expect("target lives under the package")
                     .to_string_lossy()
                     .into_owned(),
             );
@@ -166,11 +203,23 @@ fn every_windowed_target_declares_test_init() {
     );
 }
 
-/// The guard above is only worth its line count if it rejects the two shapes
-/// that would otherwise slip past it. Pinned here so it cannot rot back into a
-/// substring scan over `*.rs`.
+/// A new `tests/<name>.rs` builds only once `tests/main.rs` declares it (or
+/// Cargo.toml lists it as a target); until then it is silently dead.
 #[test]
-fn the_sweep_rejects_commented_declarations_and_sees_subdirectory_targets() {
+fn every_windowed_test_file_is_compiled() {
+    let unreached = unreached_test_files(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert!(
+        unreached.is_empty(),
+        "these tests/*.rs files are compiled into no target — add `mod <name>;` to \
+         tests/main.rs: {unreached:?}"
+    );
+}
+
+/// The guards above are only worth their line count if they reject the shapes
+/// that would otherwise slip past them. Pinned here so they cannot rot back
+/// into a substring scan.
+#[test]
+fn the_sweep_rejects_commented_declarations_and_reads_the_manifest() {
     assert!(declares_test_init("mod test_init;\n"));
     assert!(declares_test_init(
         "use x;\n\n    mod test_init;\nfn main() {}\n"
@@ -182,12 +231,21 @@ fn the_sweep_rejects_commented_declarations_and_sees_subdirectory_targets() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
-    std::fs::write(root.join("alpha.rs"), "mod test_init;\n").expect("write alpha");
-    std::fs::write(root.join("notes.txt"), "ignored").expect("write notes");
-    std::fs::create_dir(root.join("subdir_target")).expect("mkdir target");
-    std::fs::write(root.join("subdir_target/main.rs"), "fn main() {}\n").expect("write main");
-    std::fs::create_dir(root.join("plain_module")).expect("mkdir module");
-    std::fs::write(root.join("plain_module/mod.rs"), "pub fn helper() {}\n").expect("write mod");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[[test]]\nname = \"main\"\npath = \"tests/main.rs\"\n\n[[test]]\nname = \"alone\"\nharness = false\n",
+    )
+    .expect("write manifest");
+    std::fs::create_dir(root.join("tests")).expect("mkdir tests");
+    std::fs::write(
+        root.join("tests/main.rs"),
+        "mod test_init;\nmod declared;\n",
+    )
+    .expect("write main");
+    std::fs::write(root.join("tests/alone.rs"), "fn main() {}\n").expect("write alone");
+    std::fs::write(root.join("tests/declared.rs"), "").expect("write declared");
+    std::fs::write(root.join("tests/forgotten.rs"), "").expect("write forgotten");
+    std::fs::write(root.join("tests/notes.txt"), "ignored").expect("write notes");
 
     let found: Vec<String> = windowed_target_sources(root)
         .iter()
@@ -200,7 +258,12 @@ fn the_sweep_rejects_commented_declarations_and_sees_subdirectory_targets() {
         .collect();
     assert_eq!(
         found,
-        vec!["alpha.rs".to_string(), "subdir_target/main.rs".to_string()],
-        "the sweep must see `<dir>/main.rs` targets and ignore plain module directories"
+        vec!["tests/alone.rs".to_string(), "tests/main.rs".to_string()],
+        "the sweep must read `[[test]]` paths, defaulting to tests/<name>.rs"
+    );
+    assert_eq!(
+        unreached_test_files(root),
+        vec!["forgotten".to_string()],
+        "a file that is neither a target nor declared in main.rs must be reported"
     );
 }

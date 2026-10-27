@@ -22,7 +22,7 @@
 //! disappearance look like a page switch.
 //!
 //! Run: `cargo nextest run -p holon-gpui --test
-//! tab_strip_resolves_at_boot_windowed       --features holon-gpui/pbt`
+//! main tab_strip_resolves_at_boot_windowed::       --features holon-gpui/pbt`
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,9 +37,6 @@ use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::window_slice::seed::graft_displayed_text_tree;
 use holon_integration_tests::test_environment::TestEnvironment;
-
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
@@ -177,8 +174,3 @@ fn the_tab_strip_draws_an_open_tab_without_being_prodded() {
     std::mem::forget(app);
     std::mem::forget(env);
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-#[path = "test_init/mod.rs"]
-mod test_init;

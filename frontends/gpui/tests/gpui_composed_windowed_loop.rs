@@ -34,19 +34,18 @@ use holon_integration_tests::pbt::transitions::E2ETransition;
 use holon_integration_tests::pbt::transitions::NavigateFocus;
 use holon_integration_tests::pbt::transitions::ToggleState;
 use holon_pbt_core::types::CycleTarget;
+use pbt_harness::capture::FrameSink;
+use pbt_harness::panic_message;
+use pbt_harness::windowed_wide::LivePanels;
+use pbt_harness::windowed_wide::with_windowed_wide_sut;
+use pbt_harness::windowed_wide::with_windowed_wide_sut_live;
 use proptest::test_runner::Config;
 use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 
-#[path = "pbt_harness/mod.rs"]
-mod pbt_harness;
-use pbt_harness::capture::FrameSink;
-use pbt_harness::panic_message;
-use pbt_harness::windowed_wide::LivePanels;
-use pbt_harness::windowed_wide::with_windowed_wide_sut;
-use pbt_harness::windowed_wide::with_windowed_wide_sut_live;
+use crate::pbt_harness;
 
 #[test]
 fn benchmark_windowed_per_case_boot_cost() {
@@ -323,7 +322,3 @@ fn focused_task_block_shows_its_keyword_surface() {
         panic!("[keyword-surface-pin] windowed divergence:\n{msg}");
     }
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

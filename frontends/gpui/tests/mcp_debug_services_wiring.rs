@@ -72,7 +72,3 @@ fn booting_the_gpui_module_gives_the_mcp_tools_the_vault_root() {
             .expect("the session shuts down");
     });
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

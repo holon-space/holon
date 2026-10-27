@@ -16,10 +16,7 @@
 //! and observe the post-scroll items in `BoundsRegistry` keyed by their
 //! `entity_id`?
 //!
-//! Run: `cargo test -p holon-gpui --test panel_scroll_spike`
-
-#[path = "support/mod.rs"]
-mod support;
+//! Run: `cargo test -p holon-gpui --test main panel_scroll_spike::`
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,6 +33,8 @@ use holon_frontend::reactive_view_model::CollectionVariant;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_gpui::geometry::BoundsRegistry;
 use support::ReactiveFixtureView;
+
+use crate::support;
 
 const ITEM_COUNT: usize = 50;
 const TARGET_IX: usize = 45;
@@ -505,7 +504,3 @@ fn main_panel_collection_view_paints_nonzero_height_in_column(cx: &mut TestAppCo
         first.height
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;

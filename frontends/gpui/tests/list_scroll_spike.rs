@@ -10,7 +10,7 @@
 //! `entity_id` in `BoundsRegistry` after the next paint? If yes, the rest
 //! of the migration is mechanical.
 //!
-//! Run: `cargo test -p holon-gpui --test list_scroll_spike`
+//! Run: `cargo test -p holon-gpui --test main list_scroll_spike::`
 
 use gpui::Context;
 use gpui::IntoElement;
@@ -187,7 +187,3 @@ fn bounds_for_item_returns_some_after_scroll(cx: &mut TestAppContext) {
         state_handle.logical_scroll_top()
     );
 }
-
-// Installs the windowed capturing tracing subscriber before this binary's
-// first line of test code (see tests/test_init/mod.rs).
-mod test_init;
