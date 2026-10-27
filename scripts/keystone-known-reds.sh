@@ -305,7 +305,10 @@ for log in "$@"; do
     awk '
         function thread_of(line,    t) {
             sub(/^ +/, "", line)
-            if (index(line, "thread " q) != 1) return ""
+            # A stdout line written between `thread '"'"'` and the name leaves
+            # the name at the start of the next line.
+            if (index(line, "thread " q) != 1)
+                return match(line, /^[^ '"'"']+'"'"' (\([0-9]+\) )?panicked at /) ? substr(line, 1, index(line, q) - 1) : ""
             t = substr(line, 9)
             return substr(t, 1, index(t, q) - 1)
         }

@@ -265,6 +265,34 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 EOF
 expect_outcome should-panic-other-binary 1 '^PRIMARY: \[novel\] .*REAL PRODUCT BUG: the refusal was never raised$' \
     "$work/should-panic-other-binary.log"
+# Stdout can land between `thread '` and the thread name of a panic header,
+# leaving the name at the start of the next line. The panic is still that
+# test's: expected when it reports `- should panic ... ok`, else a failure.
+split_header_log() {
+    cat <<EOF
+     Running tests/hand_authored_regressions.rs (target/debug/deps/h-0000000000000001)
+
+running 3 tests
+
+thread 'test recorded_env_flag_mismatch_is_reported ... ok
+$1' (2) panicked at crates/holon-integration-tests/src/pbt/hand_authored.rs:255:9:
+hand-authored regression "<inline>":1: unknown top-level key "initail_state"
+test $1 $2
+thread 'hand_authored_keystone_regressions' (3) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  field deltas (1):\n    block:a: content: sut=\"x\" ref=\"y\"\n")]
+test hand_authored_keystone_regressions ... FAILED
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+EOF
+}
+split_header_log mistyped_initial_state_key_is_loud '- should panic ... ok' >"$work/should-panic-split-header.log"
+expect_outcome should-panic-split-header 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/should-panic-split-header.log"
+split_header_log mistyped_initial_state_key_is_loud '- should panic ... FAILED' >"$work/should-panic-split-header-failed.log"
+expect_outcome should-panic-split-header-failed 1 '^PRIMARY: \[novel\] .*unknown top-level key "initail_state"$' \
+    "$work/should-panic-split-header-failed.log"
+split_header_log mistyped_initial_state_key_is_loud '... FAILED' >"$work/split-header-plain-failed.log"
+expect_outcome split-header-plain-failed 1 '^PRIMARY: \[novel\] .*unknown top-level key "initail_state"$' \
+    "$work/split-header-plain-failed.log"
 # nextest status lines, in the shapes nextest-runner's reporter prints them
 # (reporter/displayer/imp.rs `status_str` / `short_status_str`). A test killed
 # or leaking after a passing body printed no panic, so the status line is its
