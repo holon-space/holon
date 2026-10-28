@@ -446,11 +446,15 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-entity-not-in-bounds-under-load`
 - `windowed-focus-not-in-bounds-under-load`
 - `windowed-keyword-surface-stale-done-text`
+- `windowed-live-promotion-undo-pre-warm-flake`
 - `windowed-nested-page-no-chevron-under-load`
+- `windowed-overlay-sidebar-page-tap-dismiss-pre-warm-flake`
+- `windowed-overlay-sidebar-page-tap-navigate-pre-warm-flake`
 - `windowed-previous-run-toast-box-under-load`
 - `windowed-reboot-misses-observability-caps`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
+- `windowed-undo-blur-typed-suffix-pre-warm-flake`
 - `writeback-churning-file-stall-disclosed-twice`
 - `writeorgfile-sql-reads-budget`
 
