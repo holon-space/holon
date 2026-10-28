@@ -385,6 +385,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `iroh-nat-traversal-address-set`
 - `iroh-pairing-refusal-reads-as-io-failure`
 - `iroh-proptest-fork-child-wrapper`
+- `iroh-proptest-fork-parent-aborted-before-first-case-load`
 - `iroh-proptest-fork-parent-wrapper`
 - `join-then-stale-second-join`
 - `journal-feed-main-panel-still-loading`
@@ -417,6 +418,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `slo-probe-arm-refusal-caught-panic`
 - `slot-withdrawn-last-claim-no-retraction`
 - `split-doc-root-setup-org-sync-under-load`
+- `state-toggle-live-row-never-settled-load`
 - `task-state-clear-lost-across-cut-paste`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
