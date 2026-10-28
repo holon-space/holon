@@ -611,4 +611,109 @@ mod tests {
             "the document is unsettled, so the net reconciles the deletion"
         );
     }
+
+    /// 322/E3.c: a withheld fact is never lost. The agent writes the file
+    /// while `CatchUpWrite` runs, so the ingest runs beside it: each leg's
+    /// fact loses its compare-and-set to the row the other leg moved, and
+    /// the level-triggered `Behind` fires `CatchUp` again until the file and
+    /// the store hold the agent's text.
+    #[test]
+    fn a_withheld_fact_re_fires_catch_up_until_the_agent_text_settles() {
+        let mut exec = seeded();
+        let doc = Subject::new(DOC);
+        let withheld = |exec: &Net, req: &EffectRequest| {
+            let settled = exec
+                .settled(&req.occurrence)
+                .expect("the occurrence is known");
+            let Some(Settled::OverChangedInputs { routes, .. }) = &settled else {
+                panic!(
+                    "{} settled without a withheld fact: {settled:?}",
+                    req.transition
+                );
+            };
+            routes
+                .iter()
+                .filter(|r| r.route == Route::Withheld)
+                .map(|r| r.place.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        exec.write(AUTHORITY, DOC, content([("hash", "a2")]));
+        let write = one(&mut exec, 0);
+        assert_eq!(&*write[0].transition, CATCH_UP_WRITE);
+        exec.write(DISK_CHANGED, DOC, Content::new());
+        let read = one(&mut exec, 1);
+        assert_eq!(&*read[0].transition, READ_DISK);
+        exec.complete(
+            read[0].attempt,
+            EffectResult::Done(vec![output(ON_DISK, &doc, [("hash", "agent")])]),
+            Duration::from_millis(2),
+        )
+        .unwrap();
+        let ingest = one(&mut exec, 3);
+        assert_eq!(&*ingest[0].transition, CATCH_UP_INGEST);
+
+        exec.complete(
+            write[0].attempt,
+            EffectResult::Done(vec![
+                output(BASE, &doc, [("hash", "h2"), ("authority", "a2")]),
+                output(ON_DISK, &doc, [("hash", "h2")]),
+            ]),
+            Duration::from_millis(4),
+        )
+        .unwrap();
+        assert_eq!(withheld(&exec, &write[0]), vec![ON_DISK.to_string()]);
+        exec.complete(
+            ingest[0].attempt,
+            EffectResult::Done(vec![
+                output(BASE, &doc, [("hash", "agent"), ("authority", INGESTED)]),
+                output(ON_DISK, &doc, [("hash", "agent")]),
+            ]),
+            Duration::from_millis(5),
+        )
+        .unwrap();
+        assert_eq!(withheld(&exec, &ingest[0]), vec![BASE.to_string()]);
+        assert_eq!(
+            token_field(&exec, ON_DISK, DOC, "hash").as_deref(),
+            Some("agent"),
+            "the agent's file content survives the write-back's fact"
+        );
+
+        let refire = one(&mut exec, 6);
+        assert_eq!(
+            refire.iter().map(|r| &*r.transition).collect::<Vec<_>>(),
+            vec![CATCH_UP_INGEST],
+            "the withheld base fact leaves the file Behind, so CatchUp fires again"
+        );
+        exec.complete(
+            refire[0].attempt,
+            EffectResult::Done(vec![
+                output(BASE, &doc, [("hash", "agent"), ("authority", INGESTED)]),
+                output(ON_DISK, &doc, [("hash", "agent")]),
+            ]),
+            Duration::from_millis(7),
+        )
+        .unwrap();
+        exec.write(AUTHORITY, DOC, content([("hash", "a3")]));
+        let confirm = one(&mut exec, 8);
+        assert_eq!(&*confirm[0].transition, CATCH_UP_WRITE);
+        exec.complete(
+            confirm[0].attempt,
+            EffectResult::Done(vec![
+                output(BASE, &doc, [("hash", "agent"), ("authority", "a3")]),
+                output(ON_DISK, &doc, [("hash", "agent")]),
+            ]),
+            Duration::from_millis(9),
+        )
+        .unwrap();
+
+        assert!(one(&mut exec, 10).is_empty());
+        assert!(unsettled(&exec).is_empty(), "the document is settled");
+        assert!(!is_behind(&exec, DOC));
+        assert_eq!(
+            token_field(&exec, BASE, DOC, "hash").as_deref(),
+            Some("agent"),
+            "the base holds the agent's text"
+        );
+    }
 }
