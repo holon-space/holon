@@ -32,11 +32,11 @@ PROFILE_ORDER = ("load-tolerant", "default")
 MARGINS = {
     "pbt::composed::wide_e2e::tests::sqlonly_typing_share_meets_its_floor_beside_the_loro_control":
         (585, "584 s at load 20-85 and 497 s at load 51-180, 2026-10-27"),
-    "dogfood_recorded_replay::recorded_features_replay_over_the_composed_sut":
+    "catalog_suite::dogfood_recorded_replay::recorded_features_replay_over_the_composed_sut":
         (500, "485-500 s reported standalone 2026-10-17; 131 s at load 20-27 and 204 s at load 61-205, 2026-10-27"),
-    "logseq_parity_replay::logseq_parity_corpus_replay":
+    "catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay":
         (319, "319 s reported standalone 2026-10-17; it reds before its last scenario on 2026-10-27"),
-    "the_default_layout_seed_does_not_wait_for_the_recipe_backlog":
+    "cook_vault_ingest::the_default_layout_seed_does_not_wait_for_the_recipe_backlog":
         (169, "122 s at load 16-24 and 169 s at load 45-78, 2026-10-27"),
 }
 

@@ -7,12 +7,12 @@ slow-timeout = { period = "30s", terminate-after = 4 }   # 2 min hard cap
 # Each of these needs its own recipe: `just latency-slo-gate` runs the SLO
 # rungs serially on a quiet host, `just hand-authored` sets the skip list and
 # the perf budget. Run them through nextest with `--ignore-default-filter`.
-default-filter = "not (binary(latency_slo_gate) | binary(hand_authored_regressions))"
+default-filter = "not ((binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/)) | (binary_id(holon-integration-tests::integration) & test(/^hand_authored_regressions::/)))"
 
 # E2E / property-based tests legitimately run long. Match by binary name, or
 # by module inside a crate's one test binary, so non-PBT tests stay capped at 2 min.
 [[profile.default.overrides]]
-filter = "binary(general_e2e_composed_pbt) + (binary_id(holon-orgmode::main) & (test(/^round_trip_pbt::/) + test(/^sync_controller_mutation_pbt::/))) + (binary_id(holon::main) & (test(/^petri_e2e_pbt::/) + test(/^sync_suite::/)))"
+filter = "(binary_id(holon-integration-tests::integration) & test(/^general_e2e_composed_pbt::/)) + (binary_id(holon-orgmode::main) & (test(/^round_trip_pbt::/) + test(/^sync_controller_mutation_pbt::/))) + (binary_id(holon::main) & (test(/^petri_e2e_pbt::/) + test(/^sync_suite::/)))"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 
 # The windowed composed loop boots a composed SUT per case in a real GPUI window:
@@ -26,7 +26,7 @@ slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 # full_headless session and wait for each patch to read back: ~1-2s per case,
 # 40 table rows and 64 generated cases, minutes in all.
 [[profile.default.overrides]]
-filter = "binary(dense_patch_engine_exact)"
+filter = "binary_id(holon-integration-tests::integration) & test(/^dense_patch_engine_exact::/)"
 slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 
 # The two-instance slice boots TWO full_headless sessions per case (~7s of boot
@@ -34,7 +34,7 @@ slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 # top. At 24 cases that is minutes, not seconds; the 2 min default killed it
 # mid-run, which reads as "the peers diverge" and means the opposite.
 [[profile.default.overrides]]
-filter = "binary(two_instance_composed_pbt)"
+filter = "binary_id(holon-integration-tests::integration) & test(/^two_instance_composed_pbt::/)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 
 # The typing-share floor steps its draws on the reference under two cap sets.
@@ -61,19 +61,19 @@ slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 # timeout there reads as "a parity expectation broke", which is the opposite of
 # what it means. The cap is twice its standalone time (scripts/check-timeout-margins.py).
 [[profile.default.overrides]]
-filter = "binary_id(holon-integration-tests::catalog_suite) & test(=logseq_parity_replay::logseq_parity_corpus_replay)"
+filter = "binary_id(holon-integration-tests::integration) & test(=catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay)"
 slow-timeout = { period = "60s", terminate-after = 11 }  # 11 min hard cap
 
 # The dogfood-recorded replay boots one composed SUT per recorded scenario the
 # same way. The cap is twice its standalone time (scripts/check-timeout-margins.py).
 [[profile.default.overrides]]
-filter = "binary_id(holon-integration-tests::catalog_suite) & test(=dogfood_recorded_replay::recorded_features_replay_over_the_composed_sut)"
+filter = "binary_id(holon-integration-tests::integration) & test(=catalog_suite::dogfood_recorded_replay::recorded_features_replay_over_the_composed_sut)"
 slow-timeout = { period = "60s", terminate-after = 17 }  # 17 min hard cap
 
 # Boots a vault with 500 recipes and waits for the whole backlog to ingest.
 # The cap is twice its standalone time (scripts/check-timeout-margins.py).
 [[profile.default.overrides]]
-filter = "binary_id(holon-integration-tests::cook_vault_ingest) & test(=the_default_layout_seed_does_not_wait_for_the_recipe_backlog)"
+filter = "binary_id(holon-integration-tests::integration) & test(=cook_vault_ingest::the_default_layout_seed_does_not_wait_for_the_recipe_backlog)"
 slow-timeout = { period = "60s", terminate-after = 6 }  # 6 min hard cap
 
 # The two LogSeq-DB bisects walk N = 1..24 comparing Holon's writer against
@@ -97,9 +97,9 @@ slow-timeout = { period = "60s", terminate-after = 5 }  # 5 min hard cap
 # Two of the latency gate's tests each drive the 600-write drain test on 600
 # freshly created blocks: minutes per test, which the 2 min default cuts off as
 # a TIMEOUT that reads like a slow pipeline. `just latency-slo-gate` runs this
-# binary serially under this override and is the recipe that judges the tree.
+# module serially under this override and is the recipe that judges the tree.
 [[profile.default.overrides]]
-filter = "binary(latency_slo_gate)"
+filter = "binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 
 # The 1500-pipeline drain soundness sweep takes ~27s idle and >120s on a loaded host.
@@ -122,7 +122,7 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 # The full hand-authored replay is 119 cases, each booting a composed SUT:
 # 637 s to 1951 s measured 2026-09-29/30 under `cargo test` on loaded hosts.
 [[profile.default.overrides]]
-filter = "binary(hand_authored_regressions)"
+filter = "binary_id(holon-integration-tests::integration) & test(/^hand_authored_regressions::/)"
 slow-timeout = { period = "60s", terminate-after = 49 }  # 49 min hard cap
 
 
@@ -148,7 +148,7 @@ windowed = { max-threads = 4 }
 cost-sensitive = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = "(binary(latency_slo_gate)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)) + (test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)) + (package(holon-rows) & test(=a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work)) + (package(holon-loro) & test(=loro_sync_controller::boot_gate_tests::dropped_gate_is_observed_before_the_watchdog)) + (package(holon-loro) & test(=loro_share_backend::tests::settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer)) + (package(holon) & test(=api::backend_engine::tests::deriving_the_net_is_cheap_enough_for_the_tick_path)) + (package(holon) & test(=block_live_data_catch_up::wakes_when_blocks_arrive_via_cdc)) + (package(holon) & test(=watch_context_membership_leak::a_failed_watch_setup_leaves_no_membership_row)) + (package(holon-app) & test(=integration_set_field_op::dispatching_begin_oauth_returns_before_the_flow_finishes)) + (package(holon-app) & test(=quick_open_search_at_vault_scale::quick_open_search_at_vault_scale)) + (package(holon-loro) & test(=stable_id_index_create_cost::a_create_costs_the_same_in_a_large_tree_as_in_a_small_one)) + (package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)) + (package(holon-mcp) & test(=describe_ui_deferred::fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)) + (package(holon-mcp-client) & test(=oauth_bootstrap_flow::a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout))"
+filter = "(binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)) + (test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)) + (package(holon-rows) & test(=a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work)) + (package(holon-loro) & test(=loro_sync_controller::boot_gate_tests::dropped_gate_is_observed_before_the_watchdog)) + (package(holon-loro) & test(=loro_share_backend::tests::settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer)) + (package(holon) & test(=api::backend_engine::tests::deriving_the_net_is_cheap_enough_for_the_tick_path)) + (package(holon) & test(=block_live_data_catch_up::wakes_when_blocks_arrive_via_cdc)) + (package(holon) & test(=watch_context_membership_leak::a_failed_watch_setup_leaves_no_membership_row)) + (package(holon-app) & test(=integration_set_field_op::dispatching_begin_oauth_returns_before_the_flow_finishes)) + (package(holon-app) & test(=quick_open_search_at_vault_scale::quick_open_search_at_vault_scale)) + (package(holon-loro) & test(=stable_id_index_create_cost::a_create_costs_the_same_in_a_large_tree_as_in_a_small_one)) + (package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)) + (package(holon-mcp) & test(=describe_ui_deferred::fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)) + (package(holon-mcp-client) & test(=oauth_bootstrap_flow::a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout))"
 test-group = "timing-critical"
 
 [[profile.default.overrides]]
@@ -156,7 +156,7 @@ filter = "(package(holon-gpui))"
 test-group = "windowed"
 
 [[profile.default.overrides]]
-filter = "(binary(/_cost/) + (kind(test) & test(/^[a-z0-9_]+_cost::/))) + (binary(latency_scale_gate)) + (binary(projector_lag_lock) + binary(/_under_lag$/)) + (binary_id(holon-integration-tests::loro_suite) & test(/^loro_block_type_invalid_values::/))"
+filter = "(binary(/_cost/) + (kind(test) & test(/^[a-z0-9_]*_cost[a-z0-9_]*::/))) + (binary_id(holon-integration-tests::integration) & test(/^latency_scale_gate::/)) + (binary_id(holon-integration-tests::integration) & (test(/^projector_lag_lock::/) + test(/^[a-z0-9_]+_under_lag::/))) + (binary_id(holon-integration-tests::integration) & test(/^loro_suite::loro_block_type_invalid_values::/))"
 test-group = "cost-sensitive"
 
 # The quiet-hold step runs this profile, plus the `own-recipe` rows'
@@ -171,7 +171,7 @@ default-filter = "(test(=turso_storage_repros::tabs_main_panel_delivery::cursor_
 # term would silently start running the 119-case hand-authored replay
 # inside the wide sweep, without its skip list.
 [profile.load-tolerant]
-default-filter = "not ((binary(latency_slo_gate)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)) + (test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)) + (package(holon-rows) & test(=a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work)) + (package(holon-loro) & test(=loro_sync_controller::boot_gate_tests::dropped_gate_is_observed_before_the_watchdog)) + (package(holon-loro) & test(=loro_share_backend::tests::settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer)) + (package(holon) & test(=api::backend_engine::tests::deriving_the_net_is_cheap_enough_for_the_tick_path)) + (package(holon) & test(=block_live_data_catch_up::wakes_when_blocks_arrive_via_cdc)) + (package(holon) & test(=watch_context_membership_leak::a_failed_watch_setup_leaves_no_membership_row)) + (package(holon-app) & test(=integration_set_field_op::dispatching_begin_oauth_returns_before_the_flow_finishes)) + (package(holon-app) & test(=quick_open_search_at_vault_scale::quick_open_search_at_vault_scale)) + (package(holon-loro) & test(=stable_id_index_create_cost::a_create_costs_the_same_in_a_large_tree_as_in_a_small_one)) + (package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)) + (package(holon-mcp) & test(=describe_ui_deferred::fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)) + (package(holon-mcp-client) & test(=oauth_bootstrap_flow::a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout))) & not (binary(latency_slo_gate) | binary(hand_authored_regressions) | package(holon-gpui) | binary(general_e2e_composed_pbt))"
+default-filter = "not ((binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)) + (binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)) + (test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)) + (package(holon-rows) & test(=a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work)) + (package(holon-loro) & test(=loro_sync_controller::boot_gate_tests::dropped_gate_is_observed_before_the_watchdog)) + (package(holon-loro) & test(=loro_share_backend::tests::settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer)) + (package(holon) & test(=api::backend_engine::tests::deriving_the_net_is_cheap_enough_for_the_tick_path)) + (package(holon) & test(=block_live_data_catch_up::wakes_when_blocks_arrive_via_cdc)) + (package(holon) & test(=watch_context_membership_leak::a_failed_watch_setup_leaves_no_membership_row)) + (package(holon-app) & test(=integration_set_field_op::dispatching_begin_oauth_returns_before_the_flow_finishes)) + (package(holon-app) & test(=quick_open_search_at_vault_scale::quick_open_search_at_vault_scale)) + (package(holon-loro) & test(=stable_id_index_create_cost::a_create_costs_the_same_in_a_large_tree_as_in_a_small_one)) + (package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)) + (package(holon-mcp) & test(=describe_ui_deferred::fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)) + (package(holon-mcp-client) & test(=oauth_bootstrap_flow::a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout))) & not (binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/) | binary_id(holon-integration-tests::integration) & test(/^hand_authored_regressions::/) | package(holon-gpui) | binary_id(holon-integration-tests::integration) & test(/^general_e2e_composed_pbt::/))"
 
 [profile.load-tolerant.junit]
 # Per-test durations feed the p95 the caps are derived from.
@@ -180,12 +180,12 @@ path = "junit.xml"
 [[profile.load-tolerant.overrides]]
 # 6 completed runs, load 4.8-8.6, 2026-10-19.
 # cap = 4 x p95_low 121s, within the 8x clamp.
-filter = "test(=split_block_stale_display_regression::split_block_stale_viewmodel_display_regression)"
+filter = "test(=frontend_suite::split_block_stale_display_regression::split_block_stale_viewmodel_display_regression)"
 slow-timeout = { period = "60s", terminate-after = 9 }
 
 [[profile.load-tolerant.overrides]]
 # 6 completed runs, load 5.5-9.9, 2026-10-19.
 # cap = 4 x p95_low 108s, within the 8x clamp.
-filter = "test(=convert_block_to_page_survives_a_lagging_projection)"
+filter = "test(=projector_lag_lock::convert_block_to_page_survives_a_lagging_projection)"
 slow-timeout = { period = "60s", terminate-after = 8 }
 # END generated by scripts/timing-split.py

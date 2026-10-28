@@ -41,7 +41,7 @@ use loro::Frontiers;
 use loro::TreeID;
 use tokio::sync::RwLock;
 
-use crate::projection_harness::MemorySink;
+use super::projection_harness::MemorySink;
 
 const WRITES: usize = 80;
 const DEADLINE: Duration = Duration::from_secs(30);

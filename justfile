@@ -152,7 +152,7 @@ pbt name='general' cases='64' *FLAGS:
     case "{{name}}" in
         general)
             PROPTEST_CASES={{cases}} cargo test \
-                {{CANON}} --test general_e2e_composed_pbt \
+                {{CANON}} --test integration general_e2e_composed_pbt:: \
                 -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-general.log
             ;;
         petri)
@@ -203,7 +203,7 @@ keystone-smoke:
     just pbt general 1
     L=target/gate-logs/keystone-smoke-shape.log
     HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1} HOLON_HAND_AUTHORED_CASE=shape-gate-refuses-then-admits-in-one-case \
-        cargo test {{CANON}} --test hand_authored_regressions hand_authored_keystone_regressions \
+        cargo test {{CANON}} --test integration hand_authored_regressions::hand_authored_keystone_regressions \
         -- --nocapture 2>&1 | tee "$L"
     grep -qE '^\[shape reach\] tagged-subtree edits admitted=[1-9][0-9]* refused=[1-9][0-9]* simulator comparisons=[1-9]' "$L" || {
         echo "FAIL: the shape case did not reach both shape invariants (see $L)."
@@ -221,7 +221,7 @@ loro-suite:
     mkdir -p target/gate-logs
     L=target/gate-logs/loro-suite.log
     cargo nextest run {{CANON}} \
-        --test loro_suite --no-fail-fast 2>&1 | tee "$L"
+        --test integration -E 'test(/^loro_suite::/)' --no-fail-fast 2>&1 | tee "$L"
     grep -qE 'Summary \[.*\b[1-9][0-9]* tests run' "$L" \
         || { echo "loro-suite: ran 0 tests — the filter or target is wrong"; exit 1; }
 
@@ -297,19 +297,19 @@ hand-authored *FLAGS:
     # A caller that picks the cases, the sidecar or the test flags gets one process.
     if [ -n "${HOLON_HAND_AUTHORED_CASE-}${HOLON_HAND_AUTHORED_SIDECAR-}" ] || [ -n "{{FLAGS}}" ]; then
         cargo test \
-            {{CANON}} --test hand_authored_regressions \
+            {{CANON}} --test integration hand_authored_regressions:: \
             -- --nocapture {{FLAGS}} 2>&1 | tee -a "$L"
     else
-        cargo test {{CANON}} --test hand_authored_regressions --no-run 2>&1 | tee -a "$L"
-        # Four processes, cases dealt round-robin. Shard 0 also runs the binary's
+        cargo test {{CANON}} --test integration --no-run 2>&1 | tee -a "$L"
+        # Four processes, cases dealt round-robin. Shard 0 also runs the module's
         # other tests; the rest run only the replay.
         shards=$(/usr/bin/python3 -c 'import json, sys; names = [json.loads(l)["name"] for l in open(sys.argv[1]) if l.strip() and not l.lstrip().startswith("#")]; print("\n".join(",".join(names[k::4]) for k in range(4)))' \
             crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl)
         pids=() k=0
         while IFS= read -r cases; do
-            filter=(); [ "$k" = 0 ] || filter=(--exact hand_authored_keystone_regressions)
+            filter=(hand_authored_regressions::); [ "$k" = 0 ] || filter=(--exact hand_authored_regressions::hand_authored_keystone_regressions)
             HOLON_HAND_AUTHORED_CASE=$cases cargo test \
-                {{CANON}} --test hand_authored_regressions \
+                {{CANON}} --test integration \
                 -- --nocapture "${filter[@]}" > "target/gate-logs/pbt-hand-authored-shard-$k.log" 2>&1 &
             pids+=($!) k=$((k+1))
         done <<< "$shards"
@@ -336,11 +336,11 @@ hand-authored *FLAGS:
 # 2026-09-19-convert-block-to-page-move-races-loro-sql-projection), the net
 # gate locating the page that compound just minted, `instantiate_template`
 # reading its definition, and a keystroke reading the task keyword the previous
-# keystroke cleared. Each is its own test BINARY
+# keystroke cleared. Each runs in its own test PROCESS
 # because the lag is a process-global env var the projector reads on every pass
 # — see the module docs in tests/projector_lag_lock.rs.
 #
-# Each binary holds exactly ONE test, so the count is the gate: anything other
+# Each module holds exactly ONE test, so the count is the gate: anything other
 # than `1 passed` is a FAILURE — a filtered or partial run reports `0 passed`
 # with exit 0 and would otherwise prove nothing.
 projector-lag-lock:
@@ -349,11 +349,11 @@ projector-lag-lock:
     # recipe's status is `tee`'s and a failing test exits 0.
     set -euo pipefail
     mkdir -p target/gate-logs
-    for BIN in projector_lag_lock template_instantiation_under_lag move_guard_under_lag task_keyword_under_lag focus_on_new_block_under_lag structural_burst_under_lag remote_list_under_lag; do
-        LOG=target/gate-logs/projector-lag-lock-$BIN.log
-        cargo test {{CANON}} --test "$BIN" -- --nocapture 2>&1 | tee "$LOG"
+    for MOD in projector_lag_lock template_instantiation_under_lag move_guard_under_lag task_keyword_under_lag focus_on_new_block_under_lag structural_burst_under_lag remote_list_under_lag; do
+        LOG=target/gate-logs/projector-lag-lock-$MOD.log
+        cargo test {{CANON}} --test integration "$MOD::" -- --nocapture 2>&1 | tee "$LOG"
         grep -qE '^test result: ok\. 1 passed' "$LOG" || {
-            echo "FAIL: $BIN did not report 'test result: ok. 1 passed'."
+            echo "FAIL: $MOD did not report 'test result: ok. 1 passed'."
             echo "A zero-test or filtered run is a FAILURE, not a pass — the lock proves nothing."
             grep -E '^test result:' "$LOG" || echo "(no 'test result:' line at all)"
             exit 1
@@ -442,7 +442,7 @@ keystone-scale size='25000' cases='1' settle_ms='900000' per_doc='200' *FLAGS:
         HOLON_SOAK_BLOCKS_PER_DOC={{per_doc}} HOLON_PBT_FORCE_FULL=1 \
         RUST_LOG="holon_latency=debug" \
         PROPTEST_CASES={{cases}} cargo test \
-        {{CANON}} --test general_e2e_composed_pbt \
+        {{CANON}} --test integration general_e2e_composed_pbt:: \
         -- --nocapture {{FLAGS}} 2>&1 | tee "$log"
 
 # The ONE keystone driven over the LIVE MCP surface (LiveMcpE2E composition,
@@ -466,8 +466,8 @@ keystone-mcp port='8710' cases='8' weights='':
     fi
     HOLON_PBT_LIVE_MCP=1 MCP_SERVER_PORT={{port}} PROPTEST_CASES={{cases}} \
         HOLON_PBT_WEIGHTS="{{weights}}" cargo test \
-        {{CANON}} --test general_e2e_composed_pbt \
-        general_e2e_composed_pbt_live_mcp \
+        {{CANON}} --test integration \
+        general_e2e_composed_pbt::general_e2e_composed_pbt_live_mcp \
         -- --nocapture 2>&1 | tee target/gate-logs/pbt-keystone-mcp.log
 
 # Launch the app for live MCP-driven verification: throwaway config+vault, own
@@ -512,7 +512,7 @@ pbt-extended-gen cases='64' *FLAGS:
     set -euo pipefail
     mkdir -p target/gate-logs
     PROPTEST_CASES={{cases}} HOLON_PBT_EXTENDED_GEN=1 cargo test \
-        {{CANON}} --test general_e2e_composed_pbt \
+        {{CANON}} --test integration general_e2e_composed_pbt:: \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-extended-gen.log
 
 # Layout-override sweep — the ONE keystone with the index.org override arms (prql/gql/sql
@@ -526,7 +526,7 @@ pbt-layout-override cases='64' *FLAGS:
     set -euo pipefail
     mkdir -p target/gate-logs
     PROPTEST_CASES={{cases}} HOLON_PBT_LAYOUT_OVERRIDE=1 cargo test \
-        {{CANON}} --test general_e2e_composed_pbt \
+        {{CANON}} --test integration general_e2e_composed_pbt:: \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-layout-override.log
 
 # Measure end-to-end UI action latency (indent / outdent / cycle-state / split / ...).
@@ -541,7 +541,7 @@ measure-latency cases='16' *FLAGS:
     mkdir -p target/gate-logs
     RUST_LOG="holon_latency=debug" PROPTEST_CASES={{cases}} \
         cargo test {{CANON}} \
-        --test general_e2e_composed_pbt -- --nocapture {{FLAGS}} \
+        --test integration general_e2e_composed_pbt:: -- --nocapture {{FLAGS}} \
         > target/gate-logs/holon-latency.log 2>&1 || true
     echo "raw log: target/gate-logs/holon-latency.log ($(grep -c holon_latency target/gate-logs/holon-latency.log || true) events)"
     python3 scripts/measure_latency.py target/gate-logs/holon-latency.log --max-contention-ms 30
@@ -622,7 +622,7 @@ latency-gate ceilings='docs/Testing/latency-ceilings.txt':
     RUST_LOG="holon_latency=debug" \
         HOLON_HAND_AUTHORED_SIDECAR="hand-authored-regressions/latency-ratchet.jsonl" \
         cargo test {{CANON}} \
-        --test hand_authored_regressions -- --nocapture > "$log" 2>&1 || status=$?
+        --test integration hand_authored_regressions:: -- --nocapture > "$log" 2>&1 || status=$?
     [ "$status" -eq 0 ] || echo "latency-gate: NOTE — replay exited $status; latency data below is still judged (see $log)"
     # Floor of 18: every rung is driven >= 20 times by construction, so a count
     # below this means the replay lost transitions, not that the workload is
@@ -728,7 +728,7 @@ latency-scale-gate size='1600' per_doc='50' settle_ms='180000' max_load='32' cei
         HOLON_SOAK_SHAPE=wide HOLON_SOAK_SETTLE_MS={{settle_ms}} \
         RUST_LOG="holon_latency=debug" \
         cargo test {{CANON}} \
-        --test latency_scale_gate -- --nocapture > "$log" 2>&1 || status=$?
+        --test integration latency_scale_gate:: -- --nocapture > "$log" 2>&1 || status=$?
     [ "$status" -eq 0 ] || echo "latency-scale-gate: NOTE — replay exited $status; latency data below is still judged (see $log)"
     # The SUT's own live block count, asserted at boot by wide_e2e and echoed
     # here: a seed that never reached the store would otherwise let every rung
@@ -794,7 +794,7 @@ latency-slo-gate *FLAGS:
     done
     # PINNED, not defaulted: latency is this gate's subject.
     export HOLON_PBT_TIMING=enforce
-    cargo nextest run {{CANON}} --test latency_slo_gate --ignore-default-filter \
+    cargo nextest run {{CANON}} --test integration -E 'test(/^latency_slo_gate::/)' --ignore-default-filter \
         --no-capture --no-fail-fast {{FLAGS}} 2>&1 \
         | tee target/gate-logs/latency-slo-gate.log
 
@@ -810,7 +810,7 @@ atom-counts *FLAGS:
     set -euo pipefail
     mkdir -p target/gate-logs
     L=target/gate-logs/atom-counts.log
-    HOLON_ATOM_COUNTS=1 cargo test {{CANON}} --test keystone_atom_counts {{FLAGS}} \
+    HOLON_ATOM_COUNTS=1 cargo test {{CANON}} --test integration keystone_atom_counts:: {{FLAGS}} \
         -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$L"
 
 # Report what an `owning_page` walk costs each write authority on a
@@ -821,7 +821,7 @@ owning-page-cost *FLAGS:
     set -euo pipefail
     mkdir -p target/gate-logs
     L=target/gate-logs/owning-page-cost.log
-    cargo test --release {{CANON}} --test authority_owning_page_latency \
+    cargo test --release {{CANON}} --test integration authority_owning_page_latency:: \
         -- --ignored --nocapture {{FLAGS}} 2>&1 | tee "$L"
     grep -q 'test result: ok. 1 passed' "$L" \
         || { echo "owning-page-cost: the walk did not run"; exit 1; }
@@ -858,7 +858,7 @@ soak size='5000' actions='320' settle_ms='30000' per_doc='200' soften='':
         HOLON_PBT_INVARIANTS="{{soften}}" \
         RUST_LOG="holon_latency=debug" PROPTEST_CASES="$cases" \
         cargo test {{CANON}} \
-        --test general_e2e_composed_pbt -- --nocapture \
+        --test integration general_e2e_composed_pbt:: -- --nocapture \
         > "$log" 2>&1 || echo "NOTE: test exited non-zero (see $log tail) — latency data below is still valid"
     wait "$sampler" 2>/dev/null || true
     {
@@ -1343,7 +1343,8 @@ profile name='petri' cases='4' *FLAGS:
     set -euo pipefail
     filter=""
     case "{{name}}" in
-        general)  pkg="holon-integration-tests"; test="general_e2e_composed_pbt"; feat="--features pbt" ;;
+        general)  pkg="holon-integration-tests"; test="integration"; feat="--features pbt"
+                  filter="general_e2e_composed_pbt::" ;;
         petri)    pkg="holon"; test="petri_e2e_pbt"; feat="" ;;
         orgmode)  pkg="holon-orgmode"; test="main"; feat=""
                   filter="round_trip_pbt:: --skip org_block_round_trip_pbt::" ;;
@@ -1360,7 +1361,8 @@ sample-pbt name='general' cases='1' duration='5':
     mkdir -p target/gate-logs
     filter=""
     case "{{name}}" in
-        general)  pkg="holon-integration-tests"; test="general_e2e_composed_pbt"; feat="--features pbt" ;;
+        general)  pkg="holon-integration-tests"; test="integration"; feat="--features pbt"
+                  filter="general_e2e_composed_pbt::" ;;
         petri)    pkg="holon"; test="petri_e2e_pbt"; feat="" ;;
         orgmode)  pkg="holon-orgmode"; test="main"; feat=""
                   filter="round_trip_pbt:: --skip org_block_round_trip_pbt::" ;;
@@ -1565,7 +1567,7 @@ prepush:
     just check-dioxus-web-wasm
     echo "== Tier 2 [4/4]: full keystone (PROPTEST_CASES=16) =="
     PROPTEST_CASES=16 cargo test \
-        {{CANON}} --test general_e2e_composed_pbt \
+        {{CANON}} --test integration general_e2e_composed_pbt:: \
         2>&1 | tee target/gate-logs/prepush-keystone.log
     echo "== Tier 2 PASS =="
 

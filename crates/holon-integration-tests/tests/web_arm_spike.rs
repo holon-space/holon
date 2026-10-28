@@ -17,7 +17,7 @@
 //! Run against a live server:
 //!   node frontends/dioxus-web/serve.mjs   # PORT=8791
 //!   cargo test -p holon-integration-tests --features web-arm \
-//!     --test web_arm_spike -- --ignored --nocapture
+//!     --test integration web_arm_spike:: -- --ignored --nocapture
 #![cfg(feature = "web-arm")]
 
 use std::sync::Arc;

@@ -293,7 +293,7 @@ malformed line, or an unknown transition variant panics with the offending
 ```
 just pbt … # (any keystone gate uses --features pbt)
 cargo test -p holon-integration-tests --features pbt \
-  --test hand_authored_regressions -- --nocapture 2>&1 | tee /tmp/hand-authored.log
+  --test integration hand_authored_regressions:: -- --nocapture 2>&1 | tee /tmp/hand-authored.log
 ```
 
 Each case prints `[hand-authored regression] running case "<name>"` before it
@@ -321,7 +321,7 @@ trees point at one out-of-tree probe file:
 ```bash
 HOLON_HAND_AUTHORED_SIDECAR=/tmp/probe.jsonl \
   cargo test -p holon-integration-tests --features pbt \
-  --test hand_authored_regressions -- --nocapture hand_authored_keystone_regressions
+  --test integration -- --nocapture hand_authored_regressions::hand_authored_keystone_regressions
 ```
 
 Note the trailing test-name filter: the sidecar driver is

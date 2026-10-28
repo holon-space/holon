@@ -133,7 +133,7 @@ jobs:
           set -o pipefail
           RUST_LOG="holon_latency=debug" \
             cargo test -p holon-integration-tests --features pbt \
-            --test general_e2e_composed_pbt -- --nocapture \
+            --test integration general_e2e_composed_pbt:: -- --nocapture \
             2>&1 | tee holon-latency.log
 
       # The contention precondition stays off here: its threshold is calibrated

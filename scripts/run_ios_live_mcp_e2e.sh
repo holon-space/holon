@@ -61,5 +61,5 @@ HOLON_PBT_LIVE_MCP=1 \
 MCP_SERVER_PORT="$MCP_PORT" \
 PROPTEST_CASES="$CASES" \
   cargo test -p holon-integration-tests \
-    --test general_e2e_composed_pbt general_e2e_composed_pbt_live_mcp \
+    --test integration general_e2e_composed_pbt::general_e2e_composed_pbt_live_mcp \
     -- --nocapture --test-threads=1 2>&1 | tee "$LOG"

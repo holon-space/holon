@@ -27,7 +27,7 @@ use holon_views::engine::ViewEngine;
 use loro::Frontiers;
 use tokio::sync::RwLock;
 
-use crate::projection_harness::MemorySink;
+use super::projection_harness::MemorySink;
 
 const MAX_PASSES: usize = 50;
 

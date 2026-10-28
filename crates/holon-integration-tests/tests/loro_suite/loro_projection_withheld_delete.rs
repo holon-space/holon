@@ -26,8 +26,8 @@ use loro::Frontiers;
 use loro::TreeID;
 use tokio::sync::RwLock;
 
-use crate::projection_harness::MemorySink;
-use crate::projection_harness::insert_root_block;
+use super::projection_harness::MemorySink;
+use super::projection_harness::insert_root_block;
 
 /// Create a live tree node and commit it WITHOUT `STABLE_ID` meta — the state a
 /// concurrent reader observes between a create's node step and its meta step,

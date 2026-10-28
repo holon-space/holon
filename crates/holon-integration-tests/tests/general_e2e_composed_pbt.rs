@@ -531,8 +531,8 @@ fn soak_reseed_reproduction() {
 /// [`crate::pbt::composed::soak_seed::SoakShape`]).
 ///
 /// **INVOCATION (RELEASE profile — wall-clock is meaningless un-optimized).**
-/// The `--test general_e2e_composed_pbt` filter is REQUIRED — without it every
-/// integration-test binary in the package release-compiles (minutes of wasted
+/// The `--test integration` filter is REQUIRED — without it every
+/// test target in the package release-compiles (minutes of wasted
 /// CPU). `pbt` is a DEFAULT feature of `holon-integration-tests`, so no
 /// `--features` flag is needed for this headless rung (`holon-gpui/pbt` is not
 /// a feature of this package and would error).
@@ -540,8 +540,8 @@ fn soak_reseed_reproduction() {
 /// ```text
 /// HOLON_SOAK_NAV=reproduce HOLON_SOAK_SHAPE=deep HOLON_SOAK_SEED_BLOCKS=1000 \
 ///   HOLON_SOAK_DEPTH=200 HOLON_SOAK_SETTLE_MS=30000 \
-///   cargo nextest run -p holon-integration-tests --test general_e2e_composed_pbt \
-///   --release --no-capture -E 'test(soak_nav_latency)' 2>&1 | tee /tmp/soak-nav.log
+///   cargo nextest run -p holon-integration-tests --test integration \
+///   --release --no-capture -E 'test(general_e2e_composed_pbt::soak_nav_latency)' 2>&1 | tee /tmp/soak-nav.log
 /// ```
 /// Demonstrate the guard going RED (SLO breach, content p95 ≈ 19s ≫ 2s): add
 /// `HOLON_SOAK_NAV_ASSERT=1` to the `deep` invocation. Post-fix regression

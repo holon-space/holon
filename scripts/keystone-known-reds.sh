@@ -193,7 +193,7 @@ check_sample() {
     # A run of the HEADLESS keystone only, read from the test runner's own
     # lines: cargo build output names the target without running it, and
     # `general_e2e_composed_pbt_windowed` discloses no sample.
-    grep -qE "^[[:space:]]*test general_e2e_composed_pbt |thread 'general_e2e_composed_pbt'|::general_e2e_composed_pbt general_e2e_composed_pbt\$" "$log" || return 0
+    grep -qE "^[[:space:]]*test general_e2e_composed_pbt::general_e2e_composed_pbt |thread 'general_e2e_composed_pbt::general_e2e_composed_pbt'|::integration general_e2e_composed_pbt::general_e2e_composed_pbt\$" "$log" || return 0
     line=$(grep_selecting -hF '[keystone-sample] cases=' "$log" | tail -1)
     if [ -z "$line" ]; then
         echo "SAMPLE: UNDISCLOSED — this keystone run printed no [keystone-sample] line, so"

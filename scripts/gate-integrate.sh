@@ -71,7 +71,7 @@ track() {
       featuremap) set -- /usr/bin/python3 scripts/featuremap.py check ;;
       keystone-smoke | hand-authored | extra-nextest) set -- "$0" "--$name" ;;
       keystone-tour) set -- env HOLON_PBT_TIMING=measure "HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}" cargo test --workspace --features "$PBT_FEATURES" \
-        --test keystone_tour -- --include-ignored --nocapture ;;
+        --test integration keystone_tour:: -- --include-ignored --nocapture ;;
       *) set -- just "$name" ;;
     esac
     rc=0; step "$n" "$name" "$@" >"$(step_file "$n" log)" 2>&1 || rc=$?
@@ -139,7 +139,7 @@ done
 [ -z "$red" ] || exit "$red"
 
 echo "== information only: org_suite (compare its reds with the known reds) =="
-cargo nextest run -p holon-integration-tests --test org_suite --no-fail-fast --features pbt,web-arm || echo "ORG_SUITE RED"
+cargo nextest run -p holon-integration-tests --test integration -E 'test(/^org_suite::/)' --no-fail-fast --features pbt,web-arm || echo "ORG_SUITE RED"
 [ -z "$extra_red" ] || exit "$extra_red"
 echo "INTEGRATE GREEN"
 echo "candidate tip: $tip"

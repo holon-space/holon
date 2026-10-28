@@ -38,8 +38,8 @@ use loro::Frontiers;
 use loro::TreeParentId;
 use tokio::sync::RwLock;
 
-use crate::projection_harness::MemorySink;
-use crate::projection_harness::insert_root_block;
+use super::projection_harness::MemorySink;
+use super::projection_harness::insert_root_block;
 
 /// Bounds the test's RUNTIME, never its verdict: how long we wait for a second
 /// pass to enter the sink before concluding it is blocked. The verdict rests on

@@ -11,11 +11,10 @@
 //! Method is Inc 1's: real work, counted, never a shape-only stand-in. The
 //! numbers come from `[cap-hop]` lines in the log, never retyped.
 //!
-//! Scale is env-gated. `capability_hop_cost` is the BINARY, so name it with
-//! `--test`:
+//! Scale is env-gated:
 //!
 //!   HOLON_ENABLEDNESS_DOCS=140 cargo nextest run -p holon-integration-tests \
-//!     --test capability_hop_cost --no-capture
+//!     --test integration -E 'test(/^capability_hop_cost::/)' --no-capture
 //!
 //! @pbt kind harness
 //! @pbt covers d156b-capability-hop-cost — the destination-capability clause at

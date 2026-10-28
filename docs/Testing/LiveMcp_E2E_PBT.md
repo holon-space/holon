@@ -80,7 +80,7 @@ HOLON_MCP_ALLOW_RESET=1 IOS_SIM_UDID=<udid> \
 # one case:
 HOLON_PBT_LIVE_MCP=1 MCP_SERVER_PORT=8521 PROPTEST_CASES=1 \
   cargo test -p holon-integration-tests --features pbt \
-  --test general_e2e_composed_pbt live_mcp -- --nocapture
+  --test integration general_e2e_composed_pbt::general_e2e_composed_pbt_live_mcp -- --nocapture
 
 # chunked long run (cold relaunch between chunks):
 HOLON_MCP_ALLOW_RESET=1 CHUNK=8 CHUNKS=2 \

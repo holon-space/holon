@@ -15,7 +15,7 @@ UDID="${IOS_SIM_UDID:-}"
 PORT="${MCP_SERVER_PORT:-8521}"
 CHUNK="${CHUNK:-8}"
 CHUNKS="${CHUNKS:-2}"
-TEST_FILTER="${TEST_FILTER:-live_mcp}"
+TEST_FILTER="${TEST_FILTER:-general_e2e_composed_pbt::general_e2e_composed_pbt_live_mcp}"
 
 if [ "$CHUNK" -gt 16 ]; then
   echo "CHUNK=$CHUNK too close to the 20-reset cap; use <=16" >&2
@@ -30,7 +30,7 @@ for i in $(seq 1 "$CHUNKS"); do
     cd "$REPO_ROOT"
     HOLON_PBT_LIVE_MCP=1 MCP_SERVER_PORT="$PORT" PROPTEST_CASES="$CHUNK" \
       cargo test -p holon-integration-tests --features pbt \
-      --test general_e2e_composed_pbt -- "$TEST_FILTER" --nocapture
+      --test integration -- "$TEST_FILTER" --nocapture
   )
 done
 echo "=== all $CHUNKS chunks green ==="

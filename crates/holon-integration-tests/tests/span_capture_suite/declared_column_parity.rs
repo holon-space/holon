@@ -28,7 +28,7 @@
 //! process-global and would otherwise suppress the signal under assertion).
 //!
 //! Run: `cargo nextest run -p holon-integration-tests --features pbt \
-//!       --test span_capture_suite declared_column_parity`
+//!       --test integration span_capture_suite::declared_column_parity`
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;

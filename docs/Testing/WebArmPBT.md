@@ -102,7 +102,7 @@ which is the sidecar D3.a rules out. Chrome launches, an incognito browser
 context gives a clean OPFS per case, and real clicks / keystrokes drive the
 app. Evidence: lane-logs/webpbt-spike-run5.txt.
 
-Measured over 30 ops (`--features web-arm --test web_arm_spike`):
+Measured over 30 ops (`--features web-arm --test integration web_arm_spike::`):
 
 | | p50 | p95 | max |
 |---|---|---|---|

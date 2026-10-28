@@ -241,7 +241,7 @@ fn editor_transitions_gate_on_any_of_loro_or_turso() {
 ///   HOLON_BISECT_CAPTURE=tests/.captures/general_e2e_pbt.captured.json \
 ///   HOLON_BISECT_CEILING=full_headless \
 ///   cargo test -p holon-integration-tests --features pbt \
-///     --test bisection_pbt bisect_capture_from_env -- --nocapture
+///     --test integration bisection_pbt::bisect_capture_from_env -- --nocapture
 #[test]
 #[ignore = "manual tool: set HOLON_BISECT_CAPTURE or HOLON_BISECT_SLICE, run with --ignored"]
 fn bisect_capture_from_env() {
@@ -322,7 +322,7 @@ fn bisect_capture_from_env() {
 ///   HOLON_BISECT_CAPTURE=tests/.captures/gpui_ui_pbt.captured.json.min.json \
 ///   HOLON_BISECT_CEILING=loro_vm_fast \
 ///     cargo test -p holon-integration-tests --features pbt \
-///     --test bisection_pbt replay_capture_verbose_from_env -- --nocapture
+///     --test integration bisection_pbt::replay_capture_verbose_from_env -- --nocapture
 /// ```
 #[test]
 #[ignore = "manual tool: set HOLON_BISECT_CAPTURE or HOLON_BISECT_SLICE, run with --ignored"]
@@ -429,7 +429,7 @@ fn replay_capture_verbose_from_env() {
 /// ```text
 ///   HOLON_BISECT_SLICE=gpui_ui_pbt HOLON_BISECT_CEILING=loro_vm_fast \
 ///     cargo test -p holon-integration-tests --features pbt \
-///     --test bisection_pbt minimize_capture_from_env -- --nocapture
+///     --test integration bisection_pbt::minimize_capture_from_env -- --nocapture
 /// ```
 #[test]
 #[ignore = "manual tool: set HOLON_BISECT_CAPTURE or HOLON_BISECT_SLICE, run with --ignored"]

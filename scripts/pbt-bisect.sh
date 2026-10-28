@@ -42,6 +42,6 @@ echo "[pbt-bisect] localizing ${slice} (ceiling=${HOLON_BISECT_CEILING:-full_hea
 # `tee` before filtering (project rule); surface only the bisect lines.
 env "${probe_env[@]}" HOLON_BISECT_SLICE="$slice" \
   cargo test -p holon-integration-tests --features pbt \
-    --test bisection_pbt bisect_capture_from_env -- --nocapture 2>&1 \
+    --test integration bisection_pbt::bisect_capture_from_env -- --nocapture 2>&1 \
   | tee "$log" \
   | grep -E '\[bisect\]'

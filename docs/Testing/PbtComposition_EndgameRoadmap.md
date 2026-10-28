@@ -346,7 +346,7 @@ on `seam_present`. Keystone stays GREEN (default, Loro+Turso, and forced-full ax
   (now hosted + green on the keystone) and `SutFixtureFs` (git/jj, negligible) unique to it; the
   parity gate (`composed_catalog_covers_e1_relocated_caps`) stays green. Repointed the canonical-PBT
   policy to the keystone: CLAUDE.md rule, `wiki/entities/holon-integration-tests.md`, TODO.md, the
-  justfile `general` recipes (`--features pbt --test general_e2e_composed_pbt`), and the
+  justfile `general` recipes (`--features pbt --test integration general_e2e_composed_pbt::`), and the
   `multi_peer.rs` doc comment. **§8.10 ledger: −2 tests − 1 regressions file, +0 scaffolding (DOWN).**
   Lingering `general_e2e_pbt` *string* refs remain only as (a) the native `PbtSuiteSpec` name and
   (b) explanatory comments — both belong to the native-runner core that the NEXT §8.10 step deletes.

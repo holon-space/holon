@@ -28,11 +28,10 @@
 //! run-to-run spread on this hardware. The assertions cover scale and
 //! non-vacuity.
 //!
-//! Scale is env-gated. `hop_step_cost` is the BINARY, so it selects nothing
-//! as a filter — name the binary with `--test`:
+//! Scale is env-gated:
 //!
 //!   HOLON_ENABLEDNESS_DOCS=140 cargo nextest run -p holon-integration-tests \
-//!     --test hop_step_cost --no-capture
+//!     --test integration -E 'test(/^hop_step_cost::/)' --no-capture
 //!
 //! @pbt kind harness
 //! @pbt covers arc-hop-step-cost — one correlated hop at vault scale

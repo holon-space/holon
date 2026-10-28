@@ -326,13 +326,13 @@ New (direct injection):
 
 ```bash
 # Fast run (direct injection, default):
-cargo test --test general_e2e_composed_pbt -- --nocapture
+cargo test --test integration general_e2e_composed_pbt:: -- --nocapture
 
 # Debug file watcher issues (old path):
-PBT_VIA_FS=1 cargo test --test general_e2e_composed_pbt -- --nocapture
+PBT_VIA_FS=1 cargo test --test integration general_e2e_composed_pbt:: -- --nocapture
 
 # Minimal run for quick feedback:
-PROPTEST_CASES=2 cargo test --test general_e2e_composed_pbt -- --nocapture
+PROPTEST_CASES=2 cargo test --test integration general_e2e_composed_pbt:: -- --nocapture
 ```
 
 ## Chrome Trace Profiling
@@ -340,7 +340,7 @@ PROPTEST_CASES=2 cargo test --test general_e2e_composed_pbt -- --nocapture
 Enable the `chrome-trace` feature to produce flame chart JSON for PBT runs:
 
 ```bash
-cargo test -p holon-integration-tests --test general_e2e_composed_pbt \
+cargo test -p holon-integration-tests --test integration general_e2e_composed_pbt:: \
   --features chrome-trace -- --nocapture
 ```
 
@@ -586,7 +586,7 @@ HOLON_BISECT_PROBE=1 HOLON_BISECT_SLICE=<slice> scripts/pbt-bisect.sh <slice> --
 # See the actual panic (message + backtrace) instead of the muted oracle:
 HOLON_BISECT_VERBOSE=1 HOLON_BISECT_PROBE=1 HOLON_BISECT_SLICE=<slice> \
   cargo test -p holon-integration-tests --features pbt \
-  --test bisection_pbt bisect_capture_from_env -- --nocapture
+  --test integration bisection_pbt::bisect_capture_from_env -- --nocapture
 
 # Pin an exact failure + measure Heisenbug flakiness over N replays:
 HOLON_BISECT_SIGNATURE="inv-blocks-match-ref" HOLON_BISECT_REPEAT=10 …

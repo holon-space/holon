@@ -67,8 +67,8 @@ drain twice in one hold.
 
 | Selector | Runs | Assertion | Asserts | Headroom |
 | --- | --- | --- | --- | --- |
-| `binary(latency_slo_gate)` | own-recipe | `crates/holon-integration-tests/tests/latency_slo_gate.rs:1076` | `TEETH_WRITE_DEADLINE` over the 600-write drain | thin by design |
-| `binary(latency_slo_gate)` | own-recipe | `crates/holon-integration-tests/tests/latency_slo_gate.rs:1211` | `FENCE_ROUND_PATIENCE` per fence round | thin by design |
+| `binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/)` | own-recipe | `crates/holon-integration-tests/tests/latency_slo_gate.rs:1076` | `TEETH_WRITE_DEADLINE` over the 600-write drain | thin by design |
+| `binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/)` | own-recipe | `crates/holon-integration-tests/tests/latency_slo_gate.rs:1211` | `FENCE_ROUND_PATIENCE` per fence round | thin by design |
 | `binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)` | own-recipe | `crates/holon-org-format/tests/deep_authored_text_never_aborts.rs:205` | marker-line parse cost linear in length | thin; `#[ignore]`d, run by `just org-deep-text-timing` |
 | `binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)` | own-recipe | `crates/holon-org-format/tests/deep_authored_text_never_aborts.rs:244` | marked-line render cost linear in length | thin; `#[ignore]`d, run by `just org-deep-text-timing` |
 | `test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)` | timing-step | `crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs:184` | cold matview create + first read < 5 s at ~70 pages | thin: 853 ms alone, 4.74 s at load 46, 7.52 s in an 885-test run |
@@ -205,7 +205,7 @@ wrong rather than K, and that is a card, not a silent widening.**
 `Test` is the FULL nextest test name — its module path included, the binary
 name excluded — because the generated override filters it with `test(=…)`, an
 exact match. `split_block_stale_display_regression` is a module inside the
-`frontend_suite` binary, so the bare name selects nothing and the cap would be
+`frontend_suite` module, so the bare name selects nothing and the cap would be
 silently absent. `scripts/timing-split.py resolve` is what catches that: it
 asks nextest which tests each generated filter selects and fails on an empty
 one. It needs the test binaries built, so it runs inside
@@ -213,8 +213,8 @@ one. It needs the test binaries built, so it runs inside
 
 | Test | `p95_low` | Cap | Evidence |
 | --- | --- | --- | --- |
-| `split_block_stale_display_regression::split_block_stale_viewmodel_display_regression` | 121 s | 484 s | 6 completed runs, load 4.8-8.6, 2026-10-19 |
-| `convert_block_to_page_survives_a_lagging_projection` | 108 s | 432 s | 6 completed runs, load 5.5-9.9, 2026-10-19 |
+| `frontend_suite::split_block_stale_display_regression::split_block_stale_viewmodel_display_regression` | 121 s | 484 s | 6 completed runs, load 4.8-8.6, 2026-10-19 |
+| `projector_lag_lock::convert_block_to_page_survives_a_lagging_projection` | 108 s | 432 s | 6 completed runs, load 5.5-9.9, 2026-10-19 |
 
 ## Load-sensitive binaries
 
@@ -240,10 +240,10 @@ or when one of its tests is in no group.
 | Selector | Group | Evidence |
 | --- | --- | --- |
 | `package(holon-gpui)` | `windowed` | the whole package, as `just windowed-gate` runs it (`scripts/windowed-gate.py` `build`): binaries outside any name rule open a real window too, and `gpui_rebind_reset_smoke` went red in a loaded run; `general_e2e_composed_pbt_windowed` passed alone in 379 s and timed out at 600 s inside the parallel workspace leg; known reds `windowed-focus-not-in-bounds-under-load`, `windowed-entity-not-in-bounds-under-load` (KeystoneKnownReds.md) |
-| `binary(/_cost/) + (kind(test) & test(/^[a-z0-9_]+_cost::/))` | `cost-sensitive` | a `_cost` binary, or a `_cost` module of a crate's one test binary; most time their work against a ceiling or a large-vs-small ratio; `find_foreign_blocks_cost`, `stable_id_index_cost` and `home_authority_ancestor_walk_cost` count operations and join by the name rule only; known red `shopping-mapping-cost-slo`: ~5 s alone, red at load average 34 in a land leg |
-| `binary(latency_scale_gate)` | `cost-sensitive` | judged against `docs/Testing/latency-scale-ceilings.txt`; skips unless `HOLON_SOAK_SEED_BLOCKS` is set |
-| `binary(projector_lag_lock) + binary(/_under_lag$/)` | `cost-sensitive` | the lag locks the gate's quiet-hold step runs (`just projector-lag-lock`); `convert_block_to_page_survives_a_lagging_projection` measures p95_low 108 s (Current caps) |
-| `binary_id(holon-integration-tests::loro_suite) & test(/^loro_block_type_invalid_values::/)` | `cost-sensitive` | a 20 s wait for the edit to reach the file; red "the edit never reached the file" at load ~90 in a land leg |
+| `binary(/_cost/) + (kind(test) & test(/^[a-z0-9_]*_cost[a-z0-9_]*::/))` | `cost-sensitive` | a `_cost` binary, or a `_cost` module of a crate's one test binary; most time their work against a ceiling or a large-vs-small ratio; `find_foreign_blocks_cost`, `stable_id_index_cost` and `home_authority_ancestor_walk_cost` count operations and join by the name rule only; known red `shopping-mapping-cost-slo`: ~5 s alone, red at load average 34 in a land leg |
+| `binary_id(holon-integration-tests::integration) & test(/^latency_scale_gate::/)` | `cost-sensitive` | judged against `docs/Testing/latency-scale-ceilings.txt`; skips unless `HOLON_SOAK_SEED_BLOCKS` is set |
+| `binary_id(holon-integration-tests::integration) & (test(/^projector_lag_lock::/) + test(/^[a-z0-9_]+_under_lag::/))` | `cost-sensitive` | the lag locks the gate's quiet-hold step runs (`just projector-lag-lock`); `convert_block_to_page_survives_a_lagging_projection` measures p95_low 108 s (Current caps) |
+| `binary_id(holon-integration-tests::integration) & test(/^loro_suite::loro_block_type_invalid_values::/)` | `cost-sensitive` | a 20 s wait for the edit to reach the file; red "the edit never reached the file" at load ~90 in a land leg |
 
 ## The enforced latency rung and its kind coverage
 

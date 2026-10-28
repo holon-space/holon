@@ -28,10 +28,10 @@ use loro::Frontiers;
 use loro::TreeID;
 use tokio::sync::RwLock;
 
-use crate::projection_harness::MemorySink;
-use crate::projection_harness::delete_block_in;
-use crate::projection_harness::insert_root_block;
-use crate::projection_harness::insert_root_block_in;
+use super::projection_harness::MemorySink;
+use super::projection_harness::delete_block_in;
+use super::projection_harness::insert_root_block;
+use super::projection_harness::insert_root_block_in;
 
 struct Fixture {
     _tempdir: tempfile::TempDir,

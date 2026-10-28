@@ -603,7 +603,7 @@ into hooks with `scripts/install-git-hooks.sh` (bypass a run with `--no-verify`)
 | 2 | `just prepush` | every push | `just gate-arch` · `just check-frontend-wasm` · the full keystone (`PROPTEST_CASES=16`, incl. persisted regression seeds) |
 | L | `just landing-gate` | before reporting a lane done, and before weaving | fmt · `gate-compile` · `check-frontend-wasm` · `gate-arch` · `arch-validate` · `featuremap.py check` · `analyze-arch` (archlint) · `keystone-smoke` · `loro-suite` · `hand-authored` |
 | L | `cargo nextest run --no-fail-fast -p holon -p holon-app` | per land, in parallel with `landing-gate` (D43.a form) | the `holon` and `holon-app` integration suites, classified against the known reds (D64.a) |
-| L | `cargo nextest run -p holon-integration-tests --features holon-integration-tests/pbt --test two_instance_composed_pbt --no-fail-fast` | per weave | the two-instance sharing slice — the only thing that runs the sharing transport end to end |
+| L | `cargo nextest run -p holon-integration-tests --features holon-integration-tests/pbt --test integration -E 'test(/^two_instance_composed_pbt::/)' --no-fail-fast` | per weave | the two-instance sharing slice — the only thing that runs the sharing transport end to end |
 
 Notes:
 
@@ -754,7 +754,7 @@ real platform input/render/store wiring the headless keystone cannot see.
    ```sh
    HOLON_PBT_LIVE_MCP=1 MCP_SERVER_PORT=8521 PROPTEST_CASES=3 \
      cargo test -p holon-integration-tests \
-       --test general_e2e_composed_pbt general_e2e_composed_pbt_live_mcp \
+       --test integration general_e2e_composed_pbt::general_e2e_composed_pbt_live_mcp \
        -- --nocapture --test-threads=1
    ```
    The server's reset budget is 20/process, so keep `PROPTEST_CASES` small and

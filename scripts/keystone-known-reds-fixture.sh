@@ -281,7 +281,7 @@ expect_outcome should-panic-other-binary 1 '^PRIMARY: \[novel\] .*REAL PRODUCT B
 # test's: expected when it reports `- should panic ... ok`, else a failure.
 split_header_log() {
     cat <<EOF
-     Running tests/hand_authored_regressions.rs (target/debug/deps/h-0000000000000001)
+     Running tests/main.rs (target/debug/deps/integration-0000000000000001)
 
 running 3 tests
 
@@ -366,9 +366,9 @@ expect_outcome fail-leak-known-panic 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-
 # A fixed-pending-soak row does not cover its signature, so its return is novel.
 cat >"$work/move-between-files-read-repeat.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
 reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 1 budget violation(s):\n  MoveBlockBetweenFiles.sql_read_repeat: one binding-set of `SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.sour…` re-executed 124x, over the redundancy ratchet 64 — the re-execution defect GREW; find the new consumer, do not raise the ratchet")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome move-between-files-read-repeat 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' \
@@ -377,9 +377,9 @@ expect_outcome move-between-files-read-repeat 1 '^\[known-reds\] FAIL: 1 novel p
 # violations is, and a pattern starts where its violation starts.
 cat >"$work/violation-one-known.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 1 budget violation(s):\n  OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/one-known 0 '^PRIMARY: \[known-red:cmd-click-open-tab-integration-state-write\]' "$work/violation-one-known.log"
@@ -414,50 +414,50 @@ expect_outcome violation/cmd-click-status-write-with-parent 1 '^\[known-reds\] F
     "$work/cmd-click-status-write-with-parent.log"
 cat >"$work/violation-longer-transition-name.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 1 budget violation(s):\n  ReOpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/longer-transition-name 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-longer-transition-name.log"
 cat >"$work/violation-known-plus-novel-budget.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 2 budget violation(s):\n  OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]\n  SplitBlock.sql_writes: 3 exceeds expected 1 + tolerance 0 = 1; writes: [`INSERT INTO block (id, parent_id, content) VALUES (?, ?, ?)` origin=<no-parent>]")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/known-plus-novel-budget 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-known-plus-novel-budget.log"
 cat >"$work/violation-second-novel-invariant.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/loro", "[inv-blocks-match-ref/loro] fields diverge from reference"), ("inv-sql-budget", "[inv-sql-budget] 1 budget violation(s):\n  OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/second-novel-invariant 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-second-novel-invariant.log"
 # A companion counts only beside its row's own violation.
 cat >"$work/violation-companions-beside-their-row.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  inv-blocks-match-ref/org: 14 blocks, reference: 14 blocks\n  only in inv-blocks-match-ref/org (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:wbi7-a: content: sut=\"Buy milk\" ref=\"Buy milk oat\"\n"), ("inv-blocks-match-ref/loro", "[inv-blocks-match-ref/loro] fields diverge from reference\n  inv-blocks-match-ref/loro: 17 blocks, reference: 17 blocks\n  only in inv-blocks-match-ref/loro (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:wbi7-a: content: sut=\"Buy milk\" ref=\"Buy milk oat\"\n"), ("inv-blocks-match-ref/block_raw", "[inv-blocks-match-ref/block_raw] block block:wbi7-a diverges from reference on Content\n  inv-blocks-match-ref/block_raw: Block {\n    id: EntityUri(\"block:wbi7-a\"),\n    parent_id: EntityUri(\"block:ref-doc-0\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    contributes_to: [],\n    content: \"Buy milk\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: None,\n    collapsed: false,\n    widget_only: false,\n    block_type: None,\n    created_at: 0,\n    updated_at: 0,\n}\n  reference: Block {\n    id: EntityUri(\"block:wbi7-a\"),\n    parent_id: EntityUri(\"block:ref-doc-0\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    contributes_to: [],\n    content: \"Buy milk oat\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: None,\n    collapsed: false,\n    widget_only: false,\n    block_type: None,\n    created_at: 0,\n    updated_at: 0,\n}"), ("inv-blocks-match-ref/matview", "[inv-blocks-match-ref/matview] fields diverge from reference\n  inv-blocks-match-ref/matview: 17 blocks, reference: 17 blocks\n  only in inv-blocks-match-ref/matview (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:wbi7-a: content: sut=\"Buy milk\" ref=\"Buy milk oat\"\n"), ("inv-block-content/block_raw", "[inv-block-content/block_raw] block block:wbi7-a content diverges:\n  ref:       \"Buy milk oat\"\n  block_raw: \"Buy milk\""), ("inv-block-content/sql", "[inv-block-content/sql] block block:wbi7-a content diverges:\n  ref: \"Buy milk oat\"\n  sql: \"Buy milk\"")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/companions-beside-their-row 0 '^PRIMARY: \[known-red:ref-diverge-content-text-drift\]' "$work/violation-companions-beside-their-row.log"
 cat >"$work/violation-companions-alone.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/block_raw", "[inv-blocks-match-ref/block_raw] block block:wbi7-a diverges from reference on Content\n  inv-blocks-match-ref/block_raw: Block {\n    id: EntityUri(\"block:wbi7-a\"),\n    parent_id: EntityUri(\"block:ref-doc-0\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    contributes_to: [],\n    content: \"Buy milk\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: None,\n    collapsed: false,\n    widget_only: false,\n    block_type: None,\n    created_at: 0,\n    updated_at: 0,\n}\n  reference: Block {\n    id: EntityUri(\"block:wbi7-a\"),\n    parent_id: EntityUri(\"block:ref-doc-0\"),\n    tags: Tags(\n        {},\n    ),\n    requires: [],\n    advice_suppressed: [],\n    contributes_to: [],\n    content: \"Buy milk oat\",\n    content_type: Text,\n    source_language: None,\n    source_name: None,\n    properties: {},\n    marks: None,\n    collapsed: false,\n    widget_only: false,\n    block_type: None,\n    created_at: 0,\n    updated_at: 0,\n}"), ("inv-block-content/block_raw", "[inv-block-content/block_raw] block block:wbi7-a content diverges:\n  ref:       \"Buy milk oat\"\n  block_raw: \"Buy milk\""), ("inv-block-content/sql", "[inv-block-content/sql] block block:wbi7-a content diverges:\n  ref: \"Buy milk oat\"\n  sql: \"Buy milk\"")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/companions-alone 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-companions-alone.log"
 cat >"$work/violation-page-without-own-file.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-every-page-has-its-own-file", "[inv-every-page-has-its-own-file] 1 page(s) not homed to exactly one own file: [\"page `61133fe7-d4d5-ab1c-24e4-110da5f42293` owns NO file (fileless — content lives only in the store; writeback must MATERIALIZE it into `…/61133fe7-d4d5-ab1c-24e4-110da5f42293.org`)\"]")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/page-without-own-file 0 '^PRIMARY: \[known-red:page-without-own-file\]' "$work/violation-page-without-own-file.log"
@@ -472,9 +472,9 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out;
 EOF
 expect_outcome violation/empty-created-file-header-never-written 0 '^PRIMARY: \[known-red:empty-created-file-header-never-written' "$work/violation-empty-created-file-header-never-written.log"
 cat >"$work/violation-one-byte-echo-loop-beside-fileless-page.log" <<'EOF'
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13:
 reconciled composed sequence diverged from the oracle: [("inv-org-render-fixed-point", "[inv-org-render-fixed-point] render != disk PERSISTED for 5s — not a transient projection lag but a real echo-loop / oscillation: the next re_render_all_tracked would keep rewriting the file.\n--- disk (277 bytes) [/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpfaBZ5X/forward-edge-page.org] ---\n#+ID: forward-edge-page\n* fe-parent\n:PROPERTIES:\n:ID: fe-parent\n:END:\n* fe-blocked\n:PROPERTIES:\n:ID: fe-blocked\n:REQUIRES: fe-target\n:END:\n** rlJWtK\n:PROPERTIES:\n:ID: block-4\n:column-priority: L\n:END:\nfoVL623I188Qt\ndTL dC Nh8GfJ M\n* fe-target\n:PROPERTIES:\n:ID: fe-target\n:END:\n\n--- rendered from SQL (278 bytes) ---\n#+ID: forward-edge-page\n* fe-parent\n:PROPERTIES:\n:ID: fe-parent\n:END:\n* fe-blocked\n:PROPERTIES:\n:ID: fe-blocked\n:REQUIRES: fe-target\n:END:\n** rlJWtK\n:PROPERTIES:\n:ID: block-4\n:column-priority: L\n:END:\nfoVL623I188Qt\ndTL dC Nh8GfJ M\n\n* fe-target\n:PROPERTIES:\n:ID: fe-target\n:END:\n"), ("inv-every-page-has-its-own-file", "[inv-every-page-has-its-own-file] 1 page(s) not homed to exactly one own file: [\"page `61133fe7-d4d5-ab1c-24e4-110da5f42293` owns NO file (fileless — content lives only in the store; writeback must MATERIALIZE it into `…/61133fe7-d4d5-ab1c-24e4-110da5f42293.org`)\"]")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/one-byte-echo-loop-beside-fileless-page 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-one-byte-echo-loop-beside-fileless-page.log"
@@ -490,9 +490,9 @@ expect_outcome violation/empty-created-file-beside-double-homed-page 1 '^\[known
 # A budget message also carries the non-SQL ceilings (wall, query, memory).
 cat >"$work/violation-known-plus-novel-memory-budget.log" <<'EOF'
 [keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 2 budget violation(s):\n  OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + tolerance 0 = 1; writes: [`DELETE FROM watch_context WHERE watch_key = ? AND nonce = ?` origin=<no-parent>; `UPDATE integration_state SET status = ? WHERE id = ? AND enabled =  ` origin=<no-parent>]\n  OpenTabViaModifierClick.rss_delta: +60.2MB exceeds limit 50MB (before=300MB, after=360MB)")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/known-plus-novel-memory-budget 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-known-plus-novel-memory-budget.log"
@@ -514,7 +514,7 @@ expect_outcome windowed-known-red-discloses-no-sample 0 '^\[known-reds\] PASS-WI
 # A cargo build line names the keystone's test target without running it, so
 # it must not make a log a keystone run that owes a sample disclosure.
 cat >"$work/build-warning-names-keystone.log" <<'EOF'
-warning: `holon-integration-tests` (test "general_e2e_composed_pbt") generated 1 warning (1 duplicate)
+warning: `holon-integration-tests` (test "integration") generated 1 warning (1 duplicate)
  FAIL + LEAK [   6.486s] (197/682) holon-app::main integration_toggle_round_trip::a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
   stderr ───
     thread 'a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection' (2) panicked at crates/holon-app/tests/integration_toggle_round_trip.rs:83:9:
@@ -525,26 +525,26 @@ EOF
 expect_outcome build-warning-names-keystone 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
     "$work/build-warning-names-keystone.log"
 cat >"$work/sample-undisclosed.log" <<'EOF'
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
 assertion `left == right` failed: per-tick reconcile: one synthetic per minted real id (syn=[], real=[EntityUri("block:259a9a58-18bb-4559-a589-87aee571c59e")], HeldCreates { parked: 0 })
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome sample-undisclosed 1 '^SAMPLE: UNDISCLOSED' "$work/sample-undisclosed.log"
 cat >"$work/sample-undisclosed-nextest.log" <<'EOF'
-    FAIL [  31.004s] (1/19) holon-integration-tests::general_e2e_composed_pbt general_e2e_composed_pbt
+    FAIL [  31.004s] (1/19) holon-integration-tests::integration general_e2e_composed_pbt::general_e2e_composed_pbt
   stderr ───
     thread 'main' (2) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
     assertion `left == right` failed: per-tick reconcile: one synthetic per minted real id (syn=[], real=[EntityUri("block:259a9a58-18bb-4559-a589-87aee571c59e")], HeldCreates { parked: 0 })
      Summary [  31.004s] 19 tests run: 18 passed, 1 failed, 0 skipped
-    FAIL [  31.004s] (1/19) holon-integration-tests::general_e2e_composed_pbt general_e2e_composed_pbt
+    FAIL [  31.004s] (1/19) holon-integration-tests::integration general_e2e_composed_pbt::general_e2e_composed_pbt
 EOF
 expect_outcome sample-undisclosed-nextest 1 '^SAMPLE: UNDISCLOSED' "$work/sample-undisclosed-nextest.log"
 cat >"$work/sample-floor-breach.log" <<'EOF'
 [keystone-sample] cases=16 attempted=4 completed=3 floor=8 known-red-hits=1 verdict=FLOOR-BREACH
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
 assertion `left == right` failed: per-tick reconcile: one synthetic per minted real id (syn=[], real=[EntityUri("block:259a9a58-18bb-4559-a589-87aee571c59e")], HeldCreates { parked: 0 })
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome sample-floor-breach 1 '^SAMPLE: cases=16 attempted=4 completed=3 floor=8 known-red-hits=1 verdict=FLOOR-BREACH$' \
@@ -556,9 +556,9 @@ known_budget_piece='OpenTabViaModifierClick.sql_writes: 2 exceeds expected 1 + t
 while IFS='|' read -r metric piece; do
     log="$work/violation-budget-metric-$metric.log"
     cat >"$log" <<EOF
-thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 2 budget violation(s):\n  $known_budget_piece\n  OpenTabViaModifierClick.$metric: $piece")]
-test general_e2e_composed_pbt ... FAILED
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
     expect_outcome "violation/budget-metric-$metric" 1 "^ *1 .*\[inv-sql-budget\] 1 budget violation(s):\\\\n  OpenTabViaModifierClick\\.$metric: " "$log"
@@ -641,13 +641,13 @@ expect_outcome same-name-two-binaries 1 '^\[known-reds\] FAIL: 1 novel panic(s)'
 # Under `--no-capture` the output runs between the test's `START` and its
 # status line, unindented.
 cat >"$work/no-capture-worker-panic.log" <<'EOF'
-       START [         ] (1/1) holon-integration-tests::latency_slo_gate latency_fence_under_typing_report
+       START [         ] (1/1) holon-integration-tests::integration latency_slo_gate::latency_fence_under_typing_report
 [dense-tools] embedded MCP server up in 86.56425ms
 thread 'tokio-runtime-worker' (224301153) panicked at crates/holon-integration-tests/tests/latency_slo_gate.rs:261:5:
 the fence report is over budget
-        FAIL [  13.874s] (1/1) holon-integration-tests::latency_slo_gate latency_fence_under_typing_report
+        FAIL [  13.874s] (1/1) holon-integration-tests::integration latency_slo_gate::latency_fence_under_typing_report
      Summary [  13.875s] 1 test run: 0 passed, 1 failed, 12 skipped
-        FAIL [  13.874s] (1/1) holon-integration-tests::latency_slo_gate latency_fence_under_typing_report
+        FAIL [  13.874s] (1/1) holon-integration-tests::integration latency_slo_gate::latency_fence_under_typing_report
 error: test run failed
 EOF
 expect_outcome no-capture-worker-panic 1 '^\[known-reds\] FAIL: 1 novel panic(s)' \
@@ -704,14 +704,14 @@ expect_outcome terminating-timeout-pass 0 '^\[known-reds\] PASS: 1 green run' "$
 # names the test without it.
 cat >"$work/stress-index.log" <<'EOF'
   Cancelling due to signal: 1 test still running
-     SIGTERM [  20.778s] [10/12] (1/1) holon-integration-tests::two_instance_composed_pbt edit_on_receiver_concurrent_with_create_on_owner_converges
+     SIGTERM [  20.778s] [10/12] (1/1) holon-integration-tests::integration two_instance_composed_pbt::edit_on_receiver_concurrent_with_create_on_owner_converges
  Stress test [  20.778s] iteration 10/12: 1 test run: 0 passed, 1 failed, 37 skipped
      TIMEOUT [  20.778s] [11/12] (1/1) holon::main turso_block_query_source_round_trip_pbt::round_trip
      Summary [ 385.895s] 11/12 stress run iterations: 9 passed; cancelled due to signal
-     SIGTERM [  20.778s] [10/12] (1/1) holon-integration-tests::two_instance_composed_pbt edit_on_receiver_concurrent_with_create_on_owner_converges
+     SIGTERM [  20.778s] [10/12] (1/1) holon-integration-tests::integration two_instance_composed_pbt::edit_on_receiver_concurrent_with_create_on_owner_converges
 error: test run failed
 EOF
-expect_outcome stress-index/signal 1 '^ *1 SIGTERM: holon-integration-tests::two_instance_composed_pbt edit_on_receiver_concurrent_with_create_on_owner_converges$' \
+expect_outcome stress-index/signal 1 '^ *1 SIGTERM: holon-integration-tests::integration two_instance_composed_pbt::edit_on_receiver_concurrent_with_create_on_owner_converges$' \
     "$work/stress-index.log"
 expect_outcome stress-index/known-row 1 '^WARN known-red \[turso-block-query-source-round-trip\] x1$' \
     "$work/stress-index.log"
@@ -794,7 +794,7 @@ expect_outcome timeout-row 0 '^PRIMARY: \[known-red:turso-block-query-source-rou
 # No archived corpus carries that shape (the 2026-09-19 corpus's 52 sibling-order
 # lines are swapped uuid children under a bulk PARENT and classify novel), so the
 # row is pinned by synthesised panics built on a real panic header.
-panic_header="thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1390:13:"
+panic_header="thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1390:13:"
 expect_sut_order() {
     local label="$1" want="$2" sut="$3" log="$work/sut-order-$1.log"
     {
@@ -850,12 +850,12 @@ injected_log() {
         printf '%s\n' "$payload"
         printf '%s\n' 'note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace'
         if [ "$verdict" = failed ]; then
-            printf '%s\n' "thread 'general_e2e_composed_pbt' (311836306) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1557:13:"
+            printf '%s\n' "thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (311836306) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1557:13:"
             printf '%s\n' 'REAL PRODUCT BUG: the projection vanished'
-            printf '%s\n' 'test general_e2e_composed_pbt ... FAILED'
+            printf '%s\n' 'test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED'
             printf '%s\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s'
         else
-            printf '%s\n' 'test general_e2e_composed_pbt ... ok'
+            printf '%s\n' 'test general_e2e_composed_pbt::general_e2e_composed_pbt ... ok'
             printf '%s\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s'
         fi
     } >"$work/$name.log"

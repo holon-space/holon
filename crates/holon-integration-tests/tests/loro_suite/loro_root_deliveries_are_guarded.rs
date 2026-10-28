@@ -27,7 +27,7 @@ use holon_loro::loro_text_cell_backing::LoroTextCellBacking;
 use loro::Frontiers;
 use tokio::sync::RwLock;
 
-use crate::projection_harness::MemorySink;
+use super::projection_harness::MemorySink;
 
 const RAW: &str = "root_delivery_raw_control";
 

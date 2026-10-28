@@ -31,8 +31,8 @@ use holon_loro::SinkReader;
 use loro::Frontiers;
 use tokio::sync::RwLock;
 
-use crate::projection_harness::MemorySink;
-use crate::projection_harness::insert_root_block_in;
+use super::projection_harness::MemorySink;
+use super::projection_harness::insert_root_block_in;
 
 fn stamped(id: &str, content: &str, props: &[(&str, &str)]) -> Block {
     let mut block = Block::new_text(EntityUri::block(id), EntityUri::no_parent(), content);

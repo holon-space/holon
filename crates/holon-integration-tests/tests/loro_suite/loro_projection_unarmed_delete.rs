@@ -35,9 +35,9 @@ use loro::Frontiers;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
-use crate::projection_harness::MemorySink;
-use crate::projection_harness::delete_block_in;
-use crate::projection_harness::insert_root_block_in;
+use super::projection_harness::MemorySink;
+use super::projection_harness::delete_block_in;
+use super::projection_harness::insert_root_block_in;
 
 /// A projection over a fresh store with its doc subscriptions installed — the
 /// production wiring, where the fast path can actually be reached because the

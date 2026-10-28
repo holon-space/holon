@@ -25,7 +25,8 @@
 //!   (cd frontends/holon-worker && npm install)   # once — see below
 //!   node frontends/dioxus-web/serve.mjs          # PORT=8791
 //!   cargo test -p holon-integration-tests --features web-arm,pbt \
-//!     --test web_arm_keystone -- --ignored --nocapture --test-threads=1
+//!     --test integration web_arm_keystone:: \
+//!     -- --ignored --nocapture --test-threads=1
 //!
 //! BOTH `npm install`s are required, and their absence does NOT say so. The
 //! server resolves the worker's JS glue and its `@napi-rs`/`@emnapi` runtime
