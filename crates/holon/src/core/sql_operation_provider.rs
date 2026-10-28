@@ -30,6 +30,7 @@ use holon_core::Result;
 use holon_core::block_ordering::MintedPosition;
 use holon_core::block_ordering::ORDER_REKEYS_PARAM;
 use holon_core::storage::types::StorageEntity;
+use holon_core::type_write_rule::ScopeReplacement;
 use holon_core::type_write_rule::WriteSchema;
 
 use crate::core::merge_blocks_plan;
@@ -1790,15 +1791,63 @@ impl SqlOperationProvider {
         .into())
     }
 
-    /// The batch write leg's delete: the same plan and the same SQL the
-    /// single-op route runs, without the inverse an undoable op needs.
-    async fn prepare_delete(
-        &self,
-        params: &StorageEntity,
-        staged: &StagedParents,
-    ) -> Result<PreparedOp> {
-        self.delete_statements(&self.delete_plan("delete")?, params, staged)
+    /// In ONE transaction: the scope's live rows that `rows` does not name
+    /// again are deleted, the ones it names are rewritten whole, and the rest
+    /// are created.
+    async fn replace_scope(&self, params: &StorageEntity) -> Result<OperationResult> {
+        let scope = ScopeReplacement::parse(params)?;
+        let mut held_sql = format!(
+            "SELECT id FROM {} WHERE {} = '{}'",
+            self.table_name,
+            Self::quote_identifier(&scope.owner_column),
+            scope.owner_value.replace('\'', "''")
+        );
+        if let Some(column) = self.write_schema.tombstone_column() {
+            held_sql.push_str(&format!(" AND {} IS NULL", Self::quote_identifier(column)));
+        }
+        let mut stale: HashSet<String> = self
+            .db_handle
+            .query(&held_sql, HashMap::new())
             .await
+            .map_err(|e| format!("{}: reading the scope's rows: {e}", ScopeReplacement::OP))?
+            .iter()
+            .map(|row| ScopeReplacement::id_of(row).map(str::to_string))
+            .collect::<Result<_>>()?;
+        let staged = StagedParents::default();
+        let id_params = |id: &str| StorageEntity::from([("id".into(), Value::String(id.into()))]);
+        let mut prepared = Vec::new();
+        for row in &scope.rows {
+            let id = ScopeReplacement::id_of(row)?;
+            if stale.remove(id) {
+                prepared.push(self.prepare_purge(&id_params(id), &staged).await?);
+                prepared.push(self.prepare_create(row, None)?);
+            } else {
+                let held = self.recognize_create(row).await?;
+                prepared.push(self.prepare_create(row, held.as_ref())?);
+            }
+        }
+        let delete = self.delete_plan("delete")?;
+        for id in &stale {
+            prepared.push(
+                self.delete_statements(&delete, &id_params(id), &staged)
+                    .await?,
+            );
+        }
+        let stmts: Vec<(String, Vec<turso::Value>)> = prepared
+            .iter()
+            .flat_map(|p| &p.row_statements)
+            .chain(prepared.iter().flat_map(|p| &p.edge_statements))
+            .map(|s| (s.clone(), vec![]))
+            .collect();
+        self.db_handle.transaction(stmts).await.map_err(|e| {
+            format!(
+                "{}: replacing the scope {} = {:?}: {e}",
+                ScopeReplacement::OP,
+                scope.owner_column,
+                scope.owner_value
+            )
+        })?;
+        Ok(OperationResult::irreversible(Vec::new()))
     }
 
     /// Tombstone timestamps are RFC 3339.
@@ -3805,6 +3854,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     .await
             }
             "create" => self.create_row(params, None).await,
+            ScopeReplacement::OP => self.replace_scope(&params).await,
             "update" => {
                 let mut prepared = self.prepare_update(&params).await?;
                 // block_links junction (links increment 2): a marks-carrying
@@ -4702,7 +4752,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     Some(p) => p,
                     None => continue,
                 },
-                "delete" => self.prepare_delete(&params, &staged).await?,
+                "delete" | "purge" => {
+                    self.delete_statements(&self.delete_plan(&op_name)?, &params, &staged)
+                        .await?
+                }
                 other => return Err(format!("Unknown batch operation: {}", other).into()),
             };
             removed_ids.extend(prepared.removed_ids.iter().cloned());
@@ -4716,7 +4769,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     // its own intent, whichever side of the update it sits on.
                     // A row the cascade swept up is NOT: see
                     // `assert_updated_rows_exist`.
-                    "delete" => updated_ids.retain(|u| u.as_str() != id),
+                    "delete" | "purge" => updated_ids.retain(|u| u.as_str() != id),
                     _ => {}
                 }
             }

@@ -22,6 +22,7 @@
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone drives an
 //! org-only vault and has no second-format file in its fixture
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +32,7 @@ use holon_integration_tests::TestEnvironmentBuilder;
 use holon_kitchen::COOK_BLOCKERS_SQL;
 use holon_kitchen::COOKABLE_RECIPES_SQL;
 use holon_kitchen::CookBlockReason;
+use holon_turso::commit_event::CommitChange;
 
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
@@ -627,6 +629,375 @@ fn re_ingesting_a_recipe_replaces_its_rows_and_keeps_ingredient_ids() {
             Some(flour_id.as_str()),
             "the surviving flour row changed id across three edits"
         );
+    });
+}
+
+/// A type's rows by id, as one store held them at one point.
+type RowsById = BTreeMap<String, holon_api::StorageEntity>;
+
+/// Each commit id with the changes it made, or why they could not be read.
+type CommitLog = Vec<(u64, Result<Vec<CommitChange>, String>)>;
+
+/// One table's rows as the database held them when listening began, then the
+/// changes of every later commit that touched the table.
+#[derive(Default)]
+struct TableCommits {
+    snapshot: std::sync::Mutex<Vec<holon_api::StorageEntity>>,
+    commits: std::sync::Mutex<CommitLog>,
+}
+
+impl TableCommits {
+    /// Listens on the database itself, so every committed state is seen — a
+    /// polling reader could miss the transient ones between two reads.
+    async fn listen(
+        env: &holon_integration_tests::TestEnvironment,
+        table: &'static str,
+    ) -> Arc<Self> {
+        let db = env
+            .injector()
+            .expect("a booted app has an injector")
+            .resolve::<dyn holon::di::DbHandleProvider>()
+            .handle();
+        let log = Arc::new(TableCommits::default());
+        let (on_event, on_snapshot) = (log.clone(), log.clone());
+        db.listen_from_snapshot(
+            &format!("SELECT * FROM {table}"),
+            move |event| {
+                if event.relation() == table {
+                    on_event
+                        .commits
+                        .lock()
+                        .unwrap()
+                        .push((event.envelope().commit_id, event.changes()));
+                }
+            },
+            move |rows| *on_snapshot.snapshot.lock().unwrap() = rows,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("listen to {table}: {e}"));
+        log
+    }
+
+    /// The table's rows as listening began, then after each commit.
+    fn states(&self) -> Vec<RowsById> {
+        let id = |row: &holon_api::StorageEntity| {
+            row.get("id")
+                .and_then(|v| v.as_string())
+                .expect("every row image carries its id")
+                .to_string()
+        };
+        let mut state: RowsById = self
+            .snapshot
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|row| (id(row), row.clone()))
+            .collect();
+        let mut states = vec![state.clone()];
+        let mut last_commit = None;
+        for (commit_id, changes) in self.commits.lock().unwrap().iter() {
+            let changes = changes
+                .as_ref()
+                .unwrap_or_else(|e| panic!("commit {commit_id}: {e}"));
+            for change in changes {
+                match change {
+                    CommitChange::Upsert(row) => {
+                        state.insert(id(row), row.clone());
+                    }
+                    CommitChange::Delete(row) => {
+                        state.remove(&id(row));
+                    }
+                }
+            }
+            if last_commit == Some(*commit_id) {
+                *states.last_mut().unwrap() = state.clone();
+            } else {
+                states.push(state.clone());
+            }
+            last_commit = Some(*commit_id);
+        }
+        states
+    }
+}
+
+/// The live entities of one type in the Loro Global doc as listening began,
+/// then after each local commit, replayed from the commits' own updates.
+struct DocCommits {
+    doc: Arc<holon_loro::loro_document::LoroDocument>,
+    start: loro::Frontiers,
+    updates: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    _subscription: loro::Subscription,
+}
+
+impl DocCommits {
+    async fn listen(env: &holon_integration_tests::TestEnvironment) -> Self {
+        let doc = env
+            .loro_doc_store()
+            .expect("a Loro vault has a doc store")
+            .read()
+            .await
+            .get_doc(holon_loro::loro_document_store::DocScope::Global)
+            .await
+            .expect("the global doc");
+        let updates = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let on_update = updates.clone();
+        // Under the doc's lock, so no commit falls between the two.
+        let (start, subscription) = doc
+            .with_read(|d| {
+                Ok((
+                    d.oplog_frontiers(),
+                    d.subscribe_local_update(Box::new(move |update| {
+                        on_update.lock().unwrap().push(update.clone());
+                        true
+                    })),
+                ))
+            })
+            .expect("subscribe to the global doc");
+        Self {
+            doc,
+            start,
+            updates,
+            _subscription: subscription,
+        }
+    }
+
+    fn commit_count(&self) -> usize {
+        self.updates.lock().unwrap().len()
+    }
+
+    fn states(&self, entity: &str) -> Vec<RowsById> {
+        let entity = holon_api::EntityName::new(entity);
+        let root = holon_loro::loro_entity_operations::entity_root_name(&entity);
+        let live = |doc: &loro::LoroDoc| -> RowsById {
+            let keys: Vec<String> = doc
+                .get_map(root.as_str())
+                .keys()
+                .map(|k| k.to_string())
+                .collect();
+            keys.iter()
+                .filter_map(|key| {
+                    holon_loro::loro_entity_operations::read_entity(doc, &root, &entity, key)
+                })
+                .filter(|stored| stored.live)
+                .map(|stored| {
+                    let id = stored
+                        .fields
+                        .get("id")
+                        .and_then(|v| v.as_string())
+                        .expect("a stored entity carries its id")
+                        .to_string();
+                    (id, stored.fields)
+                })
+                .collect()
+        };
+        let fork = self
+            .doc
+            .with_read(|d| Ok(d.fork_at(&self.start)?))
+            .expect("fork the global doc where listening began");
+        let mut states = vec![live(&fork)];
+        for update in self.updates.lock().unwrap().iter() {
+            fork.import(update).expect("replay a local commit");
+            states.push(live(&fork));
+        }
+        states
+    }
+}
+
+/// The rows whose `column` holds `value`, as `id -> the listed columns`.
+fn scope_of(
+    state: &RowsById,
+    column: &str,
+    value: &str,
+    columns: &[&str],
+) -> BTreeMap<String, Vec<String>> {
+    state
+        .iter()
+        .filter(|(_, row)| row.get(column).and_then(|v| v.as_string()) == Some(value))
+        .map(|(id, row)| {
+            let cells = columns
+                .iter()
+                .map(|c| format!("{:?}", row.get(*c)))
+                .collect();
+            (id.clone(), cells)
+        })
+        .collect()
+}
+
+/// `states` with each run of equal neighbours kept once.
+fn distinct_runs<T: PartialEq>(states: Vec<T>) -> Vec<T> {
+    let mut runs: Vec<T> = Vec::new();
+    for state in states {
+        if runs.last() != Some(&state) {
+            runs.push(state);
+        }
+    }
+    runs
+}
+
+const USE_COLUMNS: &[&str] = &["raw_name", "quantity", "unit", "step_index"];
+
+/// Judges what one reader of the ingredient rows saw across the two
+/// re-ingests: `states` after each commit, the first `identical_commits` of
+/// them made by the save that kept the ingredients.
+fn judge_ingredient_reader(
+    reader: &str,
+    states: &[RowsById],
+    identical_commits: usize,
+    pancakes: &str,
+    omelette: &str,
+) {
+    let scope = |state: &RowsById, recipe: &str| scope_of(state, "recipe_id", recipe, USE_COLUMNS);
+    let names = |scope: &BTreeMap<String, Vec<String>>| -> Vec<String> {
+        scope.values().map(|cells| cells[0].clone()).collect()
+    };
+
+    let old = scope(&states[0], pancakes);
+    assert_eq!(
+        old.len(),
+        2,
+        "{reader}: the pancakes start with two rows: {old:#?}"
+    );
+    let during_identical: Vec<_> = states[..=identical_commits]
+        .iter()
+        .map(|s| scope(s, pancakes))
+        .filter(|seen| *seen != old)
+        .map(|seen| names(&seen))
+        .collect();
+    assert!(
+        during_identical.is_empty(),
+        "{reader}: while the file was re-saved with the SAME ingredients a reader saw the \
+         pancakes' rows as {during_identical:#?} instead of {:?}",
+        names(&old)
+    );
+
+    let runs = distinct_runs(states.iter().map(|s| scope(s, pancakes)).collect());
+    assert_eq!(
+        runs.len(),
+        2,
+        "{reader}: a reader saw {} distinct ingredient sets of the pancakes, not the old one \
+         then the new one: {:#?}",
+        runs.len(),
+        runs.iter().map(names).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        names(&runs[1]).len(),
+        3,
+        "{reader}: the new set is not the three ingredients the file names: {:#?}",
+        runs[1]
+    );
+
+    let omelette_runs = distinct_runs(states.iter().map(|s| scope(s, omelette)).collect());
+    assert!(
+        omelette_runs.len() == 1 && omelette_runs[0].len() == 2,
+        "{reader}: replacing the pancakes' rows changed the omelette's: {omelette_runs:#?}"
+    );
+}
+
+/// A reader during a re-ingest sees a recipe's whole old row set or its whole
+/// new one, never a mix, and never an empty or partial set while the file is
+/// rewritten with the SAME ingredients. The other recipe's rows stay as they
+/// were throughout. Under Loro, both the authority's own commits and the
+/// tables the projector writes are read.
+async fn a_re_ingest_is_seen_whole(app: holon_integration_tests::TestEnvironment) {
+    use_identities(&app, "both recipes' four ingredients", |ids| ids.len() == 4).await;
+    let recipe_rows = rows(&app, "SELECT id, source_path FROM recipe").await;
+    let recipe_id = |file: &str| {
+        recipe_rows
+            .iter()
+            .find(|r| text(r, "source_path").is_some_and(|p| p.ends_with(file)))
+            .and_then(|r| text(r, "id"))
+            .unwrap_or_else(|| panic!("no recipe row for {file}: {recipe_rows:?}"))
+            .to_string()
+    };
+    let (pancakes, omelette) = (recipe_id("Pancakes.cook"), recipe_id("Omelette.cook"));
+
+    let uses = TableCommits::listen(&app, "ingredient_use").await;
+    let recipes = TableCommits::listen(&app, "recipe").await;
+    let doc = match app.loro_enabled() {
+        true => Some(DocCommits::listen(&app).await),
+        false => None,
+    };
+
+    re_save(&app, PANCAKES_COOK_REWORDED).await;
+    app.wait_for_loro_quiescence(SYNC_TIMEOUT).await;
+    let identical_table_commits = uses.states().len() - 1;
+    let identical_doc_commits = doc.as_ref().map(DocCommits::commit_count);
+
+    re_save(&app, PANCAKES_COOK_WITH_BUTTER).await;
+    use_identities(
+        &app,
+        "the recipe's three ingredients beside the omelette's two",
+        |ids| ids.len() == 5 && ids.iter().any(|(_, n)| n == "butter"),
+    )
+    .await;
+    app.wait_for_loro_quiescence(SYNC_TIMEOUT).await;
+
+    if let (Some(doc), Some(identical)) = (&doc, identical_doc_commits) {
+        judge_ingredient_reader(
+            "the Loro authority",
+            &doc.states("ingredient_use"),
+            identical,
+            &pancakes,
+            &omelette,
+        );
+    }
+    judge_ingredient_reader(
+        "the ingredient_use table",
+        &uses.states(),
+        identical_table_commits,
+        &pancakes,
+        &omelette,
+    );
+
+    let recipe_runs = distinct_runs(
+        recipes
+            .states()
+            .iter()
+            .map(|s| scope_of(s, "id", &pancakes, &["title", "source_path"]))
+            .collect(),
+    );
+    assert!(
+        recipe_runs.len() == 1 && recipe_runs[0].len() == 1,
+        "the pancakes' recipe row did not stay readable and unchanged: {recipe_runs:#?}"
+    );
+}
+
+#[test]
+fn a_re_ingest_is_seen_whole_through_the_loro_authority() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let app = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Omelette.cook", OMELETTE_COOK)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding `.cook` files must boot");
+        assert!(
+            app.loro_enabled(),
+            "precondition: Loro is the write authority"
+        );
+        a_re_ingest_is_seen_whole(app).await;
+    });
+}
+
+#[test]
+fn a_re_ingest_is_seen_whole_through_the_sql_authority() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let app = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Omelette.cook", OMELETTE_COOK)
+            .without_loro()
+            .build(rt.clone())
+            .await
+            .expect("a vault holding `.cook` files must boot without Loro");
+        assert!(
+            !app.loro_enabled(),
+            "precondition: SQL is the write authority"
+        );
+        a_re_ingest_is_seen_whole(app).await;
     });
 }
 

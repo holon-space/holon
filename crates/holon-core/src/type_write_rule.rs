@@ -210,6 +210,113 @@ impl WriteSchema {
     }
 }
 
+/// The params of `replace_scope`: every row whose `owner_column` holds
+/// `owner_value` is replaced by `rows` in one write, so a reader sees the
+/// scope's whole old row set or its whole new one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopeReplacement {
+    pub owner_column: String,
+    pub owner_value: String,
+    pub rows: Vec<StorageEntity>,
+}
+
+impl ScopeReplacement {
+    pub const OP: &'static str = "replace_scope";
+
+    /// Refuses a row without an id or outside the scope.
+    pub fn new(
+        owner_column: String,
+        owner_value: String,
+        rows: Vec<StorageEntity>,
+    ) -> Result<Self> {
+        let scope = Self {
+            owner_column,
+            owner_value,
+            rows,
+        };
+        for row in &scope.rows {
+            Self::id_of(row)?;
+            if !scope.holds(row) {
+                return Err(format!(
+                    "{}: the row {:?} does not hold {:?} = {:?}, so it is not in the scope it \
+                     replaces",
+                    Self::OP,
+                    row.get("id"),
+                    scope.owner_column,
+                    scope.owner_value
+                )
+                .into());
+            }
+        }
+        Ok(scope)
+    }
+
+    pub fn parse(params: &StorageEntity) -> Result<Self> {
+        let text = |name: &str| -> Result<String> {
+            params
+                .get(name)
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+                .ok_or_else(|| format!("{}: missing text parameter '{name}'", Self::OP).into())
+        };
+        let rows = params
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| format!("{}: missing list parameter 'rows'", Self::OP))?
+            .iter()
+            .map(|row| {
+                row.as_object()
+                    .map(|fields| {
+                        fields
+                            .iter()
+                            .map(|(k, v)| (k.as_str().into(), v.clone()))
+                            .collect()
+                    })
+                    .ok_or_else(|| format!("{}: a row is {row:?}, not an object", Self::OP))
+            })
+            .collect::<std::result::Result<Vec<StorageEntity>, String>>()?;
+        Self::new(text("owner_column")?, text("owner_value")?, rows)
+    }
+
+    pub fn params(&self) -> StorageEntity {
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| {
+                Value::Object(
+                    row.iter()
+                        .map(|(k, v)| (k.to_string(), v.clone()))
+                        .collect(),
+                )
+            })
+            .collect();
+        StorageEntity::from([
+            (
+                "owner_column".into(),
+                Value::String(self.owner_column.clone()),
+            ),
+            (
+                "owner_value".into(),
+                Value::String(self.owner_value.clone()),
+            ),
+            ("rows".into(), Value::Array(rows)),
+        ])
+    }
+
+    /// Whether `row` belongs to this scope.
+    pub fn holds(&self, row: &StorageEntity) -> bool {
+        row.get(self.owner_column.as_str())
+            .and_then(|v| v.as_string())
+            == Some(self.owner_value.as_str())
+    }
+
+    pub fn id_of(row: &StorageEntity) -> Result<&str> {
+        row.get("id")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| format!("{}: a row carries no id: {row:?}", Self::OP).into())
+    }
+}
+
 /// The marking delta and arcs of `set_field`, `create` and `delete`, for a
 /// catalog whose net declares them.
 pub struct CrudDeclarations {
@@ -230,8 +337,8 @@ impl CrudDeclarations {
 }
 
 /// The CRUD descriptors an entity's write authority advertises: `set_field`,
-/// `create`, `update`, `delete`, and `purge` when the schema declares a
-/// tombstone.
+/// `create`, `update`, `delete`, `purge` when the schema declares a tombstone,
+/// and `replace_scope` for a global type.
 pub fn crud_descriptors(
     entity_name: &EntityName,
     entity_short_name: &str,
@@ -361,6 +468,45 @@ pub fn crud_descriptors(
             arcs: TransitionArcs::Undeclared,
         });
     }
+    // A scope is a set of rows in one table, which only a global type has.
+    if target_scope == TargetScope::Global {
+        let text_param = |name: &str, description: &str| OperationParam {
+            name: name.to_string(),
+            type_hint: TypeHint::String,
+            description: description.to_string(),
+        };
+        ops.push(OperationDescriptor {
+            entity_name: entity_name.clone(),
+            entity_short_name: entity_short_name.to_string(),
+            name: ScopeReplacement::OP.to_string(),
+            display_name: "Replace Scope".to_string(),
+            description: format!(
+                "Replace every {entity_short_name} whose owner column holds a value with new rows, \
+                 in one write"
+            ),
+            required_params: vec![
+                text_param("owner_column", "The column that scopes the rows"),
+                text_param("owner_value", "The value the scope's rows hold in it"),
+                OperationParam {
+                    name: "rows".to_string(),
+                    type_hint: TypeHint::Collection,
+                    description: "The scope's new rows".to_string(),
+                },
+            ],
+            optional_params: vec![],
+            id_column: "id".to_string(),
+            affected_fields: vec![],
+            param_mappings: vec![],
+            target_scope,
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+            menu_exposure: internal(),
+            trigger: None,
+            bound_params: Default::default(),
+            marking_delta: MarkingDelta::Undeclared,
+            guard: holon_api::pattern::OpGuard::None,
+            arcs: TransitionArcs::Undeclared,
+        });
+    }
     ops
 }
 
@@ -387,5 +533,25 @@ mod tests {
         let schema =
             WriteSchema::from_type_def(&declared("gen_1", &["aaa", "bbb"])).expect("schema");
         assert_eq!(schema.column_list(), vec!["aaa", "bbb", "id"]);
+    }
+
+    #[test]
+    fn a_scope_replacement_round_trips_and_refuses_a_row_of_another_scope() {
+        let row = |id: &str, owner: &str| {
+            StorageEntity::from([
+                ("id".into(), Value::String(id.into())),
+                ("recipe_id".into(), Value::String(owner.into())),
+            ])
+        };
+        let scope = ScopeReplacement::new(
+            "recipe_id".into(),
+            "r1".into(),
+            vec![row("a", "r1"), row("b", "r1")],
+        )
+        .expect("both rows are in the scope");
+        assert_eq!(ScopeReplacement::parse(&scope.params()).unwrap(), scope);
+
+        let refused = ScopeReplacement::new("recipe_id".into(), "r1".into(), vec![row("c", "r2")]);
+        assert!(refused.is_err(), "a row of scope r2 replaced scope r1");
     }
 }

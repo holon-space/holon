@@ -3,9 +3,10 @@
 //! The file-sync controller sits below the operation dispatcher and holds only
 //! block-shaped write seams, so an adapter that derives typed rows
 //! (`holon_kitchen`'s `.cook` recipes) reaches the generic entity path through
-//! this sink. Every write goes through the ONE shared dispatcher — the same
-//! `create` / `delete` an MCP client or a keybinding would run — so vault
-//! ingest never becomes a second writer of these tables.
+//! this sink. Every write goes through the ONE shared dispatcher, one
+//! `replace_scope` per file-owned row set, so vault ingest never becomes a
+//! second writer of these tables and a reader sees a scope's whole old row set
+//! or its whole new one.
 //!
 //! The dispatcher is resolved per call rather than held: it aggregates every
 //! `OperationProvider`, one of which builds the file-sync controller this sink
@@ -23,10 +24,9 @@ use holon_api::EntityUri;
 use holon_api::OpOrigin;
 use holon_api::StorageEntity;
 use holon_api::TypeDefinition;
-use holon_api::Value;
-use holon_core::TypeWriteAuthority;
 use holon_core::file_format::TypedRowSet;
 use holon_core::file_format::TypedRowSink;
+use holon_core::type_write_rule::ScopeReplacement;
 use holon_profiles::TypeRegistry;
 
 use crate::api::operation_dispatcher::AuthoredInput;
@@ -49,12 +49,6 @@ impl DispatchingTypedRowSink {
         self.injector.resolve_async::<TypeRegistry>().await
     }
 
-    async fn authority(&self) -> Arc<dyn TypeWriteAuthority> {
-        self.injector
-            .resolve_async::<dyn TypeWriteAuthority>()
-            .await
-    }
-
     /// Refuse a row set whose type or owner column the registry does not
     /// declare: an unknown one is a wiring bug rather than input to interpret.
     async fn checked_type(&self, owned: &TypedRowSet) -> Result<TypeDefinition> {
@@ -74,40 +68,6 @@ impl DispatchingTypedRowSink {
             );
         }
         Ok(type_def)
-    }
-
-    /// Ids of the rows `owner_column` currently scopes to this file, read from
-    /// the type's write authority: a lagging projection would hide the rows a
-    /// previous ingest just created, and their re-create is refused.
-    async fn ids_in_scope(
-        &self,
-        owned: &TypedRowSet,
-        type_def: &TypeDefinition,
-    ) -> Result<Vec<String>> {
-        let rows = self
-            .authority()
-            .await
-            .read_all(type_def)
-            .await
-            .map_err(|e| anyhow::anyhow!("reading the rows already scoped to this file: {e}"))?;
-        rows.iter()
-            .filter(|row| {
-                row.get(owned.owner_column.as_str())
-                    .and_then(|v| v.as_string())
-                    == Some(owned.owner_value.as_str())
-            })
-            .map(|row| {
-                row.get("id")
-                    .and_then(|v| v.as_string())
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "a {} row has no id — its keyspace is broken",
-                            owned.type_name
-                        )
-                    })
-            })
-            .collect()
     }
 
     async fn run(&self, entity: &EntityName, op: &str, params: StorageEntity) -> Result<()> {
@@ -158,24 +118,28 @@ impl TypedRowSink for DispatchingTypedRowSink {
                 }
             }
 
-            // Retire the whole scope, then write the parse. The file is
-            // authoritative for it, so "what the file no longer says" and "what
-            // the file changed" are one operation — and a create whose id names
-            // a LIVE row is refused by the write path's recognition check, so
-            // there is no in-place upsert to prefer over this.
-            for stale in self.ids_in_scope(owned, &type_def).await? {
-                let mut params = StorageEntity::new();
-                params.insert("id".into(), Value::String(stale.clone()));
-                self.run(&entity, "delete", params)
-                    .await
-                    .with_context(|| format!("retiring the {} row {stale}", owned.type_name))?;
-            }
-
+            // The dispatcher parses a param's references by its descriptor, and
+            // `rows` nests them, so each row is parsed as the create it amounts to.
+            let dispatcher = self.dispatcher().await;
             for row in &owned.rows {
-                self.run(&entity, "create", row.clone())
-                    .await
-                    .with_context(|| format!("writing a {} row", owned.type_name))?;
+                dispatcher
+                    .parse_entity_references_of(&entity, "create", row, &[])
+                    .map_err(|e| anyhow::anyhow!("a {} row: {e}", owned.type_name))?;
             }
+            let scope = ScopeReplacement::new(
+                owned.owner_column.clone(),
+                owned.owner_value.clone(),
+                owned.rows.clone(),
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            self.run(&entity, ScopeReplacement::OP, scope.params())
+                .await
+                .with_context(|| {
+                    format!(
+                        "replacing the {} rows {} = {:?}",
+                        owned.type_name, owned.owner_column, owned.owner_value
+                    )
+                })?;
         }
         Ok(())
     }

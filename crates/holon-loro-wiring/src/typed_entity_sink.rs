@@ -1,6 +1,7 @@
-//! The Turso leg of the Loro typed-entity store: the projector lands each
-//! changed entity's row in its type's raw table through that type's SQL
-//! provider, tagged `EventOrigin::Loro` so nothing echoes it back.
+//! The Turso leg of the Loro typed-entity store: the projector lands the
+//! changed entities' rows of one pass in their type's raw table through that
+//! type's SQL provider, as ONE batch transaction, tagged `EventOrigin::Loro` so
+//! nothing echoes it back.
 
 use std::collections::HashMap;
 
@@ -13,6 +14,7 @@ use holon::storage::turso::DbHandle;
 use holon_api::EntityName;
 use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_core::BatchOp;
 use holon_core::EventOrigin;
 use holon_core::OriginTaggedWrites;
 use holon_loro::loro_entity_operations::TypedEntitySink;
@@ -49,6 +51,7 @@ impl TypedEntitySink for SqlTypedEntitySink {
             "SELECT id FROM {} WHERE id = $id",
             TursoAdapter::raw_table_name(&type_def)
         );
+        let mut ops = Vec::with_capacity(rows.len());
         for (id, row) in rows {
             let held = !self
                 .db
@@ -68,11 +71,12 @@ impl TypedEntitySink for SqlTypedEntitySink {
                 ),
                 None => continue,
             };
-            provider
-                .execute_operation_with_origin(entity, op, params, EventOrigin::Loro)
-                .await
-                .map_err(|e| anyhow::anyhow!("{op} of '{id}' in its Turso table: {e}"))?;
+            ops.push(BatchOp::data(op, params));
         }
+        provider
+            .execute_batch_with_origin(entity, ops, EventOrigin::Loro)
+            .await
+            .map_err(|e| anyhow::anyhow!("projecting {entity} rows into its Turso table: {e}"))?;
         Ok(())
     }
 }

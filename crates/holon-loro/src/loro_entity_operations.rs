@@ -25,6 +25,7 @@ use holon_core::OperationResult;
 use holon_core::Result;
 use holon_core::storage::types::StorageEntity;
 use holon_core::type_write_rule::CrudDeclarations;
+use holon_core::type_write_rule::ScopeReplacement;
 use holon_core::type_write_rule::WriteSchema;
 use loro::LoroDoc;
 use loro::LoroMap;
@@ -244,35 +245,8 @@ impl LoroEntityOperations {
                 )?;
                 Ok(OperationResult::irreversible(Vec::new()))
             }
-            // A tombstoned or purged key keeps its child container, so a create
-            // there clears every key it does not write.
             _ => {
-                self.write(
-                    |entity| {
-                        let written: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-                        for stale in entity.keys().map(|k| k.to_string()).collect::<Vec<_>>() {
-                            if stale != WriteSchema::OVERFLOW_COLUMN
-                                && !written.contains(&stale.as_str())
-                            {
-                                entity.delete(&stale)?;
-                            }
-                        }
-                        if let Some(ValueOrContainer::Container(loro::Container::Map(bag))) =
-                            entity.get(WriteSchema::OVERFLOW_COLUMN)
-                        {
-                            for stale in bag.keys().map(|k| k.to_string()).collect::<Vec<_>>() {
-                                if !written.contains(&stale.as_str()) {
-                                    bag.delete(&stale)?;
-                                }
-                            }
-                        }
-                        for (field, value) in &fields {
-                            self.put(entity, field, value)?;
-                        }
-                        Ok(())
-                    },
-                    id,
-                )?;
+                self.write(|entity| self.overwrite(entity, &fields), id)?;
                 Ok(OperationResult::new(
                     vec![FieldDelta::new(
                         id,
@@ -287,6 +261,87 @@ impl LoroEntityOperations {
                 ))
             }
         }
+    }
+
+    /// Writes `fields` as the entity's whole state. A tombstoned or purged key
+    /// keeps its child container, so every key not written is cleared.
+    fn overwrite(&self, entity: &LoroMap, fields: &[(String, Value)]) -> anyhow::Result<()> {
+        let written: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+        for stale in entity.keys().map(|k| k.to_string()).collect::<Vec<_>>() {
+            if stale != WriteSchema::OVERFLOW_COLUMN && !written.contains(&stale.as_str()) {
+                entity.delete(&stale)?;
+            }
+        }
+        if let Some(ValueOrContainer::Container(loro::Container::Map(bag))) =
+            entity.get(WriteSchema::OVERFLOW_COLUMN)
+        {
+            for stale in bag.keys().map(|k| k.to_string()).collect::<Vec<_>>() {
+                if !written.contains(&stale.as_str()) {
+                    bag.delete(&stale)?;
+                }
+            }
+        }
+        for (field, value) in fields {
+            self.put(entity, field, value)?;
+        }
+        Ok(())
+    }
+
+    /// Tombstones the scope's live entities that `rows` does not name again
+    /// and writes every row whole, in one commit.
+    fn replace_scope(&self, params: &StorageEntity) -> Result<OperationResult> {
+        let scope = ScopeReplacement::parse(params)?;
+        let root = self.store();
+        let live: HashMap<String, StorageEntity> = self.doc.with_read(|doc| {
+            let keys: Vec<String> = doc
+                .get_map(root.as_str())
+                .keys()
+                .map(|k| k.to_string())
+                .collect();
+            Ok(keys
+                .into_iter()
+                .filter_map(|key| {
+                    read_entity(doc, &root, &self.entity, &key)
+                        .filter(|stored| stored.live)
+                        .map(|stored| (key, stored.fields))
+                })
+                .collect())
+        })?;
+        let mut writes = Vec::with_capacity(scope.rows.len());
+        for row in &scope.rows {
+            let id = ScopeReplacement::id_of(row)?;
+            let key = self.key_of(ScopeReplacement::OP, id)?;
+            if let Some(held) = live.get(key).filter(|held| !scope.holds(held)) {
+                self.recognize(id, held, row)?;
+            }
+            writes.push((key.to_string(), self.partition(row)?));
+        }
+        let stale: Vec<&String> = live
+            .iter()
+            .filter(|(key, held)| scope.holds(held) && !writes.iter().any(|(k, _)| k == *key))
+            .map(|(key, _)| key)
+            .collect();
+        let tombstone = self.schema.tombstone_column().unwrap_or(TOMBSTONE_KEY);
+        let at = Value::String(chrono::Utc::now().to_rfc3339());
+        self.doc
+            .with_write(WriteOrigin::BlockOps, |txn| {
+                let store = txn.get_map(root.as_str());
+                for key in &stale {
+                    crate::mergeable_child::ensure_map(&store, key)?
+                        .insert(tombstone, column_to_loro(tombstone, &at)?)?;
+                }
+                for (key, fields) in &writes {
+                    self.overwrite(&crate::mergeable_child::ensure_map(&store, key)?, fields)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| {
+                format!(
+                    "{}: replacing the scope {} = {:?}: {e:#}",
+                    self.entity, scope.owner_column, scope.owner_value
+                )
+            })?;
+        Ok(OperationResult::irreversible(Vec::new()))
     }
 
     /// ADR 0029 D2: a create on a held id must name the same entity.
@@ -493,6 +548,7 @@ impl OperationProvider for LoroEntityOperations {
             "update" => self.update(&params),
             "delete" => self.delete(&params),
             "purge" => self.purge(&params),
+            ScopeReplacement::OP => self.replace_scope(&params),
             other => Err(format!("{}: unknown operation '{other}'", self.entity).into()),
         }
     }

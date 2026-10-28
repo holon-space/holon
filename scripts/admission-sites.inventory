@@ -18,7 +18,6 @@
 14 crates/holon-frontend/src/reactive.rs entry — two log/error format strings name dispatch_intent(_awaiting_result), not calls
 5 crates/holon-frontend/src/user_driver.rs entry
 1 crates/holon-loro-wiring/src/event_infra_module.rs below
-1 crates/holon-loro-wiring/src/typed_entity_sink.rs below
 5 crates/holon-loro/src/loro_share_backend.rs below
 1 crates/holon-mcp-client/src/mcp_provider.rs below
 1 crates/holon/src/api/action_watcher.rs entry

@@ -12,7 +12,7 @@ base table except ["block_derived", "block_history", "clock", "clock_reader", "f
 - `unreported`: observed effects missing from `result.changes` (what D1 alone would miss).
 - Not covered: the Loro write leg (Text/Mark ops such as `insert_text` are not in this catalog).
 
-Counts: 75 ops; inside 7; outside 9; undeclared 59 (of which 21 failed on the fixture binding, so their effect is unmeasured).
+Counts: 80 ops; inside 7; outside 9; undeclared 64 (of which 26 failed on the fixture binding, so their effect is unmeasured).
 
 ## Gesture ops of the slot
 
@@ -79,6 +79,7 @@ Counts: 75 ops; inside 7; outside 9; undeclared 59 (of which 21 failed on the fi
 | identity.revert_proposal_status | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
 | ingredient-use.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: ingredient_use_raw.recipe_id | Undeclared |  | ingredient-use:x — covers | - |
 | ingredient-use.delete | none | (none) | Undeclared |  | ingredient-use:x — covers | - |
+| ingredient-use.replace_scope | none | ERROR: replace_scope: missing list parameter 'rows' | Undeclared |  | relation ingredient-use — covers | - |
 | ingredient-use.set_field | none | ERROR: set_field('name') on 'ingredient-use:x' matched no row in `ingredient_use_raw`: the subject does not exist | Undeclared |  | ingredient-use:x — covers | - |
 | ingredient-use.update | none | (none) | Undeclared |  | ingredient-use:x — covers | - |
 | navigation.activate | none | ERROR: Failed to activate history row 1: Query error: Failed to fetch row: FOREIGN KEY constraint failed | Undeclared |  | relation navigation — covers | - |
@@ -93,19 +94,23 @@ Counts: 75 ops; inside 7; outside 9; undeclared 59 (of which 21 failed on the fi
 | pantry-item.consume | none | ERROR: consume: no pantry item with id 'pantry-item:x' | Undeclared |  | pantry-item:x — covers | - |
 | pantry-item.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: pantry_item_raw.quantity | Undeclared |  | pantry-item:x — covers | - |
 | pantry-item.delete | none | (none) | Undeclared |  | pantry-item:x — covers | - |
+| pantry-item.replace_scope | none | ERROR: replace_scope: missing list parameter 'rows' | Undeclared |  | relation pantry-item — covers | - |
 | pantry-item.set_field | none | ERROR: set_field('name') on 'pantry-item:x' matched no row in `pantry_item_raw`: the subject does not exist | Undeclared |  | pantry-item:x — covers | - |
 | pantry-item.update | none | (none) | Undeclared |  | pantry-item:x — covers | - |
 | person.create | none | person:x[existence:person_raw+] | Undeclared |  | person:x — covers | - |
 | person.delete | none | (none) | Undeclared |  | person:x — covers | - |
+| person.replace_scope | none | ERROR: replace_scope: missing list parameter 'rows' | Undeclared |  | relation person — covers | - |
 | person.set_field | none | ERROR: set_field('name') on 'person:x' matched no row in `person_raw`: the subject does not exist | Undeclared |  | person:x — covers | - |
 | person.update | none | (none) | Undeclared |  | person:x — covers | - |
 | recipe.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: recipe_raw.source_path | Undeclared |  | recipe:x — covers | - |
 | recipe.delete | none | (none) | Undeclared |  | recipe:x — covers | - |
+| recipe.replace_scope | none | ERROR: replace_scope: missing list parameter 'rows' | Undeclared |  | relation recipe — covers | - |
 | recipe.set_field | none | ERROR: set_field('name') on 'recipe:x' matched no row in `recipe_raw`: the subject does not exist | Undeclared |  | recipe:x — covers | - |
 | recipe.update | none | (none) | Undeclared |  | recipe:x — covers | - |
 | shopping-item.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: shopping_item_raw.cat | Undeclared |  | shopping-item:x — covers | - |
 | shopping-item.delete | none | (none) | Undeclared |  | shopping-item:x — covers | - |
 | shopping-item.purge | none | (none) | Undeclared |  | shopping-item:x — covers | - |
+| shopping-item.replace_scope | none | ERROR: replace_scope: missing list parameter 'rows' | Undeclared |  | relation shopping-item — covers | - |
 | shopping-item.set_field | none | ERROR: set_field('name') on 'shopping-item:x' matched no row in `shopping_item_raw`: the subject does not exist | Undeclared |  | shopping-item:x — covers | - |
 | shopping-item.update | none | (none) | Undeclared |  | shopping-item:x — covers | - |
 | engine.undo | none (fence) | block:n[existence:block_raw-] | Undeclared |  | fence — covers | n/a (engine compound) |
