@@ -8568,6 +8568,8 @@ impl FileSyncController {
             FoldVerdict::Stalled => return Ok(BlockChangeVerdict::NeedsBulkPass),
         }
 
+        #[cfg(feature = "crash-injection")]
+        crate::crash_injection::render_reached(&path).await;
         let disk_content = self.read_if_present(&path).await?.unwrap_or_default();
         let rendered = self.render_doc_from_holder(doc_id, &path).await?;
         let rendered = self.keep_copies(&path, &canonical, rendered, &disk_content)?;

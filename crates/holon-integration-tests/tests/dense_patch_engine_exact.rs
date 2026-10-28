@@ -1806,6 +1806,117 @@ fn a_generated_dense_edit_on_the_sql_authority_reads_back_exactly_or_is_refused(
     generated_dense_edits(Session::boot_sql_only());
 }
 
+/// A write-back render held across the judge's settle cannot leave a settled
+/// store beside a file that misses the agent's text: the settle refuses to
+/// report a fixed point while the render waits, and the file is owed the
+/// render until it is released. The hold takes only the armed file's render.
+#[test]
+fn a_render_held_across_the_settle_is_never_judged_a_settled_divergent_file() {
+    let (session, page) = Session::boot_sql_only().seed(&[
+        SeedRow::plain("One"),
+        SeedRow::plain("Two"),
+        SeedRow::plain("Three"),
+    ]);
+    let (handle, dense) = session.query(&page);
+    let mut text = DenseRows::split(&dense);
+    text.edit(
+        1,
+        &RowTextEdit::SetProperty("x.y".to_string(), "65".to_string()),
+    );
+    text.insert(
+        &NewRowText {
+            title: "New".to_string(),
+            body: Vec::new(),
+            state: None,
+            tags: Tags::default(),
+            properties: BTreeMap::new(),
+        },
+        NewRowPlace::Before(2),
+    );
+    let edited = text.join();
+    let rt = session.sut.runtime();
+    let file_path = rt
+        .block_on(
+            session
+                .driver
+                .call_tool_json("read_org_file", serde_json::json!({ "doc_id": page.file })),
+        )
+        .expect("read_org_file")["file_path"]
+        .as_str()
+        .expect("file_path")
+        .to_string();
+
+    // A session beside it in this process, as `cargo test` runs the tests of
+    // one binary, renders through the armed hold.
+    let (other, other_page) = Session::boot_sql_only().seed(&[SeedRow::plain("Other")]);
+    let (other_handle, other_dense) = other.query(&other_page);
+    let mut other_text = DenseRows::split(&other_dense);
+    other_text.edit(
+        0,
+        &RowTextEdit::SetProperty("x.y".to_string(), "65".to_string()),
+    );
+    holon_filesystem::crash_injection::hold_next_render(file_path.into());
+    let other_judged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        judge(&other, &other_page, &other_handle, &other_text.join(), &[])
+    }));
+    assert!(
+        matches!(other_judged, Ok(Ok(_))) && !holon_filesystem::crash_injection::render_held(),
+        "a render of another session's file took the hold: {:?}",
+        other_judged.map_err(|panic| panic.downcast_ref::<String>().cloned())
+    );
+
+    let judged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        judge(&session, &page, &handle, &edited, &[])
+    }));
+    assert!(
+        holon_filesystem::crash_injection::render_held(),
+        "the patch's write-back render never reached the hold, so nothing was held: {judged:?}"
+    );
+    let panic = match judged {
+        Ok(judged) => panic!("the judge returned while the render was held: {judged:?}"),
+        Err(panic) => panic
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("a formatted panic message"),
+    };
+    assert!(
+        panic.contains("did not reach a combined fixed point"),
+        "the settle must refuse a fixed point while the render waits, it panicked with:\n{panic}"
+    );
+    let disk = rt
+        .block_on(
+            session
+                .driver
+                .call_tool_json("read_org_file", serde_json::json!({ "doc_id": page.file })),
+        )
+        .expect("read_org_file");
+    let owed = rt
+        .block_on(
+            session
+                .driver
+                .call_tool_json("render_org", serde_json::json!({ "doc_id": page.file })),
+        )
+        .expect("render_org");
+    assert_ne!(
+        disk["content"], owed["rendered"],
+        "a held render leaves the file behind what write-back owes it, so a file read waits"
+    );
+
+    holon_filesystem::crash_injection::release_render();
+    session.sut.settle_projections();
+    let (_, now) = session.query(&page);
+    assert_eq!(
+        row_texts(&now),
+        row_texts(&edited),
+        "the store after release"
+    );
+    assert_eq!(
+        row_texts(&session.file_dense(&page)),
+        row_texts(&edited),
+        "the org file after release"
+    );
+}
+
 fn generated_dense_edits(session: Session) {
     const CASES: u32 = 96;
     let session = RefCell::new(Some(session));
