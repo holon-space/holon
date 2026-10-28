@@ -304,6 +304,35 @@ expect_outcome should-panic-split-header-failed 1 '^PRIMARY: \[novel\] .*unknown
 split_header_log mistyped_initial_state_key_is_loud '... FAILED' >"$work/split-header-plain-failed.log"
 expect_outcome split-header-plain-failed 1 '^PRIMARY: \[novel\] .*unknown top-level key "initail_state"$' \
     "$work/split-header-plain-failed.log"
+# libtest writes a test's verdict apart from its `test <t> ... ` head, so
+# stdout of another thread can glue text after the `ok` or push the verdict
+# onto a later line. The verdict is still that test's.
+split_verdict_log() {
+    cat <<EOF
+     Running tests/hand_authored_regressions.rs (target/debug/deps/h-0000000000000001)
+
+running 2 tests
+thread 'malformed_also_check_after_is_refused' (2) panicked at crates/holon-integration-tests/src/pbt/hand_authored.rs:212:9:
+hand-authored regression "<inline>":1 case "n": \`also_check_after\` holds "2", not a transition number
+$1
+thread 'hand_authored_keystone_regressions' (3) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  field deltas (1):\n    block:a: content: sut=\"x\" ref=\"y\"\n")]
+test hand_authored_keystone_regressions ... FAILED
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+EOF
+}
+split_verdict_log 'test malformed_also_check_after_is_refused - should panic ... ok[inv-sql-budget] UndoLastMutation: not judged — started from an unswept state' \
+    >"$work/should-panic-ok-trailing-text.log"
+expect_outcome should-panic-ok-trailing-text 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/should-panic-ok-trailing-text.log"
+split_verdict_log $'test malformed_also_check_after_is_refused - should panic ... \nApplying transition 4/6: ()\n\nok' \
+    >"$work/should-panic-ok-later-line.log"
+expect_outcome should-panic-ok-later-line 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/should-panic-ok-later-line.log"
+split_verdict_log $'test malformed_also_check_after_is_refused - should panic ... \nApplying transition 4/6: ()\nFAILED\nok' \
+    >"$work/should-panic-failed-later-line.log"
+expect_outcome should-panic-failed-later-line 1 '^PRIMARY: \[novel\] .*not a transition number$' \
+    "$work/should-panic-failed-later-line.log"
 # nextest status lines, in the shapes nextest-runner's reporter prints them
 # (reporter/displayer/imp.rs `status_str` / `short_status_str`). A test killed
 # or leaking after a passing body printed no panic, so the status line is its

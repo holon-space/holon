@@ -290,8 +290,10 @@ for log in "$@"; do
     # may panic on a worker thread, and names repeat across binaries.
     #
     # A panic on the thread of a test cargo reports as `- should panic ... ok`
-    # is that test passing. Such a panic is matched by thread name within the
-    # owning nextest instance, else within one cargo `Running` section, and is
+    # is that test passing. libtest writes the verdict apart from its head, so
+    # stdout of another thread may follow the `ok` or push it onto a later
+    # line. Such a panic is matched by thread name within the owning nextest
+    # instance, else within one cargo `Running` section, and is
     # dropped only when the panic count there equals the `ok` lines there; any
     # surplus keeps them all, because nothing tells the expected panic from the
     # real one.
@@ -412,9 +414,14 @@ for log in "$@"; do
                 next
             }
             track_line($0)
-            if (match($0, /^ *test .* - should panic \.\.\. ok$/)) {
-                name = $0; sub(/^ *test /, "", name); sub(/ - should panic \.\.\. ok$/, "", name)
-                expected[scope() SUBSEP name]++
+            if (scope() in verdict_due && match($0, /^ *(ok|FAILED|ignored)/)) {
+                if ($0 ~ /^ *ok/) expected[scope() SUBSEP verdict_due[scope()]]++
+                delete verdict_due[scope()]
+            }
+            if (match($0, /^ *test .* - should panic \.\.\. /)) {
+                name = $0; sub(/^ *test /, "", name); sub(/ - should panic \.\.\. .*$/, "", name)
+                if (substr($0, RLENGTH + 1) ~ /^ok/) expected[scope() SUBSEP name]++
+                else if (substr($0, RLENGTH + 1) !~ /^(FAILED|ignored)/) verdict_due[scope()] = name
             } else if (/panicked at /) {
                 panics[scope() SUBSEP thread_of($0)]++
             } else if (OWNER != "" && /^ *Error: / && !(OWNER in error_of)) {
