@@ -368,6 +368,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `dense-patch-cross-document-session-temp-dir-gone`
 - `dense-patch-cross-document-write-back-late-load`
 - `dense-patch-org-file-misses-agent-text`
+- `dense-patch-tags-content-property-missing-load`
 - `dogfood-replay-load-timeout`
 - `empty-created-file-header-never-written`
 - `external-rewrite-drops-page-body`
@@ -400,6 +401,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `metamorphic-undo-facet-unchanged`
 - `metamorphic-undo-snapshot-missing`
 - `mirrored-entity-authority-ops-missing`
+- `multiline-property-create-block-missing-load`
 - `no-proptest-regressions-seed-file-under-load`
 - `org-deep-text-ratio-under-load`
 - `org-suite-backward-sync-ui-delete-load-timeout`
@@ -421,6 +423,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `slot-withdrawn-last-claim-no-retraction`
 - `split-doc-root-setup-org-sync-under-load`
 - `state-toggle-live-row-never-settled-load`
+- `structural-fileless-page-writeback-not-materialized-load`
 - `task-state-clear-lost-across-cut-paste`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
@@ -450,6 +453,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-entity-not-in-bounds-under-load`
 - `windowed-focus-not-in-bounds-under-load`
 - `windowed-keyword-surface-stale-done-text`
+- `windowed-live-promotion-typed-todo-pre-warm-flake`
 - `windowed-live-promotion-undo-pre-warm-flake`
 - `windowed-nested-page-no-chevron-under-load`
 - `windowed-overlay-sidebar-page-tap-dismiss-pre-warm-flake`
@@ -458,6 +462,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-reboot-misses-observability-caps`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
+- `windowed-task-keyword-blur-promotion-pre-warm-flake`
 - `windowed-undo-blur-typed-suffix-pre-warm-flake`
 - `writeback-churning-file-stall-disclosed-twice`
 - `writeorgfile-sql-reads-budget`
