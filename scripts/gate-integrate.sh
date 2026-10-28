@@ -59,7 +59,7 @@ PBT_FEATURES="holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-
 TRACKS=(
   "13:hand-authored"
   "11:keystone-smoke 19:extra-nextest 12:loro-suite 14:projector-lag-lock 15:windowed-gate"
-  "17:timing-gate-build 7:gate-arch 3:check-release-shape 4:check-frontend-wasm 5:check-dioxus-web-wasm 6:check-worker-wasm 8:arch-validate 9:featuremap 10:analyze-arch 18:guests-verify"
+  "17:timing-gate-build 7:gate-arch 3:check-release-shape 4:check-frontend-wasm 5:check-dioxus-web-wasm 6:check-worker-wasm 8:arch-validate 9:featuremap 10:analyze-arch 18:guests-verify 22:keystone-tour"
 )
 read -ra STEPS <<<"${TRACKS[*]}"
 step_file() { echo "target/gate-logs/$GATE-step-$1.$2"; }
@@ -70,6 +70,8 @@ track() {
     case $name in
       featuremap) set -- /usr/bin/python3 scripts/featuremap.py check ;;
       keystone-smoke | hand-authored | extra-nextest) set -- "$0" "--$name" ;;
+      keystone-tour) set -- env HOLON_PBT_TIMING=measure "HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}" cargo test --workspace --features "$PBT_FEATURES" \
+        --test keystone_tour -- --include-ignored --nocapture ;;
       *) set -- just "$name" ;;
     esac
     rc=0; step "$n" "$name" "$@" >"$(step_file "$n" log)" 2>&1 || rc=$?
