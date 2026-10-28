@@ -2,3 +2,5 @@
 # (sw.sh): CoW-cloned into new lane workspaces from _sw_integ's warm build, and
 # purged from a stream's workspace once its work is confirmed landed on main.
 SW_EPHEMERAL_DIRS="target"
+# Archives each landed lane target (summaries, verdicts, logs) before it deletes it.
+SW_PURGE_CMD="/Users/martin/.claude/skills/steward/purge-lane-target.sh --archive /Users/martin/.claude/state/holon-steward/state/verdicts --lane-root /Users/martin/Workspaces/pkm/holon/.claude/worktrees --background --landed"
