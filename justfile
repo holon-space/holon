@@ -161,16 +161,18 @@ pbt name='general' cases='64' *FLAGS:
                 -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-petri.log
             ;;
         orgmode)
-            # BOTH org round-trip binaries. `org_block_round_trip_pbt` drives the
+            # BOTH org round-trip modules. `org_block_round_trip_pbt` drives the
             # `FileFormatAdapter` seam write-back renders through, so it is the
             # only gate that sees body+source-child data loss; it was in no `just`
             # recipe until 2026-08-04, which is why a renderer regression reached
-            # a green report.
+            # a green report. The filter is a substring: the skips keep the other
+            # `*_round_trip_pbt` modules out.
             PROPTEST_CASES={{cases}} cargo test \
-                {{CANON}} --test round_trip_pbt \
-                -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-orgmode.log
+                {{CANON}} --test main round_trip_pbt:: \
+                -- --skip org_block_round_trip_pbt:: --skip turso_block_ \
+                --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-orgmode.log
             PROPTEST_CASES={{cases}} cargo test \
-                {{CANON}} --test org_block_round_trip_pbt \
+                {{CANON}} --test main org_block_round_trip_pbt:: \
                 -- --nocapture {{FLAGS}} 2>&1 | tee -a target/gate-logs/pbt-orgmode.log
             ;;
         loro)
@@ -1339,25 +1341,29 @@ watch ui='gpui' *FLAGS:
 profile name='petri' cases='4' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
+    filter=""
     case "{{name}}" in
         general)  pkg="holon-integration-tests"; test="general_e2e_composed_pbt"; feat="--features pbt" ;;
         petri)    pkg="holon"; test="petri_e2e_pbt"; feat="" ;;
-        orgmode)  pkg="holon-orgmode"; test="round_trip_pbt"; feat="" ;;
+        orgmode)  pkg="holon-orgmode"; test="main"; feat=""
+                  filter="round_trip_pbt:: --skip org_block_round_trip_pbt::" ;;
         *)        echo "Unknown: {{name}}"; exit 1 ;;
     esac
     bin=$(cargo test -p "$pkg" $feat --test "$test" --no-run --message-format=json 2>/dev/null \
         | jq -r 'select(.executable) | .executable' | head -1)
-    PROPTEST_CASES={{cases}} samply record "$bin" --nocapture {{FLAGS}}
+    PROPTEST_CASES={{cases}} samply record "$bin" $filter --nocapture {{FLAGS}}
 
 # Sample stack traces of a stuck PBT (finds the right child process automatically)
 sample-pbt name='general' cases='1' duration='5':
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
+    filter=""
     case "{{name}}" in
         general)  pkg="holon-integration-tests"; test="general_e2e_composed_pbt"; feat="--features pbt" ;;
         petri)    pkg="holon"; test="petri_e2e_pbt"; feat="" ;;
-        orgmode)  pkg="holon-orgmode"; test="round_trip_pbt"; feat="" ;;
+        orgmode)  pkg="holon-orgmode"; test="main"; feat=""
+                  filter="round_trip_pbt:: --skip org_block_round_trip_pbt::" ;;
         *)        echo "Unknown: {{name}}"; exit 1 ;;
     esac
     bin=$(cargo test -p "$pkg" $feat --test "$test" --no-run --message-format=json 2>/dev/null \
@@ -1365,7 +1371,7 @@ sample-pbt name='general' cases='1' duration='5':
     binary_name=$(basename "$bin")
     echo "Binary: $bin"
     echo "Starting PBT in background..."
-    PROPTEST_CASES={{cases}} "$bin" --nocapture > target/gate-logs/pbt-sample-out.log 2>&1 &
+    PROPTEST_CASES={{cases}} "$bin" $filter --nocapture > target/gate-logs/pbt-sample-out.log 2>&1 &
     root_pid=$!
     echo "Root PID: $root_pid"
     echo "Waiting for child processes to spawn..."

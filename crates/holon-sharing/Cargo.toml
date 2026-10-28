@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -36,3 +37,7 @@ tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 holon-loro = { workspace = true, features = ["iroh-sync"] }
 iroh = { workspace = true, features = ["default"] }
 rand.workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

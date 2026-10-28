@@ -14,8 +14,6 @@
 //! Failed of a parked attempt. `HOLON_NET_TWIN=failed-settles-alone` lets a
 //! Failed settle the occurrence while another attempt may have happened.
 
-mod exec_support;
-
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -49,6 +47,8 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
+
+use crate::exec_support;
 
 const APP: &str = "app";
 const RUN_TIMER: u64 = 20;

@@ -49,7 +49,7 @@ while IFS='|' read -r twin marker; do
     fi
     log="target/twin-own-red-$twin.log"
     UFT_LOWER_TWIN="$twin" cargo nextest run -p holon-net --features naive-twins \
-        --no-fail-fast --test uft_lower >"$log" 2>&1
+        --no-fail-fast --test main -E 'test(/^uft_lower::/)' >"$log" 2>&1
     if [ $? -eq 0 ]; then
         echo "FAIL $twin: green — the twin no longer breaks anything ($log)"
         fail=1

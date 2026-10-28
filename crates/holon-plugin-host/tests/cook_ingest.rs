@@ -17,7 +17,7 @@ use holon_api::block::Block;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
 
-mod support;
+use crate::support;
 
 fn fixtures() -> PathBuf {
     support::fixtures_dir()

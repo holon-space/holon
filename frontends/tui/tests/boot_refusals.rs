@@ -6,10 +6,10 @@
 //! boots with no MCP listener; a refused second instance leaves the running
 //! instance's log intact
 
-mod tui_process;
-
 use tui_process::BOOTED;
 use tui_process::Launch;
+
+use crate::tui_process;
 
 #[test]
 fn a_missing_vault_root_refuses_to_start_and_names_it() {

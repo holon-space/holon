@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -34,3 +35,7 @@ tokio = { workspace = true, features = ["rt"] }
 [features]
 # Each twin breaks one executor rule, so a property test shows red for that rule.
 naive-twins = []
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

@@ -3,12 +3,12 @@
 //! field's one semantics (eval, planted SQL, live seat) would be replaced by a
 //! Rhai script on the live seat alone.
 
-mod common;
-
 use common::admit_one;
 use holon_profiles::TypedComputedFieldOverride;
 use holon_profiles::create_default_registry;
 use holon_profiles::parse_profile_yaml;
+
+use crate::common;
 
 const PROFILE_ID: &str = "block:vault-profile";
 

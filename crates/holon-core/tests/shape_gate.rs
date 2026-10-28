@@ -611,7 +611,7 @@ async fn an_answer_with_a_blank_body_is_legal() {
 
 /// Wall-clock cost of the gate per write, with an in-memory authority, so
 /// the number is the simulator's own overhead. Run in RELEASE:
-/// `cargo test -p holon-core --release --test shape_gate -- --ignored
+/// `cargo test -p holon-core --release --test main shape_gate:: -- --ignored
 /// --nocapture`.
 #[tokio::test]
 #[ignore]

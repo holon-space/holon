@@ -10,10 +10,6 @@
 //! Every twin must be red for the property it drops, not for another twin's:
 //! `scripts/twin-own-red.sh` holds the twin → property table and checks it.
 
-#[path = "exec_support/twin_names.rs"]
-mod twin_names;
-mod uft_lower_support;
-
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -77,6 +73,10 @@ use uft_lower_support::Ref;
 use uft_lower_support::Refusal;
 use uft_lower_support::SUBJECTS;
 use uft_lower_support::Sit;
+
+#[cfg(feature = "naive-twins")]
+use crate::exec_support::twin_names;
+use crate::uft_lower_support;
 
 const T: &str = "AcceptRemoval";
 

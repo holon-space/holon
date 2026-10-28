@@ -2,11 +2,11 @@
 //! refused when the profile loads (ruling D171.a), naming the expression, the
 //! name and the key the author most likely meant.
 
-mod common;
-
 use common::admit_one;
 use holon_profiles::create_default_registry;
 use holon_profiles::parse_profile_yaml;
+
+use crate::common;
 
 fn block_profile_with_condition(condition: &str) -> String {
     format!(

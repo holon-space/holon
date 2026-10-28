@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! HOLON_VAULT_SIM=/path/to/vault-copy \
-//!   cargo test -p holon-org-format --test vault_writeback_stability -- --ignored --nocapture
+//!   cargo test -p holon-org-format --test main vault_writeback_stability:: -- --ignored --nocapture
 //! ```
 
 use std::path::Path;

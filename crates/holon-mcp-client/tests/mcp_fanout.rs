@@ -33,7 +33,6 @@ use turso_ext::ConstraintOp;
 
 #[derive(Debug, Clone)]
 pub struct RecordedToolCall {
-    pub tool: String,
     pub params: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -93,10 +92,7 @@ impl McpCallSurface for MockPeer {
         let args = params.arguments.unwrap_or_default();
 
         let mut inner = self.inner.lock().unwrap();
-        inner.tool_calls.push(RecordedToolCall {
-            tool: tool.clone(),
-            params: args,
-        });
+        inner.tool_calls.push(RecordedToolCall { params: args });
         let body = inner
             .tool_responses
             .get_mut(&tool)

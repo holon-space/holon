@@ -3,8 +3,6 @@
 //!
 //! Twin: `HOLON_NET_TWIN=no-count-bound` retries without the count bound.
 
-mod exec_support;
-
 use std::time::Duration;
 
 use exec_support::Driver;
@@ -27,6 +25,8 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
+
+use crate::exec_support;
 
 const APP: &str = "app";
 const MAX_ATTEMPTS: u32 = 3;

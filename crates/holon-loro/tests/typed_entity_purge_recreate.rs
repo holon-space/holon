@@ -14,8 +14,6 @@
 //! state. `requirement_*` holds under that rule; the per-rule measurements keep
 //! the evidence that both key-only rules fail it.
 
-mod typed_entity_shape;
-
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
@@ -39,6 +37,8 @@ use typed_entity_shape::scan_ids;
 use typed_entity_shape::sync_pair;
 use typed_entity_shape::sync_to_closure;
 use typed_entity_shape::write_field;
+
+use crate::typed_entity_shape;
 
 const TYPE: &str = "repair-record";
 const SHAPE: Shape = Shape::MergeableChild;

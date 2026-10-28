@@ -6,8 +6,6 @@
 //! `HOLON_NET_TWIN=hidden-reservation` flags a taken token instead of moving
 //! it.
 
-mod exec_support;
-
 use std::collections::BTreeSet;
 
 use exec_support::Driver;
@@ -34,6 +32,8 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
+
+use crate::exec_support;
 
 const APP: &str = "app";
 

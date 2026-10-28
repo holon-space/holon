@@ -56,7 +56,7 @@ export HOLON_CAPABILITY_REPORT_DIR="$ROOT/$WORK/reports"
 echo "building the certification binary (once)…"
 BUILD_JSON="$WORK/build.json"
 /opt/homebrew/opt/parallel/bin/parallel --semaphore --id holon-build -j4 --fg -- \
-    cargo test -p holon-org-format --test profile_certification --no-run --message-format=json \
+    cargo test -p holon-org-format --test main --no-run --message-format=json \
     >"$BUILD_JSON" 2>"$WORK/build.err" || {
     echo "FATAL: building the certification binary failed — see $WORK/build.err"
     exit 92
@@ -69,19 +69,19 @@ for line in open(sys.argv[1]):
         continue
     m = json.loads(line)
     if m.get('reason') == 'compiler-artifact' and m.get('executable') \
-            and m.get('target', {}).get('name') == 'profile_certification':
+            and m.get('target', {}).get('name') == 'main':
         print(m['executable'])
         break
 PY
 )
 [ -n "$BIN" ] && [ -x "$BIN" ] || {
-    echo "FATAL: could not locate the profile_certification binary in $BUILD_JSON"
+    echo "FATAL: could not locate the holon-org-format test binary in $BUILD_JSON"
     exit 93
 }
 echo "binary: $BIN"
 
 run() {
-    "$BIN" --test-threads=1 --nocapture >"$RUN" 2>&1 || true
+    "$BIN" profile_certification:: --test-threads=1 --nocapture >"$RUN" 2>&1 || true
     grep "confirmed:" "$RUN" | head -1 | tr -s ' ' | sed 's/^ *//'
 }
 

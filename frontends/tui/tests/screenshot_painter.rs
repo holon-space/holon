@@ -2,6 +2,7 @@
 //! `tui_ui_pbt` `harness=false` integration so they actually run under
 //! `cargo test`.
 
+use common::screenshot::paint_offscreen_buffer;
 use holon_integration_tests::ui_driver::analyze_screenshot_emptiness;
 use r3bl_tui::OffscreenBuffer;
 use r3bl_tui::PixelChar;
@@ -11,8 +12,7 @@ use r3bl_tui::new_style;
 use r3bl_tui::tui_color;
 use r3bl_tui::width;
 
-mod common;
-use common::screenshot::paint_offscreen_buffer;
+use crate::common;
 
 fn pixel_text(c: char, style: TuiStyle) -> PixelChar {
     PixelChar::PlainText {

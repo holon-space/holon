@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -46,11 +47,6 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing-subscriber.workspace = true
 
-# These tests drive the write-back routing that lives in the `di` module.
 [[test]]
-name = "proposal_writes_do_not_amplify"
-required-features = ["di"]
-
-[[test]]
-name = "routing_applicability"
-required-features = ["di"]
+name = "main"
+path = "tests/main.rs"

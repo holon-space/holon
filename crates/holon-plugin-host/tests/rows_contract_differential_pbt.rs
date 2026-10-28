@@ -31,7 +31,7 @@ use holon_plugin_rows::Owner;
 use holon_plugin_rows::Stream;
 use proptest::prelude::*;
 
-mod support;
+use crate::support;
 
 /// One instance of each for the whole run — instantiating per case would
 /// dwarf the parse the property is about.

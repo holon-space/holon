@@ -16,7 +16,7 @@ use holon_core::file_format::FileFormatAdapter;
 use holon_plugin_host::PluginHost;
 use holon_plugin_host::PluginLimits;
 
-mod support;
+use crate::support;
 
 /// A 200-step recipe is far larger than any real one; the margin between what
 /// it spends and [`PluginLimits::default`] is what keeps a legitimate file from

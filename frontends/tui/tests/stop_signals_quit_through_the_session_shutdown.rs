@@ -11,8 +11,6 @@
 //! lands in the log, never on the terminal, and a draw to a dead terminal
 //! cannot panic; a panic shows on a live terminal
 
-mod tui_process;
-
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use std::time::Instant;
@@ -22,6 +20,8 @@ use tui_process::BOOTING;
 use tui_process::Launch;
 use tui_process::Launcher;
 use tui_process::SHUT_DOWN;
+
+use crate::tui_process;
 
 fn a_signal_quits_through_the_session_shutdown(name: &str, after: &str, mcp_port: u16) {
     let mut tui = Launch::new(mcp_port).spawn(|_| {});

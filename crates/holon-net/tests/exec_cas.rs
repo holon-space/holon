@@ -4,8 +4,6 @@
 //!
 //! Twin: `HOLON_NET_TWIN=no-cas` records without the compare.
 
-mod exec_support;
-
 use exec_support::Driver;
 use exec_support::Reads;
 use exec_support::Spec;
@@ -31,6 +29,8 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
+
+use crate::exec_support;
 
 const DOC: &str = "d";
 

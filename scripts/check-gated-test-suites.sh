@@ -52,11 +52,17 @@ for file in "${gated_files[@]}"; do
     # A `mod`-based suite (tests/<suite>/main.rs + tests/<suite>/<member>.rs)
     # compiles to ONE target named after its DIRECTORY, so `--test` must name
     # the suite while messages still name the member file.
+    # A crate whose tests/main.rs declares the file as a module builds it into
+    # its one `main` binary, so the suite is the tests under `<stem>::`.
     rel="${file#*/tests/}"
-    if [ "$rel" = "${rel##*/}" ]; then
-        target="$stem"
-    else
+    filter=""
+    if [ "$rel" != "${rel##*/}" ]; then
         target="${rel%%/*}"
+    elif grep -qE "^mod $stem;" "$crate_dir/tests/main.rs" 2>/dev/null; then
+        target="main"
+        filter="$stem::"
+    else
+        target="$stem"
     fi
 
     # Extract the gating feature. Fail loud on any form this guard can't parse
@@ -97,7 +103,7 @@ for file in "${gated_files[@]}"; do
     fi
 
     # (1) non-empty with its feature?
-    list_out=$(cargo test -p "$pkg" --features "$feat" --test "$target" -- --list 2>&1)
+    list_out=$(cargo test -p "$pkg" --features "$feat" --test "$target" -- $filter --list 2>&1)
     rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "FAIL: compiling/listing $pkg/$stem with --features $feat exited $rc"
@@ -108,8 +114,12 @@ for file in "${gated_files[@]}"; do
     # libtest's summary is singular for a one-test binary ("1 test, 0
     # benchmarks"), so the plural-only match read every such suite as 0 and
     # failed it as dead.
-    count=$(printf '%s\n' "$list_out" | grep -oE '[0-9]+ tests?,' | grep -oE '[0-9]+' | tail -1)
-    count=${count:-0}
+    if [ -n "$filter" ]; then
+        count=$(printf '%s\n' "$list_out" | grep -cE "^$filter.*: test$")
+    else
+        count=$(printf '%s\n' "$list_out" | grep -oE '[0-9]+ tests?,' | grep -oE '[0-9]+' | tail -1)
+        count=${count:-0}
+    fi
     if [ "$count" -eq 0 ]; then
         echo "FAIL: $pkg/$stem lists 0 tests WITH --features $feat — the gated suite is"
         echo "      dead (renamed feature / emptied file / tests moved out). Reconnect it."

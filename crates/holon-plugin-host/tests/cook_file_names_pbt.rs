@@ -15,7 +15,7 @@ use holon_core::file_format::FileFormatParseResult;
 use holon_plugin_host::PluginFormatAdapter;
 use proptest::prelude::*;
 
-mod support;
+use crate::support;
 
 /// One guest instance for the whole run — instantiating per case would dwarf
 /// the parse the property is about.

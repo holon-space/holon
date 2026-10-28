@@ -12,14 +12,14 @@
 
 #![cfg(feature = "di")]
 
-mod org_vault_double;
-
 use holon_api::entity_uri::EntityUri;
 use holon_filesystem::writeback_net as wn;
 use org_vault_double::DOC_ID;
 use org_vault_double::Vault;
 use org_vault_double::full_content;
 use org_vault_double::vault;
+
+use crate::org_vault_double;
 
 fn count(v: &Vault, prefix: &str) -> usize {
     v.disclosures

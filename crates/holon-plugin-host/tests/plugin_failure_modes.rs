@@ -15,7 +15,7 @@ use holon_plugin_host::PluginFormatAdapter;
 use holon_plugin_host::PluginHost;
 use holon_plugin_host::PluginLimits;
 
-mod support;
+use crate::support;
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")

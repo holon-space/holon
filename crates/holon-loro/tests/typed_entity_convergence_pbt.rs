@@ -13,8 +13,6 @@
 //! - the `delete_*` / `purge_*` tests are the measurements that decide the
 //!   delete rule (plan question 2)
 
-mod typed_entity_shape;
-
 use std::collections::BTreeMap;
 
 use loro::LoroValue;
@@ -33,6 +31,8 @@ use typed_entity_shape::read_entity;
 use typed_entity_shape::sync_pair;
 use typed_entity_shape::sync_to_closure;
 use typed_entity_shape::write_field;
+
+use crate::typed_entity_shape;
 
 const TYPE: &str = "repair-record";
 const IDS: [&str; 3] = ["r0", "r1", "r2"];
@@ -177,8 +177,8 @@ fn plain_container_child_loses_a_field_on_concurrent_create() {
 /// The red log of increment 1: the same oracle, run against the shape the plan
 /// rejects, as a failing test.
 ///
-/// `cargo test -p holon-loro --test typed_entity_convergence_pbt --
-/// --ignored red_proof`
+/// `cargo test -p holon-loro --test main
+/// typed_entity_convergence_pbt::red_proof -- --ignored`
 #[test]
 #[ignore = "red proof for the increment-1 log: asserts the shape the plan rejects"]
 fn red_proof_plain_container_child_fails_the_convergence_oracle() {

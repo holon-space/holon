@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -32,3 +33,7 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 tempfile.workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

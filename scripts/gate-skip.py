@@ -11,9 +11,8 @@ The steps are skipped only when every changed path is
   - not on TRIGGERS,
   - not lib src (any path outside `tests/`) of a crate in the
     holon-integration-tests dependency closure,
-  - in an allow class: a doc under `docs/`, or one test binary of a member
-    that no step-selecting source (justfile, scripts, the timing profile)
-    names by binary or by package.
+  - not under a member's `tests/`,
+  - a doc under `docs/` or a file that only non-skipped steps read.
 """
 import argparse
 import fnmatch
@@ -51,41 +50,21 @@ TRIGGERS = [
 NOT_REACHING = ["scripts/timing-assertions-baseline.txt"]
 
 class Workspace:
+    # The step sources and the timing profile are unused until a test binary can be resolved exactly.
     def __init__(self, metadata, step_sources, timing_profile):
         self.root = Path(metadata["workspace_root"])
         ids = set(metadata["workspace_members"])
         pkgs = {p["name"]: p for p in metadata["packages"] if p["id"] in ids}
         self.dirs = {n: P(p["manifest_path"]).parent.relative_to(P(metadata["workspace_root"])) for n, p in pkgs.items()}
-        self.test_srcs = {
-            n: {P(t["src_path"]).relative_to(P(metadata["workspace_root"])) for t in p["targets"] if "test" in t["kind"]}
-            for n, p in pkgs.items()
-        }
         self.closure = closure(pkgs, CLOSURE_ROOT)
-        self.named_words = set(re.findall(r"[\w-]+", step_sources))
-        self.named_pkgs = set(re.findall(r"(?:package\(|binary_id\()([\w-]+)", step_sources))
-        for line in step_sources.splitlines():
-            if re.search(r"nextest run|cargo test", line) and not re.search(r"--(test|example|bin|lib)\b", line):
-                self.named_pkgs |= set(re.findall(r"(?:-p|--package)\s+([\w-]+)", line))
-        # A bare `test(=module::...)` row selects that module in whichever crate holds it.
-        for module in re.findall(r"test\(=(\w+)::", timing_profile):
-            for n, d in self.dirs.items():
-                if (self.root / d / "tests" / module).exists() or (self.root / d / "tests" / f"{module}.rs").exists():
-                    self.named_pkgs.add(n)
 
     def owner(self, p):
         owners = [n for n, d in self.dirs.items() if d != P(".") and d in p.parents]
         return max(owners, key=lambda n: len(self.dirs[n].parts), default=None)
 
     def test_binary(self, member, p):
-        rel = p.relative_to(self.dirs[member])
-        tests = self.dirs[member] / "tests"
-        if len(rel.parts) == 2 and p.suffix == ".rs":
-            if p in self.test_srcs[member] or not (self.root / p).exists():
-                return p.stem
-        if len(rel.parts) > 2:
-            name = rel.parts[1]
-            if {tests / name / "main.rs", tests / f"{name}.rs"} & self.test_srcs[member]:
-                return name
+        # shortcut: no tests/ path counts as one test binary, since a text scan cannot prove that no other test
+        # pulls it in; resolve the binaries that compile `p` from cargo dep-info to skip test-only diffs again.
         return None
 
 
@@ -112,13 +91,8 @@ def blocker(path, ws):
         return None
     if member is None:
         return "unknown path"
-    binary = ws.test_binary(member, p)
-    if binary is None:
+    if ws.test_binary(member, p) is None:
         return f"test path of {member} that is not one test binary"
-    if member in ws.named_pkgs:
-        return f"tests of {member}, a package a gate step selects"
-    if binary in ws.named_words:
-        return f"test binary {binary}, named by a gate step"
     return None
 
 
@@ -136,13 +110,7 @@ def run(cmd, cwd=None):
 
 def load_workspace():
     metadata = json.loads(run(["cargo", "metadata", "--no-deps", "--format-version", "1"]))
-    root = Path(metadata["workspace_root"])
-    nextest = (root / ".config/nextest.toml").read_text()
-    timing = re.search(r"^\[profile\.timing\]\n(.*?)(?=^\[)", nextest, re.S | re.M)
-    if timing is None:
-        sys.exit("gate-skip: .config/nextest.toml has no [profile.timing] section")
-    sources = step_sources(root, (root / "justfile").read_text())
-    return Workspace(metadata, sources + "\n" + timing.group(1), timing.group(1))
+    return Workspace(metadata, "", "")
 
 
 def recipes(justfile):

@@ -10,7 +10,7 @@ use holon_api::ROUTING_DOC_URI_KEY;
 use holon_api::Value;
 use holon_core::file_format::FileFormatAdapter;
 
-mod support;
+use crate::support;
 
 /// The cell a cooklang step numbers itself with, as the guest spells it.
 const STEP_NUMBER_KEY: &str = "step_number";

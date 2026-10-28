@@ -2,11 +2,11 @@
 //! `set_field` is refused when the profile loads, naming the widget argument,
 //! the field and the structural op that owns it.
 
-mod common;
-
 use common::admit_one;
 use holon_profiles::create_default_registry;
 use holon_profiles::parse_profile_yaml;
+
+use crate::common;
 
 fn block_profile_rendering(render: &str) -> String {
     format!(

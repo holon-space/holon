@@ -6,8 +6,6 @@
 //! and must not make the pass unsettled. A commit that touches a block AND an
 //! entity map must still project the block, and only it.
 
-mod typed_entity_shape;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -29,6 +27,8 @@ use typed_entity_shape::FieldPath;
 use typed_entity_shape::changed_entities;
 use typed_entity_shape::put_field;
 use typed_entity_shape::read_entity;
+
+use crate::typed_entity_shape;
 
 const ORIGIN: WriteOrigin = WriteOrigin::Probe("typed_entity_block_projection");
 const TYPE: &str = "repair-record";

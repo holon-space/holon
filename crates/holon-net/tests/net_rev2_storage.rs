@@ -17,8 +17,6 @@
 //! (`lag <= FINAL_DELTA_MAX`) but leaves the catch-up outside the hold, so the
 //! store that takes over is up to `FINAL_DELTA_MAX` writes behind.
 
-mod exec_support;
-
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -51,6 +49,8 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
+
+use crate::exec_support;
 
 const VAULT: &str = "vault";
 const TURSO: &str = "turso";

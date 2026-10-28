@@ -16,7 +16,7 @@ use holon_filesystem::RealFileSystem;
 use holon_orgmode::di::OrgModeConfig;
 use holon_orgmode::di::seed_default_org_assets;
 
-mod org_vault_double;
+use crate::org_vault_double;
 
 const ASSET: &str = "#+TITLE: Journals\n#+ID: journals\n";
 

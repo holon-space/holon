@@ -2,8 +2,8 @@
 //! Loro write authority, which has no tagged-neighbourhood read: every plan
 //! that is not text-only is simulated.
 //!
-//! Run in RELEASE: `cargo test -p holon-loro --release --test shape_gate_cost
-//! -- --ignored --nocapture`.
+//! Run in RELEASE: `cargo test -p holon-loro --release --test main
+//! shape_gate_cost:: -- --ignored --nocapture`.
 
 use std::collections::HashMap;
 use std::sync::Arc;

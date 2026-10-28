@@ -16,4 +16,4 @@ echo "report dir: $HOLON_CAPABILITY_REPORT_DIR"
 # test must never PRE-EMPT another. Proven once on the logseq script, where
 # fail-fast skipped the day-29 boundary alarm; the hazard is milder here (a
 # cross-format assertion rather than an alarm) and the fix is the same.
-exec cargo nextest run -p holon-org-format -E 'binary(profile_certification)' --no-capture --no-fail-fast
+exec cargo nextest run -p holon-org-format -E 'binary_id(holon-org-format::main) & test(/^profile_certification::/)' --no-capture --no-fail-fast

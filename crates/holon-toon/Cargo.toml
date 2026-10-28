@@ -5,6 +5,7 @@ edition = "2021"
 license.workspace = true
 publish = false
 description = "Experiment: a TOON-based dense, round-trippable text projection of the Holon block forest, compared against Org syntax for agent read/patch workflows."
+autotests = false
 
 [dependencies]
 thiserror = { workspace = true }
@@ -36,3 +37,7 @@ measure = ["dep:tiktoken-rs", "serde-json"]
 [[example]]
 name = "measure"
 required-features = ["measure"]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

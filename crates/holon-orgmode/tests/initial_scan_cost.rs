@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-mod org_vault_double;
+use crate::org_vault_double;
 
 fn vault(files: usize) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();

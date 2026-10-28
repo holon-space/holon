@@ -1,0 +1,12 @@
+mod common;
+mod computed_null_round_trip;
+mod computed_tier_declaration;
+mod decision_profile_conditions;
+mod declared_invariant_policy;
+mod malformed_type_profile_refusal;
+mod profile_scope_refusal;
+mod profile_typed_computed_override_refusal;
+mod profile_write_target_refusal;
+mod type_home_file_and_block_conflict;
+mod type_services_declaration;
+mod vault_profile_admission_is_history_free;

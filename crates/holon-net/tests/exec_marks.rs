@@ -4,8 +4,6 @@
 //! Twins: `HOLON_NET_TWIN=mark-by-version` keys the mark by row versions;
 //! `HOLON_NET_TWIN=no-mark` sets no mark at all.
 
-mod exec_support;
-
 use exec_support::Driver;
 use exec_support::Spec;
 use exec_support::Transition;
@@ -22,6 +20,8 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
+
+use crate::exec_support;
 
 const TASK: &str = "t";
 

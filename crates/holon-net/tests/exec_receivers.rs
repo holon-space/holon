@@ -6,8 +6,6 @@
 //! definite failure. `HOLON_NET_TWIN=failed-settles-alone` lets a Failed
 //! settle the occurrence while another attempt may have happened.
 
-mod exec_support;
-
 use std::time::Duration;
 
 use exec_support::Driver;
@@ -36,6 +34,8 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
+
+use crate::exec_support;
 
 const MSG: &str = "m";
 const KEYED_ATTEMPTS: u32 = 3;

@@ -719,8 +719,8 @@ Notes:
 `scripts/gate-skip.py --base <rev> --tip <rev>` reads the batch diff and prints
 `full` or `skip: 3 4 5 6 11 12 13 14 15 16 18` (the landing gate's release-shape
 and wasm checks and its test-running steps). It skips only when every changed
-path is a doc, a file only non-skipped steps read, or one test binary that no
-skipped step names, and no path is a trigger (manifests, toolchain, justfile,
+path is a doc or a file only non-skipped steps read (any path under a crate's
+`tests/` forces full), and no path is a trigger (manifests, toolchain, justfile,
 nextest config, files the skipped steps or their tests read); a rename or copy
 counts its source and its destination. It prints each
 blocking path and its reason on stderr. Its self-check is
@@ -893,7 +893,7 @@ The interpreter's cost is measured, not assumed:
 
 ```
 cargo nextest run --release -p holon-plugin-host --test-threads 1 \
-  --run-ignored all --no-capture -E 'binary(vault_scan_latency)'
+  --run-ignored all --no-capture -E 'binary_id(holon-plugin-host::main) & test(/^vault_scan_latency::/)'
 ```
 
 Cross-target rot guards. The host itself compiles for both wasm targets, but

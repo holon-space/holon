@@ -44,16 +44,6 @@ def load_module():
     return module
 
 
-def check_scan():
-    g = load_module()
-    metadata = json.loads(subprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1"],
-                                         cwd=REPO, capture_output=True, text=True, check=True).stdout)
-    ws = g.Workspace(metadata, "cargo nextest run -p holon-net\ncargo check -p holon-api", "")
-    assert ws.named_pkgs == {"holon-net"}, f"a whole-package test run names its package, a check does not: {ws.named_pkgs}"
-    ws = g.Workspace(metadata, "", 'filter = "test(=exec_support::x)"')
-    assert ws.named_pkgs == {"holon-net"}, f"a bare test(=module::) row names the crate holding tests/module: {ws.named_pkgs}"
-
-
 def check_summary_paths():
     g = load_module()
     got = g.summary_paths("R docs/Testing/{ => registry}/KeystoneKnownReds.md\nC {a => b}/x.rs\nM justfile\nD old.md")
@@ -131,22 +121,68 @@ def check_renamed_trigger():
     assert r.stdout.strip() == "full", f"a moved trigger must be full, got {r.stdout!r}: {r.stderr}"
 
 
+def check_helper_reach_forms():
+    g = load_module()
+    pulls = {"crate": "use crate::helper as _h;\n", "super": "use super::helper as _h;\n", "grouped": "use crate::{helper as _h};\n",
+             "path": '#[path = "helper.rs"]\nmod h;\n', "include": 'mod h { include!("helper.rs"); }\n'}
+    for form, pull in pulls.items():
+        with tempfile.TemporaryDirectory() as root:
+            tests = Path(root) / "crates/fake/tests"
+            tests.mkdir(parents=True)
+            (tests / "main.rs").write_text("mod helper;\nmod leaf;\n")
+            (tests / "helper.rs").write_text("pub fn shared() {}\n")
+            (tests / "leaf.rs").write_text(pull)
+            metadata = {"workspace_root": root, "workspace_members": ["fake", "it"], "packages": [{
+                "id": "fake", "name": "fake", "manifest_path": f"{root}/crates/fake/Cargo.toml", "dependencies": [],
+                "targets": [{"kind": ["test"], "src_path": f"{root}/crates/fake/tests/main.rs"}]},
+                {"id": "it", "name": "holon-integration-tests", "manifest_path": f"{root}/it/Cargo.toml",
+                 "dependencies": [], "targets": []}]}
+            ws = g.Workspace(metadata, "", "")
+            got = ws.test_binary("fake", g.P("crates/fake/tests/helper.rs"))
+            assert got is None, f"a file another test pulls in by {form} is a shared helper, got binary {got!r}"
+
+
+def check_glob_macro_and_attr_reach_forms():
+    g = load_module()
+    forms = {
+        "glob super": ("mod helper;\nmod leaf;\n", "use super::*;\nfn g() { helper::shared() }\n"),
+        "glob crate": ("mod helper;\nmod leaf;\n", "use crate::*;\nfn g() { helper::shared() }\n"),
+        "re-export in main.rs": ("mod helper;\nuse helper::shared;\nmod leaf;\n", "fn g() { crate::shared() }\n"),
+        "macro_use in main.rs": ("#[macro_use]\nmod helper;\nmod leaf;\n", "fn g() { shared_mac!() }\n"),
+        "include of concat": ("mod leaf;\n", 'mod h { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/helper.rs")); }\n'),
+        "cfg_attr path": ("mod leaf;\n", '#[cfg_attr(all(), path = "helper.rs")]\nmod h;\n'),
+    }
+    for form, (main_rs, leaf) in forms.items():
+        with tempfile.TemporaryDirectory() as root:
+            tests = Path(root) / "crates/fake/tests"
+            tests.mkdir(parents=True)
+            (tests / "main.rs").write_text(main_rs)
+            (tests / "helper.rs").write_text("pub fn shared() {}\nmacro_rules! shared_mac { () => {} }\n")
+            (tests / "leaf.rs").write_text(leaf)
+            metadata = {"workspace_root": root, "workspace_members": ["fake", "it"], "packages": [{
+                "id": "fake", "name": "fake", "manifest_path": f"{root}/crates/fake/Cargo.toml", "dependencies": [],
+                "targets": [{"kind": ["test"], "src_path": f"{root}/crates/fake/tests/main.rs"}]},
+                {"id": "it", "name": "holon-integration-tests", "manifest_path": f"{root}/it/Cargo.toml",
+                 "dependencies": [], "targets": []}]}
+            ws = g.Workspace(metadata, "", "")
+            got = ws.test_binary("fake", g.P("crates/fake/tests/helper.rs"))
+            assert got is None, f"a file another test reaches by {form} is a shared helper, got binary {got!r}"
+
+
 def main():
-    check_scan()
+    check_helper_reach_forms()
+    check_glob_macro_and_attr_reach_forms()
     check_baseline_readers()
     check_renamed_trigger()
-    out, err = on_paths("crates/holon-net/tests/net_load.rs")
-    assert out == SKIP, f"a tests/-only diff of one binary must skip, got {out!r}: {err}"
-    out, err = on_paths("docs/Plans/x.md", "crates/holon-net/tests/net_file.rs", "crates/holon-core/tests/shape_gate/claims.rs")
-    assert out == SKIP, f"a docs and unnamed-test-binary diff must skip, got {out!r}: {err}"
+    out, err = on_paths("docs/Plans/x.md")
+    assert out == SKIP, f"a docs-only diff must skip, got {out!r}: {err}"
 
     out, err = on_paths("docs/Architecture/FeatureMap.md", "docs/Architecture/featuremap.yaml",
-                        "docs/Architecture/baseline/crates", "docs/Testing/known-red-evidence/x/y.md",
-                        "crates/holon-net/tests/net_file.rs")
+                        "docs/Architecture/baseline/crates", "docs/Testing/known-red-evidence/x/y.md")
     assert out == SKIP, f"files only steps outside the skip set read must skip, got {out!r}: {err}"
 
-    out, err = on_paths("scripts/timing-assertions-baseline.txt", "crates/holon-net/tests/net_file.rs")
-    assert out == SKIP, f"the timing-assertions baseline plus one test binary must skip, got {out!r}: {err}"
+    out, err = on_paths("scripts/timing-assertions-baseline.txt", "docs/Plans/x.md")
+    assert out == SKIP, f"the timing-assertions baseline plus a doc must skip, got {out!r}: {err}"
 
     for trigger in ["Cargo.lock", "crates/holon-api/Cargo.toml", "justfile", ".config/nextest.toml",
                     "rust-toolchain.toml", ".cargo/config.toml", "docs/Testing/KeystoneKnownReds.md",
@@ -160,18 +196,14 @@ def main():
     expect_full(["crates/holon-net/tests/net_load.rs", "frobnicate/notes.txt", "docs/Plans/x.md"],
                 "frobnicate/notes.txt", "unknown path")
 
-    expect_full(["crates/holon-integration-tests/tests/hand_authored_regressions.rs"],
-                "crates/holon-integration-tests/tests/hand_authored_regressions.rs",
-                "test binary hand_authored_regressions, named by a gate step")
-    expect_full(["crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs"],
-                "crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs",
-                "test binary general_e2e_composed_pbt, named by a gate step")
-    expect_full(["crates/holon-orgmode/tests/round_trip_pbt.rs"], "crates/holon-orgmode/tests/round_trip_pbt.rs",
-                "test binary round_trip_pbt, named by a gate step")
-    expect_full(["frontends/gpui/tests/nested_page_chevron_gate.rs"], "frontends/gpui/tests/nested_page_chevron_gate.rs",
-                "tests of holon-gpui, a package a gate step selects")
-    expect_full(["crates/holon-net/tests/exec_support/twin_names.rs"], "crates/holon-net/tests/exec_support/twin_names.rs",
-                "test path of holon-net that is not one test binary")
+    for member, test_path in [
+        ("holon-net", "crates/holon-net/tests/exec_answer.rs"), ("holon-net", "crates/holon-net/tests/exec_support/mod.rs"),
+        ("holon-net", "crates/holon-net/tests/net_load.rs"), ("holon-core", "crates/holon-core/tests/shape_gate/claims.rs"),
+        ("holon-profiles", "crates/holon-profiles/tests/common/mod.rs"),
+        ("holon-integration-tests", "crates/holon-integration-tests/tests/hand_authored_regressions.rs"),
+        ("holon-gpui", "frontends/gpui/tests/nested_page_chevron_gate.rs"),
+    ]:
+        expect_full([test_path], test_path, f"test path of {member} that is not one test binary")
 
     out, err = on_paths()
     assert out == "full" and "full: empty diff" in err, f"an empty diff must be full, got {out!r}: {err}"

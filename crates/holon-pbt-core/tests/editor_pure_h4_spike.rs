@@ -532,7 +532,6 @@ impl SutQuiesce for EditorPureSut {
 
 #[derive(Clone, Debug)]
 pub enum Rej {
-    LoroOff,
     NotStarted,
     NotSetup,
     NoFocus,
@@ -903,9 +902,9 @@ proptest_state_machine::prop_state_machine! {
 }
 
 /// Wall-clock micro-benchmark for H4 keystone. Prints to stdout.
-/// Run with `cargo nextest run -p holon-pbt-core --test editor_pure_h4_spike h4
-/// --nocapture` or `cargo test -p holon-pbt-core --test editor_pure_h4_spike h4
-/// -- --nocapture`.
+/// Run with `cargo nextest run -p holon-pbt-core --test main
+/// editor_pure_h4_spike::h4 --nocapture` or `cargo test -p holon-pbt-core
+/// --test main editor_pure_h4_spike::h4 -- --nocapture`.
 #[test]
 fn h4_microbenchmark() {
     let cases = 256_u32;

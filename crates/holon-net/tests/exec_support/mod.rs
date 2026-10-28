@@ -7,7 +7,7 @@
 
 pub mod model;
 
-mod twin_names;
+pub mod twin_names;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

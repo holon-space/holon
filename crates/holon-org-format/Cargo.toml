@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -39,3 +40,11 @@ tracing-subscriber.workspace = true
 # Dev-only cycle (that crate depends on this one): the shared `(content, marks)`
 # store-state generators live there per the shared-generator directive.
 holon-block-roundtrip-testing = { workspace = true }
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+[[test]]
+name = "deep_authored_text_never_aborts"
+path = "tests/deep_authored_text_never_aborts.rs"

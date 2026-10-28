@@ -19,10 +19,10 @@
 
 #![cfg(feature = "di")]
 
-mod org_vault_double;
-
 use org_vault_double::full_content;
 use org_vault_double::vault;
+
+use crate::org_vault_double;
 
 /// THE regression: the 0-byte intermediate of an atomic save must leave the
 /// document exactly as it was, and the content that lands next must ingest

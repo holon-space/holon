@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -67,3 +68,7 @@ iroh = { workspace = true, optional = true }
 tokio = { workspace = true, default-features = false, features = ["sync", "macros", "rt", "time"] }
 getrandom.workspace = true
 uuid = { workspace = true, features = ["js"] }
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

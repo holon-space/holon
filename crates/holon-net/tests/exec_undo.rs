@@ -1,8 +1,6 @@
 //! Undo of an answer (XQ2.a), the settled chain of an answer, and the ask
 //! hash. Each case runs on the executor and the reference model.
 
-mod exec_support;
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +40,8 @@ use holon_net::exec::Undone;
 use holon_net::exec::ask_hash;
 use holon_net::exec::hash_text;
 use holon_net::exec::work_occurrence;
+
+use crate::exec_support;
 
 fn n(v: i64) -> Content {
     content(&[("n", Value::Integer(v))])

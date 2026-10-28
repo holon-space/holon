@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 [[bin]]
 name = "holon-mcp"
@@ -61,3 +62,7 @@ holon-org-format = { workspace = true }
 holon-mcp-client = { path = "../../crates/holon-mcp-client" }
 async-trait = { workspace = true }
 holon-turso.workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

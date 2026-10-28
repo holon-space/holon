@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -31,3 +32,7 @@ uuid = { workspace = true, features = ["js"] }
 # proptest's `getrandom` and `wait-timeout` do not build for wasm.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 proptest.workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

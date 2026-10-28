@@ -9,13 +9,11 @@
 //! budget.
 //!
 //! RELEASE profile, and every number it prints names it:
-//! `cargo test -p holon-loro --release --test typed_entity_scale --
+//! `cargo test -p holon-loro --release --test main typed_entity_scale:: --
 //! --ignored --nocapture`
 //!
 //! `shape_cost_at_small_scale` is the same body at 500 entities with no
 //! budgets, so the measurement code is exercised by the default test run.
-
-mod typed_entity_shape;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -39,6 +37,8 @@ use typed_entity_shape::read_entity;
 use typed_entity_shape::read_entity_declared;
 use typed_entity_shape::read_field;
 use typed_entity_shape::scan_ids;
+
+use crate::typed_entity_shape;
 
 const TYPE: &str = "repair-record";
 const ORIGIN: WriteOrigin = WriteOrigin::Probe("typed_entity_scale");
@@ -361,7 +361,7 @@ fn measure(shape: Shape, entities: usize, samples: usize, budgets: bool) -> anyh
 }
 
 #[test]
-#[ignore = "release bench: `cargo test -p holon-loro --release --test typed_entity_scale -- --ignored --nocapture`"]
+#[ignore = "release bench: `cargo test -p holon-loro --release --test main typed_entity_scale:: -- --ignored --nocapture`"]
 fn shape_cost_at_ten_thousand_entities() -> anyhow::Result<()> {
     // The budgets below are release numbers, so a debug run must refuse to
     // report them rather than fail them.

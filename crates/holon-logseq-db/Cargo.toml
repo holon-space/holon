@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -41,3 +42,7 @@ async-trait.workspace = true
 # The fail-loud contract tests drive MUTATED COPIES of the fixture; the copies
 # live in a temp dir so the committed fixture is never written.
 tempfile.workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

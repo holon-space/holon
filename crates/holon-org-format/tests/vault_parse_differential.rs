@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! HOLON_VAULT_SIM=/path/to/vault HOLON_VAULT_DUMP=/tmp/parse.jsonl \
-//!   cargo test -p holon-org-format --test vault_parse_differential -- --ignored
+//!   cargo test -p holon-org-format --test main vault_parse_differential:: -- --ignored
 //! ```
 //!
 //! `write_rules_census` counts, without printing any content, the ids and

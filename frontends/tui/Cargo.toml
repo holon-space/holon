@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -64,3 +65,7 @@ holon-pbt-core = { path = "../../crates/holon-pbt-core" }
 proptest.workspace = true
 proptest-state-machine.workspace = true
 tempfile.workspace = true
+
+[[test]]
+name = "main"
+path = "tests/main.rs"

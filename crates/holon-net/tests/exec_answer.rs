@@ -12,8 +12,6 @@
 //! holding the row the work wrote is reached by the generator and not only by
 //! the deterministic `undo_while_a_downstream_firing_holds_a_row`.
 
-mod exec_support;
-
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -54,6 +52,8 @@ use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
+
+use crate::exec_support;
 
 const SUBJECTS: [&str; 2] = ["x", "y"];
 const IDS: [&str; 4] = ["a0", "a1", "a2", "a3"];
