@@ -16,9 +16,6 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use holon_api::Value;
-use holon_api::user_transition::AnswerCall;
-use holon_api::user_transition::AnswerId;
-use holon_api::user_transition::UftError;
 use holon_net::exec::Accepted;
 use holon_net::exec::AskMeta;
 use holon_net::exec::AttemptId;
@@ -50,6 +47,9 @@ use holon_net::exec::Trigger;
 use holon_net::exec::UndoError;
 use holon_net::exec::Undone;
 use holon_net::exec::WhyNot;
+use holon_transition_contract::AnswerCall;
+use holon_transition_contract::AnswerId;
+use holon_transition_contract::UftError;
 use model::Model;
 
 /// The marking as a guard, a binding or a derived place reads it: the
@@ -919,7 +919,7 @@ pub fn answer_spec() -> Spec {
                         r.field(
                             "Answered.Accept",
                             s,
-                            holon_api::user_transition::ANSWER_INPUT_KEY
+                            holon_transition_contract::ANSWER_INPUT_KEY
                         )
                         .is_none(),
                         "guard read the value"
@@ -943,7 +943,7 @@ pub fn answer_spec() -> Spec {
                     let answer = r.text(
                         "Answered.Accept",
                         s,
-                        holon_api::user_transition::ANSWER_ID_KEY,
+                        holon_transition_contract::ANSWER_ID_KEY,
                     )?;
                     let reason = match r.text("Situation.Accept", s, "hash") {
                         None => "ask_gone",
@@ -1001,8 +1001,8 @@ pub fn answer_call(d: &Driver, s: &str, id: &str, stale: bool, value: Option<&st
         _ => blake3::hash(b"a stale ask").to_hex().to_string(),
     };
     AnswerCall {
-        transition: holon_api::user_transition::TransitionName("Accept".to_string()),
-        subject: holon_api::user_transition::SubjectName(s.to_string()),
+        transition: holon_transition_contract::TransitionName("Accept".to_string()),
+        subject: holon_transition_contract::SubjectName(s.to_string()),
         seen: holon_net::exec::hash_from_text(&hash),
         answer: AnswerId(id.to_string()),
         value: value.map(text),

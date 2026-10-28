@@ -85,7 +85,7 @@ pub async fn create_test_engine_with_setup<F>(
 where
     F: FnOnce(&Injector) -> Result<()>,
 {
-    let conditions = Arc::new(holon_api::ConditionBus::new());
+    let conditions = Arc::new(holon_conditions::ConditionBus::new());
     let engine = create_backend_engine(
         db_path,
         crate::di::DatabaseRole::DurableStore,
@@ -110,7 +110,7 @@ where
     Fut: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let conditions = Arc::new(holon_api::ConditionBus::new());
+    let conditions = Arc::new(holon_conditions::ConditionBus::new());
     let booted = create_backend_engine_with_extras(
         db_path,
         crate::di::DatabaseRole::DurableStore,

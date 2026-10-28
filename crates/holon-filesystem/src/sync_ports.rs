@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use async_trait::async_trait;
 use holon_api::EntityUri;
-use holon_api::HolonChange;
 use holon_api::block::Block;
+use holon_conditions::HolonChange;
 
 /// What the last ingest recorded for one vault file.
 ///

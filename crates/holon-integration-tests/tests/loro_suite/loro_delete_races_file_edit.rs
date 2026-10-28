@@ -86,11 +86,13 @@ async fn row(env: &TestEnvironment, id: &str) -> Option<(String, String)> {
 fn overruled_text(env: &TestEnvironment, id: &str) -> Option<String> {
     env.injector()
         .expect("injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
         .find_map(|c| match c.reason {
-            holon_api::ConditionKind::FileEditOverruled { file_text, .. } if c.subject == id => {
+            holon_conditions::ConditionKind::FileEditOverruled { file_text, .. }
+                if c.subject == id =>
+            {
                 Some(file_text)
             }
             _ => None,
@@ -117,7 +119,7 @@ async fn conflict_copies(env: &TestEnvironment) -> Vec<(std::path::PathBuf, Stri
 fn conditions(env: &TestEnvironment) -> Vec<String> {
     env.injector()
         .expect("injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
         .map(|c| format!("{c:?}"))
@@ -438,18 +440,18 @@ fn a_parent_delete_keeping_its_child_racing_an_external_edit_keeps_the_child() {
             let disclosed = env
                 .injector()
                 .expect("injector")
-                .resolve::<Arc<holon_api::ConditionBus>>()
+                .resolve::<Arc<holon_conditions::ConditionBus>>()
                 .current()
                 .into_iter()
                 .find_map(|c| match c.reason {
-                    holon_api::ConditionKind::FileEditOverruled { change, .. }
+                    holon_conditions::ConditionKind::FileEditOverruled { change, .. }
                         if c.subject == "block:d92-child" =>
                     {
                         Some(change)
                     }
                     _ => None,
                 });
-            if disclosed == Some(holon_api::HolonChange::Moved)
+            if disclosed == Some(holon_conditions::HolonChange::Moved)
                 && gamma.as_ref().map(|(c, _)| c.as_str()) == Some("Gamma edited outside")
                 && on_disk.contains("* Gamma edited outside")
                 && alpha.is_none()

@@ -28,9 +28,6 @@ use exec_support::content;
 use exec_support::int;
 use exec_support::text;
 use holon_api::Value;
-use holon_api::user_transition::SubjectName;
-use holon_api::user_transition::TransitionName;
-use holon_api::user_transition::UftError;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
@@ -48,6 +45,9 @@ use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
 use holon_net::exec::answer_transition;
 use holon_net::exec::answered_place;
+use holon_transition_contract::SubjectName;
+use holon_transition_contract::TransitionName;
+use holon_transition_contract::UftError;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
@@ -256,7 +256,7 @@ fn work_fired_once_with_its_value(sut: &Sut) {
             req.occurrence
         );
         assert_eq!(
-            req.input.get(holon_api::user_transition::ANSWER_INPUT_KEY),
+            req.input.get(holon_transition_contract::ANSWER_INPUT_KEY),
             sut.values.get(answer.as_ref()),
             "the work of {answer} has the wrong value"
         );

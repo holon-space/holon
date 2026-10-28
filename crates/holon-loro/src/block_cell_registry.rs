@@ -68,7 +68,7 @@ pub struct BlockCellRegistry {
     /// Where an editor cell discloses a keystroke the doc's write lock
     /// refused. Absent in the SqlOnly and test registries, whose cells then
     /// return the error without raising a condition.
-    bus: Option<Arc<holon_api::ConditionBus>>,
+    bus: Option<Arc<holon_conditions::ConditionBus>>,
     /// Arms the vault's text-undo manager the first time an EDITOR cell is
     /// handed out, and a runtime to do it on.
     ///
@@ -128,7 +128,7 @@ impl BlockCellRegistry {
     /// Disclose a keystroke the document's write lock refuses. Without this
     /// an editor cell returns the error and the frontends log it, so the user
     /// keeps text the store never took.
-    pub fn with_condition_bus(mut self, bus: Arc<holon_api::ConditionBus>) -> Self {
+    pub fn with_condition_bus(mut self, bus: Arc<holon_conditions::ConditionBus>) -> Self {
         self.bus = Some(bus);
         self
     }

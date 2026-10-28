@@ -19,8 +19,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use holon_api::Clock;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
@@ -35,7 +35,7 @@ fn runtime() -> tokio::runtime::Runtime {
 /// Boot the shipped wiring with `clock` injected and hand back the degraded
 /// conditions in effect. Returning at all is half the assertion: the panic this
 /// file was written against never got here.
-async fn boot_with_clock(clock: Arc<dyn Clock>) -> Vec<holon_api::Condition> {
+async fn boot_with_clock(clock: Arc<dyn Clock>) -> Vec<holon_conditions::Condition> {
     let dir = tempfile::tempdir().expect("tempdir");
     let holon_config = HolonConfig {
         db_path: Some(dir.path().join("degraded.db")),
@@ -75,7 +75,7 @@ async fn boot_with_clock(clock: Arc<dyn Clock>) -> Vec<holon_api::Condition> {
     current
 }
 
-fn clock_not_running_error(current: &[holon_api::Condition]) -> String {
+fn clock_not_running_error(current: &[holon_conditions::Condition]) -> String {
     current
         .iter()
         .find_map(|c| match &c.reason {
@@ -110,7 +110,7 @@ fn an_out_of_range_clock_instant_is_disclosed_rather_than_fatal() {
     assert_eq!(
         current
             .iter()
-            .filter(|c| c.subject == holon_api::condition_bus::CLOCK_SUBJECT)
+            .filter(|c| c.subject == holon_conditions::condition_bus::CLOCK_SUBJECT)
             .count(),
         1,
         "exactly one clock disclosure stands; the bus carries {:?}",

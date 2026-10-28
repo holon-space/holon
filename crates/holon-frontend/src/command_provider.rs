@@ -16,8 +16,8 @@ use holon_api::render_types::OperationParam;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::TypeHint;
 use holon_api::types::EntityName;
-use holon_api::user_transition::Offer;
-use holon_api::user_transition::Offered;
+use holon_transition_contract::Offer;
+use holon_transition_contract::Offered;
 
 use crate::operation_matcher::MatchedOperation;
 use crate::operation_matcher::{self};

@@ -2864,6 +2864,7 @@ dependencies = [
  "gql-transform",
  "holon-advice",
  "holon-api",
+ "holon-conditions",
  "holon-connections",
  "holon-core",
  "holon-kitchen",
@@ -2939,6 +2940,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-conditions"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "holon-api",
+ "serde",
+ "tokio",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-connections"
 version = "0.1.0"
 dependencies = [
@@ -3007,6 +3019,7 @@ dependencies = [
  "async-trait",
  "hex",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-macros",
  "holon-net",
@@ -3037,12 +3050,14 @@ dependencies = [
  "getrandom 0.3.4",
  "holon-advice",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-filesystem",
  "holon-macros",
  "holon-oracles",
  "holon-org-format",
  "holon-secrets",
+ "holon-transition-contract",
  "memory-stats",
  "premortem",
  "serde",
@@ -3085,6 +3100,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-filesystem",
  "holon-macros",
@@ -3116,6 +3132,7 @@ dependencies = [
  "holon",
  "holon-advice",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-loro",
  "holon-profiles",
@@ -3148,6 +3165,7 @@ dependencies = [
  "holon-net-layout",
  "holon-pattern",
  "holon-rules",
+ "holon-transition-contract",
  "indexmap 2.14.2",
  "serde",
  "serde_json",
@@ -3238,6 +3256,7 @@ dependencies = [
  "anyhow",
  "futures-signals",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "rhai",
  "serde",
@@ -3304,6 +3323,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-transition-contract"
+version = "0.1.0"
+dependencies = [
+ "holon-api",
+ "serde",
+ "thiserror 2.0.21",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-turso"
 version = "0.1.0"
 dependencies = [
@@ -3314,6 +3343,7 @@ dependencies = [
  "gql-parser",
  "gql-transform",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "serde_json",
  "sqlparser 0.61.0",
@@ -3336,6 +3366,7 @@ dependencies = [
  "differential-dataflow",
  "getrandom 0.3.4",
  "holon-api",
+ "holon-conditions",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -3355,6 +3386,7 @@ dependencies = [
  "futures",
  "holon",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-frontend",
  "holon-loro-wiring",

@@ -54,10 +54,13 @@ fn is_held(failed: &OpenFailed) -> bool {
     )
 }
 
-fn database_held(path: &std::path::Path, hold: holon_api::DatabaseHold) -> holon_api::Condition {
-    holon_api::Condition {
+fn database_held(
+    path: &std::path::Path,
+    hold: holon_conditions::DatabaseHold,
+) -> holon_conditions::Condition {
+    holon_conditions::Condition {
         subject: DATABASE_SUBJECT.to_string(),
-        reason: holon_api::ConditionKind::DatabaseHeld {
+        reason: holon_conditions::ConditionKind::DatabaseHeld {
             path: path.display().to_string(),
             hold,
         },
@@ -69,13 +72,16 @@ fn database_held(path: &std::path::Path, hold: holon_api::DatabaseHold) -> holon
 fn project_in_memory_while_held(
     injector: &Injector,
     db_path: PathBuf,
-    conditions: &Arc<holon_api::ConditionBus>,
+    conditions: &Arc<holon_conditions::ConditionBus>,
 ) -> Result<(Arc<turso_core::Database>, OpenOutcome, PathBuf)> {
     tracing::warn!(
         "[DI] Another process holds {}; projecting into an in-memory database",
         db_path.display()
     );
-    conditions.emit(database_held(&db_path, holon_api::DatabaseHold::Held));
+    conditions.emit(database_held(
+        &db_path,
+        holon_conditions::DatabaseHold::Held,
+    ));
     let memory = PathBuf::from(":memory:");
     let (db, outcome) = TursoBackend::open_database_reporting_outcome(&memory)
         .context("Failed to open the in-memory database for a held database file")?;
@@ -92,7 +98,10 @@ fn project_in_memory_while_held(
             match holon_turso::db_open::is_held(&db_path) {
                 Ok(true) => {}
                 Ok(false) => {
-                    conditions.emit(database_held(&db_path, holon_api::DatabaseHold::Released));
+                    conditions.emit(database_held(
+                        &db_path,
+                        holon_conditions::DatabaseHold::Released,
+                    ));
                     return;
                 }
                 Err(error) => {
@@ -101,11 +110,11 @@ fn project_in_memory_while_held(
                          watching it: {error}",
                         db_path.display()
                     );
-                    let held = database_held(&db_path, holon_api::DatabaseHold::Held);
+                    let held = database_held(&db_path, holon_conditions::DatabaseHold::Held);
                     conditions.clear(&held.condition_key());
-                    conditions.emit(holon_api::Condition {
+                    conditions.emit(holon_conditions::Condition {
                         subject: DATABASE_SUBJECT.to_string(),
-                        reason: holon_api::ConditionKind::DatabaseWatchStopped {
+                        reason: holon_conditions::ConditionKind::DatabaseWatchStopped {
                             path: db_path.display().to_string(),
                             error: error.to_string(),
                         },
@@ -179,7 +188,7 @@ pub fn open_and_register_core(
     db_path: PathBuf,
     storage: StorageSelector,
     role: DatabaseRole,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 ) -> Result<()> {
     // Registered before the storage substrate so no wiring can spawn
     // session-scoped work without a shutdown to register it against.
@@ -266,7 +275,7 @@ pub struct CoreInfraModule {
     pub db_path: PathBuf,
     pub role: DatabaseRole,
     /// The frontend core's bus, created before any storage opens.
-    pub conditions: Arc<holon_api::ConditionBus>,
+    pub conditions: Arc<holon_conditions::ConditionBus>,
 }
 
 impl Module for CoreInfraModule {
@@ -295,7 +304,7 @@ impl Module for CoreInfraModule {
 async fn build_di_container<F>(
     db_path: PathBuf,
     role: DatabaseRole,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
     setup_fn: F,
 ) -> Result<Arc<Injector>>
 where
@@ -323,7 +332,7 @@ where
 /// caller to resolve services (e.g. the `BlockQuerySource`) from.
 pub async fn build_no_turso_container<F>(
     db_path: PathBuf,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
     setup_fn: F,
 ) -> Result<Arc<Injector>>
 where
@@ -350,7 +359,7 @@ where
 pub async fn create_backend_engine<F>(
     db_path: PathBuf,
     role: DatabaseRole,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
     setup_fn: F,
 ) -> Result<Arc<BackendEngine>>
 where
@@ -378,7 +387,7 @@ where
 pub async fn create_backend_engine_with_extras<F, G, Fut, T>(
     db_path: PathBuf,
     role: DatabaseRole,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
     setup_fn: F,
     extra_resolve: G,
 ) -> Result<(Arc<BackendEngine>, T)>
@@ -436,7 +445,7 @@ mod no_turso_tests {
 
         let injector = build_no_turso_container(
             ":memory:".into(),
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             move |inj| {
                 inj.provide::<dyn BlockQuerySource>(Provider::root(move |_| {
                     let blocks = blocks.clone();

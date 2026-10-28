@@ -677,9 +677,9 @@ pub struct BlockFeed(pub Arc<LiveData<crate::block::Block>>);
 /// through the ordinary API.
 ///
 /// The guarantee is CRATE-SCOPED: the tuple field is private, so no crate
-/// outside `holon-api` can wrap a CDC-fed mirror, but `in_memory` and
-/// `ConditionBus` construct it from inside. Within this module, wrapping a
-/// `LiveData::new` mirror is still possible and still wrong.
+/// outside `holon-api` can wrap a CDC-fed mirror, but `in_memory` constructs
+/// it from inside. Within this module, wrapping a `LiveData::new` mirror is
+/// still possible and still wrong.
 pub struct AuthoredLiveData<T: Clone + Send + Sync + 'static>(Arc<LiveData<T>>);
 
 impl<T: Clone + Send + Sync + 'static> AuthoredLiveData<T> {

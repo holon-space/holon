@@ -5,7 +5,7 @@ use gpui_component::input::Input;
 use gpui_component::input::InputState;
 use gpui_component::tooltip::Tooltip;
 use holon_api::Value;
-use holon_api::user_transition::Offer;
+use holon_transition_contract::Offer;
 use holon_frontend::answer::Answering;
 use holon_frontend::command_provider::OfferPresentation;
 use holon_frontend::command_provider::present_offer;

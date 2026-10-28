@@ -6,16 +6,16 @@
 
 use std::time::Duration;
 
-use holon_api::AllClear;
-use holon_api::ConditionPlacement;
-use holon_api::ConditionProfile;
-use holon_api::ConditionSeverity;
-use holon_api::OpId;
-use holon_api::RemedySlot;
-use holon_api::SettingsSection;
+use holon_conditions::AllClear;
+use holon_conditions::ConditionPlacement;
+use holon_conditions::ConditionProfile;
+use holon_conditions::ConditionSeverity;
+use holon_conditions::OpId;
+use holon_conditions::RemedySlot;
+use holon_conditions::SettingsSection;
 
 const LABEL: &str = "test condition";
-const ICON: &str = holon_api::condition_profile::icons::WARN;
+const ICON: &str = holon_conditions::condition_profile::icons::WARN;
 const PLACEMENT: ConditionPlacement = ConditionPlacement::Banner;
 
 #[test]

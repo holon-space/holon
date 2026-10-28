@@ -67,7 +67,7 @@ fn boot(blocks: &Blocks) -> FrontendSession {
         None,
         holon_profiles::create_default_registry().expect("default TypeRegistry"),
         &holon_api::lifecycle::SessionShutdown::new(),
-        Arc::new(holon_api::ConditionBus::new()),
+        Arc::new(holon_conditions::ConditionBus::new()),
     )
 }
 

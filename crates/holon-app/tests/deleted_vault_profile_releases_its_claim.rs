@@ -14,12 +14,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
 use holon_api::EntityName;
 use holon_api::OpOrigin;
 use holon_api::Value;
 use holon_api::render_requirements::RenderRequirements;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
@@ -84,7 +84,7 @@ async fn boot() -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.path().to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         |_| Ok(()),
         |injector| {
             (

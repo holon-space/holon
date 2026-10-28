@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use chrono::DateTime;
 use chrono::Utc;
-use holon_api::DroppedPanics;
 use holon_api::Value;
 use holon_api::render_types::RenderExpr;
+use holon_conditions::DroppedPanics;
 
 use crate::panic_record;
 use crate::panic_record::PanicRecord;

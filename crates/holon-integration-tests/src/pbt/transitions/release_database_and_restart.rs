@@ -52,8 +52,8 @@ impl TransitionRef<ReferenceState> for ReleaseDatabaseAndRestart {
         state.reboot_drops_in_memory_state();
         state.ui.boot_on_released_database();
         state.conditions.clear(
-            holon_api::condition_bus::DATABASE_SUBJECT,
-            holon_api::ConditionKind::DATABASE_HELD,
+            holon_conditions::condition_bus::DATABASE_SUBJECT,
+            holon_conditions::ConditionKind::DATABASE_HELD,
         );
     }
 }

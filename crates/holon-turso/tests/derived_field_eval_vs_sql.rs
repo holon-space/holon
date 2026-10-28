@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon_api::ConditionBus;
 use holon_api::Value;
 use holon_api::computation::ArithOp;
 use holon_api::computation::Computation;
@@ -27,6 +26,7 @@ use holon_api::computation::DerivedField;
 use holon_api::computation::DerivedFieldPlan;
 use holon_api::computation::FieldKind;
 use holon_api::computation::FieldTypes;
+use holon_conditions::ConditionBus;
 use holon_turso::derived_reconciler::spawn_derived_field_reconciler;
 use holon_turso::matview_manager::MatviewManager;
 use holon_turso::matview_manager::reconcile_named_view;
@@ -499,7 +499,7 @@ async fn a_null_operand_gives_null_in_every_seat() {
             .filter(|c| {
                 matches!(
                     c.reason,
-                    holon_api::ConditionKind::DerivedFieldNotComputed { .. }
+                    holon_conditions::ConditionKind::DerivedFieldNotComputed { .. }
                 )
             })
             .collect();

@@ -936,9 +936,9 @@ pub struct DbHandle {
 }
 
 impl DbHandle {
-    /// Raise [`holon_api::ConditionKind::DatabaseStuck`] on `bus` while a
-    /// command keeps this handle's actor busy past the hang bound.
-    pub fn disclose_stuck_commands_on(&self, bus: Arc<holon_api::ConditionBus>) {
+    /// Raise [`holon_conditions::ConditionKind::DatabaseStuck`] on `bus` while
+    /// a command keeps this handle's actor busy past the hang bound.
+    pub fn disclose_stuck_commands_on(&self, bus: Arc<holon_conditions::ConditionBus>) {
         self.watch.disclose_on(bus);
     }
 
@@ -4540,7 +4540,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_poisoned_actor_watch_fails_each_command_and_the_actor_lives_on() {
         let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
-        let bus = Arc::new(holon_api::ConditionBus::new());
+        let bus = Arc::new(holon_conditions::ConditionBus::new());
         handle.disclose_stuck_commands_on(bus.clone());
         handle.watch.poison();
 
@@ -4559,7 +4559,7 @@ mod tests {
         assert!(
             bus.current().iter().any(|c| matches!(
                 c.reason,
-                holon_api::ConditionKind::DatabaseWatchFailed { .. }
+                holon_conditions::ConditionKind::DatabaseWatchFailed { .. }
             )),
             "the failing commands are not disclosed: {:#?}",
             bus.current()

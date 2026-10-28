@@ -58,7 +58,7 @@ async fn boot_sql_only(dir: &std::path::Path, db_file: &str) -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.to_path_buf(),
         HashSet::new(),
-        Arc::new(holon_api::ConditionBus::new()),
+        Arc::new(holon_conditions::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())
@@ -190,7 +190,7 @@ async fn sqlonly_rows_not_in_org_files_survive_a_function_set_change() {
     );
     let raised: Vec<String> = second
         .injector
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .subscribe()
         .current
         .iter()

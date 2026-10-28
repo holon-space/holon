@@ -36,11 +36,11 @@ use crate::pbt::reference_state::ReferenceState;
 /// The condition kinds the model governs in every state, so a spurious one
 /// fails the run.
 pub const COPY_KINDS: [&str; 5] = [
-    holon_api::ConditionKind::BLOCK_IN_TWO_FILES,
-    holon_api::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
-    holon_api::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE,
-    holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
-    holon_api::ConditionKind::DELETION_ENDED_BY_EDIT,
+    holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES,
+    holon_conditions::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
+    holon_conditions::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE,
+    holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
+    holon_conditions::ConditionKind::DELETION_ENDED_BY_EDIT,
 ];
 
 /// The transitions the model describes while a copy stands. The others
@@ -591,15 +591,15 @@ impl ReferenceState {
                     .collect()
             };
             let kind = if copy.conflict {
-                holon_api::ConditionKind::BLOCK_EDITED_IN_TWO_FILES
+                holon_conditions::ConditionKind::BLOCK_EDITED_IN_TWO_FILES
             } else {
-                holon_api::ConditionKind::BLOCK_IN_TWO_FILES
+                holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES
             };
             raised.push((id.as_str().to_string(), kind, names(&mut copy.files.keys())));
             for (member, undone) in &copy.undone {
                 raised.push((
                     member.as_str().to_string(),
-                    holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
+                    holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
                     names(&mut undone.holders.iter()),
                 ));
             }
@@ -607,14 +607,14 @@ impl ReferenceState {
         for (id, doc) in &self.files.kept_after_delete {
             raised.push((
                 id.as_str().to_string(),
-                holon_api::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE,
+                holon_conditions::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE,
                 vec![file_name_of(self, doc)],
             ));
         }
         for (id, file) in &self.files.deletions_ended_by_edit {
             raised.push((
                 id.as_str().to_string(),
-                holon_api::ConditionKind::DELETION_ENDED_BY_EDIT,
+                holon_conditions::ConditionKind::DELETION_ENDED_BY_EDIT,
                 vec![file.clone()],
             ));
         }

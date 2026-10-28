@@ -2,12 +2,12 @@
 //! `MalformedTypeProfile` naming the type, its origin, the variant, the part
 //! and the text; every other type profile is still built.
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
 use holon_api::MalformedTypeProfile;
 use holon_api::TypeDefinition;
 use holon_api::TypeSource;
 use holon_api::VariantPart;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_profiles::create_default_registry;
 use holon_profiles::profile_from_type_def;
 use holon_profiles::type_profiles_from_registry;

@@ -174,7 +174,7 @@ async fn conflict_copies(env: &TestEnvironment) -> Vec<(std::path::PathBuf, Stri
 fn conditions(env: &TestEnvironment) -> Vec<String> {
     env.injector()
         .expect("injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
         .map(|c| format!("{c:?}"))

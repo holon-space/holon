@@ -1057,17 +1057,316 @@
             "layer": "Engine",
             "dirs": [
               {
-                "name": "bin",
-                "path": "holon-api/src/bin",
+                "name": "action_dsl",
+                "path": "holon-api/src/action_dsl",
                 "files": [
                   {
-                    "name": "panic_unwind_probe.rs"
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "admission",
+                "path": "holon-api/src/admission",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "block",
+                "path": "holon-api/src/block",
+                "files": [
+                  {
+                    "name": "mutation_gap_tests.rs"
+                  },
+                  {
+                    "name": "storage_row_round_trip.rs"
+                  },
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "block_mutation",
+                "path": "holon-api/src/block_mutation",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "block_write_field",
+                "path": "holon-api/src/block_write_field",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "capability",
+                "path": "holon-api/src/capability",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "caseless",
+                "path": "holon-api/src/caseless",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "change_set",
+                "path": "holon-api/src/change_set",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "clock",
+                "path": "holon-api/src/clock",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "commit_clock",
+                "path": "holon-api/src/commit_clock",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "computation",
+                "path": "holon-api/src/computation",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "computed",
+                "path": "holon-api/src/computed",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "content_canonical",
+                "path": "holon-api/src/content_canonical",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "edge_field",
+                "path": "holon-api/src/edge_field",
+                "files": [
+                  {
+                    "name": "mutation_gap_tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "effect_id",
+                "path": "holon-api/src/effect_id",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "entity",
+                "path": "holon-api/src/entity",
+                "files": [
+                  {
+                    "name": "create_table_sql_tests.rs"
+                  },
+                  {
+                    "name": "mutation_gap_tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "entity_reference",
+                "path": "holon-api/src/entity_reference",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "entity_uri",
+                "path": "holon-api/src/entity_uri",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "expr_parser",
+                "path": "holon-api/src/expr_parser",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "hashmap_value_conversions",
+                "path": "holon-api/src/hashmap_value_conversions",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "icon_name",
+                "path": "holon-api/src/icon_name",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "identity_minting",
+                "path": "holon-api/src/identity_minting",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "identity_recognition",
+                "path": "holon-api/src/identity_recognition",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "inline_mark",
+                "path": "holon-api/src/inline_mark",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "input_types",
+                "path": "holon-api/src/input_types",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "latency_drain",
+                "path": "holon-api/src/latency_drain",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "latency_e2e",
+                "path": "holon-api/src/latency_e2e",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "latency_slo",
+                "path": "holon-api/src/latency_slo",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "lifecycle",
+                "path": "holon-api/src/lifecycle",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "link_parser",
+                "path": "holon-api/src/link_parser",
+                "files": [
+                  {
+                    "name": "tests.rs"
                   }
                 ]
               },
               {
                 "name": "live_data",
                 "path": "holon-api/src/live_data",
+                "dirs": [
+                  {
+                    "name": "group_by",
+                    "path": "holon-api/src/live_data/group_by",
+                    "files": [
+                      {
+                        "name": "tests.rs"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "home_by",
+                    "path": "holon-api/src/live_data/home_by",
+                    "files": [
+                      {
+                        "name": "tests.rs"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "supervision",
+                    "path": "holon-api/src/live_data/supervision",
+                    "files": [
+                      {
+                        "name": "tests.rs"
+                      }
+                    ]
+                  }
+                ],
                 "files": [
                   {
                     "name": "group_by.rs"
@@ -1077,6 +1376,177 @@
                   },
                   {
                     "name": "supervision.rs"
+                  },
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "perspective",
+                "path": "holon-api/src/perspective",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "predicate",
+                "path": "holon-api/src/predicate",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "proposal",
+                "path": "holon-api/src/proposal",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "provenance",
+                "path": "holon-api/src/provenance",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "reactive",
+                "path": "holon-api/src/reactive",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "render_dsl",
+                "path": "holon-api/src/render_dsl",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "render_eval",
+                "path": "holon-api/src/render_eval",
+                "files": [
+                  {
+                    "name": "mutation_gap_tests.rs"
+                  },
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "render_requirements",
+                "path": "holon-api/src/render_requirements",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "render_types",
+                "path": "holon-api/src/render_types",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "sharing",
+                "path": "holon-api/src/sharing",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "spawner",
+                "path": "holon-api/src/spawner",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "storage_error",
+                "path": "holon-api/src/storage_error",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "streaming",
+                "path": "holon-api/src/streaming",
+                "files": [
+                  {
+                    "name": "mutation_gap_tests.rs"
+                  },
+                  {
+                    "name": "no_otel_layer_tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "template_instantiation",
+                "path": "holon-api/src/template_instantiation",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "theme_token",
+                "path": "holon-api/src/theme_token",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "types",
+                "path": "holon-api/src/types",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "widget_spec",
+                "path": "holon-api/src/widget_spec",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "write_seq",
+                "path": "holon-api/src/write_seq",
+                "files": [
+                  {
+                    "name": "tests.rs"
                   }
                 ]
               }
@@ -1126,18 +1596,6 @@
               },
               {
                 "name": "computed.rs"
-              },
-              {
-                "name": "condition_bus.rs"
-              },
-              {
-                "name": "condition_detail.rs"
-              },
-              {
-                "name": "condition_profile.rs"
-              },
-              {
-                "name": "condition_source.rs"
               },
               {
                 "name": "content_canonical.rs"
@@ -1290,9 +1748,6 @@
                 "name": "storage_error.rs"
               },
               {
-                "name": "storage_provider.rs"
-              },
-              {
                 "name": "streaming.rs"
               },
               {
@@ -1300,6 +1755,9 @@
               },
               {
                 "name": "template_instantiation.rs"
+              },
+              {
+                "name": "tests.rs"
               },
               {
                 "name": "theme_token.rs"
@@ -1312,9 +1770,6 @@
               },
               {
                 "name": "ui_watcher.rs"
-              },
-              {
-                "name": "user_transition.rs"
               },
               {
                 "name": "vault_shape.rs"
@@ -1334,15 +1789,6 @@
             "name": "tests",
             "path": "holon-api/tests",
             "files": [
-              {
-                "name": "condition_profile_refusals.rs"
-              },
-              {
-                "name": "condition_replay_order.rs"
-              },
-              {
-                "name": "contract_forward_references.rs"
-              },
               {
                 "name": "decision_core_pbt.rs"
               },
@@ -1368,9 +1814,6 @@
                 "name": "person_profile_display_name_seat_a.rs"
               },
               {
-                "name": "release_build_unwinds.rs"
-              },
-              {
                 "name": "render_dsl_colour_refusal.rs"
               },
               {
@@ -1381,12 +1824,6 @@
               },
               {
                 "name": "typed_computed_field_declaration.rs"
-              },
-              {
-                "name": "user_transition_contract.rs"
-              },
-              {
-                "name": "vault_ingest_failed_detail.rs"
               }
             ]
           }
@@ -1960,6 +2397,107 @@
               },
               {
                 "name": "violation.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-conditions",
+        "path": "holon-conditions",
+        "c4_level": "component",
+        "description": "The degradation vocabulary: the condition bus, each condition's profile and detail, and the bus as a row source. No storage backend, no frontend deps.",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\n@c4 uses holon-api \"live data, entity and row-source vocabulary\" \"Rust\"\n\nThe degradation vocabulary: the condition bus, each condition's profile and\ndetail, and the bus as a row source. No storage backend, no frontend deps.",
+        "source_file": "holon-conditions/src/lib.rs",
+        "layer": "Core",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "live data, entity and row-source vocabulary",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-conditions/src",
+            "dirs": [
+              {
+                "name": "bin",
+                "path": "holon-conditions/src/bin",
+                "files": [
+                  {
+                    "name": "panic_unwind_probe.rs"
+                  }
+                ]
+              },
+              {
+                "name": "condition_bus",
+                "path": "holon-conditions/src/condition_bus",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "condition_detail",
+                "path": "holon-conditions/src/condition_detail",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              },
+              {
+                "name": "condition_source",
+                "path": "holon-conditions/src/condition_source",
+                "files": [
+                  {
+                    "name": "tests.rs"
+                  }
+                ]
+              }
+            ],
+            "files": [
+              {
+                "name": "condition_bus.rs"
+              },
+              {
+                "name": "condition_detail.rs"
+              },
+              {
+                "name": "condition_profile.rs"
+              },
+              {
+                "name": "condition_source.rs"
+              },
+              {
+                "name": "lib.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-conditions/tests",
+            "files": [
+              {
+                "name": "condition_profile_refusals.rs"
+              },
+              {
+                "name": "condition_replay_order.rs"
+              },
+              {
+                "name": "release_build_unwinds.rs"
+              },
+              {
+                "name": "vault_ingest_failed_detail.rs"
               }
             ]
           }
@@ -3145,6 +3683,9 @@
                 "name": "list_wrap_keyword.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "numeric_column_text.rs"
               },
               {
@@ -3509,6 +4050,9 @@
                             "name": "crash_history_matches_ref.rs"
                           },
                           {
+                            "name": "crash_restore_copies_match_ref.rs"
+                          },
+                          {
                             "name": "declared_column_gaps.rs"
                           },
                           {
@@ -3798,6 +4342,9 @@
                         "name": "invariants.rs"
                       },
                       {
+                        "name": "lamport_delta.rs"
+                      },
+                      {
                         "name": "live_mcp.rs"
                       },
                       {
@@ -3959,6 +4506,9 @@
                           },
                           {
                             "name": "crash_history_matches_ref.rs"
+                          },
+                          {
+                            "name": "crash_restore_copies_match_ref.rs"
                           },
                           {
                             "name": "display_placement_canonical_inert.rs"
@@ -4831,6 +5381,9 @@
                     "name": "invariant_mode_override.rs"
                   },
                   {
+                    "name": "journals_asset.rs"
+                  },
+                  {
                     "name": "known_reds.rs"
                   },
                   {
@@ -5456,6 +6009,9 @@
                     "name": "idless_external_reedit_dup.rs"
                   },
                   {
+                    "name": "journals_folder_is_the_seeded_page.rs"
+                  },
+                  {
                     "name": "journals_seed_file_collision.rs"
                   },
                   {
@@ -5626,6 +6182,9 @@
               },
               {
                 "name": "keystone_atom_counts.rs"
+              },
+              {
+                "name": "keystone_tour.rs"
               },
               {
                 "name": "latency_scale_gate.rs"
@@ -7580,6 +8139,9 @@
                 "name": "exec_receivers.rs"
               },
               {
+                "name": "exec_redecide.rs"
+              },
+              {
                 "name": "exec_timers.rs"
               },
               {
@@ -7810,6 +8372,9 @@
               },
               {
                 "name": "netd_differential.rs"
+              },
+              {
+                "name": "netd_origin.rs"
               }
             ]
           }
@@ -8162,6 +8727,9 @@
             ],
             "files": [
               {
+                "name": "asset_seed_header_pass_cost.rs"
+              },
+              {
                 "name": "delete_during_first_ingest.rs"
               },
               {
@@ -8190,6 +8758,9 @@
               },
               {
                 "name": "ingest_data_loss_guard.rs"
+              },
+              {
+                "name": "initial_scan_cost.rs"
               },
               {
                 "name": "name_chain_error_propagation.rs"
@@ -8238,6 +8809,9 @@
               },
               {
                 "name": "template_block_roundtrip.rs"
+              },
+              {
+                "name": "the_seed_keeps_a_users_file.rs"
               },
               {
                 "name": "vault_file_emptied_disclosure.rs"
@@ -9077,6 +9651,35 @@
         ]
       },
       {
+        "name": "holon-storage-provider",
+        "path": "holon-storage-provider",
+        "c4_level": "component",
+        "description": "The lifecycle contract every storage provider (Turso, Loro, a plugin's store) satisfies, so the net's storage subnet can open them, let a standby catch up, swap it in and retire the old one without knowing which store it holds (net semantics revision 2, holon-work #171/#315).",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\n\nThe lifecycle contract every storage provider (Turso, Loro, a plugin's\nstore) satisfies, so the net's storage subnet can open them, let a standby\ncatch up, swap it in and retire the old one without knowing which store it\nholds (net semantics revision 2, holon-work #171/#315).\n\nA swappable pair is a **projection pair**: one store is the source (Loro)\nand the other a projection of it (Turso). Catching up therefore means\nreplaying the source's commits, and the source is wired when a provider is\nbuilt. Pairs that are not projections of one another are out of scope.\n\nThree things deliberately do NOT live here:\n- **Locking.** \"Apply the final delta while held\" is a precondition the net\n  enforces with holder tokens (queries shared, writes/swap/retirement\n  exclusive), never a lock inside a provider.\n- **Retries and priority.** Both are token data in the net (`tries` keyed by\n  the contribution's stable id on the request token, priority on the\n  `Service<X>` token), so a provider has no retry state and no rank.\n- **Time bounds.** A run timer on the transition is the net's deadline; a\n  provider is bounded by a write COUNT, which it can honour at a commit\n  boundary.",
+        "source_file": "holon-storage-provider/src/lib.rs",
+        "layer": "Core",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-storage-provider/src",
+            "files": [
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "tests.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
         "name": "holon-toon",
         "path": "holon-toon",
         "c4_level": "component",
@@ -9166,6 +9769,51 @@
           },
           {
             "name": "RESULTS.md"
+          }
+        ]
+      },
+      {
+        "name": "holon-transition-contract",
+        "path": "holon-transition-contract",
+        "c4_level": "component",
+        "description": "The contract of user-facing transitions (#167, increment 1).",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\n@c4 uses holon-api \"entity and place names\" \"Rust\"\n\nThe contract of user-facing transitions (#167, increment 1).\n\nDeclarations — the `#[transition]` macro and YAML sidecars — emit one\nhigh-level IR, [`TransitionDescriptor`]. It states WHAT a transition asks;\na lowering pass in `holon-net` generates the plumbing (`Asks`, `Answer`,\n`ExpireAnswer`). People and agents see the same [`AskRow`]s, fire the same\n[`AnswerCall`] and read the same [`AnswerSettlement`] through\n[`UserTransitions`].\n\nThe types live in their own crate, beside `holon-api`, because every\nconsumer (macro, lowering, executor, YAML loader, UI, MCP) needs them, and\nthe frontends do not depend on `holon-net`.",
+        "source_file": "holon-transition-contract/src/lib.rs",
+        "layer": "Core",
+        "relationships": [
+          {
+            "target": "holon-api",
+            "label": "entity and place names",
+            "protocol": "Rust"
+          }
+        ],
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-transition-contract/src",
+            "files": [
+              {
+                "name": "lib.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-transition-contract/tests",
+            "files": [
+              {
+                "name": "contract_forward_references.rs"
+              },
+              {
+                "name": "user_transition_contract.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
           }
         ]
       },
@@ -9401,6 +10049,9 @@
               },
               {
                 "name": "json_extract_matview_spike.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "matview_cache_forgets_only_dropped_views.rs"

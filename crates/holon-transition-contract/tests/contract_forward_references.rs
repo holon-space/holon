@@ -13,7 +13,7 @@ use std::path::PathBuf;
 /// A directory root covers every `.rs` file under it, so a new contract module
 /// is scanned the day it is created.
 const CONTRACT_DOC_ROOTS: [&str; 4] = [
-    "crates/holon-api/src/user_transition.rs",
+    "crates/holon-transition-contract/src/lib.rs",
     "crates/holon-net/src/uft.rs",
     "crates/holon-net/src/uft",
     "crates/holon-net/src/exec.rs",
@@ -24,7 +24,7 @@ const CONTRACT_DOC_ROOTS: [&str; 4] = [
 const CONTRACT_SYMBOLS: [&str; 3] = ["work_occurrence", "ask_hash", "lower"];
 
 /// The crates that declare the contract and its executor side.
-const CONTRACT_CRATES: [&str; 2] = ["holon-api", "holon-net"];
+const CONTRACT_CRATES: [&str; 2] = ["holon-transition-contract", "holon-net"];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

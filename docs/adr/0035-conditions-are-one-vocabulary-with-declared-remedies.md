@@ -1,7 +1,8 @@
 # ADR 0035 — A condition is one vocabulary, and its remedies are declared data
 
 **Status:** Accepted (directive 2026-09-12 in D120.a; D121.a ratified by Martin
-2026-09-14; the `OpenSettings` remedy per D-crash-history.a, 2026-10-09)
+2026-09-14; the `OpenSettings` remedy per D-crash-history.a, 2026-10-09; the vocabulary's own crate `holon-conditions` per S785.split = a,
+2026-10-28)
 **Date:** 2026-09-14
 **Deciders:** Martin (directive on generic error handling; decision-inbox
 ruling D121)
@@ -45,14 +46,14 @@ nothing acted on it, and nothing could check that a new kind named one.
 
 ## Decision
 
-**One vocabulary, in `holon-api`.** The bus moves out of `holon-loro` and is
-renamed from `ShareDegraded*` to `Condition*`; most of its kinds were never
-about shares. `holon-api` already holds the closed boundary vocabularies (the
-block-write fields of Model.md invariant 3), and conditions are the same kind of
-thing: something every layer above and below has to agree on. An arch-lint rule
-(`api-storage-backend`, `api-frontend-dep`) keeps the crate free of both a
-storage backend and a frontend toolkit, so the vocabulary stays usable in a
-configuration that has neither.
+**One vocabulary, in `holon-conditions`.** The bus moves out of `holon-loro` and
+is renamed from `ShareDegraded*` to `Condition*`; most of its kinds were never
+about shares. `holon-conditions` sits on top of `holon-api`, which holds the
+closed boundary vocabularies (the block-write fields of Model.md invariant 3),
+and conditions are the same kind of thing: something every layer above and below
+has to agree on. An arch-lint rule (`api-storage-backend`, `api-frontend-dep`)
+keeps both crates free of a storage backend and a frontend toolkit, so the
+vocabulary stays usable in a configuration that has neither.
 
 **The profile is declared per kind, as data.** `ConditionKind::profile()` is a
 total match returning severity, label, placement, the all-clear and the legal
@@ -114,9 +115,10 @@ A rename of this size is a one-time cost paid across 31 files. It is mechanical,
 and it buys the property that made it worth doing: the name no longer says
 "share" for a vocabulary that is about the whole system.
 
-`holon-api` is no longer purely about writes. That was the explicit trade-off in
-D121.a question 2, taken because conditions and intents are read together and
-one crate is easier to keep honest than two.
+Conditions live in their own crate beside `holon-api` (S785.split = a): they
+change often and have few users, so an edit to them does not rebuild every crate
+that depends on `holon-api`. The arch-lint rules cover both crates, so the split
+costs no honesty.
 
 ## Alternatives considered
 

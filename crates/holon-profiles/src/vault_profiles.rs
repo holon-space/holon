@@ -33,8 +33,9 @@ pub struct VaultProfileMirror {
 
 /// The mirror over `initial_rows`. Every change of `rows` re-admits the whole
 /// set through `admit` ([`crate::TypeRegistry::vault_profile_admitter`]), so
-/// `profiles` and the [`holon_api::ConditionKind::ProfileRefused`] conditions
-/// are a function of the current rows alone, never of the rows before them.
+/// `profiles` and the [`holon_conditions::ConditionKind::ProfileRefused`]
+/// conditions are a function of the current rows alone, never of the rows
+/// before them.
 ///
 /// Must be called from within a Tokio runtime: the re-admission runs on its
 /// own task.
@@ -44,7 +45,7 @@ pub fn vault_profile_mirror(
     + Send
     + Sync
     + 'static,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 ) -> VaultProfileMirror {
     let rows = LiveData::new(initial_rows, row_id, row_content);
     let profiles = LiveData::in_memory();
@@ -88,7 +89,7 @@ fn row_content(row: &StorageEntity) -> Result<String> {
 /// reach the profiles and the conditions.
 pub struct VaultProfileDerivation<A> {
     admit: A,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
     in_effect: BTreeMap<String, String>,
     /// The refusal conditions raised, error by subject.
     conditions_raised: BTreeMap<String, String>,
@@ -98,7 +99,7 @@ impl<A> VaultProfileDerivation<A>
 where
     A: Fn(&BTreeMap<String, String>) -> BTreeMap<String, VaultProfileAdmission>,
 {
-    pub fn new(admit: A, conditions: Arc<holon_api::ConditionBus>) -> Self {
+    pub fn new(admit: A, conditions: Arc<holon_conditions::ConditionBus>) -> Self {
         Self {
             admit,
             conditions,
@@ -135,9 +136,9 @@ where
             .collect();
         for (subject, error) in &conditions {
             if self.conditions_raised.get(subject) != Some(error) {
-                self.conditions.emit(holon_api::Condition {
+                self.conditions.emit(holon_conditions::Condition {
                     subject: subject.clone(),
-                    reason: holon_api::ConditionKind::ProfileRefused {
+                    reason: holon_conditions::ConditionKind::ProfileRefused {
                         error: error.clone(),
                     },
                 });
@@ -148,9 +149,9 @@ where
             .keys()
             .filter(|subject| !conditions.contains_key(*subject))
         {
-            self.conditions.clear(&holon_api::ConditionKey {
+            self.conditions.clear(&holon_conditions::ConditionKey {
                 subject: subject.clone(),
-                kind: holon_api::ConditionKind::PROFILE_REFUSED,
+                kind: holon_conditions::ConditionKind::PROFILE_REFUSED,
             });
         }
         self.conditions_raised = conditions;

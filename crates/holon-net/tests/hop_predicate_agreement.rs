@@ -10,7 +10,6 @@
 //! bottom of this file, and it is why `sibling(...)` exists.
 
 use holon_api::EntityUri;
-use holon_api::user_transition::Offer;
 use holon_net::Analyzability;
 use holon_net::CompiledNet;
 use holon_net::NetEntity;
@@ -28,6 +27,7 @@ use holon_pattern::pattern::Guard;
 use holon_pattern::pattern::Operand;
 use holon_pattern::pattern::Pattern;
 use holon_pattern::pattern::Subject;
+use holon_transition_contract::Offer;
 use proptest::prelude::*;
 
 /// The sentinel a root block carries; the store keeps an explicit root parent

@@ -92,7 +92,7 @@ fn block_profile() -> EntityProfile {
         .expect("default registry must build");
     holon_profiles::type_registry::type_profiles_from_registry(
         &registry,
-        &holon_api::ConditionBus::new(),
+        &holon_conditions::ConditionBus::new(),
     )
     .into_iter()
     .find(|p| p.entity_name.as_str() == "block")

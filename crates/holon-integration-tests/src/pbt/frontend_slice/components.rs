@@ -1254,12 +1254,12 @@ impl HeadlessFrontendComponent {
         let bus = self
             .degraded_bus()
             .expect("[release database] a held boot runs with Loro, which owns the bus");
-        let released = |bus: &holon_api::ConditionBus| {
+        let released = |bus: &holon_conditions::ConditionBus| {
             bus.current().into_iter().any(|c| {
                 matches!(
                     c.reason,
-                    holon_api::ConditionKind::DatabaseHeld {
-                        hold: holon_api::DatabaseHold::Released,
+                    holon_conditions::ConditionKind::DatabaseHeld {
+                        hold: holon_conditions::DatabaseHold::Released,
                         ..
                     }
                 )
@@ -1757,9 +1757,9 @@ impl HeadlessFrontendComponent {
     /// The bus this session's production writers raise degraded conditions on.
     /// A windowed harness launches its window with THIS bus, or the overlay it
     /// paints is fed by a bus nothing production writes to.
-    pub fn degraded_bus(&self) -> Option<Arc<holon_api::ConditionBus>> {
+    pub fn degraded_bus(&self) -> Option<Arc<holon_conditions::ConditionBus>> {
         self.injector()
-            .try_resolve::<Arc<holon_api::ConditionBus>>()
+            .try_resolve::<Arc<holon_conditions::ConditionBus>>()
             .ok() // ALLOW(ok): optional DI service — absent when Loro is disabled
             .map(|bus| (*bus).clone())
     }
@@ -5361,7 +5361,11 @@ impl HeadlessFrontendComponent {
 
     /// Dispatches `op` for `doc` as the user, asserts the write-back net
     /// accepted it, and awaits its outcome.
-    async fn resolve_emptied_file(&self, doc: &EntityUri, op: holon_api::condition_profile::OpId) {
+    async fn resolve_emptied_file(
+        &self,
+        doc: &EntityUri,
+        op: holon_conditions::condition_profile::OpId,
+    ) {
         let seam = op.op();
         let result = self
             .engine()
@@ -5456,13 +5460,19 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
     }
 
     async fn accept_removal(&self, doc: &EntityUri) {
-        self.resolve_emptied_file(doc, holon_api::condition_profile::OpId::AcceptRemoval)
-            .await;
+        self.resolve_emptied_file(
+            doc,
+            holon_conditions::condition_profile::OpId::AcceptRemoval,
+        )
+        .await;
     }
 
     async fn rewrite_from_store(&self, doc: &EntityUri) {
-        self.resolve_emptied_file(doc, holon_api::condition_profile::OpId::RewriteFromStore)
-            .await;
+        self.resolve_emptied_file(
+            doc,
+            holon_conditions::condition_profile::OpId::RewriteFromStore,
+        )
+        .await;
     }
 
     async fn drop_next_watcher_event(&self, doc: &EntityUri) {
@@ -8843,7 +8853,7 @@ impl HeadlessFrontendComponent {
 }
 
 /// The final path components of the files `kind` names, in its order.
-fn named_file_names(kind: &holon_api::ConditionKind) -> Vec<String> {
+fn named_file_names(kind: &holon_conditions::ConditionKind) -> Vec<String> {
     let name = |path: &str| {
         Path::new(path)
             .file_name()
@@ -8852,27 +8862,27 @@ fn named_file_names(kind: &holon_api::ConditionKind) -> Vec<String> {
             .into_owned()
     };
     match kind {
-        holon_api::ConditionKind::BlockInTwoFiles {
+        holon_conditions::ConditionKind::BlockInTwoFiles {
             owner_file,
             copy_files,
         }
-        | holon_api::ConditionKind::BlockEditedInTwoFiles {
+        | holon_conditions::ConditionKind::BlockEditedInTwoFiles {
             owner_file,
             copy_files,
         } => std::iter::once(owner_file)
             .chain(copy_files)
             .map(|f| name(f))
             .collect(),
-        holon_api::ConditionKind::DeletedBlockKeptInFile { file }
-        | holon_api::ConditionKind::DeletionEndedByEdit { file }
-        | holon_api::ConditionKind::FileEditOverruled { file, .. }
-        | holon_api::ConditionKind::HolonEditOverruled { file, .. } => vec![name(file)],
-        holon_api::ConditionKind::VaultIngestFailed(refusals) => refusals
+        holon_conditions::ConditionKind::DeletedBlockKeptInFile { file }
+        | holon_conditions::ConditionKind::DeletionEndedByEdit { file }
+        | holon_conditions::ConditionKind::FileEditOverruled { file, .. }
+        | holon_conditions::ConditionKind::HolonEditOverruled { file, .. } => vec![name(file)],
+        holon_conditions::ConditionKind::VaultIngestFailed(refusals) => refusals
             .examples()
             .iter()
             .map(|file| name(&file.path))
             .collect(),
-        holon_api::ConditionKind::DeletionUndoneBlockInOtherFile { file, copy_files } => {
+        holon_conditions::ConditionKind::DeletionUndoneBlockInOtherFile { file, copy_files } => {
             std::iter::once(file)
                 .chain(copy_files)
                 .map(|f| name(f))
@@ -8899,18 +8909,20 @@ impl holon_pbt_core::capabilities::SutConditions for HeadlessFrontendComponent {
                 kind: c.reason.condition_kind().to_string(),
                 files: named_file_names(&c.reason),
                 count: match &c.reason {
-                    holon_api::ConditionKind::VaultIngestFailed(refusals) => {
+                    holon_conditions::ConditionKind::VaultIngestFailed(refusals) => {
                         Some(refusals.count().get())
                     }
                     _ => None,
                 },
                 message: match &c.reason {
-                    holon_api::ConditionKind::PreviousRunPanicked { message, .. }
-                    | holon_api::ConditionKind::TaskPanicked { message, .. } => {
+                    holon_conditions::ConditionKind::PreviousRunPanicked { message, .. }
+                    | holon_conditions::ConditionKind::TaskPanicked { message, .. } => {
                         Some(message.clone())
                     }
-                    holon_api::ConditionKind::VaultFileEmptied { seen } => Some(seen.clone()),
-                    holon_api::ConditionKind::DatabaseHeld { hold, .. } => {
+                    holon_conditions::ConditionKind::VaultFileEmptied { seen } => {
+                        Some(seen.clone())
+                    }
+                    holon_conditions::ConditionKind::DatabaseHeld { hold, .. } => {
                         Some(crate::pbt::transitions::database_hold_message(*hold))
                     }
                     _ => None,
@@ -9102,7 +9114,7 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
     async fn raised_degraded_conditions(&self) -> Vec<String> {
         let Some(bus) = self
             .injector()
-            .optional_resolve_async::<Arc<holon_api::ConditionBus>>()
+            .optional_resolve_async::<Arc<holon_conditions::ConditionBus>>()
             .await
         else {
             return Vec::new();

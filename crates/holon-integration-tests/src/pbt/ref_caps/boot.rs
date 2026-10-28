@@ -189,9 +189,9 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
                 .insert(SEEDED_SIDEBAR_WATCH_ID.to_string(), spec);
         }
         self.conditions
-            .clear_kind(holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT);
+            .clear_kind(holon_conditions::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT);
         self.conditions
-            .clear_kind(holon_api::ConditionKind::EDIT_REFUSED_BY_SHAPE);
+            .clear_kind(holon_conditions::ConditionKind::EDIT_REFUSED_BY_SHAPE);
         self.conditions.restart();
         self.restart_forgets_copy_state();
     }

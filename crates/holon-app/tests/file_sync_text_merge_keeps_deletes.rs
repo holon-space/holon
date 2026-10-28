@@ -243,9 +243,11 @@ async fn a_file_edit_does_not_bring_back_text_the_app_deleted() {
 
 /// The text of `ALPHA` that an overruled file edit discloses, and Holon's
 /// change that overrules it.
-fn overruled_text(bus: &holon_api::ConditionBus) -> Option<(String, holon_api::HolonChange)> {
+fn overruled_text(
+    bus: &holon_conditions::ConditionBus,
+) -> Option<(String, holon_conditions::HolonChange)> {
     bus.current().into_iter().find_map(|c| match c.reason {
-        holon_api::ConditionKind::FileEditOverruled {
+        holon_conditions::ConditionKind::FileEditOverruled {
             file_text, change, ..
         } if c.subject == EntityUri::block(ALPHA).as_str() => Some((file_text, change)),
         _ => None,
@@ -302,7 +304,7 @@ async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
     let path = root.join("Notes.org");
     std::fs::write(&path, org_file(&base)).unwrap();
 
-    let bus = Arc::new(holon_api::ConditionBus::new());
+    let bus = Arc::new(holon_conditions::ConditionBus::new());
     let mut controller = new_org_sync_controller(
         Arc::new(StoreReader(store.clone())),
         Arc::new(docs.clone()),
@@ -332,7 +334,7 @@ async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
     );
     let (disclosed, change) =
         overruled_text(&bus).expect("the file's edit is disclosed as overruled");
-    assert_eq!(change, holon_api::HolonChange::Edited);
+    assert_eq!(change, holon_conditions::HolonChange::Edited);
     assert!(
         disclosed.contains(&theirs),
         "the disclosure must hold the file's text whole"
@@ -467,7 +469,7 @@ async fn an_unwritable_conflict_copy_blocks_the_overruling_write_back_and_is_dis
     let path = root.join("Notes.org");
     std::fs::write(&path, org_file(&base)).unwrap();
 
-    let bus = Arc::new(holon_api::ConditionBus::new());
+    let bus = Arc::new(holon_conditions::ConditionBus::new());
     let mut controller = new_org_sync_controller(
         Arc::new(StoreReader(store.clone())),
         Arc::new(docs),
@@ -582,7 +584,7 @@ async fn edited_too_far_apart(
 ) -> (
     tempfile::TempDir,
     PathBuf,
-    Arc<holon_api::ConditionBus>,
+    Arc<holon_conditions::ConditionBus>,
     String,
     holon_filesystem::file_sync_controller::FileSyncController,
 ) {
@@ -604,7 +606,7 @@ async fn edited_too_far_apart(
     let path = root.join(file_name);
     std::fs::write(&path, org_file(&base)).unwrap();
 
-    let bus = Arc::new(holon_api::ConditionBus::new());
+    let bus = Arc::new(holon_conditions::ConditionBus::new());
     let mut controller = new_org_sync_controller(
         Arc::new(StoreReader(store.clone())),
         Arc::new(docs),

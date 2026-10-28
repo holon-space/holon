@@ -1,11 +1,11 @@
 //! What the reference model expects the app to be DISCLOSING.
 //!
 //! Every degradation Holon raises is a sticky condition on the
-//! [`ConditionBus`](holon_api::ConditionBus), keyed by `(subject, kind)`. Until
-//! the model tracked them, a transition that fails on purpose proved only that
-//! the write was refused — never that the user was TOLD. Those are different
-//! defects, and the silent one is the failure the bus exists to prevent: from
-//! inside the store it looks exactly like a write that succeeded.
+//! [`ConditionBus`](holon_conditions::ConditionBus), keyed by `(subject,
+//! kind)`. Until the model tracked them, a transition that fails on purpose
+//! proved only that the write was refused — never that the user was TOLD. Those
+//! are different defects, and the silent one is the failure the bus exists to
+//! prevent: from inside the store it looks exactly like a write that succeeded.
 //!
 //! The model records the identity, never the prose. The kind is the stable
 //! `&'static str` every all-clear site already names; asserting the sentence
@@ -159,13 +159,16 @@ impl ConditionsRefState {
 
     /// The previous run's panic record is disclosed at start.
     pub fn previous_run_panicked(&mut self, panic: &Panicked) {
-        self.raise_panic(holon_api::ConditionKind::PREVIOUS_RUN_PANICKED, panic);
+        self.raise_panic(
+            holon_conditions::ConditionKind::PREVIOUS_RUN_PANICKED,
+            panic,
+        );
     }
 
     /// A task panicked: it is disclosed now, and its record is disclosed at
     /// the next start.
     pub fn task_panicked(&mut self, panic: Panicked) {
-        self.raise_panic(holon_api::ConditionKind::TASK_PANICKED, &panic);
+        self.raise_panic(holon_conditions::ConditionKind::TASK_PANICKED, &panic);
         self.crash_records.push((Kept::ThisRun, panic));
     }
 
@@ -174,8 +177,8 @@ impl ConditionsRefState {
     /// A record stays unshown until a drawn frame shows it, which a headless
     /// run never does, so every start discloses it again.
     pub fn restart(&mut self) {
-        self.clear_kind(holon_api::ConditionKind::TASK_PANICKED);
-        self.clear_kind(holon_api::ConditionKind::PREVIOUS_RUN_PANICKED);
+        self.clear_kind(holon_conditions::ConditionKind::TASK_PANICKED);
+        self.clear_kind(holon_conditions::ConditionKind::PREVIOUS_RUN_PANICKED);
         for (kept, _) in &mut self.crash_records {
             if *kept == Kept::ThisRun {
                 *kept = Kept::Unshown;

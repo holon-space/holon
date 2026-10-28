@@ -901,7 +901,7 @@ async fn compose_sut_seeded_impl(
             let engine = holon_loro_wiring::loro_block_query_source::loro_operation_engine(
                 block_ops,
                 global_doc.clone(),
-                Arc::new(holon_api::ConditionBus::new()),
+                Arc::new(holon_conditions::ConditionBus::new()),
             );
             loro_caps.insert(Arc::new(crate::pbt::op_write_cap::EdgeFieldWriter::new(
                 engine.clone(),

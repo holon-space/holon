@@ -56,19 +56,19 @@ impl TransitionRef<ReferenceState> for RebootWhileDatabaseHeld {
         state.reboot_drops_in_memory_state();
         state.ui.boot_on_memory_while_database_held();
         state.conditions.raise_with_message(
-            holon_api::condition_bus::DATABASE_SUBJECT,
-            holon_api::ConditionKind::DATABASE_HELD,
-            database_hold_message(holon_api::DatabaseHold::Held),
+            holon_conditions::condition_bus::DATABASE_SUBJECT,
+            holon_conditions::ConditionKind::DATABASE_HELD,
+            database_hold_message(holon_conditions::DatabaseHold::Held),
         );
         // The probe answers every second; a failed one would say so here.
         state
             .conditions
-            .clear_kind(holon_api::ConditionKind::DATABASE_WATCH_STOPPED);
+            .clear_kind(holon_conditions::ConditionKind::DATABASE_WATCH_STOPPED);
     }
 }
 
 /// The message the keystone reads a `database-held` condition's hold as.
-pub fn database_hold_message(hold: holon_api::DatabaseHold) -> String {
+pub fn database_hold_message(hold: holon_conditions::DatabaseHold) -> String {
     format!("{hold:?}")
 }
 

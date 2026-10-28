@@ -142,7 +142,7 @@ impl FrontendInjectorExt for Injector {
         // the one signal saying "your edits stopped reaching disk" must not be
         // reachable only in Loro mode.
         self.provide::<dyn holon_filesystem::WritebackDisclosure>(Provider::root(|resolver| {
-            let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+            let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
             Arc::new(crate::loro_seams::WritebackDegradedDisclosure {
                 bus: (*bus).clone(),
             }) as Arc<dyn holon_filesystem::WritebackDisclosure>
@@ -166,14 +166,15 @@ impl FrontendInjectorExt for Injector {
             )?;
             let store: Arc<dyn holon_secrets::KeychainStore> = selected.store.into();
             if let Some(disclosure) = selected.disclosure {
-                self.resolve::<Arc<holon_api::ConditionBus>>()
-                    .emit(holon_api::Condition {
+                self.resolve::<Arc<holon_conditions::ConditionBus>>().emit(
+                    holon_conditions::Condition {
                         subject: "secrets".to_string(),
-                        reason: holon_api::ConditionKind::SecretsHeldInMemory {
+                        reason: holon_conditions::ConditionKind::SecretsHeldInMemory {
                             why: disclosure.headline,
                             seed_path: disclosure.seed_path,
                         },
-                    });
+                    },
+                );
                 session_secret_store = Some(store.clone());
             }
             self.provide::<dyn holon_secrets::KeychainStore>(Provider::root(move |_| {
@@ -350,7 +351,7 @@ impl FrontendInjectorExt for Injector {
             // absence there (di.rs WARN-logs) is correct.
             self.provide::<dyn holon_filesystem::ShareWritebackDisclosure>(Provider::root(
                 |resolver| {
-                    let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+                    let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
                     Arc::new(crate::loro_seams::SharedSubtreeNotMaterializedDisclosure {
                         bus: (*bus).clone(),
                     }) as Arc<dyn holon_filesystem::ShareWritebackDisclosure>
@@ -450,7 +451,7 @@ impl FrontendInjectorExt for Injector {
             }));
             self.provide::<dyn holon_core::WriteTierAuthority>(Provider::root(|resolver| {
                 let documents = resolver.resolve::<Arc<holon_core::ReadOnlyDocuments>>();
-                let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+                let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
                 Arc::new(crate::read_only_format_gate::ReadOnlyFormatGate::new(
                     (*documents).clone(),
                     (*bus).clone(),
@@ -524,37 +525,37 @@ impl FrontendInjectorExt for Injector {
                     use holon::storage::db_open::OpenChange;
                     let reason = match change {
                         OpenChange::MovedAside { reason, backup } => {
-                            holon_api::ConditionKind::DatabaseMovedAside {
+                            holon_conditions::ConditionKind::DatabaseMovedAside {
                                 reason: reason.clone(),
                                 backup: backup.display().to_string(),
                             }
                         }
                         OpenChange::LogMovedAside { reason, backup } => {
-                            holon_api::ConditionKind::DatabaseLogMovedAside {
+                            holon_conditions::ConditionKind::DatabaseLogMovedAside {
                                 reason: reason.clone(),
                                 backup: backup.display().to_string(),
                             }
                         }
                         OpenChange::CoordinationFileMovedAside { reason, backup } => {
-                            holon_api::ConditionKind::DatabaseCoordinationFileMovedAside {
+                            holon_conditions::ConditionKind::DatabaseCoordinationFileMovedAside {
                                 reason: reason.clone(),
                                 backup: backup.display().to_string(),
                             }
                         }
                         OpenChange::ViewsDropped { reason, views } => {
-                            holon_api::ConditionKind::DatabaseViewsDropped {
+                            holon_conditions::ConditionKind::DatabaseViewsDropped {
                                 reason: reason.clone(),
                                 views: views.clone(),
                             }
                         }
                         OpenChange::LockWaited { waited_ms } => {
-                            holon_api::ConditionKind::DatabaseLockWaited {
+                            holon_conditions::ConditionKind::DatabaseLockWaited {
                                 waited_ms: *waited_ms,
                             }
                         }
                     };
-                    let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
-                    bus.emit(holon_api::Condition {
+                    let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
+                    bus.emit(holon_conditions::Condition {
                         subject: "database".to_string(),
                         reason,
                     });
@@ -566,10 +567,10 @@ impl FrontendInjectorExt for Injector {
                 // press cmd-z and get nothing with no explanation.
                 let discarded = engine.undo_entries_discarded_at_boot();
                 if discarded > 0 {
-                    let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
-                    bus.emit(holon_api::Condition {
+                    let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
+                    bus.emit(holon_conditions::Condition {
                         subject: "undo".to_string(),
-                        reason: holon_api::ConditionKind::UndoHistoryClearedAtBoot {
+                        reason: holon_conditions::ConditionKind::UndoHistoryClearedAtBoot {
                             entries: discarded,
                         },
                     });

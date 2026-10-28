@@ -28,6 +28,7 @@ futures.workspace = true
 holon.workspace = true
 holon-advice.workspace = true
 holon-api.workspace = true
+holon-conditions.workspace = true
 holon-core.workspace = true
 holon-loro.workspace = true
 holon-profiles.workspace = true

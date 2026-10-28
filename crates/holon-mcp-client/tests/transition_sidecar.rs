@@ -7,10 +7,10 @@ use std::time::Duration;
 use holon_api::EntityName;
 use holon_api::Value;
 use holon_api::render_types::TypeHint;
-use holon_api::user_transition::*;
 use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::McpSidecar;
 use holon_mcp_client::transition_sidecar::transitions_from_sidecar;
+use holon_transition_contract::*;
 use proptest::prelude::*;
 use serde_json::json;
 

@@ -446,7 +446,7 @@ impl BackendEngine {
         let scheduler = self._clock_scheduler.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "the clock is not running (condition {}), so the {} grain cannot tick",
-                holon_api::ConditionKind::CLOCK_NOT_RUNNING,
+                holon_conditions::ConditionKind::CLOCK_NOT_RUNNING,
                 grain.as_str()
             )
         })?;

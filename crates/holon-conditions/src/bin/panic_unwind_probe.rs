@@ -5,11 +5,11 @@
 
 use std::sync::Arc;
 
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
 use holon_api::lifecycle::DEFAULT_SHUTDOWN_TIMEOUT;
 use holon_api::lifecycle::SessionShutdown;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 
 fn main() {
     let message = std::env::args()

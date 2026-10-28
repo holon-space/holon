@@ -3,11 +3,11 @@
 //! Many refused files of one format are one detail that counts them and names
 //! the first few.
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
-use holon_api::IngestRefusals;
-use holon_api::RefusedFile;
-use holon_api::condition_detail::ConditionDetail;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
+use holon_conditions::IngestRefusals;
+use holon_conditions::RefusedFile;
+use holon_conditions::condition_detail::ConditionDetail;
 
 fn ingest_detail(bus: &ConditionBus, format: &str) -> ConditionDetail {
     let condition = bus

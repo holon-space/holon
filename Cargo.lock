@@ -5290,6 +5290,7 @@ dependencies = [
  "holon-api",
  "holon-block-roundtrip-testing",
  "holon-capability",
+ "holon-conditions",
  "holon-connections",
  "holon-core",
  "holon-engine",
@@ -5402,6 +5403,7 @@ dependencies = [
  "holon-api",
  "holon-block-roundtrip-testing",
  "holon-capability",
+ "holon-conditions",
  "holon-connections",
  "holon-core",
  "holon-filesystem",
@@ -5416,6 +5418,7 @@ dependencies = [
  "holon-plugin-host",
  "holon-profiles",
  "holon-secrets",
+ "holon-transition-contract",
  "holon-turso",
  "proptest 1.11.0",
  "rmcp",
@@ -5458,6 +5461,17 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-conditions"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "holon-api",
+ "serde",
+ "tokio",
  "workspace-hack 0.1.0",
 ]
 
@@ -5553,6 +5567,7 @@ dependencies = [
  "async-trait",
  "hex",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-macros",
  "holon-net",
@@ -5592,6 +5607,7 @@ dependencies = [
  "holon-advice",
  "holon-api",
  "holon-app",
+ "holon-conditions",
  "holon-core",
  "holon-filesystem",
  "holon-kitchen",
@@ -5601,6 +5617,7 @@ dependencies = [
  "holon-pbt-core",
  "holon-profiles",
  "holon-secrets",
+ "holon-transition-contract",
  "libc",
  "memory-stats",
  "opentelemetry",
@@ -5646,6 +5663,7 @@ dependencies = [
  "holon",
  "holon-api",
  "holon-app",
+ "holon-conditions",
  "holon-core",
  "holon-filesystem",
  "holon-frontend",
@@ -5658,6 +5676,7 @@ dependencies = [
  "holon-oracles",
  "holon-pbt-core",
  "holon-secrets",
+ "holon-transition-contract",
  "image",
  "insta",
  "io-surface",
@@ -5702,6 +5721,7 @@ dependencies = [
  "holon-app",
  "holon-block-roundtrip-testing",
  "holon-capability",
+ "holon-conditions",
  "holon-connections",
  "holon-connections-testing",
  "holon-core",
@@ -5726,6 +5746,7 @@ dependencies = [
  "holon-profiles",
  "holon-secrets",
  "holon-sharing",
+ "holon-transition-contract",
  "holon-turso",
  "holon-turso-testing",
  "holon-views",
@@ -5839,6 +5860,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-filesystem",
  "holon-macros",
@@ -5896,6 +5918,7 @@ dependencies = [
  "holon",
  "holon-advice",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-loro",
  "holon-profiles",
@@ -5922,6 +5945,7 @@ dependencies = [
  "holon-core",
  "holon-net",
  "holon-pattern",
+ "holon-transition-contract",
  "proc-macro2",
  "proptest 1.11.0",
  "quote",
@@ -5940,6 +5964,7 @@ dependencies = [
  "holon-core",
  "holon-macros",
  "holon-net",
+ "holon-transition-contract",
  "proptest 1.11.0",
  "serde_json",
  "workspace-hack 0.1.0",
@@ -5972,6 +5997,7 @@ dependencies = [
  "holon",
  "holon-api",
  "holon-app",
+ "holon-conditions",
  "holon-core",
  "holon-filesystem",
  "holon-frontend",
@@ -5984,6 +6010,7 @@ dependencies = [
  "holon-profiles",
  "holon-secrets",
  "holon-toon",
+ "holon-transition-contract",
  "holon-turso",
  "image",
  "opentelemetry",
@@ -6022,12 +6049,14 @@ dependencies = [
  "futures",
  "futures-signals",
  "holon-api",
+ "holon-conditions",
  "holon-connections",
  "holon-core",
  "holon-macros",
  "holon-profiles",
  "holon-rows",
  "holon-secrets",
+ "holon-transition-contract",
  "holon-turso",
  "proptest 1.11.0",
  "rand 0.9.5",
@@ -6085,6 +6114,8 @@ dependencies = [
  "holon-net-layout",
  "holon-pattern",
  "holon-rules",
+ "holon-storage-provider",
+ "holon-transition-contract",
  "indexmap 2.14.2",
  "proptest 1.11.0",
  "proptest-state-machine",
@@ -6192,6 +6223,7 @@ dependencies = [
  "futures",
  "holon-api",
  "holon-block-roundtrip-testing",
+ "holon-conditions",
  "holon-core",
  "holon-filesystem",
  "holon-markdown",
@@ -6287,6 +6319,7 @@ dependencies = [
  "anyhow",
  "futures-signals",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "proptest 1.11.0",
  "rhai",
@@ -6361,6 +6394,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-storage-provider"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "thiserror 2.0.21",
+ "tokio",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-tools"
 version = "0.1.0"
 dependencies = [
@@ -6391,6 +6435,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-transition-contract"
+version = "0.1.0"
+dependencies = [
+ "holon-api",
+ "proptest 1.11.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "workspace-hack 0.1.0",
+]
+
+[[package]]
 name = "holon-tui"
 version = "0.1.0"
 dependencies = [
@@ -6401,6 +6457,7 @@ dependencies = [
  "holon",
  "holon-api",
  "holon-app",
+ "holon-conditions",
  "holon-frontend",
  "holon-integration-tests",
  "holon-mcp",
@@ -6432,6 +6489,7 @@ dependencies = [
  "gql-parser",
  "gql-transform",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-turso",
  "proptest 1.11.0",
@@ -6467,6 +6525,7 @@ dependencies = [
  "differential-dataflow",
  "getrandom 0.3.4",
  "holon-api",
+ "holon-conditions",
  "proptest 1.11.0",
  "serde",
  "serde_json",

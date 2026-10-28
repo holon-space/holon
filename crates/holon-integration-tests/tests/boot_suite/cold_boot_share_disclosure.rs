@@ -100,14 +100,14 @@ fn not_materialized_subjects(env: &holon_integration_tests::TestEnvironment) -> 
     let injector = env
         .injector()
         .expect("test environment must expose its injector");
-    let bus = injector.resolve::<Arc<holon_api::ConditionBus>>();
+    let bus = injector.resolve::<Arc<holon_conditions::ConditionBus>>();
     bus.subscribe()
         .current
         .into_iter()
         .filter(|c| {
             matches!(
                 c.reason,
-                holon_api::ConditionKind::SharedSubtreeNotMaterialized { .. }
+                holon_conditions::ConditionKind::SharedSubtreeNotMaterialized { .. }
             )
         })
         .map(|c| c.subject)

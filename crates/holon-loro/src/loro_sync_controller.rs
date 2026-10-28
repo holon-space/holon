@@ -342,7 +342,7 @@ fn unguarded_delivery(source: CommitSource, event: &loro::event::DiffEvent<'_>) 
 /// clear each one in `raised` whose block this read covered (`read`) and found
 /// readable or gone. `raised` is the set the caller holds raised.
 pub(crate) fn disclose_unreadable_fields(
-    bus: &holon_api::condition_bus::ConditionBus,
+    bus: &holon_conditions::condition_bus::ConditionBus,
     raised: &mut HashSet<(String, &'static str)>,
     read: impl Fn(&str) -> bool,
     unreadable: Vec<crate::loro_backend::UnreadableField>,
@@ -355,7 +355,9 @@ pub(crate) fn disclose_unreadable_fields(
         let fixed = read(block_id) && !found.contains(&(block_id.clone(), *field));
         if fixed {
             bus.clear(
-                &holon_api::condition_bus::ConditionKey::block_field_unreadable(block_id, field),
+                &holon_conditions::condition_bus::ConditionKey::block_field_unreadable(
+                    block_id, field,
+                ),
             );
         }
         !fixed
@@ -370,21 +372,23 @@ pub(crate) fn disclose_unreadable_fields(
                 "loro projection: typed block field unreadable; it reads as its default"
             );
         }
-        bus.emit(holon_api::condition_bus::Condition::block_field_unreadable(
-            &u.block_id,
-            u.field,
-            u.stored,
-            u.reason,
-        ));
+        bus.emit(
+            holon_conditions::condition_bus::Condition::block_field_unreadable(
+                &u.block_id,
+                u.field,
+                u.stored,
+                u.reason,
+            ),
+        );
         raised.insert((u.block_id, u.field));
     }
 }
 
 /// The sticky condition key the projection raises and clears.
-pub fn projection_degraded_key() -> holon_api::condition_bus::ConditionKey {
-    holon_api::condition_bus::ConditionKey {
+pub fn projection_degraded_key() -> holon_conditions::condition_bus::ConditionKey {
+    holon_conditions::condition_bus::ConditionKey {
         subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
-        kind: holon_api::condition_bus::ConditionKind::SQL_PROJECTION_FAILED,
+        kind: holon_conditions::condition_bus::ConditionKind::SQL_PROJECTION_FAILED,
     }
 }
 
@@ -409,7 +413,7 @@ pub struct LoroSyncController {
     /// not optional: a stalled projection means SQL — everything the UI reads —
     /// is behind Loro, and the only alternative to disclosing it is showing
     /// stale rows as if they were current.
-    degraded: Arc<holon_api::condition_bus::ConditionBus>,
+    degraded: Arc<holon_conditions::condition_bus::ConditionBus>,
 }
 
 /// Lifetime handle returned by `start()`. It owns no lifetime of its own: the
@@ -473,7 +477,7 @@ impl LoroSyncControllerHandle {
 impl LoroSyncController {
     pub fn new(
         projection: Arc<LoroProjection>,
-        degraded: Arc<holon_api::condition_bus::ConditionBus>,
+        degraded: Arc<holon_conditions::condition_bus::ConditionBus>,
     ) -> Self {
         let last_synced = projection.last_synced();
         let wake = projection.wake_handle();
@@ -575,9 +579,9 @@ impl LoroSyncController {
                 self.run_loop(shutdown_for_task).await;
             },
             move |message| {
-                degraded_on_panic.emit(holon_api::condition_bus::Condition {
+                degraded_on_panic.emit(holon_conditions::condition_bus::Condition {
                     subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
-                    reason: holon_api::condition_bus::ConditionKind::SqlProjectionFailed(format!(
+                    reason: holon_conditions::condition_bus::ConditionKind::SqlProjectionFailed(format!(
                         "the Loro→SQL reconcile loop panicked, so SQL (what the UI reads) and the \
                          org files no longer follow Loro: {message}"
                     )),
@@ -651,7 +655,7 @@ impl LoroSyncController {
 /// Split from the run loop so the retry policy is testable without a live doc.
 async fn drive_with_redrive<F, Fut>(
     mut pass: F,
-    degraded: &holon_api::condition_bus::ConditionBus,
+    degraded: &holon_conditions::condition_bus::ConditionBus,
     error_count: &AtomicUsize,
 ) where
     F: FnMut() -> Fut,
@@ -714,10 +718,13 @@ async fn drive_with_redrive<F, Fut>(
 }
 
 /// The banner a converged pass of [`drive_with_redrive`] clears.
-fn raise_projection_degraded(degraded: &holon_api::condition_bus::ConditionBus, why: String) {
-    degraded.emit(holon_api::condition_bus::Condition {
+fn raise_projection_degraded(
+    degraded: &holon_conditions::condition_bus::ConditionBus,
+    why: String,
+) {
+    degraded.emit(holon_conditions::condition_bus::Condition {
         subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
-        reason: holon_api::condition_bus::ConditionKind::SqlProjectionFailed(why),
+        reason: holon_conditions::condition_bus::ConditionKind::SqlProjectionFailed(why),
     });
 }
 
@@ -824,7 +831,7 @@ pub struct LoroProjection {
     /// loop's own `SqlProjectionFailed` banner only fires after
     /// `RECONCILE_MAX_ATTEMPTS`, which says nothing about the window in which
     /// the UI has already shown a change SQL rejected.
-    degraded: Arc<holon_api::condition_bus::ConditionBus>,
+    degraded: Arc<holon_conditions::condition_bus::ConditionBus>,
     /// The shares loaded on this device. Their rows are written by each
     /// share's own projection, so the full walk leaves exactly those rows
     /// alone. `None`: no share machinery, so every row is this walk's.
@@ -867,7 +874,7 @@ impl LoroProjection {
         sink_reader: Arc<dyn SinkReader>,
         sidecar_path: PathBuf,
         read_model: Arc<holon_api::block_read_model::BlockReadModel>,
-        degraded: Arc<holon_api::condition_bus::ConditionBus>,
+        degraded: Arc<holon_conditions::condition_bus::ConditionBus>,
         commit_clock: Arc<CommitClock>,
         views_engine: Arc<ViewEngine>,
     ) -> Self {
@@ -1129,7 +1136,7 @@ impl LoroProjection {
         sink_reader: Arc<dyn SinkReader>,
         storage_dir: &std::path::Path,
         read_model: Arc<holon_api::block_read_model::BlockReadModel>,
-        degraded: Arc<holon_api::condition_bus::ConditionBus>,
+        degraded: Arc<holon_conditions::condition_bus::ConditionBus>,
         commit_clock: Arc<CommitClock>,
         views_engine: Arc<ViewEngine>,
     ) -> Result<Self> {
@@ -1782,9 +1789,9 @@ impl LoroProjection {
     /// already shown it" was false in the second case, and so was "the
     /// outline already reflects it".
     fn disclose_read_model_ahead_of_index(&self, e: &anyhow::Error) {
-        self.degraded.emit(holon_api::condition_bus::Condition {
+        self.degraded.emit(holon_conditions::condition_bus::Condition {
             subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
-            reason: holon_api::condition_bus::ConditionKind::SqlProjectionFailed(format!(
+            reason: holon_conditions::condition_bus::ConditionKind::SqlProjectionFailed(format!(
                 "the search index rejected a batch, so index-backed views (search, queries) \
                  may lag the outline until the next reseed repairs them: {e}"
             )),
@@ -2280,8 +2287,8 @@ fn topological_sort_deletes<'a>(
 mod redrive_tests {
     use std::sync::atomic::AtomicUsize;
 
-    use holon_api::condition_bus::ConditionBus;
-    use holon_api::condition_bus::ConditionKind;
+    use holon_conditions::condition_bus::ConditionBus;
+    use holon_conditions::condition_bus::ConditionKind;
 
     use super::*;
 

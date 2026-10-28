@@ -23,7 +23,7 @@ use holon_api::OpOrigin;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
 use holon_api::Value;
-use holon_api::condition_bus::ConditionBus;
+use holon_conditions::condition_bus::ConditionBus;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::OriginTaggedWrites;

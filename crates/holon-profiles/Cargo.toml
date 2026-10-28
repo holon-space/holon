@@ -15,6 +15,7 @@ ignored = ["workspace-hack"]
 anyhow.workspace = true
 futures-signals.workspace = true
 holon-api.workspace = true
+holon-conditions.workspace = true
 holon-core.workspace = true
 rhai.workspace = true
 serde.workspace = true

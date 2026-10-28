@@ -5,10 +5,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::task::Poll;
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
 use holon_api::EntityName;
 use holon_api::OpOrigin;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
@@ -34,7 +34,7 @@ async fn rebuild_views_is_disclosed_while_it_runs_and_not_after() {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.path().to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())

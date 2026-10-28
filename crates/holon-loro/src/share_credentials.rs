@@ -24,10 +24,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
-use holon_api::condition_bus::Condition;
-use holon_api::condition_bus::ConditionBus;
-use holon_api::condition_bus::ConditionKind;
-use holon_api::condition_bus::OWNER_IDENTITY_SUBJECT;
+use holon_conditions::condition_bus::Condition;
+use holon_conditions::condition_bus::ConditionBus;
+use holon_conditions::condition_bus::ConditionKind;
+use holon_conditions::condition_bus::OWNER_IDENTITY_SUBJECT;
 use holon_secrets::KeychainStore;
 use tracing::warn;
 

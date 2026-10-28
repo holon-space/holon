@@ -15,10 +15,10 @@
 //! @pbt slips-if-removed the toast stack silently reorders itself by subject
 //! name on every window open, while every keyed-upsert assertion stays green
 
-use holon_api::condition_bus::Condition;
-use holon_api::condition_bus::ConditionBus;
-use holon_api::condition_bus::ConditionKind;
-use holon_api::condition_bus::RefusedFile;
+use holon_conditions::condition_bus::Condition;
+use holon_conditions::condition_bus::ConditionBus;
+use holon_conditions::condition_bus::ConditionKind;
+use holon_conditions::condition_bus::RefusedFile;
 
 fn emptied_file(subject: &str) -> Condition {
     Condition {

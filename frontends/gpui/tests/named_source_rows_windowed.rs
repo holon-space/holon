@@ -30,13 +30,13 @@
 use std::sync::Arc;
 
 use gpui::TestAppContext;
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
-use holon_api::condition_source::conditions_source;
 use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
 use holon_api::row_source::RowSourceRegistry;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
+use holon_conditions::condition_source::conditions_source;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use support::TestServices;
 use support::render_reactive_fixture_quiescent_sized_with_services;

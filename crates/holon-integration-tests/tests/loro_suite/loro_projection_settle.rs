@@ -40,7 +40,7 @@ struct Fixture {
     layout: Arc<LoroDocument>,
     sink: Arc<MemorySink>,
     projection: Arc<LoroProjection>,
-    degraded: Arc<holon_api::ConditionBus>,
+    degraded: Arc<holon_conditions::ConditionBus>,
 }
 
 impl Fixture {
@@ -52,7 +52,7 @@ impl Fixture {
         let global = doc_store.read().await.get_doc(DocScope::Global).await?;
         let layout = doc_store.read().await.get_doc(DocScope::Layout).await?;
         let sink = Arc::new(MemorySink::new());
-        let degraded = Arc::new(holon_api::ConditionBus::new());
+        let degraded = Arc::new(holon_conditions::ConditionBus::new());
         let (clock, engine) = holon_integration_tests::pbt::engine_views::start_views_engine();
         let projection = Arc::new(LoroProjection::new(
             doc_store.clone(),

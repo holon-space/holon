@@ -50,6 +50,7 @@ turso_core.workspace = true
 turso_sdk_kit.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
+holon-conditions.workspace = true
 holon-core.workspace = true
 holon-org-format.workspace = true
 holon-turso.workspace = true

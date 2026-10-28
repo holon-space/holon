@@ -16,10 +16,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionChange;
-use holon_api::ConditionKind;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionChange;
+use holon_conditions::ConditionKind;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
 use tracing::Instrument;

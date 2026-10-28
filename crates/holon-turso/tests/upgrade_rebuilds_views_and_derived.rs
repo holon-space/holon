@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon_api::ConditionBus;
 use holon_api::Value;
 use holon_api::computation::ArithOp;
 use holon_api::computation::Computation;
 use holon_api::computation::DerivedField;
 use holon_api::computation::FieldIdent;
+use holon_conditions::ConditionBus;
 use holon_turso::db_open::OpenChange;
 use holon_turso::derived_reconciler::DerivedFieldReconcilerHandle;
 use holon_turso::derived_reconciler::spawn_derived_field_reconciler;

@@ -83,7 +83,7 @@ pub struct LoroDocumentStore {
     #[cfg(not(target_arch = "wasm32"))]
     saved: Arc<tokio::sync::Mutex<HashMap<&'static str, Persisted>>>,
     /// Where a dropped torn log tail is disclosed.
-    conditions: Option<Arc<holon_api::ConditionBus>>,
+    conditions: Option<Arc<holon_conditions::ConditionBus>>,
     /// Peer id to mint both docs under. `None` = the env/random default
     /// in `LoroDocument::new`. Two instances in ONE process must each
     /// inject their own — the env var is process-global and would collide.
@@ -138,7 +138,7 @@ impl LoroDocumentStore {
     }
 
     /// Disclose a dropped torn update-log tail on `bus`.
-    pub fn with_condition_bus(mut self, bus: Arc<holon_api::ConditionBus>) -> Self {
+    pub fn with_condition_bus(mut self, bus: Arc<holon_conditions::ConditionBus>) -> Self {
         self.conditions = Some(bus);
         self
     }
@@ -529,9 +529,9 @@ impl LoroDocumentStore {
     fn disclose_dropped(&self, log: &Path, bytes: u64, reason: String) {
         tracing::warn!("dropped {bytes} bytes of {}: {reason}", log.display());
         if let Some(bus) = &self.conditions {
-            bus.emit(holon_api::Condition {
+            bus.emit(holon_conditions::Condition {
                 subject: log.display().to_string(),
-                reason: holon_api::ConditionKind::LoroUpdateLogTailDropped { bytes, reason },
+                reason: holon_conditions::ConditionKind::LoroUpdateLogTailDropped { bytes, reason },
             });
         }
     }

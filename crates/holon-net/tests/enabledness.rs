@@ -5,7 +5,6 @@ use std::collections::BTreeSet;
 
 use holon_api::EntityUri;
 use holon_api::Value;
-use holon_api::user_transition::Offer;
 use holon_net::Analyzability;
 use holon_net::ArcOrigin;
 use holon_net::BindingVar;
@@ -28,6 +27,7 @@ use holon_pattern::arcs::ArcPlace;
 use holon_pattern::arcs::ArcRelation;
 use holon_pattern::pattern::CmpOp;
 use holon_pattern::pattern::Pattern;
+use holon_transition_contract::Offer;
 
 /// A marking holding present entities and, for the hop and refinement cases,
 /// their cells.

@@ -292,7 +292,7 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
         _: &holon_api::EntityUri,
         _: &std::path::Path,
         _: &str,
-        _: holon_api::HolonChange,
+        _: holon_conditions::HolonChange,
         _: &std::path::Path,
     ) {
     }

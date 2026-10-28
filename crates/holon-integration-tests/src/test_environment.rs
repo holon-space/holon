@@ -490,7 +490,7 @@ impl TestEnvironmentBuilder {
             session_config,
             config_dir,
             std::collections::HashSet::new(),
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             move |injector| {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
@@ -612,13 +612,13 @@ async fn wait_for_vault_backlog(injector: &fluxdi::Injector) -> Result<()> {
 /// finish starting.
 fn start_degradation_disclosed(injector: &fluxdi::Injector) -> bool {
     injector
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .iter()
         .any(|c| {
             let kind = c.reason.condition_kind();
-            kind == holon_api::ConditionKind::VAULT_SYNC_NOT_STARTED
-                || kind == holon_api::ConditionKind::VAULT_START_INCOMPLETE
+            kind == holon_conditions::ConditionKind::VAULT_SYNC_NOT_STARTED
+                || kind == holon_conditions::ConditionKind::VAULT_START_INCOMPLETE
         })
 }
 
@@ -746,7 +746,7 @@ pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path)
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         temp_path.to_path_buf(),
         std::collections::HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         |_| Ok(()),
         |_| (),
     )
@@ -839,7 +839,7 @@ pub(crate) async fn run_epoch_flip_rejection_check(
         session_config,
         temp_path.to_path_buf(),
         std::collections::HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         |_| Ok(()),
         |_| (),
     )
@@ -1140,7 +1140,7 @@ impl TestEnvironment {
             session_config,
             config_dir,
             std::collections::HashSet::new(),
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             move |injector| {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
@@ -1300,7 +1300,7 @@ impl TestEnvironment {
 
         let injector = build_no_turso_container(
             storage_dir,
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             {
                 let backend = backend.clone();
                 let shared_store = shared_store.clone();

@@ -5,8 +5,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_loro::DocScope;
 use holon_loro::GLOBAL_SNAPSHOT_NAME;
 use holon_loro::LoroDocument;
@@ -361,7 +361,7 @@ proptest! {
     }
 }
 
-async fn reload_disclosing(dir: &Path) -> (Arc<LoroDocument>, Vec<holon_api::Condition>) {
+async fn reload_disclosing(dir: &Path) -> (Arc<LoroDocument>, Vec<holon_conditions::Condition>) {
     let bus = Arc::new(ConditionBus::new());
     let doc = LoroDocumentStore::new(dir.to_path_buf())
         .with_condition_bus(bus.clone())
@@ -371,7 +371,7 @@ async fn reload_disclosing(dir: &Path) -> (Arc<LoroDocument>, Vec<holon_api::Con
     (doc, bus.current())
 }
 
-fn drops_a_tail(conditions: &[holon_api::Condition]) -> bool {
+fn drops_a_tail(conditions: &[holon_conditions::Condition]) -> bool {
     conditions
         .iter()
         .any(|c| matches!(c.reason, ConditionKind::LoroUpdateLogTailDropped { .. }))

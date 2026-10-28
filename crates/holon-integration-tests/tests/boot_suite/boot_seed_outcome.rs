@@ -32,10 +32,12 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 fn start_incomplete(env: &TestEnvironment) -> Vec<String> {
     env.injector()
         .expect("a booted environment has an injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
-        .filter(|c| c.reason.condition_kind() == holon_api::ConditionKind::VAULT_START_INCOMPLETE)
+        .filter(|c| {
+            c.reason.condition_kind() == holon_conditions::ConditionKind::VAULT_START_INCOMPLETE
+        })
         .map(|c| format!("{:?}", c.reason))
         .collect()
 }

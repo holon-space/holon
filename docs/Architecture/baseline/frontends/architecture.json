@@ -638,7 +638,7 @@
                 "c4_level": "unknown",
                 "description": "Shared gpui PBT harness modules for the composed windowed path.",
                 "pattern_status": "planned",
-                "content": "Shared gpui PBT harness modules for the composed windowed path.\n\nIncrement 4c: the phased real-NSWindow shell (`run_in_gpui_window` +\n`OnReady`/`GpuiLaunchContext`, the phased ready-protocol) and the\nphased harnesses (`random_pbt`, `random_pbt_sim`, `windowed_replay`) were\nDELETED. The survivors are the composed windowed boot/replay helper\n(`windowed_wide`) and the TestPlatform `SimUserDriver`\n(`sim_windowed_replay`); the windowed random runner is the 4b loop in\n`gpui_composed_windowed_loop.rs`.\n\nIncluded via `#[path = \"pbt_harness/mod.rs\"] mod pbt_harness;` from each\ntest binary (subdir modules aren't auto-discovered as tests).",
+                "content": "Shared gpui PBT harness modules for the composed windowed path.\n\nIncrement 4c: the phased real-NSWindow shell (`run_in_gpui_window` +\n`OnReady`/`GpuiLaunchContext`, the phased ready-protocol) and the\nphased harnesses (`random_pbt`, `random_pbt_sim`, `windowed_replay`) were\nDELETED. The survivors are the composed windowed boot/replay helper\n(`windowed_wide`) and the TestPlatform `SimUserDriver`\n(`sim_windowed_replay`); the windowed random runner is the 4b loop in\n`gpui_composed_windowed_loop.rs`.\n\nDeclared once by `tests/main.rs`, and included via\n`#[path = \"pbt_harness/mod.rs\"] mod pbt_harness;` by each `harness = false`\ntarget.",
                 "source_file": "gpui/tests/pbt_harness/mod.rs",
                 "parent": "gpui",
                 "files": [
@@ -850,6 +850,9 @@
               },
               {
                 "name": "live_query_context_id_windowed.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "main_outline_virtualized_pbt.rs"

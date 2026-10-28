@@ -23,7 +23,7 @@ async fn from_block_query_source_has_no_engine_but_a_source() {
         None,
         holon_profiles::create_default_registry().expect("default TypeRegistry"),
         &holon_api::lifecycle::SessionShutdown::new(),
-        Arc::new(holon_api::ConditionBus::new()),
+        Arc::new(holon_conditions::ConditionBus::new()),
     );
     // No Turso query engine wired on a no-Turso session.
     assert!(session.query_engine().is_none());

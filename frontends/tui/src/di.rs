@@ -41,7 +41,7 @@ pub struct TuiModule {
     /// Acquired before the boot, so a refusal reaches the user as its own
     /// message. `configure` takes it.
     vault: Mutex<Option<SessionVault>>,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 }
 
 impl TuiModule {

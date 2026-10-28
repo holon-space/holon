@@ -4007,7 +4007,7 @@ mod intermediate_ancestor_writeback_hole {
                 _: &holon_api::EntityUri,
                 _: &std::path::Path,
                 _: &str,
-                _: holon_api::HolonChange,
+                _: holon_conditions::HolonChange,
                 _: &std::path::Path,
             ) {
             }
@@ -4141,7 +4141,7 @@ mod intermediate_ancestor_writeback_hole {
                 _: &holon_api::EntityUri,
                 _: &std::path::Path,
                 _: &str,
-                _: holon_api::HolonChange,
+                _: holon_conditions::HolonChange,
                 _: &std::path::Path,
             ) {
             }
@@ -4298,7 +4298,7 @@ mod intermediate_ancestor_writeback_hole {
                 _: &holon_api::EntityUri,
                 _: &std::path::Path,
                 _: &str,
-                _: holon_api::HolonChange,
+                _: holon_conditions::HolonChange,
                 _: &std::path::Path,
             ) {
             }
@@ -4583,7 +4583,7 @@ impl holon_filesystem::WritebackDisclosure for RefusalLog {
         _: &holon_api::EntityUri,
         _: &std::path::Path,
         _: &str,
-        _: holon_api::HolonChange,
+        _: holon_conditions::HolonChange,
         _: &std::path::Path,
     ) {
     }

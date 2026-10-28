@@ -1330,6 +1330,18 @@ impl Default for UiInfo {
 }
 
 // =============================================================================
+// PlaceName
+// =============================================================================
+
+/// The name of a Petri-net place, unique in its net. A [`TypeHint`] names one
+/// for a picker over the subjects of its tokens.
+///
+/// [`TypeHint`]: crate::render_types::TypeHint
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PlaceName(pub String);
+
+// =============================================================================
 // Tests
 // =============================================================================
 

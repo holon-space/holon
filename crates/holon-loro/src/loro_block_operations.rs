@@ -72,7 +72,7 @@ pub struct LoroBlockOperations {
     /// Handed to every backend likewise, so `owning_page` in a share does not
     /// scan the whole tree for its mount.
     mount_cache: crate::loro_backend::MountCache,
-    condition_bus: Option<Arc<holon_api::ConditionBus>>,
+    condition_bus: Option<Arc<holon_conditions::ConditionBus>>,
 }
 
 impl LoroBlockOperations {
@@ -86,7 +86,7 @@ impl LoroBlockOperations {
     }
 
     /// Handed to every backend, which discloses what it must not repair.
-    pub fn with_condition_bus(mut self, bus: Arc<holon_api::ConditionBus>) -> Self {
+    pub fn with_condition_bus(mut self, bus: Arc<holon_conditions::ConditionBus>) -> Self {
         self.condition_bus = Some(bus);
         self
     }

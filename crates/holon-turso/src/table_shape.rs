@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use holon_api::QuarantinedTable;
 use holon_api::Value;
+use holon_conditions::QuarantinedTable;
 use holon_core::storage::types::Result;
 use holon_core::storage::types::StorageError;
 use sqlparser::ast::ColumnOption;

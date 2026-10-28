@@ -313,9 +313,9 @@ mod tests {
     use std::panic::catch_unwind;
     use std::sync::atomic::Ordering;
 
-    use holon_api::ConditionBus;
-    use holon_api::ConditionKind;
-    use holon_api::condition_bus::VIEW_ENGINE_SUBJECT;
+    use holon_conditions::ConditionBus;
+    use holon_conditions::ConditionKind;
+    use holon_conditions::condition_bus::VIEW_ENGINE_SUBJECT;
     use holon_turso::schema_module::SchemaModule;
     use holon_turso::schema_modules::NavigationSchemaModule;
     use holon_turso::turso::TursoBackend;

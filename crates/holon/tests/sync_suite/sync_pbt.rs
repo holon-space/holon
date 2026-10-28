@@ -192,10 +192,10 @@ mod tests {
         use holon_api::InlineMark;
         use holon_api::StorageEntity;
         use holon_api::Value;
-        use holon_api::condition_bus::Condition;
-        use holon_api::condition_bus::ConditionBus;
-        use holon_api::condition_bus::ConditionChange;
-        use holon_api::condition_bus::ConditionKind;
+        use holon_conditions::condition_bus::Condition;
+        use holon_conditions::condition_bus::ConditionBus;
+        use holon_conditions::condition_bus::ConditionChange;
+        use holon_conditions::condition_bus::ConditionKind;
         use holon_core::OperationProvider;
         use holon_loro::LoroBlockOperations;
         use holon_loro::device_key_store::load_or_create_device_key;

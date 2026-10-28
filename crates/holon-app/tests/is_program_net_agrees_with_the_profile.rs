@@ -30,7 +30,6 @@ use holon_api::arcs::ArcPlace;
 use holon_api::arcs::ArcRelation;
 use holon_api::block::Block;
 use holon_api::pattern::Guard;
-use holon_api::user_transition::Offer;
 use holon_net::Analyzability;
 use holon_net::CompiledNet;
 use holon_net::NetEntity;
@@ -42,6 +41,7 @@ use holon_net::marking::Marking;
 use holon_profiles::LiveEntitySpec;
 use holon_profiles::ProfileResolver;
 use holon_profiles::ProfileResolving;
+use holon_transition_contract::Offer;
 use proptest::prelude::*;
 
 /// `is_program`, written in the guard language.
@@ -62,7 +62,7 @@ fn resolver_from(blocks: &[Block]) -> Arc<dyn ProfileResolving> {
         holon_profiles::create_default_registry().expect("default TypeRegistry builds");
     let type_profiles = holon_profiles::type_profiles_from_registry(
         &type_registry,
-        &holon_api::ConditionBus::new(),
+        &holon_conditions::ConditionBus::new(),
     );
     let mut live_entities = holon_profiles::LiveEntities::new();
     for spec in LiveEntitySpec::ALL.iter().copied() {
@@ -83,7 +83,7 @@ fn resolver_from(blocks: &[Block]) -> Arc<dyn ProfileResolving> {
         HashMap::new(),
         type_profiles,
         type_registry.vault_profile_claims(),
-        Arc::new(holon_api::ConditionBus::new()),
+        Arc::new(holon_conditions::ConditionBus::new()),
     ))
 }
 

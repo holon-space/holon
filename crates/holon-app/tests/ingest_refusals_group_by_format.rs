@@ -11,12 +11,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
-use holon_api::IngestRefusals;
-use holon_api::RefusedFile;
 use holon_app::loro_seams::WritebackDegradedDisclosure;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
+use holon_conditions::IngestRefusals;
+use holon_conditions::RefusedFile;
 use holon_filesystem::WritebackDisclosure;
 use proptest::prelude::*;
 

@@ -13,12 +13,12 @@ use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
 use holon::api::BackendEngine;
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionKey;
-use holon_api::ConditionKind;
 use holon_api::EntityName;
 use holon_api::lifecycle::SessionShutdown;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKey;
+use holon_conditions::ConditionKind;
 use holon_core::OperationProvider;
 use holon_core::SyncGate;
 use holon_core::SyncTokenStore;
@@ -555,7 +555,7 @@ fn disclose_refused_integration(r: &RefusedIntegration, bus: &ConditionBus) {
             types: r
                 .refusals
                 .iter()
-                .map(|t| holon_api::condition_bus::RefusedType {
+                .map(|t| holon_conditions::condition_bus::RefusedType {
                     type_name: t.type_name.clone(),
                     field: t.field.clone(),
                     home: t.home.clone(),
@@ -1366,8 +1366,8 @@ impl Module for McpIntegrationsModule {
 
 #[cfg(test)]
 mod tests {
-    use holon_api::ConditionBus;
-    use holon_api::ConditionKind;
+    use holon_conditions::ConditionBus;
+    use holon_conditions::ConditionKind;
 
     use super::*;
 

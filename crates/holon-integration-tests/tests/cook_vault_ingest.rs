@@ -1024,7 +1024,7 @@ fn a_refused_recipe_edit_raises_a_degraded_condition() {
         let bus = env
             .injector()
             .expect("a booted app has an injector")
-            .resolve_async::<std::sync::Arc<holon_api::ConditionBus>>()
+            .resolve_async::<std::sync::Arc<holon_conditions::ConditionBus>>()
             .await;
 
         let _ = env
@@ -1045,7 +1045,7 @@ fn a_refused_recipe_edit_raises_a_degraded_condition() {
 
         let raised = bus.subscribe().current;
         let disclosed = raised.iter().any(|d| {
-            d.condition_key().kind == holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT
+            d.condition_key().kind == holon_conditions::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT
                 && d.subject.contains("Pancakes.cook")
         });
         assert!(
@@ -1145,7 +1145,7 @@ fn a_keystroke_on_a_recipe_block_is_refused_at_the_cell() {
         };
 
         let bus = injector
-            .resolve_async::<std::sync::Arc<holon_api::ConditionBus>>()
+            .resolve_async::<std::sync::Arc<holon_conditions::ConditionBus>>()
             .await;
 
         let refusal = cell
@@ -1180,7 +1180,7 @@ fn a_keystroke_on_a_recipe_block_is_refused_at_the_cell() {
 
         let raised = bus.subscribe().current;
         let disclosed = raised.iter().any(|d| {
-            d.condition_key().kind == holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT
+            d.condition_key().kind == holon_conditions::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT
                 && d.subject.contains("Pancakes.cook")
         });
         assert!(
@@ -1575,21 +1575,25 @@ fn refused_recipe(step: &str) -> String {
 const REFUSED_ORG: &str = "#+TITLE: Broken\n#+ID: doc:broken\n* A heading\n";
 
 /// The `vault-ingest-failed` conditions in effect.
-fn ingest_refusals(app: &holon_integration_tests::TestEnvironment) -> Vec<holon_api::Condition> {
+fn ingest_refusals(
+    app: &holon_integration_tests::TestEnvironment,
+) -> Vec<holon_conditions::Condition> {
     app.injector()
         .expect("a booted app has an injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
-        .filter(|c| c.reason.condition_kind() == holon_api::ConditionKind::VAULT_INGEST_FAILED)
+        .filter(|c| {
+            c.reason.condition_kind() == holon_conditions::ConditionKind::VAULT_INGEST_FAILED
+        })
         .collect()
 }
 
 /// Polls until `settled` holds for the refusal conditions, then returns them.
 async fn refusals_once(
     app: &holon_integration_tests::TestEnvironment,
-    settled: impl Fn(&[holon_api::Condition]) -> bool,
-) -> Vec<holon_api::Condition> {
+    settled: impl Fn(&[holon_conditions::Condition]) -> bool,
+) -> Vec<holon_conditions::Condition> {
     app.wait_for_org_files_stable(25, Duration::from_millis(3000))
         .await;
     let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
@@ -1616,14 +1620,14 @@ fn file_name(path: &str) -> String {
 /// the bus records as refused for it.
 fn refusal_group(
     app: &holon_integration_tests::TestEnvironment,
-    refusals: &[holon_api::Condition],
+    refusals: &[holon_conditions::Condition],
     format: &str,
 ) -> ((usize, Vec<String>), Vec<String>) {
     let condition = refusals
         .iter()
         .find(|c| c.subject == format)
         .unwrap_or_else(|| panic!("no {format} refusal condition in {refusals:?}"));
-    let holon_api::ConditionKind::VaultIngestFailed(group) = &condition.reason else {
+    let holon_conditions::ConditionKind::VaultIngestFailed(group) = &condition.reason else {
         unreachable!("ingest_refusals keeps only VaultIngestFailed");
     };
     assert_eq!(group.format(), format);
@@ -1641,7 +1645,7 @@ fn refusal_group(
 fn refused_names(app: &holon_integration_tests::TestEnvironment, format: &str) -> Vec<String> {
     app.injector()
         .expect("a booted app has an injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .refused_files(format)
         .iter()
         .map(|f| file_name(&f.path))
@@ -1650,11 +1654,14 @@ fn refused_names(app: &holon_integration_tests::TestEnvironment, format: &str) -
 
 /// Settles once `formats` conditions are raised and cooklang's counts `count`
 /// files.
-fn cooklang_counts(formats: usize, count: usize) -> impl Fn(&[holon_api::Condition]) -> bool {
+fn cooklang_counts(
+    formats: usize,
+    count: usize,
+) -> impl Fn(&[holon_conditions::Condition]) -> bool {
     move |refusals| {
         refusals.len() == formats
             && refusals.iter().any(|c| match &c.reason {
-                holon_api::ConditionKind::VaultIngestFailed(group) => {
+                holon_conditions::ConditionKind::VaultIngestFailed(group) => {
                     group.format() == "cooklang" && group.count().get() == count
                 }
                 _ => false,
@@ -2187,11 +2194,11 @@ fn an_org_file_beside_a_recipe_is_refused_when_the_recorded_file_state_is_unread
         let incomplete: Vec<_> = app
             .injector()
             .expect("a booted app has an injector")
-            .resolve::<Arc<holon_api::ConditionBus>>()
+            .resolve::<Arc<holon_conditions::ConditionBus>>()
             .current()
             .into_iter()
             .filter(|c| {
-                c.reason.condition_kind() == holon_api::ConditionKind::VAULT_START_INCOMPLETE
+                c.reason.condition_kind() == holon_conditions::ConditionKind::VAULT_START_INCOMPLETE
             })
             .collect();
         assert_eq!(

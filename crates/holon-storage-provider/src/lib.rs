@@ -1,3 +1,6 @@
+//! @c4 component
+//! @c4 layer Core
+//!
 //! The lifecycle contract every storage provider (Turso, Loro, a plugin's
 //! store) satisfies, so the net's storage subnet can open them, let a standby
 //! catch up, swap it in and retire the old one without knowing which store it

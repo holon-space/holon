@@ -37,21 +37,21 @@ use gpui::Stateful;
 use gpui::div;
 use gpui::prelude::*;
 use gpui::px;
-use holon_api::Condition;
-use holon_api::ConditionChange;
-use holon_api::ConditionKey;
-use holon_api::ConditionKind;
 use holon_api::EntityName;
-use holon_api::IngestRefusals;
 use holon_api::Value;
-use holon_api::condition_profile::ConditionPlacement;
-use holon_api::condition_profile::ConditionProfile;
-use holon_api::condition_profile::ConditionSeverity;
 use holon_app::PendingState;
 use holon_app::PendingWriteEvent;
 use holon_app::PendingWriteEventKind;
 use holon_app::PendingWriteStore;
 use holon_app::PendingWriteView;
+use holon_conditions::Condition;
+use holon_conditions::ConditionChange;
+use holon_conditions::ConditionKey;
+use holon_conditions::ConditionKind;
+use holon_conditions::IngestRefusals;
+use holon_conditions::condition_profile::ConditionPlacement;
+use holon_conditions::condition_profile::ConditionProfile;
+use holon_conditions::condition_profile::ConditionSeverity;
 use holon_frontend::FrontendSession;
 use holon_frontend::dispatch_journal::DispatchJournal;
 use holon_frontend::reactive::BuilderServices;
@@ -256,7 +256,7 @@ impl LocalToastKind {
     /// three facts a `ConditionProfile` carries, for the kinds that have no
     /// profile.
     const fn style(self) -> (ConditionSeverity, &'static str, &'static str) {
-        use holon_api::condition_profile::icons;
+        use holon_conditions::condition_profile::icons;
         match self {
             Self::UndoFailed => (ConditionSeverity::Error, icons::BLOCKED, "Undo/redo failed"),
             Self::UndoStepDropped => (
@@ -310,7 +310,7 @@ pub struct ShareUiState {
     /// The bus that raised a previous-run panic this window has not yet drawn
     /// inside its viewport; the frame after one that did calls
     /// `panic_record::seen_on`.
-    pub previous_runs_shown_on: Option<Arc<holon_api::ConditionBus>>,
+    pub previous_runs_shown_on: Option<Arc<holon_conditions::ConditionBus>>,
 }
 
 /// Blocks written on this device before it was paired that are in the archive
@@ -427,7 +427,7 @@ impl ShareUiState {
         event: Condition,
         profile: ConditionProfile,
         condition: ConditionKey,
-        detail: holon_api::condition_detail::ConditionDetail,
+        detail: holon_conditions::condition_detail::ConditionDetail,
     ) {
         let kind = event.reason.condition_kind();
         if self.surfaceless_as_toasts.insert(kind) {
@@ -441,7 +441,7 @@ impl ShareUiState {
         event: Condition,
         profile: ConditionProfile,
         condition: ConditionKey,
-        detail: holon_api::condition_detail::ConditionDetail,
+        detail: holon_conditions::condition_detail::ConditionDetail,
     ) {
         // The one kind whose headline names instance data — the format that
         // refused the files — instead of the profile's constant.
@@ -531,7 +531,7 @@ pub struct NotifyShareUi;
 impl EventEmitter<NotifyShareUi> for ShareUiState {}
 
 /// A toast's remedy asks the window to open a section of Settings.
-pub struct OpenSettings(pub holon_api::SettingsSection);
+pub struct OpenSettings(pub holon_conditions::SettingsSection);
 impl EventEmitter<OpenSettings> for ShareUiState {}
 
 /// GPUI global that routes a right-click-share event from a block view back
@@ -607,7 +607,7 @@ impl gpui::Global for DegradedToastSink {}
 /// must exist in every consolidator mode — keying it off a Loro-only handle
 /// left the shipped SqlOnly build raising conditions nobody listened to.
 pub fn spawn_degraded_bus_bridge(
-    bus: Arc<holon_api::ConditionBus>,
+    bus: Arc<holon_conditions::ConditionBus>,
     rt_handle: tokio::runtime::Handle,
     share_state: Entity<ShareUiState>,
     window_handle: AnyWindowHandle,
@@ -2094,7 +2094,7 @@ pub const TOAST_LINE: &str = "toast-line";
 pub const PREVIOUS_RUN_TOAST: &str = "previous-run-toast";
 
 /// Element id of a toast's button that opens `section` of Settings.
-pub fn open_settings_id(section: holon_api::SettingsSection) -> String {
+pub fn open_settings_id(section: holon_conditions::SettingsSection) -> String {
     format!("toast-open-settings-{section:?}")
 }
 
@@ -2161,13 +2161,13 @@ fn toast_height(toast: &DegradedToast, text_width: f32) -> f32 {
 }
 
 /// The Settings sections a toast's condition offers to open.
-fn settings_remedies(toast: &DegradedToast) -> Vec<holon_api::SettingsSection> {
+fn settings_remedies(toast: &DegradedToast) -> Vec<holon_conditions::SettingsSection> {
     match toast.kind {
         ToastKind::Condition(profile) => profile
             .remedies()
             .iter()
             .filter_map(|remedy| match remedy {
-                holon_api::RemedySlot::OpenSettings(section) => Some(*section),
+                holon_conditions::RemedySlot::OpenSettings(section) => Some(*section),
                 _ => None,
             })
             .collect(),
@@ -2510,8 +2510,8 @@ fn render_error_modal(
 #[cfg(test)]
 mod tests {
     use futures::channel::oneshot;
-    use holon_api::Condition;
-    use holon_api::ConditionKind;
+    use holon_conditions::Condition;
+    use holon_conditions::ConditionKind;
 
     use super::*;
 
@@ -2546,7 +2546,7 @@ mod tests {
             ),
             subject: subject.to_string(),
             detail: format!("{subject} is switched off").into(),
-            condition: Some(holon_api::ConditionKey {
+            condition: Some(holon_conditions::ConditionKey {
                 subject: subject.to_string(),
                 kind: ConditionKind::INTEGRATION_NOT_ENABLED,
             }),
@@ -2677,10 +2677,10 @@ mod tests {
     /// The condition a bus raises for one refused file — only the bus builds
     /// a `VaultIngestFailed`.
     fn refused_file_condition(format: &str, path: &str, reason: &str) -> Condition {
-        let bus = holon_api::ConditionBus::new();
+        let bus = holon_conditions::ConditionBus::new();
         bus.vault_ingest_refused(
             format,
-            holon_api::RefusedFile {
+            holon_conditions::RefusedFile {
                 path: path.into(),
                 reason: reason.into(),
             },
@@ -2716,11 +2716,11 @@ mod tests {
 
     #[test]
     fn the_ingest_headline_counts_every_refused_file_of_the_format() {
-        let bus = holon_api::ConditionBus::new();
+        let bus = holon_conditions::ConditionBus::new();
         for i in 0..4 {
             bus.vault_ingest_refused(
                 "cooklang",
-                holon_api::RefusedFile {
+                holon_conditions::RefusedFile {
                     path: format!("/vault/Rezepte/r{i}.cook"),
                     reason: "unknown timer unit".into(),
                 },
@@ -2909,7 +2909,7 @@ mod tests {
     /// `current` — that replay must render a toast just like a live event.
     #[test]
     fn replayed_boot_condition_renders_a_toast() {
-        let bus = holon_api::ConditionBus::new();
+        let bus = holon_conditions::ConditionBus::new();
         bus.emit(Condition {
             subject: "todoist".into(),
             reason: ConditionKind::IntegrationConnectFailed {

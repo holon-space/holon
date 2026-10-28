@@ -34,8 +34,8 @@ use std::time::Instant;
 
 use fluxdi::Injector;
 use fluxdi::Module;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_frontend::config::CrdtPreferences;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::McpConfig;

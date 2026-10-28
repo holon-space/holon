@@ -51,7 +51,7 @@ pub fn model_boot_fault(state: &mut ReferenceState, fault: BootFault) {
 /// a spawned task panics, and the boot waits (bounded) for its disclosure so
 /// the first invariant check sees it. A disclosure that never comes is left
 /// for `inv-conditions-match-ref` to report.
-pub async fn inject_task_panic(bus: Arc<holon_api::ConditionBus>) {
+pub async fn inject_task_panic(bus: Arc<holon_conditions::ConditionBus>) {
     let joined = tokio::spawn(async { injected_task_panic(true) }).await;
     let error = joined.expect_err("the injected task must panic");
     assert!(
@@ -64,7 +64,7 @@ pub async fn inject_task_panic(bus: Arc<holon_api::ConditionBus>) {
         && !bus
             .current()
             .iter()
-            .any(|c| c.reason.condition_kind() == holon_api::ConditionKind::TASK_PANICKED)
+            .any(|c| c.reason.condition_kind() == holon_conditions::ConditionKind::TASK_PANICKED)
     {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }

@@ -45,8 +45,8 @@ use std::time::Duration;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
-use holon_api::Condition;
-use holon_api::ConditionKind;
+use holon_conditions::Condition;
+use holon_conditions::ConditionKind;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;

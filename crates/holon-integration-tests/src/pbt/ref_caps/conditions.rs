@@ -29,7 +29,7 @@ impl RefConditions for ReferenceState {
     fn governed_condition_kinds(&self) -> BTreeSet<&'static str> {
         let mut governed = self.conditions.governed().clone();
         if self.files.write_churn_ran && !self.files.write_churn_armed() {
-            governed.insert(holon_api::ConditionKind::WRITEBACK_DEGRADED);
+            governed.insert(holon_conditions::ConditionKind::WRITEBACK_DEGRADED);
         }
         governed
     }

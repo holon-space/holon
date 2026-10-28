@@ -15,10 +15,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
 use holon_api::Value;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
@@ -59,7 +59,7 @@ async fn boot(dir: &Path) -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())

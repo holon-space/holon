@@ -6,10 +6,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
 use holon_api::EntityUri;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_core::EditRefused;
 use holon_core::ReadOnlyDocuments;
 use holon_core::Result;

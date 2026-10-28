@@ -65,7 +65,7 @@ pub fn build_turso_free_profile_resolver(
     source: Arc<dyn BlockQuerySource>,
     type_registry: Arc<holon_profiles::TypeRegistry>,
     shutdown: &holon_api::lifecycle::SessionShutdown,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 ) -> Arc<dyn ProfileResolving> {
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry, &conditions);
 
@@ -891,7 +891,7 @@ mod tests {
             source,
             holon_profiles::create_default_registry().expect("default TypeRegistry"),
             &holon_api::lifecycle::SessionShutdown::new(),
-            Arc::new(holon_api::ConditionBus::new()),
+            Arc::new(holon_conditions::ConditionBus::new()),
         );
         let variants = resolver.resolve_collection_variants();
         assert!(
@@ -926,7 +926,7 @@ mod tests {
             source,
             registry.clone(),
             &shutdown,
-            Arc::new(holon_api::ConditionBus::new()),
+            Arc::new(holon_conditions::ConditionBus::new()),
         );
         let declared = |registry: &holon_profiles::TypeRegistry| -> Vec<String> {
             registry
@@ -979,7 +979,7 @@ mod tests {
             ))
         })) as Arc<dyn BlockQuerySource>;
         let registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
-        let conditions = Arc::new(holon_api::ConditionBus::new());
+        let conditions = Arc::new(holon_conditions::ConditionBus::new());
         let shutdown = holon_api::lifecycle::SessionShutdown::new();
         let _resolver = build_turso_free_profile_resolver(
             source,
@@ -996,7 +996,12 @@ mod tests {
             let mut refused: Vec<String> = conditions
                 .current()
                 .into_iter()
-                .filter(|c| matches!(c.reason, holon_api::ConditionKind::ProfileRefused { .. }))
+                .filter(|c| {
+                    matches!(
+                        c.reason,
+                        holon_conditions::ConditionKind::ProfileRefused { .. }
+                    )
+                })
                 .map(|c| c.subject)
                 .collect();
             refused.sort();

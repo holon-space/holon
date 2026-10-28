@@ -24,7 +24,7 @@ pub async fn new_from_config(
     session_config: SessionConfig,
     config_dir: PathBuf,
     locked_keys: HashSet<PrefKey>,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 ) -> Result<Arc<FrontendSession>> {
     let (session, _engine, ()) = new_from_config_with_di(
         holon_config,
@@ -52,7 +52,7 @@ pub async fn new_from_config_with_di<F, G, T>(
     session_config: SessionConfig,
     config_dir: PathBuf,
     locked_keys: HashSet<PrefKey>,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
     extra_setup: F,
     extra_resolve: G,
 ) -> Result<(Arc<FrontendSession>, Arc<BackendEngine>, T)>

@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 
 /// Panics if `bus` carries `clock-not-running`. Call once the harness boot
 /// has returned.

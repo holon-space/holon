@@ -962,7 +962,7 @@ impl McpSidecar {
     /// The `transitions:` section as HL-IR, in name order.
     pub fn transition_descriptors(
         &self,
-    ) -> anyhow::Result<Vec<holon_api::user_transition::TransitionDescriptor>> {
+    ) -> anyhow::Result<Vec<holon_transition_contract::TransitionDescriptor>> {
         crate::transition_sidecar::load_transitions(self)
     }
 

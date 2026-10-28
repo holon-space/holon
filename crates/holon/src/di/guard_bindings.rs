@@ -116,7 +116,7 @@ pub fn sql_block_write_authority() -> Provider<dyn holon_core::WriteAuthorityRea
             .resolve_async::<super::DbReady<super::schema_providers::CoreTables>>()
             .await;
         let db = resolver.resolve::<dyn super::DbHandleProvider>();
-        let conditions = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+        let conditions = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
         let authority = crate::core::sql_write_authority::SqlWriteAuthority::new(db.handle());
         authority
             .disclose_unreadable_stored_block_types(&conditions)

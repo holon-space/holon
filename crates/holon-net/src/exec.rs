@@ -30,19 +30,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon_api::TypeHint;
-use holon_api::user_transition::ANSWER_ID_KEY;
-use holon_api::user_transition::ANSWER_INPUT_KEY;
-use holon_api::user_transition::AnswerCall;
-use holon_api::user_transition::AnswerId;
-use holon_api::user_transition::AnswerSettlement;
-use holon_api::user_transition::AskHash;
-use holon_api::user_transition::AskRow;
-use holon_api::user_transition::ExpireReason;
-pub use holon_api::user_transition::OccurrenceId;
-use holon_api::user_transition::SubjectName;
-use holon_api::user_transition::TransitionName;
-use holon_api::user_transition::UftError;
 use holon_pattern::Value;
+use holon_transition_contract::ANSWER_ID_KEY;
+use holon_transition_contract::ANSWER_INPUT_KEY;
+use holon_transition_contract::AnswerCall;
+use holon_transition_contract::AnswerId;
+use holon_transition_contract::AnswerSettlement;
+use holon_transition_contract::AskHash;
+use holon_transition_contract::AskRow;
+use holon_transition_contract::ExpireReason;
+pub use holon_transition_contract::OccurrenceId;
+use holon_transition_contract::SubjectName;
+use holon_transition_contract::TransitionName;
+use holon_transition_contract::UftError;
 
 /// A round fires every transition its marking enables. A net still enabled
 /// after this many rounds of one call does not terminate.

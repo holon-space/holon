@@ -1021,7 +1021,7 @@ impl holon_filesystem::WritebackDisclosure for Degradations {
         _: &EntityUri,
         _: &std::path::Path,
         _: &str,
-        _: holon_api::HolonChange,
+        _: holon_conditions::HolonChange,
         _: &std::path::Path,
     ) {
     }

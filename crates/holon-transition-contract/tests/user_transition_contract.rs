@@ -7,7 +7,7 @@ use holon_api::EntityName;
 use holon_api::OperationParam;
 use holon_api::Value;
 use holon_api::render_types::TypeHint;
-use holon_api::user_transition::*;
+use holon_transition_contract::*;
 use proptest::prelude::*;
 
 struct Cx;

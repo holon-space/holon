@@ -13,10 +13,6 @@ use exec_support::content;
 use exec_support::string;
 use exec_support::text;
 use holon_api::Value;
-use holon_api::user_transition::AnswerId;
-use holon_api::user_transition::AnswerSettlement;
-use holon_api::user_transition::ExpireReason;
-use holon_api::user_transition::UftError;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
@@ -40,6 +36,10 @@ use holon_net::exec::Undone;
 use holon_net::exec::ask_hash;
 use holon_net::exec::hash_text;
 use holon_net::exec::work_occurrence;
+use holon_transition_contract::AnswerId;
+use holon_transition_contract::AnswerSettlement;
+use holon_transition_contract::ExpireReason;
+use holon_transition_contract::UftError;
 
 use crate::exec_support;
 

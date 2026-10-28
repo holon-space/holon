@@ -1150,14 +1150,14 @@ impl ReferenceState {
     /// once the last one is gone.
     pub fn disclose_refused_recipes(&mut self) {
         const FORMAT: &str = "cooklang";
-        let kind = holon_api::ConditionKind::VAULT_INGEST_FAILED;
+        let kind = holon_conditions::ConditionKind::VAULT_INGEST_FAILED;
         if self.refused_recipes.is_empty() {
             self.conditions.clear(FORMAT, kind);
         } else {
             let named = self
                 .refused_recipes
                 .iter()
-                .take(holon_api::IngestRefusals::EXAMPLES)
+                .take(holon_conditions::IngestRefusals::EXAMPLES)
                 .cloned()
                 .collect();
             self.conditions

@@ -13,10 +13,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use holon_api::condition_bus::Condition;
-use holon_api::condition_bus::ConditionBus;
-use holon_api::condition_bus::ConditionKind;
 use holon_api::sharing::Capabilities;
+use holon_conditions::condition_bus::Condition;
+use holon_conditions::condition_bus::ConditionBus;
+use holon_conditions::condition_bus::ConditionKind;
 /// The iroh transport handles this module's public API already speaks
 /// ([`IrohAdvertiser::endpoint_for`], [`IrohAdvertiser::start_share`]'s return,
 /// [`crate::ContainerRegistry::replicate_all`]'s). Re-exported so a caller can
@@ -692,8 +692,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_bearer_ticket_admission_is_disclosed_once_on_the_degraded_bus() -> Result<()> {
-        use holon_api::condition_bus::ConditionBus;
-        use holon_api::condition_bus::ConditionKind;
+        use holon_conditions::condition_bus::ConditionBus;
+        use holon_conditions::condition_bus::ConditionKind;
 
         use crate::share_enrollment::CapabilitySecret;
         use crate::share_enrollment::ExpiryTime;

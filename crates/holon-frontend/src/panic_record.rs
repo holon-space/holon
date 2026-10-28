@@ -27,13 +27,13 @@ use std::time::UNIX_EPOCH;
 
 use chrono::DateTime;
 use chrono::Utc;
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
-use holon_api::DroppedPanics;
-use holon_api::EarlierPanic;
-use holon_api::EarlierPanics;
-use holon_api::condition_bus::PANIC_CONDITIONS_SUBJECT;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
+use holon_conditions::DroppedPanics;
+use holon_conditions::EarlierPanic;
+use holon_conditions::EarlierPanics;
+use holon_conditions::condition_bus::PANIC_CONDITIONS_SUBJECT;
 use serde::Deserialize;
 use serde::Serialize;
 

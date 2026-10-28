@@ -72,10 +72,11 @@ impl TransitionRef<ReferenceState> for RewriteFromStore {
         let name = crate::pbt::copies_model::file_name_of(state, &self.doc);
         state
             .conditions
-            .clear(&name, holon_api::ConditionKind::VAULT_FILE_EMPTIED);
-        state
-            .conditions
-            .clear(&name, holon_api::ConditionKind::REWRITE_FROM_STORE_FAILED);
+            .clear(&name, holon_conditions::ConditionKind::VAULT_FILE_EMPTIED);
+        state.conditions.clear(
+            &name,
+            holon_conditions::ConditionKind::REWRITE_FROM_STORE_FAILED,
+        );
     }
 }
 

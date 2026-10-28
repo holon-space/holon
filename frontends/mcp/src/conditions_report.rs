@@ -7,10 +7,10 @@
 //! Read-only by construction — it takes a snapshot and formats it. Raising or
 //! clearing a condition is the app's business, never an agent's.
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
-use holon_api::condition_source::placement_name;
-use holon_api::condition_source::severity_name;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
+use holon_conditions::condition_source::placement_name;
+use holon_conditions::condition_source::severity_name;
 
 /// The report for a wired bus, or the reason there is none.
 ///
@@ -85,8 +85,8 @@ pub fn refused_files_report(bus: Option<&ConditionBus>, format: &str) -> String 
 
 #[cfg(test)]
 mod tests {
-    use holon_api::Condition;
-    use holon_api::RefusedFile;
+    use holon_conditions::Condition;
+    use holon_conditions::RefusedFile;
 
     use super::*;
 
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn refused_files_lists_every_file_of_the_format_past_the_examples() {
         let bus = ConditionBus::new();
-        let paths: Vec<String> = (0..holon_api::IngestRefusals::EXAMPLES + 2)
+        let paths: Vec<String> = (0..holon_conditions::IngestRefusals::EXAMPLES + 2)
             .map(|i| format!("/vault/r{i}.cook"))
             .collect();
         for path in &paths {

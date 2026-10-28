@@ -25,8 +25,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
-use holon_api::ConditionBus;
-use holon_api::condition_bus::ConditionKind;
+use holon_conditions::ConditionBus;
+use holon_conditions::condition_bus::ConditionKind;
 use holon_core::OriginTaggedWrites;
 use holon_integration_tests::pbt::invariants::bodies::view_model_matches_store::InvViewModelMatchesStore;
 use holon_loro::DocScope;

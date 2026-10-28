@@ -393,9 +393,9 @@ fn generate(spec: &Spec, item: &ItemFn) -> TokenStream {
         let kind = kind.variant();
         let place = place_of(ty);
         quote! {
-            ::holon_api::user_transition::HlArc {
-                kind: ::holon_api::user_transition::ArcKind::#kind,
-                place: ::holon_api::user_transition::PlaceName(#place.to_string()),
+            ::holon_transition_contract::HlArc {
+                kind: ::holon_transition_contract::ArcKind::#kind,
+                place: ::holon_transition_contract::PlaceName(#place.to_string()),
             }
         }
     });
@@ -408,8 +408,8 @@ fn generate(spec: &Spec, item: &ItemFn) -> TokenStream {
             TimerKind::Delay => quote!(Delay),
         };
         quote! {
-            ::holon_api::user_transition::TimerDecl {
-                kind: ::holon_api::user_transition::TimerKind::#kind,
+            ::holon_transition_contract::TimerDecl {
+                kind: ::holon_transition_contract::TimerKind::#kind,
                 after: ::std::time::Duration::from_millis(#after),
             }
         }
@@ -417,7 +417,7 @@ fn generate(spec: &Spec, item: &ItemFn) -> TokenStream {
     let irreversible = spec.attrs.irreversible;
     let preview_symbol = spec.attrs.preview.as_ref().map(|p| {
         let text = p.to_token_stream().to_string().replace(' ', "");
-        quote!(::holon_api::user_transition::NativeRef(
+        quote!(::holon_transition_contract::NativeRef(
             format!("{}::{}", parent, #text)
         ))
     });
@@ -438,7 +438,7 @@ fn generate(spec: &Spec, item: &ItemFn) -> TokenStream {
             };
             let persist = spec.attrs.persist.is_some();
             quote! {
-                Some(::holon_api::user_transition::AskDecl {
+                Some(::holon_transition_contract::AskDecl {
                     input: #input,
                     preview: #preview,
                     persist: #persist,
@@ -477,7 +477,7 @@ fn generate(spec: &Spec, item: &ItemFn) -> TokenStream {
         Arg::Occurrence => quote! {
             let occurrence = match arg(#OCCURRENCE_KEY)? {
                 ::holon_api::Value::String(id) => {
-                    ::holon_api::user_transition::OccurrenceId::caller(id)
+                    ::holon_transition_contract::OccurrenceId::caller(id)
                 }
                 other => {
                     return Err(::holon_net::exec::Cause::definite(format!(
@@ -554,16 +554,16 @@ fn generate(spec: &Spec, item: &ItemFn) -> TokenStream {
         #vis mod #name {
             use super::*;
 
-            pub fn descriptor() -> ::holon_api::user_transition::TransitionDescriptor {
+            pub fn descriptor() -> ::holon_transition_contract::TransitionDescriptor {
                 let parent = module_path!()
                     .rsplit_once("::")
                     .expect("the generated module has a parent")
                     .0;
-                ::holon_api::user_transition::TransitionDescriptor {
-                    name: ::holon_api::user_transition::TransitionName(#name_str.to_string()),
+                ::holon_transition_contract::TransitionDescriptor {
+                    name: ::holon_transition_contract::TransitionName(#name_str.to_string()),
                     arcs: vec![#(#arcs),*],
-                    body: ::holon_api::user_transition::BodyDecl::Native {
-                        symbol: ::holon_api::user_transition::NativeRef(
+                    body: ::holon_transition_contract::BodyDecl::Native {
+                        symbol: ::holon_transition_contract::NativeRef(
                             format!("{}::{}", parent, #name_str),
                         ),
                         effectful: false,

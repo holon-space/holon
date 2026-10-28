@@ -1,0 +1,24 @@
+[package]
+name = "holon-conditions"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+
+# `workspace-hack` is the cargo-hakari feature-unification crate: every
+# member depends on it and no member references it in source, by design.
+[package.metadata.cargo-machete]
+ignored = ["workspace-hack"]
+
+[[bin]]
+name = "panic-unwind-probe"
+path = "src/bin/panic_unwind_probe.rs"
+test = false
+doc = false
+
+[dependencies]
+chrono.workspace = true
+holon-api.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+workspace-hack = { version = "0.1", path = "../../workspace-hack" }

@@ -189,7 +189,7 @@ pub fn after_step(
     if snapshot.user_write {
         state.conditions.raise(
             root.to_string(),
-            holon_api::ConditionKind::EDIT_REFUSED_BY_SHAPE,
+            holon_conditions::ConditionKind::EDIT_REFUSED_BY_SHAPE,
         );
     }
 }

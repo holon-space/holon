@@ -403,7 +403,7 @@ struct AppModel {
     shadow_ctx: RenderContext,
     show_settings: bool,
     /// The Settings section a remedy opened the modal at; drawn first.
-    settings_section: Option<holon_api::SettingsSection>,
+    settings_section: Option<holon_conditions::SettingsSection>,
     show_widget_gallery: bool,
     /// Per-window share/accept UI state (modals, toasts, quarantines).
     share_ui: Entity<share_ui::ShareUiState>,
@@ -1325,11 +1325,11 @@ impl Render for HolonApp {
             let mut sections = vec![
                 (None, content.into_any_element()),
                 (
-                    Some(holon_api::SettingsSection::Integrations),
+                    Some(holon_conditions::SettingsSection::Integrations),
                     integrations_block.into_any_element(),
                 ),
                 (
-                    Some(holon_api::SettingsSection::CrashHistory),
+                    Some(holon_conditions::SettingsSection::CrashHistory),
                     crash_history_block.into_any_element(),
                 ),
             ];
@@ -1949,7 +1949,7 @@ pub fn launch_holon_window_with_engine(
     session: Arc<FrontendSession>,
     engine: Arc<ReactiveEngine>,
     debug: Arc<holon_mcp::server::DebugServices>,
-    degraded_bus: Arc<holon_api::ConditionBus>,
+    degraded_bus: Arc<holon_conditions::ConditionBus>,
     rt_handle: tokio::runtime::Handle,
     cx: &mut App,
 ) -> BoundsRegistry {
@@ -1975,7 +1975,7 @@ pub fn launch_holon_window_with_engine_and_share(
     engine: Arc<ReactiveEngine>,
     debug: Arc<holon_mcp::server::DebugServices>,
     share_backend: Option<Arc<holon_loro::loro_share_backend::LoroShareBackend>>,
-    degraded_bus: Arc<holon_api::ConditionBus>,
+    degraded_bus: Arc<holon_conditions::ConditionBus>,
     rt_handle: tokio::runtime::Handle,
     cx: &mut App,
 ) -> BoundsRegistry {
@@ -2327,7 +2327,7 @@ pub fn launch_holon_window_rebindable(
     nav: NavigationState,
     bounds_registry: BoundsRegistry,
     debug: Option<Arc<holon_mcp::server::DebugServices>>,
-    degraded_bus: Option<Arc<holon_api::ConditionBus>>,
+    degraded_bus: Option<Arc<holon_conditions::ConditionBus>>,
     title: &str,
     cx: &mut App,
 ) -> Option<RebindHandle> {
@@ -2546,7 +2546,7 @@ fn launch_holon_window_impl(
     engine: Arc<ReactiveEngine>,
     debug: Option<Arc<holon_mcp::server::DebugServices>>,
     share_backend: Option<Arc<holon_loro::loro_share_backend::LoroShareBackend>>,
-    degraded_bus: Option<Arc<holon_api::ConditionBus>>,
+    degraded_bus: Option<Arc<holon_conditions::ConditionBus>>,
     rt_handle: tokio::runtime::Handle,
     nav: NavigationState,
     bounds_registry: BoundsRegistry,
@@ -4300,7 +4300,7 @@ mod icon_font_tests {
     /// nothing can render.
     #[test]
     fn condition_icons_render_on_android() {
-        for glyph in holon_api::condition_profile::CONDITION_ICONS {
+        for glyph in holon_conditions::condition_profile::CONDITION_ICONS {
             super::assert_icon_renderable_on_android(glyph, "CONDITION_ICONS");
         }
     }

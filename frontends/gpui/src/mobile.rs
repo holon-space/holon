@@ -180,7 +180,8 @@ fn open_holon_window(
         let engine = injector.resolve::<holon_frontend::reactive::ReactiveEngine>();
         let debug = injector.resolve::<holon_mcp::server::DebugServices>();
 
-        let degraded_bus = (*injector.resolve::<std::sync::Arc<holon_api::ConditionBus>>()).clone();
+        let degraded_bus =
+            (*injector.resolve::<std::sync::Arc<holon_conditions::ConditionBus>>()).clone();
 
         (session, engine, debug, degraded_bus, app)
     });

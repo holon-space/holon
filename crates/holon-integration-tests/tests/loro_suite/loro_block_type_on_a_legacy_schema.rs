@@ -388,7 +388,7 @@ fn every_legacy_row_survives_the_reshape_without_the_loro_store() {
         let reshaped: Vec<String> = env
             .injector()
             .expect("booted injector")
-            .resolve::<Arc<holon_api::ConditionBus>>()
+            .resolve::<Arc<holon_conditions::ConditionBus>>()
             .current()
             .into_iter()
             .filter(|c| c.subject == "block_raw")

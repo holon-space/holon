@@ -105,7 +105,7 @@ impl Module for LoroModule {
         // Register LoroDocumentStore
         injector.provide::<LoroDocumentStore>(Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
-            let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+            let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
             // Before the store can hand out a document: a pair killed between
             // its two renames left the global document in the staging or the
             // archive directory, and opening the store first would create an
@@ -136,7 +136,7 @@ impl Module for LoroModule {
         // are lazy factories, so registration order within `configure` is moot.
         injector.provide::<LoroBlockOperations>(Provider::root(|resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
-            let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+            let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
             let ops = LoroBlockOperations::new(Arc::new(RwLock::new((*doc_store).clone())))
                 .with_condition_bus((*bus).clone());
             #[cfg(all(
@@ -221,7 +221,7 @@ impl Module for LoroModule {
                 // providing the bus fails here rather than silently shipping
                 // an editor that loses keystrokes in silence.
                 let bus = resolver
-                    .resolve_async::<Arc<holon_api::ConditionBus>>()
+                    .resolve_async::<Arc<holon_conditions::ConditionBus>>()
                     .await;
                 registry = registry.with_condition_bus((*bus).clone());
                 Shared::new(registry)
@@ -258,7 +258,7 @@ impl Module for LoroModule {
         injector.provide::<CommitClock>(Provider::root(|_| Shared::new(CommitClock::new())));
         injector.provide::<ViewEngine>(Provider::root(|resolver| {
             let clock = resolver.resolve::<CommitClock>();
-            let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+            let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
             Shared::new(ViewEngine::start(clock, raise_on((*bus).clone())))
         }));
 
@@ -274,7 +274,8 @@ impl Module for LoroModule {
                 let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
                 let read_model =
                     resolver.resolve::<Arc<holon_api::block_read_model::BlockReadModel>>();
-                let degraded = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
+                let degraded =
+                    resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
                 let entity_sink = Arc::new(crate::typed_entity_sink::SqlTypedEntitySink::new(
                     db_handle.clone(),
                     resolver
@@ -510,7 +511,7 @@ impl Module for LoroModule {
             // The projection's disclosure channel: a Loro→SQL reconcile that
             // will not converge leaves the UI reading stale rows, so it becomes
             // a banner rather than a log line.
-            let degraded = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
+            let degraded = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
             let controller = LoroSyncController::new(projection, (*degraded).clone());
 
             // Phase 4: resolve the shared convergent block feed (built once in
@@ -590,7 +591,7 @@ fn register_subtree_share(injector: &Injector) {
         let key = resolver.resolve::<Arc<SecretKey>>();
         // The bus is where a BEARER-ticket admission is disclosed to the user
         // (ADR 0028 R5 stopgap); without it the advertiser can only log.
-        let bus = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
+        let bus = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
         Shared::new(Arc::new(
             IrohAdvertiser::new_with_key((**key).clone()).with_degraded_bus((*bus).clone()),
         ))
@@ -601,7 +602,7 @@ fn register_subtree_share(injector: &Injector) {
     injector.provide::<Arc<holon_loro::shared_snapshot_store::SharedSnapshotStore>>(
         Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
-            let bus = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
+            let bus = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
             Shared::new(Arc::new(
                 holon_loro::shared_snapshot_store::SharedSnapshotStore::new(
                     config.storage_dir.clone(),
@@ -617,7 +618,7 @@ fn register_subtree_share(injector: &Injector) {
             resolver.resolve::<Arc<holon_loro::shared_snapshot_store::SharedSnapshotStore>>();
         let manager = resolver.resolve::<Arc<SharedTreeSyncManager>>();
         let advertiser = resolver.resolve::<Arc<IrohAdvertiser>>();
-        let bus = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
+        let bus = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
         let key = resolver.resolve::<Arc<SecretKey>>();
         let store_arc = Arc::new(RwLock::new((*doc_store).clone()));
 
@@ -706,7 +707,7 @@ fn register_subtree_share(injector: &Injector) {
         move |resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
             let advertiser = resolver.resolve::<Arc<IrohAdvertiser>>();
-            let bus = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
+            let bus = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
             let ordering_injector = ordering_injector.clone();
             let ordering: holon_loro::device_pairing_op::OrderingResolver = Arc::new(move || {
                 let injector = ordering_injector.clone();
@@ -770,8 +771,8 @@ mod tests {
         injector.provide::<LoroConfig>(Provider::root(move |_| {
             Shared::new(LoroConfig::new(dir.path().to_path_buf()))
         }));
-        injector.provide::<Arc<holon_api::ConditionBus>>(Provider::root(|_| {
-            Shared::new(Arc::new(holon_api::ConditionBus::new()))
+        injector.provide::<Arc<holon_conditions::ConditionBus>>(Provider::root(|_| {
+            Shared::new(Arc::new(holon_conditions::ConditionBus::new()))
         }));
         LoroModule.configure(&injector).unwrap();
         injector

@@ -51,7 +51,7 @@ pub fn register_block_query_frontend(injector: &Injector) {
             .try_resolve::<dyn holon::api::OperationEngine>()
             .ok();
         let shutdown = resolver.resolve::<holon_api::lifecycle::SessionShutdown>();
-        let conditions = (*resolver.resolve::<Arc<holon_api::ConditionBus>>()).clone();
+        let conditions = (*resolver.resolve::<Arc<holon_conditions::ConditionBus>>()).clone();
         let type_registry = resolver.resolve::<holon_profiles::TypeRegistry>();
         Shared::new(from_block_query_source(
             block_query,
@@ -87,7 +87,7 @@ pub fn from_block_query_source(
     operation_engine: Option<Arc<dyn holon::api::OperationEngine>>,
     type_registry: Arc<holon_profiles::TypeRegistry>,
     shutdown: &holon_api::lifecycle::SessionShutdown,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 ) -> FrontendSession {
     let ui_watcher = Arc::new(holon_loro_wiring::loro_ui_watcher::LoroUiWatcher::new(
         block_query.clone(),

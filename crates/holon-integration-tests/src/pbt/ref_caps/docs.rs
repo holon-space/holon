@@ -128,8 +128,10 @@ impl RefDocumentsMut for ReferenceState {
             });
         self.files.documents.remove(&doc_uri);
         if self.files.refused.remove(&doc_uri).is_some() {
-            self.conditions
-                .clear(file_name, holon_api::ConditionKind::VAULT_FILE_EMPTIED);
+            self.conditions.clear(
+                file_name,
+                holon_conditions::ConditionKind::VAULT_FILE_EMPTIED,
+            );
         }
 
         // Cascade-delete the page block + all descendants through the same

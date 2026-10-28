@@ -1,6 +1,6 @@
 //! The executor side of the user-facing-transitions contract (#167): the
 //! Rust half of a transition ([`NativeParts`]) and its lowering into a net
-//! ([`lower`]). The shared types live in [`holon_api::user_transition`].
+//! ([`lower`]). The shared types live in [`holon_transition_contract`].
 
 use std::sync::Arc;
 

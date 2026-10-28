@@ -11,7 +11,7 @@ use holon_api::OperationDescriptor;
 use holon_api::OperationParam;
 use holon_api::TypeHint;
 use holon_api::Value;
-use holon_api::condition_profile::OpId;
+use holon_conditions::condition_profile::OpId;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::Result;

@@ -22,12 +22,12 @@
 use std::sync::Arc;
 
 use holon_api::Value;
-use holon_api::user_transition::ANSWER_ID_KEY;
-use holon_api::user_transition::ArcKind;
-use holon_api::user_transition::BodyDecl;
-use holon_api::user_transition::ExpireReason;
-use holon_api::user_transition::TimerKind;
-use holon_api::user_transition::TransitionDescriptor;
+use holon_transition_contract::ANSWER_ID_KEY;
+use holon_transition_contract::ArcKind;
+use holon_transition_contract::BodyDecl;
+use holon_transition_contract::ExpireReason;
+use holon_transition_contract::TimerKind;
+use holon_transition_contract::TransitionDescriptor;
 
 use super::BindFn;
 use super::NativeBody;

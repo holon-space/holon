@@ -209,7 +209,7 @@ mod tests {
         let flux_err = CoreInfraModule {
             db_path: bad_db_path,
             role: holon::di::DatabaseRole::DurableStore,
-            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
+            conditions: std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         }
         .configure(&injector)
         .expect_err("opening a directory as the Turso DB must fail, not succeed");
@@ -233,7 +233,7 @@ mod tests {
         let flux_err = CoreInfraModule {
             db_path: path.clone(),
             role: holon::di::DatabaseRole::DurableStore,
-            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
+            conditions: std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         }
         .configure(&Injector::root())
         .expect_err("a read-only database file must fail the open");

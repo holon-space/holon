@@ -17,8 +17,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use holon_api::Condition;
-use holon_api::ConditionBus;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;

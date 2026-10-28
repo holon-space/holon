@@ -841,8 +841,8 @@ An extension point that wants a deadline instead of a background retry declares
 `settle_by` on its request token.
 
 **NETREV2-contract.a.** A provider satisfies one trait —
-`holon_api::storage_provider::StorageProvider`
-(`crates/holon-api/src/storage_provider.rs`): `open`, `version`, `catch_up`,
+`holon_storage_provider::StorageProvider`
+(`crates/holon-storage-provider/src/lib.rs`): `open`, `version`, `catch_up`,
 `close`, and `Definite` / `Unknown` failures so the executor can tell a counted
 try from a parked occurrence. A provider holds no lock, no retry state and no
 rank: the net holds all three (holder tokens, `tries` on the request token,

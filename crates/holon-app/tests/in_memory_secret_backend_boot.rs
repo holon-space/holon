@@ -23,8 +23,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
@@ -54,7 +54,7 @@ async fn boot(dir: &std::path::Path) -> (Arc<holon_frontend::FrontendSession>, A
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())
@@ -241,7 +241,7 @@ fn a_seed_file_that_names_one_account_twice_refuses_to_boot() {
             SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
             dir.path().to_path_buf(),
             HashSet::new(),
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             |injector| {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 Ok(())
@@ -296,7 +296,7 @@ fn a_seed_without_the_memory_backend_refuses_to_boot() {
             SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
             dir.path().to_path_buf(),
             HashSet::new(),
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             |injector| {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 Ok(())
@@ -342,7 +342,7 @@ fn a_real_config_dir_refuses_to_boot_in_memory() {
             SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
             std::path::PathBuf::from("/Users/someone/.config/holon"),
             HashSet::new(),
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             |injector| {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 Ok(())

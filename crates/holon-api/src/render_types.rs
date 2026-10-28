@@ -628,9 +628,7 @@ pub enum TypeHint {
     /// the type and the input (E4).
     Newtype { type_name: String },
     /// The subject of a token in `place`: a picker over that place (E3).
-    PlaceId {
-        place: crate::user_transition::PlaceName,
-    },
+    PlaceId { place: crate::types::PlaceName },
 }
 
 impl TypeHint {

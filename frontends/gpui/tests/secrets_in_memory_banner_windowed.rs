@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
-use holon_api::ConditionBus;
+use holon_conditions::ConditionBus;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
@@ -143,7 +143,7 @@ fn an_in_memory_secret_session_paints_the_banner_that_admits_it() {
     assert!(
         bus.subscribe().current.iter().any(|c| matches!(
             c.reason,
-            holon_api::ConditionKind::SecretsHeldInMemory { .. }
+            holon_conditions::ConditionKind::SecretsHeldInMemory { .. }
         )),
         "precondition: the boot raised the condition — without it this rung would be asserting \
          that a window paints a banner nobody sent"

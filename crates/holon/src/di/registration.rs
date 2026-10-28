@@ -192,7 +192,7 @@ async fn create_initialized_engine(
     attribution: holon_core::integration_attribution::IntegrationAttribution,
     shutdown: Arc<holon_api::lifecycle::SessionShutdown>,
     block_write_authority: Arc<dyn holon_core::WriteAuthorityReads>,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
     unserved: super::schema_providers::UnservedTypes,
 ) -> Result<BackendEngine> {
     let backend_guard = backend.read().await;
@@ -292,9 +292,9 @@ async fn create_initialized_engine(
     // resolved in the factory below) instead (§6).
     if let Err(e) = start_clock(&mut engine, &db_handle, clock, &shutdown).await {
         tracing::error!("[DI] the clock did not start: {e:#}");
-        conditions.emit(holon_api::Condition {
-            subject: holon_api::condition_bus::CLOCK_SUBJECT.to_string(),
-            reason: holon_api::ConditionKind::ClockNotRunning {
+        conditions.emit(holon_conditions::Condition {
+            subject: holon_conditions::condition_bus::CLOCK_SUBJECT.to_string(),
+            reason: holon_conditions::ConditionKind::ClockNotRunning {
                 error: format!("{e:#}"),
             },
         });
@@ -318,7 +318,7 @@ async fn create_initialized_engine(
 /// NavigationProvider, OperationProvider (nav), OperationModule.
 fn register_shared_services(
     injector: &Injector,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 ) -> Result<()> {
     let type_registry =
         create_default_registry().context("Failed to create default TypeRegistry")?;
@@ -375,8 +375,8 @@ fn register_shared_services(
 /// Degraded-state disclosure bus: the only channel through which a frontend
 /// learns that something degraded, so every container has one. The caller's
 /// core owns it, so it exists before any storage opens.
-fn register_condition_bus(injector: &Injector, conditions: Arc<holon_api::ConditionBus>) {
-    injector.provide::<Arc<holon_api::ConditionBus>>(Provider::root(move |_| {
+fn register_condition_bus(injector: &Injector, conditions: Arc<holon_conditions::ConditionBus>) {
+    injector.provide::<Arc<holon_conditions::ConditionBus>>(Provider::root(move |_| {
         Shared::new(conditions.clone())
     }));
 }
@@ -392,7 +392,7 @@ fn register_condition_bus(injector: &Injector, conditions: Arc<holon_api::Condit
 pub fn register_core_services_no_turso(
     injector: &Injector,
     db_path: PathBuf,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 ) -> Result<()> {
     tracing::debug!(
         "[DI] register_core_services_no_turso (Turso-free) called with db_path: {:?}",
@@ -505,7 +505,7 @@ async fn create_profile_resolver(
     + 'static,
     vault_profile_claims: holon_profiles::VaultProfileClaims,
     vault_profile_file_rows: Vec<holon_api::StorageEntity>,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
     shutdown: &holon_api::lifecycle::SessionShutdown,
 ) -> Result<Arc<ProfileResolver>> {
     // `instantiate_template` is left out (`include_template_picker = false`):
@@ -591,14 +591,14 @@ fn entity_operations(
 
 /// Keep `resolver`'s operations equal to the dispatcher's catalog after
 /// `seen`, the catalog it was built from. A panic raises
-/// [`holon_api::ConditionKind::OperationCatalogStopped`].
+/// [`holon_conditions::ConditionKind::OperationCatalogStopped`].
 fn follow_operation_catalog(
     dispatcher: &OperationDispatcher,
     seen: Arc<Vec<holon_api::OperationDescriptor>>,
     block_synthetic: Vec<holon_api::OperationDescriptor>,
     resolver: std::sync::Weak<ProfileResolver>,
     shutdown: &holon_api::lifecycle::SessionShutdown,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 ) {
     use futures::StreamExt;
     use futures_signals::signal::SignalExt;
@@ -626,9 +626,9 @@ fn follow_operation_catalog(
             }
         },
         move |message| {
-            conditions.emit(holon_api::condition_bus::Condition {
-                subject: holon_api::condition_bus::OPERATION_CATALOG_SUBJECT.to_string(),
-                reason: holon_api::ConditionKind::OperationCatalogStopped(format!(
+            conditions.emit(holon_conditions::condition_bus::Condition {
+                subject: holon_conditions::condition_bus::OPERATION_CATALOG_SUBJECT.to_string(),
+                reason: holon_conditions::ConditionKind::OperationCatalogStopped(format!(
                     "the operation-catalog follower panicked: {message}"
                 )),
             })
@@ -642,7 +642,7 @@ pub fn register_core_services_with_backend(
     db_path: PathBuf,
     backend: Arc<RwLock<TursoBackend>>,
     db_handle: DbHandle,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 ) -> Result<()> {
     tracing::debug!(
         "[DI] register_core_services_with_backend called with db_path: {:?}",
@@ -669,7 +669,7 @@ pub fn register_core_services_with_backend(
     injector.provide::<dyn DbHandleProvider>(Provider::root(move |resolver| {
         tracing::debug!("[DI] Registering pre-created DbHandle");
         db_handle.disclose_stuck_commands_on(
-            (*resolver.resolve::<Arc<holon_api::ConditionBus>>()).clone(),
+            (*resolver.resolve::<Arc<holon_conditions::ConditionBus>>()).clone(),
         );
         Arc::new(DbHandleProviderImpl {
             handle: db_handle.clone(),
@@ -807,7 +807,7 @@ pub fn register_core_services_with_backend(
                         inj.resolve_async::<holon_api::lifecycle::SessionShutdown>()
                             .await,
                         block_write_authority,
-                        (*inj.resolve::<Arc<holon_api::ConditionBus>>()).clone(),
+                        (*inj.resolve::<Arc<holon_conditions::ConditionBus>>()).clone(),
                         (*inj.resolve::<super::schema_providers::UnservedTypes>()).clone(),
                     )
                     .await

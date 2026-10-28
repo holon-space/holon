@@ -210,7 +210,7 @@ pub struct DebugServices {
     /// actually disclosing instead of re-deriving it from storage. Set by the
     /// frontend; unset in a headless run, where the tool SAYS it is unwired
     /// rather than reporting an all-clear it cannot vouch for.
-    pub conditions: std::sync::OnceLock<Arc<holon_api::ConditionBus>>,
+    pub conditions: std::sync::OnceLock<Arc<holon_conditions::ConditionBus>>,
     /// Channel for injecting raw input events into the GPUI window.
     /// Set by the GPUI frontend after window creation.
     /// Uses `futures::channel::mpsc` so the pump awaits messages instead of

@@ -23,9 +23,8 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use holon_api::live_data::LiveData;
 use tokio::sync::broadcast;
-
-use crate::live_data::LiveData;
 
 /// Whether another process still holds a database file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -474,7 +473,7 @@ pub enum ConditionKind {
     ///
     /// All-clear: none — type profiles are built once at boot, so the
     /// condition holds until a restart with a fixed profile.
-    TypeProfileRefused(crate::entity::MalformedTypeProfile),
+    TypeProfileRefused(holon_api::entity::MalformedTypeProfile),
     /// One block id is on disk in two or more org files. `subject` is the
     /// block id; `owner_file` belongs to the page that owns the block and stays
     /// authoritative, `copy_files` hold the other copies. Holon deletes none:
@@ -1240,7 +1239,7 @@ pub struct ConditionBus {
     /// frontend keeping its own mirror of it — which is what let a glyph and a
     /// banner disagree. Nothing in it touches storage, so the bus is the
     /// authority in every configuration.
-    conditions: crate::live_data::AuthoredLiveData<Condition>,
+    conditions: holon_api::live_data::AuthoredLiveData<Condition>,
     /// When each condition in effect was first raised.
     ///
     /// The holder is keyed by subject-then-kind, so ITS order is alphabetical,

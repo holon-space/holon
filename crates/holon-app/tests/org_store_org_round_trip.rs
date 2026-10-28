@@ -956,7 +956,7 @@ async fn a_value_the_file_cannot_hold_raises_the_files_writeback_condition() {
             .insert(page.id.clone(), (page.clone(), restored));
     }
 
-    let bus = Arc::new(holon_api::ConditionBus::new());
+    let bus = Arc::new(holon_conditions::ConditionBus::new());
     let mut sync = holon_orgmode::file_sync_controller::new_org_sync_controller(
         Arc::new(pages.clone()),
         Arc::new(pages.clone()),
@@ -976,7 +976,7 @@ async fn a_value_the_file_cannot_hold_raises_the_files_writeback_condition() {
             .display()
             .to_string();
         bus.current().into_iter().find_map(|c| match c.reason {
-            holon_api::ConditionKind::WritebackLossy { detail } if c.subject == subject => {
+            holon_conditions::ConditionKind::WritebackLossy { detail } if c.subject == subject => {
                 Some(detail)
             }
             _ => None,
@@ -1048,7 +1048,7 @@ async fn a_render_the_parser_would_refuse_leaves_the_page_readable() {
         .unwrap()
         .insert(page.id.clone(), (page.clone(), vec![kid.clone()]));
 
-    let bus = Arc::new(holon_api::ConditionBus::new());
+    let bus = Arc::new(holon_conditions::ConditionBus::new());
     let mut sync = holon_orgmode::file_sync_controller::new_org_sync_controller(
         Arc::new(pages.clone()),
         Arc::new(pages.clone()),
@@ -1101,7 +1101,7 @@ async fn a_render_the_parser_would_refuse_leaves_the_page_readable() {
     let condition = |file: &Path| {
         let subject = holon_core::CanonicalPath::new(file).display().to_string();
         bus.current().into_iter().find_map(|c| match c.reason {
-            holon_api::ConditionKind::WritebackLossy { detail } if c.subject == subject => {
+            holon_conditions::ConditionKind::WritebackLossy { detail } if c.subject == subject => {
                 Some(detail)
             }
             _ => None,

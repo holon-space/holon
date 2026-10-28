@@ -215,7 +215,7 @@ impl TransitionRef<ReferenceState> for ExternalLineEdit {
                 let name = crate::pbt::copies_model::file_name_of(state, &self.doc);
                 state.conditions.raise_with_message(
                     name,
-                    holon_api::ConditionKind::VAULT_FILE_EMPTIED,
+                    holon_conditions::ConditionKind::VAULT_FILE_EMPTIED,
                     holon_filesystem::base_sidecar::BaseSidecars::hash(
                         ExternalFileEdit::emptied_text(*whitespace),
                     ),

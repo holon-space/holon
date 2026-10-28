@@ -1,3 +1,7 @@
+//! @c4 component
+//! @c4 layer Core
+//! @c4 uses holon-api "entity and place names" "Rust"
+//!
 //! The contract of user-facing transitions (#167, increment 1).
 //!
 //! Declarations — the `#[transition]` macro and YAML sidecars — emit one
@@ -7,33 +11,28 @@
 //! [`AnswerCall`] and read the same [`AnswerSettlement`] through
 //! [`UserTransitions`].
 //!
-//! The types live here because every consumer (macro, lowering, executor,
-//! YAML loader, UI, MCP) already depends on `holon-api`, and the frontends do
-//! not depend on `holon-net`.
+//! The types live in their own crate, beside `holon-api`, because every
+//! consumer (macro, lowering, executor, YAML loader, UI, MCP) needs them, and
+//! the frontends do not depend on `holon-net`.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use holon_api::EntityUri;
+use holon_api::Value;
+use holon_api::render_types::OperationDescriptor;
+use holon_api::render_types::TypeHint;
+use holon_api::types::EntityName;
+pub use holon_api::types::PlaceName;
 use serde::Deserialize;
 use serde::Serialize;
-
-use crate::EntityUri;
-use crate::Value;
-use crate::render_types::OperationDescriptor;
-use crate::render_types::TypeHint;
-use crate::types::EntityName;
 
 /// The name of a transition, unique in its net.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TransitionName(pub String);
-
-/// The name of a place, unique in its net.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PlaceName(pub String);
 
 /// The subject a token, an ask or an answer is about (`a.org`, `b.org#4`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

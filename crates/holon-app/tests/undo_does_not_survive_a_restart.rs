@@ -53,7 +53,7 @@ async fn boot(dir: &std::path::Path) -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())
@@ -136,7 +136,9 @@ async fn a_restart_clears_the_journal_and_discloses_it() {
     );
 
     // The disclosure reached the bus.
-    let bus = second.injector.resolve::<Arc<holon_api::ConditionBus>>();
+    let bus = second
+        .injector
+        .resolve::<Arc<holon_conditions::ConditionBus>>();
     // `subscribe` snapshots the conditions currently in effect, so a condition
     // raised during boot is still observable after it.
     let raised: Vec<String> = bus
@@ -148,7 +150,7 @@ async fn a_restart_clears_the_journal_and_discloses_it() {
     assert!(
         raised
             .iter()
-            .any(|k| k == holon_api::ConditionKind::UNDO_HISTORY_CLEARED_AT_BOOT),
+            .any(|k| k == holon_conditions::ConditionKind::UNDO_HISTORY_CLEARED_AT_BOOT),
         "the boot cleared the journal without disclosing it; a silent loss is exactly what the \
          error policy forbids. Conditions raised: {raised:?}"
     );

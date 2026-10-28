@@ -74,7 +74,7 @@ pub struct LoroTextCellBacking {
     lock_label: String,
     /// Where a lost keystroke is disclosed. A caller that passes `None` gets
     /// the `Err` and owes its user the disclosure itself.
-    bus: Option<Arc<holon_api::ConditionBus>>,
+    bus: Option<Arc<holon_conditions::ConditionBus>>,
     /// The block whose text this cell holds, named as the condition's subject.
     subject: String,
     remote_tx: broadcast::Sender<TextDelta>,
@@ -95,7 +95,7 @@ impl LoroTextCellBacking {
     pub fn disclosing(
         doc: Arc<LoroDoc>,
         text: LoroText,
-        bus: Option<Arc<holon_api::ConditionBus>>,
+        bus: Option<Arc<holon_conditions::ConditionBus>>,
         subject: String,
     ) -> Result<Self> {
         let text_id = text.id();
@@ -146,15 +146,15 @@ impl LoroTextCellBacking {
 /// while the editor kept the text — the one failure mode this project ranks
 /// last if it stays silent. Disclose it, then hand the error on.
 fn disclose_refused_write<R>(
-    bus: &Option<Arc<holon_api::ConditionBus>>,
+    bus: &Option<Arc<holon_conditions::ConditionBus>>,
     subject: &str,
     outcome: Result<R>,
 ) -> Result<R> {
     outcome.inspect_err(|e| {
         if let Some(bus) = bus {
-            bus.emit(holon_api::Condition {
+            bus.emit(holon_conditions::Condition {
                 subject: subject.to_string(),
-                reason: holon_api::ConditionKind::LocalEditNotApplied {
+                reason: holon_conditions::ConditionKind::LocalEditNotApplied {
                     detail: e.to_string(),
                 },
             });
@@ -657,7 +657,7 @@ mod tests {
             .ensure_mergeable_text("content_raw")
             .unwrap();
 
-        let bus = Arc::new(holon_api::ConditionBus::new());
+        let bus = Arc::new(holon_conditions::ConditionBus::new());
         let backing = LoroTextCellBacking::disclosing(
             doc,
             text,
@@ -682,7 +682,9 @@ mod tests {
         let raised = bus.current();
         let disclosed: Vec<_> = raised
             .iter()
-            .filter(|c| c.condition_key().kind == holon_api::ConditionKind::LOCAL_EDIT_NOT_APPLIED)
+            .filter(|c| {
+                c.condition_key().kind == holon_conditions::ConditionKind::LOCAL_EDIT_NOT_APPLIED
+            })
             .collect();
         assert_eq!(
             disclosed.len(),

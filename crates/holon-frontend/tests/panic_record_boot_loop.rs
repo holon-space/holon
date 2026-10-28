@@ -7,8 +7,8 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 
 const DIR_ENV: &str = "HOLON_BOOT_LOOP_DIR";
 const DEATH_ENV: &str = "HOLON_BOOT_LOOP_DEATH";

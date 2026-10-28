@@ -377,8 +377,8 @@ worst case is not "LWW per field": create the container with its node
 
 Every abnormal state a user must know about is a **condition**, and there is one
 vocabulary for all of them
-([`holon-api::condition_bus`](../../crates/holon-api/src/condition_bus.rs),
-[`condition_profile`](../../crates/holon-api/src/condition_profile.rs)).
+([`holon-conditions::condition_bus`](../../crates/holon-conditions/src/condition_bus.rs),
+[`condition_profile`](../../crates/holon-conditions/src/condition_profile.rs)).
 
 - **A condition is always local.** It describes this process, now. It is not a
   replica, so it has no base, never syncs, and is never persisted. Nothing
@@ -408,9 +408,9 @@ vocabulary for all of them
   degradation that is still true, which invariant 14 already calls the failure
   mode this project ranks last.
 
-`holon-api` carries this vocabulary and must import neither a storage backend
-nor a frontend toolkit — the `api-storage-backend` and `api-frontend-dep`
-arch-lint rules. That is what keeps conditions usable in a configuration with
+`holon-conditions` carries this vocabulary on top of `holon-api`, and neither
+crate may import a storage backend or a frontend toolkit — the
+`api-storage-backend` and `api-frontend-dep` arch-lint rules. That is what keeps conditions usable in a configuration with
 no Turso.
 
 ## Page identity: name-chains derive only through page ancestors

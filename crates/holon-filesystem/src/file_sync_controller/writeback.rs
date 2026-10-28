@@ -12,8 +12,8 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use holon_api::ConditionKind;
 use holon_api::EntityUri;
+use holon_conditions::ConditionKind;
 use holon_core::CanonicalPath;
 use holon_net::exec::Cause;
 use holon_net::exec::EffectRequest;

@@ -3,6 +3,9 @@ members = [
   "crates/holon",
   "crates/holon-advice",
   "crates/holon-api",
+  "crates/holon-conditions",
+  "crates/holon-transition-contract",
+  "crates/holon-storage-provider",
   "crates/holon-capability",
   "crates/holon-core",
   "crates/holon-turso",
@@ -277,6 +280,9 @@ r3bl_tui = { git = "https://github.com/nightscape/r3bl-open-core.git", branch = 
 holon = { path = "crates/holon" }
 holon-advice = { path = "crates/holon-advice" }
 holon-api = { path = "crates/holon-api" }
+holon-conditions = { path = "crates/holon-conditions" }
+holon-transition-contract = { path = "crates/holon-transition-contract" }
+holon-storage-provider = { path = "crates/holon-storage-provider" }
 holon-capability = { path = "crates/holon-capability" }
 holon-logseq-db = { path = "crates/holon-logseq-db" }
 holon-oracles = { path = "crates/holon-oracles" }

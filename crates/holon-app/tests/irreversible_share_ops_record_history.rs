@@ -42,7 +42,7 @@ async fn boot(dir: &std::path::Path) -> (Arc<BackendEngine>, Arc<FrontendSession
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         move |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             injector

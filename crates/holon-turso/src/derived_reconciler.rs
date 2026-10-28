@@ -33,12 +33,12 @@ use std::hash::Hasher;
 use std::sync::Arc;
 
 use holon_api::Change;
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionKey;
-use holon_api::DerivedFieldSeat;
 use holon_api::computation::Context;
 use holon_api::computation::DerivedField;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKey;
+use holon_conditions::DerivedFieldSeat;
 use holon_core::storage::StorageEntity;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;

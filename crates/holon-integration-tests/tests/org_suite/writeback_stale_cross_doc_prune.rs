@@ -86,10 +86,12 @@ async fn count_rows(env: &TestEnvironment, id: &str) -> usize {
 fn two_files_conditions(env: &TestEnvironment) -> Vec<String> {
     env.injector()
         .expect("test environment must expose its injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
-        .filter(|c| c.reason.condition_kind() == holon_api::ConditionKind::BLOCK_IN_TWO_FILES)
+        .filter(|c| {
+            c.reason.condition_kind() == holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES
+        })
         .map(|c| c.subject)
         .collect()
 }
@@ -198,7 +200,7 @@ fn copies_disclosed(env: &TestEnvironment) -> Vec<(String, String, Vec<String>)>
     two_files_disclosure(
         env.injector()
             .expect("test environment must expose its injector")
-            .resolve::<Arc<holon_api::ConditionBus>>()
+            .resolve::<Arc<holon_conditions::ConditionBus>>()
             .current(),
     )
 }
@@ -212,12 +214,12 @@ fn file_name(path: &str) -> String {
 }
 
 fn two_files_disclosure(
-    conditions: impl IntoIterator<Item = holon_api::Condition>,
+    conditions: impl IntoIterator<Item = holon_conditions::Condition>,
 ) -> Vec<(String, String, Vec<String>)> {
     conditions
         .into_iter()
         .filter_map(|c| match c.reason {
-            holon_api::ConditionKind::BlockInTwoFiles {
+            holon_conditions::ConditionKind::BlockInTwoFiles {
                 owner_file,
                 copy_files,
             } => Some((
@@ -333,7 +335,7 @@ fn a_missing_owner_file_does_not_hand_the_block_away() {
         let bus = env
             .injector()
             .expect("test environment must expose its injector")
-            .resolve::<Arc<holon_api::ConditionBus>>();
+            .resolve::<Arc<holon_conditions::ConditionBus>>();
         let mut changes = bus.subscribe().changes;
 
         env.write_org_file("Overview.org", OVERVIEW_ORG)
@@ -546,16 +548,16 @@ fn copy_conditions(env: &TestEnvironment) -> Vec<(String, &'static str)> {
     let mut out: Vec<(String, &'static str)> = env
         .injector()
         .expect("test environment must expose its injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
         .map(|c| (c.subject, c.reason.condition_kind()))
         .filter(|(_, kind)| {
             [
-                holon_api::ConditionKind::BLOCK_IN_TWO_FILES,
-                holon_api::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
-                holon_api::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE,
-                holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
+                holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES,
+                holon_conditions::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
+                holon_conditions::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE,
+                holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
             ]
             .contains(kind)
         })
@@ -732,7 +734,7 @@ fn a_conflict_ends_with_the_users_next_deletion() {
             copy_conditions(&env),
             vec![(
                 STALE_ID.to_string(),
-                holon_api::ConditionKind::BLOCK_EDITED_IN_TWO_FILES
+                holon_conditions::ConditionKind::BLOCK_EDITED_IN_TWO_FILES
             )],
         );
 
@@ -790,7 +792,7 @@ fn a_block_deleted_in_holon_lives_on_in_its_copy() {
             copy_conditions(&env),
             vec![(
                 STALE_ID.to_string(),
-                holon_api::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE
+                holon_conditions::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE
             )],
         );
 
@@ -1023,7 +1025,7 @@ fn a_child_edited_in_holon_and_dropped_from_the_copy_refuses_the_adoption() {
             copy_conditions(&env),
             vec![(
                 STALE_ID.to_string(),
-                holon_api::ConditionKind::BLOCK_EDITED_IN_TWO_FILES
+                holon_conditions::ConditionKind::BLOCK_EDITED_IN_TWO_FILES
             )],
         );
 
@@ -1052,17 +1054,18 @@ fn a_deletion_undone_because_of_a_copy_is_disclosed() {
         let undone: Vec<(String, String, Vec<String>)> = env
             .injector()
             .expect("injector")
-            .resolve::<Arc<holon_api::ConditionBus>>()
+            .resolve::<Arc<holon_conditions::ConditionBus>>()
             .current()
             .into_iter()
             .filter_map(|c| match c.reason {
-                holon_api::ConditionKind::DeletionUndoneBlockInOtherFile { file, copy_files } => {
-                    Some((
-                        c.subject,
-                        file_name(&file),
-                        copy_files.iter().map(|f| file_name(f)).collect(),
-                    ))
-                }
+                holon_conditions::ConditionKind::DeletionUndoneBlockInOtherFile {
+                    file,
+                    copy_files,
+                } => Some((
+                    c.subject,
+                    file_name(&file),
+                    copy_files.iter().map(|f| file_name(f)).collect(),
+                )),
                 _ => None,
             })
             .collect();
@@ -1099,11 +1102,11 @@ fn ingest_refusals(env: &TestEnvironment) -> Vec<String> {
     let bus = env
         .injector()
         .expect("injector")
-        .resolve::<Arc<holon_api::ConditionBus>>();
+        .resolve::<Arc<holon_conditions::ConditionBus>>();
     bus.current()
         .into_iter()
         .filter_map(|c| match c.reason {
-            holon_api::ConditionKind::VaultIngestFailed(refusals) => {
+            holon_conditions::ConditionKind::VaultIngestFailed(refusals) => {
                 Some(bus.refused_files(refusals.format()))
             }
             _ => None,
@@ -1174,7 +1177,7 @@ fn a_journal_day_page_whose_heading_is_copied_into_journals_is_still_ingested() 
             copy_conditions(&env),
             vec![(
                 STALE_ID.to_string(),
-                holon_api::ConditionKind::BLOCK_IN_TWO_FILES
+                holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES
             )],
         );
 
@@ -1207,11 +1210,11 @@ fn deleting_the_child_from_the_copy_too_lets_its_deletion_stand() {
             vec![
                 (
                     STALE_ID.to_string(),
-                    holon_api::ConditionKind::BLOCK_IN_TWO_FILES
+                    holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES
                 ),
                 (
                     KID.to_string(),
-                    holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+                    holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
                 ),
             ],
             "premise: the deletion is undone and disclosed"
@@ -1222,7 +1225,7 @@ fn deleting_the_child_from_the_copy_too_lets_its_deletion_stand() {
             copy_conditions(&env),
             vec![(
                 STALE_ID.to_string(),
-                holon_api::ConditionKind::BLOCK_IN_TWO_FILES
+                holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES
             )],
             "the undone deletion is still disclosed after the copy lost the child"
         );
@@ -1279,9 +1282,8 @@ const OVERVIEW_NO_COPY: &str = "#+TITLE: Overview\n#+ID: overview\n";
 async fn assert_the_deletion_stands(env: &TestEnvironment) {
     assert_eq!(count_rows(env, KID).await, 0, "the deletion does not stand");
     assert!(
-        !copy_conditions(env)
-            .iter()
-            .any(|(_, kind)| *kind == holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE),
+        !copy_conditions(env).iter().any(|(_, kind)| *kind
+            == holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE),
         "the undone-deletion warning is still raised: {:?}",
         copy_conditions(env)
     );
@@ -1305,7 +1307,7 @@ async fn undone_with_two_copies(rt: Arc<tokio::runtime::Runtime>) -> TestEnviron
     assert!(
         copy_conditions(&env).contains(&(
             KID.to_string(),
-            holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+            holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
         )),
         "premise: the undone deletion is disclosed"
     );
@@ -1369,11 +1371,11 @@ fn an_undone_deletion_stands_when_the_last_copy_is_deleted() {
             vec![
                 (
                     STALE_ID.to_string(),
-                    holon_api::ConditionKind::BLOCK_IN_TWO_FILES
+                    holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES
                 ),
                 (
                     KID.to_string(),
-                    holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+                    holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
                 ),
             ],
         );
@@ -1402,7 +1404,7 @@ fn a_child_no_copy_holds_is_deleted_at_once() {
             copy_conditions(&env),
             vec![(
                 STALE_ID.to_string(),
-                holon_api::ConditionKind::BLOCK_IN_TWO_FILES
+                holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES
             )],
         );
         env.stop_app().await.expect("stop_app");
@@ -1461,7 +1463,7 @@ async fn undone_then_closed(rt: Arc<tokio::runtime::Runtime>) -> TestEnvironment
     assert!(
         copy_conditions(&env).contains(&(
             KID.to_string(),
-            holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+            holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
         )),
         "premise: the undone deletion is disclosed"
     );
@@ -1503,7 +1505,7 @@ fn an_undone_deletion_stands_when_the_copy_lets_go_while_closed() {
             copy_conditions(&env),
             vec![(
                 STALE_ID.to_string(),
-                holon_api::ConditionKind::BLOCK_IN_TWO_FILES
+                holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES
             )],
         );
         env.stop_app().await.expect("stop_app");
@@ -1523,7 +1525,7 @@ fn an_undone_deletion_survives_a_restart() {
         assert!(
             copy_conditions(&env).contains(&(
                 KID.to_string(),
-                holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+                holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
             )),
             "the restart forgot the undone deletion: {:?}",
             copy_conditions(&env)
@@ -1537,7 +1539,7 @@ fn an_undone_deletion_survives_a_restart() {
 fn condition_subjects(env: &TestEnvironment, kind: &str) -> Vec<String> {
     env.injector()
         .expect("injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
         .filter(|c| c.reason.condition_kind() == kind)
@@ -1558,7 +1560,10 @@ fn an_unreadable_undone_deletions_record(bytes: &'static str) {
         wait_for_row(&env, "block:day-keeps").await;
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        let unreadable = condition_subjects(&env, holon_api::ConditionKind::VAULT_STATE_UNREADABLE);
+        let unreadable = condition_subjects(
+            &env,
+            holon_conditions::ConditionKind::VAULT_STATE_UNREADABLE,
+        );
         assert_eq!(
             unreadable.len(),
             1,
@@ -1572,7 +1577,11 @@ fn an_unreadable_undone_deletions_record(bytes: &'static str) {
             "the unreadable record is still in place"
         );
         assert!(
-            condition_subjects(&env, holon_api::ConditionKind::VAULT_SYNC_NOT_STARTED).is_empty(),
+            condition_subjects(
+                &env,
+                holon_conditions::ConditionKind::VAULT_SYNC_NOT_STARTED
+            )
+            .is_empty(),
             "an unreadable record must not stop the sync"
         );
         assert_eq!(count_rows(&env, KID).await, 1, "the put-back child is gone");
@@ -1633,8 +1642,10 @@ fn a_file_sync_controller_that_cannot_start_is_disclosed() {
         .expect("write a sync-conflict artifact");
         env.start_app(true).await.expect("start_app");
         tokio::time::sleep(Duration::from_millis(1500)).await;
-        let not_started =
-            condition_subjects(&env, holon_api::ConditionKind::VAULT_SYNC_NOT_STARTED);
+        let not_started = condition_subjects(
+            &env,
+            holon_conditions::ConditionKind::VAULT_SYNC_NOT_STARTED,
+        );
         assert_eq!(
             not_started.len(),
             1,
@@ -1676,7 +1687,7 @@ fn an_undone_deletion_survives_a_crash_at(crash_point: &'static str, put_back_be
         assert!(
             copy_conditions(&env).contains(&(
                 KID.to_string(),
-                holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+                holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
             )),
             "the crash lost the undone deletion: {:?}",
             copy_conditions(&env)
@@ -1714,8 +1725,10 @@ fn a_vault_that_cannot_be_watched_is_disclosed() {
         holon_filesystem::crash_injection::arm("arm_watcher");
         env.start_app(true).await.expect("start_app");
         tokio::time::sleep(Duration::from_millis(1500)).await;
-        let not_started =
-            condition_subjects(&env, holon_api::ConditionKind::VAULT_SYNC_NOT_STARTED);
+        let not_started = condition_subjects(
+            &env,
+            holon_conditions::ConditionKind::VAULT_SYNC_NOT_STARTED,
+        );
         assert_eq!(
             not_started.len(),
             1,
@@ -1774,7 +1787,7 @@ fn a_standing_deletion_survives_a_crash_at(ending: Ending, crash_point: &'static
         assert!(
             copy_conditions(&env).contains(&(
                 KID.to_string(),
-                holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+                holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
             )),
             "premise: the undone deletion is disclosed"
         );
@@ -1900,13 +1913,14 @@ fn an_undone_deletion_stays_while_its_copy_file_cannot_be_read() {
         let undone: Vec<_> = env
             .injector()
             .expect("injector")
-            .resolve::<Arc<holon_api::ConditionBus>>()
+            .resolve::<Arc<holon_conditions::ConditionBus>>()
             .current()
             .into_iter()
             .filter_map(|c| match c.reason {
-                holon_api::ConditionKind::DeletionUndoneBlockInOtherFile { copy_files, .. } => {
-                    Some((c.subject, copy_files))
-                }
+                holon_conditions::ConditionKind::DeletionUndoneBlockInOtherFile {
+                    copy_files,
+                    ..
+                } => Some((c.subject, copy_files)),
                 _ => None,
             })
             .collect();
@@ -1958,7 +1972,10 @@ fn an_undone_deletion_record_outside_the_vault_is_refused_alone() {
         wait_for_row(&env, "block:day-keeps").await;
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        let unreadable = condition_subjects(&env, holon_api::ConditionKind::VAULT_STATE_UNREADABLE);
+        let unreadable = condition_subjects(
+            &env,
+            holon_conditions::ConditionKind::VAULT_STATE_UNREADABLE,
+        );
         assert_eq!(
             unreadable.len(),
             1,
@@ -1967,7 +1984,7 @@ fn an_undone_deletion_record_outside_the_vault_is_refused_alone() {
         assert!(
             copy_conditions(&env).contains(&(
                 KID.to_string(),
-                holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+                holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
             )),
             "the valid record was dropped with the refused one: {:?}",
             copy_conditions(&env)
@@ -2008,7 +2025,10 @@ fn a_failed_start_step_of_the_vault_is_disclosed() {
             None,
             "premise: the boot never settled the undone deletions"
         );
-        let incomplete = condition_subjects(&env, holon_api::ConditionKind::VAULT_START_INCOMPLETE);
+        let incomplete = condition_subjects(
+            &env,
+            holon_conditions::ConditionKind::VAULT_START_INCOMPLETE,
+        );
         assert_eq!(
             incomplete.len(),
             1,
@@ -2048,14 +2068,13 @@ async fn assert_the_deletion_ended_by_edit(env: &TestEnvironment, text: &str) {
         read_file(env, "DayPage.org").await
     );
     assert_eq!(
-        condition_subjects(env, holon_api::ConditionKind::DELETION_ENDED_BY_EDIT),
+        condition_subjects(env, holon_conditions::ConditionKind::DELETION_ENDED_BY_EDIT),
         vec![KID.to_string()],
         "the end of the deletion is not disclosed"
     );
     assert!(
-        !copy_conditions(env)
-            .iter()
-            .any(|(_, kind)| *kind == holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE),
+        !copy_conditions(env).iter().any(|(_, kind)| *kind
+            == holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE),
         "the undone-deletion warning is still raised: {:?}",
         copy_conditions(env)
     );
@@ -2154,11 +2173,11 @@ fn a_vault_walk_that_fails_at_boot_is_disclosed() {
         let incomplete: Vec<String> = env
             .injector()
             .expect("injector")
-            .resolve::<Arc<holon_api::ConditionBus>>()
+            .resolve::<Arc<holon_conditions::ConditionBus>>()
             .current()
             .into_iter()
             .filter_map(|c| match c.reason {
-                holon_api::ConditionKind::VaultStartIncomplete { step, .. } => Some(step),
+                holon_conditions::ConditionKind::VaultStartIncomplete { step, .. } => Some(step),
                 _ => None,
             })
             .collect();
@@ -2211,7 +2230,7 @@ async fn put_back_kid(env: &TestEnvironment) {
     assert!(
         copy_conditions(env).contains(&(
             KID.to_string(),
-            holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+            holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
         )),
         "premise: the undone deletion is disclosed: {:?}",
         copy_conditions(env)
@@ -2233,7 +2252,7 @@ async fn assert_kid_and_grandchild_kept(env: &TestEnvironment) {
         "DayPage.org lost the child or the grandchild:\n{day_page}"
     );
     assert_eq!(
-        condition_subjects(env, holon_api::ConditionKind::DELETION_ENDED_BY_EDIT),
+        condition_subjects(env, holon_conditions::ConditionKind::DELETION_ENDED_BY_EDIT),
         vec![KID.to_string()],
         "the end of the deletion is not disclosed"
     );
@@ -2306,7 +2325,10 @@ fn a_put_back_child_moved_in_holon_to_another_page_stays_when_the_copy_lets_go()
             "Notes.org lost the child:\n{notes}"
         );
         assert_eq!(
-            condition_subjects(&env, holon_api::ConditionKind::DELETION_ENDED_BY_EDIT),
+            condition_subjects(
+                &env,
+                holon_conditions::ConditionKind::DELETION_ENDED_BY_EDIT
+            ),
             vec![KID.to_string()],
             "the end of the deletion is not disclosed"
         );
@@ -2332,14 +2354,17 @@ fn a_put_back_child_whose_grandchild_no_copy_holds_still_lets_its_deletion_stand
             "premise: the grandchild no copy holds is deleted"
         );
         assert_eq!(
-            condition_subjects(&env, holon_api::ConditionKind::DELETION_ENDED_BY_EDIT),
+            condition_subjects(
+                &env,
+                holon_conditions::ConditionKind::DELETION_ENDED_BY_EDIT
+            ),
             Vec::<String>::new(),
             "the put-back child is said to be edited, though nobody edited it"
         );
         assert!(
             copy_conditions(&env).contains(&(
                 KID.to_string(),
-                holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+                holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
             )),
             "the undone deletion is not disclosed: {:?}",
             copy_conditions(&env)
@@ -2383,7 +2408,7 @@ fn an_edit_of_a_put_back_grandchild_ends_the_put_back_child_too() {
             copy_conditions(&env)
                 .into_iter()
                 .filter(|(_, kind)| *kind
-                    == holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE)
+                    == holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE)
                 .map(|(subject, _)| subject)
                 .collect::<Vec<_>>(),
             vec![KID.to_string(), GRANDCHILD.to_string()],
@@ -2394,7 +2419,10 @@ fn an_edit_of_a_put_back_grandchild_ends_the_put_back_child_too() {
             .expect("edit the put-back grandchild in Holon");
         eventually_on_disk(&env, "DayPage.org", "grandchild edited in Holon").await;
         tokio::time::sleep(Duration::from_millis(800)).await;
-        let mut ended = condition_subjects(&env, holon_api::ConditionKind::DELETION_ENDED_BY_EDIT);
+        let mut ended = condition_subjects(
+            &env,
+            holon_conditions::ConditionKind::DELETION_ENDED_BY_EDIT,
+        );
         ended.sort();
         assert_eq!(
             ended,
@@ -2402,10 +2430,8 @@ fn an_edit_of_a_put_back_grandchild_ends_the_put_back_child_too() {
             "the child's deletion still stands over the grandchild that stays"
         );
         assert!(
-            !copy_conditions(&env)
-                .iter()
-                .any(|(_, kind)| *kind
-                    == holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE),
+            !copy_conditions(&env).iter().any(|(_, kind)| *kind
+                == holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE),
             "an undone-deletion warning is still raised: {:?}",
             copy_conditions(&env)
         );
@@ -2493,7 +2519,7 @@ fn a_restore_inside_the_crash_window_between_write_and_stamp_keeps_the_stores_ed
 fn conditions_on_file(env: &TestEnvironment, name: &str) -> Vec<(&'static str, String)> {
     env.injector()
         .expect("test environment must expose its injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
         .filter(|c| c.subject.ends_with(&format!("/{name}")))
@@ -2536,7 +2562,8 @@ fn a_write_back_the_file_table_cannot_record_is_not_written_and_says_why() {
         let conditions = conditions_on_file(&env, "Notes.org");
         assert!(
             conditions.iter().any(|(kind, reason)| {
-                *kind == holon_api::ConditionKind::WRITEBACK_DEGRADED && reason.contains("file row")
+                *kind == holon_conditions::ConditionKind::WRITEBACK_DEGRADED
+                    && reason.contains("file row")
             }),
             "the unwritten edit is not disclosed with its cause: {conditions:?}"
         );
@@ -2651,10 +2678,12 @@ fn the_hash_of_a_write_back_is_recorded_when_the_sync_is_idle() {
 fn unrecorded_writes(env: &TestEnvironment) -> Vec<String> {
     env.injector()
         .expect("injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
-        .filter(|c| c.reason.condition_kind() == holon_api::ConditionKind::WRITTEN_FILES_UNRECORDED)
+        .filter(|c| {
+            c.reason.condition_kind() == holon_conditions::ConditionKind::WRITTEN_FILES_UNRECORDED
+        })
         .map(|c| format!("{} {:?}", c.subject, c.reason))
         .collect()
 }

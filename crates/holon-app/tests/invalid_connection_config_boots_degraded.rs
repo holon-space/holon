@@ -22,8 +22,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
@@ -63,7 +63,7 @@ fn enable(dir: &Path, provider: &str) {
 /// effect once the session is up. Reaching this function's return value at all
 /// is half the assertion: the panic this file was written against never got
 /// here.
-async fn boot_and_read_degraded(dir: &Path) -> Vec<holon_api::Condition> {
+async fn boot_and_read_degraded(dir: &Path) -> Vec<holon_conditions::Condition> {
     let holon_config = HolonConfig {
         db_path: Some(dir.join("degraded.db")),
         vault: VaultConfig {
@@ -76,7 +76,7 @@ async fn boot_and_read_degraded(dir: &Path) -> Vec<holon_api::Condition> {
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())

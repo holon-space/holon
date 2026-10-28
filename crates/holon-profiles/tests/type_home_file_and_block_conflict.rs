@@ -13,8 +13,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_profiles::EntityProfile;
 use holon_profiles::TypeRegistry;
 use holon_profiles::VAULT_PROFILE_HOME;

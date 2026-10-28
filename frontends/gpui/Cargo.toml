@@ -113,6 +113,8 @@ holon-frontend = { workspace = true, features = ["otel"] }
 holon-secrets.workspace = true
 holon-app.workspace = true
 holon-api.workspace = true
+holon-transition-contract.workspace = true
+holon-conditions.workspace = true
 holon-core.workspace = true
 chrono.workspace = true
 holon-filesystem.workspace = true

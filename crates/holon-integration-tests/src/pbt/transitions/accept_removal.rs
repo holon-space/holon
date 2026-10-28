@@ -79,16 +79,16 @@ impl TransitionRef<ReferenceState> for AcceptRemoval {
         let name = crate::pbt::copies_model::file_name_of(state, &self.doc);
         state
             .conditions
-            .clear(&name, holon_api::ConditionKind::VAULT_FILE_EMPTIED);
+            .clear(&name, holon_conditions::ConditionKind::VAULT_FILE_EMPTIED);
         if at_refusal != state.doc_rows(&self.doc) {
             state
                 .conditions
-                .raise(name, holon_api::ConditionKind::REMOVAL_NOT_ACCEPTED);
+                .raise(name, holon_conditions::ConditionKind::REMOVAL_NOT_ACCEPTED);
             return;
         }
         state
             .conditions
-            .clear(&name, holon_api::ConditionKind::REMOVAL_NOT_ACCEPTED);
+            .clear(&name, holon_conditions::ConditionKind::REMOVAL_NOT_ACCEPTED);
         let children: Vec<EntityUri> = state
             .domain
             .block_state

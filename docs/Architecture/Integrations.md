@@ -435,7 +435,7 @@ transitions:
 ```
 
 - `timers:` still takes `kind: retry` (`TimerKind::Retry`,
-  `crates/holon-api/src/user_transition.rs`). Net revision 2 retires it: a
+  `crates/holon-transition-contract/src/lib.rs`). Net revision 2 retires it: a
   retry is `tries` on the token and a guard that bounds them (ADR 0032 §9.1),
   so the kinds a new sidecar declares are `run`, `abandon` and `delay`.
 - Places (`take`, `read`, `inhibit`, `input: { place: … }`) are keys of this

@@ -69,6 +69,7 @@ futures = { version = "0.3", default-features = false, features = ["alloc"] }
 # `default-features = false` disables `iroh-sync` which depends on QUIC and
 # is native-only.
 holon-api = { path = "../../crates/holon-api" }
+holon-conditions = { path = "../../crates/holon-conditions" }
 holon-core = { path = "../../crates/holon-core" }
 holon = { path = "../../crates/holon", default-features = false }
 # EventInfraModule, registered during engine_init (see lib.rs). Same

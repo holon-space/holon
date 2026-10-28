@@ -39,6 +39,8 @@ tracing.workspace = true
 holon-core.workspace = true
 holon-macros.workspace = true
 holon-api.workspace = true
+holon-transition-contract.workspace = true
+holon-conditions.workspace = true
 # default-features = false drops holon-advice's `engine` feature (→ holon-turso →
 # turso, native-only) so this shared renderer stays wasm-clean for the
 # dioxus-web page. holon-frontend only uses the pure rule surface

@@ -36,7 +36,6 @@ use std::time::Instant;
 use holon_api::ArcPlace;
 use holon_api::ArcRelation;
 use holon_api::EntityUri;
-use holon_api::user_transition::Offer;
 use holon_integration_tests::TestEnvironment;
 use holon_integration_tests::TestEnvironmentBuilder;
 use holon_net::enabledness::evaluate;
@@ -51,6 +50,7 @@ use holon_net::exec::Subject;
 use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
 use holon_net::marking::Marking;
+use holon_transition_contract::Offer;
 
 /// Headline ladder, copied from `vault_scale_interaction_latency.rs` so the
 /// two harnesses stress the same vault shape.

@@ -43,7 +43,7 @@ pub struct AnswerSettledParams {
 
 /// One `asks_list` row: the ask plus the exact `execute_operation` call that
 /// answers it (add `value` when `input` is set).
-fn ask_json(ask: &holon_api::user_transition::AskRow) -> serde_json::Value {
+fn ask_json(ask: &holon_transition_contract::AskRow) -> serde_json::Value {
     use holon_frontend::answer as a;
     serde_json::json!({
         "transition": ask.transition.0,
@@ -67,8 +67,8 @@ fn ask_json(ask: &holon_api::user_transition::AskRow) -> serde_json::Value {
 /// Maps an agent's refused answer to an MCP error. `NeedsApproval` has its own
 /// typed code, so an agent can tell "ask a person" from "fix the call".
 fn agent_answer_error(e: holon_frontend::answer::AgentAnswerError) -> rmcp::ErrorData {
-    use holon_api::user_transition::UftError;
     use holon_frontend::answer::AgentAnswerError;
+    use holon_transition_contract::UftError;
     match e {
         AgentAnswerError::Ask(UftError::NeedsApproval {
             transition,
@@ -124,7 +124,7 @@ pub async fn answer_settled_text(
 ) -> String {
     use holon_frontend::answer::AnswerOutcome;
     use holon_frontend::answer::Progress;
-    let id = holon_api::user_transition::AnswerId(params.answer_id);
+    let id = holon_transition_contract::AnswerId(params.answer_id);
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_millis(params.timeout_ms);
     let outcome = loop {
@@ -7390,7 +7390,7 @@ pub(crate) mod engine_harness {
         holon::di::create_backend_engine_with_extras(
             ":memory:".into(),
             holon::di::DatabaseRole::DurableStore,
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             |injector| {
                 holon_loro_wiring::EventInfraModule
                     .configure(injector)
@@ -7534,7 +7534,7 @@ pub(crate) mod engine_harness {
         holon::di::create_backend_engine_with_extras(
             ":memory:".into(),
             holon::di::DatabaseRole::DurableStore,
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             move |injector| {
                 injector.provide::<holon_loro_wiring::LoroConfig>(Provider::root(move |_| {
                     fluxdi::Shared::new(
@@ -10011,7 +10011,7 @@ mod shape_sim_cell_branch_tests {
         holon::di::create_backend_engine_with_extras(
             ":memory:".into(),
             holon::di::DatabaseRole::DurableStore,
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             |injector| {
                 holon_loro_wiring::EventInfraModule
                     .configure(injector)

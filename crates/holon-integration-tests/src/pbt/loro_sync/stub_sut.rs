@@ -101,12 +101,12 @@ impl StubSut {
             sink_reader,
             &self.storage_dir,
             holon_api::block_read_model::BlockReadModel::new(),
-            Arc::new(holon_api::ConditionBus::new()),
+            Arc::new(holon_conditions::ConditionBus::new()),
             clock,
             engine,
         )?);
         let controller =
-            LoroSyncController::new(projection, Arc::new(holon_api::ConditionBus::new()));
+            LoroSyncController::new(projection, Arc::new(holon_conditions::ConditionBus::new()));
         // The stub exercises the EventBus inbound/outbound path with in-memory
         // stores and no MatviewManager, so the Phase 4 block mirror is fed an
         // empty, unsubscribed `LiveData<Block>` (no source) — a no-op mirror.

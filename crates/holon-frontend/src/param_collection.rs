@@ -22,9 +22,9 @@ use holon_api::Value;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationParam;
 use holon_api::render_types::TypeHint;
-use holon_api::user_transition::InputContext;
-use holon_api::user_transition::InputParseError;
-use holon_api::user_transition::parse_input;
+use holon_transition_contract::InputContext;
+use holon_transition_contract::InputParseError;
+use holon_transition_contract::parse_input;
 
 use crate::operations::OperationIntent;
 

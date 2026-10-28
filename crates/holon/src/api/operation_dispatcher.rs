@@ -104,7 +104,7 @@ pub struct OperationDispatcher {
 struct ShapeGate {
     validators: Arc<holon_core::ShapeValidators>,
     authority: Arc<dyn holon_core::WriteAuthorityReads>,
-    bus: Arc<holon_api::ConditionBus>,
+    bus: Arc<holon_conditions::ConditionBus>,
 }
 
 /// One op of an admitted plan that has not been dispatched yet: its name and
@@ -143,9 +143,9 @@ fn disclose_shape(
     origin: &OpOrigin,
 ) {
     if origin.is_user() {
-        gate.bus.emit(holon_api::Condition {
+        gate.bus.emit(holon_conditions::Condition {
             subject: broken.root.to_string(),
-            reason: holon_api::ConditionKind::EditRefusedByShape {
+            reason: holon_conditions::ConditionKind::EditRefusedByShape {
                 tag: broken.tag.clone(),
                 rule: broken.rule.clone(),
             },
@@ -256,7 +256,7 @@ impl OperationDispatcher {
     pub fn set_view_rebuild(
         &mut self,
         manager: Arc<crate::sync::MatviewManager>,
-        bus: Arc<holon_api::ConditionBus>,
+        bus: Arc<holon_conditions::ConditionBus>,
     ) {
         self.view_rebuild = Some(ViewRebuild {
             manager,
@@ -304,7 +304,7 @@ impl OperationDispatcher {
         &mut self,
         validators: Arc<holon_core::ShapeValidators>,
         authority: Arc<dyn holon_core::WriteAuthorityReads>,
-        bus: Arc<holon_api::ConditionBus>,
+        bus: Arc<holon_conditions::ConditionBus>,
     ) {
         self.shape_gate = Some(ShapeGate {
             validators,
@@ -2625,7 +2625,7 @@ impl OperationProvider for OperationDispatcher {
 
 struct ViewRebuild {
     manager: Arc<crate::sync::MatviewManager>,
-    bus: Arc<holon_api::ConditionBus>,
+    bus: Arc<holon_conditions::ConditionBus>,
     running: std::sync::atomic::AtomicBool,
 }
 
@@ -2640,10 +2640,10 @@ impl ViewRebuild {
         Ok(RebuildRunning(self))
     }
 
-    fn condition() -> holon_api::Condition {
-        holon_api::Condition {
-            subject: holon_api::condition_bus::WATCH_VIEWS_SUBJECT.to_string(),
-            reason: holon_api::ConditionKind::WatchViewsRebuilding,
+    fn condition() -> holon_conditions::Condition {
+        holon_conditions::Condition {
+            subject: holon_conditions::condition_bus::WATCH_VIEWS_SUBJECT.to_string(),
+            reason: holon_conditions::ConditionKind::WatchViewsRebuilding,
         }
     }
 }
@@ -2702,7 +2702,7 @@ impl Module for OperationModule {
             if let Some(store) = sync_token_store {
                 dispatcher.set_sync_token_store(store);
             }
-            let bus = r.resolve_async::<Arc<holon_api::ConditionBus>>().await;
+            let bus = r.resolve_async::<Arc<holon_conditions::ConditionBus>>().await;
             dispatcher.set_view_rebuild(matview_mgr, (*bus).clone());
             dispatcher.set_guard_world(Arc::new(crate::api::guard_world::SqlGuardWorld::new(
                 db_handle_provider.handle(),
@@ -2956,7 +2956,7 @@ mod tests {
         dispatcher.set_shape_gate(
             Arc::new(validators),
             Arc::new(Unread),
-            Arc::new(holon_api::ConditionBus::new()),
+            Arc::new(holon_conditions::ConditionBus::new()),
         );
         dispatcher
     }
@@ -3421,7 +3421,7 @@ mod tests {
             .expect("subscribe broken");
         db.execute_ddl("DROP TABLE gone").await.expect("drop gone");
         let mut dispatcher = OperationDispatcher::new(vec![]);
-        let bus = Arc::new(holon_api::ConditionBus::new());
+        let bus = Arc::new(holon_conditions::ConditionBus::new());
         dispatcher.set_view_rebuild(manager.clone(), bus.clone());
         assert!(
             dispatcher
@@ -3479,12 +3479,12 @@ mod tests {
             .await
             .expect("subscribe");
         let mut dispatcher = OperationDispatcher::new(vec![]);
-        let bus = Arc::new(holon_api::ConditionBus::new());
+        let bus = Arc::new(holon_conditions::ConditionBus::new());
         dispatcher.set_view_rebuild(manager, bus.clone());
         let rebuilding = || {
-            bus.current()
-                .iter()
-                .any(|c| c.condition_key().kind == holon_api::ConditionKind::WATCH_VIEWS_REBUILDING)
+            bus.current().iter().any(|c| {
+                c.condition_key().kind == holon_conditions::ConditionKind::WATCH_VIEWS_REBUILDING
+            })
         };
         let wildcard = EntityName::new("*");
         let rebuild =
@@ -3575,7 +3575,10 @@ mod tests {
             synced: std::sync::atomic::AtomicBool::new(false),
         });
         let mut dispatcher = OperationDispatcher::new(vec![provider.clone()]);
-        dispatcher.set_view_rebuild(manager.clone(), Arc::new(holon_api::ConditionBus::new()));
+        dispatcher.set_view_rebuild(
+            manager.clone(),
+            Arc::new(holon_conditions::ConditionBus::new()),
+        );
         let unlistened = manager
             .ensure_view("SELECT id FROM items")
             .await
@@ -3872,7 +3875,7 @@ mod tests {
                         db,
                         Arc::new(tokio::sync::Mutex::new(())),
                     )),
-                    Arc::new(holon_api::ConditionBus::new()),
+                    Arc::new(holon_conditions::ConditionBus::new()),
                 );
             }
             let composition = format!("syncable={syncable}, rebuild wired={rebuild_wired}");

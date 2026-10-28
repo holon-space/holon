@@ -1249,18 +1249,18 @@ pub struct ProfileResolver {
     computed_disclosure: ComputedFieldDisclosure,
 }
 
-/// Raises [`holon_api::ConditionKind::DerivedFieldNotComputed`] for a computed
-/// field whose evaluation failed on a row, and clears it on the next success
-/// for that row and field.
+/// Raises [`holon_conditions::ConditionKind::DerivedFieldNotComputed`] for a
+/// computed field whose evaluation failed on a row, and clears it on the next
+/// success for that row and field.
 struct ComputedFieldDisclosure {
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
     /// `(block id, field)` of every condition raised here, so a success clears
     /// only what is in effect instead of taking the bus lock per field per row.
     raised: std::sync::Mutex<HashSet<(String, String)>>,
 }
 
 impl ComputedFieldDisclosure {
-    fn new(conditions: Arc<holon_api::ConditionBus>) -> Self {
+    fn new(conditions: Arc<holon_conditions::ConditionBus>) -> Self {
         Self {
             conditions,
             raised: std::sync::Mutex::new(HashSet::new()),
@@ -1275,8 +1275,8 @@ impl ComputedFieldDisclosure {
                 Err(reason) => {
                     raised.insert(key);
                     self.conditions
-                        .emit(holon_api::Condition::derived_field_not_computed(
-                            holon_api::DerivedFieldSeat::Resolver,
+                        .emit(holon_conditions::Condition::derived_field_not_computed(
+                            holon_conditions::DerivedFieldSeat::Resolver,
                             block_id,
                             field,
                             reason.clone(),
@@ -1285,8 +1285,8 @@ impl ComputedFieldDisclosure {
                 Ok(()) => {
                     if raised.remove(&key) {
                         self.conditions.clear(
-                            &holon_api::ConditionKey::derived_field_not_computed(
-                                holon_api::DerivedFieldSeat::Resolver,
+                            &holon_conditions::ConditionKey::derived_field_not_computed(
+                                holon_conditions::DerivedFieldSeat::Resolver,
                                 block_id,
                                 field,
                             ),
@@ -1310,7 +1310,7 @@ impl ProfileResolver {
         entity_operations: HashMap<EntityName, Vec<OperationDescriptor>>,
         type_profiles: Vec<EntityProfile>,
         vault_profile_claims: VaultProfileClaims,
-        conditions: Arc<holon_api::ConditionBus>,
+        conditions: Arc<holon_conditions::ConditionBus>,
     ) -> Self {
         let entity_operations = std::sync::RwLock::new(Arc::new(entity_operations));
         let type_profiles = Arc::new(type_profiles);
@@ -2992,7 +2992,7 @@ variants:
         let registry = crate::type_registry::create_default_registry().unwrap();
         crate::type_registry::type_profiles_from_registry(
             &registry,
-            &holon_api::ConditionBus::new(),
+            &holon_conditions::ConditionBus::new(),
         )
         .into_iter()
         .find(|p| p.entity_name.as_str() == "block")
@@ -3133,11 +3133,13 @@ variants:
         assert_ne!(name, "embedded_page_expanded");
     }
 
-    fn derived_field_conditions(bus: &holon_api::ConditionBus) -> Vec<(String, String, String)> {
+    fn derived_field_conditions(
+        bus: &holon_conditions::ConditionBus,
+    ) -> Vec<(String, String, String)> {
         bus.current()
             .into_iter()
             .filter_map(|c| match c.reason {
-                holon_api::ConditionKind::DerivedFieldNotComputed {
+                holon_conditions::ConditionKind::DerivedFieldNotComputed {
                     block_id,
                     field,
                     reason,
@@ -3162,7 +3164,7 @@ variants:
             }),
         ];
         for (seat_name, seat) in seats {
-            let bus = Arc::new(holon_api::ConditionBus::new());
+            let bus = Arc::new(holon_conditions::ConditionBus::new());
             let resolver = ProfileResolver::with_type_profiles(
                 holon_api::live_data::LiveData::new(
                     Vec::new(),
@@ -3213,7 +3215,7 @@ variants:
 
     #[tokio::test]
     async fn a_sidecar_success_does_not_clear_a_resolver_condition() {
-        let bus = Arc::new(holon_api::ConditionBus::new());
+        let bus = Arc::new(holon_conditions::ConditionBus::new());
         let resolver = ProfileResolver::with_type_profiles(
             holon_api::live_data::LiveData::new(
                 Vec::new(),
@@ -3243,8 +3245,8 @@ variants:
         resolver.resolve_with_computed(&row);
         assert_eq!(derived_field_conditions(&bus).len(), 1);
 
-        bus.clear(&holon_api::ConditionKey::derived_field_not_computed(
-            holon_api::DerivedFieldSeat::Sidecar,
+        bus.clear(&holon_conditions::ConditionKey::derived_field_not_computed(
+            holon_conditions::DerivedFieldSeat::Sidecar,
             "thing:one",
             "ratio",
         ));

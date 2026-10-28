@@ -40,13 +40,13 @@ impl SqlWriteAuthority {
     /// discloses its own store's unreadable values instead.
     pub async fn disclose_unreadable_stored_block_types(
         &self,
-        conditions: &holon_api::ConditionBus,
+        conditions: &holon_conditions::ConditionBus,
     ) {
         let unaudited = |error: String| {
             tracing::error!(%error, "boot audit of the stored block_type values failed");
-            conditions.emit(holon_api::Condition {
+            conditions.emit(holon_conditions::Condition {
                 subject: BLOCK_WRITE_TABLE.to_string(),
-                reason: holon_api::ConditionKind::StoredBlockTypesUnaudited { error },
+                reason: holon_conditions::ConditionKind::StoredBlockTypesUnaudited { error },
             });
         };
         let sql =
@@ -67,7 +67,7 @@ impl SqlWriteAuthority {
             };
             if let Err(reason) = holon_api::block::parse_stored_block_type(&stored) {
                 tracing::warn!(block_id = %id, %stored, %reason, "stored block_type unreadable; it reads as untyped");
-                conditions.emit(holon_api::Condition::block_field_unreadable(
+                conditions.emit(holon_conditions::Condition::block_field_unreadable(
                     id,
                     "block_type",
                     stored,

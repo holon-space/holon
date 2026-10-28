@@ -650,7 +650,7 @@ impl TransitionRef<ReferenceState> for EditDecisionSubtree {
             ExpectedShapeOutcome::Refused { .. } if self.origin().is_user() => {
                 state.conditions.raise(
                     self.root.clone(),
-                    holon_api::ConditionKind::EDIT_REFUSED_BY_SHAPE,
+                    holon_conditions::ConditionKind::EDIT_REFUSED_BY_SHAPE,
                 );
             }
             ExpectedShapeOutcome::Refused { .. } => {}

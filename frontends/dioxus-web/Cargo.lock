@@ -2622,6 +2622,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-conditions"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "holon-api",
+ "serde",
+ "tokio",
+ "workspace-hack",
+]
+
+[[package]]
 name = "holon-core"
 version = "0.1.0"
 dependencies = [
@@ -2684,6 +2695,7 @@ dependencies = [
  "async-trait",
  "hex",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-macros",
  "holon-net",
@@ -2714,12 +2726,14 @@ dependencies = [
  "getrandom 0.3.4",
  "holon-advice",
  "holon-api",
+ "holon-conditions",
  "holon-core",
  "holon-filesystem",
  "holon-macros",
  "holon-oracles",
  "holon-org-format",
  "holon-secrets",
+ "holon-transition-contract",
  "memory-stats",
  "premortem",
  "serde",
@@ -2754,6 +2768,7 @@ dependencies = [
  "holon-net-layout",
  "holon-pattern",
  "holon-rules",
+ "holon-transition-contract",
  "indexmap",
  "serde",
  "serde_json",
@@ -2842,6 +2857,16 @@ dependencies = [
  "keyring",
  "security-framework",
  "toml 0.8.23",
+ "workspace-hack",
+]
+
+[[package]]
+name = "holon-transition-contract"
+version = "0.1.0"
+dependencies = [
+ "holon-api",
+ "serde",
+ "thiserror 2.0.21",
  "workspace-hack",
 ]
 

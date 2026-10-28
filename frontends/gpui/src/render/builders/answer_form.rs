@@ -5,7 +5,7 @@ use gpui::Window;
 use gpui_component::input::Input;
 use gpui_component::input::InputState;
 use holon_api::Value;
-use holon_api::user_transition::AskRow;
+use holon_transition_contract::AskRow;
 use holon_frontend::answer::AnswerForm;
 use holon_frontend::answer::Answering;
 use holon_frontend::answer::FormPhase;

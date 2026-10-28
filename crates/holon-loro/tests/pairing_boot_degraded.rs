@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use holon_api::BlockContent;
 use holon_api::BlockEdges;
 use holon_api::EntityUri;
-use holon_api::condition_bus::Condition;
-use holon_api::condition_bus::ConditionBus;
+use holon_conditions::condition_bus::Condition;
+use holon_conditions::condition_bus::ConditionBus;
 use holon_core::DownstreamProjection;
 use holon_core::ProjectionPass;
 use holon_core::block_ordering::BlockCreateRequest;
@@ -292,7 +292,7 @@ async fn a_mixed_archive_reimports_what_has_a_home_and_defers_only_the_orphans()
     assert!(
         raised.iter().any(|c| matches!(
             &c.reason,
-            holon_api::condition_bus::ConditionKind::PairingReimportDeferred {
+            holon_conditions::condition_bus::ConditionKind::PairingReimportDeferred {
                 orphans: count,
                 archive,
             } if *count == absent.len()
@@ -356,7 +356,7 @@ async fn a_pre_pair_top_level_page_is_reimported_and_only_the_parentless_defer()
     assert!(
         raised.iter().any(|c| matches!(
             &c.reason,
-            holon_api::condition_bus::ConditionKind::PairingReimportDeferred {
+            holon_conditions::condition_bus::ConditionKind::PairingReimportDeferred {
                 orphans: count,
                 ..
             } if *count == 2
@@ -455,7 +455,7 @@ async fn the_reimport_completes_once_its_parent_appears_and_lifts_the_banner() -
             format!("{:?}", c.reason).contains(&f.marker.archive.display().to_string())
                 && !matches!(
                     c.reason,
-                    holon_api::condition_bus::ConditionKind::PairingReimportedLocalContent { .. }
+                    holon_conditions::condition_bus::ConditionKind::PairingReimportedLocalContent { .. }
                 )
         }),
         "the deferred-re-import banner must be lifted once the re-import ran: {still_raised:?}"

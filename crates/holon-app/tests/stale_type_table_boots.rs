@@ -23,14 +23,14 @@ use std::sync::Arc;
 
 use holon::api::BackendEngine;
 use holon::api::HolonService;
-use holon_api::Condition;
-use holon_api::ConditionBus;
 use holon_api::EntityName;
 use holon_api::OpOrigin;
 use holon_api::QueryEngine;
 use holon_api::QueryLanguage;
 use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
 use holon_frontend::FrontendSession;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;

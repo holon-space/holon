@@ -205,7 +205,7 @@ impl holon_filesystem::WritebackDisclosure for Overruled {
         block_id: &EntityUri,
         _: &std::path::Path,
         file_text: &str,
-        change: holon_api::HolonChange,
+        change: holon_conditions::HolonChange,
         _: &std::path::Path,
     ) {
         self.0

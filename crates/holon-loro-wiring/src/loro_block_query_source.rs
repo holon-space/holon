@@ -153,7 +153,7 @@ pub fn register_loro_operation_engine(
             Err(_) => block_ops,
         }
     };
-    let bus = injector.resolve::<Arc<holon_api::ConditionBus>>();
+    let bus = injector.resolve::<Arc<holon_conditions::ConditionBus>>();
     let engine = loro_operation_engine(block_ops, collab, (*bus).clone());
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
 }
@@ -163,7 +163,7 @@ pub fn register_loro_operation_engine(
 pub fn loro_operation_engine(
     block_ops: LoroBlockOperations,
     collab: Arc<holon_loro::LoroDocument>,
-    bus: Arc<holon_api::ConditionBus>,
+    bus: Arc<holon_conditions::ConditionBus>,
 ) -> Arc<dyn OperationEngine> {
     let block_ops = Arc::new(block_ops);
     // Navigation ops (focus / back / forward / home) have no Turso substrate in
@@ -353,7 +353,7 @@ mod tests {
 
         let injector = build_no_turso_container(
             ":memory:".into(),
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             move |inj| {
                 register_loro_block_query_source(inj, backend);
                 Ok(())
@@ -383,7 +383,7 @@ mod tests {
 
         let injector = build_no_turso_container(
             ":memory:".into(),
-            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             |_| Ok(()),
         )
         .await
@@ -586,7 +586,7 @@ mod tests {
         let engine = loro_operation_engine(
             LoroBlockOperations::new(store.clone()),
             collab,
-            Arc::new(holon_api::ConditionBus::new()),
+            Arc::new(holon_conditions::ConditionBus::new()),
         );
         let run = |op: &'static str, params: Vec<(&'static str, String)>| {
             let engine = engine.clone();

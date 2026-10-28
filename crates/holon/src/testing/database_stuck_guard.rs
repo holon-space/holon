@@ -26,11 +26,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionChange;
-use holon_api::ConditionKey;
-use holon_api::ConditionKind;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionChange;
+use holon_conditions::ConditionKey;
+use holon_conditions::ConditionKind;
 use tokio::sync::broadcast::error::RecvError;
 
 const ID: &str = "inv-no-database-stuck";

@@ -12,11 +12,11 @@
 //! separate from the arc language, and yields [`Offer::Unknown`].
 
 use holon_api::EntityUri;
-use holon_api::user_transition::Offer;
 use holon_pattern::Value;
 use holon_pattern::arcs::ArcPlace;
 use holon_pattern::arcs::ArcRelation;
 use holon_pattern::pattern::compare_2valued;
+use holon_transition_contract::Offer;
 
 use crate::bridge::TransitionKey;
 use crate::bridge::TransitionSource;

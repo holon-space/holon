@@ -236,17 +236,18 @@ impl TypeRegistry {
     ///
     /// The files are user data, so a unit that cannot be read — the home
     /// itself or one file — is disclosed as
-    /// [`holon_api::ConditionKind::ProfileRefused`] and left out whole, and the
-    /// boot continues (directive boot-always). A missing home is no profiles.
+    /// [`holon_conditions::ConditionKind::ProfileRefused`] and left out whole,
+    /// and the boot continues (directive boot-always). A missing home is no
+    /// profiles.
     pub fn load_vault_profile_home(
         &self,
         vault_root: &std::path::Path,
-        conditions: &holon_api::ConditionBus,
+        conditions: &holon_conditions::ConditionBus,
     ) {
         let refuse = |subject: &std::path::Path, error: String| {
-            conditions.emit(holon_api::Condition {
+            conditions.emit(holon_conditions::Condition {
                 subject: subject.display().to_string(),
-                reason: holon_api::ConditionKind::ProfileRefused { error },
+                reason: holon_conditions::ConditionKind::ProfileRefused { error },
             });
         };
         let home = vault_root.join(VAULT_PROFILE_HOME);
@@ -998,10 +999,10 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
 /// shared by the Turso DI path and the no-Turso bundled-only resolver.
 ///
 /// A type whose profile does not parse is left out and raised on `conditions`
-/// as [`holon_api::ConditionKind::TypeProfileRefused`].
+/// as [`holon_conditions::ConditionKind::TypeProfileRefused`].
 pub fn type_profiles_from_registry(
     type_registry: &TypeRegistry,
-    conditions: &holon_api::ConditionBus,
+    conditions: &holon_conditions::ConditionBus,
 ) -> Vec<EntityProfile> {
     let mut profiles = Vec::new();
     for td in type_registry.all() {
@@ -1013,9 +1014,9 @@ pub fn type_profiles_from_registry(
             Ok(None) => {}
             Err(refusal) => {
                 tracing::error!("type profile refused: {refusal}");
-                conditions.emit(holon_api::Condition {
+                conditions.emit(holon_conditions::Condition {
                     subject: refusal.entity.clone(),
-                    reason: holon_api::ConditionKind::TypeProfileRefused(refusal),
+                    reason: holon_conditions::ConditionKind::TypeProfileRefused(refusal),
                 });
             }
         }

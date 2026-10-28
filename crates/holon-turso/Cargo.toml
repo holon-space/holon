@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 holon-api.workspace = true
+holon-conditions.workspace = true
 holon-core.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true

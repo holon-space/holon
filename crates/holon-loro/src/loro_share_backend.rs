@@ -18,11 +18,11 @@ use holon_api::EntityUri;
 use holon_api::OperationDescriptor;
 use holon_api::StorageEntity;
 use holon_api::Value;
-use holon_api::condition_bus::Condition;
-use holon_api::condition_bus::ConditionBus;
-use holon_api::condition_bus::ConditionKey;
-use holon_api::condition_bus::ConditionKind;
 use holon_api::sharing::Capabilities;
+use holon_conditions::condition_bus::Condition;
+use holon_conditions::condition_bus::ConditionBus;
+use holon_conditions::condition_bus::ConditionKey;
+use holon_conditions::condition_bus::ConditionKind;
 use holon_core::DownstreamProjection;
 use holon_core::FieldDelta;
 use holon_core::MaybeSendSync;
@@ -5435,7 +5435,7 @@ mod tests {
             {
                 assert_eq!(
                     event.subject,
-                    holon_api::condition_bus::OWNER_IDENTITY_SUBJECT
+                    holon_conditions::condition_bus::OWNER_IDENTITY_SUBJECT
                 );
                 disclosures += 1;
             }
@@ -8867,7 +8867,7 @@ mod tests {
         _dir: TempDir,
         global: Arc<crate::loro_document::LoroDocument>,
         warm: crate::loro_backend::LoroBackend,
-        changes: tokio::sync::broadcast::Receiver<holon_api::condition_bus::ConditionChange>,
+        changes: tokio::sync::broadcast::Receiver<holon_conditions::condition_bus::ConditionChange>,
         m1: String,
         m1_tid: TreeID,
         m2: String,
@@ -9128,9 +9128,11 @@ mod tests {
     }
 
     fn duplicate_mount_events(
-        changes: &mut tokio::sync::broadcast::Receiver<holon_api::condition_bus::ConditionChange>,
+        changes: &mut tokio::sync::broadcast::Receiver<
+            holon_conditions::condition_bus::ConditionChange,
+        >,
     ) -> Vec<String> {
-        use holon_api::condition_bus::ConditionChange;
+        use holon_conditions::condition_bus::ConditionChange;
         let mut events = Vec::new();
         while let Ok(change) = changes.try_recv() {
             match change {

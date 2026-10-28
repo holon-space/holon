@@ -17,7 +17,7 @@ fn a_conditions_row_id_names_an_entity() {
     });
     let id = row.get(ID_COLUMN).expect("the row declares an id column");
     assert_eq!(
-        crate::widget_spec::row_id_of(&row)
+        holon_api::widget_spec::row_id_of(&row)
             .entity()
             .map(|u| u.to_string()),
         Some("condition:todoist:integration-connect-failed".to_string()),
@@ -37,7 +37,7 @@ fn a_subject_needing_encoding_still_names_an_entity() {
         },
     });
     assert!(
-        crate::widget_spec::row_id_of(&row).entity().is_some(),
+        holon_api::widget_spec::row_id_of(&row).entity().is_some(),
         "an awkward subject must still yield a classifiable id, got {:?}",
         row.get(ID_COLUMN)
     );

@@ -131,7 +131,7 @@ pub async fn boot_a_working_session() -> Booted {
     let dir = tempfile::tempdir().expect("create tempdir for the vault");
     std::fs::write(dir.path().join("probe.org"), VAULT_ORG).expect("write the probe vault file");
 
-    let conditions = std::sync::Arc::new(holon_api::ConditionBus::new());
+    let conditions = std::sync::Arc::new(holon_conditions::ConditionBus::new());
     let holon_config = HolonConfig {
         db_path: Some(dir.path().join("shutdown.db")),
         vault: VaultConfig {

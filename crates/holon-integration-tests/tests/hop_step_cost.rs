@@ -53,7 +53,6 @@ use holon_api::pattern::Guard;
 use holon_api::pattern::Operand;
 use holon_api::pattern::Pattern;
 use holon_api::pattern::Subject;
-use holon_api::user_transition::Offer;
 use holon_api::widget_spec::DataRow;
 use holon_integration_tests::TestEnvironment;
 use holon_integration_tests::TestEnvironmentBuilder;
@@ -65,6 +64,7 @@ use holon_net::TransitionSource;
 use holon_net::enabledness::evaluate;
 use holon_net::guards::classify_guard;
 use holon_net::marking::Marking;
+use holon_transition_contract::Offer;
 
 /// Headline ladder, copied from `vault_scale_interaction_latency.rs` so the
 /// two harnesses stress the same vault shape.

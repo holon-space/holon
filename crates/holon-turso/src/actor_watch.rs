@@ -30,10 +30,10 @@ use std::time::Duration;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::time::Instant;
 
-use holon_api::Condition;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
-use holon_api::condition_bus::DATABASE_SUBJECT;
+use holon_conditions::Condition;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
+use holon_conditions::condition_bus::DATABASE_SUBJECT;
 use tokio::sync::mpsc;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use web_time::Instant;

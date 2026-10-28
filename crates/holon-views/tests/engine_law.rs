@@ -15,15 +15,15 @@ use std::thread;
 use std::time::Duration;
 
 use holon_api::Block;
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
 use holon_api::EntityUri;
 use holon_api::block::SnapshotBlock;
 use holon_api::commit_clock::CommitClock;
 use holon_api::commit_clock::CommitSource;
 use holon_api::commit_clock::CoverAboveHighWater;
 use holon_api::commit_clock::Stamp;
-use holon_api::condition_bus::VIEW_ENGINE_SUBJECT;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
+use holon_conditions::condition_bus::VIEW_ENGINE_SUBJECT;
 use holon_views::batch;
 use holon_views::batch::Multiset;
 use holon_views::batch::add;

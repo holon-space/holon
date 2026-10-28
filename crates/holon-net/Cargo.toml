@@ -14,6 +14,7 @@ ignored = ["workspace-hack"]
 [dependencies]
 blake3.workspace = true
 holon-api.workspace = true
+holon-transition-contract.workspace = true
 holon-net-layout.workspace = true
 holon-pattern.workspace = true
 holon-rules.workspace = true
@@ -31,6 +32,7 @@ holon-core.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
 tokio = { workspace = true, features = ["rt"] }
+holon-storage-provider.workspace = true
 
 [features]
 # Each twin breaks one executor rule, so a property test shows red for that rule.

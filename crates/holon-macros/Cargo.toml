@@ -23,6 +23,7 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 [dev-dependencies]
 holon-core.workspace = true
 holon-api.workspace = true
+holon-transition-contract.workspace = true
 holon-net.workspace = true
 proptest.workspace = true
 serde_json.workspace = true

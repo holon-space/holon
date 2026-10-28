@@ -2449,7 +2449,7 @@ mod writeback_panic_tests {
             _: &holon_api::EntityUri,
             _: &std::path::Path,
             _: &str,
-            _: holon_api::HolonChange,
+            _: holon_conditions::HolonChange,
             _: &std::path::Path,
         ) {
         }

@@ -1,6 +1,6 @@
 //! Net semantics revision 2 (#171, experiment #315): the storage lifecycle on
 //! the REAL executor with fake providers behind
-//! [`holon_api::storage_provider::StorageProvider`].
+//! [`holon_storage_provider::StorageProvider`].
 //!
 //! The net: `ProviderTries` carries the try count per provider (token data, no
 //! engine retry attribute); `Storage` holds the primary (one token per subject
@@ -31,9 +31,6 @@ use exec_support::bind;
 use exec_support::content;
 use exec_support::text;
 use holon_api::Value;
-use holon_api::storage_provider::ProviderFailure;
-use holon_api::storage_provider::StorageProvider;
-use holon_api::storage_provider::StorageVersion;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
@@ -45,6 +42,9 @@ use holon_net::exec::Output;
 use holon_net::exec::Receiver;
 use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
+use holon_storage_provider::ProviderFailure;
+use holon_storage_provider::StorageProvider;
+use holon_storage_provider::StorageVersion;
 use proptest::prelude::*;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;

@@ -2330,7 +2330,7 @@ pub struct LoroBackend {
     event_log: Arc<Mutex<EventRing<Change<Block>>>>,
     shared_trees: Option<Arc<dyn SharedTreeStore>>,
     mount_cache: MountCache,
-    condition_bus: Option<Arc<holon_api::ConditionBus>>,
+    condition_bus: Option<Arc<holon_conditions::ConditionBus>>,
     clock: std::sync::Arc<dyn holon_api::Clock>,
 }
 
@@ -2357,7 +2357,7 @@ impl LoroBackend {
     }
 
     /// Where the backend discloses what it finds but must not repair.
-    pub fn with_condition_bus(mut self, bus: Arc<holon_api::ConditionBus>) -> Self {
+    pub fn with_condition_bus(mut self, bus: Arc<holon_conditions::ConditionBus>) -> Self {
         self.condition_bus = Some(bus);
         self
     }
@@ -2368,9 +2368,9 @@ impl LoroBackend {
         shared_tree_id: &str,
         report: MountReport<'_>,
     ) {
-        use holon_api::condition_bus::Condition;
-        use holon_api::condition_bus::ConditionKey;
-        use holon_api::condition_bus::ConditionKind;
+        use holon_conditions::condition_bus::Condition;
+        use holon_conditions::condition_bus::ConditionKey;
+        use holon_conditions::condition_bus::ConditionKind;
         let (canonical, duplicates) = match report {
             MountReport::Duplicated { canonical, others } => (canonical, others),
             MountReport::Resolved { live_mounts } => {

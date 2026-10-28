@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 
 use holon_api::EntityUri;
-use holon_api::user_transition::Offer;
 use holon_net::Analyzability;
 use holon_net::CompiledNet;
 use holon_net::NetEntity;
@@ -33,6 +32,7 @@ use holon_pattern::pattern::Operand;
 use holon_pattern::pattern::Pattern;
 use holon_pattern::pattern::Subject;
 use holon_pattern::pattern::WorldBlock;
+use holon_transition_contract::Offer;
 use proptest::prelude::*;
 
 const SUBJECT: &str = "block:subject";

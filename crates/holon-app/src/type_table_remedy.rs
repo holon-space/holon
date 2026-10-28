@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use fluxdi::Injector;
 use holon::di::schema_providers::UnservedTypes;
-use holon_api::ConditionBus;
-use holon_api::ConditionKey;
-use holon_api::ConditionKind;
 use holon_api::EntityName;
 use holon_api::OperationDescriptor;
 use holon_api::OperationParam;
 use holon_api::TypeHint;
-use holon_api::condition_profile::OpId;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKey;
+use holon_conditions::ConditionKind;
+use holon_conditions::condition_profile::OpId;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::Result;

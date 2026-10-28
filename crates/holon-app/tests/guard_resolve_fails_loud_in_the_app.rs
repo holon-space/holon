@@ -81,7 +81,7 @@ async fn app_boot_failure_message(
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
-        Arc::new(holon_api::ConditionBus::new()),
+        Arc::new(holon_conditions::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             bind(injector);

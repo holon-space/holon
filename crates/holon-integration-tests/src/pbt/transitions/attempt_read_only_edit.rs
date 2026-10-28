@@ -123,7 +123,7 @@ impl TransitionRef<ReferenceState> for AttemptReadOnlyEdit {
             .to_string();
         state.conditions.raise(
             file,
-            holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT,
+            holon_conditions::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT,
         );
     }
 }

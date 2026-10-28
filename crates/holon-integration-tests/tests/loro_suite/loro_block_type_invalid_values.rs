@@ -84,7 +84,7 @@ async fn view_block(env: &TestEnvironment, id: &str) -> Block {
 fn unreadable_conditions(env: &TestEnvironment) -> Vec<(String, String)> {
     env.injector()
         .expect("booted injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
         .filter(|c| c.condition_key().kind == "block-field-unreadable")
@@ -501,7 +501,7 @@ fn a_sql_row_the_block_type_audit_cannot_read_boots_and_discloses() {
         let unaudited: Vec<String> = env
             .injector()
             .expect("booted injector")
-            .resolve::<Arc<holon_api::ConditionBus>>()
+            .resolve::<Arc<holon_conditions::ConditionBus>>()
             .current()
             .into_iter()
             .filter(|c| c.condition_key().kind == "stored-block-types-unaudited")

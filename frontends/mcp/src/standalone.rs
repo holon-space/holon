@@ -18,7 +18,7 @@ pub struct McpStandaloneModule {
     holon_config: holon_frontend::HolonConfig,
     session_config: holon_frontend::SessionConfig,
     config_dir: PathBuf,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 }
 
 impl McpStandaloneModule {
@@ -81,8 +81,8 @@ mod tests {
     use std::time::Duration;
     use std::time::Instant;
 
-    use holon_api::ConditionBus;
-    use holon_api::ConditionKind;
+    use holon_conditions::ConditionBus;
+    use holon_conditions::ConditionKind;
     use holon_frontend::config::VaultConfig;
 
     use super::*;

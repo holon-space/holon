@@ -665,14 +665,14 @@ impl AliasRegistrar for LoroAliasRegistrar {
 /// in the wiring crate because it bridges the storage-agnostic port
 /// (holon-filesystem) to the concrete bus (holon-api).
 pub struct SharedSubtreeNotMaterializedDisclosure {
-    pub bus: Arc<holon_api::ConditionBus>,
+    pub bus: Arc<holon_conditions::ConditionBus>,
 }
 
 impl holon_filesystem::ShareWritebackDisclosure for SharedSubtreeNotMaterializedDisclosure {
     fn shared_subtree_not_materialized(&self, shared_tree_id: &str, file: &Path) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: shared_tree_id.to_string(),
-            reason: holon_api::ConditionKind::SharedSubtreeNotMaterialized {
+            reason: holon_conditions::ConditionKind::SharedSubtreeNotMaterialized {
                 file: file.display().to_string(),
             },
         });
@@ -684,38 +684,38 @@ impl holon_filesystem::ShareWritebackDisclosure for SharedSubtreeNotMaterialized
 /// [`SharedSubtreeNotMaterializedDisclosure`]: the supervisor lives in holon-orgmode, which
 /// has no view of the concrete bus.
 pub struct WritebackDegradedDisclosure {
-    pub bus: Arc<holon_api::ConditionBus>,
+    pub bus: Arc<holon_conditions::ConditionBus>,
 }
 
 impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     fn writeback_degraded(&self, detail: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             // Not a share condition; the sentinel subject the
             // `WritebackDegraded` variant documents keeps one process-wide
             // banner instead of one per share.
             subject: "org-writeback".to_string(),
-            reason: holon_api::ConditionKind::WritebackDegraded(detail.to_string()),
+            reason: holon_conditions::ConditionKind::WritebackDegraded(detail.to_string()),
         });
     }
 
     fn writeback_stalled(&self, path: &Path, detail: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: file_subject(path),
-            reason: holon_api::ConditionKind::WritebackDegraded(detail.to_string()),
+            reason: holon_conditions::ConditionKind::WritebackDegraded(detail.to_string()),
         });
     }
 
     fn writeback_resumed(&self, path: &Path) {
-        self.bus.clear(&holon_api::ConditionKey {
+        self.bus.clear(&holon_conditions::ConditionKey {
             subject: file_subject(path),
-            kind: holon_api::ConditionKind::WRITEBACK_DEGRADED,
+            kind: holon_conditions::ConditionKind::WRITEBACK_DEGRADED,
         });
     }
 
     fn ingest_refused(&self, path: &Path, format: &str, reason: &str) {
         self.bus.vault_ingest_refused(
             format,
-            holon_api::RefusedFile {
+            holon_conditions::RefusedFile {
                 path: file_subject(path),
                 reason: reason.to_string(),
             },
@@ -724,59 +724,59 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
 
     fn ingest_recovered(&self, path: &Path) {
         self.bus.vault_ingest_recovered(&file_subject(path));
-        self.bus.clear(&holon_api::ConditionKey {
+        self.bus.clear(&holon_conditions::ConditionKey {
             subject: file_subject(path),
-            kind: holon_api::ConditionKind::VAULT_FILE_EMPTIED,
+            kind: holon_conditions::ConditionKind::VAULT_FILE_EMPTIED,
         });
     }
 
     fn vault_file_emptied(&self, path: &Path, seen: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: file_subject(path),
-            reason: holon_api::ConditionKind::VaultFileEmptied {
+            reason: holon_conditions::ConditionKind::VaultFileEmptied {
                 seen: seen.to_string(),
             },
         });
     }
 
     fn removal_not_accepted(&self, path: &Path, cause: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: file_subject(path),
-            reason: holon_api::ConditionKind::RemovalNotAccepted {
+            reason: holon_conditions::ConditionKind::RemovalNotAccepted {
                 cause: cause.to_string(),
             },
         });
     }
 
     fn rewrite_from_store_failed(&self, path: &Path, cause: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: file_subject(path),
-            reason: holon_api::ConditionKind::RewriteFromStoreFailed {
+            reason: holon_conditions::ConditionKind::RewriteFromStoreFailed {
                 cause: cause.to_string(),
             },
         });
     }
 
     fn file_condition_cleared(&self, path: &Path, kind: &'static str) {
-        self.bus.clear(&holon_api::ConditionKey {
+        self.bus.clear(&holon_conditions::ConditionKey {
             subject: file_subject(path),
             kind,
         });
     }
 
     fn writeback_lossy(&self, path: &Path, detail: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: file_subject(path),
-            reason: holon_api::ConditionKind::WritebackLossy {
+            reason: holon_conditions::ConditionKind::WritebackLossy {
                 detail: detail.to_string(),
             },
         });
     }
 
     fn writeback_faithful(&self, path: &Path) {
-        self.bus.clear(&holon_api::ConditionKey {
+        self.bus.clear(&holon_conditions::ConditionKey {
             subject: file_subject(path),
-            kind: holon_api::ConditionKind::WRITEBACK_LOSSY,
+            kind: holon_conditions::ConditionKind::WRITEBACK_LOSSY,
         });
     }
 
@@ -795,26 +795,26 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         let copy_files = copy_files.iter().map(|p| p.display().to_string()).collect();
         let (reason, other) = if conflict {
             (
-                holon_api::ConditionKind::BlockEditedInTwoFiles {
+                holon_conditions::ConditionKind::BlockEditedInTwoFiles {
                     owner_file,
                     copy_files,
                 },
-                holon_api::ConditionKind::BLOCK_IN_TWO_FILES,
+                holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES,
             )
         } else {
             (
-                holon_api::ConditionKind::BlockInTwoFiles {
+                holon_conditions::ConditionKind::BlockInTwoFiles {
                     owner_file,
                     copy_files,
                 },
-                holon_api::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
+                holon_conditions::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
             )
         };
-        self.bus.clear(&holon_api::ConditionKey {
+        self.bus.clear(&holon_conditions::ConditionKey {
             subject: block_id.as_str().to_string(),
             kind: other,
         });
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: block_id.as_str().to_string(),
             reason,
         });
@@ -822,10 +822,10 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
 
     fn block_in_one_file_again(&self, block_id: &EntityUri) {
         for kind in [
-            holon_api::ConditionKind::BLOCK_IN_TWO_FILES,
-            holon_api::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
+            holon_conditions::ConditionKind::BLOCK_IN_TWO_FILES,
+            holon_conditions::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
         ] {
-            self.bus.clear(&holon_api::ConditionKey {
+            self.bus.clear(&holon_conditions::ConditionKey {
                 subject: block_id.as_str().to_string(),
                 kind,
             });
@@ -833,18 +833,18 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     }
 
     fn deleted_block_kept_in_file(&self, block_id: &EntityUri, file: &Path) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: block_id.as_str().to_string(),
-            reason: holon_api::ConditionKind::DeletedBlockKeptInFile {
+            reason: holon_conditions::ConditionKind::DeletedBlockKeptInFile {
                 file: file.display().to_string(),
             },
         });
     }
 
     fn deletion_undone(&self, block_id: &EntityUri, file: &Path, copy_files: &[&Path]) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: block_id.as_str().to_string(),
-            reason: holon_api::ConditionKind::DeletionUndoneBlockInOtherFile {
+            reason: holon_conditions::ConditionKind::DeletionUndoneBlockInOtherFile {
                 file: file.display().to_string(),
                 copy_files: copy_files.iter().map(|p| p.display().to_string()).collect(),
             },
@@ -852,9 +852,9 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     }
 
     fn deletion_ended_by_edit(&self, block_id: &EntityUri, file: &Path) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: block_id.as_str().to_string(),
-            reason: holon_api::ConditionKind::DeletionEndedByEdit {
+            reason: holon_conditions::ConditionKind::DeletionEndedByEdit {
                 file: file.display().to_string(),
             },
         });
@@ -866,9 +866,9 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         existing_id: &EntityUri,
         companion_id: &EntityUri,
     ) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: folder.to_string(),
-            reason: holon_api::ConditionKind::CompanionPageIdOverruled {
+            reason: holon_conditions::ConditionKind::CompanionPageIdOverruled {
                 existing_id: existing_id.as_str().to_string(),
                 companion_id: companion_id.as_str().to_string(),
             },
@@ -880,12 +880,12 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         block_id: &EntityUri,
         file: &Path,
         file_text: &str,
-        change: holon_api::HolonChange,
+        change: holon_conditions::HolonChange,
         conflict_copy: &Path,
     ) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: block_id.as_str().to_string(),
-            reason: holon_api::ConditionKind::FileEditOverruled {
+            reason: holon_conditions::ConditionKind::FileEditOverruled {
                 file: file.display().to_string(),
                 file_text: file_text.to_string(),
                 change,
@@ -902,9 +902,9 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         conflicts: &[String],
         conflict_copy: &Path,
     ) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: block_id.as_str().to_string(),
-            reason: holon_api::ConditionKind::HolonEditOverruled {
+            reason: holon_conditions::ConditionKind::HolonEditOverruled {
                 file: file.display().to_string(),
                 holon_text: holon_text.to_string(),
                 conflicts: conflicts.to_vec(),
@@ -914,18 +914,18 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     }
 
     fn vault_sync_not_started(&self, vault: &Path, cause: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: vault.display().to_string(),
-            reason: holon_api::ConditionKind::VaultSyncNotStarted {
+            reason: holon_conditions::ConditionKind::VaultSyncNotStarted {
                 cause: cause.to_string(),
             },
         });
     }
 
     fn vault_state_unreadable(&self, file: &Path, kept_as: &Path, reason: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: file.display().to_string(),
-            reason: holon_api::ConditionKind::VaultStateUnreadable {
+            reason: holon_conditions::ConditionKind::VaultStateUnreadable {
                 kept_as: kept_as.display().to_string(),
                 reason: reason.to_string(),
             },
@@ -933,9 +933,9 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     }
 
     fn vault_start_incomplete(&self, vault: &Path, step: &str, cause: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: vault.display().to_string(),
-            reason: holon_api::ConditionKind::VaultStartIncomplete {
+            reason: holon_conditions::ConditionKind::VaultStartIncomplete {
                 step: step.to_string(),
                 cause: cause.to_string(),
             },
@@ -943,23 +943,23 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     }
 
     fn vault_backlog_ingesting(&self, vault: &Path, done: usize, total: usize) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: vault.display().to_string(),
-            reason: holon_api::ConditionKind::VaultBacklogIngesting { done, total },
+            reason: holon_conditions::ConditionKind::VaultBacklogIngesting { done, total },
         });
     }
 
     fn vault_backlog_ingested(&self, vault: &Path) {
-        self.bus.clear(&holon_api::ConditionKey {
+        self.bus.clear(&holon_conditions::ConditionKey {
             subject: vault.display().to_string(),
-            kind: holon_api::ConditionKind::VAULT_BACKLOG_INGESTING,
+            kind: holon_conditions::ConditionKind::VAULT_BACKLOG_INGESTING,
         });
     }
 
     fn written_files_unrecorded(&self, vault: &Path, files: &[&Path], cause: &str) {
-        self.bus.emit(holon_api::Condition {
+        self.bus.emit(holon_conditions::Condition {
             subject: vault.display().to_string(),
-            reason: holon_api::ConditionKind::WrittenFilesUnrecorded {
+            reason: holon_conditions::ConditionKind::WrittenFilesUnrecorded {
                 files: files.iter().map(|f| f.display().to_string()).collect(),
                 cause: cause.to_string(),
             },
@@ -967,23 +967,23 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     }
 
     fn written_files_recorded(&self, vault: &Path) {
-        self.bus.clear(&holon_api::ConditionKey {
+        self.bus.clear(&holon_conditions::ConditionKey {
             subject: vault.display().to_string(),
-            kind: holon_api::ConditionKind::WRITTEN_FILES_UNRECORDED,
+            kind: holon_conditions::ConditionKind::WRITTEN_FILES_UNRECORDED,
         });
     }
 
     fn undone_deletion_resolved(&self, block_id: &EntityUri) {
-        self.bus.clear(&holon_api::ConditionKey {
+        self.bus.clear(&holon_conditions::ConditionKey {
             subject: block_id.as_str().to_string(),
-            kind: holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
+            kind: holon_conditions::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
         });
     }
 
     fn deleted_block_gone_from_file(&self, block_id: &EntityUri) {
-        self.bus.clear(&holon_api::ConditionKey {
+        self.bus.clear(&holon_conditions::ConditionKey {
             subject: block_id.as_str().to_string(),
-            kind: holon_api::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE,
+            kind: holon_conditions::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE,
         });
     }
 }

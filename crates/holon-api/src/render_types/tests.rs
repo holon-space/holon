@@ -55,7 +55,7 @@ fn every_type_hint_round_trips_through_json() {
             type_name: "FileName".into(),
         },
         TypeHint::PlaceId {
-            place: crate::user_transition::PlaceName("Project".into()),
+            place: crate::types::PlaceName("Project".into()),
         },
     ];
     // No `_` arm: a new variant does not compile until it gets an index here

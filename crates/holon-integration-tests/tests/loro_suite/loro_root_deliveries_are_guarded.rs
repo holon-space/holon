@@ -48,7 +48,7 @@ async fn every_root_delivery_holds_the_doc_write_guard() -> Result<()> {
         sink.clone() as Arc<dyn SinkReader>,
         tempdir.path().join("sidecar").join("sc.sync"),
         holon_api::block_read_model::BlockReadModel::new(),
-        Arc::new(holon_api::ConditionBus::new()),
+        Arc::new(holon_conditions::ConditionBus::new()),
         clock,
         engine,
     ));

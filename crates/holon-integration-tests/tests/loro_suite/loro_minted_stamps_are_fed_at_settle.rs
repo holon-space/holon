@@ -140,7 +140,7 @@ async fn every_minted_stamp_is_fed_at_settle() -> Result<()> {
         sink.clone() as Arc<dyn SinkReader>,
         tempdir.path().join("sidecar").join("sc.sync"),
         holon_api::block_read_model::BlockReadModel::new(),
-        Arc::new(holon_api::ConditionBus::new()),
+        Arc::new(holon_conditions::ConditionBus::new()),
         clock,
         engine.clone(),
     ));

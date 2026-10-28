@@ -524,7 +524,7 @@ mod tests {
         unserved.insert(
             "note_refused",
             "note_refused_raw",
-            holon_api::ConditionKind::TYPE_TABLE_REFUSED,
+            holon_conditions::ConditionKind::TYPE_TABLE_REFUSED,
             "test refusal".to_string(),
         );
 

@@ -26,7 +26,7 @@ use gpui::AnyWindowHandle;
 use gpui::AssetSource;
 use gpui::InputEvent;
 use gpui::TestApp;
-use holon_api::SettingsSection;
+use holon_conditions::SettingsSection;
 use holon_frontend::crash_history::CrashHistory;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;

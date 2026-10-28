@@ -30,7 +30,7 @@ pub struct FreshSut {
     /// so `reset_vault` can point the debug PBT tools at the fresh session.
     pub live_debug: holon_mcp::server::DebugHandlesCell,
     /// The fresh session's core bus, as its injector resolves it.
-    pub conditions: Arc<holon_api::ConditionBus>,
+    pub conditions: Arc<holon_conditions::ConditionBus>,
 }
 
 /// Build a production-faithful `FrontendSession` + `ReactiveEngine` on the
@@ -113,7 +113,7 @@ pub async fn build_fresh_sut(
         .get()
         .expect("injector captured in extra_resolve");
     let live_debug = holon_mcp::di::debug_handles(injector, Some(reactive.clone())).await;
-    let conditions = (*injector.resolve::<Arc<holon_api::ConditionBus>>()).clone();
+    let conditions = (*injector.resolve::<Arc<holon_conditions::ConditionBus>>()).clone();
 
     // Boot settle. The window runs its own settle-to-fixed-point after rebind,
     // so a bounded sleep here is enough to let the org drain + first projection

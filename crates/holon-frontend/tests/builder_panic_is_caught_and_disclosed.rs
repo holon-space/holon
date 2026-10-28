@@ -9,11 +9,11 @@ use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 use std::time::Instant;
 
-use holon_api::ConditionBus;
-use holon_api::ConditionKind;
 use holon_api::Value;
 use holon_api::render_types::Arg;
 use holon_api::render_types::RenderExpr;
+use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_frontend::RenderContext;
 use holon_frontend::StubBuilderServices;
 use holon_frontend::panic_record;

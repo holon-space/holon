@@ -40,7 +40,7 @@ pub struct GpuiModule {
     session_config: SessionConfig,
     config_dir: PathBuf,
     locked_keys: HashSet<PrefKey>,
-    conditions: Arc<holon_api::ConditionBus>,
+    conditions: Arc<holon_conditions::ConditionBus>,
 }
 
 impl GpuiModule {

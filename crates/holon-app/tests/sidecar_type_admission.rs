@@ -17,8 +17,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use holon_api::ConditionBus;
 use holon_app::integration_projection::IntegrationStatus;
+use holon_conditions::ConditionBus;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;

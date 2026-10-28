@@ -1,9 +1,9 @@
 //! The conditions in effect, as a named row source.
 //!
-//! The first registration on the [`row_source`](crate::row_source) seam, and
-//! the reason the seam exists: "what is currently degraded" is state no query
-//! produces, so before this every surface that wanted to show it kept its own
-//! mirror — which is how a provider's status glyph and its banner came to
+//! The first registration on the [`row_source`](holon_api::row_source) seam,
+//! and the reason the seam exists: "what is currently degraded" is state no
+//! query produces, so before this every surface that wanted to show it kept its
+//! own mirror — which is how a provider's status glyph and its banner came to
 //! disagree.
 //!
 //! The columns are the kind-level facts plus the instance's identity. There is
@@ -14,15 +14,16 @@
 
 use std::sync::Arc;
 
-use crate::Value;
+use holon_api::Value;
+use holon_api::live_data_source::ID_COLUMN;
+use holon_api::live_data_source::LiveDataSource;
+use holon_api::row_source::NamedSourceDef;
+use holon_api::widget_spec::DataRow;
+
 use crate::condition_bus::Condition;
 use crate::condition_bus::ConditionBus;
 use crate::condition_profile::ConditionPlacement;
 use crate::condition_profile::ConditionSeverity;
-use crate::live_data_source::ID_COLUMN;
-use crate::live_data_source::LiveDataSource;
-use crate::row_source::NamedSourceDef;
-use crate::widget_spec::DataRow;
 
 /// What a row of the `conditions` source carries.
 ///
@@ -61,8 +62,11 @@ fn condition_row(condition: &Condition) -> DataRow {
         (
             ID_COLUMN.to_string(),
             Value::String(
-                crate::EntityUri::condition(&condition.subject, condition.reason.condition_kind())
-                    .to_string(),
+                holon_api::EntityUri::condition(
+                    &condition.subject,
+                    condition.reason.condition_kind(),
+                )
+                .to_string(),
             ),
         ),
         (

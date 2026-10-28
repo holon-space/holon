@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use holon::storage::turso::DbHandle;
 use holon::storage::turso::TursoBackend;
-use holon_api::condition_bus::ConditionBus;
+use holon_conditions::condition_bus::ConditionBus;
 use holon_loro::device_key_store::load_or_create_device_key;
 use holon_loro::iroh_advertiser::IrohAdvertiser;
 use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;

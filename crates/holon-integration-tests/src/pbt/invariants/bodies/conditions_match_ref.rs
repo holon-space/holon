@@ -138,7 +138,7 @@ mod tests {
     use crate::pbt::conditions_state::ConditionsRefState;
 
     /// The stable kind `read_only_format_gate` discloses on a refused write.
-    const KIND: &str = holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT;
+    const KIND: &str = holon_conditions::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT;
     /// What `AttemptReadOnlyEdit` pins in the model: a BARE FILE NAME.
     const PINNED_NAME: &str = "keystone-recipe.cook";
     /// The temp-vault path the gate raises for the pinned file.

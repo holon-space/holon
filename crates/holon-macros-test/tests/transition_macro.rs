@@ -10,16 +10,6 @@ use std::time::Duration;
 
 use holon_api::TypeHint;
 use holon_api::Value;
-use holon_api::user_transition::ArcKind;
-use holon_api::user_transition::AskDecl;
-use holon_api::user_transition::BodyDecl;
-use holon_api::user_transition::HlArc;
-use holon_api::user_transition::NativeRef;
-use holon_api::user_transition::PlaceName;
-use holon_api::user_transition::TimerDecl;
-use holon_api::user_transition::TimerKind;
-use holon_api::user_transition::TransitionDescriptor;
-use holon_api::user_transition::TransitionName;
 use holon_macros::input_type;
 use holon_macros::place;
 use holon_macros::transition;
@@ -39,6 +29,16 @@ use holon_net::exec::Subject;
 use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
 use holon_net::uft::NativeBody;
+use holon_transition_contract::ArcKind;
+use holon_transition_contract::AskDecl;
+use holon_transition_contract::BodyDecl;
+use holon_transition_contract::HlArc;
+use holon_transition_contract::NativeRef;
+use holon_transition_contract::PlaceName;
+use holon_transition_contract::TimerDecl;
+use holon_transition_contract::TimerKind;
+use holon_transition_contract::TransitionDescriptor;
+use holon_transition_contract::TransitionName;
 use proptest::prelude::*;
 
 #[place]

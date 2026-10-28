@@ -55,7 +55,7 @@ async fn boot_with_crdt(dir: &std::path::Path, db_file: &str, crdt_enabled: bool
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())
@@ -138,7 +138,7 @@ async fn names(booted: &Booted, sql: &str) -> Vec<String> {
 fn raised_kinds(booted: &Booted) -> Vec<String> {
     booted
         .injector
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .subscribe()
         .current
         .iter()
@@ -176,7 +176,7 @@ async fn a_database_the_engine_cannot_open_is_moved_aside_and_disclosed() {
 
     let current = booted
         .injector
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .subscribe()
         .current;
     let moved = current
@@ -191,10 +191,13 @@ async fn a_database_the_engine_cannot_open_is_moved_aside_and_disclosed() {
     let profile = moved.reason.profile();
     assert_ne!(
         profile.severity(),
-        holon_api::ConditionSeverity::Info,
+        holon_conditions::ConditionSeverity::Info,
         "the move must not be an info-level notice"
     );
-    assert_eq!(profile.all_clear(), holon_api::AllClear::UntilRestart);
+    assert_eq!(
+        profile.all_clear(),
+        holon_conditions::AllClear::UntilRestart
+    );
     let detail = moved.reason.detail(&moved.subject);
     let rendered = format!("{} {}", detail.headline, detail.body.join(" | "));
     for needle in [
@@ -273,7 +276,7 @@ async fn an_upgrade_builds_the_same_views_as_a_fresh_boot() {
     );
     let current = upgraded
         .injector
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .subscribe()
         .current;
     let dropped = current
@@ -353,7 +356,7 @@ async fn a_damaged_write_ahead_log_is_moved_aside_and_disclosed() {
 
     let current = booted
         .injector
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .subscribe()
         .current;
     let moved = current
@@ -405,7 +408,7 @@ async fn a_damaged_coordination_file_is_moved_aside_and_disclosed() {
 
     let current = booted
         .injector
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .subscribe()
         .current;
     let moved = current
@@ -500,7 +503,7 @@ async fn a_boot_that_waited_for_the_lock_discloses_the_wait_to_the_first_window(
     // snapshot the bus replays to a late subscriber.
     let current = booted
         .injector
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .subscribe()
         .current;
     let waited = current
@@ -515,12 +518,12 @@ async fn a_boot_that_waited_for_the_lock_discloses_the_wait_to_the_first_window(
     let profile = waited.reason.profile();
     assert_eq!(
         profile.all_clear(),
-        holon_api::AllClear::UntilRestart,
+        holon_conditions::AllClear::UntilRestart,
         "the wait is a one-shot notice about this boot"
     );
     assert_ne!(
         profile.severity(),
-        holon_api::ConditionSeverity::Info,
+        holon_conditions::ConditionSeverity::Info,
         "a boot the user had to wait through is not an info-level notice"
     );
     let detail = waited.reason.detail(&waited.subject);
@@ -554,10 +557,10 @@ fn database_held_text(booted: &Booted) -> Option<String> {
     condition(booted, "database-held").map(|(_, text)| text)
 }
 
-fn condition(booted: &Booted, kind: &str) -> Option<(holon_api::ConditionSeverity, String)> {
+fn condition(booted: &Booted, kind: &str) -> Option<(holon_conditions::ConditionSeverity, String)> {
     booted
         .injector
-        .resolve::<Arc<holon_api::ConditionBus>>()
+        .resolve::<Arc<holon_conditions::ConditionBus>>()
         .current()
         .into_iter()
         .find(|c| c.condition_key().kind == kind)
@@ -674,7 +677,11 @@ async fn a_held_database_whose_probe_fails_says_the_watch_stopped_and_why() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     };
-    assert_eq!(severity, holon_api::ConditionSeverity::Error, "{text}");
+    assert_eq!(
+        severity,
+        holon_conditions::ConditionSeverity::Error,
+        "{text}"
+    );
     assert!(
         text.contains("holon stopped watching the database")
             && text.contains("restart holon to retry")

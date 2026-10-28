@@ -244,7 +244,7 @@ async fn loro_ui_row_matches_the_sql_block_row() {
         source.clone(),
         holon_profiles::create_default_registry().expect("default TypeRegistry"),
         &shutdown,
-        Arc::new(holon_api::ConditionBus::new()),
+        Arc::new(holon_conditions::ConditionBus::new()),
     );
     shutdown
         .shutdown(DEFAULT_SHUTDOWN_TIMEOUT)
