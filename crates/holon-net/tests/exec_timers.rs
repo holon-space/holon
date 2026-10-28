@@ -52,6 +52,7 @@ fn net() -> Spec {
             .reads("Want")
             .inhibits("TursoReady")
             .inhibits("TursoDown")
+            .inhibits("LoroReady")
             .retry(Duration::from_secs(2), MAX_ATTEMPTS)
             .run_timer(Duration::from_secs(20))
             .abandon(Duration::from_secs(3))
@@ -75,6 +76,8 @@ enum Op {
     Done,
     FailRetryable,
     Unknown,
+    /// A new `Want` url: new input during a pending backoff fires at once.
+    NewUrl(u8),
 }
 
 struct Ref;
@@ -93,6 +96,7 @@ impl ReferenceStateMachine for Ref {
             Just(Op::Done),
             Just(Op::FailRetryable),
             Just(Op::Unknown),
+            (0u8..3).prop_map(Op::NewUrl),
         ]
         .boxed()
     }
@@ -127,6 +131,11 @@ impl StateMachineTest for Test {
             Op::Unknown => {
                 d.complete_oldest(|_| EffectResult::Unknown(Cause::definite("connection reset")))
             }
+            Op::NewUrl(n) => d.write(
+                "Want",
+                APP,
+                content(&[("url", text(&format!("libsql://{n}")))]),
+            ),
         }
         .expect("the net quiesces");
         d

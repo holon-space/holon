@@ -274,9 +274,17 @@ pub fn unsettled(exec: &Executor) -> Vec<String> {
 /// Each document whose last catch-up failed on a disk that did not take it,
 /// as `<doc> (<cause>)`: its file is behind the store.
 pub fn failed_writebacks(exec: &Executor) -> Vec<String> {
-    exec.marks()
-        .filter(|(t, _, mark)| CATCH_UP.contains(t) && mark.cause.retryable)
-        .map(|(_, doc, mark)| format!("{doc} ({})", mark.cause.text))
+    let marked = exec
+        .marks()
+        .filter(|(_, _, mark)| mark.cause.retryable)
+        .map(|(t, doc, mark)| (t, doc, &mark.cause));
+    let retrying = exec
+        .retrying()
+        .filter(|(t, doc, _)| exec.mark(t, doc).is_none());
+    marked
+        .chain(retrying)
+        .filter(|(t, _, _)| CATCH_UP.contains(t))
+        .map(|(_, doc, cause)| format!("{doc} ({})", cause.text))
         .collect()
 }
 
@@ -342,8 +350,12 @@ mod tests {
     }
 
     fn seeded() -> Net {
+        seeded_with(CATCH_UP_BACKOFF)
+    }
+
+    fn seeded_with(backoff: Duration) -> Net {
         let mut net = Net {
-            exec: Executor::new(net()).expect("the write-back net loads"),
+            exec: Executor::new(net_with_backoff(backoff)).expect("the write-back net loads"),
             pending: Vec::new(),
             now: Duration::ZERO,
         };
@@ -474,6 +486,67 @@ mod tests {
         let retry = one(&mut exec, 1 + backoff);
         assert_eq!(retry.len(), 1);
         assert_eq!(&*retry[0].transition, CATCH_UP_WRITE);
+    }
+
+    /// A shutdown that reads the failed list while a retry runs still finds
+    /// the document whose write has not landed.
+    #[test]
+    fn a_write_whose_retry_is_running_is_still_named_failed() {
+        let mut exec = seeded();
+        exec.write(AUTHORITY, DOC, content([("hash", "a2")]));
+        let reqs = one(&mut exec, 0);
+        exec.complete(
+            reqs[0].attempt,
+            EffectResult::Failed(holon_net::exec::Cause::retryable("disk full")),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        let retry = one(&mut exec, 1 + CATCH_UP_BACKOFF.as_millis() as u64);
+        assert_eq!(retry.len(), 1, "the retry is running");
+        assert_eq!(
+            failed_writebacks(&exec),
+            vec!["doc:a (disk full)".to_string()]
+        );
+    }
+
+    /// An ingest that failed on a long backoff, as each test below starts.
+    fn failed_ingest() -> Net {
+        let mut exec = seeded_with(Duration::from_secs(60));
+        exec.write(ON_DISK, DOC, content([("hash", "h2")]));
+        let reqs = one(&mut exec, 0);
+        assert_eq!(&*reqs[0].transition, CATCH_UP_INGEST);
+        exec.complete(
+            reqs[0].attempt,
+            EffectResult::Failed(holon_net::exec::Cause::retryable("store busy")),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        exec
+    }
+
+    /// Q6.a: new file content starts from zero tries, so it does not wait
+    /// for the backoff of an ingest that failed on older content.
+    #[test]
+    fn new_file_content_is_ingested_before_the_backoff_of_a_failed_ingest_ends() {
+        let mut exec = failed_ingest();
+        exec.write(ON_DISK, DOC, content([("hash", "h3")]));
+        let reqs = one(&mut exec, 2);
+        assert_eq!(reqs.len(), 1, "the new file content fires at once");
+        assert_eq!(&*reqs[0].transition, CATCH_UP_INGEST);
+        assert_eq!(field(&reqs[0].input, "disk"), "h3");
+    }
+
+    #[test]
+    fn the_same_file_content_waits_for_the_backoff_of_its_failed_ingest() {
+        let mut exec = failed_ingest();
+        exec.write(AUTHORITY, DOC, content([("hash", "a1")]));
+        assert!(
+            one(&mut exec, 59_000).is_empty(),
+            "no retry before the backoff"
+        );
+        let retry = one(&mut exec, 60_001);
+        assert_eq!(retry.len(), 1, "the retry fires when the backoff ends");
+        assert_eq!(field(&retry[0].input, "disk"), "h2");
     }
 
     /// A write the disk does not take keeps its retry pending; a new file

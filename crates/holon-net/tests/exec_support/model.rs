@@ -857,42 +857,51 @@ impl Model {
         if in_flight {
             return Err(WhyNot::InFlight);
         }
-        if let Some(due) = self.runs.get(&key(&t.name, s)).and_then(|r| r.retry_due) {
+        let answered = self.answered_of(&t.name);
+        let bound = (|| {
+            let present = |p: &String| self.content(p, s).is_some();
+            if let Some(p) = t.consumes.iter().chain(&t.reads).find(|p| !present(p)) {
+                return Err(WhyNot::Needs {
+                    place: Place::new(p),
+                    held_by: self.holder(p, s),
+                });
+            }
+            if let Some(p) = t
+                .inhibits
+                .iter()
+                .find(|p| self.executor_place_held(p, s).unwrap_or_else(|| present(p)))
+            {
+                return Err(WhyNot::Inhibited(Place::new(p)));
+            }
+            let mut trace = Trace::default();
+            for p in t.consumes.iter().chain(&t.reads).chain(&t.inhibits) {
+                self.row(&mut trace, p, s);
+            }
+            if let Some(p) = &answered {
+                let answer = self.answered_field(p, s, ANSWER_ID_KEY);
+                self.row(&mut trace, p, s)
+                    .fields
+                    .insert(ANSWER_ID_KEY.to_string(), Some(answer));
+            }
+            let mut reader = Reader {
+                model: self,
+                trace: &mut trace,
+            };
+            let input = (t.bind.model)(&mut reader, &Subject::new(s)).ok_or(WhyNot::Guard)?;
+            Ok((trace, input))
+        })();
+        let mark = self.marks.get(&key(&t.name, s));
+        let same_input =
+            matches!((&bound, mark), (Ok((trace, _)), Some((seen, _))) if *seen == trace.seen());
+        if let Some(due) = self.runs.get(&key(&t.name, s)).and_then(|r| r.retry_due)
+            && (bound.is_err() || same_input || mark.is_none())
+        {
             return Err(WhyNot::RetryPending { due });
         }
-        let present = |p: &String| self.content(p, s).is_some();
-        if let Some(p) = t.consumes.iter().chain(&t.reads).find(|p| !present(p)) {
-            return Err(WhyNot::Needs {
-                place: Place::new(p),
-                held_by: self.holder(p, s),
-            });
-        }
-        if let Some(p) = t
-            .inhibits
-            .iter()
-            .find(|p| self.executor_place_held(p, s).unwrap_or_else(|| present(p)))
-        {
-            return Err(WhyNot::Inhibited(Place::new(p)));
-        }
-        let mut trace = Trace::default();
-        for p in t.consumes.iter().chain(&t.reads).chain(&t.inhibits) {
-            self.row(&mut trace, p, s);
-        }
-        let answered = self.answered_of(&t.name);
-        if let Some(p) = &answered {
-            let answer = self.answered_field(p, s, ANSWER_ID_KEY);
-            self.row(&mut trace, p, s)
-                .fields
-                .insert(ANSWER_ID_KEY.to_string(), Some(answer));
-        }
-        let mut reader = Reader {
-            model: self,
-            trace: &mut trace,
-        };
-        let mut input = (t.bind.model)(&mut reader, &Subject::new(s)).ok_or(WhyNot::Guard)?;
+        let (trace, mut input) = bound?;
         if t.trigger == Trigger::Auto
-            && let Some((seen, cause)) = self.marks.get(&key(&t.name, s))
-            && *seen == trace.seen()
+            && same_input
+            && let Some((_, cause)) = mark
         {
             return Err(WhyNot::FailedOnThisInput(cause.clone()));
         }
@@ -1173,6 +1182,13 @@ impl Model {
                 (p.clone(), c.expect("decide checked every consumed token"))
             })
             .collect();
+        if self
+            .runs
+            .get(&key(&t.name, s))
+            .is_some_and(|r| r.retry_due.is_some())
+        {
+            self.runs.remove(&key(&t.name, s));
+        }
         self.runs
             .entry(key(&t.name, s))
             .or_insert(Run {

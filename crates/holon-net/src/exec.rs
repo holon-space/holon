@@ -1310,6 +1310,8 @@ fn outcome(attempts: &BTreeMap<AttemptId, Seen>) -> Outcome {
 struct Run {
     started: Duration,
     attempts: u32,
+    /// The cause of the last failed attempt while a retry is due or runs.
+    failed: Option<Cause>,
 }
 
 /// A condition the net discloses for a subject (NET-rev1 termination):
@@ -1611,6 +1613,15 @@ impl Executor {
 
     pub fn marks(&self) -> impl Iterator<Item = (&str, &Subject, &Mark)> {
         self.marks.iter().map(|((t, s), m)| (&**t, s, m))
+    }
+
+    /// The retries running now, with the cause of the attempt they retry: the
+    /// failure holds until the retry's outcome is known.
+    pub fn retrying(&self) -> impl Iterator<Item = (&str, &Subject, &Cause)> {
+        self.in_flight.values().filter_map(|a| {
+            let run = self.runs.get(&(a.transition.clone(), a.subject.clone()))?;
+            Some((&*a.transition, &a.subject, run.failed.as_ref()?))
+        })
     }
 
     /// The occurrences with an attempt running now.
@@ -2481,9 +2492,37 @@ impl Executor {
         if self.tokens.token(&t.running(), s).is_some() {
             return Err(WhyNot::InFlight);
         }
-        if let Some(due) = self.retry_due(&t.name, s) {
+        let bound = self.bind_input(t, s, trace);
+        let mark = self.marks.get(&(t.name.clone(), s.clone()));
+        let same_input = bound.is_ok() && mark.is_some_and(|m| m.key == self.key(trace));
+        // ADR 0032 Q6.a: new input starts from zero tries, not after the backoff.
+        if let Some(due) = self.retry_due(&t.name, s)
+            && (bound.is_err() || same_input || mark.is_none())
+        {
             return Err(WhyNot::RetryPending { due });
         }
+        let mut input = bound?;
+        if t.trigger == Trigger::Auto
+            && same_input
+            && let Some(mark) = mark
+        {
+            return Err(WhyNot::FailedOnThisInput(mark.cause.clone()));
+        }
+        if let Some(p) = &self.net.answered_of(&t.name) {
+            let value = self.answered_field(p, s, ANSWER_INPUT_KEY);
+            merge_value(&mut input, ANSWER_INPUT_KEY, value, &t.name);
+        }
+        Ok(input)
+    }
+
+    /// The bound input of `t` for `s` from its arcs, its answer and its bind,
+    /// with every row read in `trace`.
+    fn bind_input(
+        &self,
+        t: &TransitionDef,
+        s: &Subject,
+        trace: &mut Trace,
+    ) -> Result<Content, WhyNot> {
         let present = |p: &Place| self.tokens.token(p, s).is_some();
         if let Some(p) = t.consumes.iter().find(|p| !self.available(p, s)) {
             return Err(WhyNot::Needs {
@@ -2513,18 +2552,7 @@ impl Executor {
                 .fields
                 .insert(ANSWER_ID_KEY.to_string(), Some(answer));
         }
-        let mut input = (t.bind)(&mut self.reader(trace), s).ok_or(WhyNot::Guard)?;
-        if t.trigger == Trigger::Auto
-            && let Some(mark) = self.marks.get(&(t.name.clone(), s.clone()))
-            && mark.key == self.key(trace)
-        {
-            return Err(WhyNot::FailedOnThisInput(mark.cause.clone()));
-        }
-        if let Some(p) = &answered {
-            let value = self.answered_field(p, s, ANSWER_INPUT_KEY);
-            merge_value(&mut input, ANSWER_INPUT_KEY, value, &t.name);
-        }
-        Ok(input)
+        (t.bind)(&mut self.reader(trace), s).ok_or(WhyNot::Guard)
     }
 
     /// A field of the `Answered` token a work firing consumes.
@@ -2581,11 +2609,16 @@ impl Executor {
             self.tokens.lend(&p);
             taken.push((p, token));
         }
+        let key = (transition.clone(), subject.clone());
+        if self.retry_due(transition, &subject).is_some() {
+            self.end_run(&key);
+        }
         self.runs
-            .entry((transition.clone(), subject.clone()))
+            .entry(key)
             .or_insert(Run {
                 started: now,
                 attempts: 0,
+                failed: None,
             })
             .attempts += 1;
         self.occurrences.insert(occurrence.clone(), None);
@@ -3008,13 +3041,14 @@ impl Executor {
         let (retry, on_failure) = (t.retry, t.on_failure.clone());
         let key = (transition.clone(), subject.clone());
         let unbounded = self.twin(Twin::NoCountBound);
-        let Some(run) = self.runs.get(&key) else {
+        let Some(run) = self.runs.get_mut(&key) else {
             return;
         };
         if cause.retryable
             && let Some(retry) = retry
             && (unbounded || run.attempts < retry.max_attempts)
         {
+            run.failed = Some(cause.clone());
             self.set_retry_due(&key, Some(now + retry.backoff));
             return;
         }
