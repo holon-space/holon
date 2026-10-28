@@ -363,6 +363,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `crash-restore-window-not-disclosed`
 - `create-sql-read-repeat-budget`
 - `deletebackward-sql-reads-budget`
+- `deleted-file-recreated-by-stale-page-mirror`
+- `deleted-page-rewritten-from-stale-page-mirror-pin`
 - `dense-patch-cross-document-session-temp-dir-gone`
 - `dense-patch-cross-document-write-back-late-load`
 - `dense-patch-org-file-misses-agent-text`
