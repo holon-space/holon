@@ -54,12 +54,12 @@ extra_nextest() {
 }
 PBT_FEATURES="holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt"
 
-# Balanced by step time, longest track first; the first track runs in the
+# Balanced by step time; the first track runs in the
 # gate's own slot. A step is <n>:<name>, its number in gate-steps.jsonl.
 TRACKS=(
-  "13:hand-authored"
-  "11:keystone-smoke 19:extra-nextest 12:loro-suite 14:projector-lag-lock 15:windowed-gate"
-  "17:timing-gate-build 7:gate-arch 3:check-release-shape 4:check-frontend-wasm 5:check-dioxus-web-wasm 6:check-worker-wasm 8:arch-validate 9:featuremap 10:analyze-arch 18:guests-verify 22:keystone-tour"
+  "13:hand-authored 17:timing-gate-build 7:gate-arch 14:projector-lag-lock 5:check-dioxus-web-wasm 6:check-worker-wasm 8:arch-validate 9:featuremap 18:guests-verify"
+  "19:extra-nextest 3:check-release-shape 4:check-frontend-wasm 12:loro-suite"
+  "11:keystone-smoke 15:windowed-gate 10:analyze-arch 22:keystone-tour"
 )
 read -ra STEPS <<<"${TRACKS[*]}"
 step_file() { echo "target/gate-logs/$GATE-step-$1.$2"; }

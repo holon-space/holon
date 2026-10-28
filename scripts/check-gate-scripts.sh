@@ -91,7 +91,7 @@ for l in open(sys.argv[1]):
     r = json.loads(l)
     if r["gate"] == sys.argv[2]: print(r["step"], r["name"], r["exit"])' "$home/.cache/holon-build/gate-steps.jsonl" "$1" | sort -n
 }
-steps="1 20 2 13 11 19 12 14 15 17 7 3 4 5 6 8 9 10 18 22"
+steps="1 20 2 13 17 7 14 5 6 8 9 18 19 3 4 12 11 15 10 22"
 sorted_steps=$(tr ' ' '\n' <<<"$steps" | sort -n | tr '\n' ' ')
 in_stubs() { env HOME="$home" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
 
