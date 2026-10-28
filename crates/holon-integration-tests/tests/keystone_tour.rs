@@ -5,13 +5,13 @@
 //! A random case draws a few transitions, so whether a landing exercises a
 //! given kind depends on the draw. The tour replays [`TOUR`] through the exact
 //! keystone harness (`ComposedSut::<WideE2E>` over the `full_headless`
-//! wiring), runs the whole catalog after every step, and judges every
-//! invariant any step names in `engages` plus `hand_authored::LOCK_FLOOR`. The
-//! invariants a step names must give a non-`Skipped` verdict at that step, so a
-//! step that stops reaching the state they judge is red rather than a vacuous
-//! green. A step whose verdict a `known-red` row of
-//! `docs/Testing/KeystoneKnownReds.md` matches is a pass-with-note and the tour
-//! goes on; any other red fails it.
+//! wiring). After each step it runs and judges only that step's scope
+//! ([`step_scope`]); after the last step one sweep runs and judges every
+//! invariant the booted wiring selects. The invariants a step names must give
+//! a non-`Skipped` verdict at that step, so a step that stops reaching the
+//! state they judge is red rather than a vacuous green. A verdict a
+//! `known-red` row of `docs/Testing/KeystoneKnownReds.md` matches is a
+//! pass-with-note and the tour goes on; any other red fails it.
 //!
 //! [`the_tour_covers_the_alphabet`] keeps the tour honest: every kind of
 //! `E2ETransition::VARIANT_NAMES` is a tour step or a row of [`NOT_TOURED`].
@@ -24,8 +24,10 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
+use holon_integration_tests::pbt::composed::harness::divergence_site;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
+use holon_integration_tests::pbt::conditions_state::Panicked;
 use holon_integration_tests::pbt::hand_authored::CheckScope;
 use holon_integration_tests::pbt::hand_authored::LOCK_FLOOR;
 use holon_integration_tests::pbt::known_reds::KnownReds;
@@ -253,16 +255,23 @@ fn a_step_whose_invariants_all_skipped_is_unengaged() {
     assert!(unengaged(&engages, &BTreeSet::from(["inv-a", "inv-b"])).is_empty());
 }
 
-/// One scope for every step: a reboot asserts that the judged set survives it.
-fn scope_of(tour: &[TourStep]) -> CheckScope {
+/// Builds the views the next transition reads, as a frontend that shows them
+/// keeps them built: `inv-sql-budget` measures the next step's window without
+/// those builds in it.
+const RENDER_WARM: &str = "inv-viewmodel-snapshot";
+
+/// What a step runs and judges: the invariants it names, [`LOCK_FLOOR`] and
+/// [`RENDER_WARM`].
+fn step_scope(engages: &[String]) -> CheckScope {
     CheckScope {
-        judged: tour
+        judged: engages
             .iter()
-            .flat_map(|step| step.engages.iter().cloned())
-            .chain(LOCK_FLOOR.iter().map(|id| id.to_string()))
+            .map(String::as_str)
+            .chain(LOCK_FLOOR.iter().copied())
+            .chain([RENDER_WARM])
+            .map(str::to_string)
             .collect(),
-        // `inv-sql-budget` judges a step only after a whole-catalog sweep of the previous state.
-        runs_whole_catalog: true,
+        runs_whole_catalog: false,
     }
 }
 
@@ -274,12 +283,42 @@ fn keystone_tour() {
     }
     let tour = load_tour(&tour_path());
     let total = tour.len();
-    let scope = scope_of(&tour);
     let mut ref_state = wide_e2e_ref();
     let known_reds = KnownReds::load().expect("known-reds registry");
     let mut known_red_hits = Vec::new();
+    // `Err` carries a known red's divergence panic: the check panics last, so
+    // the SUT state stays sound and the tour goes on from it.
+    let mut judge = |at: &str, check: &mut dyn FnMut() -> BTreeSet<&'static str>| {
+        let payload = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)) {
+            Ok(engaged) => return Ok(engaged),
+            Err(payload) => payload,
+        };
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_default();
+        let Some(key) = known_reds.classify(&message) else {
+            std::panic::resume_unwind(payload)
+        };
+        known_red_hits.push(format!("{at}: `{key}`"));
+        eprintln!("[keystone tour] {at} hit known red `{key}`");
+        Err(Panicked {
+            location: divergence_site(),
+            message,
+        })
+    };
     let mut sut = ComposedSut::<WideE2E>::init_test(&ref_state);
-    sut.check_scoped(&ref_state, &scope);
+    // Also builds the views the first step reads.
+    let end_scope = CheckScope {
+        judged: sut
+            .run_report_now(&ref_state)
+            .ran_ids()
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        runs_whole_catalog: true,
+    };
     for (
         ix,
         TourStep {
@@ -289,54 +328,37 @@ fn keystone_tour() {
     ) in tour.into_iter().enumerate()
     {
         let kind = transition.variant_name();
+        let at = format!("step {}/{total} ({kind})", ix + 1);
         eprintln!("\nApplying transition {}/{total}: {transition:?}", ix + 1);
         assert!(
             Machine::preconditions(&ref_state, &transition),
-            "tour step {}/{total} ({kind}) fails its precondition in the state the tour reaches",
-            ix + 1
+            "tour {at} fails its precondition in the state the tour reaches"
         );
         ref_state = Machine::apply(ref_state, &transition);
         sut = ComposedSut::<WideE2E>::apply(sut, &ref_state, transition);
-        // The verdict panic is the check's last statement, so the SUT state
-        // stays sound past a known red and the tour goes on from it.
-        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sut.check_scoped(&ref_state, &scope)
-        }));
-        let engaged = match checked {
+        let scope = step_scope(&engages);
+        let engaged = match judge(&at, &mut || sut.check_scoped(&ref_state, &scope)) {
             Ok(engaged) => engaged,
-            Err(payload) => {
-                let message = payload
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
-                    .unwrap_or_default();
-                let Some(key) = known_reds.classify(&message) else {
-                    std::panic::resume_unwind(payload)
-                };
-                known_red_hits.push(format!("step {}/{total} ({kind}): `{key}`", ix + 1));
-                eprintln!(
-                    "[keystone tour] step {}/{total} {kind} hit known red `{key}`; its engage \
-                     check is not judged",
-                    ix + 1
-                );
+            Err(panicked) => {
+                ref_state.conditions.task_panicked(panicked);
+                eprintln!("[keystone tour] {at}: its engage check is not judged");
                 continue;
             }
         };
         let missing = unengaged(&engages, &engaged);
         assert!(
             missing.is_empty(),
-            "tour step {}/{total} ({kind}) engaged {} of its {} invariant(s): {missing:?} gave \
-             only `Skipped` verdicts, so the step no longer reaches the state they judge",
-            ix + 1,
+            "tour {at} engaged {} of its {} invariant(s): {missing:?} gave only `Skipped` \
+             verdicts, so the step no longer reaches the state they judge",
             engages.len() - missing.len(),
             engages.len(),
         );
-        eprintln!(
-            "[keystone tour] step {}/{total} {kind} engaged {engages:?}",
-            ix + 1
-        );
+        eprintln!("[keystone tour] {at} engaged {engages:?}");
     }
-    sut.teardown_scoped(ref_state, &scope);
+    let _ = judge("the end sweep", &mut || {
+        sut.check_scoped(&ref_state, &end_scope)
+    });
+    sut.teardown_scoped(ref_state, &end_scope);
     eprintln!(
         "[keystone tour] {} known red hit(s) in {} (pass-with-note): {known_red_hits:#?}",
         known_red_hits.len(),

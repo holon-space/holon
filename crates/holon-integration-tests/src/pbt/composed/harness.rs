@@ -1536,7 +1536,11 @@ impl<S: ComposedSlice> ComposedSut<S> {
         if sut.reboot_pending.replace(false)
             && let Some(before) = sut.last_selected.borrow().as_ref()
         {
-            let lost: Vec<&&'static str> = before.difference(&selected).collect();
+            // A scoped check reports only its own ids, so only an id this check
+            // deselects is lost; one it does not judge is not.
+            let deselected: BTreeSet<&'static str> =
+                report.deselected.iter().map(|id| id.0).collect();
+            let lost: Vec<&&'static str> = before.intersection(&deselected).collect();
             assert!(
                 lost.is_empty(),
                 "[reboot] the Reboot deselected {lost:?}: every invariant selected before a \
@@ -1604,9 +1608,9 @@ impl<S: ComposedSlice> ComposedSut<S> {
             let authority = crate::pbt::composed::wide_e2e::authority_routing_disclosure(
                 &ref_state.harness.wiring,
             );
-            panic!(
+            divergence_panic(Some(format!(
                 "reconciled composed sequence diverged from the oracle: {hard:?}\n{authority}\n{verdict}"
-            );
+            )));
         }
         Some(report)
     }
@@ -2152,6 +2156,27 @@ fn pair_synthetic_creates(
     );
     failed_synthetics.extend(synthetic);
     Vec::new()
+}
+
+/// Where a check panics on a divergence. The process's panic hook records that
+/// panic as a crash, so a run that catches it and goes on models it there.
+pub fn divergence_site() -> String {
+    divergence_panic(None)
+}
+
+fn divergence_panic(message: Option<String>) -> String {
+    divergence_panic_site(message)
+}
+
+/// `#[track_caller]`, so its panic and its `Location::caller` both report the
+/// one call in [`divergence_panic`].
+#[track_caller]
+fn divergence_panic_site(message: Option<String>) -> String {
+    if let Some(message) = message {
+        panic!("{message}");
+    }
+    let site = std::panic::Location::caller();
+    format!("{}:{}:{}", site.file(), site.line(), site.column())
 }
 
 #[cfg(test)]
