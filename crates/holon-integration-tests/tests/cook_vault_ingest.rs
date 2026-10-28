@@ -346,29 +346,44 @@ async fn rows(
         .unwrap_or_else(|e| panic!("query {sql:?}: {e:#}"))
 }
 
-/// Poll `sql` until it returns `expected` rows, or fail naming what it saw.
+/// Poll `sql` until its rows satisfy `done`, or fail naming what it saw last.
 /// The ingest write and the matview read are separate transactions, so a bare
 /// read races the projection rather than measuring it.
+async fn rows_until(
+    env: &holon_integration_tests::TestEnvironment,
+    sql: &str,
+    what: &str,
+    done: impl Fn(&[holon_api::widget_spec::DataRow]) -> bool,
+) -> Vec<holon_api::widget_spec::DataRow> {
+    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+    loop {
+        let got = rows(env, sql).await;
+        if done(&got) {
+            return got;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("{what}: the rows never got there, last read {got:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Poll `sql` until it returns `expected` rows. Only for a read that no
+/// replace can race: a re-ingest passes through row sets of other counts AND of
+/// the right count with old values, so a read after one waits on the values.
 async fn rows_eventually(
     env: &holon_integration_tests::TestEnvironment,
     sql: &str,
     expected: usize,
     what: &str,
 ) -> Vec<holon_api::widget_spec::DataRow> {
-    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
-    loop {
-        let got = rows(env, sql).await;
-        if got.len() == expected {
-            return got;
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "{what}: expected {expected} rows, got {} — {got:?}",
-                got.len()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    rows_until(
+        env,
+        sql,
+        &format!("{what} (expected {expected} rows)"),
+        |got| got.len() == expected,
+    )
+    .await
 }
 
 /// Red 3 — the ingest leg. A `.cook` file in the vault must produce `recipe`
@@ -490,26 +505,36 @@ fn a_vault_recipe_produces_typed_rows_and_answers_cookable_now() {
 
 /// `(id, raw_name)` for every ingredient use, name-ordered — the identity the
 /// re-ingest rungs below compare across edits.
+fn identities(rows: &[holon_api::widget_spec::DataRow]) -> Vec<(String, String)> {
+    rows.iter()
+        .map(|r| {
+            (
+                text(r, "id").expect("row has an id").to_string(),
+                text(r, "raw_name").expect("row has a raw_name").to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The ingredient identities, once they satisfy `done`.
 async fn use_identities(
     env: &holon_integration_tests::TestEnvironment,
-    expected: usize,
     what: &str,
+    done: impl Fn(&[(String, String)]) -> bool,
 ) -> Vec<(String, String)> {
-    rows_eventually(
-        env,
-        "SELECT id, raw_name FROM ingredient_use ORDER BY raw_name",
-        expected,
-        what,
-    )
-    .await
-    .iter()
-    .map(|r| {
-        (
-            text(r, "id").expect("row has an id").to_string(),
-            text(r, "raw_name").expect("row has a raw_name").to_string(),
+    identities(
+        &rows_until(
+            env,
+            "SELECT id, raw_name FROM ingredient_use ORDER BY raw_name",
+            what,
+            |got| done(&identities(got)),
         )
-    })
-    .collect()
+        .await,
+    )
+}
+
+fn use_names(ids: &[(String, String)]) -> Vec<&str> {
+    ids.iter().map(|(_, n)| n.as_str()).collect()
 }
 
 /// Rewrite the recipe on disk and wait for the vault to settle. The content
@@ -539,20 +564,20 @@ fn re_ingesting_a_recipe_replaces_its_rows_and_keeps_ingredient_ids() {
             .await
             .expect("a vault holding a `.cook` file must boot");
 
-        let first = use_identities(&env, 2, "the recipe's two ingredients").await;
-        assert_eq!(
-            first.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
-            vec!["eggs", "flour"]
-        );
+        let first = use_identities(&env, "the recipe's two ingredients", |ids| {
+            use_names(ids) == ["eggs", "flour"]
+        })
+        .await;
 
         // Prose-only edit — the bytes differ so the file genuinely re-ingests,
         // but the ingredients do not. Same rows, same ids, no duplicates.
         re_save(&env, PANCAKES_COOK_REWORDED).await;
-        let reworded = use_identities(&env, 2, "a prose-only edit must not duplicate rows").await;
-        assert_eq!(
-            reworded, first,
-            "a prose-only edit re-minted the ingredient rows"
-        );
+        use_identities(
+            &env,
+            "a prose-only edit must keep the ingredient rows and ids, without duplicates",
+            |ids| ids == first,
+        )
+        .await;
         rows_eventually(
             &env,
             "SELECT id FROM recipe",
@@ -566,14 +591,10 @@ fn re_ingesting_a_recipe_replaces_its_rows_and_keeps_ingredient_ids() {
         // re-point eggs' id at butter and flour's at eggs — silently, and
         // wrongly, for anything that held one.
         re_save(&env, PANCAKES_COOK_WITH_BUTTER).await;
-        let with_butter = use_identities(&env, 3, "the recipe's three ingredients").await;
-        assert_eq!(
-            with_butter
-                .iter()
-                .map(|(_, n)| n.as_str())
-                .collect::<Vec<_>>(),
-            vec!["butter", "eggs", "flour"]
-        );
+        let with_butter = use_identities(&env, "the recipe's three ingredients", |ids| {
+            use_names(ids) == ["butter", "eggs", "flour"]
+        })
+        .await;
         for (id, name) in &first {
             assert!(
                 with_butter.contains(&(id.clone(), name.clone())),
@@ -584,19 +605,18 @@ fn re_ingesting_a_recipe_replaces_its_rows_and_keeps_ingredient_ids() {
 
         // A deletion: the eggs and the butter are gone, the flour is doubled.
         re_save(&env, PANCAKES_COOK_EDITED).await;
-        let after = rows_eventually(
+        let after = rows_until(
             &env,
             "SELECT id, raw_name, quantity FROM ingredient_use ORDER BY raw_name",
-            1,
-            "the deleted ingredients left ORPHAN rows — they would block this recipe forever",
+            "the edit must leave ONE flour row of 250 — orphan rows would block this recipe \
+             forever",
+            |got| {
+                got.len() == 1
+                    && text(&got[0], "raw_name") == Some("flour")
+                    && got[0].get("quantity").and_then(|v| v.as_f64()) == Some(250.0)
+            },
         )
         .await;
-        assert_eq!(text(&after[0], "raw_name"), Some("flour"));
-        assert_eq!(
-            after[0].get("quantity").and_then(|v| v.as_f64()),
-            Some(250.0),
-            "the edited quantity did not reach the row: {after:?}"
-        );
         let flour_id = first
             .iter()
             .find(|(_, n)| n == "flour")
