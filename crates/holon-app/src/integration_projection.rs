@@ -316,6 +316,12 @@ impl IntegrationStateProjector {
     }
 }
 
+/// The statement that records an integration's status. Its own text, so a
+/// per-interaction write budget can tell this background write from the
+/// interaction's own.
+pub const SET_INTEGRATION_STATUS_SQL: &str =
+    "UPDATE integration_state SET status = ? WHERE id = ? AND enabled = 1";
+
 /// Record the boot outcome of an integration the projector has already placed
 /// in the mirror.
 ///
@@ -329,7 +335,7 @@ pub async fn set_integration_status(
 ) -> anyhow::Result<()> {
     let updated = db
         .execute_values(
-            "UPDATE integration_state SET status = ? WHERE id = ? AND enabled = 1",
+            SET_INTEGRATION_STATUS_SQL,
             vec![
                 Value::String(status.label().to_string()),
                 Value::String(integration_row_id(provider)),

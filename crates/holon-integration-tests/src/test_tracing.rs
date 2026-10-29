@@ -897,11 +897,17 @@ impl SpanCollector {
         let is_hash_stamp = |s: &&SpanData| {
             sql_attr(s).is_some_and(|sql| sql.starts_with(holon_filesystem::RECORD_FILE_HASH_SQL))
         };
+        // The `execute` span records the statement with its literals erased.
+        let integration_status_sql = holon_turso::turso::redact_sql_for_logs(
+            holon_app::integration_projection::SET_INTEGRATION_STATUS_SQL,
+        );
+        let is_integration_status =
+            |s: &&SpanData| sql_attr(s).is_some_and(|sql| sql == integration_status_sql);
         let by_id = span_index(&spans);
         let writes = spans
             .iter()
             .filter(|s| s.name.as_ref() == "execute")
-            .filter(|s| !is_hash_stamp(s))
+            .filter(|s| !is_hash_stamp(s) && !is_integration_status(s))
             .map(|s| SqlWrite {
                 sql: sql_attr(s).expect("every `execute` span records its `sql` field"),
                 origin: origin_chain(s, &by_id),
@@ -911,6 +917,11 @@ impl SpanCollector {
             .iter()
             .filter(|s| s.name.as_ref() == "execute")
             .filter(is_hash_stamp)
+            .count();
+        let integration_status_write_count = spans
+            .iter()
+            .filter(|s| s.name.as_ref() == "execute")
+            .filter(is_integration_status)
             .count();
         let sql_ddl_count = spans
             .iter()
@@ -1001,6 +1012,7 @@ impl SpanCollector {
             sql_read_count,
             writes,
             hash_stamp_write_count,
+            integration_status_write_count,
             sql_ddl_count,
             max_query_duration,
             total_query_duration,
@@ -1219,12 +1231,17 @@ pub struct TransitionMetrics {
     /// SQL SELECT queries (`"query"` spans from turso.rs)
     pub sql_read_count: usize,
     /// SQL INSERT/UPDATE/DELETE (`"execute"` spans from turso.rs), without
-    /// [`Self::hash_stamp_write_count`]
+    /// [`Self::hash_stamp_write_count`] and
+    /// [`Self::integration_status_write_count`]
     pub writes: Vec<SqlWrite>,
     /// Writes of [`holon_filesystem::RECORD_FILE_HASH_SQL`]: the org sync
     /// records the hashes of earlier write-backs when it is idle, so these
     /// belong to no interaction in the window.
     pub hash_stamp_write_count: usize,
+    /// Writes of `SET_INTEGRATION_STATUS_SQL`: an integration's connect and
+    /// sync-health tasks record its status whenever they finish, so these
+    /// belong to no interaction in the window.
+    pub integration_status_write_count: usize,
     /// DDL statements (`"execute_ddl"` + `"execute_ddl_with_deps"`)
     pub sql_ddl_count: usize,
     /// Spans a periodic background task emitted in this window, excluded
@@ -2024,5 +2041,33 @@ mod capture_tests {
             1,
             "another test's transition reset must not clear this test's span window"
         );
+    }
+}
+
+#[cfg(test)]
+mod background_write_tests {
+    use super::*;
+
+    /// An integration's status is written by its connect and sync-health tasks,
+    /// whenever they finish, so it belongs to no transition's window.
+    #[test]
+    fn an_integration_status_write_is_not_the_windows_write() {
+        let collector = SpanCollector::global();
+        begin_test_scope();
+        tracing::info_span!(
+            "execute",
+            sql = %holon_turso::turso::redact_sql_for_logs(
+                holon_app::integration_projection::SET_INTEGRATION_STATUS_SQL
+            )
+        )
+        .in_scope(|| {});
+        tracing::info_span!("execute", sql = "UPDATE block SET content = ? WHERE id = ?")
+            .in_scope(|| {});
+
+        let metrics = collector.snapshot();
+
+        let writes: Vec<&str> = metrics.writes.iter().map(|w| w.sql.as_str()).collect();
+        assert_eq!(writes, ["UPDATE block SET content = ? WHERE id = ?"]);
+        assert_eq!(metrics.integration_status_write_count, 1);
     }
 }

@@ -277,6 +277,10 @@ impl MetricsSut {
             0 => String::new(),
             n => format!(" idle_hash_stamps={n}"),
         };
+        let stamp_summary = match metrics.integration_status_write_count {
+            0 => stamp_summary,
+            n => format!("{stamp_summary} integration_status_writes={n}"),
+        };
         let periodic_summary = match metrics.periodic_span_count {
             0 => String::new(),
             n => format!(" periodic_spans_excluded={n}"),
