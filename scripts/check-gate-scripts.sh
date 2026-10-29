@@ -57,11 +57,10 @@ echo "== a head rewritten locally since its push"
 rc=0; combine_in_repo "${heads##* }" >/dev/null || rc=$?
 expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 
-# `just` and `cargo` stubs append each call and the quiet marker's content to
-# $GATE_PROBE; `just timing-gate-build` prints $BUILD_OUT and `just $STUB_RED`
-# exits 1. HOME is a scratch
-# dir, so the hold's marker, lock, log and slot walk are scratch files and no
-# real build is lowered.
+# `just` and `cargo` stubs append each call, its HOLON_PBT_TIMING and the quiet
+# marker's content to $GATE_PROBE; `just timing-gate-build` prints $BUILD_OUT
+# and `just $STUB_RED` exits 1. HOME is a scratch dir, so the hold's marker,
+# lock, log and slot walk are scratch files and no real build is lowered.
 home="$scratch/home" stubs="$scratch/stubs" probe="$scratch/probe.log"
 orch="$home/.claude/skills/orchestrator/scripts"
 mkdir -p "$orch" "$home/.cache/holon-build" "$stubs"
@@ -77,7 +76,7 @@ chmod +x "$orch/with-build-slot.sh"
 for tool in just cargo; do
   cat > "$stubs/$tool" <<'EOF'
 #!/usr/bin/env bash
-echo "$(basename "$0") $* | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
+echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
 [ "$*" != "${STUB_RED:-}" ] || exit 1
 EOF
@@ -105,6 +104,11 @@ expect "logs the non-timing steps in order (got $order)" [ "$order" = "$steps " 
 expect "writes one gate-steps row per step" [ "$(rows_of g1 | cut -d' ' -f1 | tr '\n' ' ')" = "$sorted_steps" ]
 expect "never calls timing-gate" [ "$(grep -c '^just timing-gate |' "$probe")" = 0 ]
 expect "never takes the quiet hold" [ -z "$(grep -v ' | quiet=$' "$probe")" ]
+# The integrate run judges no duration, so every cargo call that runs tests
+# measures. fmt runs none; org_suite's exit status is discarded.
+expect "runs cargo test arms" grep -qE '^cargo (test|nextest) ' "$probe"
+unmeasured=$(grep -E '^cargo (test|nextest) ' "$probe" | grep -v ' | timing=measure | ' | grep -v 'org_suite' || true)
+expect "runs every cargo test arm with HOLON_PBT_TIMING=measure${unmeasured:+, not: $unmeasured}" [ -z "$unmeasured" ]
 expect "marks the target for the sweep" [ -f "$integ/target/.gc-mark" ]
 
 echo "== the integrate run with one red step after gate-compile"
