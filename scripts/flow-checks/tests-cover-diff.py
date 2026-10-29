@@ -5,10 +5,13 @@
 
 Run from the lane root. It runs `scripts/select-tests.py --base <commit>` and reads its `<step>: <args>` lines.
 The cited logs are the `target/...` `.log` and `.txt` paths between the summary's `How tested` and `Confidence` lines.
-A step ran when a cited log written by scripts/flow-checks/run-step.sh has the selected line as line 1 and `exit: 0`
-as its last line; the selector's disclosure steps (NOT_RUN_STEPS of select-tests.py) need no log.
-PASS (exit 0) when every selected step ran, each cited log holds for every step it names exactly the selected line,
-every backticked `<step>: <args>` span of the summary equals the selected line, and the selector printed no step twice.
+Of a cited log it reads only line 1 and the last line: a log written by scripts/flow-checks/run-step.sh has the step
+line as line 1 and `exit: <code>` as its last line, and the lines between are the step's own output.
+A step ran when a cited log has the selected line as line 1 and `exit: 0` as its last line; the selector's disclosure
+steps (NOT_RUN_STEPS of select-tests.py) need no log.
+PASS (exit 0) when every selected step ran, every cited log whose line 1 names a selected step has the selected line
+as line 1 and `exit: 0` as its last line, every backticked `<step>: <args>` span of the summary equals the selected
+line, and the selector printed no step twice.
 Lines compare with runs of whitespace collapsed. Every problem is one stderr line; it never runs tests.
 """
 import argparse
@@ -64,16 +67,16 @@ def check(selected_text, summary_text, logs, not_run):
     selected = step_lines(selected_text)
     ran = set()
     for path, text in sorted(logs.items()):
-        for step, held in sorted(step_lines(text).items()):
-            if step in selected and held != selected[step]:
-                bad.append(f"{path} holds `{step}` lines {sorted(held)}, the selector prints {sorted(selected[step])}")
         lines = text.splitlines() or [""]
         first = (m := STEP_LINE.match(lines[0])) and m.group(1)
-        if first in selected and {norm(lines[0])} == selected[first]:
-            if lines[-1] == EXIT_OK:
-                ran.add(first)
-            else:
-                bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `{EXIT_OK}`")
+        if first not in selected:
+            continue
+        if {norm(lines[0])} != selected[first]:
+            bad.append(f"{path} runs `{lines[0]}`, the selector prints {sorted(selected[first])}")
+        elif lines[-1] == EXIT_OK:
+            ran.add(first)
+        else:
+            bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `{EXIT_OK}`")
     bad += [f"no cited run-step log ran the selected step `{step}`" for step in sorted(set(selected) - not_run - ran)]
     for span in SPAN.findall(summary_text):
         if (m := STEP_LINE.match(span)) and m.group(1) in selected and {norm(span)} != selected[m.group(1)]:

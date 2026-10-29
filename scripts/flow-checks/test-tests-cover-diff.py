@@ -72,14 +72,22 @@ def fixtures():
            1, "target/r2/clippy.log", "exit: 1")
     expect("disclosure lines need no log",
            run([real_line, TIMING, UNOWNED], {}, spans=[TIMING], ran={"target/r2/clippy.log": real}), 0)
+    # An owner recipe may print a line that starts with its own step name.
+    odt = "org-deep-text-timing: just org-deep-text-timing"
+    odt_log = f"{odt}\n{HEADER}org-deep-text-timing: load before {{ 45.47 69.68 96.03 }}\nSummary [ 1s]\n\nexit: 0\n"
+    expect("owner recipe that echoes its step name",
+           run([real_line, odt], {}, ran={"target/r2/clippy.log": real, "target/r2/org-deep-text-timing.log": odt_log}), 0)
     expect("run-step log without exit trailer",
            run(SELECTED, {}, ran={**ran, "target/r1/nextest.log": step_log(NEXTEST).replace("exit: 0\n", "")}),
            1, "target/r1/nextest.log", "`nextest`")
-    expect("narrower set",
-           run(SELECTED, {"target/r1/select.log": [CLIPPY, WINDOWED], "target/r1/nextest.log": [NARROW]}),
+    expect("narrower set", run(SELECTED, {}, ran={**ran, "target/r1/nextest.log": step_log(NARROW)}),
            1, "target/r1/nextest.log", NARROW, NEXTEST)
-    expect("also a narrower line", run(SELECTED, {"target/r1/select.log": SELECTED + [NARROW]}),
-           1, "target/r1/select.log", NARROW)
+    expect("also a narrower line", run(SELECTED, {}, ran={**ran, "target/r1/narrow.log": step_log(NARROW)}),
+           1, "target/r1/narrow.log", NARROW)
+    body = step_log(CLIPPY).replace("running\n", f"running\n{NEXTEST}\n")
+    expect("body line of another selected step",
+           run(SELECTED, {}, ran={"target/r1/clippy.log": body, "target/r1/windowed.log": step_log(WINDOWED)}),
+           1, "`nextest`")
     # The selector's own output names the steps but is no evidence that any of them ran.
     expect("selector output only", run(SELECTED, {"target/r1/select.log": SELECTED}), 1)
     expect("step not covered", run(SELECTED, {"target/r1/select.log": [CLIPPY, WINDOWED]}), 1, "`nextest`")
@@ -112,7 +120,10 @@ def generated(cases):
         # The selector's own output contract (scripts/select-tests.py STEP_LINE) starts the args with a non-blank.
         selected = {s: f"{s}: --workspace " + " ".join(rng.choices(tokens, k=rng.randint(0, 6))) for s in steps}
         stdout = HEADER + "".join(line + "\n" for line in selected.values())
-        logs = {f"target/r1/{s}.log": "\n".join([line, *HEADER.splitlines(), *rng.sample(noise, rng.randint(0, 7)),
+        # A step's output may echo any step line, its own name with other text or another step's exact line.
+        echoes = [f"{s}: load before 1.5" for s in steps] + list(selected.values())
+        body = noise + echoes
+        logs = {f"target/r1/{s}.log": "\n".join([line, *HEADER.splitlines(), *rng.sample(body, rng.randint(0, 9)),
                                                  "", "exit: 0"]) for s, line in selected.items() if s not in not_run}
         if rng.random() < 0.5:
             logs["target/r1/select.log"] = stdout
