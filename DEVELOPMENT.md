@@ -815,7 +815,7 @@ lives under the same service.
 
 Every profile unwinds, so a catch boundary (`spawn_disclosing_panic`, the
 element-builder boundary) turns a panic into a condition in the shipped app.
-`cargo test --release -p holon-api --test release_build_unwinds` proves it for
+`cargo test --release -p holon-conditions --test main release_build_unwinds` proves it for
 the release profile. Android and iOS unwind. Both wasm targets
 (`wasm32-unknown-unknown`, `wasm32-wasip1-threads`, so the browser frontend and
 `holon-worker`) abort: their target spec sets `panic-strategy: abort` and the

@@ -1,6 +1,6 @@
 //! A shipped build must unwind, or no catch boundary runs: the panic ends the
 //! process before `spawn_disclosing_panic` can disclose it. Run under the
-//! shipped profile with `cargo test --release -p holon-api --test
+//! shipped profile with `cargo test --release -p holon-conditions --test main
 //! release_build_unwinds`.
 
 use std::process::Command;

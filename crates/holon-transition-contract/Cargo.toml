@@ -4,11 +4,16 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
 [package.metadata.cargo-machete]
 ignored = ["workspace-hack"]
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [dependencies]
 holon-api.workspace = true

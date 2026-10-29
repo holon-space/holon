@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 publish = false
+autotests = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
@@ -19,6 +20,10 @@ ignored = ["workspace-hack"]
 slo-fault-injection = []
 # `spelling::another_spelling`, for test generators.
 test-helpers = []
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [dependencies]
 anyhow.workspace = true
