@@ -9,11 +9,14 @@
 //! Atomicity: everything is validated before anything is returned, so a
 //! refused file yields `Err` and leaves NO document block and NO scope behind.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::SystemTime;
 
 use anyhow::Context as _;
 use anyhow::Result;
@@ -69,6 +72,15 @@ pub struct PluginFormatAdapter {
     /// milliseconds and buys nothing per call. The mutex serialises parses,
     /// which the sync controller already does per vault scan.
     host: Mutex<PluginHost>,
+    /// Each directory's file names as last listed, kept while its modification
+    /// time stands: a vault scan lists a directory once, not once per file.
+    listings: Mutex<HashMap<PathBuf, Listing>>,
+}
+
+struct Listing {
+    modified: SystemTime,
+    /// Sorted, so the files of one stem are a contiguous run.
+    names: Vec<String>,
 }
 
 impl PluginFormatAdapter {
@@ -109,6 +121,7 @@ impl PluginFormatAdapter {
         Ok(Self {
             format,
             host: Mutex::new(host),
+            listings: Mutex::new(HashMap::new()),
         })
     }
 
@@ -144,10 +157,17 @@ impl PluginFormatAdapter {
     }
 
     /// Run the guest over `content` and return the stream it emitted.
-    fn run(&self, source_path: &str, file_stem: &str, content: &str) -> Result<String> {
+    fn run(
+        &self,
+        source_path: &str,
+        file_stem: &str,
+        sibling_files: &[String],
+        content: &str,
+    ) -> Result<String> {
         let ctx = serde_json::json!({
             "source_path": source_path,
             "file_stem": file_stem,
+            "sibling_files": sibling_files,
         })
         .to_string();
         let mut host = self.host.lock().map_err(|_| {
@@ -201,7 +221,8 @@ impl FileFormatAdapter for PluginFormatAdapter {
             anyhow!("vault path {source_path:?} names no document to hang blocks on: {e}")
         })?;
 
-        let text = self.run(&source_path, file_stem, content)?;
+        let siblings = self.sibling_files(path, file_stem)?;
+        let text = self.run(&source_path, file_stem, &siblings, content)?;
         let stream = Stream::from_jsonl(&text).map_err(|e| {
             anyhow!(
                 "the {} plugin emitted a stream for {source_path} that is not the row contract: \
@@ -566,4 +587,58 @@ impl std::fmt::Debug for PluginFormatAdapter {
             .field("format", &self.format.format_name)
             .finish_non_exhaustive()
     }
+}
+
+impl PluginFormatAdapter {
+    /// The names of the files beside `path` that start with `<file_stem>.` —
+    /// the pictures a recipe's convention pairs with it — sorted, `path`
+    /// itself left out.
+    ///
+    /// shortcut: a picture added later reaches the rows only on the recipe's
+    /// next parse; upgrade to a file watch on pictures when that shows up.
+    fn sibling_files(&self, path: &Path, file_stem: &str) -> Result<Vec<String>> {
+        let dir = path
+            .parent()
+            .with_context(|| format!("path {} has no directory", path.display()))?;
+        let modified = match std::fs::metadata(dir) {
+            Ok(meta) => meta
+                .modified()
+                .with_context(|| format!("directory {} has no modification time", dir.display()))?,
+            // The content arrives in memory; a directory gone since it was read
+            // has no siblings to offer.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(|| format!("cannot stat {}", dir.display())),
+        };
+        let mut listings = self
+            .listings
+            .lock()
+            .map_err(|_| anyhow!("the directory listing cache is poisoned"))?;
+        if listings.get(dir).is_none_or(|l| l.modified != modified) {
+            let names = list_dir(dir)?;
+            listings.insert(dir.to_path_buf(), Listing { modified, names });
+        }
+        let names = &listings[dir].names;
+        let prefix = format!("{file_stem}.");
+        let own = path.file_name().and_then(|n| n.to_str());
+        let start = names.partition_point(|n| n.as_str() < prefix.as_str());
+        Ok(names[start..]
+            .iter()
+            .take_while(|n| n.starts_with(&prefix))
+            .filter(|n| Some(n.as_str()) != own)
+            .cloned()
+            .collect())
+    }
+}
+
+/// The UTF-8 file names in `dir`, sorted.
+fn list_dir(dir: &Path) -> Result<Vec<String>> {
+    let context = || format!("cannot list the directory {}", dir.display());
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(context)? {
+        if let Some(name) = entry.with_context(context)?.file_name().to_str() {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    Ok(names)
 }

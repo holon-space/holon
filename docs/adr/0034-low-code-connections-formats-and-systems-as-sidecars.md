@@ -72,7 +72,7 @@ unchanged. The wire is JSON Lines; the host's one parse point is
 {"holon_rows":2,"scopes":[{"type":"recipe","owner_column":"source_path","owner":{"text":"Rezepte/Pfannkuchen.cook"}},
                           {"type":"ingredient_use","owner_column":"recipe_id","owner":{"ref":{"type":"recipe","id":{"path":["Rezepte","Pfannkuchen.cook"]}}}}]}
 {"document":{"title":"Pfannkuchen"}}
-{"row":{"type":"recipe","id":{"path":["Rezepte","Pfannkuchen.cook"]},"cells":{"title":"Pfannkuchen","servings":"4|6"}}}
+{"row":{"type":"recipe","id":{"path":["Rezepte","Pfannkuchen.cook"]},"cells":{"title":"Pfannkuchen","servings":4}}}
 {"row":{"type":"ingredient_use","id":{"path":["Rezepte","Pfannkuchen.cook"],"parts":["iu","mehl-0"]},"refs":{"recipe_id":{"type":"recipe","id":{"path":["Rezepte","Pfannkuchen.cook"]}}},"cells":{"raw_name":"Mehl","quantity":250.0,"unit":"g","step_index":0}}}
 ```
 
@@ -124,7 +124,10 @@ with JSON Lines through linear memory.
 
 **Guests are pure functions.** Bytes plus context in, rows out: no filesystem, no
 clock, no network. That capability model also disposes of the WASI question —
-wasmi's WASI-p1-only limit never binds.
+wasmi's WASI-p1-only limit never binds. What a format needs from beside the
+file comes in the context: `source_path`, `file_stem`, and `sibling_files`, the
+names of the files in the same folder that start with `<file_stem>.` (the
+cooklang guest finds a recipe's pictures there).
 
 **tree-sitter is a plugin TEMPLATE, never a native host.** Runtime grammar
 loading needs `wasmtime-c-api` (cannot target wasm32) and shells out to a C

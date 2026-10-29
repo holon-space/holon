@@ -115,7 +115,7 @@ fn render_ingredient(name: &str, amount: &Amount) -> String {
 }
 
 /// A `.cook` document: optional frontmatter, then steps carrying zero or more
-/// ingredients plus cookware and timers the row projection must ignore.
+/// ingredients plus one cookware item and one timer each.
 pub fn recipe_text() -> impl Strategy<Value = String> {
     let step = proptest::collection::vec((proptest::sample::select(NAMES), amount()), 0..4);
     (

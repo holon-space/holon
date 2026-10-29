@@ -1,0 +1,47 @@
+name: recipe_timer
+default_lifetime: persistent
+primary_key: id
+graph_label: RecipeTimer
+source: pre_configured
+fields:
+  - name: id
+    sql_type: TEXT
+    primary_key: true
+    indexed: true
+  - name: recipe_id
+    sql_type: TEXT
+    indexed: true
+  # NULL for a component outside every named section.
+  - name: section_id
+    sql_type: TEXT
+    nullable: true
+    indexed: true
+  - name: step_index
+    sql_type: INTEGER
+  - name: name
+    sql_type: TEXT
+    nullable: true
+  # The duration as written, without its unit: `10`, `20-25`, `1/2`.
+  - name: amount
+    sql_type: TEXT
+  - name: unit
+    sql_type: TEXT
+    nullable: true
+  # NULL for a range or a bare number, which have no single duration.
+  - name: seconds
+    sql_type: REAL
+    nullable: true
+  # The overflow bag every authoring write needs: the engine stamps
+  # `_provenance` onto each `create`, and a type with nowhere to put it is
+  # refused at the write boundary rather than written without its origin.
+  - name: properties
+    sql_type: TEXT
+    nullable: true
+    jsonb: true
+    value_kind: overflow_properties
+  # `properties`' companion: it records each key's value KIND so a stored NULL
+  # stays distinguishable from an absent key on read-back.
+  - name: property_kinds
+    sql_type: TEXT
+    nullable: true
+    value_kind: overflow_property_kinds

@@ -1,0 +1,33 @@
+name: recipe_section
+default_lifetime: persistent
+primary_key: id
+graph_label: RecipeSection
+source: pre_configured
+fields:
+  - name: id
+    sql_type: TEXT
+    primary_key: true
+    indexed: true
+  - name: recipe_id
+    sql_type: TEXT
+    indexed: true
+  - name: name
+    sql_type: TEXT
+  # 0-based position among the recipe's sections, the unnamed leading one
+  # included.
+  - name: section_index
+    sql_type: INTEGER
+  # The overflow bag every authoring write needs: the engine stamps
+  # `_provenance` onto each `create`, and a type with nowhere to put it is
+  # refused at the write boundary rather than written without its origin.
+  - name: properties
+    sql_type: TEXT
+    nullable: true
+    jsonb: true
+    value_kind: overflow_properties
+  # `properties`' companion: it records each key's value KIND so a stored NULL
+  # stays distinguishable from an absent key on read-back.
+  - name: property_kinds
+    sql_type: TEXT
+    nullable: true
+    value_kind: overflow_property_kinds

@@ -20,6 +20,7 @@ mod typed_entity_convergence_pbt;
 mod typed_entity_purge_recreate;
 mod typed_entity_scale;
 mod typed_entity_shape;
+mod typed_reads_register_no_root;
 mod undo_history_trim_probe;
 mod update_log_cost;
 mod update_log_recovery;

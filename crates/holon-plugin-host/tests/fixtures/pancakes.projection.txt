@@ -5,11 +5,18 @@ block "Pour the wet into the dry and fold until barely combined. Rest the batter
 block "Melt butter in a skillet over medium heat and cook each pancake for 2 minutes a side." [step_number=String("4")]
 block "Serve with maple syrup." [step_number=String("5")]
 rowset recipe source_path pancakes.cook
-  row course=String("breakfast") id=String("recipe:pancakes.cook") source_path=String("pancakes.cook") title=String("Buttermilk Pancakes")
+  row course=String("breakfast") id=String("recipe:pancakes.cook") image=Null servings=Integer(4) source_path=String("pancakes.cook") title=String("Buttermilk Pancakes")
 rowset ingredient_use recipe_id recipe:pancakes.cook
-  row id=String("ingredient-use:pancakes.cook::iu::flour-0") quantity=Float(200.0) raw_name=String("flour") recipe_id=String("recipe:pancakes.cook") step_index=Integer(1) unit=String("g")
-  row id=String("ingredient-use:pancakes.cook::iu::baking-powder-0") quantity=Float(2.0) raw_name=String("baking powder") recipe_id=String("recipe:pancakes.cook") step_index=Integer(1) unit=String("tsp")
-  row id=String("ingredient-use:pancakes.cook::iu::eggs-0") quantity=Float(2.0) raw_name=String("eggs") recipe_id=String("recipe:pancakes.cook") step_index=Integer(2) unit=Null
-  row id=String("ingredient-use:pancakes.cook::iu::buttermilk-0") quantity=Float(300.0) raw_name=String("buttermilk") recipe_id=String("recipe:pancakes.cook") step_index=Integer(2) unit=String("ml")
-  row id=String("ingredient-use:pancakes.cook::iu::butter-0") quantity=Float(1.0) raw_name=String("butter") recipe_id=String("recipe:pancakes.cook") step_index=Integer(4) unit=String("tbsp")
-  row id=String("ingredient-use:pancakes.cook::iu::maple-syrup-0") quantity=Null raw_name=String("maple syrup") recipe_id=String("recipe:pancakes.cook") step_index=Integer(5) unit=Null
+  row id=String("ingredient-use:pancakes.cook::iu::flour-0") quantity=Float(200.0) raw_name=String("flour") recipe_id=String("recipe:pancakes.cook") section_id=Null step_index=Integer(1) unit=String("g")
+  row id=String("ingredient-use:pancakes.cook::iu::baking-powder-0") quantity=Float(2.0) raw_name=String("baking powder") recipe_id=String("recipe:pancakes.cook") section_id=Null step_index=Integer(1) unit=String("tsp")
+  row id=String("ingredient-use:pancakes.cook::iu::eggs-0") quantity=Float(2.0) raw_name=String("eggs") recipe_id=String("recipe:pancakes.cook") section_id=Null step_index=Integer(2) unit=Null
+  row id=String("ingredient-use:pancakes.cook::iu::buttermilk-0") quantity=Float(300.0) raw_name=String("buttermilk") recipe_id=String("recipe:pancakes.cook") section_id=Null step_index=Integer(2) unit=String("ml")
+  row id=String("ingredient-use:pancakes.cook::iu::butter-0") quantity=Float(1.0) raw_name=String("butter") recipe_id=String("recipe:pancakes.cook") section_id=Null step_index=Integer(4) unit=String("tbsp")
+  row id=String("ingredient-use:pancakes.cook::iu::maple-syrup-0") quantity=Null raw_name=String("maple syrup") recipe_id=String("recipe:pancakes.cook") section_id=Null step_index=Integer(5) unit=Null
+rowset recipe_section recipe_id recipe:pancakes.cook
+rowset cookware recipe_id recipe:pancakes.cook
+  row id=String("cookware:pancakes.cook::cw::large-bowl-0") name=String("large bowl") quantity=Null recipe_id=String("recipe:pancakes.cook") section_id=Null step_index=Integer(1)
+  row id=String("cookware:pancakes.cook::cw::skillet-0") name=String("skillet") quantity=Null recipe_id=String("recipe:pancakes.cook") section_id=Null step_index=Integer(4)
+rowset recipe_timer recipe_id recipe:pancakes.cook
+  row amount=String("15") id=String("recipe-timer:pancakes.cook::tm::15-minutes-0") name=Null recipe_id=String("recipe:pancakes.cook") seconds=Float(900.0) section_id=Null step_index=Integer(3) unit=String("minutes")
+  row amount=String("2") id=String("recipe-timer:pancakes.cook::tm::2-minutes-0") name=Null recipe_id=String("recipe:pancakes.cook") seconds=Float(120.0) section_id=Null step_index=Integer(4) unit=String("minutes")

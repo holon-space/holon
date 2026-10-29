@@ -12,7 +12,7 @@ base table except ["block_derived", "block_history", "clock", "clock_reader", "f
 - `unreported`: observed effects missing from `result.changes` (what D1 alone would miss).
 - Not covered: the Loro write leg (Text/Mark ops such as `insert_text` are not in this catalog).
 
-Counts: 80 ops; inside 7; outside 9; undeclared 64 (of which 26 failed on the fixture binding, so their effect is unmeasured).
+Counts: 95 ops; inside 7; outside 9; undeclared 79 (of which 35 failed on the fixture binding, so their effect is unmeasured).
 
 ## Gesture ops of the slot
 
@@ -69,6 +69,11 @@ Counts: 80 ops; inside 7; outside 9; undeclared 64 (of which 26 failed on the fi
 | block.set_field | block(s=Relocates t=Produces e=Reads) envelope by field | block:b[text:content] | Inside |  | block:b — covers | - |
 | block.split_block | block(s=Produces t=Produces e=Produces) | block:a[structural:sort_key text:content]; block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | Outside | block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | block:a — misses block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
 | block.update | none | block:b[text:content] | Undeclared |  | block:b — covers | block:b[text:content] |
+| cookware.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: cookware_raw.recipe_id | Undeclared |  | cookware:x — covers | - |
+| cookware.delete | none | (none) | Undeclared |  | cookware:x — covers | - |
+| cookware.replace_scope | none | ERROR: replace_scope: missing list parameter 'rows' | Undeclared |  | relation cookware — covers | - |
+| cookware.set_field | none | ERROR: set_field('name') on 'cookware:x' matched no row in `cookware_raw`: the subject does not exist | Undeclared |  | cookware:x — covers | - |
+| cookware.update | none | (none) | Undeclared |  | cookware:x — covers | - |
 | identity.accept_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | fence — covers | - |
 | identity.delete_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
 | identity.merge_entities | none | ERROR: merge_entities: select canonical_a: Database error: Failed to prepare query: Parse error: no such table: canonical_entity | Undeclared |  | relation identity — covers | - |
@@ -107,6 +112,16 @@ Counts: 80 ops; inside 7; outside 9; undeclared 64 (of which 26 failed on the fi
 | recipe.replace_scope | none | ERROR: replace_scope: missing list parameter 'rows' | Undeclared |  | relation recipe — covers | - |
 | recipe.set_field | none | ERROR: set_field('name') on 'recipe:x' matched no row in `recipe_raw`: the subject does not exist | Undeclared |  | recipe:x — covers | - |
 | recipe.update | none | (none) | Undeclared |  | recipe:x — covers | - |
+| recipe-section.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: recipe_section_raw.recipe_id | Undeclared |  | recipe-section:x — covers | - |
+| recipe-section.delete | none | (none) | Undeclared |  | recipe-section:x — covers | - |
+| recipe-section.replace_scope | none | ERROR: replace_scope: missing list parameter 'rows' | Undeclared |  | relation recipe-section — covers | - |
+| recipe-section.set_field | none | ERROR: set_field('name') on 'recipe-section:x' matched no row in `recipe_section_raw`: the subject does not exist | Undeclared |  | recipe-section:x — covers | - |
+| recipe-section.update | none | (none) | Undeclared |  | recipe-section:x — covers | - |
+| recipe-timer.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: recipe_timer_raw.recipe_id | Undeclared |  | recipe-timer:x — covers | - |
+| recipe-timer.delete | none | (none) | Undeclared |  | recipe-timer:x — covers | - |
+| recipe-timer.replace_scope | none | ERROR: replace_scope: missing list parameter 'rows' | Undeclared |  | relation recipe-timer — covers | - |
+| recipe-timer.set_field | none | ERROR: set_field('name') on 'recipe-timer:x' matched no row in `recipe_timer_raw`: the subject does not exist | Undeclared |  | recipe-timer:x — covers | - |
+| recipe-timer.update | none | (none) | Undeclared |  | recipe-timer:x — covers | - |
 | shopping-item.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: shopping_item_raw.cat | Undeclared |  | shopping-item:x — covers | - |
 | shopping-item.delete | none | (none) | Undeclared |  | shopping-item:x — covers | - |
 | shopping-item.purge | none | (none) | Undeclared |  | shopping-item:x — covers | - |

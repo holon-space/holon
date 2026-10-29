@@ -293,11 +293,9 @@ impl LoroEntityOperations {
         let scope = ScopeReplacement::parse(params)?;
         let root = self.store();
         let live: HashMap<String, StorageEntity> = self.doc.with_read(|doc| {
-            let keys: Vec<String> = doc
-                .get_map(root.as_str())
-                .keys()
-                .map(|k| k.to_string())
-                .collect();
+            let keys: Vec<String> = held_root(doc, &root)
+                .map(|store| store.keys().map(|k| k.to_string()).collect())
+                .unwrap_or_default();
             Ok(keys
                 .into_iter()
                 .filter_map(|key| {
@@ -321,6 +319,9 @@ impl LoroEntityOperations {
             .filter(|(key, held)| scope.holds(held) && !writes.iter().any(|(k, _)| k == *key))
             .map(|(key, _)| key)
             .collect();
+        if writes.is_empty() && stale.is_empty() {
+            return Ok(OperationResult::irreversible(Vec::new()));
+        }
         let tombstone = self.schema.tombstone_column().unwrap_or(TOMBSTONE_KEY);
         let at = Value::String(chrono::Utc::now().to_rfc3339());
         self.doc
@@ -456,6 +457,15 @@ impl LoroEntityOperations {
     }
 }
 
+/// The root map `root` once the doc holds it. `LoroDoc::get_map` would
+/// register an empty root that shows in this peer's state alone.
+fn held_root(doc: &LoroDoc, root: &str) -> Option<LoroMap> {
+    match doc.get_by_path(&[loro::Index::Key(root.into())])? {
+        ValueOrContainer::Container(loro::Container::Map(m)) => Some(m),
+        other => panic!("root {root:?} holds {other:?}, not a map"),
+    }
+}
+
 /// Read one entity of the type whose root map is `root`, or `None` when the
 /// key holds nothing.
 pub fn read_entity(
@@ -464,7 +474,7 @@ pub fn read_entity(
     entity: &EntityName,
     key: &str,
 ) -> Option<StoredEntity> {
-    let map = match doc.get_map(root).get(key)? {
+    let map = match held_root(doc, root)?.get(key)? {
         ValueOrContainer::Container(loro::Container::Map(m)) => m,
         other => panic!("{root}: entity key {key:?} holds {other:?}, not a map"),
     };
@@ -622,8 +632,9 @@ impl holon_core::TypeWriteAuthority for LoroTypeWriteAuthority {
         let root = entity_root_name(&entity);
         Ok(self.doc.with_read(|doc| {
             let mut keys = Vec::new();
-            doc.get_map(root.as_str())
-                .for_each(|key, _| keys.push(key.to_string()));
+            if let Some(store) = held_root(doc, &root) {
+                store.for_each(|key, _| keys.push(key.to_string()));
+            }
             Ok(keys
                 .iter()
                 .filter_map(|key| read_entity(doc, &root, &entity, key))

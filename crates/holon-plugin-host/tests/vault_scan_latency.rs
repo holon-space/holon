@@ -18,27 +18,34 @@ use holon_plugin_host::PluginLimits;
 
 use crate::support;
 
-/// A 200-step recipe is far larger than any real one; the margin between what
-/// it spends and [`PluginLimits::default`] is what keeps a legitimate file from
-/// ever hitting a limit meant for a runaway guest.
+/// Twice the size of the largest recipe that parses in a real corpus, as the
+/// stand-in for the largest legitimate file: a 4x fuel margin over it keeps
+/// every real file clear of a limit meant for a runaway guest.
+const LARGEST_LEGITIMATE_RECIPE_BYTES: usize = 2 * 11_049;
+
 #[test]
 fn fuel_and_memory_headroom() {
     let wasm = std::fs::read(support::plugins_dir().join("cooklang.wasm")).unwrap();
     let limits = PluginLimits::default();
     let mut host = PluginHost::from_bytes(&wasm, limits).unwrap();
 
-    let recipe = support::big_recipe(200);
-    let ctx = br#"{"source_path":"Rezepte/Large.cook","file_stem":"Large"}"#;
-    host.parse(recipe.as_bytes(), ctx)
-        .expect("a 200-step recipe is an ordinary parse");
+    let recipe = (1..)
+        .map(support::big_recipe)
+        .find(|r| r.len() >= LARGEST_LEGITIMATE_RECIPE_BYTES)
+        .unwrap();
+    host.parse(recipe.as_bytes(), LARGE_CTX)
+        .expect("a recipe twice the largest real one is an ordinary parse");
 
     let spent = limits.fuel_per_call - host.fuel_remaining();
     let memory = host.memory_bytes();
-    println!("200-step recipe: {spent} fuel, {memory} bytes of guest memory");
+    println!(
+        "{}-byte recipe: {spent} fuel, {memory} bytes of guest memory",
+        recipe.len()
+    );
 
     assert!(
         spent * 4 < limits.fuel_per_call,
-        "the fuel budget must leave a 4x margin over the largest legitimate file: {spent} of {}",
+        "the fuel budget must leave a 4x margin over twice the largest real recipe: {spent} of {}",
         limits.fuel_per_call
     );
     assert!(
@@ -48,16 +55,91 @@ fn fuel_and_memory_headroom() {
     );
 }
 
+const LARGE_CTX: &[u8] =
+    br#"{"source_path":"Rezepte/Large.cook","file_stem":"Large","sibling_files":[]}"#;
+
+/// A 200-step recipe is far larger than any real one; it must still parse
+/// within the limits.
+#[test]
+fn a_200_step_recipe_parses_within_the_limits() {
+    let wasm = std::fs::read(support::plugins_dir().join("cooklang.wasm")).unwrap();
+    let limits = PluginLimits::default();
+    let mut host = PluginHost::from_bytes(&wasm, limits).unwrap();
+
+    host.parse(support::big_recipe(200).as_bytes(), LARGE_CTX)
+        .expect("a 200-step recipe is an ordinary parse");
+    println!(
+        "200-step recipe: {} fuel, {} bytes of guest memory",
+        limits.fuel_per_call - host.fuel_remaining(),
+        host.memory_bytes()
+    );
+}
+
+/// The fuel each `.cook` file under `$HOLON_COOK_CORPUS` spends on a warm host,
+/// reported as max and p99. The corpus is private data, so the test reads it
+/// from the environment instead of the repository.
+#[test]
+#[ignore = "measurement over a private corpus; set HOLON_COOK_CORPUS"]
+fn fuel_over_a_recipe_corpus() {
+    let corpus = PathBuf::from(
+        std::env::var("HOLON_COOK_CORPUS").expect("HOLON_COOK_CORPUS names the corpus directory"),
+    );
+    let wasm = std::fs::read(support::plugins_dir().join("cooklang.wasm")).unwrap();
+    let limits = PluginLimits::default();
+    let mut host = PluginHost::from_bytes(&wasm, limits).unwrap();
+
+    let mut files = vec![corpus];
+    let mut spent = Vec::new();
+    let mut refused = 0usize;
+    while let Some(path) = files.pop() {
+        if path.is_dir() {
+            files.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("cook") {
+            continue;
+        }
+        let content = std::fs::read(&path).unwrap();
+        match host.parse(&content, LARGE_CTX) {
+            Ok(_) => spent.push((limits.fuel_per_call - host.fuel_remaining(), content.len())),
+            Err(e) => {
+                assert!(
+                    !format!("{e:#}").contains("fuel"),
+                    "{} ran out of fuel: {e:#}",
+                    path.display()
+                );
+                println!("REFUSED: {e:#}");
+                refused += 1;
+            }
+        }
+    }
+    assert!(
+        !spent.is_empty(),
+        "the corpus holds no parseable .cook file"
+    );
+    spent.sort_unstable();
+    let (max, max_bytes) = spent[spent.len() - 1];
+    let largest = spent.iter().map(|(_, bytes)| *bytes).max().unwrap();
+    let p99 = spent[(spent.len() * 99).div_ceil(100) - 1].0;
+    println!(
+        "CORPUS FUEL: {} parsed, {refused} refused; max {max} ({max_bytes} bytes), p99 {p99}; \
+         largest file {largest} bytes; cap {}",
+        spent.len(),
+        limits.fuel_per_call
+    );
+}
+
 /// What a vault scan pays per file once the host is warm. Measured with the
-/// unit table built once and the talc allocator: 1.9 M for a real recipe and
-/// 104.6 M for the 200-step one; rebuilding the unit table on every call cost
+/// unit table built once and the talc allocator: 2.4 M for a real recipe and
+/// 139.4 M for the 200-step one; rebuilding the unit table on every call cost
 /// 5.25 M per file on top.
 #[test]
 fn a_warm_host_spends_fuel_on_the_recipe_rather_than_on_setup() {
     let wasm = std::fs::read(support::plugins_dir().join("cooklang.wasm")).unwrap();
     let limits = PluginLimits::default();
     let mut host = PluginHost::from_bytes(&wasm, limits).unwrap();
-    let ctx = br#"{"source_path":"Rezepte/Pancakes.cook","file_stem":"Pancakes"}"#;
+    let ctx =
+        br#"{"source_path":"Rezepte/Pancakes.cook","file_stem":"Pancakes","sibling_files":[]}"#;
     let mut spend = |recipe: &str| {
         host.parse(recipe.as_bytes(), ctx)
             .expect("an ordinary recipe parses");
@@ -79,7 +161,7 @@ fn a_warm_host_spends_fuel_on_the_recipe_rather_than_on_setup() {
         real.len()
     );
     assert!(
-        big_spent < 125_000_000,
+        big_spent < 175_000_000,
         "the 200-step recipe spent {big_spent} fuel on a warm host"
     );
 }

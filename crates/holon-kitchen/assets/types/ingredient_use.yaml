@@ -11,6 +11,11 @@ fields:
   - name: recipe_id
     sql_type: TEXT
     indexed: true
+  # NULL for a component outside every named section.
+  - name: section_id
+    sql_type: TEXT
+    nullable: true
+    indexed: true
   # Verbatim cooklang ingredient text. Never normalised away — it is what the
   # unmatched-ingredient affordance shows the user.
   - name: raw_name

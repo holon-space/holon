@@ -3,7 +3,8 @@
 //!
 //! A pure function. It imports nothing — no WASI, no clock, no filesystem — so
 //! the only thing that reaches it is the file's bytes and a JSON context
-//! naming the vault-relative `source_path` and the file's `file_stem`.
+//! naming the vault-relative `source_path`, the file's `file_stem` and the
+//! `sibling_files` beside it.
 //!
 //! Every refusal here is the whole file's refusal: the host emits no scope and
 //! no document block for a stream it never receives.
@@ -15,6 +16,7 @@ use cooklang::Extensions;
 use cooklang::Item;
 use cooklang::Recipe;
 use cooklang::convert::Converter;
+use cooklang::convert::PhysicalQuantity;
 use cooklang::convert::UnitsFile;
 use cooklang::model::Content;
 use cooklang::quantity::Number;
@@ -44,6 +46,21 @@ static ALLOC: talc::TalckWasm = unsafe { talc::TalckWasm::new_global() };
 /// The property carrying a step's 1-based number, which distinguishes a step
 /// block from a prose block.
 const STEP_NUMBER_KEY: &str = "step_number";
+
+/// The property carrying the vault-relative path of a step's picture.
+const IMAGE_KEY: &str = "image";
+
+/// cooklang's picture convention: `<stem>.jpg` beside the recipe is its own,
+/// `<stem>.<n>.jpg` the picture of its n-th step.
+const IMAGE_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
+
+/// The types whose rows the recipe owns through `recipe_id`.
+const OWNED_TYPES: [&str; 4] = [
+    "ingredient_use",
+    "recipe_section",
+    "cookware",
+    "recipe_timer",
+];
 
 fn parse_cook(input: &[u8], ctx: &[u8]) -> Result<String, String> {
     let source = core::str::from_utf8(input).map_err(|e| format!("input is not UTF-8: {e}"))?;
@@ -86,18 +103,31 @@ fn parse_cook(input: &[u8], ctx: &[u8]) -> Result<String, String> {
         type_name: "recipe".to_string(),
         id: recipe_id.clone(),
     };
-    let scopes = vec![
-        Scope {
-            type_name: "recipe".to_string(),
-            owner_column: "source_path".to_string(),
-            owner: Owner::Text(source_path.to_string()),
-        },
-        Scope {
-            type_name: "ingredient_use".to_string(),
+    let mut scopes = vec![Scope {
+        type_name: "recipe".to_string(),
+        owner_column: "source_path".to_string(),
+        owner: Owner::Text(source_path.to_string()),
+    }];
+    for type_name in OWNED_TYPES {
+        scopes.push(Scope {
+            type_name: type_name.to_string(),
             owner_column: "recipe_id".to_string(),
             owner: Owner::Ref(recipe_ref.clone()),
-        },
-    ];
+        });
+    }
+
+    let siblings = sibling_files(&ctx)?;
+    let dir = source_path
+        .rsplit_once('/')
+        .map(|(dir, _)| format!("{dir}/"))
+        .unwrap_or_default();
+    let image_of = |base: &str| {
+        IMAGE_EXTENSIONS
+            .iter()
+            .map(|ext| format!("{base}.{ext}"))
+            .find(|name| siblings.contains(&name.as_str()))
+            .map(|name| format!("{dir}{name}"))
+    };
 
     let mut lines = Vec::new();
     let mut document = Fields::new();
@@ -109,10 +139,15 @@ fn parse_cook(input: &[u8], ctx: &[u8]) -> Result<String, String> {
         properties: document,
     }));
 
+    let mut step_ordinal = 0;
     for (seq, block) in blocks_of(&recipe).into_iter().enumerate() {
         let mut properties = Fields::new();
         if let Some(number) = block.step_number {
             properties.insert(STEP_NUMBER_KEY, json!(number.to_string()));
+            step_ordinal += 1;
+            if let Some(image) = image_of(&format!("{file_stem}.{step_ordinal}")) {
+                properties.insert(IMAGE_KEY, json!(image));
+            }
         }
         lines.push(Line::Block(BlockRow {
             key: BlockKey::new(["b".to_string(), seq.to_string()]).map_err(|e| e.to_string())?,
@@ -124,11 +159,14 @@ fn parse_cook(input: &[u8], ctx: &[u8]) -> Result<String, String> {
     let mut cells = Fields::new();
     cells.insert("source_path", json!(source_path));
     cells.insert("title", json!(title));
-    // `servings` is deliberately not written: cooklang admits non-integer
-    // servings (`4|6|8`) that the INTEGER column cannot hold, and the metadata
-    // reaches the recipe page through the document block's properties either
-    // way.
     cells.insert("course", json!(course));
+    // A servings text such as `4|6` has no single number; the page still
+    // shows it through the document's properties.
+    cells.insert(
+        "servings",
+        json!(recipe.metadata.servings().and_then(|s| s.as_number())),
+    );
+    cells.insert("image", json!(image_of(file_stem)));
     lines.push(Line::Row(Row {
         type_name: "recipe".to_string(),
         id: recipe_id.clone(),
@@ -136,30 +174,97 @@ fn parse_cook(input: &[u8], ctx: &[u8]) -> Result<String, String> {
         cells,
     }));
 
-    let mut seen: HashMap<String, usize> = HashMap::new();
-    for use_ in uses_of(&recipe)? {
-        let slug = id_slug(&use_.name);
-        let occurrence = seen.entry(slug.clone()).or_insert(0);
-        let id = recipe_id
-            .clone()
-            .part("iu")
-            .and_then(|id| id.part(format!("{slug}-{occurrence}")))
-            .map_err(|e| e.to_string())?;
-        *occurrence += 1;
+    let owned_row = |type_name: &str, id: LocalId, section: usize, cells: Fields<Value>| {
         let mut refs = Fields::new();
         refs.insert("recipe_id", recipe_ref.clone());
-        let mut cells = Fields::new();
-        // The schema's column for what the parser calls `name`.
-        cells.insert("raw_name", json!(use_.name));
-        cells.insert("quantity", json!(use_.quantity));
-        cells.insert("unit", json!(use_.unit));
-        cells.insert("step_index", json!(use_.step_index));
-        lines.push(Line::Row(Row {
-            type_name: "ingredient_use".to_string(),
+        let mut cells = cells;
+        match section_ref(&recipe, &recipe_id, section)? {
+            Some(section) => refs.insert("section_id", section),
+            None => cells.insert("section_id", Value::Null),
+        }
+        Ok::<_, String>(Line::Row(Row {
+            type_name: type_name.to_string(),
             id,
             refs,
             cells,
+        }))
+    };
+
+    for (index, section) in recipe.sections.iter().enumerate() {
+        let Some(name) = &section.name else { continue };
+        let mut refs = Fields::new();
+        refs.insert("recipe_id", recipe_ref.clone());
+        let mut cells = Fields::new();
+        cells.insert("name", json!(name));
+        cells.insert("section_index", json!(index));
+        lines.push(Line::Row(Row {
+            type_name: "recipe_section".to_string(),
+            id: component_id(&recipe_id, "sec", index.to_string())?,
+            refs,
+            cells,
         }));
+    }
+
+    let placements = placements_of(&recipe);
+
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (index, ingredient) in recipe.ingredients.iter().enumerate() {
+        let at = placement(
+            &placements.ingredients,
+            index,
+            "ingredient",
+            &ingredient.name,
+        )?;
+        let (quantity, unit) = match &ingredient.quantity {
+            Some(q) => (numeric_value(q), q.unit().map(str::to_string)),
+            None => (None, None),
+        };
+        let mut cells = Fields::new();
+        // The schema's column for what the parser calls `name`.
+        cells.insert("raw_name", json!(ingredient.name));
+        cells.insert("quantity", json!(quantity));
+        cells.insert("unit", json!(unit));
+        cells.insert("step_index", json!(at.step));
+        let id = component_id(
+            &recipe_id,
+            "iu",
+            occurrence_part(&mut seen, &ingredient.name),
+        )?;
+        lines.push(owned_row("ingredient_use", id, at.section, cells)?);
+    }
+
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (index, cookware) in recipe.cookware.iter().enumerate() {
+        let at = placement(&placements.cookware, index, "cookware", &cookware.name)?;
+        let mut cells = Fields::new();
+        cells.insert("name", json!(cookware.name));
+        cells.insert(
+            "quantity",
+            json!(cookware.quantity.as_ref().and_then(numeric_value)),
+        );
+        cells.insert("step_index", json!(at.step));
+        let id = component_id(&recipe_id, "cw", occurrence_part(&mut seen, &cookware.name))?;
+        lines.push(owned_row("cookware", id, at.section, cells)?);
+    }
+
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (index, timer) in recipe.timers.iter().enumerate() {
+        let quantity = timer.quantity.as_ref().ok_or_else(|| {
+            format!(
+                "cooklang: timer {:?} has no duration, which TIMER_REQUIRES_TIME refuses",
+                timer.name
+            )
+        })?;
+        let label = timer.name.clone().unwrap_or_else(|| quantity.to_string());
+        let at = placement(&placements.timers, index, "timer", &label)?;
+        let mut cells = Fields::new();
+        cells.insert("name", json!(timer.name));
+        cells.insert("amount", json!(quantity.value().to_string()));
+        cells.insert("unit", json!(quantity.unit()));
+        cells.insert("seconds", json!(timer_seconds(quantity)?));
+        cells.insert("step_index", json!(at.step));
+        let id = component_id(&recipe_id, "tm", occurrence_part(&mut seen, &label))?;
+        lines.push(owned_row("recipe_timer", id, at.section, cells)?);
     }
 
     Ok(Stream { scopes, lines }.to_jsonl())
@@ -169,17 +274,6 @@ fn cell<'a>(ctx: &'a Value, key: &str) -> Result<&'a str, String> {
     ctx[key]
         .as_str()
         .ok_or_else(|| format!("context is missing string `{key}`"))
-}
-
-/// One use of one ingredient by one recipe step.
-struct IngredientUse {
-    name: String,
-    /// `None` for a bare ingredient (`@salt`) and for a non-numeric amount
-    /// (`@salt{a pinch}`), which cooklang admits and no `REAL` column can hold.
-    quantity: Option<f64>,
-    unit: Option<String>,
-    /// 1-based step number this ingredient is first referenced from.
-    step_index: u32,
 }
 
 struct BlockText {
@@ -381,61 +475,133 @@ fn blocks_of(recipe: &Recipe) -> Vec<BlockText> {
     out
 }
 
-fn uses_of(recipe: &Recipe) -> Result<Vec<IngredientUse>, String> {
-    let first_step = first_reference_steps(recipe);
-    recipe
-        .ingredients
-        .iter()
-        .enumerate()
-        .map(|(idx, ing)| {
-            let (quantity, unit) = match &ing.quantity {
-                Some(q) => (numeric_value(q), q.unit().map(str::to_string)),
-                None => (None, None),
-            };
-            // cooklang builds `ingredients` FROM step references, so every
-            // entry has a referencing step. An absent one means that invariant
-            // broke; `step_index` is 1-based and non-nullable, so there is no
-            // in-band value to write — say so instead.
-            let step_index = first_step.get(&idx).copied().ok_or_else(|| {
-                format!(
-                    "cooklang: ingredient {:?} is referenced by no step — cannot assign the \
-                     1-based step_index its column requires",
-                    ing.name
-                )
-            })?;
-            Ok(IngredientUse {
-                name: ing.name.clone(),
-                quantity,
-                unit,
-                step_index,
-            })
-        })
-        .collect()
+/// Where a step placed a component: the index of its section and the step's
+/// number, which restarts at 1 in every section.
+#[derive(Clone, Copy)]
+struct Placement {
+    section: usize,
+    step: u32,
 }
 
-/// Map ingredient index → the number of the first step referencing it.
-fn first_reference_steps(recipe: &Recipe) -> HashMap<usize, u32> {
-    let mut out = HashMap::new();
-    for section in &recipe.sections {
-        for content in &section.content {
-            if let Content::Step(step) = content {
-                for item in &step.items {
-                    if let Item::Ingredient { index } = item {
-                        out.entry(*index).or_insert(step.number);
-                    }
-                }
+#[derive(Default)]
+struct Placements {
+    ingredients: HashMap<usize, Placement>,
+    cookware: HashMap<usize, Placement>,
+    timers: HashMap<usize, Placement>,
+}
+
+fn placements_of(recipe: &Recipe) -> Placements {
+    let mut out = Placements::default();
+    for (section, body) in recipe.sections.iter().enumerate() {
+        for content in &body.content {
+            let Content::Step(step) = content else {
+                continue;
+            };
+            let at = Placement {
+                section,
+                step: step.number,
+            };
+            for item in &step.items {
+                let (map, index) = match item {
+                    Item::Ingredient { index } => (&mut out.ingredients, index),
+                    Item::Cookware { index } => (&mut out.cookware, index),
+                    Item::Timer { index } => (&mut out.timers, index),
+                    Item::Text { .. } | Item::InlineQuantity { .. } => continue,
+                };
+                map.entry(*index).or_insert(at);
             }
         }
     }
     out
 }
 
-/// An ingredient name reduced to lowercase ASCII, so `@Sea Salt` and
+/// cooklang builds its component lists FROM step references, so every entry
+/// has a step; the non-nullable `step_index` has no value for one without.
+fn placement(
+    placements: &HashMap<usize, Placement>,
+    index: usize,
+    kind: &str,
+    name: &str,
+) -> Result<Placement, String> {
+    placements.get(&index).copied().ok_or_else(|| {
+        format!("cooklang: {kind} {name:?} is referenced by no step — it has no step to sit in")
+    })
+}
+
+/// The row of a named section; an unnamed one (the part before the first
+/// `== Name ==`) projects none.
+fn section_ref(
+    recipe: &Recipe,
+    recipe_id: &LocalId,
+    section: usize,
+) -> Result<Option<EntityRef>, String> {
+    if recipe.sections[section].name.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(EntityRef {
+        type_name: "recipe_section".to_string(),
+        id: component_id(recipe_id, "sec", section.to_string())?,
+    }))
+}
+
+fn component_id(recipe_id: &LocalId, kind: &str, part: String) -> Result<LocalId, String> {
+    recipe_id
+        .clone()
+        .part(kind)
+        .and_then(|id| id.part(part))
+        .map_err(|e| e.to_string())
+}
+
+/// `<slug>-<n>`, `n` counting earlier components of the same slug — counted on
+/// the slug, not the name, because distinct names may share one.
+fn occurrence_part(seen: &mut HashMap<String, usize>, name: &str) -> String {
+    let slug = id_slug(name);
+    let occurrence = seen.entry(slug.clone()).or_insert(0);
+    let part = format!("{slug}-{occurrence}");
+    *occurrence += 1;
+    part
+}
+
+/// A timer's duration in seconds; `None` for a range, which has no single
+/// duration, and for a bare number, which has no unit to scale.
+fn timer_seconds(quantity: &Quantity) -> Result<Option<f64>, String> {
+    if quantity.unit().is_none() {
+        return Ok(None);
+    }
+    let ratio = PARSER.with(|parser| {
+        let parser = parser.as_ref().map_err(Clone::clone)?;
+        quantity
+            .unit_info(parser.converter())
+            .filter(|unit| unit.physical_quantity == PhysicalQuantity::Time)
+            .map(|unit| unit.ratio)
+            .ok_or_else(|| {
+                format!("cooklang: timer {quantity} has no time unit, which ADVANCED_UNITS refuses")
+            })
+    })?;
+    match quantity.value() {
+        CookValue::Number(n) => Ok(Some(number_to_f64(n) * ratio)),
+        CookValue::Range { .. } => Ok(None),
+        CookValue::Text(text) => Err(format!(
+            "cooklang: timer value {text:?} is text, which ADVANCED_UNITS refuses"
+        )),
+    }
+}
+
+/// The names of the files beside the recipe, as the host lists them.
+fn sibling_files(ctx: &Value) -> Result<Vec<&str>, String> {
+    ctx["sibling_files"]
+        .as_array()
+        .ok_or("context is missing the `sibling_files` list")?
+        .iter()
+        .map(|name| {
+            name.as_str()
+                .ok_or_else(|| format!("context `sibling_files` holds {name}, not a file name"))
+        })
+        .collect()
+}
+
+/// A component name reduced to lowercase ASCII, so `@Sea Salt` and
 /// `@sea salt` share an id part.
-///
-/// Distinct names may collide here (`sea salt` and `sea-salt`); the occurrence
-/// counter in the caller is keyed on the SLUG, not the name, so a collision
-/// still produces distinct ids rather than one row overwriting the other.
 fn id_slug(name: &str) -> String {
     name.chars()
         .map(|c| {

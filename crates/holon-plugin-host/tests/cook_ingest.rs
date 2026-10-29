@@ -356,13 +356,12 @@ fn a_german_recipe_parses_with_its_own_timer_and_quantity_units() {
     find(&r.blocks, "1 Stunde");
 }
 
-/// D100.a adds German vocabulary and must add nothing else: an English recipe's
-/// whole projection stays byte-identical. The golden was captured BEFORE the
-/// German units file existed, so a diff here is the regression it guards.
+/// The German units add vocabulary and nothing else: an English recipe's whole
+/// projection stays byte-identical to the golden.
 #[test]
 fn the_english_projection_is_unchanged_by_the_german_units() {
     let golden = std::fs::read_to_string(fixtures().join("pancakes.projection.txt"))
-        .expect("the pre-change English golden must be readable");
+        .expect("the English golden must be readable");
     assert_eq!(projection_digest(&parse("pancakes.cook")), golden);
 }
 
@@ -443,8 +442,8 @@ fn a_file_name_with_a_space_and_an_umlaut_ingests() {
         );
 
         let recipe = format!("recipe:{encoded}");
-        let [recipes, uses] = &parsed.typed_rows[..] else {
-            panic!("{rel} must project exactly the recipe and ingredient_use scopes");
+        let [recipes, uses, ..] = &parsed.typed_rows[..] else {
+            panic!("{rel} must project the recipe and ingredient_use scopes first");
         };
         assert_eq!(recipes.rows.len(), 1, "{rel} must project its recipe row");
         assert_eq!(

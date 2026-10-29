@@ -39,7 +39,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
     /// Every id the recipe projects is its path encoded segment by segment:
-    /// the recipe row, each ingredient use, the reference from a use to its
+    /// the recipe row, each row it owns, the reference from that row to its
     /// recipe, the scope owner and the step blocks.
     #[test]
     fn any_file_name_ingests_under_its_encoded_path(
@@ -52,20 +52,24 @@ proptest! {
         let recipe = EntityUri::from_segments("recipe", &segments, &[] as &[&str]).to_string();
 
         let types: Vec<&str> = parsed.typed_rows.iter().map(|s| s.type_name.as_str()).collect();
-        prop_assert_eq!(types, vec!["recipe", "ingredient_use"]);
+        prop_assert_eq!(
+            types,
+            vec!["recipe", "ingredient_use", "recipe_section", "cookware", "recipe_timer"]
+        );
         let recipes = &parsed.typed_rows[0];
-        let uses = &parsed.typed_rows[1];
 
         prop_assert_eq!(recipes.rows.len(), 1);
         prop_assert_eq!(id_of(&recipes.rows[0]), recipe.as_str());
-        prop_assert_eq!(&uses.owner_value, &recipe);
-        for row in &uses.rows {
-            prop_assert_eq!(row.get("recipe_id"), Some(&Value::String(recipe.clone())));
+        for (owned, part) in parsed.typed_rows[1..].iter().zip(["iu", "sec", "cw", "tm"]) {
+            prop_assert_eq!(&owned.owner_value, &recipe);
             let prefix = format!(
-                "{}::iu::",
-                EntityUri::from_segments("ingredient-use", &segments, &[] as &[&str])
+                "{}::{part}::",
+                EntityUri::from_segments(&owned.type_name.replace('_', "-"), &segments, &[] as &[&str])
             );
-            prop_assert!(id_of(row).starts_with(&prefix), "{} lacks {}", id_of(row), prefix);
+            for row in &owned.rows {
+                prop_assert_eq!(row.get("recipe_id"), Some(&Value::String(recipe.clone())));
+                prop_assert!(id_of(row).starts_with(&prefix), "{} lacks {}", id_of(row), prefix);
+            }
         }
         for (seq, block) in parsed.blocks.iter().enumerate() {
             let expected = EntityUri::from_segments("block", &segments, &["b".to_string(), seq.to_string()]);

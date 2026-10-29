@@ -36,9 +36,9 @@ pub struct PluginLimits {
 }
 
 impl Default for PluginLimits {
-    /// Measured, not guessed: the cooklang guest spends 110.7 M fuel and
-    /// 2.4 MiB on a 200-step recipe — far larger than any real one — so these
-    /// leave a 9x and a 26x margin, which `fuel_and_memory_headroom` pins.
+    /// Measured, not guessed: `fuel_and_memory_headroom` pins a 4x margin of
+    /// both over a recipe twice the size of the largest real one, and a
+    /// 200-step recipe — far larger than any real one — still parses.
     /// Fuel overstates the work: wasmi charges a whole function or loop body
     /// on entry, including the branches that do not run.
     /// At the measured ~1.1 G fuel/s a runaway guest is stopped inside a

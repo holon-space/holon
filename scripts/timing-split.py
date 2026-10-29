@@ -88,6 +88,7 @@ PATH_RECIPES = {
     "frontends/dioxus-web/Cargo.lock": "check-dioxus-web-wasm",
     "frontends/holon-worker/": "check-worker-wasm",
     "frontends/waterui/Cargo.lock": "deny",
+    "guests/": "guests-verify",
 }
 
 # ── the cap rule (docs/Testing/TimingCritical.md) ────────────────────

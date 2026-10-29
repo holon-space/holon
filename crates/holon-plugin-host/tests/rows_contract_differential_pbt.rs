@@ -44,9 +44,10 @@ static GUEST: LazyLock<Mutex<PluginHost>> = LazyLock::new(|| {
 });
 
 /// The columns `plugins/cooklang.yaml` declares for `ingredient_use`.
-const INGREDIENT_USE_COLUMNS: [&str; 6] = [
+const INGREDIENT_USE_COLUMNS: [&str; 7] = [
     "id",
     "recipe_id",
+    "section_id",
     "raw_name",
     "quantity",
     "unit",
@@ -54,7 +55,11 @@ const INGREDIENT_USE_COLUMNS: [&str; 6] = [
 ];
 
 fn guest_stream(source_path: &str, file_stem: &str, content: &str) -> Stream {
-    let ctx = serde_json::json!({ "source_path": source_path, "file_stem": file_stem });
+    let ctx = serde_json::json!({
+        "source_path": source_path,
+        "file_stem": file_stem,
+        "sibling_files": [],
+    });
     let text = GUEST
         .lock()
         .unwrap()
@@ -149,12 +154,12 @@ proptest! {
         let stored = stored_rows(&source_path, &text);
         prop_assert_eq!(&stored, &expected_rows(&stream));
 
-        // Both scopes are stored even when one owns no rows: an
-        // `ingredient_use` scope dropped for being empty is how the LAST
-        // ingredient of a recipe would never get swept on re-ingest.
+        // Every scope is stored even when it owns no rows: a scope dropped
+        // for being empty is how the LAST row of a recipe would never get
+        // swept on re-ingest.
         prop_assert_eq!(
             stored.iter().map(|s| s.type_name.as_str()).collect::<Vec<_>>(),
-            vec!["recipe", "ingredient_use"]
+            vec!["recipe", "ingredient_use", "recipe_section", "cookware", "recipe_timer"]
         );
         for set in &stored {
             let ids: BTreeSet<String> = set.rows.iter().map(|r| format!("{:?}", r["id"])).collect();

@@ -29,6 +29,9 @@ use holon_profiles::type_registry::TypeRegistry;
 
 pub const RECIPE_TYPE_YAML: &str = include_str!("../assets/types/recipe.yaml");
 pub const INGREDIENT_USE_TYPE_YAML: &str = include_str!("../assets/types/ingredient_use.yaml");
+pub const RECIPE_SECTION_TYPE_YAML: &str = include_str!("../assets/types/recipe_section.yaml");
+pub const COOKWARE_TYPE_YAML: &str = include_str!("../assets/types/cookware.yaml");
+pub const RECIPE_TIMER_TYPE_YAML: &str = include_str!("../assets/types/recipe_timer.yaml");
 pub const PANTRY_ITEM_TYPE_YAML: &str = include_str!("../assets/types/pantry_item.yaml");
 pub const RECIPE_PROFILE_YAML: &str = include_str!("../assets/types/recipe_profile.yaml");
 pub const SHOPPING_ITEM_TYPE_YAML: &str = include_str!("../assets/types/shopping_item.yaml");
@@ -52,6 +55,9 @@ pub fn register_kitchen_types(registry: &TypeRegistry) -> Result<()> {
     for (name, yaml) in [
         ("recipe", RECIPE_TYPE_YAML),
         ("ingredient_use", INGREDIENT_USE_TYPE_YAML),
+        ("recipe_section", RECIPE_SECTION_TYPE_YAML),
+        ("cookware", COOKWARE_TYPE_YAML),
+        ("recipe_timer", RECIPE_TIMER_TYPE_YAML),
         ("pantry_item", PANTRY_ITEM_TYPE_YAML),
         ("shopping_item", SHOPPING_ITEM_TYPE_YAML),
     ] {

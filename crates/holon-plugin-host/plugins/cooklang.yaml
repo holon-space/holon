@@ -10,10 +10,16 @@ scopes:
   - type: recipe
     owner_column: source_path
     id_from: source_path
-    # `servings` is deliberately absent: cooklang admits non-integer servings
-    # (`4|6|8`) that the INTEGER column cannot hold, and the metadata reaches
-    # the recipe page through the document block's properties either way.
-    columns: [id, source_path, title, course]
+    columns: [id, source_path, title, course, servings, image]
   - type: ingredient_use
     owner_column: recipe_id
-    columns: [id, recipe_id, raw_name, quantity, unit, step_index]
+    columns: [id, recipe_id, section_id, raw_name, quantity, unit, step_index]
+  - type: recipe_section
+    owner_column: recipe_id
+    columns: [id, recipe_id, name, section_index]
+  - type: cookware
+    owner_column: recipe_id
+    columns: [id, recipe_id, section_id, step_index, name, quantity]
+  - type: recipe_timer
+    owner_column: recipe_id
+    columns: [id, recipe_id, section_id, step_index, name, amount, unit, seconds]
