@@ -1,4 +1,5 @@
 mod a_lagging_page_registry_keeps_the_page_header;
+mod a_retracted_page_root_keeps_the_page_header;
 mod asset_seed_header_pass_cost;
 mod delete_during_first_ingest;
 mod directory_companion_adoption;

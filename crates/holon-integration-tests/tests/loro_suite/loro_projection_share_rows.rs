@@ -268,3 +268,91 @@ async fn the_rows_of_a_share_that_failed_to_rehydrate_are_reconciled_away() -> R
     );
     Ok(())
 }
+
+/// A share moves the page into its own doc; it does not delete it. So the
+/// incremental pass that sees the page leave the global tree must leave its
+/// rows to the share, or every `block_raw` consumer sees the page vanish and
+/// come back.
+#[tokio::test]
+async fn sharing_a_page_deletes_none_of_its_rows() -> Result<()> {
+    let tempdir = tempfile::tempdir()?;
+    let doc_store = Arc::new(RwLock::new(LoroDocumentStore::new(
+        tempdir.path().to_path_buf(),
+    )));
+    let sink = Arc::new(MemorySink::new());
+    let (clock, engine) = holon_integration_tests::pbt::engine_views::start_views_engine();
+    let shares = Arc::new(holon_loro::iroh_sync_adapter::SharedTreeSyncManager::new());
+    let projection = LoroProjection::new(
+        doc_store.clone(),
+        Arc::new(StdMutex::new(Frontiers::default())),
+        sink.clone() as Arc<dyn OriginTaggedWrites>,
+        sink.clone() as Arc<dyn SinkReader>,
+        tempdir.path().join("sc.sync"),
+        holon_api::block_read_model::BlockReadModel::new(),
+        Arc::new(holon_conditions::ConditionBus::new()),
+        clock,
+        engine,
+    )
+    .with_shared_trees(shares.clone());
+    projection.install_doc_subscriptions().await?;
+    projection.arm();
+
+    let collab = doc_store.read().await.get_doc(DocScope::Global).await?;
+    let page = collab.with_write(holon_loro::WriteOrigin::Probe("share"), |txn| {
+        let tree = txn.get_tree(holon_loro::TREE_NAME);
+        let page = tree.create(None)?;
+        let kid = tree.create(Some(page))?;
+        for (node, id) in [(page, "page-id"), (kid, "kid-id")] {
+            holon_loro::write_stable_id(txn, node, id)?;
+            let meta = tree.get_meta(node)?;
+            meta.insert(holon_loro::CONTENT_TYPE, loro::LoroValue::from("text"))?;
+            meta.ensure_mergeable_text(holon_loro::CONTENT_RAW)?
+                .insert(0, id)?;
+        }
+        tree.get_meta(page)?.insert(
+            "tags",
+            serde_json::to_string(&[holon_api::block::PAGE_TAG])?,
+        )?;
+        Ok(page)
+    })?;
+    assert_eq!(projection.project().await?, ProjectionPass::Converged);
+    assert!(projection.is_seeded());
+    assert_eq!(sink.row_ids(), ["block:kid-id", "block:page-id"]);
+
+    collab.with_write(holon_loro::WriteOrigin::Probe("share"), |txn| {
+        let extracted = holon_loro::shared_tree::extract_for_share(
+            txn,
+            page,
+            None,
+            "share-id".into(),
+            holon_loro::shared_tree::HistoryRetention::None,
+        )?;
+        shares.register("share-id".into(), extracted.shared_doc.fork());
+        let mount = holon_loro::shared_tree::commit_share_prune(txn, &extracted)?;
+        holon_loro::write_stable_id(txn, mount, "mount-id")?;
+        holon_loro::shared_tree::record_mount(
+            &txn.get_tree(holon_loro::TREE_NAME),
+            mount,
+            &holon_loro::shared_tree::ShareKind::Page {
+                root: "page-id".into(),
+            },
+            holon_loro::shared_tree::MountRole::Owner,
+        )?;
+        Ok(())
+    })?;
+    let reads = sink.read_calls();
+    assert_eq!(projection.project().await?, ProjectionPass::Converged);
+
+    assert_eq!(
+        sink.read_calls(),
+        reads,
+        "the share is one bounded commit, so the incremental pass projects it"
+    );
+    assert_eq!(
+        sink.row_ids(),
+        ["block:kid-id", "block:page-id"],
+        "the page and its child moved into the share, so no delete of their rows may reach the \
+         sink"
+    );
+    Ok(())
+}

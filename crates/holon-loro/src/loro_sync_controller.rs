@@ -289,8 +289,8 @@ fn pass_outcome(ungrounded: usize, settled: bool) -> ProjectionPass {
 ///
 /// Once ARMED the gate can only have fired on an unsettled snapshot, and then a
 /// withheld delete is owed to the sink exactly like a withheld create. The
-/// share backend's prune-delete is one of these, which is why the check that
-/// guards it could not otherwise detect its own case.
+/// share backend's flush barrier reads only this count, so an owed delete of
+/// its pass over the prune must show in it.
 fn withheld_deletes_are_owed(armed: bool) -> bool {
     armed
 }
@@ -1257,6 +1257,16 @@ impl LoroProjection {
                     // write succeeds — a failed apply (e.g. an FK reject that rolls
                     // the whole batch back) must not advance the base, which would
                     // silently drop the change; instead we reseed and retry.
+                    // A node that left the global tree into a loaded share is
+                    // moved, not deleted: its row belongs to the share's
+                    // projection, as on the full walk.
+                    let share_rows = if changed.iter().any(|(_, new)| new.is_none()) {
+                        collab.with_read(|doc| {
+                            registered_share_rows(doc, self.shared_trees.as_deref())
+                        })?
+                    } else {
+                        std::collections::HashSet::new()
+                    };
                     let (ops, staging, before_len, after_len, has_orphan, has_unarmed_delete) = {
                         let live = self.live.lock().unwrap();
                         let before_len = live.len();
@@ -1283,6 +1293,11 @@ impl LoroProjection {
                                     }
                                     Some(_) => { /* identical — no-op (compare-and-skip) */ }
                                 },
+                                None if share_rows.contains(&id) => {
+                                    if live.contains_key(&id) {
+                                        staging.push((id, None));
+                                    }
+                                }
                                 None => {
                                     if live.contains_key(&id) {
                                         let mut params = holon_api::StorageEntity::new();

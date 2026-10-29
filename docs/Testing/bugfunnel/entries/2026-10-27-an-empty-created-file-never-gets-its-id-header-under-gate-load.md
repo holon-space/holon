@@ -27,30 +27,46 @@ real defect, not only test noise.
 The header write lands. A later write-back overwrites it with an empty render:
 
 - The ingest of the empty `doc_0.org` writes the 43-byte `#+ID:` header.
-- Sharing the page re-projects it. The resulting change of the page reaches
-  `on_block_changed` (`crates/holon-filesystem/src/file_sync_controller.rs:8574`), which
-  renders from the holder.
-- The render asked the page registry (`DocumentManager::get_by_id`) for the page's header.
-  Production's registry (`LiveDocumentManager`, `crates/holon-app/src/turso_seams.rs`) is a
-  matview of `Page`-tagged blocks fed by its own CDC stream, so it can lag the holder.
-  When it lacked the page, `WritebackRenderer::render_blocks`
-  (`crates/holon-filesystem/src/writeback_render.rs:89`) rendered body-only: `""`.
-- The write-back net wrote `""` over the file. A probe build of the two-instance test logged this
-  0-byte write in 157 of 160 runs; a later change usually wrote the header back. When none
-  followed, or the watcher event of the empty file reached the empty-file refusal first, the
-  file stayed 0 bytes and the page owned no file.
+- Sharing the page moves it out of the global Loro tree
+  (`crates/holon-loro/src/shared_tree.rs:649`, `commit_share_prune`). The incremental pass of
+  the global projection saw the page leave the tree and emitted a `delete` of its row in the
+  write authority (`block_raw`). `project_descendants_to_sql` re-created the row about 16 ms
+  later (`crates/holon-loro/src/loro_share_backend.rs`, `share_subtree`).
+- In that window no store held the page: the holder, the page registry
+  (`DocumentManager::get_by_id`) and the write authority
+  (`BlockReader::get_block_authoritative`) all lacked it. So `WritebackRenderer::render_blocks`
+  (`crates/holon-filesystem/src/writeback_render.rs:89`) rendered body-only, `""`, as it does
+  for a deleted page, and the write-back net wrote `""` over the file.
+- A later change usually wrote the header back. When none followed, or the watcher event of the
+  empty file reached the empty-file refusal first, the file stayed 0 bytes and the page owned
+  no file.
 
 ## Missing piece
-The failing path runs in the test, but only a registry lag at the moment of the share exposes
-it as a lasting failure: the test passed 25 of 26 gate extra runs and was red 1 of 128 and
-0 of 160 times (our shape) in local batches. No test forced the registry to lag the holder.
+The failing path ran in almost every run of the test (a probe build logged the 0-byte write in
+159 of 160 runs), but the oracle only saw it when no later write restored the header: the test
+passed 25 of 26 gate extra runs. No test asserted that a share leaves the page's row in
+`block_raw`.
 
 ## Remedy
-- `render_doc_from_holder` (`crates/holon-filesystem/src/file_sync_controller.rs:8852`) renders
-  the header from the page root the holder holds, and asks the registry only when the holder
-  has no page root.
-- Red-first test `crates/holon-orgmode/tests/a_lagging_page_registry_keeps_the_page_header.rs`
-  removes the page from the registry before a page change and asserts the `#+ID:` header
-  stays on disk: red before the fix (disk `""`), green after.
+- A share moves rows; it deletes none. The incremental pass of the global projection
+  (`crates/holon-loro/src/loro_sync_controller.rs:1263`, `:1296`) emits no `delete` for a row
+  that a loaded share holds (`registered_share_rows`), the rule its full walk already had.
+- `share_subtree` registers the shared doc before the prune commits
+  (`crates/holon-loro/src/loro_share_backend.rs:2170`), so the first projection pass over the
+  prune already counts the moved rows as the share's.
+- Red-first test `sharing_a_page_deletes_none_of_its_rows`
+  (`crates/holon-integration-tests/tests/loro_suite/loro_projection_share_rows.rs`): red before
+  the fix (the page and child rows deleted), green after.
+- Probe build of the two-instance test: 0 zero-byte writes of `doc_0.org` in 160 runs after
+  the fix, 159 of 160 with the share fix reverted.
+- The page registry lags the holder and the write authority, so the write-back no longer
+  depends on it alone for the header:
+  - `render_doc_from_holder` (`crates/holon-filesystem/src/file_sync_controller.rs:8937`) takes
+    the header from a held page root; pinned by
+    `crates/holon-orgmode/tests/a_lagging_page_registry_keeps_the_page_header.rs`.
+  - `WritebackRenderer::render_blocks` takes it from the page registry, else from the write
+    authority; pinned by
+    `crates/holon-orgmode/tests/a_retracted_page_root_keeps_the_page_header.rs`, which is red
+    without it, also with the share fix in place.
 - Removed the known red `empty-created-file-header-never-written` from
   `docs/Testing/KeystoneKnownReds.md`.

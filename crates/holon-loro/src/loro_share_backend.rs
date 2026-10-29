@@ -323,11 +323,10 @@ pub struct LoroShareBackend {
     sql_ops: Option<Arc<dyn OriginTaggedWrites>>,
     /// The global Loro→SQL projection (the same `DownstreamProjection`
     /// `LoroSyncController` drives). `share_subtree` flushes it after
-    /// pruning the shared subtree from the global tree so the global
-    /// prune-delete diff is applied to SQL — and its watermark advances —
-    /// BEFORE the sharer re-projects the subtree under the mount. Without
-    /// this barrier the global delete-diff races the re-projection and can
-    /// re-remove the just-re-created rows (see `share_subtree`). `Option`
+    /// pruning the shared subtree from the global tree so the global pass
+    /// over the prune is applied to SQL — and its watermark advances —
+    /// BEFORE the sharer re-projects the subtree under the mount, so the
+    /// share's writes are the last ones (see `share_subtree`). `Option`
     /// for the same reason as `sql_ops`: tests without the DI stack skip it.
     downstream_projection: Option<Arc<dyn DownstreamProjection>>,
     /// The write-tier authority, for the blocks a peer's import puts under a
@@ -2165,18 +2164,19 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     &kind,
                     MountRole::Owner,
                 )?;
+                // Registered before the commit wakes the global projection, so
+                // its first pass over the prune counts the moved rows as the
+                // share's and deletes none of them.
+                let shared_arc = Arc::new(extracted.shared_doc);
+                self.manager
+                    .register_arc(shared_tree_id.clone(), shared_arc.clone());
                 // Not `doc.commit()`: `commit_share_prune` already consumed the
                 // scope's armed origin, so a bare commit here would land
                 // unlabelled and a text-undo manager would offer to take the
                 // share back.
                 txn.commit();
 
-                Ok((
-                    Arc::new(extracted.shared_doc),
-                    shared_root,
-                    mount_parent_uri,
-                    kind,
-                ))
+                Ok((shared_arc, shared_root, mount_parent_uri, kind))
             })
             .map_err(typed_share_error)?;
 
@@ -2200,26 +2200,18 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // shared content; `share_subtree` must too, or the sharing peer loses
         // the subtree from the UI until the next restart re-hydrates it.
         //
-        // Ordering matters. The prune commit above removed every descendant
-        // block from the GLOBAL tree, so the global Loro→SQL projection's next
-        // diff emits a DELETE for each. That is a ONE-TIME event: the global
-        // projection diffs the global doc against an advancing base, so once
-        // the pruned snapshot becomes the base it never re-deletes those ids.
-        // If we re-created the descendant rows BEFORE that delete pass ran, the
-        // delete would wipe them again. We defeat it deterministically:
-        //   1. register the shared doc, so every reader that follows the mount finds it
-        //      and a full reseed of the global projection counts the share's rows as
-        //      the share's;
-        //   2. a BLOCK share projects its container row (an UPSERT; carries
+        // The prune moved the subtree out of the GLOBAL tree; it deleted
+        // nothing. The shared doc was registered before the prune committed,
+        // so the global projection counts the moved rows as the share's and
+        // keeps them in `block_raw`: no reader ever sees the page vanish.
+        //   1. a BLOCK share projects its container row (an UPSERT; carries
         //      `share-role`) — a page share has none, its page keeps its own row;
-        //   3. flush the global projection — this acquires its project lock
-        //      (serializing with the background loop), drains the pending prune-delete,
-        //      and advances its base, so no later pass can re-delete the descendants;
-        //   4. re-project the subtree as the LAST write.
-        // Without the DI-wired projection (tests) there is no global loop to
-        // race, so the flush is simply skipped.
-        self.manager
-            .register_arc(shared_tree_id.clone(), shared_arc.clone());
+        //   2. flush the global projection — this acquires its project lock
+        //      (serializing with the background loop) and advances its base past the
+        //      prune, so no later pass diffs it again;
+        //   3. re-project the subtree as the LAST write.
+        // Without the DI-wired projection (tests) there is no global loop, so
+        // the flush is simply skipped.
         if kind == ShareKind::Block {
             self.project_container_to_sql(&mount_stable_id, &mount_parent_uri, &shared_tree_id)
                 .await?;
@@ -2230,12 +2222,11 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     "flush global projection before re-projecting shared descendants: {e:#}"
                 ))
             })?;
-            // The prune-delete this flush publishes MUST land before the shared
-            // descendants are re-projected, or the delete races and re-removes
-            // the just-re-created rows. A withheld op means it did not land.
+            // A withheld op means the global pass over the prune did not
+            // complete, so its writes could still land after the share's.
             if pass.withheld() > 0 {
                 return Err(err(format!(
-                    "the global projection withheld {} FK-ungrounded op(s), so the prune-delete \
+                    "the global projection withheld {} FK-ungrounded op(s), so the prune \
                      did not reach SQL before re-projecting shared descendants",
                     pass.withheld()
                 )));
@@ -6037,7 +6028,7 @@ mod tests {
     }
 
     /// `DownstreamProjection` that reports a fixed outcome — the global
-    /// projection's answer to `share_subtree`'s prune-delete barrier.
+    /// projection's answer to `share_subtree`'s flush barrier.
     struct FixedPassProjection(holon_core::ProjectionPass);
 
     #[async_trait]
@@ -6058,7 +6049,7 @@ mod tests {
     /// Like `make_backend`, but wires a `RecordingSqlOps` so mount/descendant
     /// projection writes are observable. `downstream_projection` is `None` —
     /// there is no global `LoroSyncController` loop in these tests, so no
-    /// prune-delete races the projection and the flush barrier is unnecessary.
+    /// global pass races the projection and the flush barrier is unnecessary.
     fn make_backend_with_sql() -> (Arc<LoroShareBackend>, Arc<RecordingSqlOps>, TempDir) {
         make_backend_with_sql_and_projection(None)
     }
@@ -6665,14 +6656,14 @@ mod tests {
         backend.advertiser.close_all().await;
     }
 
-    /// The prune-delete `share_subtree` publishes must reach SQL before the
-    /// shared descendants are re-projected, or the delete re-removes the rows
-    /// just re-created. The only evidence that it landed is the flush's
+    /// The global pass over the prune must reach SQL before the shared
+    /// descendants are re-projected, or its writes land after the share's.
+    /// The only evidence that it landed is the flush's
     /// `ProjectionPass`, so an incomplete one must abort the share rather than
     /// continue into the race.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn share_subtree_fails_when_the_prune_delete_did_not_reach_sql() {
+    async fn share_subtree_fails_when_the_prune_did_not_reach_sql() {
         let (backend, _sql, _dir) = make_backend_with_sql_and_projection(Some(Arc::new(
             FixedPassProjection(holon_core::ProjectionPass::Incomplete { withheld: 2 }),
         )));
@@ -6691,10 +6682,43 @@ mod tests {
             .expect_err("an incomplete flush must abort the share");
         let msg = format!("{e:#}");
         assert!(
-            msg.contains("withheld 2") && msg.contains("prune-delete"),
+            msg.contains("withheld 2") && msg.contains("prune did not reach SQL"),
             "the error must name the owed op count and what did not land: {msg}"
         );
 
+        backend.advertiser.close_all().await;
+    }
+
+    /// The global projection wakes on the commit that prunes the shared
+    /// subtree. If the share is not registered by then, that pass reads the
+    /// moved rows as deleted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_share_is_registered_when_its_prune_commits() {
+        let (backend, _sql, _dir) = make_backend_with_sql();
+        seed_page(&backend, "shared-page", None, "My Shared Page").await;
+        seed_block(&backend, "p-child", Some("shared-page"), "Child under P").await;
+
+        let registered_at_commit: Arc<std::sync::Mutex<Vec<usize>>> = Arc::default();
+        let (manager, seen) = (backend.manager.clone(), registered_at_commit.clone());
+        // ALLOW(loro_doc_escape): subscription registration only
+        let raw = backend.global_doc().await.unwrap().doc();
+        let _sub = raw.subscribe_root(Arc::new(move |_| {
+            seen.lock()
+                .unwrap()
+                .push(crate::shared_tree::SharedTreeStore::shared_tree_ids(&*manager).len());
+        }));
+
+        backend
+            .share_subtree("block:shared-page", "none".into())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            registered_at_commit.lock().unwrap().first(),
+            Some(&1),
+            "the prune commit must find the share registered"
+        );
         backend.advertiser.close_all().await;
     }
 

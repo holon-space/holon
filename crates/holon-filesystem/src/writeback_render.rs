@@ -84,20 +84,33 @@ impl WritebackRenderer {
     /// Render `blocks` — already in authoritative document order — as
     /// `doc_id`'s file text, with the stored values that text does not hold.
     ///
-    /// A known document renders with its header (`#+TITLE:`, `#+ID:`); an
-    /// unknown one renders body-only.
+    /// A known document renders with its header (`#+TITLE:`, `#+ID:`); one
+    /// the write authority holds no page for renders body-only.
     pub async fn render_blocks(
         &self,
         doc_id: &EntityUri,
         path: &Path,
         blocks: &[Block],
     ) -> Result<Rendered> {
-        let rendered = match self.doc_manager.get_by_id(doc_id).await? {
+        let rendered = match self.page_root(doc_id).await? {
             Some(doc) => self.render_with_document_block(&doc, blocks, path)?,
             None => self.render_body_raw(doc_id, path, blocks)?,
         };
         assert_rendered(doc_id, blocks, &rendered.text);
         Ok(rendered)
+    }
+
+    /// `doc_id`'s page root. The page registry is a view that lags the write
+    /// authority, so a miss there is asked again of the authority.
+    async fn page_root(&self, doc_id: &EntityUri) -> Result<Option<Block>> {
+        if let Some(doc) = self.doc_manager.get_by_id(doc_id).await? {
+            return Ok(Some(doc));
+        }
+        Ok(self
+            .block_reader
+            .get_block_authoritative(doc_id)
+            .await?
+            .filter(|root| root.id == *doc_id && root.is_page()))
     }
 
     /// Render with an explicitly supplied document block — for a caller that
