@@ -58,6 +58,13 @@ fn is_an_armed_write_refusal(problem: &str, held: &std::collections::BTreeSet<St
         && held.iter().any(|file| problem.contains(file.as_str()))
 }
 
+/// iroh logs this when quinn refuses to close a redundant path, so no path
+/// changes; a connection that then dies fails the sync operation on its own.
+fn is_irohs_refused_redundant_path_close(problem: &str) -> bool {
+    problem.starts_with("[ERROR] iroh::socket::remote_map::remote_state (")
+        && problem.ends_with("): could not close last open path")
+}
+
 /// Fails when any ERROR-level tracing event or panic was captured during the
 /// transition window — the swallowed-error guard the advice panic slipped past.
 pub struct InvNoObservedErrors;
@@ -81,6 +88,7 @@ impl Invariant<CapMap, CapMap> for InvNoObservedErrors {
             .observed_problems()
             .into_iter()
             .filter(|p| !is_an_armed_write_refusal(p, &held))
+            .filter(|p| !is_irohs_refused_redundant_path_close(p))
             .collect();
         if problems.is_empty() {
             InvariantResult::Ok
@@ -144,5 +152,39 @@ mod tests {
             }
             other => panic!("expected Fail on a captured problem, got {other:?}"),
         }
+    }
+
+    const IROH_REFUSED_CLOSE: &str = "[ERROR] iroh::socket::remote_map::remote_state \
+        (/registry/iroh-0.96.1/src/socket/remote_map/remote_state.rs:1127): \
+        could not close last open path";
+
+    #[tokio::test]
+    async fn irohs_refused_redundant_path_close_is_not_a_problem() {
+        let sut = map(vec![IROH_REFUSED_CLOSE.to_string()]);
+        assert!(matches!(
+            InvNoObservedErrors.check(&CapMap::new(), &sut).await,
+            InvariantResult::Ok
+        ));
+    }
+
+    #[tokio::test]
+    async fn another_error_from_the_same_iroh_target_still_fails() {
+        let other = IROH_REFUSED_CLOSE.replace("could not close last open path", "actor died");
+        let sut = map(vec![other]);
+        assert!(matches!(
+            InvNoObservedErrors.check(&CapMap::new(), &sut).await,
+            InvariantResult::Fail(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_same_message_from_another_target_still_fails() {
+        let other =
+            IROH_REFUSED_CLOSE.replace("iroh::socket::remote_map::remote_state", "holon_loro");
+        let sut = map(vec![other]);
+        assert!(matches!(
+            InvNoObservedErrors.check(&CapMap::new(), &sut).await,
+            InvariantResult::Fail(_)
+        ));
     }
 }

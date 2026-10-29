@@ -431,6 +431,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `toggle-state-sql-read-repeat-budget`
 - `tour-spike-advance-cursor-not-visible`
 - `tour-spike-create-op-not-observable-load`
+- `tui-boot-refusals-second-instance-load-timeout`
 - `tui-inline-row-mount-unsettled-frame`
 - `tui-refused-write-back-missing-from-log`
 - `tui-stderr-write-missing-from-log-load`
