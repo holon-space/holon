@@ -8931,7 +8931,9 @@ impl FileSyncController {
         Ok(FoldVerdict::Incomplete)
     }
 
-    /// Render `doc_id` from its holder entry, in document order.
+    /// Render `doc_id` from its holder entry, in document order. A held page
+    /// root supplies the header: the page registry is fed apart from the
+    /// holder and can lag it, and without the root the render drops `#+ID:`.
     async fn render_doc_from_holder(&self, doc_id: &EntityUri, path: &Path) -> Result<String> {
         let held = self.holder.get(doc_id).ok_or_else(|| {
             anyhow::anyhow!(
@@ -8942,7 +8944,15 @@ impl FileSyncController {
             )
         })?;
         let blocks = held.document_order(doc_id);
-        self.render_doc_blocks(doc_id, path, &blocks).await
+        match held.blocks.get(doc_id).filter(|root| root.block.is_page()) {
+            Some(root) => self.disclose_render(
+                path,
+                self.renderer
+                    .render_document_block(&root.block, &blocks, path)
+                    .await,
+            ),
+            None => self.render_doc_blocks(doc_id, path, &blocks).await,
+        }
     }
 
     /// Poll all tracked files for pending external changes that the file

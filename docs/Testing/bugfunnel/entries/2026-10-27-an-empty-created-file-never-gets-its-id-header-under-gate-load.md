@@ -3,7 +3,7 @@ id: 2026-10-27-an-empty-created-file-never-gets-its-id-header-under-gate-load
 date: 2026-10-27
 gap: ENVIRONMENT
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Under gate load, an empty org file created on disk is ingested as a page, but its `#+ID:`
   header write never lands, so the file stays 0 bytes and the page owns no file.
@@ -24,29 +24,33 @@ A 0-byte file next to a page that the store holds can lose data on a later write
 real defect, not only test noise.
 
 ## Root cause
-UNMEASURED. The investigation stopped at the owed write-back:
+The header write lands. A later write-back overwrites it with an empty render:
 
-- The test writes an empty `doc_0.org`
-  (`crates/holon-integration-tests/src/pbt/transitions/create_document.rs`); the controller
-  ingests it and mints the page.
-- The file has no `#+ID:`, so `needs_id_writeback` forces a render
-  (`crates/holon-filesystem/src/file_sync_controller.rs:7672`), and the render that differs from
-  disk is put into `owed` for the write-back net (`file_sync_controller.rs:7855`).
-- That write never landed within the 5 s budget. Candidate exits in `catch_up_write`
-  (`crates/holon-filesystem/src/file_sync_controller/writeback.rs`): home not writable, the
-  base-hash equality skip, the virtual-seed gate, quarantine, or a disk change. The share step
-  of the test may also change the page's home before the write fires.
+- The ingest of the empty `doc_0.org` writes the 43-byte `#+ID:` header.
+- Sharing the page re-projects it. The resulting change of the page reaches
+  `on_block_changed` (`crates/holon-filesystem/src/file_sync_controller.rs:8574`), which
+  renders from the holder.
+- The render asked the page registry (`DocumentManager::get_by_id`) for the page's header.
+  Production's registry (`LiveDocumentManager`, `crates/holon-app/src/turso_seams.rs`) is a
+  matview of `Page`-tagged blocks fed by its own CDC stream, so it can lag the holder.
+  When it lacked the page, `WritebackRenderer::render_blocks`
+  (`crates/holon-filesystem/src/writeback_render.rs:89`) rendered body-only: `""`.
+- The write-back net wrote `""` over the file. A probe build of the two-instance test logged this
+  0-byte write in 157 of 160 runs; a later change usually wrote the header back. When none
+  followed, or the watcher event of the empty file reached the empty-file refusal first, the
+  file stayed 0 bytes and the page owned no file.
 
 ## Missing piece
-The failing path runs in the test, but only heavy load exposes it: the test passed 25 of 26
-gate extra runs, and three batches of 20 single-test runs on main were red 0, 3 and 0 times
-(3 of 60); the red batch ran at load average about 64, each red with the same shape. No test forces the
-timing window, so the red stays rare and looks like noise.
+The failing path runs in the test, but only a registry lag at the moment of the share exposes
+it as a lasting failure: the test passed 25 of 26 gate extra runs and was red 1 of 128 and
+0 of 160 times (our shape) in local batches. No test forced the registry to lag the holder.
 
 ## Remedy
-- Registered as known red `empty-created-file-header-never-written` in
-  `docs/Testing/KeystoneKnownReds.md` (owner holon-space/holon-work#782). The fileless arm is
-  matched by its own row `page-without-own-file`. The one-byte `org-render-echo-loop` shape and
-  a double-homed page beside the empty file stay novel (`scripts/keystone-known-reds-fixture.sh`).
-- Open: holon-space/holon-work#782 finds and fixes the dropped header write, with a
-  deterministic red-first reproduction, and removes the row.
+- `render_doc_from_holder` (`crates/holon-filesystem/src/file_sync_controller.rs:8852`) renders
+  the header from the page root the holder holds, and asks the registry only when the holder
+  has no page root.
+- Red-first test `crates/holon-orgmode/tests/a_lagging_page_registry_keeps_the_page_header.rs`
+  removes the page from the registry before a page change and asserts the `#+ID:` header
+  stays on disk: red before the fix (disk `""`), green after.
+- Removed the known red `empty-created-file-header-never-written` from
+  `docs/Testing/KeystoneKnownReds.md`.
