@@ -834,6 +834,44 @@ test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 EOF
 expect_outcome wb-d7 0 '^PRIMARY: \[known-red:syn-real-mint\]' "$work/wb-d7.log"
 
+# A row whose assert every generated case reaches covers only its observed
+# signature: another file, line or boot arm at that assert stays a failure.
+hand_authored_log() {
+    local name="$1" site="$2" payload="$3"
+    {
+        printf '%s\n' "thread 'hand_authored_keystone_regressions' (1) panicked at $site:"
+        printf '%s\n' "$payload"
+        printf '%s\n' 'test hand_authored_keystone_regressions ... FAILED'
+        printf '%s\n' 'test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.73s'
+    } >"$work/$name.log"
+}
+deleted_site=crates/holon-integration-tests/src/pbt/frontend_slice/components.rs
+deleted_payload() {
+    printf '[SutAppLifecycle::delete_document] %s exists again after its blocks vanished — a projection writer recreated a file the user deleted' "$1"
+}
+novel_only='^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red'
+hand_authored_log deleted-observed "$deleted_site:6067:9" "$(deleted_payload gamma.org)"
+expect_outcome deleted-file/observed 0 '^PRIMARY: \[known-red:deleted-file-recreated-by-stale-page-mirror\]' "$work/deleted-observed.log"
+hand_authored_log deleted-current-site "$deleted_site:6077:9" "$(deleted_payload gamma.org)"
+expect_outcome deleted-file/current-site 0 '^PRIMARY: \[known-red:deleted-file-recreated-by-stale-page-mirror\]' "$work/deleted-current-site.log"
+hand_authored_log deleted-other-file-other-line "$deleted_site:1234:5" "$(deleted_payload journal.org)"
+expect_outcome deleted-file/other-file-other-line 1 "$novel_only" "$work/deleted-other-file-other-line.log"
+hand_authored_log deleted-other-file "$deleted_site:6077:9" "$(deleted_payload journal.org)"
+expect_outcome deleted-file/other-file 1 "$novel_only" "$work/deleted-other-file.log"
+hand_authored_log deleted-other-line "$deleted_site:1234:5" "$(deleted_payload gamma.org)"
+expect_outcome deleted-file/other-line 1 '^\[known-reds\] FAIL: cross-family match: deleted-file-recreated-by-stale-page-mirror' \
+    "$work/deleted-other-line.log"
+boot_site=crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs
+boot_payload() {
+    printf 'the composed boot did not finish within 60s with the `fake-mcp` integration peer drawn to answer %s: the session resolves only after every enabled integration connected' "$1"
+}
+hand_authored_log boot-instant "$boot_site:1402:9" "$(boot_payload Instant)"
+expect_outcome boot-timeout/instant 0 '^PRIMARY: \[known-red:composed-boot-timeout-under-load\]' "$work/boot-instant.log"
+for timing in AfterSessionResolve Never; do
+    hand_authored_log "boot-$timing" "$boot_site:1402:9" "$(boot_payload "$timing")"
+    expect_outcome "boot-timeout/$timing" 1 "$novel_only" "$work/boot-$timing.log"
+done
+
 # The keystone's `BootFault::TaskPanic` panics on purpose. Only that exact
 # payload at that exact site is no failure; anything else stays a signature.
 injected_site=crates/holon-integration-tests/src/pbt/composed/boot_fault.rs
