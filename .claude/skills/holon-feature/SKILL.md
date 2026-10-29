@@ -48,6 +48,27 @@ only proves consistency: derive the expected result from an independent
 rule have drawn inputs that must fail by name
 (`crates/holon-mcp-client/tests/transition_sidecar.rs`).
 
+### After green — the testing loop on the real code
+
+Red-first proves the test can see the feature. The testing loop of the
+`property-based-testing` skill ("The testing loop") then hunts for the defects
+the test cannot see yet. Every lane runs it after step 4:
+
+1. **Widen the generators.** Draw all public operations and all input classes,
+   failures and concurrency included, with no or very few restrictions.
+2. **Run them on the real code** until a test fails or the code crashes.
+3. **Analyse each failure.** A state that cannot happen in production: narrow
+   the generator and write the reason down (`narrowed`). A realistic edge case
+   the code misses: harden the code (`hardened`).
+
+A test written before the code exists is not frozen. The lane runs it again on
+the real code and analyses its failures; a test that ran only on stubs proves
+nothing about the code.
+
+The change summary lists each generator restriction with its reason, and each
+failure with its verdict, under `Generators:` (the summary template of the
+`verify-lane` skill). A restriction without a reason is a verifier finding.
+
 ## 2. Which tier — headless keystone vs GPUI windowed
 
 | The feature is about… | Tier | Where |
