@@ -48,6 +48,8 @@ OWNER_TABLE_FILE = "scripts/timing-split.py"
 OWNER_TABLE = "OWNER_RECIPES"
 PATH_TABLE = "PATH_RECIPES"
 STEP_LINE = re.compile(r"([a-z][a-z0-9-]*): \S.*")
+# Disclosure lines: a lane runs no command for them (`timing:` belongs to the landing gate, `unowned:` names no recipe).
+NOT_RUN_STEPS = ("timing", "unowned")
 # shortcut: a `#[path]` module is not followed; module_files then fails loudly on the missing file.
 MOD_DECL = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.M)
 
