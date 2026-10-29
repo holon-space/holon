@@ -28,20 +28,9 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-/// `blocks_with_paths` reduced to the columns the recursion needs.
-const PATHS_VIEW: &str = "CREATE MATERIALIZED VIEW blocks_with_paths AS
-WITH RECURSIVE paths AS (
-    SELECT id, parent_id, '/' || id AS path, id AS root_id
-    FROM block WHERE parent_id LIKE 'sentinel:%'
-    UNION ALL
-    SELECT b.id, b.parent_id, p.path || '/' || b.id AS path, p.root_id
-    FROM block b INNER JOIN paths p ON b.parent_id = p.id
-)
-SELECT * FROM paths";
-
-/// Moves `a` under its own child `b`: the stored parent cycle that makes the
-/// IVM commit of `blocks_with_paths` spin forever.
-const CYCLE_WRITE: &str = "UPDATE block SET parent_id = 'b' WHERE id = 'a'";
+/// A write whose WHERE counts an endless recursion, so it never finishes.
+const SPINNING_WRITE: &str = "UPDATE block SET parent_id = 'b' WHERE id = 'a' AND \
+     (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c) > 0";
 
 fn slow_count_sql(n: u64) -> String {
     format!(
@@ -211,7 +200,6 @@ fn a_spinning_commit_is_disclosed_with_its_command_kind_and_redacted_sql() {
             .execute_ddl("CREATE TABLE block (id TEXT PRIMARY KEY, parent_id TEXT)")
             .await
             .expect("create block");
-        handle.execute_ddl(PATHS_VIEW).await.expect("create view");
         handle
             .execute_values(
                 "INSERT INTO block VALUES ('a', 'sentinel:no_parent'), ('b', 'a')",
@@ -224,8 +212,8 @@ fn a_spinning_commit_is_disclosed_with_its_command_kind_and_redacted_sql() {
     let spinning = handle.clone();
     let started = Instant::now();
     rt.spawn(async move {
-        let outcome = spinning.execute_values(CYCLE_WRITE, vec![]).await;
-        panic!("the cycle write returned ({outcome:?}); this test needs it to spin");
+        let outcome = spinning.execute_values(SPINNING_WRITE, vec![]).await;
+        panic!("the spinning write returned ({outcome:?}); this test needs it to spin");
     });
 
     let stuck = wait_for_stuck(&bus, Duration::from_secs(10));

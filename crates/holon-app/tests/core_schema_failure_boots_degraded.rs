@@ -28,7 +28,7 @@ const DB_FILE: &str = "foreign.db";
 fn seed(dir: &Path, statements: &[&str]) {
     let db = holon::storage::turso::TursoBackend::open_database(dir.join(DB_FILE))
         .expect("open the database to seed");
-    let conn = db.connect().expect("connect");
+    let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
     for sql in statements {
         conn.execute(*sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
     }

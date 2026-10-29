@@ -263,7 +263,7 @@ fn record_foreign_function_set(db_path: &std::path::Path) {
     let db = holon::storage::turso::TursoBackend::open_database(db_path)
         .unwrap_or_else(|e| panic!("[reboot] open {} between boots: {e}", db_path.display()));
     let conn = db
-        .connect()
+        .connect(holon::storage::turso::ConnectOpts::new())
         .unwrap_or_else(|e| panic!("[reboot] connect: {e}"));
     for sql in [
         "CREATE TABLE IF NOT EXISTS holon_db_fn_set (signature TEXT NOT NULL)",

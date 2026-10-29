@@ -160,6 +160,21 @@ async fn a_rebuild_leaves_each_subscriber_holding_exactly_its_rebuilt_view() {
     );
 }
 
+/// The engine keeps a table from changing under a matview, so the failed
+/// recreate is staged: the table goes, and a stand-in view keeps the name.
+async fn drop_table_under_stand_in(handle: &DbHandle, view: &str, table: &str) {
+    for ddl in [
+        format!("DROP VIEW {view}"),
+        format!("DROP TABLE {table}"),
+        format!("CREATE MATERIALIZED VIEW {view} AS SELECT id, content AS extra FROM items"),
+    ] {
+        handle
+            .execute_ddl(&ddl)
+            .await
+            .unwrap_or_else(|e| panic!("{ddl}: {e}"));
+    }
+}
+
 #[tokio::test]
 async fn a_rebuild_recreates_every_listened_view_it_can_and_names_each_one_it_cannot() {
     let handle = live_database().await;
@@ -172,11 +187,8 @@ async fn a_rebuild_recreates_every_listened_view_it_can_and_names_each_one_it_ca
     let (_, _other_broken) = Subscriber::open(&manager, "SELECT id, extra FROM t3").await;
     let broken = MatviewManager::compute_view_name("SELECT id, extra FROM t2");
     let other_broken = MatviewManager::compute_view_name("SELECT id, extra FROM t3");
-    for table in ["t2", "t3"] {
-        handle
-            .execute_ddl(&format!("DROP TABLE {table}"))
-            .await
-            .expect("drop table");
+    for (view, table) in [(&broken, "t2"), (&other_broken, "t3")] {
+        drop_table_under_stand_in(&handle, view, table).await;
     }
 
     let err = self::manager(&handle)
@@ -217,7 +229,7 @@ async fn a_subscriber_whose_view_cannot_be_recreated_is_told_so() {
         .ensure_and_subscribe(sql, Some("one-watch"))
         .await
         .expect("subscribe keyed");
-    handle.execute_ddl("DROP TABLE t2").await.expect("drop t2");
+    drop_table_under_stand_in(&handle, &view, "t2").await;
 
     self::manager(&handle)
         .rebuild_watch_views()

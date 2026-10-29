@@ -210,7 +210,7 @@ async fn seed_then_reshape(dir: &Path, reshape: impl FnOnce(&Arc<turso_core::Con
     }
     let db = holon::storage::turso::TursoBackend::open_database(dir.join(LATER_DB))
         .expect("open between the sessions");
-    let conn = db.connect().expect("connect");
+    let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
     reshape(&conn);
 }
 
@@ -653,7 +653,7 @@ async fn a_refused_type_stays_quarantined_across_boots_until_the_remedy() {
 fn between_sessions(dir: &Path, statements: &[&str]) {
     let db = holon::storage::turso::TursoBackend::open_database(dir.join(LATER_DB))
         .expect("open between the sessions");
-    let conn = db.connect().expect("connect");
+    let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
     for statement in statements {
         exec(&conn, statement);
     }

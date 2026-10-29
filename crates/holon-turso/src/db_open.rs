@@ -18,12 +18,14 @@ use holon_core::storage::types::DatabaseOpenFailure;
 use holon_core::storage::types::Result;
 use holon_core::storage::types::StorageError;
 use turso_core::CompletionError;
+use turso_core::ConnectOpts;
 use turso_core::Connection;
 use turso_core::Database;
 use turso_core::DatabaseOpts;
 use turso_core::IO;
 use turso_core::LimboError;
 use turso_core::MemoryIO;
+use turso_core::NamespaceId;
 use turso_core::OpenFlags;
 use turso_core::OpenOptions;
 use turso_core::Value;
@@ -393,7 +395,14 @@ fn attempt(
     })?;
     // The engine reads the write-ahead log at the first connect, so a damaged
     // log surfaces there.
-    if let Err(error) = db.connect() {
+    if let Err(error) = log_header_is_intact(path) {
+        return Err(Failed {
+            leg: Leg::Connect,
+            error,
+            db: Some(db),
+        });
+    }
+    if let Err(error) = db.connect(ConnectOpts::new()) {
         return Err(Failed {
             leg: Leg::Connect,
             error: engine("connect")(error),
@@ -507,6 +516,59 @@ fn recover_damaged(
     })
 }
 
+/// The engine reads a log whose header fails its checksum as empty and
+/// overwrites it at the next write, so the open refuses such a log first.
+#[cfg(target_family = "unix")]
+fn log_header_is_intact(path: &str) -> Step<()> {
+    use std::io::Read;
+
+    use turso_core::storage::sqlite3_ondisk::WAL_HEADER_SIZE;
+    use turso_core::storage::sqlite3_ondisk::WAL_MAGIC_BE;
+    use turso_core::storage::sqlite3_ondisk::WAL_MAGIC_LE;
+    use turso_core::storage::sqlite3_ondisk::WalHeader;
+    use turso_core::storage::sqlite3_ondisk::checksum_wal;
+
+    let log = sidecar(path, LOG_SUFFIX);
+    let unreadable = |e: std::io::Error| invalid(format!("read the log {}: {e}", log.display()));
+    let mut file = match std::fs::File::open(&log) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(unreadable(e)),
+    };
+    if file.metadata().map_err(unreadable)?.len() < WAL_HEADER_SIZE as u64 {
+        return Ok(());
+    }
+    let mut bytes = [0u8; WAL_HEADER_SIZE];
+    file.read_exact(&mut bytes).map_err(unreadable)?;
+    let word = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+    let header = WalHeader {
+        magic: word(0),
+        file_format: word(4),
+        page_size: word(8),
+        checkpoint_seq: word(12),
+        salt_1: word(16),
+        salt_2: word(20),
+        checksum_1: word(24),
+        checksum_2: word(28),
+    };
+    let native = cfg!(target_endian = "big") == (header.magic & 1 != 0);
+    if matches!(header.magic, WAL_MAGIC_LE | WAL_MAGIC_BE)
+        && checksum_wal(&bytes[..24], &header, (0, 0), native)
+            == (header.checksum_1, header.checksum_2)
+    {
+        return Ok(());
+    }
+    Err(engine("read the log header")(LimboError::Corrupt(format!(
+        "{} does not start with a valid write-ahead log header",
+        log.display()
+    ))))
+}
+
+#[cfg(not(target_family = "unix"))]
+fn log_header_is_intact(_: &str) -> Step<()> {
+    Ok(())
+}
+
 const LOG_SUFFIX: &str = "-wal";
 const COORDINATION_SUFFIX: &str = "-tshm";
 
@@ -594,7 +656,10 @@ fn open_fresh(path: &str, fns: &[ScalarFn]) -> Step<Arc<Database>> {
 /// Returns the dropped view names.
 fn drop_computed(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Vec<String>> {
     let conn = connect(db)?;
-    let unloadable = unloadable_views(&conn)?;
+    let unloadable: Vec<String> = unloadable_views(&conn)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     let mut views: Vec<(String, String)> = rows(
         &conn,
         "SELECT name, sql FROM sqlite_schema WHERE type = 'view' ORDER BY name",
@@ -658,18 +723,65 @@ fn names_word(sql: &str, name: &str) -> bool {
         .any(|word| word == name)
 }
 
-fn unloadable_views(conn: &Arc<Connection>) -> Step<Vec<String>> {
-    conn.with_schema_mut(|schema| {
-        let mut views: Vec<String> = schema
-            .incompatible_views
-            .keys()
-            .chain(schema.broken_views.iter())
-            .cloned()
-            .collect();
-        views.sort();
-        views
+/// The views the engine could not load, each with why. The engine loads a
+/// materialized view whose SELECT names a column its table no longer has, and
+/// then refuses every write to that table, so such a view counts as unloadable.
+fn unloadable_views(conn: &Arc<Connection>) -> Step<Vec<(String, String)>> {
+    let views: Vec<(String, String)> = rows(
+        conn,
+        "SELECT name, sql FROM sqlite_schema WHERE type = 'view' ORDER BY name",
+    )?
+    .into_iter()
+    .map(|row| match row.as_slice() {
+        [Value::Text(name), Value::Text(sql)] => {
+            Ok((name.as_str().to_string(), sql.as_str().to_string()))
+        }
+        other => Err(invalid(format!("sqlite_schema view row is {other:?}"))),
     })
-    .map_err(engine("read the schema"))
+    .collect::<Step<_>>()?;
+    let flagged: Vec<(String, String, Option<&'static str>)> = conn
+        .with_schema_mut(|schema| {
+            views
+                .into_iter()
+                .map(|(name, sql)| {
+                    let why = if schema.is_broken_view(NamespaceId::ROOT, &name) {
+                        Some("its SQL does not parse")
+                    } else if schema.is_incompatible_view(NamespaceId::ROOT, &name) {
+                        Some("its stored state is from an incompatible engine version")
+                    } else {
+                        None
+                    };
+                    (name, sql, why)
+                })
+                .collect()
+        })
+        .map_err(engine("read the schema"))?;
+    Ok(flagged
+        .into_iter()
+        .filter_map(|(name, sql, why)| match why {
+            Some(why) => Some((name, why.to_string())),
+            None if is_materialized(&sql) => match view_select(&sql) {
+                Some(select) => conn
+                    .prepare(select)
+                    .err()
+                    .map(|e| (name, format!("its SELECT no longer compiles: {e}"))),
+                None => Some((name, "its SQL has no `AS <select>`".to_string())),
+            },
+            None => None,
+        })
+        .collect())
+}
+
+/// The SELECT of a stored `CREATE MATERIALIZED VIEW <name> AS <select>`.
+fn view_select(sql: &str) -> Option<&str> {
+    let b = sql.as_bytes();
+    (1..b.len().saturating_sub(2))
+        .find(|&i| {
+            b[i - 1].is_ascii_whitespace()
+                && b[i..i + 2].eq_ignore_ascii_case(b"AS")
+                && b[i + 2].is_ascii_whitespace()
+        })
+        .map(|i| &sql[i + 3..])
 }
 
 fn has_table(conn: &Arc<Connection>, table: &str) -> Step<bool> {
@@ -746,23 +858,10 @@ fn unusable_reason(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Option<String>>
             "it was built with the scalar functions [{stored}], this binary registers [{wanted}]"
         )));
     }
-    let unusable = conn
-        .with_schema_mut(|schema| {
-            let mut views: Vec<String> = schema
-                .incompatible_views
-                .iter()
-                .map(|(name, reason)| format!("{name} ({reason})"))
-                .chain(
-                    schema
-                        .broken_views
-                        .iter()
-                        .map(|name| format!("{name} (its SQL does not parse)")),
-                )
-                .collect();
-            views.sort();
-            views
-        })
-        .map_err(engine("read the schema"))?;
+    let unusable: Vec<String> = unloadable_views(&conn)?
+        .into_iter()
+        .map(|(name, why)| format!("{name} ({why})"))
+        .collect();
     if unusable.is_empty() {
         return Ok(None);
     }
@@ -840,7 +939,7 @@ fn is_empty(conn: &Arc<Connection>) -> Step<bool> {
 }
 
 fn connect(db: &Arc<Database>) -> Step<Arc<Connection>> {
-    db.connect().map_err(engine("connect"))
+    db.connect(ConnectOpts::new()).map_err(engine("connect"))
 }
 
 fn rows(conn: &Arc<Connection>, sql: &str) -> Step<Vec<Vec<Value>>> {
@@ -1085,6 +1184,46 @@ mod tests {
                 "{case}: the record must be written again"
             );
         }
+    }
+
+    /// The engine opens a file whose view calls a function nobody registered,
+    /// and only refuses the next write that has to maintain that view. The
+    /// open must drop the view instead, and say so.
+    #[test]
+    fn a_function_dropped_from_the_registered_set_drops_its_views_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        {
+            let (db, _) = open(&path, scalar_fns::ALL, WhenHeld::Wait).unwrap();
+            exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)").unwrap();
+            exec(&db, "INSERT INTO t (n) VALUES (1), (2)").unwrap();
+            exec(
+                &db,
+                "CREATE MATERIALIZED VIEW v AS SELECT id, holon_add(n, 1) AS m FROM t",
+            )
+            .unwrap();
+        }
+        let without_add: Vec<ScalarFn> = scalar_fns::ALL
+            .iter()
+            .filter(|f| f.name != "holon_add")
+            .copied()
+            .collect();
+        assert_eq!(without_add.len() + 1, scalar_fns::ALL.len());
+
+        let (db, outcome) = open(&path, &without_add, WhenHeld::Wait)
+            .unwrap_or_else(|e| panic!("open without holon_add: {e}"));
+        assert!(
+            matches!(
+                outcome.0.as_slice(),
+                [OpenChange::ViewsDropped { views, .. }] if views == &["v".to_string()]
+            ),
+            "the open must disclose the dropped view, got {:?}",
+            outcome.0
+        );
+        assert!(!has(&db, "view", "v"));
+        exec(&db, "INSERT INTO t (n) VALUES (3)")
+            .expect("with the view gone, writes to its source table must be accepted");
+        assert_eq!(count(&db, "SELECT count(*) FROM t"), 3);
     }
 
     /// `w` reads `v`, which calls `DOUBLE`: both go, the source rows stay.

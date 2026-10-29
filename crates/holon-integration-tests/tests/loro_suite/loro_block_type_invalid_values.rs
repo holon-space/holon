@@ -414,7 +414,9 @@ fn a_sql_row_holding_an_invalid_block_type_boots_reads_untyped_and_discloses() {
         let id = "block:bt-sql-invalid";
         let db = holon_turso::turso::TursoBackend::open_database(env.temp_path().join("test.db"))
             .expect("opening the database must succeed");
-        let conn = db.connect().expect("connecting must succeed");
+        let conn = db
+            .connect(holon_turso::turso::ConnectOpts::new())
+            .expect("connecting must succeed");
         for statement in holon_turso::sql_utils::sql_statements(
             holon_turso::schema_modules::block_raw_schema_sql(),
         ) {
@@ -475,7 +477,9 @@ fn a_sql_row_the_block_type_audit_cannot_read_boots_and_discloses() {
         let id = "block:bt-sql-after-unaudited";
         let db = holon_turso::turso::TursoBackend::open_database(env.temp_path().join("test.db"))
             .expect("opening the database must succeed");
-        let conn = db.connect().expect("connecting must succeed");
+        let conn = db
+            .connect(holon_turso::turso::ConnectOpts::new())
+            .expect("connecting must succeed");
         for statement in holon_turso::sql_utils::sql_statements(
             holon_turso::schema_modules::block_raw_schema_sql(),
         ) {

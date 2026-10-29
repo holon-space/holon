@@ -149,6 +149,7 @@ pub fn cmd_fingerprint(cmd: &DbCommand) -> (&'static str, Option<&str>) {
         DbCommand::ResourceExists { .. } => ("ResourceExists", None),
         DbCommand::Transaction { .. } => ("Transaction", None),
         DbCommand::SubscribeCdc { .. } => ("SubscribeCdc", None),
+        DbCommand::StopListening { .. } => ("StopListening", None),
         DbCommand::ListenFromSnapshot { snapshot_sql, .. } => {
             ("ListenFromSnapshot", Some(snapshot_sql.as_str()))
         }

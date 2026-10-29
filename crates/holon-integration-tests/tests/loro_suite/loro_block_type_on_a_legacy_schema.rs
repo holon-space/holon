@@ -148,7 +148,7 @@ async fn create_legacy_database(env: &TestEnvironment, runtime: Arc<tokio::runti
     let db = holon_turso::turso::TursoBackend::open_database(env.temp_path().join("test.db"))
         .expect("opening the legacy database must succeed");
     let conn = db
-        .connect()
+        .connect(holon_turso::turso::ConnectOpts::new())
         .expect("connecting to the legacy database must succeed");
     conn.execute(LEGACY_BLOCK_RAW)
         .expect("creating the legacy block_raw must succeed");
@@ -338,7 +338,9 @@ fn every_legacy_row_survives_the_reshape_without_the_loro_store() {
         create_legacy_database(&env, runtime.clone()).await;
         let db = holon_turso::turso::TursoBackend::open_database(env.temp_path().join("test.db"))
             .expect("opening the legacy database must succeed");
-        let conn = db.connect().expect("connecting must succeed");
+        let conn = db
+            .connect(holon_turso::turso::ConnectOpts::new())
+            .expect("connecting must succeed");
         for row in [
             format!(
                 "INSERT INTO block_raw (id, parent_id, content, block_type) VALUES \

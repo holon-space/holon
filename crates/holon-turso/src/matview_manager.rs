@@ -419,7 +419,16 @@ pub(crate) async fn drop_dependent_views(db_handle: &DbHandle, view_name: &str) 
     Ok(())
 }
 
-/// Disclose (never DROP) `__turso_internal_dbsp_state_v*_{view_name}` tables
+/// The DBSP state tables whose name contains `view_name`, a superset of the
+/// ones `view_name` owns.
+fn state_tables_sql(view_name: &str) -> String {
+    format!(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{}%{view_name}%'",
+        turso_core::schema::DBSP_TABLE_PREFIX
+    )
+}
+
+/// Disclose (never DROP) the DBSP state tables of `view_name`
 /// left behind by a crash mid-DDL or an older DBSP-circuit epoch.
 ///
 /// These are Turso IVM internal state, NOT user data. The `__turso_internal_`
@@ -438,14 +447,13 @@ pub(crate) async fn drop_dependent_views(db_handle: &DbHandle, view_name: &str) 
 /// We surface it loudly (fail-loud disclosure) but leave disposal to Turso;
 /// base tables — the source of truth — are never touched, so no data loss.
 async fn cleanup_orphaned_dbsp_state(db_handle: &DbHandle, view_name: &str) -> Result<()> {
-    let pattern = format!("__turso_internal_dbsp_state_v%_{}", view_name);
-    let check_sql = format!(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{}'",
-        pattern
-    );
-    let residual = db_handle.query(&check_sql, HashMap::new()).await?;
+    let residual = db_handle
+        .query(&state_tables_sql(view_name), HashMap::new())
+        .await?;
     for row in residual {
-        if let Some(Value::String(table_name)) = row.get("name") {
+        if let Some(Value::String(table_name)) = row.get("name")
+            && crate::dbsp_state::is_state_of(table_name, view_name)
+        {
             tracing::warn!(
                 "[reconcile_named_view] Leaving Turso-internal DBSP state table '{table_name}' \
                  in place: its reserved prefix forbids a user DROP, and disposal belongs to \
@@ -503,13 +511,13 @@ pub(crate) async fn cleanup_orphaned_dbsp_state_on_conn(
     conn: &turso::Connection,
     view_name: &str,
 ) -> Result<()> {
-    let check_sql = format!(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE \
-         '__turso_internal_dbsp_state_v%_{view_name}'"
-    );
-    let residual = crate::turso::TursoBackend::query_rows(conn, &check_sql, HashMap::new()).await?;
+    let residual =
+        crate::turso::TursoBackend::query_rows(conn, &state_tables_sql(view_name), HashMap::new())
+            .await?;
     for row in residual {
-        if let Some(Value::String(table_name)) = row.get("name") {
+        if let Some(Value::String(table_name)) = row.get("name")
+            && crate::dbsp_state::is_state_of(table_name, view_name)
+        {
             tracing::warn!(
                 "[Actor] Leaving Turso-internal DBSP state table '{table_name}' in place: its \
                  reserved prefix forbids a user DROP, and disposal belongs to Turso's own \
@@ -1970,20 +1978,20 @@ mod tests {
             .await
             .expect("transition to ready");
 
-        reconcile_named_view(&handle, "src_view", "SELECT id, v FROM src")
-            .await
-            .expect("create matview");
+        reconcile_named_view(
+            &handle,
+            "src_view",
+            "SELECT v, count(*) AS n FROM src GROUP BY v",
+        )
+        .await
+        .expect("create matview");
 
         // The matview owns a real system-prefixed DBSP state table.
         let dbsp = handle
-            .query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE \
-                 '__turso_internal_dbsp_state_v%_src_view'",
-                HashMap::new(),
-            )
+            .query(&state_tables_sql("src_view"), HashMap::new())
             .await
             .expect("query dbsp state table");
-        assert_eq!(dbsp.len(), 1, "matview must create a DBSP state table");
+        assert!(!dbsp.is_empty(), "matview must create a DBSP state table");
 
         // The exact panic path: cleanup must not attempt a forbidden DROP on
         // the system-prefixed DBSP state table.
@@ -1997,7 +2005,7 @@ mod tests {
             .await
             .expect("insert into base");
         let rows = handle
-            .query("SELECT id, v FROM src_view", HashMap::new())
+            .query("SELECT v, n FROM src_view", HashMap::new())
             .await
             .expect("query matview after cleanup");
         assert_eq!(rows.len(), 1, "live matview must survive the cleanup");

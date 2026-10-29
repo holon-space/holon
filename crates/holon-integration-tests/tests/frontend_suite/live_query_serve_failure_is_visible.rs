@@ -25,16 +25,8 @@ const BLOCKS_ORG: &str = "#+ID: blocks\n\
 * Parent\n:PROPERTIES:\n:ID: parent\n:END:\n\
 ** Child\n:PROPERTIES:\n:ID: child\n:END:\n";
 
-/// The probe shape: a recursive CTE whose anchor is `WHERE 1=1`. The fork's
-/// IVM refuses a `value op value` filter when it builds the matview.
-const MATVIEW_REFUSED_SQL: &str = "WITH RECURSIVE d(id) AS (
-  SELECT b.id FROM block b
-  WHERE 1=1
-  UNION ALL
-  SELECT c.id FROM block c JOIN d ON c.parent_id = d.id
-)
-SELECT b.*
-FROM block b JOIN d ON d.id = b.id";
+/// The engine refuses a call to an unknown function when it builds the matview.
+const MATVIEW_REFUSED_SQL: &str = "SELECT b.*, no_such_function(b.id) AS x FROM block b";
 
 /// `EXISTS` routes the query to eager re-execution; the unknown column fails
 /// its first read.
@@ -92,11 +84,7 @@ async fn assert_failure_rendered(sql: &str, expected_message: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn matview_refused_live_query_renders_its_error() {
-    assert_failure_rendered(
-        MATVIEW_REFUSED_SQL,
-        "Filter predicate must be column op value or column op column",
-    )
-    .await;
+    assert_failure_rendered(MATVIEW_REFUSED_SQL, "no_such_function").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

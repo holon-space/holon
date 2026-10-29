@@ -3419,7 +3419,17 @@ mod tests {
             .ensure_and_subscribe("SELECT id FROM gone", None)
             .await
             .expect("subscribe broken");
-        db.execute_ddl("DROP TABLE gone").await.expect("drop gone");
+        // The engine keeps a table from changing under a matview, so the table
+        // goes in stages and a stand-in view keeps the name.
+        for ddl in [
+            format!("DROP VIEW {broken}"),
+            "DROP TABLE gone".to_string(),
+            format!("CREATE MATERIALIZED VIEW {broken} AS SELECT id FROM items"),
+        ] {
+            db.execute_ddl(&ddl)
+                .await
+                .unwrap_or_else(|e| panic!("{ddl}: {e}"));
+        }
         let mut dispatcher = OperationDispatcher::new(vec![]);
         let bus = Arc::new(holon_conditions::ConditionBus::new());
         dispatcher.set_view_rebuild(manager.clone(), bus.clone());

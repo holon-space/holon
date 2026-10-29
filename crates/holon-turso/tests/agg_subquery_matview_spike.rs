@@ -8,15 +8,15 @@
 //! (`json_extract_matview_spike.rs`).
 //!
 //! **VERDICT (this file, green, is the executable record):**
-//!   * correlated scalar subquery in a matview SELECT list → **REJECTED** at
-//!     DDL. The fork says so by name and prescribes the rewrite: LEFT OUTER
-//!     JOIN + GROUP BY. §3.4's "no change to the plant site" is REFUTED.
+//!   * correlated scalar `SUM` subquery in a matview SELECT list → **REJECTED**
+//!     at DDL as an unsupported subquery; a correlated `COUNT(*)` plants and is
+//!     maintained. §3.4's "no change to the plant site" is REFUTED for `SUM`.
 //!   * GROUP BY side-matview + LEFT OUTER JOIN → accepted and IVM-maintained
 //!     across child insert / update / delete / re-parent, and over a parent
 //!     with no children at all. This is already the shape `block` uses for its
 //!     edge fields, so `Agg` lowers onto a landed production pattern.
-//!   * `COUNT(*) FILTER (WHERE …)` vs `SUM(iif(…, 1, 0))` — the two candidate
-//!     lowerings for `unmatched_count`; the probes below record which plants.
+//!   * `COUNT(*) FILTER (WHERE …)` and `SUM(iif(…, 1, 0))` — the two candidate
+//!     lowerings for `unmatched_count` — both plant and are maintained.
 //!   * The JOIN lowering also DELETES a correctness hazard the subquery
 //!     lowering carried: an inner column that only the parent owns is a hard
 //!     DDL error there, where the subquery form would have silently bound it to
@@ -29,9 +29,9 @@
 //! **RETAINED AS FORK-CAPABILITY GUARDS** (the rest of this file is superseded
 //! once Inc D's real differential exists): the two `probe_a_*` rejections and
 //! `probe_c_filtered_count_via_filter_clause`. A RED there does not mean the
-//! test broke — it means a fork bump changed what plants, and Kitchen.md §3.4's
-//! lowering must be revisited deliberately. `probe_b`'s childless-parent `0.0`
-//! assertion is likewise a permanent guard on the `COALESCE`.
+//! test broke — it means an engine bump changed what plants, and Kitchen.md
+//! §3.4's lowering must be revisited deliberately. `probe_b`'s childless-parent
+//! `0.0` assertion is likewise a permanent guard on the `COALESCE`.
 
 use std::collections::HashMap;
 
@@ -142,10 +142,9 @@ async fn read_agg(handle: &DbHandle, view: &str, col: &str) -> Vec<(String, f64)
 // A. The correlated scalar subquery — the shape §3.4 assumes. REJECTED.
 // ---------------------------------------------------------------------------
 
-/// Pins the rejection AND the fork's prescribed rewrite. If a future fork bump
-/// makes correlated subqueries plantable, this test flips red and the `Agg` SQL
-/// seat may be revisited — the same guard style `probe_searched_case_rejected`
-/// uses for `CASE`.
+/// Pins the rejection. If a future engine bump makes correlated `SUM`
+/// subqueries plantable, this test flips red and the `Agg` SQL seat may be
+/// revisited.
 #[tokio::test]
 async fn probe_a_correlated_sum_subquery_is_rejected_at_ddl() {
     let handle = setup().await;
@@ -153,35 +152,36 @@ async fn probe_a_correlated_sum_subquery_is_rejected_at_ddl() {
                   c.recipe_id = r.id) AS grams_total FROM rcp r";
     let err = reconcile_named_view(&handle, "v_sum_corr", select)
         .await
-        .expect_err("the fork's IVM compiler must reject a correlated scalar subquery");
+        .expect_err("the IVM compiler must reject a correlated scalar SUM subquery");
     let msg = err.to_string();
     assert!(
-        msg.contains(
-            "Correlated scalar subqueries in materialized view SELECT lists are not yet \
-                      supported"
-        ),
-        "expected the correlated-subquery rejection, got: {msg}"
-    );
-    assert!(
-        msg.contains("LEFT OUTER JOIN with GROUP BY"),
-        "the fork prescribes the replacement lowering; that prescription is what Inc D builds on: \
-         {msg}"
+        msg.contains("materialized views with subqueries are not yet supported"),
+        "expected the subquery rejection, got: {msg}"
     );
 }
 
-/// The same rejection for a correlated `COUNT`, so the verdict is about the
-/// SHAPE and not about `SUM` in particular.
+/// A correlated `COUNT(*)` plants, and the child relation drives its
+/// maintenance.
 #[tokio::test]
-async fn probe_a_correlated_count_subquery_is_rejected_at_ddl() {
+async fn probe_a_correlated_count_subquery_plants_and_is_maintained() {
     let handle = setup().await;
     let select =
         "SELECT r.id, (SELECT COUNT(*) FROM iuse c WHERE c.recipe_id = r.id) AS n FROM rcp r";
-    let err = reconcile_named_view(&handle, "v_cnt_corr", select)
+    reconcile_named_view(&handle, "v_cnt_corr", select)
         .await
-        .expect_err("correlated COUNT must be rejected for the same reason as SUM");
-    assert!(
-        err.to_string().contains("Correlated scalar subqueries"),
-        "got: {err}"
+        .unwrap_or_else(|e| panic!("correlated COUNT must plant: {e}"));
+    put_recipe(&handle, "r1", 2).await;
+    put_use(&handle, "u1", "r1", 10.0, None).await;
+    put_use(&handle, "u2", "r1", 20.0, None).await;
+    assert_eq!(
+        read_agg(&handle, "v_cnt_corr", "n").await,
+        vec![("r1".into(), 2.0)]
+    );
+    delete_use(&handle, "u1").await;
+    assert_eq!(
+        read_agg(&handle, "v_cnt_corr", "n").await,
+        vec![("r1".into(), 1.0)],
+        "a child DELETE retracts from the correlated count"
     );
 }
 
@@ -306,25 +306,33 @@ async fn probe_c_filtered_count_via_sum_of_iif() {
     assert_eq!(as_f64(rows[0].get("unmatched")), 0.0);
 }
 
-/// `COUNT(*) FILTER (WHERE …)` is what the fork's own error message suggests.
-/// Recorded either way: if it plants, `Agg`'s filter lowers directly; if not,
-/// the `iif` form above is the one to generate. Not an assertion of support —
-/// a measurement of it.
+/// `COUNT(*) FILTER (WHERE …)` plants, so `Agg`'s filter can lower directly.
 #[tokio::test]
 async fn probe_c_filtered_count_via_filter_clause() {
     let handle = setup().await;
-    let err = reconcile_named_view(
+    reconcile_named_view(
         &handle,
         "v_unmatched_filter",
         "SELECT recipe_id, COUNT(*) FILTER (WHERE product_id IS NULL) AS unmatched FROM iuse GROUP \
          BY recipe_id",
     )
     .await
-    .expect_err("the FILTER clause the fork's own error message suggests is itself unsupported");
-    assert!(
-        err.to_string().contains("FILTER not supported with Count"),
-        "expected the FILTER limitation; a different error (or success) means the fork's aggregate \
-         support moved and §3.4's filtered-count lowering must be revisited: {err}"
+    .unwrap_or_else(|e| panic!("the FILTER clause must plant: {e}"));
+    put_use(&handle, "u1", "r1", 10.0, Some("p1")).await;
+    put_use(&handle, "u2", "r1", 20.0, None).await;
+    let unmatched = || async {
+        let rows = handle
+            .query("SELECT unmatched FROM v_unmatched_filter", HashMap::new())
+            .await
+            .expect("query");
+        as_f64(rows[0].get("unmatched"))
+    };
+    assert_eq!(unmatched().await, 1.0);
+    put_use(&handle, "u2", "r1", 20.0, Some("p9")).await;
+    assert_eq!(
+        unmatched().await,
+        0.0,
+        "binding the ingredient clears the count"
     );
 }
 

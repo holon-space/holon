@@ -1,9 +1,10 @@
-//! Reproducer: Turso IVM DBSP chain break when upstream matviews are
-//! DROP+CREATEd while downstream matviews persist from a previous session.
+//! A matview chain persisted by one session stays live in the next: the
+//! engine refuses to drop an upstream matview while a downstream one reads it,
+//! so the downstream view can never lose its upstream.
 //!
-//! Session 1 (fresh DB): Create tables, matview chain, insert data, navigate →
-//! CDC works ✓ Session 2 (reopen): DROP+CREATE upstream matviews, skip
-//! downstream → CDC broken ✗
+//! Session 1 (fresh DB): create tables, matview chain, insert data, navigate.
+//! Session 2 (reopen): the upstream drop is refused, and navigation still
+//! reaches the persisted downstream view.
 //!
 //! Run with:
 //!   cargo test -p holon turso_ivm_navigation_cursor_repro -- --nocapture
@@ -43,8 +44,7 @@ fn collect_cdc(
     counts
 }
 
-/// DROP+CREATE of upstream matviews breaks DBSP chain to persisted downstream
-/// matviews.
+/// The persisted downstream matview follows navigation after a reopen.
 #[tokio::test]
 async fn dbsp_chain_break_after_upstream_drop_create() {
     let temp_dir = TempDir::new().unwrap();
@@ -225,7 +225,7 @@ async fn dbsp_chain_break_after_upstream_drop_create() {
     }
 
     // ═══════════════════════════════════════════
-    // Session 2: Reopen + DROP+CREATE upstream matviews
+    // Session 2: Reopen; the upstream drop is refused
     // ═══════════════════════════════════════════
     eprintln!("\n[session2] Reopening...");
     {
@@ -233,32 +233,14 @@ async fn dbsp_chain_break_after_upstream_drop_create() {
         let (cdc_tx, mut cdc_rx) = tokio::sync::broadcast::channel(1024);
         let (_backend, handle) = TursoBackend::new(db, cdc_tx).expect("create backend");
 
-        // Recreate upstream matviews (production schema setup does this every start)
-        handle
+        let refused = handle
             .execute_ddl("DROP VIEW IF EXISTS focus_roots")
             .await
-            .unwrap();
-        handle
-            .execute_ddl("DROP VIEW IF EXISTS current_focus")
-            .await
-            .unwrap();
-        handle
-            .execute_ddl(
-                "CREATE MATERIALIZED VIEW current_focus AS SELECT nc.region, nh.block_id FROM \
-                 navigation_cursor nc JOIN navigation_history nh ON nc.history_id = nh.id",
-            )
-            .await
-            .unwrap();
-        handle
-            .execute_ddl(
-                "CREATE MATERIALIZED VIEW focus_roots AS SELECT cf.region, cf.block_id, b.id AS \
-                 root_id FROM current_focus cf JOIN block b ON b.parent_id = cf.block_id UNION \
-                 ALL SELECT cf.region, cf.block_id, b.id AS root_id FROM current_focus cf JOIN \
-                 block b ON b.id = cf.block_id",
-            )
-            .await
-            .unwrap();
-        // watch_view is NOT recreated — persists from session 1
+            .expect_err("an upstream matview with a persisted dependent cannot be dropped");
+        assert!(
+            refused.to_string().contains("dependent materialized view"),
+            "the refusal names the dependent view: {refused}"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let _ = collect_cdc(&mut cdc_rx);
@@ -322,8 +304,8 @@ async fn dbsp_chain_break_after_upstream_drop_create() {
         let watch_cdc = cdc2.get("watch_view").copied().unwrap_or(0);
         assert!(
             ids.contains("doc_a") && !ids.contains("doc_b"),
-            "BUG: DROP+CREATE of upstream matviews (current_focus, focus_roots) broke the DBSP \
-             chain to the persisted downstream matview (watch_view).\n\ncurrent_focus CDC: {}, \
+            "the persisted downstream matview (watch_view) lost its upstream chain.\n\n\
+             current_focus CDC: {}, \
              focus_roots CDC: {}, watch_view CDC: {}\nwatch_view (stale): {:?}\nfocus_roots \
              (correct): {:?}",
             cdc2.get("current_focus").unwrap_or(&0),

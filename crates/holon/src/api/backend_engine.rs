@@ -1323,6 +1323,8 @@ impl BackendEngine {
     /// verifier R3):
     ///   * `Cannot convert LogicalExpr …`           — subquery-predicate
     ///     refusal
+    ///   * `… cannot be maintained: …`             — the engine cannot compile
+    ///     the view's maintenance plan (e.g. `fts_match`)
     ///   * `… not yet supported …`                  — scalar subquery in
     ///     SELECT, `EXCEPT`/`INTERSECT`
     ///   * `no such column …`                       — derived-table `FROM
@@ -1342,6 +1344,7 @@ impl BackendEngine {
             return false; // transient: dependency table not built yet
         }
         text.contains("Cannot convert LogicalExpr")
+            || text.contains("cannot be maintained")
             || text.contains("not yet supported")
             || text.contains("no such column")
     }
@@ -2983,7 +2986,7 @@ mod tests {
 
     /// The eager BACKSTOP: a shape the routing predicate thinks is maintainable
     /// (no subquery node) but the engine REFUSES PERMANENTLY at matview CREATE
-    /// (`CASE` → "Cannot convert LogicalExpr") must still be served by eager
+    /// (`date('now')` → "not yet supported") must still be served by eager
     /// re-execution WITH a disclosure — never a wedged/error widget. Two
     /// classifiers (parser + engine), defense-in-depth.
     #[tokio::test(flavor = "multi_thread")]
@@ -3004,20 +3007,18 @@ mod tests {
             .await
             .unwrap();
 
-        // `CASE` has no Exists/InSubquery node, so `sql_ivm_maintainable` returns
-        // true and the matview path is taken — where the fork's IVM planner
-        // refuses `CASE` at DDL. The backstop must catch that and serve eager.
+        // `date('now')` has no Exists/InSubquery node, so `sql_ivm_maintainable`
+        // returns true and the matview path is taken — where the engine refuses
+        // it at DDL as non-deterministic. The backstop must catch that and serve eager.
         assert!(
             holon_turso::matview_manager::sql_ivm_maintainable(
-                "SELECT b.id, CASE WHEN json_extract(b.properties,'$.task_state')='TODO' THEN 1 \
-                 ELSE 0 END AS flag FROM block b"
+                "SELECT b.id, date('now') AS flag FROM block b"
             ),
-            "sanity: the predicate does NOT flag CASE (only the engine refuses it) — that is why \
+            "sanity: the predicate does NOT flag `date('now')` (only the engine refuses it) — that is why \
              the backstop exists"
         );
 
-        let sql = "SELECT b.id, CASE WHEN json_extract(b.properties,'$.task_state')='TODO' THEN 1 \
-                   ELSE 0 END AS flag FROM block b";
+        let sql = "SELECT b.id, date('now') AS flag FROM block b";
         let mut stream = engine
             .query_and_watch(sql.to_string(), HashMap::new(), None)
             .await
@@ -3042,7 +3043,7 @@ mod tests {
                 .metadata
                 .degraded
                 .as_deref()
-                .is_some_and(|d| d.contains("materialized view") && d.contains("Cannot convert")),
+                .is_some_and(|d| d.contains("materialized view") && d.contains("not yet supported")),
             "backstop disclosure must carry the engine's own refusal text; got {:?}",
             first.metadata.degraded
         );
@@ -3133,6 +3134,8 @@ mod tests {
             "Correlated scalar subqueries in materialized view SELECT lists are not yet supported \
              by the IVM compiler",
             "INTERSECT and EXCEPT not yet supported in logical plans",
+            "Failed to execute DDL: Parse error: materialized view 'watch_view_x' cannot be \
+             maintained: fts_match requires an FTS index query",
             "Failed to prepare query: Parse error: no such column: x.id",
         ] {
             assert!(

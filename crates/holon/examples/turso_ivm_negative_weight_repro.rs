@@ -20,7 +20,7 @@ use turso_sdk_kit::rsapi::TursoConnection;
 
 fn open_db(path: &str) -> turso::Connection {
     let db = holon::storage::turso::TursoBackend::open_database(path).expect("open database");
-    let conn_core = db.connect().expect("connect");
+    let conn_core = db.connect(turso_core::ConnectOpts::new()).expect("connect");
     let turso_conn = TursoConnection::new(&holon::storage::turso::sdk_config(), conn_core);
     turso::Connection::create(turso_conn, None)
 }

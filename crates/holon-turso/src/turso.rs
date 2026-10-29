@@ -14,6 +14,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
+pub use turso_core::ConnectOpts;
 use turso_core::Database;
 use turso_core::OpenFlags;
 use turso_core::types::RelationChangeEvent;
@@ -232,6 +233,12 @@ pub enum DbCommand {
         snapshot_sql: String,
         on_event: Box<dyn Fn(CommitEvent<'_>) + Send + Sync>,
         on_snapshot: Box<dyn FnOnce(Vec<StorageEntity>) + Send>,
+        response: oneshot::Sender<Result<turso::CallbackId>>,
+    },
+
+    /// Stop calling the listener `ListenFromSnapshot` registered as `id`.
+    StopListening {
+        id: turso::CallbackId,
         response: oneshot::Sender<Result<()>>,
     },
 
@@ -1168,19 +1175,36 @@ impl DbHandle {
 
     /// Calls `on_event` with every relation's events of every later commit,
     /// and `on_snapshot` with the rows of `snapshot_sql` as of the last commit
-    /// before the first of them.
+    /// before the first of them. The id stops the listener
+    /// ([`Self::stop_listening`]).
     pub async fn listen_from_snapshot(
         &self,
         snapshot_sql: &str,
         on_event: impl Fn(CommitEvent<'_>) + Send + Sync + 'static,
         on_snapshot: impl FnOnce(Vec<StorageEntity>) + Send + 'static,
-    ) -> Result<()> {
+    ) -> Result<turso::CallbackId> {
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
             .send(DbCommand::ListenFromSnapshot {
                 snapshot_sql: snapshot_sql.to_string(),
                 on_event: Box::new(on_event),
                 on_snapshot: Box::new(on_snapshot),
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| StorageError::ActorGone)?;
+
+        response_rx
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
+    }
+
+    /// No commit after this returns reaches the listener `id`.
+    pub async fn stop_listening(&self, id: turso::CallbackId) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::StopListening {
+                id,
                 response: response_tx,
             })
             .await
@@ -2236,7 +2260,7 @@ impl TursoBackend {
         use std::sync::atomic::AtomicU64;
         use std::sync::atomic::Ordering;
         // Create connection for actor
-        let conn = Self::create_connection_internal(&db)?;
+        let (conn, core_conn) = Self::create_connection_internal(&db)?;
 
         // Process-monotonic CDC sequence shared with every cloned `DbHandle`.
         // Stamped onto the batch metadata before broadcast so subscribers can
@@ -2317,7 +2341,7 @@ impl TursoBackend {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         tokio::spawn(Self::run_actor(
             rx,
-            conn,
+            (conn, core_conn),
             cdc_broadcast_for_actor,
             actor_stats_for_actor,
             matview_stats_for_actor,
@@ -2327,7 +2351,7 @@ impl TursoBackend {
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         wasm_bindgen_futures::spawn_local(Self::run_actor(
             rx,
-            conn,
+            (conn, core_conn),
             cdc_broadcast_for_actor,
             actor_stats_for_actor,
             matview_stats_for_actor,
@@ -2401,14 +2425,18 @@ impl TursoBackend {
     }
 
     /// Create a connection from database (internal helper).
-    fn create_connection_internal(db: &Arc<Database>) -> Result<turso::Connection> {
+    /// The binding connection, and the engine connection beneath it for what
+    /// the binding does not offer.
+    fn create_connection_internal(
+        db: &Arc<Database>,
+    ) -> Result<(turso::Connection, Arc<turso_core::Connection>)> {
         use std::sync::atomic::Ordering;
         static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
         let conn_id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
 
         tracing::debug!("[CONN-{}] Creating new raw database connection...", conn_id);
 
-        let conn_core = db.connect().map_err(|e| {
+        let conn_core = db.connect(turso_core::ConnectOpts::new()).map_err(|e| {
             tracing::error!("[CONN-{}] Failed to create connection: {}", conn_id, e);
             StorageError::DatabaseError(e.to_string())
         })?;
@@ -2419,7 +2447,7 @@ impl TursoBackend {
         // actually enforced on writes.
         conn_core.set_foreign_keys_enabled(true);
 
-        let turso_conn = TursoConnection::new(&sdk_config(), conn_core);
+        let turso_conn = TursoConnection::new(&sdk_config(), conn_core.clone());
         let conn = turso::Connection::create(turso_conn, None);
 
         // Set busy timeout to prevent indefinite hangs on lock contention
@@ -2440,7 +2468,7 @@ impl TursoBackend {
             autocommit
         );
 
-        Ok(conn)
+        Ok((conn, conn_core))
     }
 
     /// Get a new connection to the database for direct SQL access.
@@ -2452,7 +2480,7 @@ impl TursoBackend {
     ///
     /// For writes that should trigger CDC, use `handle()` methods instead.
     pub fn get_connection(&self) -> Result<turso::Connection> {
-        Self::create_connection_internal(&self.db)
+        Self::create_connection_internal(&self.db).map(|(conn, _)| conn)
     }
 
     /// Helper to parse a row of turso_core::Value into our Entity type using
@@ -2773,7 +2801,7 @@ impl TursoBackend {
     /// Internal actor loop - runs in spawned task
     async fn run_actor(
         mut rx: mpsc::Receiver<Envelope>,
-        conn: turso::Connection,
+        (conn, core_conn): (turso::Connection, Arc<turso_core::Connection>),
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
         actor_stats: Option<Arc<crate::turso_actor_stats::ActorStats>>,
         matview_stats: Arc<MatviewStats>,
@@ -2807,8 +2835,14 @@ impl TursoBackend {
             let should_break: std::result::Result<bool, Box<dyn std::any::Any + Send>> =
                 AssertUnwindSafe(async {
                     let _watching = watch.watching(&envelope);
-                    Self::process_actor_command(envelope.cmd, &conn, &mut state, &cdc_broadcast)
-                        .await
+                    Self::process_actor_command(
+                        envelope.cmd,
+                        &conn,
+                        &core_conn,
+                        &mut state,
+                        &cdc_broadcast,
+                    )
+                    .await
                 })
                 .catch_unwind()
                 .await;
@@ -2852,6 +2886,7 @@ impl TursoBackend {
     async fn process_actor_command(
         cmd: DbCommand,
         conn: &turso::Connection,
+        core_conn: &Arc<turso_core::Connection>,
         state: &mut ActorState,
         cdc_broadcast: &broadcast::Sender<BatchWithMetadata<RowChange>>,
     ) -> bool {
@@ -3027,12 +3062,13 @@ impl TursoBackend {
                 response,
             } => {
                 let result = async {
-                    conn.set_change_callback(move |event: &RelationChangeEvent| {
-                        on_event(CommitEvent::new(event))
-                    })
-                    .map_err(|e| {
-                        StorageError::DatabaseError(format!("register a commit listener: {e}"))
-                    })?;
+                    let id = conn
+                        .set_change_callback(move |event: &RelationChangeEvent| {
+                            on_event(CommitEvent::new(event))
+                        })
+                        .map_err(|e| {
+                            StorageError::DatabaseError(format!("register a commit listener: {e}"))
+                        })?;
                     let rows = Self::handle_query(
                         conn,
                         &state.schema_catalog,
@@ -3041,9 +3077,16 @@ impl TursoBackend {
                     )
                     .await?;
                     on_snapshot(rows);
-                    Ok(())
+                    Ok(id)
                 }
                 .await;
+                let _ = response.send(result);
+            }
+
+            DbCommand::StopListening { id, response } => {
+                let result = conn.clear_change_callback(id).map_err(|e| {
+                    StorageError::DatabaseError(format!("stop the commit listener {id:?}: {e}"))
+                });
                 let _ = response.send(result);
             }
 
@@ -3065,7 +3108,7 @@ impl TursoBackend {
                 fdw,
                 response,
             } => {
-                let result = conn.register_foreign_table(&name, fdw).map_err(|e| {
+                let result = core_conn.register_foreign_table(&name, fdw).map_err(|e| {
                     StorageError::DatabaseError(format!(
                         "Failed to register foreign table '{name}': {e}"
                     ))

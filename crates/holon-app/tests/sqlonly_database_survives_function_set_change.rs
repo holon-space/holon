@@ -172,7 +172,7 @@ async fn sqlonly_rows_not_in_org_files_survive_a_function_set_change() {
     {
         let db = holon::storage::turso::TursoBackend::open_database(dir.path().join(LATER_DB_FILE))
             .expect("open between the sessions");
-        let conn = db.connect().expect("connect");
+        let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
         for sql in [
             "CREATE TABLE IF NOT EXISTS holon_db_fn_set (signature TEXT NOT NULL)",
             "DELETE FROM holon_db_fn_set",

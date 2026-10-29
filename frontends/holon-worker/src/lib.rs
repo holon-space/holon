@@ -2013,7 +2013,7 @@ pub fn open_db(path: String) -> napi::Result<()> {
     let db = holon::storage::turso::TursoBackend::open_database(&path)
         .map_err(|e| nerr("open_database", e))?;
 
-    let conn = db.connect().map_err(|e| nerr("connect", e))?;
+    let conn = db.connect(turso_core::ConnectOpts::new()).map_err(|e| nerr("connect", e))?;
 
     *db_slot().lock() = Some(DbState { _db: db, conn, io });
     Ok(())

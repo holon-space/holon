@@ -168,7 +168,7 @@ async fn an_upgrade_rebuilds_the_views_and_refills_block_derived() {
 
     {
         let db = TursoBackend::open_database(&path).expect("open between boots");
-        let conn = db.connect().expect("connect");
+        let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
         for sql in [
             "DELETE FROM holon_db_fn_set",
             "INSERT INTO holon_db_fn_set (signature) VALUES ('older_fn/1/v1')",
@@ -188,7 +188,7 @@ async fn an_upgrade_rebuilds_the_views_and_refills_block_derived() {
         other => panic!("an upgrade must drop the views, got {other:?}"),
     }
     {
-        let conn = db.connect().expect("connect");
+        let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
         let rows = conn
             .prepare("SELECT count(*) FROM block_derived")
             .and_then(|mut stmt| stmt.run_collect_rows())

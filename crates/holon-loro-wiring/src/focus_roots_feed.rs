@@ -322,8 +322,8 @@ mod tests {
     use holon_views::engine::Field;
     use holon_views::engine::raise_on;
     use holon_views::views::View;
-    use turso_core::DatabaseChange;
-    use turso_core::DatabaseChangeType;
+    use turso_core::types::DatabaseChange;
+    use turso_core::types::DatabaseChangeType;
     use turso_core::types::ImmutableRecord;
     use turso_core::types::RelationChangeEvent;
 

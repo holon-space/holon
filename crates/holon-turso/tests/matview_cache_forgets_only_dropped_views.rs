@@ -122,8 +122,11 @@ async fn dropping_a_base_view_forgets_the_view_chained_on_it() {
     assert_eq!(rows.len(), 1, "the recreated chained view holds the item");
 }
 
+/// The engine refuses to drop a view another view reads, so the chained view
+/// can never outlive its base. The actor forgets the views before it drops
+/// them, so a refused drop costs a probe but never a stale cache hit.
 #[tokio::test]
-async fn dropping_only_the_base_view_forgets_its_dependents() {
+async fn dropping_only_the_base_view_is_refused_and_both_views_stay() {
     let handle = live_database().await;
     let manager = manager(&handle);
     let base = manager
@@ -136,22 +139,26 @@ async fn dropping_only_the_base_view_forgets_its_dependents() {
         .await
         .expect("ensure chained");
 
-    handle
+    let refused = handle
         .execute_ddl(&format!("DROP VIEW IF EXISTS {base}"))
         .await
-        .expect("drop base");
+        .expect_err("the engine must refuse to drop a base that a view reads");
+    assert!(
+        refused.to_string().contains("dependent materialized view"),
+        "expected the dependents refusal, got: {refused}"
+    );
 
-    let before = probes(&manager);
-    manager
+    let again = manager
         .ensure_view(&chained_sql)
         .await
         .expect("re-ensure chained");
-    assert_eq!(
-        probes(&manager),
-        before + 1,
-        "dropping the base {base} left the chained {chained} known, so ensure_view trusted \
-         the cache instead of checking sqlite_master"
-    );
+    assert_eq!(again, chained, "the chained view keeps its name");
+    for view in [&base, &chained] {
+        handle
+            .query(&format!("SELECT id FROM {view}"), HashMap::new())
+            .await
+            .unwrap_or_else(|e| panic!("{view} must survive the refused drop: {e}"));
+    }
 }
 
 /// Wait for the next CDC batch on `stream`, failing if none arrives.

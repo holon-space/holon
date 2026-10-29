@@ -144,7 +144,7 @@ impl McpCallSurface for MockPeer {
 fn open_memory_conn() -> Arc<CoreConnection> {
     let db = holon_turso::turso::TursoBackend::open_database(":memory:")
         .expect("open in-memory database");
-    db.connect().expect("connect")
+    db.connect(turso_core::ConnectOpts::new()).expect("connect")
 }
 
 fn execute_sql(conn: &Arc<CoreConnection>, sql: &str) {

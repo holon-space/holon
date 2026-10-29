@@ -21,7 +21,7 @@ use turso_core::Database;
 const CHILD_DB_PATH: &str = "HOLON_DB_OPEN_TEST_CHILD_DB_PATH";
 
 fn exec(db: &Arc<Database>, sql: &str) {
-    db.connect()
+    db.connect(turso_core::ConnectOpts::new())
         .unwrap_or_else(|e| panic!("connect: {e}"))
         .execute(sql)
         .unwrap_or_else(|e| panic!("{sql}: {e}"));
@@ -254,7 +254,7 @@ fn build_checkpointed(path: &Path) {
 }
 
 fn rows_in_t(db: &Arc<Database>) -> Vec<Vec<turso_core::Value>> {
-    db.connect()
+    db.connect(turso_core::ConnectOpts::new())
         .unwrap()
         .prepare("SELECT id FROM t")
         .and_then(|mut stmt| stmt.run_collect_rows())
@@ -524,7 +524,7 @@ fn a_truncated_write_ahead_log_does_not_lose_rows_silently() {
         let (db, outcome) = TursoBackend::open_database_reporting_outcome(&path)
             .unwrap_or_else(|e| panic!("log cut to {keep} bytes: {e:?}"));
         let rows = db
-            .connect()
+            .connect(turso_core::ConnectOpts::new())
             .unwrap()
             .prepare("SELECT id FROM t")
             .and_then(|mut stmt| stmt.run_collect_rows());

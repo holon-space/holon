@@ -65,6 +65,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile.workspace = true
 proptest.workspace = true
 tracing-subscriber.workspace = true
+zstd = "0.14"
 
 [[test]]
 name = "main"

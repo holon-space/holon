@@ -17,14 +17,12 @@
 //! VERDICT (this file, green, is the executable record):
 //!   * json_extract as a BARE derived column  -> IVM-maintained + retracts  ✅
 //!   * `iif(cond, a, b)` (incl. over json_extract) -> IVM-maintained         ✅
-//!   * searched `CASE WHEN …` and simple `CASE x WHEN …` -> REJECTED at DDL
-//!     ("Cannot convert LogicalExpr to AST Expr: Case { … }") by the fork's
-//!     matview AST conversion — NOT plantable.                               ❌
+//!   * searched `CASE WHEN …` and simple `CASE x WHEN …` -> IVM-maintained  ✅
 //!
 //! Consequences for the workstream:
 //!   1. json_extract Field-binding is UNBLOCKED (bare extraction plants).
-//!   2. `Computation::Case::compile_sql` lowers to nested `iif(...)`, NEVER to
-//!      SQL `CASE WHEN`, because CASE does not survive the fork's IVM planning.
+//!   2. `Computation::Case::compile_sql` may lower to nested `iif(...)` or to
+//!      SQL `CASE WHEN`; both survive IVM planning.
 
 use std::collections::HashMap;
 
@@ -139,36 +137,29 @@ async fn probe_bare_json_extract_column() {
     assert_maintained("v_bare_json", "json_extract(properties, '$.p')", |p| p).await;
 }
 
-/// Assert the fork's IVM matview planner REJECTS `expr` at DDL time with the
-/// `Case` LogicalExpr-conversion error. This pins the limitation that forces
-/// `iif` lowering — if a future fork bump makes CASE plantable, this test flips
-/// RED and we revisit the lowering.
-async fn assert_ddl_rejects_case(view: &str, expr: &str) {
-    let handle = setup().await;
-    let select = format!("SELECT id, {expr} AS d FROM blk");
-    let err = reconcile_named_view(&handle, view, &select)
-        .await
-        .expect_err("fork IVM must reject CASE in a matview SELECT");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("Cannot convert LogicalExpr to AST Expr: Case"),
-        "expected the CASE conversion rejection, got: {msg}"
-    );
-}
-
 // --- Axis 2: conditional lowering over a PLAIN column ----------------------
-// CASE (searched AND simple) is REJECTED; iif is accepted.
+// CASE (searched AND simple) and iif are all accepted.
 
 #[tokio::test]
-async fn probe_searched_case_rejected() {
-    assert_ddl_rejects_case("v_case_plain", "CASE WHEN priority > 5 THEN 1 ELSE 0 END").await;
+async fn probe_searched_case_maintained() {
+    assert_maintained(
+        "v_case_plain",
+        "CASE WHEN priority > 5 THEN 1 ELSE 0 END",
+        |p| (p > 5) as i64,
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn probe_simple_case_rejected() {
-    assert_ddl_rejects_case(
+async fn probe_simple_case_maintained() {
+    assert_maintained(
         "v_simplecase_plain",
         "CASE priority WHEN 3 THEN 100 WHEN 8 THEN 40 ELSE 1 END",
+        |p| match p {
+            3 => 100,
+            8 => 40,
+            _ => 1,
+        },
     )
     .await;
 }
@@ -181,10 +172,11 @@ async fn probe_iif_over_plain_column() {
 // --- Axis 1 x 2: conditional lowering over json_extract --------------------
 
 #[tokio::test]
-async fn probe_searched_case_over_json_extract_rejected() {
-    assert_ddl_rejects_case(
+async fn probe_searched_case_over_json_extract_maintained() {
+    assert_maintained(
         "v_case_json",
         "CASE WHEN json_extract(properties, '$.p') > 5 THEN 1 ELSE 0 END",
+        |p| (p > 5) as i64,
     )
     .await;
 }

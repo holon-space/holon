@@ -1,7 +1,7 @@
 //! Which DBSP state tables a database holds that no live view of the current
-//! circuit version owns. Turso's `DROP VIEW` removes only the state table
-//! named `{DBSP_TABLE_PREFIX}{DBSP_CIRCUIT_VERSION}_{view}`; anything else is
-//! left behind.
+//! circuit version owns. A view owns the tables
+//! `{DBSP_TABLE_PREFIX}{version}_{key}` whose key is the view name, or the
+//! view name followed by `__n<node>` or `__b<branch>` and a suffix.
 
 use std::collections::HashMap;
 
@@ -18,6 +18,21 @@ fn version_and_view(table: &str) -> (&str, &str) {
         .unwrap_or_else(|| panic!("{table} is not a DBSP state table name"))
 }
 
+fn owns(view: &str, key: &str) -> bool {
+    key.strip_prefix(view).is_some_and(|rest| {
+        rest.is_empty()
+            || ["__n", "__b"].iter().any(|tag| {
+                rest.strip_prefix(tag)
+                    .is_some_and(|id| id.starts_with(|c: char| c.is_ascii_digit()))
+            })
+    })
+}
+
+/// Whether `table`, a DBSP state table name, belongs to `view`.
+pub(crate) fn is_state_of(table: &str, view: &str) -> bool {
+    owns(view, version_and_view(table).1)
+}
+
 /// State tables whose view is not in `live_views`, or whose circuit version
 /// is not the newest one a live view carries. The current version is read off
 /// the tables because turso keeps the constant private; a stale table is
@@ -26,14 +41,14 @@ pub fn left_behind(state_tables: &[String], live_views: &[String]) -> Vec<String
     let current = state_tables
         .iter()
         .map(|table| version_and_view(table))
-        .filter(|(_, view)| live_views.iter().any(|v| v == view))
+        .filter(|(_, view)| live_views.iter().any(|v| owns(v, view)))
         .map(|(version, _)| version)
         .max_by_key(|version| version.parse::<u32>().expect("a numeric circuit version"));
     state_tables
         .iter()
         .filter(|table| {
             let (version, view) = version_and_view(table);
-            !live_views.iter().any(|v| v == view) || Some(version) != current
+            !live_views.iter().any(|v| owns(v, view)) || Some(version) != current
         })
         .cloned()
         .collect()
@@ -80,6 +95,20 @@ mod tests {
             "__turso_internal_dbsp_state_v1_b",
         ]);
         assert!(left_behind(&tables, &s(&["a", "b"])).is_empty());
+    }
+
+    #[test]
+    fn the_node_tables_of_a_live_view_are_not_left_behind() {
+        let tables = s(&[
+            "__turso_internal_dbsp_state_v2_block__n3",
+            "__turso_internal_dbsp_state_v2_block__n12__a4",
+            "__turso_internal_dbsp_state_v2_block_with_path__n7__r",
+            "__turso_internal_dbsp_state_v2_blocks__n1",
+        ]);
+        assert_eq!(
+            left_behind(&tables, &s(&["block", "block_with_path"])),
+            s(&["__turso_internal_dbsp_state_v2_blocks__n1"])
+        );
     }
 
     #[test]

@@ -92,7 +92,7 @@ fn modules() -> Vec<Box<dyn SchemaModule>> {
 }
 
 /// Every module in dependency order, as the DI graph orders them at boot.
-async fn ensure_all(handle: &DbHandle) {
+pub(crate) async fn ensure_all(handle: &DbHandle) {
     let mut pending = modules();
     let mut ready: HashSet<Resource> = HashSet::new();
     while !pending.is_empty() {
