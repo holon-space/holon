@@ -28,9 +28,10 @@ def step_log(line, code=0):
     return f"{line}\n{HEADER}running\nSummary [ 1s]\n\nexit: {code}\n"
 
 
-def run(selected, logs, spans=(), selector_exit=0, ran={}):
+def run(selected, logs, spans=(), selector_exit=0, ran={}, cites=None):
     """Run the checker in a fresh lane root; `logs` maps a path under target/ to the step lines of a log shaped like
-    the selector output, `ran` maps a path under target/ to the text of a run-step log."""
+    the selector output, `ran` maps a path under target/ to the text of a run-step log.
+    `cites` replaces the cited paths of the summary; `<root>` in it is the lane root."""
     with tempfile.TemporaryDirectory() as root:
         root = Path(root)
         (root / "scripts").mkdir()
@@ -47,7 +48,8 @@ def run(selected, logs, spans=(), selector_exit=0, ran={}):
         summary = root / "target/summary.md"
         summary.parent.mkdir(exist_ok=True)
         summary.write_text("# lane change summary\n\nHow tested:\n"
-                           + "".join(f"- Green log: {p} (`Summary [ 1s]`)\n" for p in [*logs, *ran])
+                           + "".join(f"- Green log: {p.replace('<root>', str(root))} (`Summary [ 1s]`)\n"
+                                     for p in (cites if cites is not None else [*logs, *ran]))
                            + "".join(f"- selector line `{s}`\n" for s in spans)
                            + "\nConfidence (1-5) that the verifier will confirm: 4\n")
         return subprocess.run([sys.executable, str(CHECKER), "--base", "3936d83", "--summary", str(summary)],
@@ -72,6 +74,16 @@ def fixtures():
            1, "target/r2/clippy.log", "exit: 1")
     expect("disclosure lines need no log",
            run([real_line, TIMING, UNOWNED], {}, spans=[TIMING], ran={"target/r2/clippy.log": real}), 0)
+    expect("non-run steps still need their logs",
+           run([CLIPPY, NEXTEST, TIMING, UNOWNED], {}, ran={"target/r2/clippy.log": step_log(CLIPPY)}), 1, "`nextest`")
+    expect("non-run steps still need their logs",
+           run([CLIPPY, NEXTEST, TIMING, UNOWNED], {}, ran={"target/r2/nextest.log": step_log(NEXTEST)}), 1, "`clippy`")
+    expect("brace list", run(SELECTED, {}, ran=ran, cites=["target/r1/{clippy,nextest,windowed}.log"]), 0)
+    expect("brace list with one log missing",
+           run(SELECTED, {}, ran=ran, cites=["target/r1/{clippy,windowed}.log"]), 1, "`nextest`")
+    expect("absolute path under the lane root", run(SELECTED, {}, ran=ran, cites=[f"<root>/{p}" for p in ran]), 0)
+    expect("path behind a placeholder", run(SELECTED, {}, ran=ran, cites=[*ran, "<ws>/target/r1/clippy.log"]),
+           1, "`<ws>/target/r1/clippy.log`")
     # An owner recipe may print a line that starts with its own step name.
     odt = "org-deep-text-timing: just org-deep-text-timing"
     odt_log = f"{odt}\n{HEADER}org-deep-text-timing: load before {{ 45.47 69.68 96.03 }}\nSummary [ 1s]\n\nexit: 0\n"
@@ -149,6 +161,61 @@ def generated(cases):
     print(f"[tests-cover-diff] generated: {cases} cases PASS")
 
 
+def citation(rng):
+    """One cited path in a form lanes write, and the paths it names."""
+    root = rng.choice(["", "/Users/m/w/lane-12-a-b/", "/var/folders/x1/T/tmpq_7z/", "~/w/lane-3/"])
+    dirs = rng.choice(["target/", "target/r2/", "target/lane-x.y/r1/"])
+    stem = rng.choice(["clippy", "nextest", "gate-alone", "gate.r1"])
+    ext = rng.choice([".log", ".txt"])
+    if rng.random() < 0.4:
+        alts = rng.sample(["1", "2", "3", "a", "b-2", ""], rng.randint(2, 4))
+        cut = rng.choice([len(dirs), len(dirs) + len(stem)])
+        head, tail = (dirs + stem)[:cut], (dirs + stem)[cut:]
+        if cut == len(dirs):
+            alts = [a or "x" for a in alts]
+        return f"{root}{head}{{{','.join(alts)}}}{tail}{ext}", {f"{root}{head}{a}{tail}{ext}" for a in alts}
+    return f"{root}{dirs}{stem}{ext}", {f"{root}{dirs}{stem}{ext}"}
+
+
+def citations(cases):
+    """Summaries citing paths in the forms lanes write: the check reads exactly the paths the generator drew."""
+    cited_logs = load_checker().cited_logs
+    rng = random.Random(1)
+    wraps = ["{}", "`{}`", "({})", "{}.", "{},", "{};", "`{}`.", "**{}**", "[log]({})", "<{}>", "log={}", "{}:12"]
+    lead = ["- ", "  - ", "* ", "1. ", "Green log: ", "- Red log: ", "| clippy | ", ""]
+    for case in range(cases):
+        want, body = set(), []
+        for _ in range(rng.randint(0, 6)):
+            parts = []
+            for _ in range(rng.randint(1, 3)):
+                text, paths = citation(rng)
+                want |= paths
+                parts.append(rng.choice(wraps).format(text))
+            body.append(rng.choice(lead) + rng.choice([" ", ", ", " and "]).join(parts)
+                        + rng.choice(["", " (`Summary [ 1s] 3 tests run: 3 passed`)", " -> exit: 0",
+                                      " copy of target/s-summary.md", " see src/a.log", " target/x.logs"]))
+        placeholder = None
+        if rng.random() < 0.15:
+            text, _ = citation(rng)
+            placeholder = rng.choice(["<ws>/", "<archive>/", "$WS/"]) + text.lstrip("/~")
+            body.insert(rng.randint(0, len(body)), f"- `{placeholder}`")
+        outside = citation(rng)[0]
+        summary = (f"# s\nClaim: see {outside}\n## How tested:\n" + "\n".join(body)
+                   + f"\n\nConfidence (1-5) that the verifier will confirm: 4\n{outside}\n")
+        if placeholder:
+            try:
+                cited_logs(summary)
+                raise AssertionError(f"case {case}: {placeholder} read as a path")
+            except SystemExit as e:
+                assert f"`{placeholder}`" in str(e), f"case {case}: {e}"
+            continue
+        got = cited_logs(summary)
+        assert got == sorted(want), f"case {case}: read {got}, cited {sorted(want)} in:\n{summary}"
+    print(f"[tests-cover-diff] citations: {cases} cases PASS")
+
+
 if __name__ == "__main__":
     fixtures()
-    generated(int(sys.argv[1]) if len(sys.argv) > 1 else 300)
+    cases = int(sys.argv[1]) if len(sys.argv) > 1 else 300
+    generated(cases)
+    citations(cases)

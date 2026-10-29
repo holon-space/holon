@@ -4,7 +4,8 @@
     scripts/flow-checks/tests-cover-diff.py --base <commit> --summary <path>
 
 Run from the lane root. It runs `scripts/select-tests.py --base <commit>` and reads its `<step>: <args>` lines.
-The cited logs are the `target/...` `.log` and `.txt` paths between the summary's `How tested` and `Confidence` lines.
+The cited logs are the `target/...` `.log` and `.txt` paths between the summary's `How tested` and `Confidence` lines;
+a brace list (`target/x/{a,b}.log`) cites each of its paths, as the shell expands it.
 Of a cited log it reads only line 1 and the last line: a log written by scripts/flow-checks/run-step.sh has the step
 line as line 1 and `exit: <code>` as its last line, and the lines between are the step's own output.
 A step ran when a cited log has the selected line as line 1 and `exit: 0` as its last line; the selector's disclosure
@@ -24,7 +25,10 @@ from pathlib import Path
 
 SELECTOR = "scripts/select-tests.py"
 STEP_LINE = re.compile(r"([a-z][a-z0-9-]*): \S")
-LOG_PATH = re.compile(r"(?<![\w./~-])[\w./~-]{0,256}target/[\w./-]{0,256}\.(?:log|txt)(?!\w)")
+BRACE = r"\{[\w./~-]*(?:,[\w./~-]*)+\}"
+LOG_PATH = re.compile(rf"(?<![\w./~{{}}-])(?:[\w./~-]|{BRACE}){{0,256}}target/(?:[\w./-]|{BRACE}){{0,256}}\.(?:log|txt)(?!\w)")
+# A path starts after one of these; any other character before it belongs to a prefix the check cannot resolve.
+PATH_START = set(" \t`\"'([<=:,*|")
 SPAN = re.compile(r"`([^`\n]+)`")
 HEADING = r"^(?:#+\s*)?(?:\*\*)?"
 EXIT_OK = "exit: 0"
@@ -51,13 +55,27 @@ def step_lines(text):
     return found
 
 
+def expand(path):
+    if not (m := re.search(BRACE, path)):
+        return [path]
+    return [p for alt in m.group(0)[1:-1].split(",") for p in expand(path[:m.start()] + alt + path[m.end():])]
+
+
 def cited_logs(summary_text):
     lines = summary_text.splitlines()
     start = next((i for i, line in enumerate(lines) if re.match(rf"{HEADING}How tested", line)), None)
     if start is None:
         raise SystemExit("tests-cover-diff: the summary has no `How tested` line")
     end = next((i for i in range(start, len(lines)) if re.match(rf"{HEADING}Confidence", lines[i])), len(lines))
-    return sorted({m.group(0) for line in lines[start:end] for m in LOG_PATH.finditer(line)})
+    paths = set()
+    for line in lines[start:end]:
+        for m in LOG_PATH.finditer(line):
+            if m.start() and line[m.start() - 1] not in PATH_START:
+                token = re.split(r"[\s`]", line[:m.start()])[-1] + m.group(0)
+                raise SystemExit(f"tests-cover-diff: the summary cites `{token}`; cite the log by its relative, "
+                                 "absolute or ~ path")
+            paths.update(expand(m.group(0)))
+    return sorted(paths)
 
 
 def check(selected_text, summary_text, logs, not_run):
