@@ -496,6 +496,31 @@ test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/known-plus-novel-memory-budget 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/violation-known-plus-novel-memory-budget.log"
+# A cut-and-paste that leaves one child id in two org files: only a verdict
+# whose every swallowed problem is that error for those ids and files is known.
+cut_paste_dup_problem=$(cat <<'EOF'
+\n  [ERROR] holon_filesystem::file_sync_controller (crates/holon-filesystem/src/file_sync_controller.rs:3025): [FileSyncController] DUPLICATE BLOCK ID: 'block:kd-1-a' is declared by BOTH /private/var/folders/hc/T/.tmpDupId/Journals/2026-01-16.org and /private/var/folders/hc/T/.tmpDupId/forward-edge-page.org, so /private/var/folders/hc/T/.tmpDupId/forward-edge-page.org is NOT ingested — QUARANTINING this file from write-back, because ingesting it would merge its headlines into the other file's document and rewrite one file with the other's content. Give the duplicated headline a fresh `:ID:` in one of the two files, or delete the stray copy. The claimant is whichever file was ingested FIRST, and the vault walk order is arbitrary, so which of the two wins can differ between runs. Repeats for this path log at DEBUG. (slug=block:kd-1-a claimed_by=/private/var/folders/hc/T/.tmpDupId/Journals/2026-01-16.org refused=/private/var/folders/hc/T/.tmpDupId/forward-edge-page.org)
+EOF
+)
+cut_paste_dup_log() {
+    local out="$1" count="$2" problems="$3"
+    {
+        echo "thread 'hand_authored_regressions::hand_authored_keystone_regressions' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13:"
+        echo "reconciled composed sequence diverged from the oracle: [(\"inv-no-observed-errors\", \"[inv-no-observed-errors] $count swallowed problem(s) (ERROR log / panic) during this transition — a green run is hiding a real failure:$problems\")]"
+        echo "test hand_authored_regressions::hand_authored_keystone_regressions ... FAILED"
+        echo "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 634 filtered out; finished in 3.68s"
+    } >"$out"
+}
+cut_paste_dup_log "$work/cut-paste-dup-known.log" 1 "$cut_paste_dup_problem"
+expect_outcome cut-paste-dup/known 0 '^PRIMARY: \[known-red:cut-paste-duplicate-block-id\]' "$work/cut-paste-dup-known.log"
+cut_paste_dup_log "$work/cut-paste-dup-two-known.log" 2 "$cut_paste_dup_problem${cut_paste_dup_problem//kd-1-a/kd-1-b}"
+expect_outcome cut-paste-dup/two-known 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' "$work/cut-paste-dup-two-known.log"
+cut_paste_dup_log "$work/cut-paste-dup-other-id.log" 1 "${cut_paste_dup_problem//kd-1-a/fe-parent}"
+expect_outcome cut-paste-dup/other-id 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/cut-paste-dup-other-id.log"
+cut_paste_dup_log "$work/cut-paste-dup-other-files.log" 1 "${cut_paste_dup_problem//forward-edge-page.org/doc_0.org}"
+expect_outcome cut-paste-dup/other-files 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/cut-paste-dup-other-files.log"
+cut_paste_dup_log "$work/cut-paste-dup-beside-another-error.log" 2 "$cut_paste_dup_problem\n  [ERROR] holon_filesystem::file_sync_controller (crates/holon-filesystem/src/file_sync_controller.rs:3100): write-back of doc_0.org failed"
+expect_outcome cut-paste-dup/beside-another-error 1 '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/cut-paste-dup-beside-another-error.log"
 # The sample rules (`[keystone-sample]`) belong to the HEADLESS keystone, which
 # is the only test that discloses one. The windowed keystone's name contains the
 # headless name as a substring, so these three cases pin which log each rule
