@@ -503,16 +503,18 @@ cut_paste_dup_problem=$(cat <<'EOF'
 EOF
 )
 cut_paste_dup_log() {
-    local out="$1" count="$2" problems="$3"
+    local out="$1" count="$2" problems="$3" prefix="${4-}"
     {
         echo "thread 'hand_authored_regressions::hand_authored_keystone_regressions' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13:"
-        echo "reconciled composed sequence diverged from the oracle: [(\"inv-no-observed-errors\", \"[inv-no-observed-errors] $count swallowed problem(s) (ERROR log / panic) during this transition — a green run is hiding a real failure:$problems\")]"
+        echo "${prefix}reconciled composed sequence diverged from the oracle: [(\"inv-no-observed-errors\", \"[inv-no-observed-errors] $count swallowed problem(s) (ERROR log / panic) during this transition — a green run is hiding a real failure:$problems\")]"
         echo "test hand_authored_regressions::hand_authored_keystone_regressions ... FAILED"
         echo "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 634 filtered out; finished in 3.68s"
     } >"$out"
 }
 cut_paste_dup_log "$work/cut-paste-dup-known.log" 1 "$cut_paste_dup_problem"
 expect_outcome cut-paste-dup/known 0 '^PRIMARY: \[known-red:cut-paste-duplicate-block-id\]' "$work/cut-paste-dup-known.log"
+cut_paste_dup_log "$work/cut-paste-dup-proptest-terminal.log" 1 "$cut_paste_dup_problem" 'Test failed: '
+expect_outcome cut-paste-dup/proptest-terminal 0 '^PRIMARY: \[known-red:cut-paste-duplicate-block-id\]' "$work/cut-paste-dup-proptest-terminal.log"
 cut_paste_dup_log "$work/cut-paste-dup-two-known.log" 2 "$cut_paste_dup_problem${cut_paste_dup_problem//kd-1-a/kd-1-b}"
 expect_outcome cut-paste-dup/two-known 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' "$work/cut-paste-dup-two-known.log"
 cut_paste_dup_log "$work/cut-paste-dup-other-id.log" 1 "${cut_paste_dup_problem//kd-1-a/fe-parent}"

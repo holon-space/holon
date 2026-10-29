@@ -276,4 +276,17 @@ mod tests {
         assert!(tally.check_floor(16).is_ok());
         assert!(tally.disclose(16).contains("verdict=OK"));
     }
+
+    #[test]
+    fn a_duplicate_block_id_verdict_beside_another_invariant_stays_novel() {
+        let reds = KnownReds::load().expect("load registry");
+        let problem = r#""[inv-no-observed-errors] 1 swallowed problem(s) (ERROR log / panic) during this transition — a green run is hiding a real failure:\n  [ERROR] holon_filesystem::file_sync_controller (crates/holon-filesystem/src/file_sync_controller.rs:3025): [FileSyncController] DUPLICATE BLOCK ID: 'block:kd-1-a' is declared by BOTH /v/Journals/2026-01-16.org and /v/forward-edge-page.org, so /v/forward-edge-page.org is NOT ingested""#;
+        let head = "reconciled composed sequence diverged from the oracle: [";
+        let alone = format!("{head}(\"inv-no-observed-errors\", {problem})]");
+        assert_eq!(reds.classify(&alone), Some("cut-paste-duplicate-block-id"));
+        let cofired = format!(
+            "{head}(\"inv-copies-stay-on-disk\", \"kd-1 has 0 copies on disk where the model expects 1\"), (\"inv-no-observed-errors\", {problem})]"
+        );
+        assert_eq!(reds.classify(&cofired), None, "{cofired}");
+    }
 }
