@@ -92,7 +92,8 @@ for l in open(sys.argv[1]):
 }
 steps="1 20 2 13 17 7 14 5 6 8 9 18 19 3 4 12 11 15 10 22"
 sorted_steps=$(tr ' ' '\n' <<<"$steps" | sort -n | tr '\n' ' ')
-in_stubs() { env HOME="$home" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
+# Without the caller's HOLON_PBT_TIMING, only the gate scripts can set it.
+in_stubs() { env -u HOLON_PBT_TIMING HOME="$home" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
 
 echo "== the integrate run"
 rc=0; in_stubs "$integrate" g1 "1 2" "$tip" >"$scratch/integrate.out" 2>&1 || rc=$?
