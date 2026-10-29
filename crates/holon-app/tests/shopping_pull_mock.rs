@@ -82,6 +82,8 @@ enum Mode {
     /// had, applies nothing, and someone else's write is visible on the next
     /// pull.
     StaleFirstCommit,
+    /// The list serves its pulls and fails every commit.
+    FailingCommits,
 }
 
 #[derive(Default)]
@@ -139,6 +141,13 @@ impl ListState {
             if let Some(picked) = command["picked"].as_str() {
                 match picked {
                     "del" => self.picked.retain(|(n, c, _)| !(n == &name && c == &cat)),
+                    // The picked list is keyed by name, so an `add` replaces
+                    // whatever entry of that name it held.
+                    "add" => {
+                        self.picked.retain(|(n, _, _)| n != &name);
+                        self.picked
+                            .push((name, cat, good.get("pickedCount").cloned()));
+                    }
                     "replace" => {
                         let entry = self
                             .picked
@@ -251,6 +260,11 @@ async fn start_mock_with(mode: Mode, list: ListState) -> Mock {
                     (
                         "500 Internal Server Error",
                         format!("{{\"error\":\"upstream failed for {path}\"}}"),
+                    )
+                } else if method == "POST" && mode == Mode::FailingCommits {
+                    (
+                        "500 Internal Server Error",
+                        "{\"error\":\"the list is read-only\"}".to_string(),
                     )
                 } else if method == "POST" {
                     let sent: serde_json::Value =
@@ -1240,5 +1254,203 @@ fn the_pull_arguments_carry_a_freshness_value_only_when_one_is_declared() {
     assert!(
         !args.contains_key("nocache"),
         "a connection declaring no cache buster was still handed one: {args:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tick and un-tick
+// ---------------------------------------------------------------------------
+
+/// A list holding only `Salmon` in `Fish` with the amount `1`, ticked or not.
+fn salmon_list(ticked: bool) -> ListState {
+    let salmon = ("Salmon".into(), "Fish".into(), Some(serde_json::json!("1")));
+    let (items, picked) = if ticked {
+        (Vec::new(), vec![salmon])
+    } else {
+        (vec![salmon], Vec::new())
+    };
+    ListState {
+        items,
+        picked,
+        version: 7,
+        ..ListState::default()
+    }
+}
+
+/// Holon's mirror of `Salmon`, last served with `served_ticked` and now held
+/// with `checked`.
+fn salmon_row(served_ticked: bool, checked: bool) -> LocalRow {
+    let mut row = local("Salmon", "Fish", Some("1"));
+    set(&mut row, "checked", Value::Integer(i64::from(checked)));
+    set(
+        &mut row,
+        "remote_base",
+        Value::String(serde_json::json!({"checked": served_ticked, "count": "1"}).to_string()),
+    );
+    row
+}
+
+/// Every command a commit carried for `name`, without its idempotency id.
+fn sent_for(mock: &Mock, name: &str) -> Vec<serde_json::Value> {
+    mock.state
+        .lock()
+        .expect("mock list")
+        .sent
+        .iter()
+        .filter(|command| command["good"]["name"] == name)
+        .map(|command| {
+            let mut command = command.clone();
+            command
+                .as_object_mut()
+                .expect("a command is an object")
+                .remove("id")
+                .expect("every command carries an id");
+            command
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_tick_in_holon_reaches_the_app_as_its_own_check_wire() {
+    let mock = start_mock_with(Mode::Live, salmon_list(false)).await;
+    let peer = peer_for(&mock.base_url);
+
+    let outcome = sync_once(
+        &peer,
+        &Rows(vec![salmon_row(false, true)]),
+        &RemoteListReconciler::new(connection()),
+        DEVICE_ID,
+        1_756_700_000_000,
+    )
+    .await
+    .expect("one round");
+
+    assert_eq!(
+        sent_for(&mock, "Salmon"),
+        vec![
+            serde_json::json!({"cmd": "del", "good": {"name": "Salmon", "cat": "Fish", "new": true}}),
+            serde_json::json!({"picked": "add", "good": {"name": "Salmon", "cat": "Fish", "pickedCount": "1"}}),
+        ],
+        "a tick must reach the app as the command delete and `picked` add its own client sends"
+    );
+    let state = mock.state.lock().expect("mock list");
+    assert!(
+        state.items.is_empty() && state.picked.len() == 1,
+        "the app holds {:?} / {:?}",
+        state.items,
+        state.picked
+    );
+    assert!(
+        !outcome.retried,
+        "the verifying pull did not see the tick land"
+    );
+}
+
+#[tokio::test]
+async fn an_untick_in_holon_reaches_the_app_and_the_next_pull_keeps_it_unticked() {
+    let mock = start_mock_with(Mode::Live, salmon_list(true)).await;
+    let peer = peer_for(&mock.base_url);
+
+    let outcome = sync_once(
+        &peer,
+        &Rows(vec![salmon_row(true, false)]),
+        &RemoteListReconciler::new(connection()),
+        DEVICE_ID,
+        1_756_700_000_000,
+    )
+    .await
+    .expect("one round");
+
+    let reticked: Vec<_> = outcome
+        .local
+        .iter()
+        .filter(|intent| {
+            matches!(intent, LocalIntent::SetColumn { column, value, .. }
+                if column == "checked" && *value != Value::Integer(0) && *value != Value::Boolean(false))
+        })
+        .collect();
+    assert!(
+        reticked.is_empty(),
+        "the round ticked again an item Holon un-ticked: {reticked:?}"
+    );
+    assert_eq!(
+        sent_for(&mock, "Salmon"),
+        vec![
+            serde_json::json!({"picked": "del", "good": {"name": "Salmon", "cat": "Fish"}}),
+            serde_json::json!({"cmd": "add", "good": {"name": "Salmon", "cat": "Fish", "count": "1"}}),
+        ],
+        "an un-tick must reach the app as the `picked` delete and command add its own client sends"
+    );
+    let state = mock.state.lock().expect("mock list");
+    assert!(
+        state.picked.is_empty() && state.items.len() == 1,
+        "the app holds {:?} / {:?}",
+        state.items,
+        state.picked
+    );
+}
+
+#[tokio::test]
+async fn an_untick_the_app_fails_is_disclosed_by_name_and_kept() {
+    let mock = start_mock_with(Mode::FailingCommits, salmon_list(true)).await;
+    let peer = peer_for(&mock.base_url);
+
+    let err = format!(
+        "{:#}",
+        sync_once(
+            &peer,
+            &Rows(vec![salmon_row(true, false)]),
+            &RemoteListReconciler::new(connection()),
+            DEVICE_ID,
+            1_756_700_000_000,
+        )
+        .await
+        .expect_err("a commit the app fails must fail the round, not tick the item again")
+    );
+    assert!(
+        err.contains("Salmon in Fish") && err.contains("500"),
+        "the failure does not name the item it did not send: {err}"
+    );
+    assert!(!err.contains(CAP_TOKEN), "the credential leaked: {err}");
+}
+
+/// Entry `docs/Testing/bugfunnel/entries/
+/// 2026-10-05-shopping-app-add-item-matches-by-name-alone.md`: the app finds
+/// the entry an `add` replaces by name alone, so an item Holon creates under a
+/// name the list holds in another category would replace that entry.
+#[tokio::test]
+async fn an_addition_under_a_name_the_app_holds_in_another_category_is_withheld() {
+    let list = ListState {
+        items: vec![("Milk".into(), "Ca".into(), Some(serde_json::json!("1")))],
+        version: 7,
+        ..ListState::default()
+    };
+    let mock = start_mock_with(Mode::Live, list).await;
+    let peer = peer_for(&mock.base_url);
+
+    let mut mine = local("Milk", "R", Some("2kg"));
+    set(&mut mine, "last_seen_remote", Value::Null);
+    let outcome = sync_once(
+        &peer,
+        &Rows(vec![mine]),
+        &RemoteListReconciler::new(connection()),
+        DEVICE_ID,
+        1_756_700_000_000,
+    )
+    .await
+    .expect("one round");
+
+    assert_eq!(
+        mock.state.lock().expect("mock list").items,
+        vec![("Milk".into(), "Ca".into(), Some(serde_json::json!("1")))],
+        "the addition replaced the app's entry of the same name"
+    );
+    assert!(
+        outcome
+            .withheld
+            .iter()
+            .any(|reason| reason.contains("Milk in R") && reason.contains("Milk in Ca")),
+        "the withheld addition is not disclosed by name: {:?}",
+        outcome.withheld
     );
 }

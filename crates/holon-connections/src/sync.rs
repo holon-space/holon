@@ -13,6 +13,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 
+use anyhow::Context as _;
 use anyhow::Result;
 use async_trait::async_trait;
 use holon_api::Value;
@@ -22,6 +23,8 @@ use crate::reconcile::PushIntent;
 use crate::reconcile::RemoteListReconciler;
 use crate::snapshot::ListSnapshot;
 use crate::snapshot::LocalRowReader;
+use crate::snapshot::json_of;
+use crate::spec::CompiledListSync;
 use crate::spec::RowKey;
 
 /// The intents a reconciler can push.
@@ -233,6 +236,8 @@ pub struct SyncOutcome {
     pub refused: Vec<String>,
     /// Holon's edits the peer's own edit of the same cell overwrote.
     pub overwritten: Vec<String>,
+    /// Holon's additions the peer would match to another item, not sent.
+    pub withheld: Vec<String>,
 }
 
 /// Run one round: pull the list, reconcile it against the local rows, commit
@@ -272,14 +277,16 @@ pub async fn sync_once(
                 retried,
                 refused: snapshot.refusals().to_vec(),
                 overwritten: outcome.overwritten,
+                withheld: outcome.withheld,
             });
         }
+        let unsent = unsent_names(reconciler.compiled(), &outcome.push)?;
         anyhow::ensure!(
             attempt < MAX_COMMITS,
-            "remote list sync: {} change(s) still un-pushed after {MAX_COMMITS} commits against \
+            "remote list sync: {unsent} still un-pushed after {MAX_COMMITS} commits against \
              versions up to {}; the list is being written faster than a round can converge, and \
-             re-sending over a list this round has not read would lose whoever else is editing",
-            outcome.push.len(),
+             re-sending over a list this round has not read would lose whoever else is editing; \
+             Holon keeps its values and the next round sends them again",
             snapshot.version()
         );
         retried = attempt > 0;
@@ -288,7 +295,12 @@ pub async fn sync_once(
         // mint the SAME id for the same logical command, or the peer cannot
         // recognise the re-send.
         let batch = CommitBatch::from_push_intents(&outcome.push, &snapshot, device_id, now_ms);
-        let acked = peer.commit(&batch).await?;
+        let acked = peer.commit(&batch).await.with_context(|| {
+            format!(
+                "remote list sync: the peer did not take {unsent}; Holon keeps its values and \
+                 the next round sends them again"
+            )
+        })?;
         anyhow::ensure!(
             acked.version >= batch.version,
             "remote list sync: the peer answered version {} to a commit based on version {}; a \
@@ -300,6 +312,20 @@ pub async fn sync_once(
         snapshot = pull_at_least(peer, acked.version).await?;
     }
     unreachable!("the loop returns or fails on its last pass")
+}
+
+/// The changes of `push`, by the names a person knows their rows by.
+fn unsent_names(compiled: &CompiledListSync, push: &[PushIntent]) -> Result<String> {
+    let names = push
+        .iter()
+        .map(|intent| {
+            let (PushIntent::Add { row, .. }
+            | PushIntent::Update { row, .. }
+            | PushIntent::Remove { row, .. }) = intent;
+            compiled.display_name_of(&json_of(&row.columns)?)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(format!("the change(s) to {}", names.join(", ")))
 }
 
 /// Pull until the list is at least as new as a write we KNOW landed.

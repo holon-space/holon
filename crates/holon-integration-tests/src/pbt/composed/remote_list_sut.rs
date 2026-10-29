@@ -216,12 +216,14 @@ impl SutRemoteListSync for RemoteListSut {
                 self.app
                     .change(|list| list.untick(&Self::cell(columns, "name")));
             }
-            RemoteListMutation::TickLocally { columns } => {
+            RemoteListMutation::TickLocally { columns }
+            | RemoteListMutation::UntickLocally { columns } => {
                 let id = Self::id_of(columns);
+                let ticked = matches!(mutation, RemoteListMutation::TickLocally { .. });
                 let mut params = holon_api::StorageEntity::default();
                 params.insert("id".into(), Value::String(id.clone()));
                 params.insert("field".into(), Value::String("checked".into()));
-                params.insert("value".into(), Value::Integer(1));
+                params.insert("value".into(), Value::Integer(i64::from(ticked)));
                 self.execute("set_field", params, &id).await;
             }
             RemoteListMutation::EditBoth { columns, peer } => {

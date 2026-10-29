@@ -4844,9 +4844,12 @@ pub enum RemoteListMutation {
     /// A person un-ticks, in the app, a row the app holds ticked alone: the
     /// item goes back on the list, and Holon follows.
     UntickRemotely { columns: Vec<(String, String)> },
-    /// A person ticks a row in Holon. The tick is never pushed, so it stays
-    /// local while the app serves the item active.
+    /// A person ticks in Holon a row the app holds active; the round pushes
+    /// the tick.
     TickLocally { columns: Vec<(String, String)> },
+    /// A person un-ticks in Holon a row the app holds ticked alone; the round
+    /// pushes the un-tick, and the next pull must not tick it again.
+    UntickLocally { columns: Vec<(String, String)> },
 }
 
 impl RemoteListMutation {
@@ -4863,7 +4866,8 @@ impl RemoteListMutation {
             | RemoteListMutation::EditBoth { columns, .. }
             | RemoteListMutation::AddActiveOverTicked { columns }
             | RemoteListMutation::UntickRemotely { columns }
-            | RemoteListMutation::TickLocally { columns } => columns,
+            | RemoteListMutation::TickLocally { columns }
+            | RemoteListMutation::UntickLocally { columns } => columns,
         }
     }
 }

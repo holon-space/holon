@@ -153,6 +153,7 @@
                       "type": "string",
                       "description": "A command on the picked list; a command carries `cmd` or `picked`.",
                       "enum": [
+                        "add",
                         "replace",
                         "del"
                       ]

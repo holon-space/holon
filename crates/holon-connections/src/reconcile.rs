@@ -78,6 +78,9 @@ pub struct ReconcileOutcome {
     pub push: Vec<PushIntent>,
     /// Holon's edits the peer's own edit of the same cell overwrote, by name.
     pub overwritten: Vec<String>,
+    /// Holon's additions not sent because the peer would match them to an item
+    /// it already holds under another key, by name.
+    pub withheld: Vec<String>,
 }
 
 /// Turns `(local rows, one complete remote snapshot)` into intents, under the
@@ -119,6 +122,13 @@ impl RemoteListReconciler {
         }
 
         let mut outcome = ReconcileOutcome::default();
+        let mut held_by_match: BTreeMap<String, String> = BTreeMap::new();
+        for (_, remote) in snapshot.rows() {
+            let row = json_of(&remote.columns)?;
+            if let Some(matched) = self.compiled.peer_match_of(&row)? {
+                held_by_match.insert(matched.to_string(), self.compiled.display_name_of(&row)?);
+            }
+        }
         let mut seen: BTreeSet<RowKey> = BTreeSet::new();
         for (key, remote) in snapshot.rows() {
             seen.insert(key.clone());
@@ -248,10 +258,29 @@ impl RemoteListReconciler {
                     .local
                     .push(LocalIntent::Delete { id: row.id.clone() }),
                 // Never sent by the peer, so its absence says nothing about it.
-                (false, false) => outcome.push.push(PushIntent::Add {
-                    key: key.clone(),
-                    row: (*row).clone(),
-                }),
+                (false, false) => {
+                    let json = json_of(&row.columns)?;
+                    let name = self.compiled.display_name_of(&json)?;
+                    match self.compiled.peer_match_of(&json)? {
+                        Some(matched) => match held_by_match.get(&matched.to_string()) {
+                            Some(holder) => outcome.withheld.push(format!(
+                                "{name} is not sent: the peer matches an addition by {matched} \
+                                 and already holds {holder} under it"
+                            )),
+                            None => {
+                                held_by_match.insert(matched.to_string(), name);
+                                outcome.push.push(PushIntent::Add {
+                                    key: key.clone(),
+                                    row: (*row).clone(),
+                                });
+                            }
+                        },
+                        None => outcome.push.push(PushIntent::Add {
+                            key: key.clone(),
+                            row: (*row).clone(),
+                        }),
+                    }
+                }
             }
         }
 
@@ -350,9 +379,12 @@ fn shown(value: &Value) -> Result<String> {
 /// The peer's JSON writes a count as an integer and the declared `REAL` column
 /// reads back as a float, so both spellings of one number compare equal.
 /// Without that, every round would rewrite the column and only its watermark
-/// would look changed.
+/// would look changed. A flag is stored as `INTEGER` and a mapping may serve it
+/// as a boolean, so `1` and `true` compare equal too.
 fn same_value(local: Option<&Value>, incoming: &Value) -> bool {
     match (local, incoming) {
+        (Some(Value::Integer(a)), Value::Boolean(b)) => *a == i64::from(*b),
+        (Some(Value::Boolean(a)), Value::Integer(b)) => i64::from(*a) == *b,
         (Some(Value::Integer(a)), Value::Float(b)) => (*a as f64) == *b,
         (Some(Value::Float(a)), Value::Integer(b)) => *a == (*b as f64),
         (None, Value::Null) => true,

@@ -1007,7 +1007,17 @@ impl RemoteListRefState {
                 self.row_mut(&id)[Self::CHECKED] = "0".to_string();
             }
             RemoteListMutation::TickLocally { .. } => {
+                self.app.tick(&name);
                 self.row_mut(&id)[Self::CHECKED] = "1".to_string();
+            }
+            RemoteListMutation::UntickLocally { .. } => {
+                assert!(
+                    self.app.picked.contains_key(&name) && !self.app.is_folded(&name),
+                    "the reference model un-ticks {id} in Holon, which the app does not hold \
+                     ticked alone"
+                );
+                self.app.untick(&name);
+                self.row_mut(&id)[Self::CHECKED] = "0".to_string();
             }
             RemoteListMutation::EditLocally { .. } => {
                 let amount = cell(columns, "count");

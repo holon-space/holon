@@ -56,7 +56,7 @@ The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-inte
 | Slash commands | Slash-menu keystroke sequence resolving to a command | `TriggerSlashCommand`; `inv-viewmodel-editable-text-triggers` | [0024](../adr/0024-unified-action-execution.md) | — | `crates/holon-frontend/src/popup_menu.rs` |
 | Templates | A canned inline template instantiates into real blocks | `InstantiateTemplate` | [0024](../adr/0024-unified-action-execution.md) | — | `crates/holon-frontend/src/popup_menu.rs` |
 
-Open reds here: `editor-text-mirror`, `editor-caret-mirror`, `movecursor-unopened-editor`, `split-id-no-pairing`, `syn-real-mint`.
+Open reds here: `editor-text-mirror`, `editor-caret-mirror`, `movecursor-unopened-editor`, `split-id-no-pairing`, `syn-real-mint`, `split-on-decision-without-options-refused-dc1`.
 
 `syn-real-mint` is a block-loss detector, not a minting defect.
 

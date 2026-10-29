@@ -182,7 +182,7 @@ areas:
         ruled_by: "[0024](../adr/0024-unified-action-execution.md)"
         mode_axes: "—"
         entry: "`crates/holon-frontend/src/popup_menu.rs`"
-    open_reds: [editor-text-mirror, editor-caret-mirror, movecursor-unopened-editor, split-id-no-pairing, syn-real-mint]
+    open_reds: [editor-text-mirror, editor-caret-mirror, movecursor-unopened-editor, split-id-no-pairing, syn-real-mint, split-on-decision-without-options-refused-dc1]
     note: >
       `syn-real-mint` is a block-loss detector, not a minting defect.
 

@@ -145,6 +145,7 @@ utcp:
                         type: "string"
                         description: "A command on the picked list; a command carries `cmd` or `picked`."
                         enum:
+                          - "add"
                           - "replace"
                           - "del"
                       name:
@@ -238,15 +239,13 @@ holon:
     command_row_type: shopping_command
     merge_columns:
       - count
-    # The app's amount and tick as this list last served them: what tells an
-    # amount edited in Holon (pushed) from one edited in the app (taken), and
-    # an item the app un-ticked from one Holon ticked.
-    base_column: remote_base
-    # With no timestamp to arbitrate with, a wrong check skips one item while a
-    # wrong un-check re-buys it every trip, so only the app's own un-tick
-    # lowers a tick.
-    latch_columns:
       - checked
+    # The app's amount and tick as this list last served them: what tells an
+    # edit made in Holon (pushed) from one made in the app (taken).
+    base_column: remote_base
+    # The app matches an addition by its name alone, so a new `Milk in R` would
+    # merge into a held `Milk in Ca`; such an addition is withheld by name.
+    peer_match: .name
   tools:
     pull_list:
       # The manual declares these inputs; this says how they reach the wire.
@@ -336,23 +335,27 @@ holon:
       # transport's neutral key so the caller carries no field name of its own.
       response_version_path: version
       # The write leg's mapping: the reconciler's command ROWS become this
-      # peer's `commands` array and the versions the batch is based on. A check
-      # toggle is deliberately unrepresentable: the on-versus-off encoding was
-      # never isolated in a capture, and a guess risks deleting the item instead
-      # of ticking it. The amount travels verbatim: `count` is a merge column, so
-      # an amount left off the wire returns from the verifying re-pull as none.
+      # peer's `commands` array and the versions the batch is based on. The
+      # amount travels verbatim: `count` is a merge column, so an amount left off
+      # the wire returns from the verifying re-pull as none.
       #
       # The app keeps a ticked item in its picked list, so a command on one goes
       # there, the way the app's own client sends it (`www/js/list.js`
-      # `addPickedItem` / `removePickedItem`): an amount edit is a `replace`
-      # carrying the new amount as both `count` and `pickedCount`, a deletion a
-      # picked `del`. An active amount edit is a repeated `add`, which replaces
-      # the entry of that name. A `del` removes ONE active entry, so the removal
-      # of a key the list holds `active_entries` times is that many `del`s in the
+      # `addPickedItem` / `removePickedItem`): a tick is a `del` of the active
+      # entries plus a picked `add` carrying the amount as `pickedCount`, an
+      # un-tick a picked `del` plus an active `add`; an amount edit is a
+      # `replace` carrying the new amount as both `count` and `pickedCount`, a
+      # deletion a picked `del`. An active amount edit is a repeated `add`, which
+      # replaces the entry of that name. A `del` removes ONE active entry, so a
+      # key the list holds `active_entries` times takes that many `del`s in the
       # same commit, each under its own id.
       request: |
         def amount($field): if .count != null then {($field): .count} else {} end;
         def ticked: .remote.checked == true or .remote.checked == 1;
+        def mine_ticked: .checked == true or .checked == 1;
+        def active_dels($id; $n): range(0; $n) as $i
+          | {cmd: "del", good: {name: .name, cat: .cat, new: true},
+             id: (if $i == 0 then $id else "\($id)_\($i)" end)};
         .rows as $rows
         | ($rows | map(select(.type == "shopping_commit")) | .[0].row
            // error("the row stream carries no `shopping_commit` row")) as $batch
@@ -363,14 +366,21 @@ holon:
             commands: [ $rows[] | select(.type == "shopping_command") | .row
                         | .command_id as $id
                         | (.remote.active_entries) as $n
-                        | if .verb == "remove" and (($n | type) != "number" or (ticked and $n != 0) or ((ticked | not) and $n < 1)) then
-                            error("the removal of `\(.name)` in `\(.cat)` reads `active_entries` \($n | tojson) on a row the list serves \(if ticked then "ticked" else "active" end); a ticked row holds no active entry and an active row at least one")
+                        | (.verb == "remove" or (.verb == "update" and mine_ticked != ticked)) as $reads_entries
+                        | if $reads_entries and (($n | type) != "number" or (ticked and $n != 0) or ((ticked | not) and $n < 1)) then
+                            error("the \(.verb) of `\(.name)` in `\(.cat)` reads `active_entries` \($n | tojson) on a row the list serves \(if ticked then "ticked" else "active" end); a ticked row holds no active entry and an active row at least one")
                           elif .verb == "remove" and (ticked | not) then
-                            range(0; $n) as $i
-                            | {cmd: "del", good: {name: .name, cat: .cat, new: true},
-                               id: (if $i == 0 then $id else "\($id)_\($i)" end)}
+                            active_dels($id; $n)
+                          elif .verb == "update" and mine_ticked and (ticked | not) then
+                            active_dels($id; $n),
+                            {picked: "add", good: ({name: .name, cat: .cat} + amount("pickedCount")), id: "\($id)_\($n)"}
+                          elif .verb == "update" and ticked and (mine_ticked | not) then
+                            {picked: "del", good: {name: .name, cat: .cat}, id: $id},
+                            {cmd: "add", good: ({name: .name, cat: .cat} + amount("count")), id: "\($id)_1"}
                           else
-                          (if .verb == "add" then
+                          (if .verb == "add" and mine_ticked then
+                            {picked: "add", good: ({name: .name, cat: .cat} + amount("pickedCount"))}
+                          elif .verb == "add" then
                             {cmd: "add", good: ({name: .name, cat: .cat, new: true} + amount("count"))}
                           elif .verb == "update" and ticked then
                             {picked: "replace", name: .name, good: ({name: .name, cat: .cat} + amount("count") + amount("pickedCount"))}

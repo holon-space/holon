@@ -24,11 +24,10 @@ fields:
   - name: count
     sql_type: TEXT
     nullable: true
-  # Local-only. The peer's observed schema has neither field, and checking an
-  # item there may simply BE removal from the list, so nothing here is ever
-  # pushed until the write leg is specified (docs/Plans/Kitchen.md P28).
+  # The peer's tick: membership of its picked list. Synced both ways.
   - name: checked
     sql_type: INTEGER
+  # Local-only: the peer's schema has no such field.
   - name: product_id
     sql_type: TEXT
     nullable: true

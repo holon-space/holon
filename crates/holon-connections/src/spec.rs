@@ -69,11 +69,8 @@ pub struct ListSyncSpec {
     /// Columns a peer's set always reaches Holon, while an unset reaches it
     /// only where the peer itself un-set the column: the base says the peer
     /// served it set, and it now serves it unset. A Holon set the peer has not
-    /// served yet stays.
-    ///
-    /// A shopping list's `checked` is the worked example: with no timestamp to
-    /// arbitrate with, a wrong check skips one item while a wrong un-check
-    /// re-buys it every trip, so only the peer's own un-check lowers it.
+    /// served yet stays. Holon's own unset is never pushed, so a peer that can
+    /// take a push of the flag declares it a merge column instead.
     #[serde(default)]
     pub latch_columns: Vec<String>,
     /// Row type under which the pull mapping reports entries it skipped, each
@@ -81,6 +78,14 @@ pub struct ListSyncSpec {
     /// never hold an entry the mapping must skip.
     #[serde(default)]
     pub refusal_row_type: Option<String>,
+    /// A `jaq` expression over one item row yielding what the PEER matches an
+    /// addition by, where that is less than the key: a list that matches
+    /// `.name` alone would merge a new `Milk in R` into its `Milk in Ca`. An
+    /// addition that matches a held item, or an earlier addition of the same
+    /// round, is withheld and disclosed by name. Absent where the peer matches
+    /// by the key itself.
+    #[serde(default)]
+    pub peer_match: Option<String>,
 }
 
 /// The freshness argument a connection's pull carries, under the name
@@ -121,6 +126,7 @@ pub struct CompiledListSync {
     spec: ListSyncSpec,
     key: RowMapper,
     display_name: RowMapper,
+    peer_match: Option<RowMapper>,
     tombstone_column: String,
     entity_scheme: holon_api::EntityName,
     tombstone_window: Duration,
@@ -173,6 +179,16 @@ impl CompiledListSync {
         .with_context(|| {
             format!("connection '{connection}': the `list_sync.display_name` expression")
         })?;
+        let peer_match = spec
+            .peer_match
+            .as_deref()
+            .map(|expr| {
+                RowMapper::compile(format!("{connection}: holon.list_sync.peer_match"), expr)
+                    .with_context(|| {
+                        format!("connection '{connection}': the `list_sync.peer_match` expression")
+                    })
+            })
+            .transpose()?;
 
         let declared_columns: BTreeSet<String> =
             declared.fields.iter().map(|f| f.name.clone()).collect();
@@ -243,6 +259,7 @@ impl CompiledListSync {
             spec,
             key,
             display_name,
+            peer_match,
         }))
     }
 
@@ -291,6 +308,25 @@ impl CompiledListSync {
             [one] => Ok(RowKey(one.clone())),
             other => anyhow::bail!(
                 "`list_sync.key` emitted {} values for the row {row}, and a key is exactly one",
+                other.len()
+            ),
+        }
+    }
+
+    /// What the peer matches an addition of this row by, `None` where the
+    /// sidecar declares no `peer_match`.
+    pub fn peer_match_of(&self, row: &serde_json::Value) -> Result<Option<serde_json::Value>> {
+        let Some(peer_match) = &self.peer_match else {
+            return Ok(None);
+        };
+        let emitted = peer_match
+            .map(row)
+            .with_context(|| format!("deriving what the peer matches the row {row} by"))?;
+        match emitted.as_slice() {
+            [one] => Ok(Some(one.clone())),
+            other => anyhow::bail!(
+                "`list_sync.peer_match` emitted {} values for the row {row}, and a match is \
+                 exactly one",
                 other.len()
             ),
         }

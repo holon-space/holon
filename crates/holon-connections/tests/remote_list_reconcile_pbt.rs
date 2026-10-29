@@ -1117,3 +1117,171 @@ fn a_row_id_under_a_foreign_scheme_is_refused() {
         "the refusal does not name the scheme the row must carry: {message}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A peer that takes a push of its tick, and matches an addition by name alone.
+// ---------------------------------------------------------------------------
+
+const PICKED_LIST_SYNC: &str = r#"
+entity: shopping_item
+pull_tool: pull_list
+commit_tool: commit
+list_row_type: shopping_list
+version_column: version
+key: "[.name, .cat]"
+display_name: '.name + " in " + .cat'
+watermark_column: last_seen_remote
+base_column: remote_base
+batch_row_type: shopping_commit
+command_row_type: shopping_command
+merge_columns: [count, checked]
+peer_match: .name
+"#;
+
+fn picked_list() -> Conn {
+    Conn {
+        label: "shopping (tick merged, matched by name)",
+        compiled: compile("picked", SHOPPING_TYPE, PICKED_LIST_SYNC),
+        ..shopping()
+    }
+}
+
+/// A flag as one side spells it: the mirror's `INTEGER`, or a mapping's
+/// boolean.
+fn flag(on: bool, as_boolean: bool) -> Value {
+    if as_boolean {
+        Value::Boolean(on)
+    } else {
+        Value::Integer(i64::from(on))
+    }
+}
+
+fn item(name: u8, cat: u8, seen: bool) -> LocalRow {
+    let mut columns: BTreeMap<String, Value> = BTreeMap::new();
+    let id = format!("shopping-item:cat{cat}:item{name}");
+    columns.insert("id".into(), Value::String(id.clone()));
+    columns.insert("name".into(), Value::String(format!("item{name}")));
+    columns.insert("cat".into(), Value::String(format!("cat{cat}")));
+    columns.insert("count".into(), amount(0));
+    columns.insert("checked".into(), Value::Integer(0));
+    columns.insert("deleted_at".into(), Value::Null);
+    columns.insert(
+        "last_seen_remote".into(),
+        if seen {
+            Value::String("2026-09-13T00:00:00+00:00".into())
+        } else {
+            Value::Null
+        },
+    );
+    LocalRow { id, columns }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// A flag merged as a column settles three-way whichever spelling each side
+    /// and the base carry it in: `1` and `true` are one value, so an unchanged
+    /// flag is neither rewritten nor pushed.
+    #[test]
+    fn a_merged_flag_settles_three_way_across_its_spellings(
+        base in prop::option::of((any::<bool>(), any::<bool>())),
+        mine in any::<bool>(),
+        theirs in (any::<bool>(), any::<bool>()),
+    ) {
+        let conn = picked_list();
+        let mut row = local_row(&conn, 0, 0, mine, Tombstone::None, true);
+        if let Some((on, as_boolean)) = base {
+            let served = if as_boolean { serde_json::json!(on) } else { serde_json::json!(i64::from(on)) };
+            row.columns.insert(
+                "remote_base".into(),
+                Value::String(serde_json::json!({ "count": AMOUNTS[0], "checked": served }).to_string()),
+            );
+        }
+        let mut remote = remote_row(&conn, 0, 0, false);
+        remote.insert("checked".into(), flag(theirs.0, theirs.1));
+        let snapshot = snapshot_of(&conn, vec![remote], 1);
+        let outcome = RemoteListReconciler::new(conn.compiled.clone())
+            .reconcile(&[row], &snapshot)
+            .expect("the round");
+        let taken = outcome.local.iter().any(|intent| {
+            matches!(intent, LocalIntent::SetColumn { column, .. } if column == "checked")
+        });
+        let pushed = outcome.push.iter().any(|push| matches!(push, PushIntent::Update { .. }));
+        let base = base.map(|(on, _)| on);
+        let theirs = theirs.0;
+        let want = if mine == theirs {
+            (false, false, false)
+        } else if base == Some(theirs) {
+            (false, true, false)
+        } else if base == Some(mine) {
+            (true, false, false)
+        } else {
+            (true, false, true)
+        };
+        prop_assert_eq!(
+            (taken, pushed, !outcome.overwritten.is_empty()),
+            want,
+            "base {:?}, Holon {}, peer {} → (taken, pushed, disclosed); disclosed {:?}",
+            base, mine, theirs, outcome.overwritten
+        );
+    }
+
+    /// The peer matches an addition by name alone, so of Holon's additions under
+    /// one name at most one is sent, and none under a name the peer holds; every
+    /// other one is withheld and named.
+    #[test]
+    fn an_addition_the_peer_would_match_to_another_item_is_withheld(
+        held in prop::collection::btree_set((0u8..3, 0u8..3), 0..4),
+        added in prop::collection::btree_set((0u8..3, 0u8..3), 0..6),
+    ) {
+        let conn = picked_list();
+        let added: BTreeSet<(u8, u8)> = added.difference(&held).copied().collect();
+        let remote = held
+            .iter()
+            .map(|&(name, cat)| {
+                let mut row: holon_api::entity::StorageEntity = Default::default();
+                for (column, value) in item(name, cat, true).columns {
+                    if ["id", "name", "cat", "count", "checked"].contains(&column.as_str()) {
+                        row.insert(column.into(), value);
+                    }
+                }
+                row
+            })
+            .collect();
+        let local: Vec<LocalRow> = added.iter().map(|&(name, cat)| item(name, cat, false)).collect();
+        let snapshot = snapshot_of(&conn, remote, 1);
+        let outcome = RemoteListReconciler::new(conn.compiled.clone())
+            .reconcile(&local, &snapshot)
+            .expect("the round");
+
+        let mut sent: BTreeMap<String, usize> = BTreeMap::new();
+        for push in &outcome.push {
+            let PushIntent::Add { row, .. } = push else {
+                prop_assert!(false, "an addition-only round pushed {push:?}");
+                unreachable!()
+            };
+            let Some(Value::String(name)) = row.columns.get("name") else {
+                panic!("an addition without a name: {row:?}");
+            };
+            *sent.entry(name.clone()).or_default() += 1;
+        }
+        let held_names: BTreeSet<String> = held.iter().map(|(n, _)| format!("item{n}")).collect();
+        let added_names: BTreeSet<String> = added.iter().map(|(n, _)| format!("item{n}")).collect();
+        let want: BTreeMap<String, usize> =
+            added_names.difference(&held_names).map(|name| (name.clone(), 1)).collect();
+        prop_assert_eq!(&sent, &want, "held {:?}, added {:?}", held, added);
+        prop_assert_eq!(
+            outcome.withheld.len() + outcome.push.len(),
+            added.len(),
+            "every addition is sent or withheld: {:?}",
+            outcome.withheld
+        );
+        for disclosure in &outcome.withheld {
+            prop_assert!(
+                added.iter().any(|(n, c)| disclosure.starts_with(&format!("item{n} in cat{c} is not sent")))
+                    && !disclosure.contains('['),
+                "the disclosure {disclosure:?} does not open with the withheld item's name"
+            );
+        }
+    }
+}

@@ -126,11 +126,9 @@ impl TransitionFactory<ReferenceState> for RemoteListSync {
                             .prop_map(|columns| RemoteListMutation::Add { columns })
                             .boxed(),
                     ),
-                    // A row authored in Holon is never ticked: `checked` is not
-                    // pushed, so a local tick would stay local.
                     (
                         3,
-                        fresh_row(vec!["0"])
+                        fresh_row(vec!["0", "1"])
                             .prop_map(|columns| RemoteListMutation::AuthorLocally { columns })
                             .boxed(),
                     ),
@@ -176,6 +174,12 @@ impl TransitionFactory<ReferenceState> for RemoteListSync {
                         2,
                         prop::sample::select(ticked_only.clone())
                             .prop_map(|columns| RemoteListMutation::UntickRemotely { columns })
+                            .boxed(),
+                    ));
+                    arms.push((
+                        2,
+                        prop::sample::select(ticked_only.clone())
+                            .prop_map(|columns| RemoteListMutation::UntickLocally { columns })
                             .boxed(),
                     ));
                     arms.push((

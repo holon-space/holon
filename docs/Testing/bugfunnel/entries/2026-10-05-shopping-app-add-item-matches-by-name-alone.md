@@ -3,7 +3,7 @@ id: 2026-10-05-shopping-app-add-item-matches-by-name-alone
 date: 2026-10-05
 gap: ENVIRONMENT
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   That Shopping List's `addItem` finds an existing entry by normalized name
   alone, so a Holon push of (X, catA) replaces the app's (X, catB), including
@@ -43,7 +43,22 @@ a `[.label, .bucket]` pair (line 70), the analogue of Holon's `(name, cat)`. The
 cannot produce this collision.
 
 ## Remedy
-Open. Candidates, not decided: make the fixture peer replace by normalized name
-alone (so the keystone can generate the collision), and make Holon refuse or
-rename a local (X, catA) create when the pulled list holds X under another
-category.
+The sidecar declares `peer_match: .name` (`assets/integrations/shopping.yaml`
+`list_sync`). The reconciler withholds an addition whose `peer_match` equals
+that of an item the pulled list holds, or of an earlier addition of the same
+round, and names it in the round's `withheld` disclosure, which the sync
+operation logs and returns. Holon keeps its row; nothing reaches the app.
+
+Tests:
+- `shopping_pull_mock.rs`
+  `an_addition_under_a_name_the_app_holds_in_another_category_is_withheld`:
+  the repro above against the fake app, which replaces by name as the real
+  one does. Red before the change (the app's `Milk in Ca 1` became
+  `Milk in R 2kg`), green after.
+- `remote_list_reconcile_pbt.rs`
+  `an_addition_the_peer_would_match_to_another_item_is_withheld`: at most one
+  addition per name is sent, none under a held name, every other one is
+  withheld by name.
+
+Still open: the keystone's fixture peer keys items by `(name, cat)`, so the
+keystone cannot generate the collision.

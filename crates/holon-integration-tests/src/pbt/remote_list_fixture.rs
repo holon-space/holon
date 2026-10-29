@@ -137,6 +137,28 @@ impl AppList {
         self.picked.remove(name);
     }
 
+    /// A tick that reached the app the way its own client sends one
+    /// (`list.js` `removeItem` + `addPickedItem`): every active entry of that
+    /// name leaves, and the ticked entry carries the first one's amount as
+    /// `pickedCount`.
+    pub fn tick(&mut self, name: &str) {
+        let at = self
+            .items
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap_or_else(|| panic!("the list app holds no active '{name}' to tick"));
+        let entry = self.items.remove(at);
+        self.items.retain(|e| e.name != name);
+        self.picked.insert(
+            entry.name,
+            PickedEntry {
+                cat: entry.cat,
+                count: None,
+                picked_count: entry.count,
+            },
+        );
+    }
+
     /// A person un-ticks a ticked item in the app: it goes back on the active
     /// list with its picked amount (`list.js` `removePickedItem` + `cmd: add`).
     pub fn untick(&mut self, name: &str) {
@@ -274,6 +296,18 @@ impl AppList {
             }
             (None, Some("del")) => {
                 self.picked.remove(&entry.name);
+            }
+            // The picked list is keyed by name: the entry of that name becomes
+            // `good` as sent.
+            (None, Some("add")) => {
+                self.picked.insert(
+                    entry.name,
+                    PickedEntry {
+                        cat: entry.cat,
+                        count: entry.count,
+                        picked_count: text("pickedCount"),
+                    },
+                );
             }
             // The ticked entry becomes `good` as sent, both amount fields
             // included.
