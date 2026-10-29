@@ -105,10 +105,19 @@ expect "writes one gate-steps row per step" [ "$(rows_of g1 | cut -d' ' -f1 | tr
 expect "never calls timing-gate" [ "$(grep -c '^just timing-gate |' "$probe")" = 0 ]
 expect "never takes the quiet hold" [ -z "$(grep -v ' | quiet=$' "$probe")" ]
 # The integrate run judges no duration, so every cargo call that runs tests
-# measures. fmt runs none; org_suite's exit status is discarded.
+# measures; fmt runs none.
 expect "runs cargo test arms" grep -qE '^cargo (test|nextest) ' "$probe"
-unmeasured=$(grep -E '^cargo (test|nextest) ' "$probe" | grep -v ' | timing=measure | ' | grep -v 'org_suite' || true)
+unmeasured=$(grep -E '^cargo (test|nextest) ' "$probe" | grep -v ' | timing=measure | ' || true)
 expect "runs every cargo test arm with HOLON_PBT_TIMING=measure${unmeasured:+, not: $unmeasured}" [ -z "$unmeasured" ]
+# A `just` arm runs cargo inside its recipe, out of the stub's sight: a recipe
+# that runs integration tests must default the mode to measure.
+unmeasured_just=$(sed -n 's/^just \([^ ]*\) | timing=\([^ |]*\) | .*/\1 \2/p' "$probe" | while read -r r t; do
+  [ "$t" != measure ] || continue
+  body=$(just --justfile "$here/../justfile" --show "$r")
+  grep -qE -- '--test integration|just pbt ' <<<"$body" || continue
+  grep -qE 'HOLON_PBT_TIMING=(\$\{HOLON_PBT_TIMING-)?measure' <<<"$body" || printf '%s ' "$r"
+done)
+expect "runs every just test arm with measure${unmeasured_just:+, not: $unmeasured_just}" [ -z "$unmeasured_just" ]
 expect "marks the target for the sweep" [ -f "$integ/target/.gc-mark" ]
 
 echo "== the integrate run with one red step after gate-compile"
