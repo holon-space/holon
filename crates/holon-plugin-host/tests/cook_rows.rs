@@ -317,7 +317,19 @@ fn component_amount() -> impl Strategy<Value = Option<String>> {
 enum Piece {
     Text(&'static str),
     Cookware(&'static str, Option<String>),
+    Ingredient(&'static str, Option<String>),
     Timer(Option<&'static str>, String),
+}
+
+fn ingredients() -> impl Strategy<Value = &'static str> {
+    proptest::sample::select(vec![
+        "salt",
+        "Sea Salt",
+        "sea-salt",
+        "Äpfel",
+        "olive oil",
+        "x",
+    ])
 }
 
 fn piece() -> impl Strategy<Value = Piece> {
@@ -325,6 +337,7 @@ fn piece() -> impl Strategy<Value = Piece> {
     prop_oneof![
         proptest::sample::select(vec!["stir ", "then ", "für "]).prop_map(Piece::Text),
         (names(), component_amount()).prop_map(|(n, a)| Piece::Cookware(n, a)),
+        (ingredients(), component_amount()).prop_map(|(n, a)| Piece::Ingredient(n, a)),
         (proptest::option::of(names()), timer_amount()).prop_map(|(n, a)| Piece::Timer(n, a)),
     ]
 }
@@ -335,6 +348,10 @@ fn render_piece(piece: &Piece) -> String {
         Piece::Cookware(name, None) if !name.contains(' ') => format!("#{name} "),
         Piece::Cookware(name, amount) => {
             format!("#{name}{{{}}} ", amount.as_deref().unwrap_or(""))
+        }
+        Piece::Ingredient(name, None) if !name.contains(' ') => format!("@{name} "),
+        Piece::Ingredient(name, amount) => {
+            format!("@{name}{{{}}} ", amount.as_deref().unwrap_or(""))
         }
         Piece::Timer(name, amount) => format!("~{}{{{amount}}} ", name.unwrap_or("")),
     }
@@ -385,7 +402,7 @@ fn render_recipe(servings: &Option<String>, sections: &[Section]) -> String {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig { cases: 256, failure_persistence: None, ..ProptestConfig::default() })]
 
     /// Every component the cook wrote is one row, every section a row names is
     /// one the recipe projects, and nothing emitted is JSON text.
@@ -416,6 +433,36 @@ proptest! {
         let timers = pieces.filter(|p| matches!(p, Piece::Timer(..))).count();
         prop_assert_eq!(rows(&parsed, "cookware").len(), cookware, "{}", text);
         prop_assert_eq!(rows(&parsed, "recipe_timer").len(), timers, "{}", text);
+
+        // A section without a header continues the one above it; `==  ==`
+        // starts an unnamed one, which projects no row.
+        let mut header = None;
+        let mut headers = 0;
+        let mut expected = Vec::new();
+        for section in &sections {
+            match section.name {
+                Some("") => header = None,
+                Some(_) => {
+                    header = Some(headers);
+                    headers += 1;
+                }
+                None => {}
+            }
+            for p in section.steps.iter().flatten() {
+                if matches!(p, Piece::Ingredient(..)) {
+                    expected.push(header);
+                }
+            }
+        }
+        let section_rows = rows(&parsed, "recipe_section");
+        let actual: Vec<Option<usize>> = rows(&parsed, "ingredient_use")
+            .iter()
+            .map(|u| {
+                let section = cell(u, "section_id");
+                section_rows.iter().position(|row| cell(row, "id") == section)
+            })
+            .collect();
+        prop_assert_eq!(actual, expected, "ingredient uses sit in other sections\n{}", text);
 
         let section_ids: Vec<Value> = rows(&parsed, "recipe_section")
             .iter()
