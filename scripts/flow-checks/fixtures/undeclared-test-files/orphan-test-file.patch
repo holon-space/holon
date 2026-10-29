@@ -1,0 +1,7 @@
+--- /dev/null	2026-10-29 07:00:25
++++ crates/holon-transition-contract/tests/orphan_probe.rs	2026-10-29 07:00:25
+@@ -0,0 +1,4 @@
++#[test]
++fn an_undeclared_test_file_still_runs() {
++    panic!("orphan test ran");
++}
