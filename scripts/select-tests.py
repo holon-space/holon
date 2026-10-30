@@ -267,6 +267,9 @@ def term_reaches_selection(term, pkgs, bins, binary_pkgs, never_owner):
     shortcut: a term naming only test names resolves to no package and counts as out of reach;
     upgrade when the owner table carries each row's package.
     """
+    module = re.search(r"\btest\(/\^(\w+)::/\)", term)
+    if module and module.group(1) in never_owner and f"binary_id({INTEGRATION}::" in term:
+        return False
     if pkgs is None:
         return True
     hits = []
@@ -280,8 +283,7 @@ def term_reaches_selection(term, pkgs, bins, binary_pkgs, never_owner):
         if pkg is None:
             continue
         if pkg == INTEGRATION and INTEGRATION not in pkgs:
-            module = re.search(r"\btest\(/\^(\w+)::/\)", term)
-            hits.append(binary in bins and not (module and module.group(1) in never_owner))
+            hits.append(binary in bins)
         else:
             hits.append(pkg in pkgs)
     return bool(hits) and all(hits)
@@ -525,7 +527,7 @@ UNOWNED_LEAF = f"unowned: package(leaf) is excluded by the load-tolerant profile
 RDEP_OF_CORE = f"nextest: {RUN} -E 'package(app) | package(core) | package(gpui) | package(rows) | {OLD_BINARIES}'"
 # Each case: the changed paths, the lines the per-file-binary selector printed for them on the same workspace laid
 # out as one test binary per tests/*.rs file (`ValueError` when it failed) plus the owner lines of the modules the
-# default profile drops, and the integration term this layout prints.
+# default profile drops (none for a module in NEVER_OWNER_MODULES), and the integration term this layout prints.
 GOLDEN = [
     (["crates/core/src/lib.rs"],
      [f"clippy: {CANON}", RDEP_OF_CORE, "hand-authored: just hand-authored", "timing: just timing-gate",
@@ -541,15 +543,15 @@ GOLDEN = [
      None),
     ([f"crates/{INTEGRATION}/tests/latency_slo_gate.rs"],
      [f"clippy: {CANON}", f"nextest: {RUN} -E 'package({INTEGRATION})'", "hand-authored: just hand-authored",
-      "latency-slo: just latency-slo-gate", "timing: just timing-gate"], None),
+      "timing: just timing-gate"], None),
     ([f"crates/{INTEGRATION}/tests/hand.rs"],
      [f"clippy: {CANON}", f"nextest: {RUN} -E 'package({INTEGRATION})'", "hand-authored: just hand-authored",
-      "keystone-smoke: just keystone-smoke", "latency-slo: just latency-slo-gate", "timing: just timing-gate"], None),
+      "keystone-smoke: just keystone-smoke", "timing: just timing-gate"], None),
     ([f"crates/{INTEGRATION}/src/pbt/step.rs"],
      [f"clippy: {CANON}", f"nextest: {RUN} -E 'package({INTEGRATION})'", "hand-authored: just hand-authored",
-      "keystone-smoke: just keystone-smoke", "latency-slo: just latency-slo-gate", "timing: just timing-gate"], None),
+      "keystone-smoke: just keystone-smoke", "timing: just timing-gate"], None),
     (["Cargo.lock"],
-     [f"clippy: {CANON}", f"nextest: {RUN}", "hand-authored: just hand-authored", "latency-slo: just latency-slo-gate",
+     [f"clippy: {CANON}", f"nextest: {RUN}", "hand-authored: just hand-authored",
       "org-deep-text-timing: just org-deep-text-timing", "timing: just timing-gate", UNOWNED_LEAF,
       "windowed: just windowed-gate"], None),
     (["docs/Testing/Testing.md"], [f"clippy: {CANON}"], None),
@@ -582,11 +584,14 @@ def golden_problems(root, meta):
 
 
 def never_owner_problems(root, meta):
-    """A dropped module put into the never-owner set loses its owner line."""
-    with contextlib.redirect_stderr(io.StringIO()):
-        lines = selection(root, meta, ["crates/core/src/lib.rs"], NEVER_OWNER_MODULES | {"hand"})
-    return [f"`hand` is in the never-owner set but its owner line is printed: {lines}"] \
-        if "hand-authored: just hand-authored" in lines else []
+    """A dropped module put into the never-owner set loses its owner line, also when the integration crate changes."""
+    found = []
+    for changed in (["crates/core/src/lib.rs"], [f"crates/{INTEGRATION}/tests/plain.rs"]):
+        with contextlib.redirect_stderr(io.StringIO()):
+            lines = selection(root, meta, changed, NEVER_OWNER_MODULES | {"hand"})
+        if "hand-authored: just hand-authored" in lines:
+            found.append(f"{changed}: `hand` is in the never-owner set but its owner line is printed: {lines}")
+    return found
 
 
 def removed_binary_problems(root):
