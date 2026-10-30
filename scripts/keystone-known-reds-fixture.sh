@@ -899,6 +899,50 @@ for timing in AfterSessionResolve Never; do
     expect_outcome "boot-timeout/$timing" 1 "$novel_only" "$work/boot-$timing.log"
 done
 
+# The hand-authored replay runs past a red case. Each case's panic is judged
+# against the row the case names in `known_red`, so one row covers its own
+# cases only. Arguments per case: name, declared row ("" for none), payload
+# ("" for a red case that printed no panic).
+replay_site=crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13
+on_window_row='reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 expected disclosure(s) are NOT in effect: [\"crash-restore-ambiguous on a subject whose final path component is `hm4.org`\"]. Owed. Raised (governed kinds only): []")]'
+on_vouch_row='reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 condition(s) of a governed kind are in effect that the model does not expect: [RaisedCondition { subject: \"org-writeback\", kind: \"writeback-degraded\", files: [], count: None, message: None }]. Raised. Expected: []")]'
+replay_log() {
+    local names=()
+    printf '%s\n' '     Running tests/main.rs (target/debug/deps/integration-0000000000000001)' '' 'running 1 test'
+    while [ "$#" -gt 0 ]; do
+        names+=("\"$1\"")
+        printf '[hand-authored regression] running case "%s" (%s3 transitions, Checkpoints([]), Locks([]))\n' \
+            "$1" "${2:+known red: $2, }"
+        [ -z "$3" ] || printf "thread 'hand_authored_keystone_regressions' (3) panicked at %s:\n%s\n" "$replay_site" "$3"
+        printf '[hand-authored regression] RED case "%s"\n' "$1"
+        shift 3
+    done
+    local IFS=,
+    printf "thread 'hand_authored_keystone_regressions' (3) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:62:5:\n"
+    printf 'hand-authored replay: %d red case(s): [%s]\n' "${#names[@]}" "${names[*]}"
+    printf '%s\n' 'test hand_authored_keystone_regressions ... FAILED' \
+        'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s'
+}
+replay_log a crash-restore-window-not-disclosed "$on_window_row" b crash-restart-row-vouches-unstamped-base "$on_vouch_row" \
+    >"$work/replay-both-on-rows.log"
+expect_outcome replay/both-on-rows 0 '^\[known-reds\] PASS-WITH-NOTE: 2 known-red panic(s), 0 novel' \
+    "$work/replay-both-on-rows.log"
+replay_log a crash-restore-window-not-disclosed "$on_window_row" b crash-restart-row-vouches-unstamped-base \
+    'assertion failed: the store kept no copy' >"$work/replay-one-novel.log"
+expect_outcome replay/one-novel 1 '^\[known-reds\] FAIL: case "b" matches no row; it names crash-restart-row-vouches-unstamped-base' \
+    "$work/replay-one-novel.log"
+replay_log a crash-restore-window-not-disclosed "$on_window_row" b '' "$on_window_row" >"$work/replay-row-not-its-own.log"
+expect_outcome replay/row-covers-only-its-own-cases 1 '^\[known-reds\] FAIL: case "b" matches crash-restore-window-not-disclosed; it names no row' \
+    "$work/replay-row-not-its-own.log"
+replay_log a crash-restore-window-not-disclosed "$on_window_row" b crash-restart-row-vouches-unstamped-base "$on_window_row" \
+    >"$work/replay-other-row.log"
+expect_outcome replay/matches-another-row 1 '^\[known-reds\] FAIL: case "b" matches crash-restore-window-not-disclosed; it names crash-restart-row-vouches-unstamped-base' \
+    "$work/replay-other-row.log"
+replay_log a crash-restore-window-not-disclosed "$on_window_row" b crash-restart-row-vouches-unstamped-base '' \
+    >"$work/replay-red-without-panic.log"
+expect_outcome replay/red-case-without-panic 1 '^\[known-reds\] FAIL: case "b" matches no row' \
+    "$work/replay-red-without-panic.log"
+
 # The keystone's `BootFault::TaskPanic` panics on purpose. Only that exact
 # payload at that exact site is no failure; anything else stays a signature.
 injected_site=crates/holon-integration-tests/src/pbt/composed/boot_fault.rs

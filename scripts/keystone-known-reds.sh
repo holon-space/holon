@@ -34,6 +34,10 @@
 #           be said about the run at all. Also a nextest status label this
 #           script does not know: guessing its meaning would guess the verdict.
 #
+# A hand-authored replay log names the case of each panic. A case's panic is
+# known only when it matches exactly the row the case names (`known_red`), so
+# one row never covers another case; a red case without a panic is novel.
+#
 # The registry is the single source of truth for the patterns; this script holds
 # none of its own. Apart from that, it knows exactly one panic: the keystone's
 # injected boot fault (`injected_panic` below), which is no failure at all.
@@ -178,6 +182,21 @@ is_collateral() {
     [[ "$sig" == *'Any { .. }'* ]] && return 0
     [[ "$loc" == *"tracing-subscriber-"*"sharded.rs"* ]] && return 0
     return 1
+}
+
+# The hand-authored replay's closing panic lists its red cases, each of which
+# is judged on its own panic.
+is_replay_report() {
+    [[ "$1" =~ ^hand-authored\ replay:\ [0-9]+\ red\ case\(s\):\  ]]
+}
+
+# The index of registry row `$1`, or -1.
+row_index() {
+    local i
+    for i in "${!keys[@]}"; do
+        [ "${keys[$i]}" = "$1" ] && { echo "$i"; return; }
+    done
+    echo -1
 }
 
 # The keystone's own sample-floor panic is this gate speaking, not a bug: it is
@@ -339,6 +358,7 @@ for log in "$@"; do
             return 1
         }
         function unknown_label(label) {
+            stopped = 1
             printf "[known-reds] UNKNOWN nextest status label \"%s\" at %s:%d — the classifier cannot read this run.\n", label, FILENAME, FNR >"/dev/stderr"
             exit 3
         }
@@ -401,7 +421,7 @@ for log in "$@"; do
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
-        FNR == 1 { section = ""; live = ""; captured = "" }
+        FNR == 1 { section = ""; live = ""; captured = ""; replay_case = "" }
         /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = $0 }
         FNR == NR {
             if (parse_status($0)) {
@@ -442,13 +462,31 @@ for log in "$@"; do
             next
         }
         { track_line($0) }
+        # A hand-authored replay names the case it runs and the row that case
+        # is registered under; a panic between those lines is that case'"'"'s.
+        /\[hand-authored regression\] running case "/ {
+            replay_case = $0; sub(/^.*running case "/, "", replay_case); sub(/".*$/, "", replay_case)
+            declared[replay_case] = match($0, /\(known red: [^,]*,/) ? substr($0, RSTART + 12, RLENGTH - 13) : ""
+        }
+        /\[hand-authored regression\] (PASSED|RED) case "/ {
+            if (/\] RED case "/) red_case[replay_case] = 1
+            replay_case = ""
+        }
         /panicked at / {
             if ((OWNER in passed) && !(OWNER in flaky_failed)) { getline; next }
             key = scope() SUBSEP thread_of($0)
             if ((key in expected) && expected[key] == panics[key]) next
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/\r$/, "", loc); sub(/:$/, "", loc)
-            if ((getline msg) > 0) { sub(/^ +/, "", msg); print loc "\t" msg }
+            if ((getline msg) > 0) {
+                sub(/^ +/, "", msg)
+                if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
+                print loc "\t" msg
+            }
             next
+        }
+        END {
+            if (!stopped)
+                for (c in red_case) if (!(c in judged)) print "-\tthe red case printed no panic\037" c "\037" declared[c]
         }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" "$log" "$log" >"$sigs_file" \
         || { rc=$?; rm -f "$sigs_file" "$novel_file"; exit "$rc"; }
 
@@ -508,10 +546,19 @@ for log in "$@"; do
     tail_file=$(mktemp)
     while IFS=$'\t' read -r loc sig; do
         line_no=$((line_no + 1))
+        replay_case="" declared_row=""
+        if [[ "$sig" == *$'\037'* ]]; then
+            declared_row=${sig##*$'\037'}
+            replay_case=${sig#*$'\037'}
+            replay_case=${replay_case%$'\037'*}
+            sig=${sig%%$'\037'*}
+        fi
         norm=$(normalize_sig "$sig")
 
         if is_sample_floor "$sig"; then
             class="sample-floor"
+        elif [ -z "$replay_case" ] && is_replay_report "$sig"; then
+            class="replay-report"
         elif is_collateral "$loc" "$sig"; then
             class="collateral"
             collateral=$((collateral + 1))
@@ -572,6 +619,8 @@ for log in "$@"; do
                 cross=$((cross + 1))
             elif [ -n "$novel_pieces" ]; then
                 class="novel"
+                [ -z "$replay_case" ] \
+                    || echo "[known-reds] FAIL: case \"$replay_case\" matches no row; it names ${declared_row:-no row}"
                 # Grouped by normalized message only, not location: the same
                 # bug's panic site and proptest's own terminal re-report of it
                 # are two locations for one signature (see normalize_sig's
@@ -579,6 +628,13 @@ for log in "$@"; do
                 # the same way known-red counts already ignore location. Only
                 # the violations no row knows are listed.
                 printf '%s' "$novel_pieces" >>"$novel_file"
+                novel=$((novel + 1))
+            elif [ -n "$replay_case" ] && [ "$hits" != " $(row_index "$declared_row") " ]; then
+                class="novel"
+                matched_rows=""
+                for hit in $hits; do matched_rows="$matched_rows${keys[$hit]}+"; done
+                echo "[known-reds] FAIL: case \"$replay_case\" matches ${matched_rows%+}; it names ${declared_row:-no row}"
+                printf 'case "%s": %.240s\n' "$replay_case" "$norm" >>"$novel_file"
                 novel=$((novel + 1))
             else
                 class="known-red:"
@@ -592,7 +648,7 @@ for log in "$@"; do
             fi
         fi
 
-        entry="[$class] $base @ $loc: $(printf '%.240s' "$norm")"
+        entry="[$class] $base @ $loc${replay_case:+ case \"$replay_case\"}: $(printf '%.240s' "$norm")"
         if [ "$line_no" -eq 1 ]; then
             echo "PRIMARY: $entry"
         else

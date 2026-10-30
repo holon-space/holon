@@ -103,6 +103,7 @@ pub const KNOWN_CASE_KEYS: &[&str] = &[
     "transitions",
     ALSO_CHECK_AFTER_KEY,
     LOCKS_KEY,
+    KNOWN_RED_KEY,
 ];
 
 /// The replay-only key naming extra checkpoints; see [`Checkpoints`].
@@ -110,6 +111,11 @@ pub const ALSO_CHECK_AFTER_KEY: &str = "also_check_after";
 
 /// The replay-only key naming the invariants a case locks; see [`Locks`].
 pub const LOCKS_KEY: &str = "locks";
+
+/// The replay-only key naming the `docs/Testing/KeystoneKnownReds.md` row a
+/// red case is registered under; `scripts/keystone-known-reds.sh` accepts the
+/// case's panic only when it matches that row.
+pub const KNOWN_RED_KEY: &str = "known_red";
 
 /// Judged by every case on top of its [`Locks`]; the reason for each member is
 /// in `docs/Testing/HandAuthoredRegressions.md`.
@@ -237,6 +243,7 @@ pub struct ReplayCase {
     pub case: HandAuthoredCase,
     pub checkpoints: Checkpoints,
     pub locks: Locks,
+    pub known_red: Option<String>,
 }
 
 /// A [`StateMachineTest`] whose check can be narrowed to part of the catalog.
@@ -380,10 +387,15 @@ pub fn parse_replay_case(path: &std::path::Path, lineno: usize, line: &str) -> R
         &provenance,
     );
     let locks = Locks::parse(raw.get(LOCKS_KEY), &provenance);
+    let known_red = raw.get(KNOWN_RED_KEY).map(|row| match row.as_str() {
+        Some(key) if !key.is_empty() => key.to_string(),
+        _ => panic!("{provenance}: `{KNOWN_RED_KEY}` must name a known-reds row key, got {row}"),
+    });
     ReplayCase {
         case,
         checkpoints,
         locks,
+        known_red,
     }
 }
 

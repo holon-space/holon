@@ -282,18 +282,15 @@ hand-authored *FLAGS:
     # (docs/Testing/bugfunnel/entries/2026-09-22-unseeded-vault-blocks-are-sql-only-so-a-loro-fed-read-model-cannot-show-them.md).
     # Re-strict by deleting this default the day that pass lands; the
     # invariant itself excludes NOTHING, so the case reds again on its own.
-    # `external-rewrite-keeps-a-promoted-pages-body` is registered known red
-    # `external-rewrite-drops-page-body` (unowned).
-    # The failed-create rows are registered known reds
-    # (`failed-slot-create-sqlonly-keystrokes-run-anyway`,
-    # `failed-slot-create-loro-dispatch-keystrokes-run-anyway`) until admission
-    # Inc 2; `split-then-two-backspaces-caret-follows-second-join` is registered
-    # known red `join-then-stale-second-join` until admission Inc 2.
-    # The crash-restore cases below are registered known reds
-    # (`crash-restore-window-not-disclosed`, `crash-restart-row-vouches-unstamped-base`);
-    # the replay stops at its first red, so each is judged on its own with
-    # `HOLON_HAND_AUTHORED_CASE`.
-    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers,external-rewrite-keeps-a-promoted-pages-body,a-failed-create-cancels-its-keystrokes-with-one-disclosure,a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch,split-then-two-backspaces-caret-follows-second-join,hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit,hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot,wbs-an-empty-org-block-survives-write-back-and-a-crash-restart,crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy,a-crash-after-an-external-add-to-a-held-file-while-an-editor-is-dirty-keeps-no-copy-of-the-file-without-it}
+    # A case registered as a known red names its row in `known_red` instead of
+    # being skipped (docs/Testing/HandAuthoredRegressions.md). The other cases
+    # skipped here red with a panic their row does not match, until admission
+    # Inc 2 (the external-rewrite row is unowned):
+    #   external-rewrite-keeps-a-promoted-pages-body: external-rewrite-drops-page-body
+    #   a-failed-create-cancels-its-keystrokes-with-one-disclosure: failed-slot-create-sqlonly-keystrokes-run-anyway
+    #   a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch: failed-slot-create-loro-dispatch-keystrokes-run-anyway
+    #   split-then-two-backspaces-caret-follows-second-join: join-then-stale-second-join
+    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers,external-rewrite-keeps-a-promoted-pages-body,a-failed-create-cancels-its-keystrokes-with-one-disclosure,a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch,split-then-two-backspaces-caret-follows-second-join}
     # A caller that picks the cases, the sidecar or the test flags gets one process.
     if [ -n "${HOLON_HAND_AUTHORED_CASE-}${HOLON_HAND_AUTHORED_SIDECAR-}" ] || [ -n "{{FLAGS}}" ]; then
         cargo test \
@@ -320,9 +317,8 @@ hand-authored *FLAGS:
             echo "== hand-authored shard $k (exit $rc): $S ==" | tee -a "$L"
             tee -a "$L" < "$S"
             [ "$rc" = 0 ] && continue
-            last=$(sed -n 's/.*running case "\([^"]*\)".*/\1/p' "$S" | tail -1)
-            if [ -z "$last" ] || grep -qF "PASSED case \"$last\"" "$S"; then last="none, see the log"; fi
-            reds+=("shard $k exit $rc, red case: $last, log: $S")
+            red=$(sed -n 's/.*\] RED case "\([^"]*\)".*/\1/p' "$S" | paste -sd, -)
+            reds+=("shard $k exit $rc, red cases: ${red:-none, see the log}, log: $S")
         done
         if [ "${#reds[@]}" -gt 0 ]; then
             printf 'HAND-AUTHORED RED: %s\n' "${reds[@]}" | tee -a "$L"

@@ -56,8 +56,6 @@
 //!   trees at ONE out-of-tree case file instead of editing each tree's
 //!   committed JSONL.
 //! * `HOLON_HAND_AUTHORED_CASE` — comma-separated list of case `name`s to run.
-//!   The driver stops at the first red, so without this a probe case is masked
-//!   by any earlier failing case.
 //! * `HOLON_HAND_AUTHORED_SKIP` — comma-separated list of case `name`s to
 //!   QUARANTINE (skip a known-bad case without editing the committed sidecar,
 //!   so un-quarantining can never be forgotten in a code edit). Each skip is
@@ -75,6 +73,7 @@
 //! and the limits of what a hand-authored regression can express.
 
 use std::collections::BTreeSet;
+use std::panic::AssertUnwindSafe;
 
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::span_metrics::ComposedBudget;
@@ -84,8 +83,10 @@ use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::hand_authored::CapturedInitialState;
 use holon_integration_tests::pbt::hand_authored::CheckScope;
+use holon_integration_tests::pbt::hand_authored::Checkpoints;
 use holon_integration_tests::pbt::hand_authored::HandAuthoredCase;
 use holon_integration_tests::pbt::hand_authored::LockedReplay;
+use holon_integration_tests::pbt::hand_authored::Locks;
 use holon_integration_tests::pbt::hand_authored::ReplayCase;
 use holon_integration_tests::pbt::hand_authored::load_replay_cases;
 use holon_integration_tests::pbt::hand_authored::parse_case;
@@ -102,7 +103,8 @@ use proptest_state_machine::StateMachineTest;
 /// Replay every hand-authored keystone regression through the production
 /// harness. A case that reproduces a live defect (or breaks an invariant) fails
 /// here exactly as the random keystone would — and becomes a permanent lock:
-/// green once the defect is fixed.
+/// green once the defect is fixed. A red case does not stop the replay: the
+/// test fails after the last case and names every red one.
 #[test]
 fn hand_authored_keystone_regressions() {
     let cases = load_replay_cases();
@@ -112,44 +114,64 @@ fn hand_authored_keystone_regressions() {
         sidecar_path()
     );
 
+    let mut red = Vec::new();
     for ReplayCase {
         case,
         checkpoints,
         locks,
+        known_red,
     } in cases
     {
+        let name = case.name.clone();
+        let known_red = known_red.map_or(String::new(), |row| format!("known red: {row}, "));
         eprintln!(
-            "[hand-authored regression] running case {:?} ({} transitions, {checkpoints:?}, \
-             {locks:?})",
-            case.name,
+            "[hand-authored regression] running case {name:?} ({known_red}{} transitions, \
+             {checkpoints:?}, {locks:?})",
             case.transitions.len()
         );
-        // A pinned `initial_state` rebuilds the failing draw's oracle exactly;
-        // without one the base is `HOLON_PBT_FORCE_FULL=1`'s `full_headless`
-        // wiring, so `init_test` boots the full Turso + frontend SUT.
-        let provenance = format!("hand-authored regression case {:?}", case.name);
-        let initial_state = match case.initial_state {
-            Some(pinned) => pinned.into_reference_state(&provenance),
-            None => wide_e2e_ref(),
-        };
-        // `wide_e2e_ref_for` is NOT pure: `HOLON_FOLDER_COMPANION_SEED` makes it
-        // seed extra blocks and `PBT_MUTABLE_TEXT` changes the reference's
-        // editor semantics, so a byte-identical `initial_state` still yields
-        // different starting states under different flags. `environment` is
-        // where a capture records them; compare, never assume.
-        if let Some(report) = case
-            .environment
-            .mismatch_report(Some(&initial_state.harness.wiring))
+        // The panic hook has already printed this case's panic block; catching it
+        // lets every later case be judged too.
+        match std::panic::catch_unwind(AssertUnwindSafe(|| replay_case(case, &checkpoints, &locks)))
         {
-            panic!(
-                "{provenance}: recorded capture environment does not match this replay — the \
-                 starting state differs from the one this case pins:\n{report}"
-            );
+            Ok(()) => eprintln!("[hand-authored regression] PASSED case {name:?}"),
+            Err(_) => {
+                eprintln!("[hand-authored regression] RED case {name:?}");
+                red.push(name);
+            }
         }
-        replay::<ComposedSut<WideE2E>>(initial_state, case.transitions, &checkpoints, &locks);
-        eprintln!("[hand-authored regression] PASSED case {:?}", case.name);
     }
     shape_sim_matches_authority::report_reach();
+    assert!(
+        red.is_empty(),
+        "hand-authored replay: {} red case(s): {red:?}",
+        red.len()
+    );
+}
+
+fn replay_case(case: HandAuthoredCase, checkpoints: &Checkpoints, locks: &Locks) {
+    // A pinned `initial_state` rebuilds the failing draw's oracle exactly;
+    // without one the base is `HOLON_PBT_FORCE_FULL=1`'s `full_headless`
+    // wiring, so `init_test` boots the full Turso + frontend SUT.
+    let provenance = format!("hand-authored regression case {:?}", case.name);
+    let initial_state = match case.initial_state {
+        Some(pinned) => pinned.into_reference_state(&provenance),
+        None => wide_e2e_ref(),
+    };
+    // `wide_e2e_ref_for` is NOT pure: `HOLON_FOLDER_COMPANION_SEED` makes it
+    // seed extra blocks and `PBT_MUTABLE_TEXT` changes the reference's
+    // editor semantics, so a byte-identical `initial_state` still yields
+    // different starting states under different flags. `environment` is
+    // where a capture records them; compare, never assume.
+    if let Some(report) = case
+        .environment
+        .mismatch_report(Some(&initial_state.harness.wiring))
+    {
+        panic!(
+            "{provenance}: recorded capture environment does not match this replay — the \
+             starting state differs from the one this case pins:\n{report}"
+        );
+    }
+    replay::<ComposedSut<WideE2E>>(initial_state, case.transitions, checkpoints, locks);
 }
 
 /// PARKED pin — echo-loop `BlockToPage` embedded-page child render-leak
@@ -350,6 +372,7 @@ fn sweeps_of_replay(line: &str) -> Vec<usize> {
         case,
         checkpoints,
         locks,
+        ..
     } = parse_replay_case(std::path::Path::new("<inline>"), 1, line);
     SWEPT.with(|swept| swept.borrow_mut().clear());
     replay::<CountingSut>(0, vec![(); case.transitions.len()], &checkpoints, &locks);

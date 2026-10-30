@@ -29,15 +29,14 @@ keystone_smoke() {
   grep -q 'PASS-WITH-NOTE' "$classified" || { echo "KEYSTONE SMOKE NOVEL RED"; exit 11; }
   echo "keystone smoke: pass-with-note (known reds only)"
 }
-# The run stops at its first red case, so a known red is rerun once and the
-# rerun must be green.
+# The replay runs every case; the classifier judges each red case against the
+# row the case names.
 hand_authored() {
   local log=target/gate-logs/$GATE-hand.log classified=target/gate-logs/$GATE-hand-classify.txt
   just hand-authored 2>&1 | tee "$log" && return
   bash scripts/keystone-known-reds.sh "$log" | tee "$classified" || true
   grep -q 'PASS-WITH-NOTE' "$classified" || { echo "HAND-AUTHORED NOVEL RED"; exit 11; }
-  echo "hand-authored: known red, rerun once"
-  just hand-authored 2>&1 | tee "target/gate-logs/$GATE-hand-rerun.log"
+  echo "hand-authored: pass-with-note (known reds only)"
 }
 extra_nextest() {
   local log=target/gate-logs/$GATE-extra.log classified=target/gate-logs/$GATE-extra-classify.txt

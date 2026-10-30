@@ -64,6 +64,7 @@ cases leave defaulted:
 | `environment: CaptureEnvironment` (`#[serde(default)]`) | omitted — the wiring/env-flag capture is for generator-captured fixtures |
 | `locks: [String]` (replay-only, required) | the catalog invariant ids the case's bug breaks; see [What a case checks](#what-a-case-checks-its-locks-plus-the-floor) |
 | `also_check_after: [usize]` (replay-only, optional) | 1-based transition numbers whose state the check also judges; see [Where the check runs](#where-the-check-runs) |
+| `known_red: String` (replay-only, optional) | the `docs/Testing/KeystoneKnownReds.md` row key of a registered known-red case; `scripts/keystone-known-reds.sh` accepts the case's panic only when it matches this row |
 
 Because `initial_state`/`environment` are `#[serde(default)]`, a JSONL line that
 names only `name`/`description`/`transitions` deserializes losslessly and
@@ -297,8 +298,12 @@ cargo test -p holon-integration-tests --features pbt \
 ```
 
 Each case prints `[hand-authored regression] running case "<name>"` before it
-runs and `PASSED case "<name>"` after — so a red pinpoints the failing line. The
-loop stops at the first failing case (fail-loud); put liveness/green cases first.
+runs and `PASSED case "<name>"` or `RED case "<name>"` after. A red case does
+not stop the loop: every case runs, and the test then fails naming each red
+case. `scripts/keystone-known-reds.sh <log>` judges each red case's panic on its
+own: it is known only when it matches the row the case names in `known_red`.
+A registered known-red case therefore carries `known_red` instead of a
+`HOLON_HAND_AUTHORED_SKIP` entry.
 
 ### Env seams: running one case, or a case file that isn't committed
 
@@ -312,8 +317,8 @@ Two env vars turn the sidecar from a fixed gate into an A/B instrument:
 Both fail loud: an unreadable override path panics; a filter naming a case the
 sidecar does not contain panics listing the known names.
 
-Why they exist: the driver stops at the **first** red, so without the filter a
-probe case is masked by any earlier failing case. And a cross-revision A/B probe
+Why they exist: a probe of one case need not boot every other case. And a
+cross-revision A/B probe
 (does this red exist at revision X but not Y?) had to *edit the committed JSONL
 in each tree*, which contaminates the diff under test. With the override, both
 trees point at one out-of-tree probe file:
