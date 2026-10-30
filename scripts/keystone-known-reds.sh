@@ -37,6 +37,7 @@
 # A hand-authored replay log names the case of each panic. A case's panic is
 # known only when it matches exactly the row the case names (`known_red`), so
 # one row never covers another case; a red case without a panic is novel.
+# A case that names a row and runs green prints a NOTE line, not a failure.
 #
 # The registry is the single source of truth for the patterns; this script holds
 # none of its own. Apart from that, it knows exactly one panic: the keystone's
@@ -278,6 +279,7 @@ cross=0
 collateral=0
 sample_bad=0
 green=0
+green_declared=0
 indeterminate=0
 unreadable=0
 # Per-key hit counts + one example each. Parallel indexed arrays, not an
@@ -438,10 +440,11 @@ for log in "$@"; do
                 if ($0 ~ /^ *ok/) expected[scope() SUBSEP verdict_due[scope()]]++
                 delete verdict_due[scope()]
             }
-            if (match($0, /^ *test .* - should panic \.\.\. /)) {
-                name = $0; sub(/^ *test /, "", name); sub(/ - should panic \.\.\. .*$/, "", name)
-                if (substr($0, RLENGTH + 1) ~ /^ok/) expected[scope() SUBSEP name]++
-                else if (substr($0, RLENGTH + 1) !~ /^(FAILED|ignored)/) verdict_due[scope()] = name
+            # Stdout of another thread can put text before the head on its line.
+            if (match($0, /(^| |\()test [^ ]+ - should panic \.\.\. /)) {
+                name = substr($0, RSTART, RLENGTH); sub(/^.?test /, "", name); sub(/ - should panic \.\.\. $/, "", name)
+                if (substr($0, RSTART + RLENGTH) ~ /^ok/) expected[scope() SUBSEP name]++
+                else if (substr($0, RSTART + RLENGTH) !~ /^(FAILED|ignored)/) verdict_due[scope()] = name
             } else if (/panicked at /) {
                 panics[scope() SUBSEP thread_of($0)]++
             } else if (OWNER != "" && /^ *Error: / && !(OWNER in error_of)) {
@@ -470,6 +473,7 @@ for log in "$@"; do
         }
         /\[hand-authored regression\] (PASSED|RED) case "/ {
             if (/\] RED case "/) red_case[replay_case] = 1
+            else if (declared[replay_case] != "") print "note\t" replay_case "\037" declared[replay_case]
             replay_case = ""
         }
         /panicked at / {
@@ -545,6 +549,11 @@ for log in "$@"; do
     line_no=0
     tail_file=$(mktemp)
     while IFS=$'\t' read -r loc sig; do
+        if [ "$loc" = note ]; then
+            echo "[known-reds] NOTE: known_red ${sig#*$'\037'} case \"${sig%%$'\037'*}\": declared known red, ran green"
+            green_declared=$((green_declared + 1))
+            continue
+        fi
         line_no=$((line_no + 1))
         replay_case="" declared_row=""
         if [[ "$sig" == *$'\037'* ]]; then
@@ -717,11 +726,14 @@ if [ "$no_verdict" -ne 0 ]; then
     echo "             Re-run the keystone and keep the whole log."
     exit 3
 fi
-if [ "$matched" -eq 0 ] && [ "$collateral" -eq 0 ]; then
+if [ "$matched" -eq 0 ] && [ "$collateral" -eq 0 ] && [ "$green_declared" -eq 0 ]; then
     echo "[known-reds] PASS: $green green run(s), nothing to classify."
     exit 0
 fi
 echo "[known-reds] PASS-WITH-NOTE: $matched known-red panic(s), 0 novel, $collateral collateral (ignored)."
+if [ "$green_declared" -ne 0 ]; then
+    echo "             Plus $green_declared declared known-red case(s) that ran green — see NOTE above."
+fi
 if [ "$green" -ne 0 ]; then
     echo "             Plus $green green run(s) with nothing to classify."
 fi

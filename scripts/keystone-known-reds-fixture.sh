@@ -333,6 +333,14 @@ split_verdict_log $'test malformed_also_check_after_is_refused - should panic ..
     >"$work/should-panic-failed-later-line.log"
 expect_outcome should-panic-failed-later-line 1 '^PRIMARY: \[novel\] .*not a transition number$' \
     "$work/should-panic-failed-later-line.log"
+split_verdict_log $'Applying transition 4/6: (test malformed_also_check_after_is_refused - should panic ... Checkpoints({7}))\nok' \
+    >"$work/should-panic-head-mid-line.log"
+expect_outcome should-panic-head-mid-line 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/should-panic-head-mid-line.log"
+split_verdict_log $'Applying transition 4/6: (test malformed_also_check_after_is_refused - should panic ... Checkpoints({7}))\nFAILED' \
+    >"$work/should-panic-head-mid-line-failed.log"
+expect_outcome should-panic-head-mid-line-failed 1 '^PRIMARY: \[novel\] .*not a transition number$' \
+    "$work/should-panic-head-mid-line-failed.log"
 # nextest status lines, in the shapes nextest-runner's reporter prints them
 # (reporter/displayer/imp.rs `status_str` / `short_status_str`). A test killed
 # or leaking after a passing body printed no panic, so the status line is its
@@ -902,7 +910,7 @@ done
 # The hand-authored replay runs past a red case. Each case's panic is judged
 # against the row the case names in `known_red`, so one row covers its own
 # cases only. Arguments per case: name, declared row ("" for none), payload
-# ("" for a red case that printed no panic).
+# ("" for a red case that printed no panic, PASSED for a green case).
 replay_site=crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13
 on_window_row='reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 expected disclosure(s) are NOT in effect: [\"crash-restore-ambiguous on a subject whose final path component is `hm4.org`\"]. Owed. Raised (governed kinds only): []")]'
 on_vouch_row='reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 condition(s) of a governed kind are in effect that the model does not expect: [RaisedCondition { subject: \"org-writeback\", kind: \"writeback-degraded\", files: [], count: None, message: None }]. Raised. Expected: []")]'
@@ -910,11 +918,15 @@ replay_log() {
     local names=()
     printf '%s\n' '     Running tests/main.rs (target/debug/deps/integration-0000000000000001)' '' 'running 1 test'
     while [ "$#" -gt 0 ]; do
-        names+=("\"$1\"")
         printf '[hand-authored regression] running case "%s" (%s3 transitions, Checkpoints([]), Locks([]))\n' \
             "$1" "${2:+known red: $2, }"
-        [ -z "$3" ] || printf "thread 'hand_authored_keystone_regressions' (3) panicked at %s:\n%s\n" "$replay_site" "$3"
-        printf '[hand-authored regression] RED case "%s"\n' "$1"
+        if [ "$3" = PASSED ]; then
+            printf '[hand-authored regression] PASSED case "%s"\n' "$1"
+        else
+            names+=("\"$1\"")
+            [ -z "$3" ] || printf "thread 'hand_authored_keystone_regressions' (3) panicked at %s:\n%s\n" "$replay_site" "$3"
+            printf '[hand-authored regression] RED case "%s"\n' "$1"
+        fi
         shift 3
     done
     local IFS=,
@@ -942,6 +954,21 @@ replay_log a crash-restore-window-not-disclosed "$on_window_row" b crash-restart
     >"$work/replay-red-without-panic.log"
 expect_outcome replay/red-case-without-panic 1 '^\[known-reds\] FAIL: case "b" matches no row' \
     "$work/replay-red-without-panic.log"
+replay_log a crash-restore-window-not-disclosed "$on_window_row" b crash-restart-row-vouches-unstamped-base PASSED \
+    >"$work/replay-declared-green.log"
+expect_outcome replay/declared-green-notes 0 '^\[known-reds\] NOTE: known_red crash-restart-row-vouches-unstamped-base case "b": declared known red, ran green$' \
+    "$work/replay-declared-green.log"
+expect_outcome replay/declared-green-stays-pass-with-note 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/replay-declared-green.log"
+replay_log a crash-restore-window-not-disclosed "$on_window_row" b '' PASSED >"$work/replay-undeclared-green.log"
+expect_outcome replay/undeclared-green 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/replay-undeclared-green.log"
+if "$repo_root/scripts/keystone-known-reds.sh" "$work/replay-undeclared-green.log" 2>&1 | grep -q 'NOTE: known_red'; then
+    echo "[fixture] FAIL outcome/replay/undeclared-green-prints-no-note: a case without known_red printed a NOTE line"
+    outcome_fail=1
+else
+    echo "[fixture] ok outcome/replay/undeclared-green-prints-no-note"
+fi
 
 # The keystone's `BootFault::TaskPanic` panics on purpose. Only that exact
 # payload at that exact site is no failure; anything else stays a signature.
