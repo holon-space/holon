@@ -10915,7 +10915,6 @@ struct EmptyHashRow {
     base_hash: String,
 }
 
-/// The key a per-file batch disclosure is recorded under.
 /// The `file` row of the vault file at `rel_path`: its id, and the path fields
 /// a write that creates the row needs (a non-org format's row exists nowhere
 /// else).
@@ -10932,6 +10931,7 @@ fn file_row_identity(rel_path: &Path) -> (EntityUri, String, String) {
     (EntityUri::file(&rel), name, parent_dir)
 }
 
+/// The key a per-file batch disclosure is recorded under.
 fn batch_file_key(path: &Path) -> EntityUri {
     EntityUri::file(&path.to_string_lossy())
 }
