@@ -208,7 +208,7 @@ const CASES_RUN: u32 = 512;
 /// the auto transitions it caused, so no answer waits for a `step` (D151.a,
 /// #167 idle rule, #192).
 fn offered_asks_have_their_answer_enabled(d: &Driver, op: &str) {
-    for row in d.exec().asks() {
+    for row in d.exec().asks().expect("the asks derive") {
         let (work, s) = (&row.transition.0, &row.subject.0);
         let tokens = d.exec().tokens();
         for busy in [
@@ -222,7 +222,10 @@ fn offered_asks_have_their_answer_enabled(d: &Driver, op: &str) {
             );
         }
         let answer = answer_transition(work);
-        let why = d.exec().why_not(&answer, s);
+        let why = d
+            .exec()
+            .why_not(&answer, s)
+            .expect("the net holds the transition");
         assert!(
             why.is_none(),
             "ask offered but its Answer is not enabled: '{answer}' for {s} after {op}: {why:?}"
@@ -236,7 +239,11 @@ fn no_auto_transition_is_enabled(sut: &Sut, op: &str) {
     for t in &sut.autos {
         for s in SUBJECTS {
             assert!(
-                sut.d.exec().why_not(t, s).is_some(),
+                sut.d
+                    .exec()
+                    .why_not(t, s)
+                    .expect("the net holds the transition")
+                    .is_some(),
                 "not quiescent: the auto '{t}' is enabled for {s} after {op}"
             );
         }
@@ -500,13 +507,18 @@ fn an_offered_ask_has_its_answer_enabled() {
     let attempt = d.pending.front().expect("the work is running").attempt;
     d.complete(attempt, EffectResult::Failed(Cause::definite("rejected")))
         .expect("the attempt is in flight");
-    let offered = d.exec().asks();
+    let offered = d.exec().asks().expect("the asks derive");
     assert_eq!(
         offered.len(),
         1,
         "the ask of x is offered again: {offered:?}"
     );
-    assert_eq!(d.exec().why_not(&answer_transition("Accept"), "x"), None);
+    assert_eq!(
+        d.exec()
+            .why_not(&answer_transition("Accept"), "x")
+            .expect("the net holds the transition"),
+        None
+    );
 }
 
 /// A fixed path through the red of each twin: answer, the work fails, the
@@ -545,13 +557,21 @@ fn no_ask_is_offered_while_its_work_runs() {
     let c = answer_call(&d, "y", "a1", false, None);
     d.answer(c).expect("the ask applies");
     d.write("Item", "y", item()).expect("the net quiesces");
-    assert_eq!(d.exec().asks(), Vec::new(), "an ask of y while a1 works");
+    assert_eq!(
+        d.exec().asks().expect("the asks derive"),
+        Vec::new(),
+        "an ask of y while a1 works"
+    );
     let c = answer_call(&d, "y", "a0", false, None);
     assert_eq!(d.answer(c), Err(UftError::NoLongerApplies));
     d.complete_oldest(|_| EffectResult::Failed(Cause::definite("rejected")))
         .expect("the net quiesces");
     offered_asks_have_their_answer_enabled(&d, "the failure of a1");
-    assert_eq!(d.exec().asks().len(), 1, "the ask of y is back");
+    assert_eq!(
+        d.exec().asks().expect("the asks derive").len(),
+        1,
+        "the ask of y is back"
+    );
 }
 
 /// `answer_spec` whose work also reads the absent `Gate`, and whose auto

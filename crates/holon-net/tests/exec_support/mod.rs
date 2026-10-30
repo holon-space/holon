@@ -593,7 +593,10 @@ impl Driver {
         let subjects: BTreeSet<String> = self.model.slot_keys().map(|(_, s)| s).collect();
         for work in self.model.asks().keys() {
             for s in &subjects {
-                let sut = self.exec.why_not(work, s);
+                let sut = self
+                    .exec
+                    .why_not(work, s)
+                    .expect("the net holds the transition");
                 let model = self.model.why_not(work, s);
                 assert!(
                     !matches!(sut, Some(WhyNot::FailedOnThisInput(_)))
@@ -811,13 +814,18 @@ impl Driver {
             )
             .expect("the answer is known");
         }
-        agree(op, "asks", self.exec.asks(), self.model.ask_rows());
+        agree(
+            op,
+            "asks",
+            self.exec.asks().expect("the asks derive"),
+            self.model.ask_rows(),
+        );
         for (p, d) in &self.spec.places {
             if let PlaceSpec::Derived(_) = d {
                 agree(
                     op,
                     &format!("derive_all({p})"),
-                    self.exec.derive_all(p),
+                    self.exec.derive_all(p).expect("a derived place"),
                     self.model.derive_all(p),
                 );
             }
@@ -829,7 +837,9 @@ impl Driver {
                 agree(
                     op,
                     &format!("why '{}' is not enabled for {s}", t.name),
-                    self.exec.why_not(&t.name, s),
+                    self.exec
+                        .why_not(&t.name, s)
+                        .expect("the net holds the transition"),
                     self.model.why_not(&t.name, s),
                 );
             }
@@ -996,7 +1006,11 @@ fn ask_row(r: &mut dyn Reads, s: &Subject) -> Option<Content> {
 /// An answer of `Accept` for `s`; `stale` or a missing ask gives a seen
 /// hash that matches no ask.
 pub fn answer_call(d: &Driver, s: &str, id: &str, stale: bool, value: Option<&str>) -> AnswerCall {
-    let hash = match d.exec().derive("Asks.Accept", &Subject::new(s)) {
+    let hash = match d
+        .exec()
+        .derive("Asks.Accept", &Subject::new(s))
+        .expect("a derived place")
+    {
         Some(row) if !stale => string(&row, "hash"),
         _ => blake3::hash(b"a stale ask").to_hex().to_string(),
     };

@@ -454,7 +454,9 @@ fn check_state(sut: &mut Sut, m: &Model) {
     }
     for (i, s) in SUBJECTS.iter().enumerate() {
         if let (Some(ask), Some(sit)) = (
-            sut.exec.derive(&asks_place(T), &Subject::new(s)),
+            sut.exec
+                .derive(&asks_place(T), &Subject::new(s))
+                .expect("a derived place"),
             m.subj[i].offered(),
         ) {
             sut.hashes.entry((i, sit)).or_insert(get(&ask, HASH_FIELD));
@@ -601,7 +603,10 @@ fn started(sut: &mut Sut, pre: &Model, m: &Model, requests: Vec<EffectRequest>) 
         if sut.exec.tokens().token(&answered_place(T), s).is_none() {
             continue;
         }
-        let why = sut.exec.why_not(T, s);
+        let why = sut
+            .exec
+            .why_not(T, s)
+            .expect("the net holds the transition");
         assert!(
             !matches!(why, Some(WhyNot::Guard | WhyNot::Needs { .. })),
             "P2 an Answered on {s} outlives its ask: {why:?}"
@@ -647,9 +652,15 @@ fn compare(sut: &mut Sut, m: &Model) {
             sut.exec.mark(T, s).is_some(),
             sj.mark.is_some(),
         );
-        let ask = sut.exec.derive(&asks_place(T), &Subject::new(s));
+        let ask = sut
+            .exec
+            .derive(&asks_place(T), &Subject::new(s))
+            .expect("a derived place");
         if ask.is_some() {
-            let why = sut.exec.why_not(&answer_transition(T), s);
+            let why = sut
+                .exec
+                .why_not(&answer_transition(T), s)
+                .expect("the net holds the transition");
             assert!(
                 why.is_none(),
                 "P5 an offered ask on {s} has a dead Answer: {why:?}"
@@ -819,7 +830,7 @@ fn the_bypass_check_names_every_near_miss() {
 fn ask_row_carries_the_declared_input_type() {
     let mut exec = executor(&descriptor());
     assert!(situation(&mut exec).is_empty(), "no answer, so no work");
-    let rows = exec.asks();
+    let rows = exec.asks().expect("the asks derive");
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].transition.0, T);
     assert_eq!(rows[0].subject.0, "a");
@@ -900,6 +911,7 @@ fn a_pure_work_body_reads_the_answer_value_and_id_under_the_adapter_keys() {
     assert!(situation(&mut exec).is_empty(), "no answer, so no work");
     let ask = exec
         .derive(&asks_place(T), &Subject::new("a"))
+        .expect("a derived place")
         .expect("asks");
     let pure = exec
         .fire(
@@ -928,6 +940,7 @@ fn asked(exec: &Executor) -> String {
     get(
         &exec
             .derive(&asks_place(T), &Subject::new("a"))
+            .expect("a derived place")
             .expect("asks"),
         HASH_FIELD,
     )
@@ -1075,7 +1088,8 @@ fn a_read_only_work_in_flight_hides_its_ask() {
     let mut exec = asking(&read_only(descriptor()));
     let req = answer_and_start(&mut exec, "1");
     assert_eq!(
-        exec.derive(&asks_place(T), &Subject::new("a")),
+        exec.derive(&asks_place(T), &Subject::new("a"))
+            .expect("a derived place"),
         None,
         "the ask shows while answer 1 runs"
     );
@@ -1084,7 +1098,9 @@ fn a_read_only_work_in_flight_hides_its_ask() {
         .expect("the attempt is known");
     assert!(done.requests.is_empty());
     assert!(
-        exec.derive(&asks_place(T), &Subject::new("a")).is_some(),
+        exec.derive(&asks_place(T), &Subject::new("a"))
+            .expect("a derived place")
+            .is_some(),
         "the ask returns once the run ends"
     );
 }
@@ -1105,21 +1121,24 @@ fn a_parked_unknown_outcome_hides_its_ask() {
         .expect("the attempt is known");
     assert!(lost.requests.is_empty());
     assert_eq!(
-        exec.derive(&asks_place(T), &Subject::new("a")),
+        exec.derive(&asks_place(T), &Subject::new("a"))
+            .expect("a derived place"),
         None,
         "the ask shows while answer 1 is parked with an unknown outcome"
     );
     assert!(
-        exec.asks().is_empty(),
+        exec.asks().expect("the asks derive").is_empty(),
         "the parked occurrence still offers an Asks row: {:?}",
-        exec.asks()
+        exec.asks().expect("the asks derive")
     );
     let verified = exec
         .resolve(&req.occurrence, Resolution::Verify(vec![]), Duration::ZERO)
         .expect("the occurrence is parked");
     assert!(verified.requests.is_empty());
     assert!(
-        exec.derive(&asks_place(T), &Subject::new("a")).is_some(),
+        exec.derive(&asks_place(T), &Subject::new("a"))
+            .expect("a derived place")
+            .is_some(),
         "the ask does not return once the parked occurrence resolved"
     );
 }
@@ -1149,12 +1168,16 @@ fn an_ask_hides_while_a_retry_is_pending() {
         "answer 1 did not expire during the backoff"
     );
     assert!(
-        matches!(exec.why_not(T, "a"), Some(WhyNot::RetryPending { .. })),
+        matches!(
+            exec.why_not(T, "a").expect("the net holds the transition"),
+            Some(WhyNot::RetryPending { .. })
+        ),
         "the retry is not pending: {:?}",
-        exec.why_not(T, "a")
+        exec.why_not(T, "a").expect("the net holds the transition")
     );
     assert_eq!(
-        exec.derive(&asks_place(T), &Subject::new("a")),
+        exec.derive(&asks_place(T), &Subject::new("a"))
+            .expect("a derived place"),
         None,
         "the ask shows while a retry is pending"
     );
@@ -1223,6 +1246,7 @@ fn an_undo_waits_while_the_work_it_undoes_runs() {
     let seen = get(
         &exec
             .derive(&asks_place(U), &Subject::new("a"))
+            .expect("a derived place")
             .expect("the undo asks"),
         HASH_FIELD,
     );
@@ -1245,9 +1269,12 @@ fn an_undo_waits_while_the_work_it_undoes_runs() {
         "the undo ran while the work it undoes runs: {answered:?}"
     );
     assert!(
-        matches!(exec.why_not(U, "a"), Some(WhyNot::Inhibited(_))),
+        matches!(
+            exec.why_not(U, "a").expect("the net holds the transition"),
+            Some(WhyNot::Inhibited(_))
+        ),
         "the undo is not inhibited by the running work: {:?}",
-        exec.why_not(U, "a")
+        exec.why_not(U, "a").expect("the net holds the transition")
     );
     let done = exec
         .complete(accept.attempt, EffectResult::Done(vec![]), Duration::ZERO)

@@ -230,8 +230,9 @@ impl Tools {
             .read(|exec| exec.why_not(&args.transition, &args.subject));
         let head = format!("{} {}", args.transition, args.subject);
         match why {
-            None => answer(format!("{head}: enabled"), json!({"enabled": true})),
-            Some(why) => {
+            Err(e) => refuse(e.to_string()),
+            Ok(None) => answer(format!("{head}: enabled"), json!({"enabled": true})),
+            Ok(Some(why)) => {
                 let (text, json) = why_not(&why);
                 answer(
                     format!("{head}: {text}"),
@@ -304,6 +305,14 @@ fn why_not(why: &WhyNot) -> (String, Value) {
         WhyNot::FailedOnThisInput(cause) => (
             format!("it failed on this input: {}", cause.text),
             json!({"kind": "failed_on_this_input", "cause": cause.text}),
+        ),
+        WhyNot::ReadsUndeclared(place) => (
+            format!("its bind reads {place}, which the net does not declare"),
+            json!({"kind": "reads_undeclared", "place": place.as_str()}),
+        ),
+        WhyNot::BindsAnswerInput => (
+            "its bind produces the field the answer value fills".to_owned(),
+            json!({"kind": "binds_answer_input"}),
         ),
     }
 }

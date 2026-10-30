@@ -201,7 +201,7 @@ impl FileSyncController {
         for transition in wn::CATCH_UP {
             let (why_not, mark) = self.net.read(|exec| {
                 (
-                    exec.why_not(transition, doc.as_str()),
+                    wn::why_not(exec, transition, doc.as_str()),
                     exec.mark(transition, doc.as_str()).cloned(),
                 )
             });

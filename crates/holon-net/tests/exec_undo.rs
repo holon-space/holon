@@ -121,7 +121,12 @@ fn undo_reverses_the_work_and_discloses_each_row() {
             .map(|t| t.content.clone()),
         Some(n(1))
     );
-    assert!(d.exec().derive("Asks.Accept", &Subject::new("x")).is_some());
+    assert!(
+        d.exec()
+            .derive("Asks.Accept", &Subject::new("x"))
+            .expect("a derived place")
+            .is_some()
+    );
     assert_eq!(
         d.exec().answer_settlement(&AnswerId("a0".to_string())),
         Ok(AnswerSettlement::Undone)
@@ -261,7 +266,11 @@ fn hashing_executor() -> Executor {
 #[test]
 fn ask_hash_covers_content_subject_and_transition_not_version() {
     let mut e = hashing_executor();
-    let hash = |e: &Executor, s: &str| e.derive("H", &Subject::new(s)).expect("Item holds a token");
+    let hash = |e: &Executor, s: &str| {
+        e.derive("H", &Subject::new(s))
+            .expect("a derived place")
+            .expect("Item holds a token")
+    };
     let _ = e
         .write("Item", "x", n(1), Duration::ZERO)
         .expect("the net quiesces");
@@ -348,7 +357,10 @@ fn a_pending_undo_applies_when_the_holder_rolls_back() {
         "the undone Accepted/x is live again after Consume rolled back"
     );
     assert!(
-        d.exec().derive("Asks.Accept", &Subject::new("x")).is_some(),
+        d.exec()
+            .derive("Asks.Accept", &Subject::new("x"))
+            .expect("a derived place")
+            .is_some(),
         "the ask does not show again after the undo completed"
     );
 }

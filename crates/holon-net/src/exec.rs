@@ -533,10 +533,23 @@ impl NetDef {
     }
 
     fn transition_def(&self, name: &str) -> &TransitionDef {
+        self.find_transition(name).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn find_transition(&self, name: &str) -> Result<&TransitionDef, UnknownTransition> {
         self.transitions
             .iter()
             .find(|t| &*t.name == name)
-            .unwrap_or_else(|| panic!("no transition '{name}' in the net"))
+            .ok_or_else(|| UnknownTransition(name.to_string()))
+    }
+
+    /// A place a write or retraction from outside the net may change.
+    fn outside_place(&self, place: &str) -> Result<(), ExecError> {
+        match self.places.get(place).map(|d| &d.kind) {
+            None => Err(ExecError::UndeclaredPlace(place.to_string())),
+            Some(PlaceKind::Derived(_)) => Err(ExecError::DerivedPlace(place.to_string())),
+            Some(PlaceKind::Stored { .. }) => Ok(()),
+        }
     }
 
     fn candidate_of(&self, place: &Place) -> Option<&Place> {
@@ -905,6 +918,8 @@ impl Tokens {
 #[derive(Clone, Debug, Default)]
 pub struct Trace {
     rows: BTreeMap<(Place, Subject), RowRead>,
+    /// The first place read that the net does not declare.
+    undeclared: Option<Place>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -963,6 +978,9 @@ pub struct Reader<'a> {
 impl Reader<'_> {
     pub fn field(&mut self, place: &str, subject: &str, field: &str) -> Option<Value> {
         let net = self.net;
+        if !self.declared(place) {
+            return None;
+        }
         match &net.place_def(place).kind {
             PlaceKind::Derived(_) => self.derived(place, &Subject::new(subject))?.remove(field),
             PlaceKind::Stored { .. }
@@ -988,16 +1006,33 @@ impl Reader<'_> {
     /// `cpu > 0`". The guard decides when the firing starts, so a later change
     /// of the pool does not make the firing stale.
     pub fn free(&mut self, place: &str) -> usize {
+        if !self.declared(place) {
+            return 0;
+        }
         self.trace.row(self.tokens, place, POOL_SUBJECT);
         self.tokens.free(place)
     }
 
     pub fn present(&mut self, place: &str, subject: &str) -> bool {
         let net = self.net;
+        if !self.declared(place) {
+            return false;
+        }
         match &net.place_def(place).kind {
             PlaceKind::Derived(_) => self.derived(place, &Subject::new(subject)).is_some(),
             PlaceKind::Stored { .. } => self.trace.row(self.tokens, place, subject).present,
         }
+    }
+
+    /// An undeclared place reads as empty and refuses the firing that read it.
+    fn declared(&mut self, place: &str) -> bool {
+        let declared = self.net.places.contains_key(place);
+        if !declared {
+            self.trace
+                .undeclared
+                .get_or_insert_with(|| Place::new(place));
+        }
+        declared
     }
 
     fn derived(&mut self, place: &str, s: &Subject) -> Option<Content> {
@@ -1028,6 +1063,9 @@ impl Reader<'_> {
                 .fields
                 .extend(row.fields.clone());
         }
+        if self.trace.undeclared.is_none() {
+            self.trace.undeclared = sub.undeclared.clone();
+        }
         (r, sub)
     }
 
@@ -1057,6 +1095,10 @@ pub enum WhyNot {
     Guard,
     /// A failure mark keyed by the current read trace (NET-mark.a).
     FailedOnThisInput(Cause),
+    /// The bind read this place, which the net does not declare.
+    ReadsUndeclared(Place),
+    /// The bind of an ask's work produces the field the answer value fills.
+    BindsAnswerInput,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1155,8 +1197,19 @@ pub struct Quiesced<T> {
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FireError {
+    #[error(transparent)]
+    UnknownTransition(#[from] UnknownTransition),
+    #[error(transparent)]
+    ClockWentBack(#[from] ClockWentBack),
     #[error("'{0}' is not a manual transition")]
     NotManual(String),
+    #[error("the user input field '{field}' of '{transition}' collides with a bound field")]
+    ValueCollides { transition: String, field: String },
+    #[error("'{transition}' fired as '{occurrence}', which is not the answer id of its value")]
+    AnswerOccurrence {
+        transition: String,
+        occurrence: OccurrenceId,
+    },
     #[error("occurrence '{0}' is already known")]
     DuplicateOccurrence(OccurrenceId),
     #[error("'{transition}' is not enabled for '{subject}': {why:?}")]
@@ -1171,6 +1224,14 @@ pub enum FireError {
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ExecError {
+    #[error(transparent)]
+    ClockWentBack(#[from] ClockWentBack),
+    #[error("the net does not declare the place '{0}'")]
+    UndeclaredPlace(String),
+    #[error("'{0}' is a derived place: only the net writes it")]
+    DerivedPlace(String),
+    #[error("'{place}' holds no token of '{subject}' to retract")]
+    NothingToRetract { place: String, subject: String },
     #[error("the net is still enabled after {0} rounds of one call")]
     NoQuiescence(usize),
     #[error("no attempt {0:?} is running")]
@@ -1187,6 +1248,27 @@ pub enum ExecError {
 #[derive(Debug, thiserror::Error, PartialEq)]
 #[error("no occurrence '{0}'")]
 pub struct UnknownOccurrence(pub OccurrenceId);
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+#[error("no transition '{0}' in the net")]
+pub struct UnknownTransition(pub String);
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum DeriveError {
+    #[error("the net does not declare the place '{0}'")]
+    UndeclaredPlace(String),
+    #[error("'{0}' is a stored place, not a derived one")]
+    StoredPlace(String),
+    #[error("the derived place '{place}' reads '{read}', which the net does not declare")]
+    ReadsUndeclared { place: Place, read: Place },
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+#[error("the clock went back from {clock:?} to {now:?}")]
+pub struct ClockWentBack {
+    pub clock: Duration,
+    pub now: Duration,
+}
 
 /// What an undo of an answer did (XQ2.a), disclosed in full.
 #[derive(Clone, Debug, PartialEq)]
@@ -1220,6 +1302,8 @@ pub enum ReversalOutcome {
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum UndoError {
+    #[error(transparent)]
+    ClockWentBack(#[from] ClockWentBack),
     #[error("no occurrence '{0}'")]
     UnknownOccurrence(OccurrenceId),
     #[error("'{0}' is no answer")]
@@ -1343,6 +1427,16 @@ pub enum Condition {
         subject: Subject,
         writer: Option<Arc<str>>,
     },
+    /// The bind of `transition` for `subject` read `place`, which the net does
+    /// not declare, so the transition does not fire.
+    ReadsUndeclared {
+        transition: Arc<str>,
+        subject: Subject,
+        place: Place,
+    },
+    /// The bind of the ask's work `work` for `subject` produces the field the
+    /// answer value fills, so the work never fires on an answer.
+    BindsAnswerInput { work: Arc<str>, subject: Subject },
 }
 
 /// The holder an undo names when that holder used the row.
@@ -1427,6 +1521,20 @@ impl fmt::Display for Condition {
                     Some(w) => format!(" of {w}"),
                     None => String::new(),
                 }
+            ),
+            Self::ReadsUndeclared {
+                transition,
+                subject,
+                place,
+            } => write!(
+                f,
+                "{transition} does not fire for {subject}: its bind reads {place}, which the net \
+                 does not declare"
+            ),
+            Self::BindsAnswerInput { work, subject } => write!(
+                f,
+                "{work} does not fire for {subject}: its bind produces the field the answer value \
+                 fills"
             ),
         }
     }
@@ -1681,6 +1789,9 @@ impl Executor {
         call: AnswerCall,
         now: Duration,
     ) -> Result<Quiesced<AnswerId>, UftError> {
+        // shortcut: UftError has no clock form yet, so a clock that went back panics
+        // here.
+        self.advance(now).unwrap_or_else(|e| panic!("{e}"));
         let work = call.transition.0.as_str();
         if !self.net.asks.contains_key(work) {
             return Err(UftError::UnknownTransition(call.transition));
@@ -1728,14 +1839,30 @@ impl Executor {
                     steps,
                 })
             }
+            // shortcut: UftError has no form for it yet, so it still panics here.
             Err(
-                e @ (FireError::NotManual(_)
+                e @ FireError::NotEnabled {
+                    why: WhyNot::ReadsUndeclared(_),
+                    ..
+                },
+            ) => panic!("{e}"),
+            Err(
+                e @ (FireError::ClockWentBack(_)
+                | FireError::UnknownTransition(_)
+                | FireError::NotManual(_)
+                | FireError::ValueCollides { .. }
+                | FireError::AnswerOccurrence { .. }
                 | FireError::NotEnabled {
                     why:
-                        WhyNot::InFlight | WhyNot::RetryPending { .. } | WhyNot::FailedOnThisInput(_),
+                        WhyNot::InFlight
+                        | WhyNot::RetryPending { .. }
+                        | WhyNot::FailedOnThisInput(_)
+                        | WhyNot::BindsAnswerInput,
                     ..
                 }),
-            ) => unreachable!("the load checks that '{work}' has a manual pure Answer: {e}"),
+            ) => unreachable!(
+                "the clock is set and the load checks that '{work}' has a manual pure Answer: {e}"
+            ),
         }
     }
 
@@ -1779,10 +1906,10 @@ impl Executor {
     }
 
     /// The rows of every `Asks.T`, in work and subject order.
-    pub fn asks(&self) -> Vec<AskRow> {
+    pub fn asks(&self) -> Result<Vec<AskRow>, DeriveError> {
         let mut rows = Vec::new();
         for (work, meta) in &self.net.asks {
-            for (subject, row) in self.derive_all(&asks_place(work)) {
+            for (subject, row) in self.derive_all(&asks_place(work))? {
                 let Some(Value::String(hash)) = row.get(HASH_FIELD) else {
                     panic!(
                         "the {} row of {subject} has no '{HASH_FIELD}'",
@@ -1799,16 +1926,34 @@ impl Executor {
                 });
             }
         }
-        rows
+        Ok(rows)
     }
 
     /// Evaluates the derived `place` for one subject, outside any firing.
-    pub fn derive(&self, place: &str, subject: &Subject) -> Option<Content> {
-        self.reader(&mut Trace::default()).derived(place, subject)
+    pub fn derive(&self, place: &str, subject: &Subject) -> Result<Option<Content>, DeriveError> {
+        self.derived_place(place)?;
+        let mut trace = Trace::default();
+        let row = self.reader(&mut trace).derived(place, subject);
+        match trace.undeclared {
+            Some(read) => Err(DeriveError::ReadsUndeclared {
+                place: Place::new(place),
+                read,
+            }),
+            None => Ok(row),
+        }
+    }
+
+    fn derived_place(&self, place: &str) -> Result<(), DeriveError> {
+        match self.net.places.get(place).map(|d| &d.kind) {
+            None => Err(DeriveError::UndeclaredPlace(place.to_string())),
+            Some(PlaceKind::Stored { .. }) => Err(DeriveError::StoredPlace(place.to_string())),
+            Some(PlaceKind::Derived(_)) => Ok(()),
+        }
     }
 
     /// Evaluates the derived `place` for every subject a stored place holds.
-    pub fn derive_all(&self, place: &str) -> Vec<(Subject, Content)> {
+    pub fn derive_all(&self, place: &str) -> Result<Vec<(Subject, Content)>, DeriveError> {
+        self.derived_place(place)?;
         let subjects: BTreeSet<Subject> = self
             .net
             .places
@@ -1818,10 +1963,13 @@ impl Executor {
             })
             .flat_map(|(p, _)| self.tokens.subjects(p))
             .collect();
-        subjects
-            .into_iter()
-            .filter_map(|s| self.derive(place, &s).map(|c| (s, c)))
-            .collect()
+        let mut rows = Vec::new();
+        for s in subjects {
+            if let Some(c) = self.derive(place, &s)? {
+                rows.push((s, c));
+            }
+        }
+        Ok(rows)
     }
 
     /// Undoes an answer (XQ2.a) in one step: removes its `Answered` token
@@ -1834,7 +1982,7 @@ impl Executor {
         answer: &OccurrenceId,
         now: Duration,
     ) -> Result<Quiesced<Undone>, UndoError> {
-        self.advance(now);
+        self.advance(now)?;
         if !self.occurrences.contains_key(answer) {
             return Err(UndoError::UnknownOccurrence(answer.clone()));
         }
@@ -1918,11 +2066,8 @@ impl Executor {
         content: Content,
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
-        assert!(
-            matches!(self.net.place_def(place).kind, PlaceKind::Stored { .. }),
-            "an outside write to the derived place '{place}'"
-        );
-        self.advance(now);
+        self.advance(now)?;
+        self.net.outside_place(place)?;
         self.tokens
             .put(&Place::new(place), &Subject::new(subject), content, None);
         self.quiesced((), now)
@@ -1936,25 +2081,32 @@ impl Executor {
         subject: &str,
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
-        assert!(
-            matches!(self.net.place_def(place).kind, PlaceKind::Stored { .. }),
-            "an outside retraction from the derived place '{place}'"
-        );
-        self.advance(now);
+        self.advance(now)?;
+        self.net.outside_place(place)?;
+        if self.tokens.token(place, subject).is_none() {
+            return Err(ExecError::NothingToRetract {
+                place: place.to_string(),
+                subject: subject.to_string(),
+            });
+        }
         self.tokens
             .remove(&Place::new(place), &Subject::new(subject), None);
         self.quiesced((), now)
     }
 
-    pub fn why_not(&self, transition: &str, subject: &str) -> Option<WhyNot> {
-        let t = self.net.transition_def(transition);
-        self.decide(t, &Subject::new(subject)).err()
+    pub fn why_not(
+        &self,
+        transition: &str,
+        subject: &str,
+    ) -> Result<Option<WhyNot>, UnknownTransition> {
+        let t = self.net.find_transition(transition)?;
+        Ok(self.decide(t, &Subject::new(subject)).err())
     }
 
     /// Runs timers due at `now`, then the auto transitions to quiescence.
     /// Returns the effects to run.
     pub fn step(&mut self, now: Duration) -> Result<Vec<EffectRequest>, ExecError> {
-        self.advance(now);
+        self.advance(now)?;
         self.timers(now);
         self.quiesce(now).map_err(ExecError::NoQuiescence)
     }
@@ -2003,7 +2155,26 @@ impl Executor {
                             };
                             started.push(self.start(&name, s, occurrence, trace, input, now));
                         }
-                        Err(_) => {
+                        Err(why) => {
+                            let c = match why {
+                                WhyNot::ReadsUndeclared(place) => {
+                                    Some(Condition::ReadsUndeclared {
+                                        transition: name.clone(),
+                                        subject: s.clone(),
+                                        place,
+                                    })
+                                }
+                                WhyNot::BindsAnswerInput => Some(Condition::BindsAnswerInput {
+                                    work: name.clone(),
+                                    subject: s.clone(),
+                                }),
+                                _ => None,
+                            };
+                            if let Some(c) = c
+                                && !self.conditions.contains(&c)
+                            {
+                                self.conditions.push(c);
+                            }
                             for row in trace.rows.into_keys() {
                                 self.waiters
                                     .entry(row)
@@ -2097,8 +2268,8 @@ impl Executor {
         value: Content,
         now: Duration,
     ) -> Result<Quiesced<Accepted>, FireError> {
-        self.advance(now);
-        let t = self.net.transition_def(transition);
+        self.advance(now)?;
+        let t = self.net.find_transition(transition)?;
         if t.trigger != Trigger::Manual {
             return Err(FireError::NotManual(transition.to_string()));
         }
@@ -2114,20 +2285,29 @@ impl Executor {
                 why,
             })?;
         let name = t.name.clone();
+        if let Some(field) = value.keys().find(|k| input.contains_key(*k)) {
+            return Err(FireError::ValueCollides {
+                transition: transition.to_string(),
+                field: field.clone(),
+            });
+        }
         if let Some(work) = self.net.work_of_answer(transition) {
-            let OccurrenceId::Caller(id) = &occurrence else {
-                panic!("'{transition}' fired with the non-caller occurrence {occurrence}");
+            let answer = match &occurrence {
+                OccurrenceId::Caller(id)
+                    if value.get(ANSWER_ID_KEY) == Some(&Value::String(id.to_string())) =>
+                {
+                    id.clone()
+                }
+                _ => {
+                    return Err(FireError::AnswerOccurrence {
+                        transition: transition.to_string(),
+                        occurrence,
+                    });
+                }
             };
-            assert_eq!(
-                value.get(ANSWER_ID_KEY),
-                Some(&Value::String(id.to_string())),
-                "'{transition}' fired with an answer id other than its occurrence"
-            );
-            self.answers.insert(id.clone(), (work, subject.clone()));
+            self.answers.insert(answer, (work, subject.clone()));
         }
-        for (k, v) in value {
-            merge_value(&mut input, &k, v, transition);
-        }
+        input.extend(value);
         let id = self.start(&name, subject, occurrence.clone(), trace, input, now);
         self.run_body(id, now);
         let requests = self.quiesce(now).map_err(FireError::NoQuiescence)?;
@@ -2147,7 +2327,7 @@ impl Executor {
         result: EffectResult,
         now: Duration,
     ) -> Result<Quiesced<Completion>, ExecError> {
-        self.advance(now);
+        self.advance(now)?;
         let live = self.in_flight.remove(&attempt);
         let occurrence = match &live {
             Some(a) => a.occurrence.clone(),
@@ -2331,7 +2511,7 @@ impl Executor {
         resolution: Resolution,
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
-        self.advance(now);
+        self.advance(now)?;
         if let (Resolution::Retry, Some(a)) = (&resolution, self.parked.get(occurrence))
             && self
                 .tokens
@@ -2367,13 +2547,15 @@ impl Executor {
         self.quiesced((), now)
     }
 
-    fn advance(&mut self, now: Duration) {
-        assert!(
-            now >= self.now,
-            "the clock went back from {:?} to {now:?}",
-            self.now
-        );
+    fn advance(&mut self, now: Duration) -> Result<(), ClockWentBack> {
+        if now < self.now {
+            return Err(ClockWentBack {
+                clock: self.now,
+                now,
+            });
+        }
         self.now = now;
+        Ok(())
     }
 
     fn mint(&mut self, transition: &Arc<str>) -> OccurrenceId {
@@ -2493,6 +2675,9 @@ impl Executor {
             return Err(WhyNot::InFlight);
         }
         let bound = self.bind_input(t, s, trace);
+        if matches!(bound, Err(WhyNot::ReadsUndeclared(_))) {
+            return bound;
+        }
         let mark = self.marks.get(&(t.name.clone(), s.clone()));
         let same_input = bound.is_ok() && mark.is_some_and(|m| m.key == self.key(trace));
         // ADR 0032 Q6.a: new input starts from zero tries, not after the backoff.
@@ -2509,8 +2694,11 @@ impl Executor {
             return Err(WhyNot::FailedOnThisInput(mark.cause.clone()));
         }
         if let Some(p) = &self.net.answered_of(&t.name) {
+            if input.contains_key(ANSWER_INPUT_KEY) {
+                return Err(WhyNot::BindsAnswerInput);
+            }
             let value = self.answered_field(p, s, ANSWER_INPUT_KEY);
-            merge_value(&mut input, ANSWER_INPUT_KEY, value, &t.name);
+            input.insert(ANSWER_INPUT_KEY.to_string(), value);
         }
         Ok(input)
     }
@@ -2552,7 +2740,11 @@ impl Executor {
                 .fields
                 .insert(ANSWER_ID_KEY.to_string(), Some(answer));
         }
-        (t.bind)(&mut self.reader(trace), s).ok_or(WhyNot::Guard)
+        let bound = (t.bind)(&mut self.reader(trace), s);
+        if let Some(place) = &trace.undeclared {
+            return Err(WhyNot::ReadsUndeclared(place.clone()));
+        }
+        bound.ok_or(WhyNot::Guard)
     }
 
     /// A field of the `Answered` token a work firing consumes.
@@ -3151,14 +3343,6 @@ impl Executor {
 
 fn cause_content(cause: &Cause) -> Content {
     Content::from([("cause".to_string(), Value::String(cause.text.clone()))])
-}
-
-/// Adds the user value to a bound input after the bind, so no guard reads it.
-fn merge_value(input: &mut Content, field: &str, value: Value, transition: &str) {
-    assert!(
-        input.insert(field.to_string(), value).is_none(),
-        "the user input field '{field}' of '{transition}' collides with a bound field"
-    );
 }
 
 fn encode_rows(h: &mut blake3::Hasher, trace: &Trace, with_version: bool) {

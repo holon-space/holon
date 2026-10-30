@@ -624,14 +624,7 @@ impl Model {
                     steps,
                 })
             }
-            Err(
-                e @ (FireError::NotManual(_)
-                | FireError::NotEnabled {
-                    why:
-                        WhyNot::InFlight | WhyNot::RetryPending { .. } | WhyNot::FailedOnThisInput(_),
-                    ..
-                }),
-            ) => unreachable!("'{work}' has a manual pure Answer: {e}"),
+            Err(e) => unreachable!("'{work}' has a manual pure Answer: {e}"),
         }
     }
 

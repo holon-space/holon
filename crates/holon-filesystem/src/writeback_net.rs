@@ -245,6 +245,11 @@ pub fn is_behind(exec: &Executor, doc: &str) -> bool {
     }
 }
 
+pub fn why_not(exec: &Executor, transition: &str, doc: &str) -> Option<holon_net::exec::WhyNot> {
+    exec.why_not(transition, doc)
+        .unwrap_or_else(|e| panic!("the write-back net holds its transitions: {e}"))
+}
+
 /// The documents whose file is not settled: a pending disk read, a running
 /// or retrying catch-up, or `Behind` without a failure mark that stops it.
 pub fn unsettled(exec: &Executor) -> Vec<String> {
@@ -254,10 +259,10 @@ pub fn unsettled(exec: &Executor) -> Vec<String> {
         .into_iter()
         .filter(|doc| {
             exec.tokens().token(DISK_CHANGED, doc).is_some()
-                || exec.why_not(READ_DISK, doc).is_none()
+                || why_not(exec, READ_DISK, doc).is_none()
                 || CATCH_UP.iter().any(|t| {
                     matches!(
-                        exec.why_not(t, doc),
+                        why_not(exec, t, doc),
                         None | Some(
                             holon_net::exec::WhyNot::InFlight
                                 | holon_net::exec::WhyNot::RetryPending { .. }
