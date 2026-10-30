@@ -19,6 +19,12 @@ CREATE TABLE IF NOT EXISTS file (
     -- its bytes hash to this value. Written and read by raw SQL only, like
     -- `read_only_blocks`. Empty when Holon never wrote the file's bytes.
     base_hash TEXT NOT NULL DEFAULT '',
+    -- JSON object: the format that refused this file at its last ingest, why,
+    -- and the file's mtime and size as that ingest saw it. NULL while the
+    -- file's last ingest succeeded. A boot discloses the refusal before it
+    -- can read the file again, and only while mtime and size still match.
+    -- Written and read by raw SQL only, like `read_only_blocks`.
+    ingest_refusal TEXT,
     properties TEXT,
     property_kinds TEXT,
     _change_origin TEXT

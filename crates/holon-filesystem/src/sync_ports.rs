@@ -48,6 +48,17 @@ pub struct FileProjection {
     pub read_only_blocks: Vec<EntityUri>,
 }
 
+/// A format's refusal of a file at its last ingest, as the `file` row keeps
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestRefusal {
+    pub format: String,
+    pub reason: String,
+    /// `(mtime, size)` of the refused file. A boot cannot read a file before
+    /// its backlog does, so this is what tells it the refusal still applies.
+    pub signature: (std::time::SystemTime, u64),
+}
+
 /// Read-only access to blocks, organized by document.
 ///
 /// The org crate uses this to render blocks → org text without knowing
@@ -183,6 +194,32 @@ pub trait BlockReader: Send + Sync {
         _: &str,
         _: &FileProjection,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    /// The refusal each `file` row holds. Default impl returns empty for
+    /// backends without a `file` table.
+    async fn load_ingest_refusals(&self) -> Result<Vec<(EntityUri, IngestRefusal)>> {
+        Ok(Vec::new())
+    }
+
+    /// Store `refusal` on the `file` row `file_id`, creating the row when the
+    /// file never ingested (`name`/`parent_dir` as in
+    /// [`persist_file_projection`](Self::persist_file_projection)). Default
+    /// impl is a no-op for backends without a `file` table.
+    async fn record_ingest_refusal(
+        &self,
+        _: &EntityUri,
+        _: &str,
+        _: &str,
+        _: &IngestRefusal,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Remove the refusal from the `file` row `file_id`. Default impl is a
+    /// no-op for backends without a `file` table.
+    async fn clear_ingest_refusal(&self, _: &EntityUri) -> Result<()> {
         Ok(())
     }
 

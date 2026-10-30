@@ -116,6 +116,7 @@ pub use sync_ports::ExistingChild;
 pub use sync_ports::FileProjection;
 pub use sync_ports::ImageDataProvider;
 pub use sync_ports::IncomingIdentity;
+pub use sync_ports::IngestRefusal;
 pub use sync_ports::MatchBasis;
 pub use sync_ports::MatchVerdict;
 pub use sync_ports::MemoSeam;

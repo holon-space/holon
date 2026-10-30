@@ -813,6 +813,10 @@ pub struct FileSyncController {
     /// be the parent walk this registry exists to delete.
     persisted_read_only_blocks: HashMap<CanonicalPath, Vec<EntityUri>>,
 
+    /// The refusal each `file` row holds, loaded at startup and kept equal to
+    /// the rows by every refusal write.
+    persisted_refusals: HashMap<CanonicalPath, crate::sync_ports::IngestRefusal>,
+
     /// The `file` rows could not be read at startup, so no file this session
     /// has not ingested itself is known to hold a page.
     recorded_homes_unknown: bool,
@@ -1249,6 +1253,7 @@ impl FileSyncController {
             empty_hash_rows: HashMap::new(),
             last_projection_doc: HashMap::new(),
             persisted_read_only_blocks: HashMap::new(),
+            persisted_refusals: HashMap::new(),
             recorded_homes_unknown: false,
             disk_signatures: HashMap::new(),
             base_store: SyncBaseStore::in_memory(),
@@ -1877,6 +1882,9 @@ impl FileSyncController {
         }
         self.claim_persisted_read_only_homes()?;
         self.retire_vanished_read_only_homes().await?;
+        if let Err(e) = self.raise_recorded_refusals().await {
+            self.disclose_start_incomplete("reading the recorded refusals of the files", &e);
+        }
 
         // A matching hash proves the consolidator holds the file's blocks only
         // while the consolidator is not behind the sink that stamped the hash.
@@ -3117,6 +3125,85 @@ impl FileSyncController {
         Ok(())
     }
 
+    /// Disclose each recorded refusal whose file still has the signature it
+    /// was refused with. The backlog reads and judges every such file again,
+    /// but until it does, the row is the only account of the file.
+    async fn raise_recorded_refusals(&mut self) -> Result<()> {
+        for (uri, refusal) in self.block_reader.load_ingest_refusals().await? {
+            let Some(canonical) = self.file_uri_to_canonical_path(&uri)? else {
+                continue;
+            };
+            let path = canonical.as_path_buf().clone();
+            match self.fs.metadata(&path).await {
+                Ok(meta) if (meta.modified, meta.len) == refusal.signature => {
+                    if let Some(disclosure) = &self.writeback_disclosure {
+                        disclosure.ingest_refused(&path, &refusal.format, &refusal.reason);
+                    }
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("stat {} to check its recorded refusal", path.display())
+                    });
+                }
+            }
+            self.persisted_refusals.insert(canonical, refusal);
+        }
+        Ok(())
+    }
+
+    /// Keep `refusal` on the `file` row of `path`, unless the row holds it.
+    async fn record_refusal(&mut self, path: &Path, format: &str, reason: String) -> Result<()> {
+        let canonical = CanonicalPath::new(path);
+        let meta = self
+            .fs
+            .metadata(path)
+            .await
+            .with_context(|| format!("stat the refused {}", path.display()))?;
+        let refusal = crate::sync_ports::IngestRefusal {
+            format: format.to_string(),
+            reason,
+            signature: (meta.modified, meta.len),
+        };
+        if self.persisted_refusals.get(&canonical) == Some(&refusal) {
+            return Ok(());
+        }
+        let rel_path = path.strip_prefix(&self.root_dir).with_context(|| {
+            format!(
+                "{} is outside the vault {}",
+                path.display(),
+                self.root_dir.display()
+            )
+        })?;
+        let (file_uri, name, parent_dir) = file_row_identity(rel_path);
+        self.block_reader
+            .record_ingest_refusal(&file_uri, &name, &parent_dir, &refusal)
+            .await?;
+        self.persisted_refusals.insert(canonical, refusal);
+        Ok(())
+    }
+
+    /// Remove the refusal from the `file` row of `path`, if it holds one.
+    async fn clear_recorded_refusal(&mut self, path: &Path) -> Result<()> {
+        let canonical = CanonicalPath::new(path);
+        if !self.persisted_refusals.contains_key(&canonical) {
+            return Ok(());
+        }
+        let rel_path = path.strip_prefix(&self.root_dir).with_context(|| {
+            format!(
+                "{} is outside the vault {}",
+                path.display(),
+                self.root_dir.display()
+            )
+        })?;
+        self.block_reader
+            .clear_ingest_refusal(&file_row_identity(rel_path).0)
+            .await?;
+        self.persisted_refusals.remove(&canonical);
+        Ok(())
+    }
+
     /// Whether `path`'s format refuses write-back.
     fn is_read_only_path(&self, path: &Path) -> bool {
         self.formats
@@ -3791,6 +3878,7 @@ impl FileSyncController {
                     if let Some(disclosure) = &self.writeback_disclosure {
                         disclosure.ingest_recovered(path);
                     }
+                    self.clear_recorded_refusal(path).await?;
                 }
                 if outcome == IngestOutcome::Ingested
                     && self.quarantined.remove(&canonical).is_some()
@@ -3821,11 +3909,19 @@ impl FileSyncController {
                 // Raise the file's degraded condition, named by the format that
                 // refused it. Every episode re-raises: `emit` replaces by key,
                 // so the banner carries the current reason.
+                let format = self
+                    .formats
+                    .require(path)
+                    .expect("the ingest that just refused this file resolved an adapter for it")
+                    .format_name();
+                let reason = format!("{e:#}");
                 if let Some(disclosure) = &self.writeback_disclosure {
-                    let adapter = self.formats.require(path).expect(
-                        "the ingest that just refused this file resolved an adapter for it",
+                    disclosure.ingest_refused(path, format, &reason);
+                }
+                if let Err(record) = self.record_refusal(path, format, reason).await {
+                    return Err(
+                        record.context(format!("record the refusal of {}: {e:#}", path.display()))
                     );
-                    disclosure.ingest_refused(path, adapter.format_name(), &format!("{e:#}"));
                 }
                 if !already_ingest_caused {
                     // New quarantine episode: re-arm the once-per-episode
@@ -8076,18 +8172,7 @@ impl FileSyncController {
             self.persisted_read_only_blocks
                 .insert(canonical.clone(), read_only_members.to_vec());
         }
-        let rel = rel_path.to_string_lossy();
-        let file_uri = EntityUri::file(&rel);
-        // The row's own path fields, used only if this write is the one that
-        // creates it (a non-org format's row exists nowhere else).
-        let name = rel_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| rel.to_string());
-        let parent_dir = match rel_path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_string_lossy().to_string(),
-            _ => ".".to_string(),
-        };
+        let (file_uri, name, parent_dir) = file_row_identity(rel_path);
         // Hash, document and membership in ONE row shape: the boot that arms
         // on the hash needs both of the others, and a write that carried only
         // some of them would leave the next boot re-ingesting forever (missing
@@ -10831,6 +10916,22 @@ struct EmptyHashRow {
 }
 
 /// The key a per-file batch disclosure is recorded under.
+/// The `file` row of the vault file at `rel_path`: its id, and the path fields
+/// a write that creates the row needs (a non-org format's row exists nowhere
+/// else).
+fn file_row_identity(rel_path: &Path) -> (EntityUri, String, String) {
+    let rel = rel_path.to_string_lossy();
+    let name = rel_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| rel.to_string());
+    let parent_dir = match rel_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_string_lossy().to_string(),
+        _ => ".".to_string(),
+    };
+    (EntityUri::file(&rel), name, parent_dir)
+}
+
 fn batch_file_key(path: &Path) -> EntityUri {
     EntityUri::file(&path.to_string_lossy())
 }

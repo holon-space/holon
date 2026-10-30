@@ -115,6 +115,32 @@ async fn file_gains_read_only_blocks_under_a_stored_matview() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn file_gains_ingest_refusal_under_a_stored_matview() {
+    let (_b, handle) = boot_over(
+        &[
+            "CREATE TABLE file (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, parent_id TEXT \
+             NOT NULL, content_hash TEXT NOT NULL DEFAULT '', document_id TEXT, read_only_blocks \
+             TEXT, base_hash TEXT NOT NULL DEFAULT '', properties TEXT, property_kinds TEXT, \
+             _change_origin TEXT)",
+            "INSERT INTO file (id, name, parent_id, content_hash) VALUES ('f1', 'a.cook', 'root', \
+             'h1')",
+            "CREATE MATERIALIZED VIEW watch_view_files AS SELECT id, name FROM file",
+        ],
+        &CoreSchemaModule,
+    )
+    .await;
+    let refusals = handle
+        .query(
+            "SELECT ingest_refusal FROM file WHERE id = 'f1'",
+            HashMap::new(),
+        )
+        .await
+        .expect("the upgraded file table has the refusal column");
+    assert_eq!(refusals.len(), 1);
+    assert_eq!(refusals[0].get("ingest_refusal"), Some(&Value::Null));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn integration_state_gains_its_presentation_columns_under_the_sidebar_matview() {
     let (_b, handle) = boot_over(
         &[

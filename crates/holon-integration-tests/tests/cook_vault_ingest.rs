@@ -2997,3 +2997,120 @@ fn a_recipe_page_waiting_in_the_backlog_gets_no_org_twin() {
         );
     });
 }
+
+/// The `ingest_refusal` cell of `file:{name}`, once `done` holds for it.
+async fn stored_refusal(
+    app: &holon_integration_tests::TestEnvironment,
+    name: &str,
+    what: &str,
+    done: impl Fn(Option<&str>) -> bool,
+) -> Option<String> {
+    let rows = rows_until(
+        app,
+        &format!("SELECT ingest_refusal FROM file WHERE id = 'file:{name}'"),
+        what,
+        |rows| done(rows.first().and_then(|r| text(r, "ingest_refusal"))),
+    )
+    .await;
+    rows.first()
+        .and_then(|r| text(r, "ingest_refusal"))
+        .map(str::to_string)
+}
+
+/// Boot the stopped app with every recipe read held. Returns once the
+/// writable files are ingested.
+async fn boot_with_recipe_reads_held(app: &mut holon_integration_tests::TestEnvironment) {
+    app.org_fs.hold_reads_with_extension("cook");
+    app.start_app(false).await.expect("boot 2 start_app");
+    app.injector()
+        .expect("a booted app has an injector")
+        .resolve::<holon_orgmode::FileWatcherReadySignal>()
+        .wait_ready()
+        .await
+        .expect("the writable files are ingested while the recipe reads are held");
+    app.wait_for_org_files_stable(25, Duration::from_millis(1500))
+        .await;
+}
+
+/// A refused recipe keeps its refusal on its `file` row; the repair clears
+/// the row, so the next boot has nothing to disclose although it cannot read
+/// the recipe yet.
+#[test]
+fn a_repaired_recipe_clears_its_recorded_refusal() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut app = TestEnvironmentBuilder::new()
+            .with_vault_file("Good.cook", recipe("Good", "Stir"))
+            .build(rt.clone())
+            .await
+            .expect("a vault of one recipe must boot");
+        wait_for_recipe(&app, "Good.cook").await;
+        app.write_org_file("Good.cook", &refused_recipe("Good"))
+            .await
+            .expect("break Good.cook");
+        refusals_once(&app, cooklang_counts(1, 1)).await;
+        let recorded =
+            stored_refusal(&app, "Good.cook", "the refusal on the row", |c| c.is_some()).await;
+        assert!(
+            recorded.as_deref().is_some_and(|c| c.contains("cooklang")),
+            "the refusal names its format: {recorded:?}"
+        );
+
+        app.write_org_file("Good.cook", &recipe("Good", "Fold"))
+            .await
+            .expect("repair Good.cook");
+        let refusals = refusals_once(&app, |r| r.is_empty()).await;
+        assert!(refusals.is_empty(), "the repair clears the condition");
+        let cell = stored_refusal(&app, "Good.cook", "the cleared row", |c| c.is_none()).await;
+        assert_eq!(cell, None, "the repair must clear the recorded refusal");
+
+        app.stop_app().await.expect("stop_app after boot 1");
+        boot_with_recipe_reads_held(&mut app).await;
+        let held = ingest_refusals(&app);
+        app.org_fs.release_reads_with_extension("cook");
+        assert!(
+            held.is_empty(),
+            "a boot over a repaired recipe disclosed a refusal: {held:?}"
+        );
+    });
+}
+
+/// A refused recipe edited while the app is off no longer shows the bytes the
+/// refusal judged. The boot must not disclose the stale refusal; the backlog
+/// judges the file again and, as it now ingests, nothing is disclosed.
+#[test]
+fn a_refused_recipe_changed_while_the_app_is_off_is_judged_again() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut app = TestEnvironmentBuilder::new()
+            .with_vault_file("Good.cook", refused_recipe("Good"))
+            .build(rt.clone())
+            .await
+            .expect("a vault of one refused recipe must boot");
+        refusals_once(&app, cooklang_counts(1, 1)).await;
+        stored_refusal(&app, "Good.cook", "the refusal on the row", |c| c.is_some()).await;
+
+        app.stop_app().await.expect("stop_app after boot 1");
+        app.write_org_file("Good.cook", &recipe("Good", "Fold"))
+            .await
+            .expect("repair Good.cook while the app is off");
+        boot_with_recipe_reads_held(&mut app).await;
+        let held = ingest_refusals(&app);
+        app.org_fs.release_reads_with_extension("cook");
+        assert!(
+            held.is_empty(),
+            "the boot trusted a refusal of bytes the file no longer holds: {held:?}"
+        );
+
+        wait_for_recipe(&app, "Good.cook").await;
+        let refusals = refusals_once(&app, |r| r.is_empty()).await;
+        assert!(
+            refusals.is_empty(),
+            "the repaired recipe ingested, yet a refusal is disclosed: {refusals:?}"
+        );
+        let cell = stored_refusal(&app, "Good.cook", "the cleared row", |c| c.is_none()).await;
+        assert_eq!(cell, None, "the ingest must clear the stale refusal");
+    });
+}

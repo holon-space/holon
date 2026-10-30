@@ -574,6 +574,112 @@ impl BlockReader for CacheBlockReader {
         );
         Ok(())
     }
+
+    async fn load_ingest_refusals(
+        &self,
+    ) -> anyhow::Result<Vec<(holon_api::EntityUri, holon_filesystem::IngestRefusal)>> {
+        let rows = self
+            .cache
+            .db_handle()
+            .query(
+                "SELECT id, ingest_refusal FROM file WHERE ingest_refusal IS NOT NULL",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("[CacheBlockReader] load_ingest_refusals failed: {e}"))?;
+        rows.iter()
+            .map(|row| {
+                let (Some(holon_api::Value::String(id)), Some(holon_api::Value::String(cell))) =
+                    (row.get("id"), row.get("ingest_refusal"))
+                else {
+                    anyhow::bail!(
+                        "[CacheBlockReader] a file row's ingest refusal is not text: {row:?}"
+                    );
+                };
+                let uri = holon_api::EntityUri::parse(id).map_err(|e| {
+                    anyhow::anyhow!("[CacheBlockReader] file.id={id:?} not a valid EntityUri: {e}")
+                })?;
+                let refusal = parse_ingest_refusal(cell).map_err(|e| {
+                    anyhow::anyhow!(
+                        "[CacheBlockReader] file.ingest_refusal of {id} ({e:#}): {cell:?}"
+                    )
+                })?;
+                Ok((uri, refusal))
+            })
+            .collect()
+    }
+
+    async fn record_ingest_refusal(
+        &self,
+        file_id: &holon_api::EntityUri,
+        name: &str,
+        parent_dir: &str,
+        refusal: &holon_filesystem::IngestRefusal,
+    ) -> anyhow::Result<()> {
+        let modified_ns = u64::try_from(
+            refusal
+                .signature
+                .0
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos(),
+        )?;
+        let cell = serde_json::json!({
+            "format": refusal.format,
+            "reason": refusal.reason,
+            "modified_ns": modified_ns,
+            "len": refusal.signature.1,
+        });
+        self.cache
+            .db_handle()
+            .execute_values(
+                "INSERT INTO file (id, name, parent_id, ingest_refusal) VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET ingest_refusal = excluded.ingest_refusal",
+                vec![
+                    holon_api::Value::String(file_id.to_string()),
+                    holon_api::Value::String(name.to_string()),
+                    holon_api::Value::String(parent_dir.to_string()),
+                    holon_api::Value::String(cell.to_string()),
+                ],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("[CacheBlockReader] record_ingest_refusal failed: {e}"))?;
+        Ok(())
+    }
+
+    async fn clear_ingest_refusal(&self, file_id: &holon_api::EntityUri) -> anyhow::Result<()> {
+        self.cache
+            .db_handle()
+            .execute_values(
+                "UPDATE file SET ingest_refusal = NULL WHERE id = ?",
+                vec![holon_api::Value::String(file_id.to_string())],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("[CacheBlockReader] clear_ingest_refusal failed: {e}"))?;
+        Ok(())
+    }
+}
+
+fn parse_ingest_refusal(cell: &str) -> anyhow::Result<holon_filesystem::IngestRefusal> {
+    let v: serde_json::Value = serde_json::from_str(cell)?;
+    let text = |key: &str| {
+        v[key]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("`{key}` is not text"))
+    };
+    let number = |key: &str| {
+        v[key]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("`{key}` is not an unsigned integer"))
+    };
+    Ok(holon_filesystem::IngestRefusal {
+        format: text("format")?,
+        reason: text("reason")?,
+        signature: (
+            std::time::UNIX_EPOCH + std::time::Duration::from_nanos(number("modified_ns")?),
+            number("len")?,
+        ),
+    })
 }
 
 /// DocumentManager backed by CDC-driven LiveData over page blocks.
