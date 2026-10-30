@@ -50,7 +50,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -72,28 +71,28 @@ pub const DEFAULT_PEER_IDS: [u64; 3] = [100, 101, 102];
 #[derive(Debug, Clone)]
 pub struct PeerRefState {
     pub peer_id: u64,
-    pub blocks: HashMap<String, PeerBlock>,
+    /// Ordered, so generators that pick from it draw the same case per seed.
+    pub blocks: BTreeMap<String, PeerBlock>,
     /// Stable IDs this peer has deleted since its last sync with the
     /// primary. Propagated by `SyncWithPeer`/`MergeFromPeer` so the
     /// primary's reference block map reflects the delete the production
     /// controller just applied via `subscribe_root`.
-    pub deleted_stable_ids: HashSet<String>,
+    pub deleted_stable_ids: BTreeSet<String>,
     /// Stable IDs explicitly modified by PeerEdit::Update since AddPeer.
     /// Used by `merge_peer_blocks_into_primary` to distinguish peer edits
     /// from inherited-at-AddPeer blocks.
-    pub modified_stable_ids: HashSet<String>,
+    pub modified_stable_ids: BTreeSet<String>,
     /// Stable IDs created by PeerEdit::Create since the last sync. Only
     /// these are added to the primary on merge — inherited-at-AddPeer
     /// blocks the primary may have since deleted must NOT be re-added,
     /// because the actual Loro CRDT keeps primary-side deletes.
-    pub created_stable_ids: HashSet<String>,
+    pub created_stable_ids: BTreeSet<String>,
 }
 
 /// The block-level merge intent [`LoroRefExt`] hands to the core after
 /// advancing the shadow docs. The core (`merge_peer_blocks_into_primary`)
 /// consumes it to mutate the primary `BlockState`; this module never touches
-/// that type. `peer_blocks` arrives in `HashMap` iteration order — the merge is
-/// responsible for its own deterministic stamping (it sorts by stable id).
+/// that type. `peer_blocks` arrives in stable-id order.
 pub struct PeerMergeIntent {
     pub peer_blocks: Vec<PeerBlock>,
     pub modified: HashSet<String>,
@@ -325,7 +324,7 @@ impl LoroRefExt {
         // boots them into the global Loro doc at all — the SUT peer fork (a
         // snapshot of that doc) lacks the node and `peer_update_block` panics
         // (keystone fresh-case RED, 2026-07-11).
-        let peer_blocks: HashMap<String, PeerBlock> = primary_blocks
+        let peer_blocks: BTreeMap<String, PeerBlock> = primary_blocks
             .values()
             .filter(|b| {
                 let is_seed = block_documents
@@ -349,9 +348,9 @@ impl LoroRefExt {
         self.peers.push(PeerRefState {
             peer_id,
             blocks: peer_blocks,
-            deleted_stable_ids: HashSet::new(),
-            modified_stable_ids: HashSet::new(),
-            created_stable_ids: HashSet::new(),
+            deleted_stable_ids: BTreeSet::new(),
+            modified_stable_ids: BTreeSet::new(),
+            created_stable_ids: BTreeSet::new(),
         });
         peer_id
     }
@@ -536,8 +535,16 @@ impl LoroRefExt {
     /// primary-side merge is now the core's job). Order of clears preserved
     /// byte-for-byte from the pre-split impl.
     fn take_merge_intent(&mut self, peer_idx: usize) -> PeerMergeIntent {
-        let modified = self.peers[peer_idx].modified_stable_ids.clone();
-        let created = self.peers[peer_idx].created_stable_ids.clone();
+        let modified = self.peers[peer_idx]
+            .modified_stable_ids
+            .iter()
+            .cloned()
+            .collect();
+        let created = self.peers[peer_idx]
+            .created_stable_ids
+            .iter()
+            .cloned()
+            .collect();
         self.peers[peer_idx].deleted_stable_ids.clear();
         self.peers[peer_idx].modified_stable_ids.clear();
         self.peers[peer_idx].created_stable_ids.clear();
