@@ -39,7 +39,9 @@ use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
 use holon_integration_tests::pbt::known_reds::KnownReds;
 use holon_integration_tests::pbt::known_reds::SampleTally;
 use holon_integration_tests::pbt::run_result::RunResultGuard;
+use proptest::prelude::RngCore;
 use proptest::test_runner::Config;
+use proptest::test_runner::RngSeed;
 use proptest::test_runner::TestRunner;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
@@ -74,6 +76,13 @@ fn general_e2e_composed_pbt() {
     });
     config.test_name = Some(concat!(module_path!(), "::general_e2e_composed_pbt"));
     config.source_file = Some(file!());
+    // Pinned when drawn too, so PROPTEST_RNG_SEED=<printed seed> replays the run.
+    let seed = match config.rng_seed {
+        RngSeed::Fixed(seed) => seed,
+        RngSeed::Random => TestRunner::new(config.clone()).rng().next_u64(),
+    };
+    config.rng_seed = RngSeed::Fixed(seed);
+    eprintln!("keystone seed: {seed}");
 
     let strategy = <WideE2EMachine as ReferenceStateMachine>::sequential_strategy(1..40);
     let mut runner = TestRunner::new(config.clone());
@@ -149,7 +158,10 @@ fn general_e2e_composed_pbt() {
         }
         // Stays red; panic recorded via the global hook. The message replicates
         // `proptest!`'s terminal panic so classification is unchanged.
-        Err(e) => panic!("{}\n{}", e, runner),
+        Err(e) => {
+            eprintln!("keystone seed: {seed}");
+            panic!("{}\n{}", e, runner)
+        }
     }
 }
 

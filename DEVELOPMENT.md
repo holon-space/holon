@@ -122,6 +122,14 @@ three independent axes — there is ONE test, never a per-focus twin binary:
 Plus the generation knobs: `PROPTEST_CASES`, `HOLON_PBT_EXTENDED_GEN=1`,
 `HOLON_PBT_SHAPE_PROFILE`, `HOLON_PBT_UNDO_REDO_DENSITY`.
 
+Every keystone run prints its seed on stderr as one line `keystone seed: <u64 decimal>`:
+at the start of the run, and again just before the failure panic of a red run.
+Without `PROPTEST_RNG_SEED` the seed is random per run. To replay a run, set
+the printed seed and keep the other env vars of that run:
+`PROPTEST_RNG_SEED=<seed> just pbt general <cases>`. The replay draws the same
+cases only on the same tree, because changed generators draw other cases from
+the same seed.
+
 "Focus on component X" = compose these — never fork the keystone. If the
 component has no transition presence yet (nothing to weight up), that is a
 COVERAGE gap: add the transition to the shared catalog first.
