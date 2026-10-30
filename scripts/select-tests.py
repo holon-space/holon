@@ -20,6 +20,7 @@ stdout: first the `BASE:` and `TREE:` lines (commit ids of the fork point of `@`
   The nextest line carries `--profile load-tolerant` when the repo's nextest config defines that profile, and one
   further line per recipe that owns an excluded test the selection reaches: `windowed: just windowed-gate`, read
   from the owner table in scripts/timing-split.py. Excluded tests the table does not own share one `unowned:` line.
+  A module the default profile drops from a reached binary counts as reached, unless NEVER_OWNER_MODULES names it.
   A recipe whose prefix in that file's `PATH_RECIPES` table a changed path starts with gets a line of the same form
   (`keystone-smoke: just keystone-smoke`), also when there is no `nextest:` line.
 stderr: why each crate is in the list.
@@ -52,6 +53,8 @@ STEP_LINE = re.compile(r"([a-z][a-z0-9-]*): \S.*")
 NOT_RUN_STEPS = ("timing", "unowned")
 # shortcut: a `#[path]` module is not followed; module_files then fails loudly on the missing file.
 MOD_DECL = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.M)
+# Integration modules whose owner recipe only the landing gate runs: a lane gets no owner line for them.
+NEVER_OWNER_MODULES = frozenset({"latency_slo_gate"})
 
 
 def workspace_graph(meta):
@@ -255,8 +258,11 @@ def excluded_terms(filt):
     return terms
 
 
-def term_reaches_selection(term, pkgs, bins, binary_pkgs):
+def term_reaches_selection(term, pkgs, bins, binary_pkgs, never_owner):
     """Whether the printed selection runs anything the excluded `term` names.
+
+    A top-level module of a reached integration binary counts as reached also when the default profile drops it,
+    since its owner recipe is then the only run of it; a module in `never_owner` never does.
 
     shortcut: a term naming only test names resolves to no package and counts as out of reach;
     upgrade when the owner table carries each row's package.
@@ -275,17 +281,17 @@ def term_reaches_selection(term, pkgs, bins, binary_pkgs):
             continue
         if pkg == INTEGRATION and INTEGRATION not in pkgs:
             module = re.search(r"\btest\(/\^(\w+)::/\)", term)
-            hits.append(binary in bins and not (module and module.group(1) in bins[binary]))
+            hits.append(binary in bins and not (module and module.group(1) in never_owner))
         else:
             hits.append(pkg in pkgs)
     return bool(hits) and all(hits)
 
 
-def owner_lines(filt, pkgs, bins, binary_pkgs, owners):
+def owner_lines(filt, pkgs, bins, binary_pkgs, owners, never_owner):
     """One line per recipe that owns an excluded term the selection reaches, and one `unowned:` line for the rest."""
     recipes, unowned = set(), []
     for term in excluded_terms(filt):
-        if not term_reaches_selection(term, pkgs, bins, binary_pkgs):
+        if not term_reaches_selection(term, pkgs, bins, binary_pkgs, never_owner):
             continue
         if term in owners:
             recipes.add(recipe_line(owners[term]))
@@ -395,7 +401,7 @@ def checked(lines):
     return lines
 
 
-def selection(root, meta, changed):
+def selection(root, meta, changed, never_owner=NEVER_OWNER_MODULES):
     """The step lines for the `changed` paths of the workspace at `root`."""
     dirs, _ = workspace_graph(meta)
     cfg = nextest_config(root)
@@ -414,7 +420,7 @@ def selection(root, meta, changed):
         if bins:
             print(f"  {INTEGRATION}: reverse dep, named by binary()", file=sys.stderr)
     excluding = profile_default_filter(cfg, LOAD_TOLERANT)
-    owners = (owner_lines(excluding, pkgs, bins, test_binary_packages(meta), owner_recipes(root))
+    owners = (owner_lines(excluding, pkgs, bins, test_binary_packages(meta), owner_recipes(root), never_owner)
               if excluding else [])
     paths = path_owner_lines(changed, path_owners)
     return checked(arg_lines(pkgs, bins, canon_features(root), LOAD_TOLERANT if excluding else None, owners, paths))
@@ -460,8 +466,8 @@ FIXTURE_PACKAGES = {
 FIXTURE_FILES = {
     "crates/core/src/lib.rs": 'const SEED: &str = "assets/default";',
     "crates/ofmt/tests/deep.rs": "#[test] fn t() {}",
-    f"crates/{INTEGRATION}/tests/main.rs": "mod slow;\nmod hand;\nmod e2e;\nmod plain;\nmod suite;\nmod web;\n",
-    f"crates/{INTEGRATION}/tests/slow.rs": "#[test] fn s() {}",
+    f"crates/{INTEGRATION}/tests/main.rs": "mod latency_slo_gate;\nmod hand;\nmod e2e;\nmod plain;\nmod suite;\nmod web;\n",
+    f"crates/{INTEGRATION}/tests/latency_slo_gate.rs": "#[test] fn s() {}",
     f"crates/{INTEGRATION}/tests/hand.rs": "#[test] fn h() {}",
     f"crates/{INTEGRATION}/tests/e2e.rs": "#[test] fn e() {}",
     f"crates/{INTEGRATION}/tests/plain.rs": "#[test] fn p() {}",
@@ -472,7 +478,7 @@ FIXTURE_FILES = {
     "frontends/other/Cargo.toml": "",
     "justfile": f'CANON_FEATURES := "{INTEGRATION}/pbt,gpui/pbt"\n',
 }
-SLOW, HAND, E2E = (module_term("integration", m) for m in ("slow", "hand", "e2e"))
+SLOW, HAND, E2E = (module_term("integration", m) for m in ("latency_slo_gate", "hand", "e2e"))
 FIXTURE_NEXTEST = f"""[profile.default]
 default-filter = "not (({SLOW}) | ({HAND}))"
 
@@ -514,23 +520,26 @@ def fixture_workspace(root):
 CANON = f"--workspace --features {INTEGRATION}/pbt,gpui/pbt"
 RUN = f"{CANON} --profile load-tolerant"
 OLD_BINARIES = f"(package({INTEGRATION}) & (binary(e2e) | binary(plain) | binary(suite)))"
-ONE_BINARY = f"(package({INTEGRATION}) & binary(integration) & not (test(/^hand::/) | test(/^slow::/) | test(/^web::/)))"
+ONE_BINARY = f"(package({INTEGRATION}) & binary(integration) & not (test(/^hand::/) | test(/^latency_slo_gate::/) | test(/^web::/)))"
 UNOWNED_LEAF = f"unowned: package(leaf) is excluded by the load-tolerant profile and has no recipe in {OWNER_TABLE_FILE}"
 RDEP_OF_CORE = f"nextest: {RUN} -E 'package(app) | package(core) | package(gpui) | package(rows) | {OLD_BINARIES}'"
 # Each case: the changed paths, the lines the per-file-binary selector printed for them on the same workspace laid
-# out as one test binary per tests/*.rs file (`ValueError` when it failed), and the integration term this layout prints.
+# out as one test binary per tests/*.rs file (`ValueError` when it failed) plus the owner lines of the modules the
+# default profile drops, and the integration term this layout prints.
 GOLDEN = [
     (["crates/core/src/lib.rs"],
-     [f"clippy: {CANON}", RDEP_OF_CORE, "timing: just timing-gate", "windowed: just windowed-gate"], ONE_BINARY),
+     [f"clippy: {CANON}", RDEP_OF_CORE, "hand-authored: just hand-authored", "timing: just timing-gate",
+      "windowed: just windowed-gate"], ONE_BINARY),
     (["assets/default/seed.yaml"],
-     [f"clippy: {CANON}", RDEP_OF_CORE, "timing: just timing-gate", "windowed: just windowed-gate"], ONE_BINARY),
+     [f"clippy: {CANON}", RDEP_OF_CORE, "hand-authored: just hand-authored", "timing: just timing-gate",
+      "windowed: just windowed-gate"], ONE_BINARY),
     (["crates/leaf/src/lib.rs"], [f"clippy: {CANON}", f"nextest: {RUN} -E 'package(leaf)'", UNOWNED_LEAF], None),
     (["crates/rows/tests/r.rs"],
      [f"clippy: {CANON}", f"nextest: {RUN} -E 'package(rows)'", "timing: just timing-gate"], None),
     (["crates/ofmt/src/lib.rs"],
      [f"clippy: {CANON}", f"nextest: {RUN} -E 'package(ofmt)'", "org-deep-text-timing: just org-deep-text-timing"],
      None),
-    ([f"crates/{INTEGRATION}/tests/slow.rs"],
+    ([f"crates/{INTEGRATION}/tests/latency_slo_gate.rs"],
      [f"clippy: {CANON}", f"nextest: {RUN} -E 'package({INTEGRATION})'", "hand-authored: just hand-authored",
       "latency-slo: just latency-slo-gate", "timing: just timing-gate"], None),
     ([f"crates/{INTEGRATION}/tests/hand.rs"],
@@ -572,6 +581,14 @@ def golden_problems(root, meta):
     return found
 
 
+def never_owner_problems(root, meta):
+    """A dropped module put into the never-owner set loses its owner line."""
+    with contextlib.redirect_stderr(io.StringIO()):
+        lines = selection(root, meta, ["crates/core/src/lib.rs"], NEVER_OWNER_MODULES | {"hand"})
+    return [f"`hand` is in the never-owner set but its owner line is printed: {lines}"] \
+        if "hand-authored: just hand-authored" in lines else []
+
+
 def removed_binary_problems(root):
     """Names the selection gives the integration crate that are not its cargo test targets, for a change its
     reverse-dep walk reaches: each such name is a per-file binary nextest refuses."""
@@ -587,6 +604,20 @@ def removed_binary_problems(root):
         return [f"a change in {reached} names no integration test binary: {nextest}"]
     return [f"a change in {reached} names {sorted(named - targets)}, not test targets of {INTEGRATION}"
             f" ({sorted(targets)})"] if named - targets else []
+
+
+def dropped_module_owner_problems(root):
+    """A change that reaches the integration binary through the real dependency graph prints the owner line of a
+    module the default profile drops; a change that reaches no crate prints none."""
+    meta = load_metadata()
+    found = []
+    for changed, want in ((["crates/holon-loro/src/lib.rs"], True), (["crates/holon-orgmode/src/lib.rs"], True),
+                          (["docs/Testing/Testing.md"], False)):
+        with contextlib.redirect_stderr(io.StringIO()):
+            lines = selection(root, meta, changed)
+        if ("hand-authored: just hand-authored" in lines) != want:
+            found.append(f"{changed}: the `hand-authored:` owner line is {'missing' if want else 'printed'}: {lines}")
+    return found
 
 
 def contract_problems(root):
@@ -619,13 +650,15 @@ def contract_problems(root):
 def self_check():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        found = golden_problems(root, fixture_workspace(root))
+        meta = fixture_workspace(root)
+        found = golden_problems(root, meta) + never_owner_problems(root, meta)
     cwd = Path.cwd()
-    found += removed_binary_problems(cwd) + contract_problems(cwd)
+    found += removed_binary_problems(cwd) + dropped_module_owner_problems(cwd) + contract_problems(cwd)
     for line in found:
         print(f"[select-tests] FAIL {line}")
     print(f"[select-tests] self-check {'FAIL' if found else 'PASS'}: {len(GOLDEN)} golden cases,"
-          f" the integration test targets, the output contract")
+          f" the never-owner set, the integration test targets, the dropped modules' owner lines,"
+          f" the output contract")
     return 1 if found else 0
 
 
