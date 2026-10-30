@@ -43,8 +43,10 @@ a `[.label, .bucket]` pair (line 70), the analogue of Holon's `(name, cat)`. The
 cannot produce this collision.
 
 ## Remedy
-The sidecar declares `peer_match: .name` (`assets/integrations/shopping.yaml`
-`list_sync`). The reconciler withholds an addition whose `peer_match` equals
+The sidecar declares a `peer_match` that mirrors the app's `normalizeStr` on
+the name: the app's own diacritics table, lower case, and `.`, `,`, `-` and
+space dropped (`assets/integrations/shopping.yaml` `list_sync`). The
+reconciler withholds an addition whose `peer_match` equals
 that of an item the pulled list holds, or of an earlier addition of the same
 round, and names it in the round's `withheld` disclosure, which the sync
 operation logs and returns. Holon keeps its row; nothing reaches the app.
@@ -55,10 +57,15 @@ Tests:
   the repro above against the fake app, which replaces by name as the real
   one does. Red before the change (the app's `Milk in Ca 1` became
   `Milk in R 2kg`), green after.
+- `shopping_pull_mock.rs`
+  `an_addition_whose_name_the_app_normalizes_to_a_held_name_is_withheld`:
+  `milk in R` beside a held `Milk in Ca`; red with a raw `.name` key.
 - `remote_list_reconcile_pbt.rs`
-  `an_addition_the_peer_would_match_to_another_item_is_withheld`: at most one
-  addition per name is sent, none under a held name, every other one is
-  withheld by name.
+  `an_addition_the_peer_would_match_to_another_item_is_withheld`, over the
+  sidecar's own `peer_match`: names are drawn in case, accent and `.`, `,`,
+  `-`, space spellings; at most one addition per normalized name is sent,
+  none under a held one, every other one is withheld by name.
 
 Still open: the keystone's fixture peer keys items by `(name, cat)`, so the
-keystone cannot generate the collision.
+keystone cannot generate the collision. `ascii_downcase` does not lower
+non-Latin capitals (Cyrillic, Greek), which the app's `toLowerCase` does.

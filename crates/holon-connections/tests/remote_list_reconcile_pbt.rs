@@ -1119,7 +1119,8 @@ fn a_row_id_under_a_foreign_scheme_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
-// A peer that takes a push of its tick, and matches an addition by name alone.
+// A peer that takes a push of its tick, and matches an addition by its name,
+// raw or normalized, through the shopping sidecar's own `peer_match`.
 // ---------------------------------------------------------------------------
 
 const PICKED_LIST_SYNC: &str = r#"
@@ -1135,13 +1136,27 @@ base_column: remote_base
 batch_row_type: shopping_commit
 command_row_type: shopping_command
 merge_columns: [count, checked]
-peer_match: .name
 "#;
 
+const SHOPPING_SIDECAR: &str = include_str!("../../../assets/integrations/shopping.yaml");
+
 fn picked_list() -> Conn {
+    let sidecar: serde_yaml::Value = serde_yaml::from_str(SHOPPING_SIDECAR).expect("the sidecar");
+    let peer_match = sidecar["holon"]["list_sync"]["peer_match"].clone();
+    assert!(
+        peer_match.is_string(),
+        "the shopping sidecar declares no list_sync.peer_match"
+    );
+    let mut spec: serde_yaml::Mapping =
+        serde_yaml::from_str(PICKED_LIST_SYNC).expect("the list_sync block");
+    spec.insert("peer_match".into(), peer_match);
     Conn {
         label: "shopping (tick merged, matched by name)",
-        compiled: compile("picked", SHOPPING_TYPE, PICKED_LIST_SYNC),
+        compiled: compile(
+            "picked",
+            SHOPPING_TYPE,
+            &serde_yaml::to_string(&spec).expect("the list_sync block"),
+        ),
         ..shopping()
     }
 }
@@ -1156,11 +1171,45 @@ fn flag(on: bool, as_boolean: bool) -> Value {
     }
 }
 
-fn item(name: u8, cat: u8, seen: bool) -> LocalRow {
+/// `item{n}` as one of its spellings the app normalizes back to `item{n}`:
+/// each letter kept, upper-cased or accented, and at most one `.`, `,`, `-`
+/// or space put in. The digit is never touched, so `n` stays readable.
+fn spelling() -> impl Strategy<Value = String> {
+    const LETTERS: [[char; 4]; 4] = [
+        ['i', 'I', 'í', 'Ï'],
+        ['t', 'T', 'ť', 'Ť'],
+        ['e', 'E', 'é', 'Ë'],
+        ['m', 'M', 'ḿ', 'Ṁ'],
+    ];
+    (
+        0u8..3,
+        prop::array::uniform4(0usize..4),
+        prop::option::of((0usize..5, prop::sample::select(vec!['.', ',', '-', ' ']))),
+    )
+        .prop_map(|(n, styles, separator)| {
+            let mut name: Vec<char> = (0..4).map(|i| LETTERS[i][styles[i]]).collect();
+            name.push(char::from(b'0' + n));
+            if let Some((at, sep)) = separator {
+                name.insert(at, sep);
+            }
+            name.into_iter().collect()
+        })
+}
+
+/// The `n` of a name drawn by [`spelling`].
+fn base_of(name: &str) -> char {
+    let digits: Vec<char> = name.chars().filter(char::is_ascii_digit).collect();
+    assert_eq!(digits.len(), 1, "a drawn name carries one digit: {name:?}");
+    digits[0]
+}
+
+fn item(name: &str, cat: u8, seen: bool) -> LocalRow {
     let mut columns: BTreeMap<String, Value> = BTreeMap::new();
-    let id = format!("shopping-item:cat{cat}:item{name}");
+    // A drawn spelling holds characters a reference cannot carry.
+    let hex: String = name.bytes().map(|b| format!("{b:02x}")).collect();
+    let id = format!("shopping-item:cat{cat}:{hex}");
     columns.insert("id".into(), Value::String(id.clone()));
-    columns.insert("name".into(), Value::String(format!("item{name}")));
+    columns.insert("name".into(), Value::String(name.into()));
     columns.insert("cat".into(), Value::String(format!("cat{cat}")));
     columns.insert("count".into(), amount(0));
     columns.insert("checked".into(), Value::Integer(0));
@@ -1226,21 +1275,21 @@ proptest! {
         );
     }
 
-    /// The peer matches an addition by name alone, so of Holon's additions under
-    /// one name at most one is sent, and none under a name the peer holds; every
-    /// other one is withheld and named.
+    /// The peer matches an addition by its name, raw or normalized, so of
+    /// Holon's additions under one normalized name at most one is sent, and none
+    /// under a name the peer holds; every other one is withheld and named.
     #[test]
     fn an_addition_the_peer_would_match_to_another_item_is_withheld(
-        held in prop::collection::btree_set((0u8..3, 0u8..3), 0..4),
-        added in prop::collection::btree_set((0u8..3, 0u8..3), 0..6),
+        held in prop::collection::btree_set((spelling(), 0u8..3), 0..4),
+        added in prop::collection::btree_set((spelling(), 0u8..3), 0..6),
     ) {
         let conn = picked_list();
-        let added: BTreeSet<(u8, u8)> = added.difference(&held).copied().collect();
+        let added: BTreeSet<(String, u8)> = added.difference(&held).cloned().collect();
         let remote = held
             .iter()
-            .map(|&(name, cat)| {
+            .map(|(name, cat)| {
                 let mut row: holon_api::entity::StorageEntity = Default::default();
-                for (column, value) in item(name, cat, true).columns {
+                for (column, value) in item(name, *cat, true).columns {
                     if ["id", "name", "cat", "count", "checked"].contains(&column.as_str()) {
                         row.insert(column.into(), value);
                     }
@@ -1248,13 +1297,13 @@ proptest! {
                 row
             })
             .collect();
-        let local: Vec<LocalRow> = added.iter().map(|&(name, cat)| item(name, cat, false)).collect();
+        let local: Vec<LocalRow> = added.iter().map(|(name, cat)| item(name, *cat, false)).collect();
         let snapshot = snapshot_of(&conn, remote, 1);
         let outcome = RemoteListReconciler::new(conn.compiled.clone())
             .reconcile(&local, &snapshot)
             .expect("the round");
 
-        let mut sent: BTreeMap<String, usize> = BTreeMap::new();
+        let mut sent: BTreeMap<char, usize> = BTreeMap::new();
         for push in &outcome.push {
             let PushIntent::Add { row, .. } = push else {
                 prop_assert!(false, "an addition-only round pushed {push:?}");
@@ -1263,12 +1312,12 @@ proptest! {
             let Some(Value::String(name)) = row.columns.get("name") else {
                 panic!("an addition without a name: {row:?}");
             };
-            *sent.entry(name.clone()).or_default() += 1;
+            *sent.entry(base_of(name)).or_default() += 1;
         }
-        let held_names: BTreeSet<String> = held.iter().map(|(n, _)| format!("item{n}")).collect();
-        let added_names: BTreeSet<String> = added.iter().map(|(n, _)| format!("item{n}")).collect();
-        let want: BTreeMap<String, usize> =
-            added_names.difference(&held_names).map(|name| (name.clone(), 1)).collect();
+        let held_names: BTreeSet<char> = held.iter().map(|(n, _)| base_of(n)).collect();
+        let added_names: BTreeSet<char> = added.iter().map(|(n, _)| base_of(n)).collect();
+        let want: BTreeMap<char, usize> =
+            added_names.difference(&held_names).map(|&n| (n, 1)).collect();
         prop_assert_eq!(&sent, &want, "held {:?}, added {:?}", held, added);
         prop_assert_eq!(
             outcome.withheld.len() + outcome.push.len(),
@@ -1278,7 +1327,7 @@ proptest! {
         );
         for disclosure in &outcome.withheld {
             prop_assert!(
-                added.iter().any(|(n, c)| disclosure.starts_with(&format!("item{n} in cat{c} is not sent")))
+                added.iter().any(|(n, c)| disclosure.starts_with(&format!("{n} in cat{c} is not sent")))
                     && !disclosure.contains('['),
                 "the disclosure {disclosure:?} does not open with the withheld item's name"
             );

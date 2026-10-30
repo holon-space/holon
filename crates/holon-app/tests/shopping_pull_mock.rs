@@ -163,10 +163,15 @@ impl ListState {
             match command["cmd"].as_str().unwrap_or_default() {
                 // The peer keeps exactly what the command carries: an amount
                 // the command leaves out is an item with no amount. An `add`
-                // for a name already listed replaces that entry.
+                // for a name already listed, raw or normalized, replaces that
+                // entry.
                 "add" => {
                     let entry = (name, cat, good.get("count").cloned());
-                    match self.items.iter_mut().find(|(n, _, _)| n == &entry.0) {
+                    match self
+                        .items
+                        .iter_mut()
+                        .find(|(n, _, _)| n == &entry.0 || normalized(n) == normalized(&entry.0))
+                    {
                         Some(existing) => *existing = entry,
                         None => self.items.push(entry),
                     }
@@ -176,6 +181,16 @@ impl ListState {
             }
         }
     }
+}
+
+/// The app's `normalizeStr`: lower case, `.`, `,`, `-` and space dropped.
+/// shortcut: diacritics are not folded; the reconciler proptest pins them
+/// against the sidecar, fold them here once a test here adds an accented name.
+fn normalized(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '.' | ',' | '-' | ' '))
+        .collect()
 }
 
 struct Mock {
@@ -1451,6 +1466,40 @@ async fn an_addition_under_a_name_the_app_holds_in_another_category_is_withheld(
             .iter()
             .any(|reason| reason.contains("Milk in R") && reason.contains("Milk in Ca")),
         "the withheld addition is not disclosed by name: {:?}",
+        outcome.withheld
+    );
+}
+
+/// The app's `indexOfItem` compares names raw OR through `normalizeStr`
+/// (diacritics removed, lower case, `.`, `,`, `-` and space dropped), so an
+/// addition `milk` in `R` replaces the held `Milk` in `Ca` just as `Milk`
+/// would.
+#[tokio::test]
+async fn an_addition_whose_name_the_app_normalizes_to_a_held_name_is_withheld() {
+    let list = ListState {
+        items: vec![("Milk".into(), "Ca".into(), Some(serde_json::json!("1")))],
+        version: 7,
+        ..ListState::default()
+    };
+    let mock = start_mock_with(Mode::Live, list).await;
+    let peer = peer_for(&mock.base_url);
+
+    let mut mine = local("milk", "R", Some("2kg"));
+    set(&mut mine, "last_seen_remote", Value::Null);
+    let outcome = sync_once(
+        &peer,
+        &Rows(vec![mine]),
+        &RemoteListReconciler::new(connection()),
+        DEVICE_ID,
+        1_756_700_000_000,
+    )
+    .await
+    .expect("one round");
+
+    assert_eq!(
+        sent_for(&mock, "milk"),
+        Vec::<serde_json::Value>::new(),
+        "an addition the app matches to `Milk in Ca` by its normalized name was sent; withheld: {:?}",
         outcome.withheld
     );
 }
