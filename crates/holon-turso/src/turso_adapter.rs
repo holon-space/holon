@@ -737,6 +737,58 @@ mod tests {
         handle.shutdown().await.expect("shutdown");
     }
 
+    // The engine refuses to drop a table or view another view still reads, so
+    // teardown and a plain DROP TABLE fail loudly and keep every row, instead
+    // of leaving that view without its source.
+    #[tokio::test]
+    async fn a_dependent_view_blocks_teardown_and_drop_table_without_losing_rows() {
+        use std::collections::HashMap;
+
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+        let td = person_td();
+        let artifacts = TursoAdapter::register(&td, &handle)
+            .await
+            .expect("register");
+        handle
+            .execute(
+                "INSERT INTO person_raw (id, email) VALUES ('p1', 'a@b')",
+                vec![],
+            )
+            .await
+            .expect("insert");
+        handle
+            .execute_ddl("CREATE MATERIALIZED VIEW person_emails AS SELECT id, email FROM person")
+            .await
+            .expect("dependent view");
+
+        let err = TursoAdapter::teardown(&artifacts, &handle)
+            .await
+            .expect_err("teardown under a dependent view must fail");
+        assert!(format!("{err}").contains("DROP VIEW"), "{err}");
+        handle
+            .execute_ddl("DROP TABLE IF EXISTS person_raw")
+            .await
+            .expect_err("DROP TABLE under a view must fail");
+        let left = handle
+            .query("SELECT id FROM person_raw", HashMap::new())
+            .await
+            .expect("base table survives");
+        assert_eq!(left.len(), 1);
+
+        handle
+            .execute_ddl("DROP VIEW person_emails")
+            .await
+            .expect("drop dependent view");
+        TursoAdapter::teardown(&artifacts, &handle)
+            .await
+            .expect("teardown once nothing depends on the type");
+        handle.shutdown().await.expect("shutdown");
+    }
+
     // The adapter's matview must be IVM-maintained for writes that go through
     // `DbHandle::execute_values` (the path every non-`StorageBackend` writer
     // takes), not only for `StorageBackend::insert`.

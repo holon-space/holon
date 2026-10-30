@@ -5,7 +5,7 @@
 //! enforced that, so a hand-written `holon_sql` block could silently return
 //! wrong data or abort the process. This test makes the accident deliberate.
 //!
-//! Three properties are enforced here. The first two are measured against the
+//! Four properties are enforced here. The first two are measured against the
 //! engine at our pin (`lane-logs/research-j1p-unpark.md`, B-audit); the third
 //! guards a fork-head regression and is measured there:
 //!
@@ -23,6 +23,8 @@
 //!   terminate on upstream's rewritten recursive-CTE engine, which arrives with
 //!   the re-pin. See `a_recursive_arm_never_left_joins_on_its_own_base_row`
 //!   below.
+//! - **`UNION ALL` and a seed with a `FROM`.** The engine refuses any other
+//!   recursive CTE in a matview at CREATE. See `engine_rule_violation`.
 //!
 //! Do not widen any of these into a blanket ban on `LEFT JOIN` in the
 //! recursive arm: four of the six production CTEs contain one and are measured
@@ -39,6 +41,8 @@ struct FoundCte {
     name: String,
     /// The two arms of the CTE body, split at the top-level `UNION [ALL]`.
     arms: Vec<String>,
+    /// Every top-level separator is `UNION ALL`, none a bare `UNION`.
+    union_all: bool,
 }
 
 fn repo_root() -> PathBuf {
@@ -240,11 +244,13 @@ fn balanced_len(s: &str) -> Option<usize> {
     None
 }
 
-/// Split the body at every top-level `UNION` / `UNION ALL`.
-fn split_arms(body: &str) -> Vec<String> {
+/// Split the body at every top-level `UNION` / `UNION ALL`; the flag tells
+/// whether every separator was `UNION ALL`.
+fn split_arms(body: &str) -> (Vec<String>, bool) {
     let bytes = body.as_bytes();
     let upper = body.to_uppercase();
     let mut arms = Vec::new();
+    let mut union_all = true;
     let mut depth = 0usize;
     let mut arm_start = 0usize;
     let mut i = 0usize;
@@ -262,6 +268,7 @@ fn split_arms(body: &str) -> Vec<String> {
             {
                 5 + rest.find("ALL").unwrap_or(0) + 3
             } else {
+                union_all = false;
                 5
             };
             i += skip;
@@ -271,7 +278,7 @@ fn split_arms(body: &str) -> Vec<String> {
         i += 1;
     }
     arms.push(body[arm_start..].to_string());
-    arms
+    (arms, union_all)
 }
 
 fn is_word_boundary(upper: &str, at: usize, len: usize) -> bool {
@@ -343,11 +350,13 @@ fn find_production_ctes() -> Vec<FoundCte> {
             let window = &text[at..(at + 8000).min(text.len())];
             let sql = normalise_whitespace(&strip_sql_comments(&unescape_rust(window)));
             let (name, body) = cte_name_and_body(&sql);
+            let (arms, union_all) = split_arms(&body);
             found.push(FoundCte {
                 file: file.strip_prefix(&root).unwrap_or(&file).to_path_buf(),
                 line: text[..at].matches('\n').count() + 1,
                 name,
-                arms: split_arms(&body),
+                arms,
+                union_all,
             });
         }
     }
@@ -401,6 +410,129 @@ fn every_production_recursive_cte_has_a_single_arm_base_and_a_join_bearing_recur
          recursive-CTE defects unreachable:\n  {}",
         violations.join("\n  ")
     );
+}
+
+/// The engine maintains a recursive CTE in a matview only when its arms are
+/// joined by `UNION ALL` and its base arm reads a table: a bare `UNION` or a
+/// table-less seed such as `SELECT 1` is refused at CREATE.
+fn engine_rule_violation(cte: &FoundCte) -> Option<String> {
+    let plain_query = PLAIN_QUERY_CTES
+        .iter()
+        .any(|(file, name)| cte.file == Path::new(file) && cte.name == *name);
+    if !cte.union_all && !plain_query {
+        return Some("the arms are joined by a bare UNION, the engine needs UNION ALL".into());
+    }
+    let base = &cte.arms[0];
+    if table_refs(base).is_empty() {
+        return Some(format!(
+            "the base arm reads no table (`{}`), the engine needs a FROM in the seed",
+            base.trim()
+        ));
+    }
+    None
+}
+
+/// CTEs only a plain query reads, never a matview: the engine runs a bare
+/// `UNION` there, and its de-duplication is what stops a parent cycle.
+const PLAIN_QUERY_CTES: &[(&str, &str)] = &[(
+    "crates/holon/src/core/sql_operation_provider.rs",
+    "descendants",
+)];
+
+#[test]
+fn every_production_recursive_cte_uses_union_all_and_a_seed_with_a_from() {
+    let ctes = find_production_ctes();
+    assert!(ctes.len() >= KNOWN_PRODUCTION_CTES, "scanner is broken");
+    let violations: Vec<String> = ctes
+        .iter()
+        .filter(|cte| cte.arms.len() == 2)
+        .filter_map(|cte| {
+            engine_rule_violation(cte).map(|v| {
+                format!(
+                    "{}:{} CTE `{}`: {v}",
+                    cte.file.display(),
+                    cte.line,
+                    cte.name
+                )
+            })
+        })
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "recursive CTEs the engine cannot maintain:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[tokio::test]
+async fn the_engine_refuses_a_bare_union_and_a_table_less_seed_in_a_matview() {
+    let (backend, handle) = holon_turso::turso::TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory db");
+    std::mem::forget(backend);
+    handle
+        .execute_ddl("CREATE TABLE block (id TEXT PRIMARY KEY, parent_id TEXT)")
+        .await
+        .expect("create table");
+    let join = "SELECT b.id FROM d JOIN block b ON b.parent_id = d.id";
+    let view = |name: &str, seed: &str, union: &str| {
+        format!(
+            "CREATE MATERIALIZED VIEW {name} AS WITH RECURSIVE d(id) AS ({seed} {union} {join}) \
+             SELECT id FROM d"
+        )
+    };
+    handle
+        .execute_ddl(&view(
+            "ok",
+            "SELECT id FROM block WHERE parent_id IS NULL",
+            "UNION ALL",
+        ))
+        .await
+        .expect("UNION ALL with a FROM in the seed must build");
+    handle
+        .query(
+            &format!(
+                "WITH RECURSIVE d(id) AS (SELECT id FROM block WHERE parent_id IS NULL UNION \
+                 {join}) SELECT id FROM d"
+            ),
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("a plain query runs a bare UNION");
+    for (name, seed, union) in [
+        (
+            "bare_union",
+            "SELECT id FROM block WHERE parent_id IS NULL",
+            "UNION",
+        ),
+        ("no_from", "SELECT 'root' AS id", "UNION ALL"),
+    ] {
+        let refused = handle.execute_ddl(&view(name, seed, union)).await;
+        assert!(
+            refused.is_err(),
+            "{name}: the engine must refuse this recursive CTE"
+        );
+    }
+}
+
+#[test]
+fn the_engine_rule_check_flags_a_bare_union_and_a_table_less_seed() {
+    let cte = |body: &str| {
+        let (arms, union_all) = split_arms(body);
+        FoundCte {
+            file: PathBuf::from("synthetic"),
+            line: 1,
+            name: "d".into(),
+            arms,
+            union_all,
+        }
+    };
+    let join = " SELECT b.id FROM d JOIN block b ON b.parent_id = d.id";
+    assert!(
+        engine_rule_violation(&cte(&format!("SELECT id FROM block UNION ALL{join}"))).is_none()
+    );
+    assert!(engine_rule_violation(&cte(&format!("SELECT id FROM block UNION{join}"))).is_some());
+    assert!(engine_rule_violation(&cte(&format!("SELECT 1 AS id UNION ALL{join}"))).is_some());
 }
 
 /// A recursive arm that `LEFT JOIN`s on the base-table row that arm itself

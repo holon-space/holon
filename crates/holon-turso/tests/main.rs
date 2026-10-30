@@ -42,6 +42,7 @@ mod sidecar_views;
 mod sql_log_fields_carry_no_literals;
 mod stopped_commit_listener;
 mod stuck_actor_watch;
+mod sum_avg_matview;
 mod time_functions_matview;
 mod type_table_add_column_under_matview;
 mod unregistered_dependency_fast_fail;
