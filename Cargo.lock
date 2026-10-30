@@ -5958,6 +5958,7 @@ dependencies = [
  "holon-net",
  "holon-pattern",
  "libc",
+ "proptest 1.11.0",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

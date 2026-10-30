@@ -84,6 +84,14 @@ pub enum ShellError {
     PidFileLine { path: PathBuf, line: String },
     #[error("the log `{path}` of a shell effect cannot be written: {source}")]
     Log { path: PathBuf, source: io::Error },
+    #[error(
+        "the log pattern `{pattern}` is refused: it must be relative, name `{{attempt}}`, use no brace outside `{{transition}}` `{{subject}}` `{{attempt}}` `{{occurrence}}`, have no `..` segment and end in a file name (working dir `{working_dir}`, subject `{subject}`)"
+    )]
+    LogPath {
+        pattern: String,
+        working_dir: String,
+        subject: String,
+    },
     #[error("the shell effect `{argv}` does not start: {source}")]
     Spawn { argv: String, source: io::Error },
     #[error("the child of the shell effect `{argv}` cannot be waited for: {source}")]
@@ -131,15 +139,16 @@ impl Runner {
     }
 
     /// Runs one attempt of `effect` as its own process group, with both its
-    /// streams in the log its `log_path` names for this request.
+    /// streams in a new log file that [`Finished::log_path`] names: `log_path`
+    /// rendered for this request, with a `.N` suffix when that file exists.
     pub async fn run(
         &self,
         effect: &ShellEffect,
         request: &EffectRequest,
     ) -> Result<Finished, ShellError> {
         let argv = effect.command.argv.join(" ");
-        let log_path = log_path(effect, request);
-        let (mut child, pgid) = spawn(effect, &log_path)?;
+        let (log, log_path) = create_log(log_path(effect, request)?)?;
+        let (mut child, pgid) = spawn(effect, log, &log_path)?;
         let abandon = self.register(request, pgid)?;
         let stop = tokio::select! {
             status = child.wait() => Stop::Exited(status.map_err(|source| ShellError::Wait {
@@ -274,8 +283,11 @@ pub(crate) async fn end_group(pgid: Pgid, mut child: Option<&mut Child>) -> io::
     Ok(())
 }
 
-fn spawn(effect: &ShellEffect, log_path: &Path) -> Result<(Child, Pgid), ShellError> {
-    let log = create_log(log_path)?;
+fn spawn(
+    effect: &ShellEffect,
+    log: fs::File,
+    log_path: &Path,
+) -> Result<(Child, Pgid), ShellError> {
     let stderr = log.try_clone().map_err(|source| ShellError::Log {
         path: log_path.to_owned(),
         source,
@@ -326,25 +338,98 @@ fn outcome_of(code: i32, codes: &ExitCodeMap) -> Outcome {
     }
 }
 
-fn log_path(effect: &ShellEffect, request: &EffectRequest) -> PathBuf {
-    let expanded = effect
-        .log_path
-        .replace("{transition}", &request.transition)
-        .replace("{subject}", request.subject.as_str())
-        .replace("{attempt}", &request.attempt.0.to_string())
-        .replace("{occurrence}", &request.occurrence.to_string());
-    Path::new(&effect.command.working_dir).join(expanded)
+/// Renders the pattern one `/`-separated segment at a time, so no value can
+/// add a separator or a `..`, and no value is read as a placeholder. A
+/// pattern the net-file loader refuses, an absolute one, one with a `..`
+/// segment and one that ends in no file name are refused here too.
+fn log_path(effect: &ShellEffect, request: &EffectRequest) -> Result<PathBuf, ShellError> {
+    let pattern = &effect.log_path;
+    let refused = || ShellError::LogPath {
+        pattern: pattern.clone(),
+        working_dir: effect.command.working_dir.clone(),
+        subject: request.subject.as_str().to_owned(),
+    };
+    if pattern.starts_with('/') || !pattern.contains("{attempt}") {
+        return Err(refused());
+    }
+    let values = [
+        ("{transition}", request.transition.to_string()),
+        ("{subject}", request.subject.as_str().to_owned()),
+        ("{attempt}", request.attempt.0.to_string()),
+        ("{occurrence}", request.occurrence.to_string()),
+    ]
+    .map(|(name, value)| (name, component(&value)));
+    let segments = pattern
+        .split('/')
+        .map(|segment| render(segment, &values).ok_or_else(refused))
+        .collect::<Result<Vec<_>, _>>()?;
+    let last = segments.last().expect("a split yields a segment");
+    if matches!(last.as_str(), "" | ".") || segments.iter().any(|s| s == "..") {
+        return Err(refused());
+    }
+    let mut path = PathBuf::from(&effect.command.working_dir);
+    path.extend(segments.iter().filter(|s| !matches!(s.as_str(), "" | ".")));
+    Ok(path)
 }
 
-fn create_log(path: &Path) -> Result<fs::File, ShellError> {
-    let failed = |source| ShellError::Log {
+/// `None` when a brace is not part of one of the four placeholders.
+fn render(segment: &str, values: &[(&str, String)]) -> Option<String> {
+    let mut rendered = String::new();
+    let mut rest = segment;
+    while let Some(brace) = rest.find(['{', '}']) {
+        rendered.push_str(&rest[..brace]);
+        rest = &rest[brace..];
+        let (name, value) = values.iter().find(|(name, _)| rest.starts_with(name))?;
+        rendered.push_str(value);
+        rest = &rest[name.len()..];
+    }
+    Some(rendered + rest)
+}
+
+/// One path component that names `value` and no other value: never empty,
+/// `.` or `..`, and printable ASCII only, so no file system refuses it for
+/// its characters. Every other byte is percent-encoded.
+fn component(value: &str) -> String {
+    match value {
+        "" => "%".to_owned(),
+        "." | ".." => value.replace('.', "%2E"),
+        _ => value
+            .bytes()
+            .map(|b| match b {
+                b' '..=b'~' if b != b'/' && b != b'%' => char::from(b).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect(),
+    }
+}
+
+/// Never opens an existing file, so a restarted runner that reuses an attempt
+/// id keeps the earlier log and writes `<path>.1`, `<path>.2`, ... instead.
+fn create_log(path: PathBuf) -> Result<(fs::File, PathBuf), ShellError> {
+    let failed = |path: &Path, source| ShellError::Log {
         path: path.to_owned(),
         source,
     };
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(failed)?;
+        fs::create_dir_all(dir).map_err(|source| failed(&path, source))?;
     }
-    fs::File::create(path).map_err(failed)
+    let name = path
+        .file_name()
+        .expect("a log path ends in a file name")
+        .to_owned();
+    let mut candidate = path.clone();
+    for n in 1u64.. {
+        match fs::File::create_new(&candidate) {
+            Ok(log) => return Ok((log, candidate)),
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                let mut next = name.clone();
+                next.push(format!(".{n}"));
+                candidate = path.with_file_name(next);
+            }
+            Err(source) => return Err(failed(&candidate, source)),
+        }
+    }
+    unreachable!("a directory holds fewer than u64::MAX logs")
 }
 
 fn parse_groups(text: &str, path: &Path) -> Result<Vec<Group>, ShellError> {

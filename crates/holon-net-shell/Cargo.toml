@@ -21,3 +21,4 @@ holon-pattern.workspace = true
 libc = "0.2"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "process", "rt", "sync", "time"] }
+proptest.workspace = true

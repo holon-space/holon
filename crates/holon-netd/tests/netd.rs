@@ -65,7 +65,7 @@ effects:
       working_dir: {dir}
       env_allow: []
       timeout: 10s
-    log_path: {dir}/logs/{{transition}}-{{subject}}-{{attempt}}.log
+    log_path: logs/{{transition}}-{{subject}}-{{attempt}}.log
     exit_codes:
       done:
       - 0
@@ -79,7 +79,7 @@ effects:
       working_dir: {dir}
       env_allow: []
       timeout: 10s
-    log_path: {dir}/logs/{{transition}}-{{subject}}-{{attempt}}.log
+    log_path: logs/{{transition}}-{{subject}}-{{attempt}}.log
     exit_codes:
       done: []
       failed:
@@ -376,7 +376,7 @@ effects:
       working_dir: {shown}
       env_allow: []
       timeout: 1s
-    log_path: {shown}/logs/{{transition}}-{{subject}}-{{attempt}}.log
+    log_path: logs/{{transition}}-{{subject}}-{{attempt}}.log
     exit_codes:
       done:
       - 0
