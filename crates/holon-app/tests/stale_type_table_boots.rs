@@ -353,6 +353,7 @@ async fn a_declared_nullable_column_is_added_and_the_rows_survive() {
     )
     .await
     .expect("a write naming the added column must succeed");
+    settled(&later).await;
     let sugar = sql(
         &later,
         "SELECT product_id FROM pantry_item WHERE id = 'pantry-item:sugar'",
