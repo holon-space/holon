@@ -440,9 +440,10 @@ for log in "$@"; do
                 if ($0 ~ /^ *ok/) expected[scope() SUBSEP verdict_due[scope()]]++
                 delete verdict_due[scope()]
             }
-            # Stdout of another thread can put text before the head on its line.
-            if (match($0, /(^| |\()test [^ ]+ - should panic \.\.\. /)) {
-                name = substr($0, RSTART, RLENGTH); sub(/^.?test /, "", name); sub(/ - should panic \.\.\. $/, "", name)
+            # Unbuffered stderr of another thread can put any text, even part of
+            # a word, before the head on its line.
+            if (match($0, /test [^ ]+ - should panic \.\.\. /)) {
+                name = substr($0, RSTART + 5, RLENGTH - 5); sub(/ - should panic \.\.\. $/, "", name)
                 if (substr($0, RSTART + RLENGTH) ~ /^ok/) expected[scope() SUBSEP name]++
                 else if (substr($0, RSTART + RLENGTH) !~ /^(FAILED|ignored)/) verdict_due[scope()] = name
             } else if (/panicked at /) {

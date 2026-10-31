@@ -325,6 +325,10 @@ split_verdict_log 'test malformed_also_check_after_is_refused - should panic ...
     >"$work/should-panic-ok-trailing-text.log"
 expect_outcome should-panic-ok-trailing-text 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
     "$work/should-panic-ok-trailing-text.log"
+split_verdict_log $'Applying transition 4/6: (Checkpointstest malformed_also_check_after_is_refused ... ({7}))\nok' \
+    >"$work/plain-head-after-a-word.log"
+expect_outcome plain-head-after-a-word 1 '^PRIMARY: \[novel\] .*not a transition number$' \
+    "$work/plain-head-after-a-word.log"
 split_verdict_log $'test malformed_also_check_after_is_refused - should panic ... \nApplying transition 4/6: ()\n\nok' \
     >"$work/should-panic-ok-later-line.log"
 expect_outcome should-panic-ok-later-line 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
@@ -341,6 +345,10 @@ split_verdict_log $'Applying transition 4/6: (test malformed_also_check_after_is
     >"$work/should-panic-head-mid-line-failed.log"
 expect_outcome should-panic-head-mid-line-failed 1 '^PRIMARY: \[novel\] .*not a transition number$' \
     "$work/should-panic-head-mid-line-failed.log"
+split_verdict_log $'Applying transition 4/6: (Checkpointstest malformed_also_check_after_is_refused - should panic ... ({7}))\nok' \
+    >"$work/should-panic-head-after-a-word.log"
+expect_outcome should-panic-head-after-a-word 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/should-panic-head-after-a-word.log"
 # nextest status lines, in the shapes nextest-runner's reporter prints them
 # (reporter/displayer/imp.rs `status_str` / `short_status_str`). A test killed
 # or leaking after a passing body printed no panic, so the status line is its
