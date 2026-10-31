@@ -79,11 +79,7 @@ pub fn net_def(
             (PlaceCapacity::Fifo, None) => net.fifo(place, Class::Process),
         };
     }
-    // The executor fires in declaration order, so the authored priority — the
-    // higher fires first — becomes that order.
-    let mut transitions: Vec<_> = file.transitions.iter().collect();
-    transitions.sort_by_key(|t| std::cmp::Reverse(t.1.priority));
-    for (name, spec) in transitions {
+    for (name, spec) in &file.transitions {
         net = net.transition(transition(name, spec, logic(name)));
     }
     Ok(net)
@@ -103,7 +99,8 @@ fn transition(name: &str, spec: &TransitionSpec, logic: Logic) -> TransitionDef 
             panic!("transition `{name}` runs the effect `{effect}`, so its firing is not a body")
         }
     };
-    let mut t = TransitionDef::new(name, trigger(spec.trigger), logic.bind, body);
+    let mut t =
+        TransitionDef::new(name, trigger(spec.trigger), logic.bind, body).priority(spec.priority);
     for place in &spec.consumes {
         t = t.consumes(place);
     }
@@ -112,6 +109,9 @@ fn transition(name: &str, spec: &TransitionSpec, logic: Logic) -> TransitionDef 
     }
     for place in &spec.inhibits {
         t = t.inhibits(place);
+    }
+    for place in &spec.produces {
+        t = t.produces(place);
     }
     for place in &spec.facts {
         t = t.fact(place);

@@ -277,11 +277,6 @@ Each of these is a field a later card adds, not a silent default:
   of ADR 0032 §9.4 first. A later `class` is an optional field whose default
   is `process`, so it reads every file written today and needs no revision of
   this format.
-- **Producer order.** `priority` is in the file because producers of one
-  place are ordered (ADR 0032 §9.1), but `exec::TransitionDef` has no priority
-  field. holon-space/holon-work#370 maps it onto the executor's producer
-  ordering, and adds the field to the executor if it has none; the loader does
-  not order the transitions itself.
 - **Guards.** A transition carries arcs only. Whether a firing may happen is
   what the arcs say; there is no expression to evaluate.
 - **Correlated arcs.** The derived net of ADR 0032 §2 binds one subject across
@@ -297,10 +292,13 @@ firing runs. The caller owns what the format cannot hold — the guard and
 binding of each transition, and the body of each transition that runs no
 effect — and hands them in per transition name as a `Logic`.
 
-The authored `priority` becomes the order the executor fires in, highest
-first. `produces` stays the file's declaration of a transition's outputs: the
-executor takes the outputs from the firing itself, so the loader builds
-nothing from it.
+The executor scans the transitions in file order. `priority` acts only among
+the producers of one place, the transitions whose `produces` names it
+(ADR 0032 §9.1): in a round, of the enabled producers of one place for one
+subject, only the one with the highest priority fires; on equal priority, the
+one declared first. The others decide again in the next round. The executor
+still takes the outputs from the firing itself; `produces` only names the
+producers.
 
 Every refusal names the file, the line of the declaration it refused and the
 field, so a reader can open the file at that line:

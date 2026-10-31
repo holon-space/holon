@@ -544,7 +544,9 @@ examples and the experiment evidence are in the design note
   places.
 - **Producers are chosen by priority, not by a declared order.** Priority is
   data on the provider token (§9.6), so it changes at runtime. Among the
-  enabled producers of one place the highest priority fires.
+  enabled producers of one place the highest priority fires; on equal
+  priority, the one declared first. Priority orders no transitions that
+  produce no common place.
 - **A producer that cannot fire now does not hold the place.** The next
   priority fires at once and the preferred producer keeps attempting beside it,
   with its own request token; it takes over through the standby slot and the

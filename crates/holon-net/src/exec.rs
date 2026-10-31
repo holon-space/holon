@@ -21,6 +21,7 @@
 //! derived places outside a firing.
 
 use std::borrow::Borrow;
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -314,6 +315,11 @@ pub struct TransitionDef {
     pub consumes: Vec<Place>,
     pub reads: Vec<Place>,
     pub inhibits: Vec<Place>,
+    /// The places it produces into. Among the enabled producers of one place
+    /// only the first in `priority` order fires in a round (ADR 0032 §9.1).
+    pub produces: Vec<Place>,
+    /// The higher fires first; on equal priority, the earlier in the net.
+    pub priority: i32,
     /// The guard and the binding in one: `None` is a false guard, `Some` is
     /// the input the body sees. Its reads are the firing's read trace.
     pub bind: Read,
@@ -339,6 +345,8 @@ impl TransitionDef {
             consumes: Vec::new(),
             reads: Vec::new(),
             inhibits: Vec::new(),
+            produces: Vec::new(),
+            priority: 0,
             bind,
             body,
             facts: Vec::new(),
@@ -362,6 +370,16 @@ impl TransitionDef {
 
     pub fn inhibits(mut self, place: &str) -> Self {
         self.inhibits.push(Place::new(place));
+        self
+    }
+
+    pub fn produces(mut self, place: &str) -> Self {
+        self.produces.push(Place::new(place));
+        self
+    }
+
+    pub fn priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
         self
     }
 
@@ -1621,6 +1639,9 @@ pub struct Executor {
     watchers: BTreeMap<Place, Vec<Arc<str>>>,
     /// Who declined on a read of a row: decided again when the row changes.
     waiters: BTreeMap<(Place, Subject), BTreeSet<Decision>>,
+    /// Per transition, the auto producers of a place it produces that come
+    /// before it in priority order.
+    preferred: Vec<Vec<usize>>,
     /// The (transition, subject) pairs to decide again. A pair outside it
     /// decides as it did last time, because no row it read changed since.
     pending: BTreeMap<Arc<str>, BTreeSet<Subject>>,
@@ -1715,6 +1736,23 @@ impl Executor {
                 watchers.entry(p).or_default().push(t.name.clone());
             }
         }
+        let preferred = net
+            .transitions
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                net.transitions
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, u)| {
+                        u.trigger == Trigger::Auto
+                            && u.produces.iter().any(|p| t.produces.contains(p))
+                            && (u.priority, Reverse(j)) > (t.priority, Reverse(i))
+                    })
+                    .map(|(j, _)| j)
+                    .collect()
+            })
+            .collect();
         Ok(Self {
             net,
             tokens,
@@ -1731,6 +1769,7 @@ impl Executor {
             requests: Vec::new(),
             watchers,
             waiters: BTreeMap::new(),
+            preferred,
             pending: BTreeMap::new(),
             pending_all: BTreeSet::new(),
             now: Duration::ZERO,
@@ -2180,6 +2219,7 @@ impl Executor {
         for _ in 0..MAX_ROUNDS {
             self.apply_pending_undos();
             let mut started = Vec::new();
+            let mut fired = BTreeSet::new();
             for i in 0..self.net.transitions.len() {
                 let t = &self.net.transitions[i];
                 if t.trigger != Trigger::Auto
@@ -2193,6 +2233,13 @@ impl Executor {
                     let mut trace = Trace::default();
                     match self.decide_into(t, &s, &mut trace) {
                         Ok(input) => {
+                            if let Some(j) = self.preferred_enabled(i, &s, &fired) {
+                                let first = self.net.transitions[j].name.clone();
+                                self.pending.entry(first).or_default().insert(s.clone());
+                                self.pending.entry(name.clone()).or_default().insert(s);
+                                continue;
+                            }
+                            fired.insert((i, s.clone()));
                             let occurrence = match self.net.answered_of(&name) {
                                 Some(p) => match self.answered_field(&p, &s, ANSWER_ID_KEY) {
                                     Value::String(answer) => work_occurrence(&name, &answer),
@@ -2240,6 +2287,22 @@ impl Executor {
             }
         }
         Err(MAX_ROUNDS)
+    }
+
+    /// A producer that comes before `i` in priority order and fires for `s`
+    /// in this round, or did.
+    fn preferred_enabled(
+        &self,
+        i: usize,
+        s: &Subject,
+        fired: &BTreeSet<(usize, Subject)>,
+    ) -> Option<usize> {
+        self.preferred[i].iter().copied().find(|&j| {
+            let u = &self.net.transitions[j];
+            fired.contains(&(j, s.clone()))
+                || !(self.twin(Twin::KeepWorkFailed) && self.takes_failure_port(u))
+                    && self.decide(u, s).is_ok()
+        })
     }
 
     /// Settles what an undo could not reverse while a later firing held the
