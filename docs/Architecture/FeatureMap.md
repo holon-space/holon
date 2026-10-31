@@ -376,6 +376,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `failed-slot-create-sqlonly-keystrokes-run-anyway`
 - `folder-companion-subdir-fileless-page-not-homed-load`
 - `fs-watcher-arm-no-event-agent-session`
+- `fs-watcher-move-out-lost-remove`
 - `fs-watcher-no-events-agent-session`
 - `fs-watcher-rename-unpaired-agent-session`
 - `fts-query-block-watch-view-create-fails`
