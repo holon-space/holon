@@ -25,7 +25,11 @@ UNOWNED = "unowned: package(leaf) is excluded by the load-tolerant profile and h
 
 
 def step_log(line, code=0):
-    return f"{line}\n{HEADER}running\nSummary [ 1s]\n\nexit: {code}\n"
+    return f"{line}\n{HEADER}STARTED: 2026-10-31T17:00:00Z\nrunning\nSummary [ 1s]\n\nexit: {code}\n"
+
+
+def classifier_log(step_log_path, code=0):
+    return step_log(f"known-reds: scripts/keystone-known-reds.sh {step_log_path}", code)
 
 
 def run(selected, logs, spans=(), selector_exit=0, ran={}, cites=None):
@@ -100,6 +104,33 @@ def fixtures():
     expect("body line of another selected step",
            run(SELECTED, {}, ran={"target/r1/clippy.log": body, "target/r1/windowed.log": step_log(WINDOWED)}),
            1, "`nextest`")
+    red = {**ran, "target/r1/nextest.log": step_log(NEXTEST, 100)}
+    expect("red step judged known reds only",
+           run(SELECTED, {}, ran={**red, "target/r1/nextest-known-reds.log": classifier_log("target/r1/nextest.log")}), 0)
+    expect("red step judged by a classifier cited by its absolute path",
+           run(SELECTED, {}, ran={**red, "target/r1/nextest-known-reds.log": classifier_log("target/r1/nextest.log")},
+               cites=[*ran, "<root>/target/r1/nextest-known-reds.log"]), 0)
+    expect("green step without a classifier log", run(SELECTED, {}, ran=ran), 0)
+    for code in (1, 3):
+        expect(f"classifier exit {code}",
+               run(SELECTED, {}, ran={**red, "target/r1/nextest-known-reds.log":
+                                      classifier_log("target/r1/nextest.log", code)}),
+               1, "target/r1/nextest-known-reds.log", "`nextest`", f"`exit: {code}`")
+    expect("red step without a classifier log", run(SELECTED, {}, ran=red),
+           1, "target/r1/nextest.log", "`exit: 100`", "known-reds: scripts/keystone-known-reds.sh target/r1/nextest.log")
+    expect("classifier run on another step log",
+           run(SELECTED, {}, ran={**red, "target/r0/nextest.log": step_log(NEXTEST, 100),
+                                  "target/r1/nextest-known-reds.log": classifier_log("target/r0/nextest.log")},
+               cites=[*red, "target/r1/nextest-known-reds.log"]),
+           1, "target/r1/nextest.log", "target/r1/nextest-known-reds.log classifies target/r0/nextest.log")
+    expect("step log without exit trailer judged known reds only",
+           run(SELECTED, {}, ran={**ran, "target/r1/nextest.log": step_log(NEXTEST, 100).rsplit("exit: 100", 1)[0],
+                                  "target/r1/nextest-known-reds.log": classifier_log("target/r1/nextest.log")}),
+           1, "target/r1/nextest.log", "`nextest`")
+    expect("red step of a narrower line judged known reds only",
+           run(SELECTED, {}, ran={**ran, "target/r1/nextest.log": step_log(NARROW, 100),
+                                  "target/r1/nextest-known-reds.log": classifier_log("target/r1/nextest.log")}),
+           1, "target/r1/nextest.log", NARROW)
     # The selector's own output names the steps but is no evidence that any of them ran.
     expect("selector output only", run(SELECTED, {"target/r1/select.log": SELECTED}), 1)
     expect("step not covered", run(SELECTED, {"target/r1/select.log": [CLIPPY, WINDOWED]}), 1, "`nextest`")
@@ -158,6 +189,22 @@ def generated(cases):
         dropped = {p: t for p, t in logs.items() if p != path}
         assert any(f"`{step}`" in b for b in check(stdout, spans, dropped, not_run)), \
             f"case {case}: dropped {step} passes"
+
+        red_code = rng.choice([1, 100, 101, 2])
+        red = {**logs, path: logs[path].rsplit("exit: 0", 1)[0] + f"exit: {red_code}"}
+        judge = f"target/r1/{step}-known-reds.log"
+        judged = {**red, judge: classifier_log(rng.choice([path, f"./{path}"]))}
+        assert check(stdout, spans, judged, not_run) == [], f"case {case}: red {step} judged known reds only fails"
+        for name, text in [("classifier exit 1", classifier_log(path, 1)), ("classifier exit 3", classifier_log(path, 3)),
+                           ("classifier without exit trailer", classifier_log(path).rsplit("exit: 0", 1)[0]),
+                           ("classifier on another log", classifier_log(f"target/r0/{step}.log"))]:
+            assert any(f"`{step}`" in b for b in check(stdout, spans, {**red, judge: text}, not_run)), \
+                f"case {case}: {name} for red {step} passes"
+        assert any(path in b for b in check(stdout, spans, red, not_run)), f"case {case}: red {step} unjudged passes"
+        cut = rng.choice(["", "killed", f"exit: {red_code} (signal)"])
+        cut_judged = {**judged, path: logs[path].rsplit("exit: 0", 1)[0] + cut}
+        assert any(path in b and f"`{step}`" in b for b in check(stdout, spans, cut_judged, not_run)), \
+            f"case {case}: {step} log ending {cut!r} judged known reds only passes"
     print(f"[tests-cover-diff] generated: {cases} cases PASS")
 
 

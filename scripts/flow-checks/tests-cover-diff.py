@@ -8,16 +8,27 @@ The cited logs are the `target/...` `.log` and `.txt` paths between the summary'
 a brace list (`target/x/{a,b}.log`) cites each of its paths, as the shell expands it.
 Of a cited log it reads only line 1 and the last line: a log written by scripts/flow-checks/run-step.sh has the step
 line as line 1 and `exit: <code>` as its last line, and the lines between are the step's own output.
-A step ran when a cited log has the selected line as line 1 and `exit: 0` as its last line; the selector's disclosure
-steps (NOT_RUN_STEPS of select-tests.py) need no log.
+A step ran when a cited log has the selected line as line 1, and either:
+  - its last line is `exit: 0`, or
+  - its last line is `exit: <non-zero>` AND the same log is cited together with a classifier log:
+    `scripts/keystone-known-reds.sh <step log>` run on the final tree, whose last line is `exit: 0` (every signature
+    matched a known-red row, every keystone sample verdict=OK).
+Every other outcome of the classifier (exit 1 regression, exit 3 indeterminate) is a FAIL of tests-cover-diff that
+names the step and the classifier exit.
+The check never runs the classifier itself and never reads the registry: one copy of each rule (the registry and the
+classifier own the matching).
+A classifier log is a cited run-step log of the line `known-reds: scripts/keystone-known-reds.sh <step log>`; it
+classifies the step log whose path resolves, from the lane root, to the same file as a cited path.
+The selector's disclosure steps (NOT_RUN_STEPS of select-tests.py) need no log.
 PASS (exit 0) when every selected step ran, every cited log whose line 1 names a selected step has the selected line
-as line 1 and `exit: 0` as its last line, every backticked `<step>: <args>` span of the summary equals the selected
-line, and the selector printed no step twice.
+as line 1, every backticked `<step>: <args>` span of the summary equals the selected line, and the selector printed
+no step twice.
 Lines compare with runs of whitespace collapsed. Every problem is one stderr line; it never runs tests.
 """
 import argparse
 import importlib.util
 import re
+import shlex
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -32,6 +43,8 @@ PATH_START = set(" \t`\"'([<=:,*|")
 SPAN = re.compile(r"`([^`\n]+)`")
 HEADING = r"^(?:#+\s*)?(?:\*\*)?"
 EXIT_OK = "exit: 0"
+EXIT_RED = re.compile(r"exit: [1-9][0-9]*")
+CLASSIFIER = "known-reds: scripts/keystone-known-reds.sh"
 
 
 def not_run_steps():
@@ -78,23 +91,50 @@ def cited_logs(summary_text):
     return sorted(paths)
 
 
+def same_file(a, b):
+    return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+
+
+def classified(lines):
+    """The step log path a classifier log names on line 1, or None when line 1 is no classifier line."""
+    if not norm(lines[0]).startswith(CLASSIFIER + " "):
+        return None
+    args = shlex.split(lines[0])
+    assert len(args) == 3, f"a classifier line names exactly one step log: `{lines[0]}`"
+    return args[2]
+
+
 def check(selected_text, summary_text, logs, not_run):
     """`logs` maps each cited path to its text; `not_run` names the steps no log runs. Returns the problems."""
     counts = Counter(m.group(1) for line in selected_text.splitlines() if (m := STEP_LINE.match(line)))
     bad = [f"the selector prints step `{step}` {n} times" for step, n in sorted(counts.items()) if n > 1]
     selected = step_lines(selected_text)
     ran = set()
-    for path, text in sorted(logs.items()):
-        lines = text.splitlines() or [""]
+    split = {path: text.splitlines() or [""] for path, text in logs.items()}
+    classifiers = {path: target for path, lines in split.items() if (target := classified(lines))}
+    for path, lines in sorted(split.items()):
         first = (m := STEP_LINE.match(lines[0])) and m.group(1)
         if first not in selected:
             continue
         if {norm(lines[0])} != selected[first]:
             bad.append(f"{path} runs `{lines[0]}`, the selector prints {sorted(selected[first])}")
-        elif lines[-1] == EXIT_OK:
+            continue
+        if lines[-1] == EXIT_OK:
             ran.add(first)
-        else:
-            bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `{EXIT_OK}`")
+            continue
+        if not EXIT_RED.fullmatch(lines[-1]):
+            bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `exit: <code>`")
+            continue
+        judges = [c for c, target in sorted(classifiers.items()) if same_file(target, path)]
+        if not judges:
+            others = "".join(f"; {c} classifies {t}" for c, t in sorted(classifiers.items()))
+            bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `{EXIT_OK}`, and no cited "
+                       f"classifier log has line 1 `{CLASSIFIER} {path}`{others}")
+        judged_red = [c for c in judges if split[c][-1] != EXIT_OK]
+        for c in judged_red:
+            bad.append(f"{c} classifies {path} of step `{first}`; its last line is `{split[c][-1]}`, not `{EXIT_OK}`")
+        if judges and not judged_red:
+            ran.add(first)
     bad += [f"no cited run-step log ran the selected step `{step}`" for step in sorted(set(selected) - not_run - ran)]
     for span in SPAN.findall(summary_text):
         if (m := STEP_LINE.match(span)) and m.group(1) in selected and {norm(span)} != selected[m.group(1)]:
