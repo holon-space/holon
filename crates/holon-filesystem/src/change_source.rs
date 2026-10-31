@@ -772,39 +772,89 @@ mod tests {
         assert_eq!(out, vec![(target, FileChangeKind::Create)], "{out:?}");
     }
 
-    /// End-to-end on the PRODUCTION watcher: the scenario as a user runs it.
-    #[tokio::test]
-    async fn a_live_write_back_after_a_move_out_does_not_rehome_the_moved_page() {
-        let outside = tempfile::tempdir().unwrap();
+    type Seen = Vec<(String, FileChangeKind)>;
+
+    /// How long a live test waits for FSEvents; a loaded machine delays
+    /// delivery by seconds.
+    const LIVE_BUDGET: Duration = Duration::from_secs(30);
+
+    /// Collects changes until `done` holds or [`LIVE_BUDGET`] passes. After
+    /// each quiet spell longer than [`RENAME_PAIR_WINDOW`] it rewrites
+    /// `nudge`: the pairing discloses an aged `From` only when a later relevant
+    /// event arrives. Panics when no nudge came back, so a stalled `fseventsd`
+    /// is not reported as a lost event.
+    async fn collect_until(
+        rx: &mut broadcast::Receiver<FileChange>,
+        nudge: &Path,
+        done: impl Fn(&Seen) -> bool,
+    ) -> Seen {
+        let deadline = Instant::now() + LIVE_BUDGET;
+        let quiet = RENAME_PAIR_WINDOW + Duration::from_millis(100);
+        let mut seen = Seen::new();
+        while !done(&seen) && Instant::now() < deadline {
+            match tokio::time::timeout(quiet, rx.recv()).await {
+                Ok(change) => {
+                    let change = change.expect("watcher channel closed");
+                    let name = change.path.file_name().unwrap().to_string_lossy();
+                    seen.push((name.to_string(), change.kind));
+                }
+                Err(_) => std::fs::write(nudge, b"* nudge").unwrap(),
+            }
+        }
+        let nudge_name = nudge.file_name().unwrap().to_string_lossy();
+        assert!(
+            done(&seen) || seen.iter().any(|(n, _)| *n == nudge_name),
+            "the watch stalled: no event for {nudge_name} within {LIVE_BUDGET:?}: {seen:?}"
+        );
+        seen
+    }
+
+    /// Arms a watcher on a fresh vault and returns once the watch delivers:
+    /// FSEvents drops what happens before the stream starts.
+    async fn armed_vault() -> (
+        tempfile::TempDir,
+        PathBuf,
+        NotifyWatcher,
+        broadcast::Receiver<FileChange>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let watcher = NotifyWatcher::new_unarmed().unwrap();
         let mut rx = watcher.subscribe();
         watcher.arm(&root).unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let live = root.join("live.org");
+        collect_until(&mut rx, &live, |s| s.iter().any(|(n, _)| n == "live.org")).await;
+        (dir, root, watcher, rx)
+    }
 
-        std::fs::write(root.join("page.org"), b"* seed").unwrap();
-        std::fs::write(root.join("a.org"), b"* a").unwrap();
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        while rx.try_recv().is_ok() {}
+    /// Writes `files`, then waits until FSEvents has delivered all of them:
+    /// it delivers in event order, so the `seeded.org` marker comes last.
+    async fn seed(rx: &mut broadcast::Receiver<FileChange>, root: &Path, files: &[&str]) {
+        for f in files {
+            std::fs::write(root.join(f), b"* seed").unwrap();
+        }
+        let marker = root.join("seeded.org");
+        std::fs::write(&marker, b"* seeded").unwrap();
+        collect_until(rx, &marker, |s| s.iter().any(|(n, _)| n == "seeded.org")).await;
+    }
+
+    /// End-to-end on the PRODUCTION watcher: the scenario as a user runs it.
+    #[tokio::test]
+    async fn a_live_write_back_after_a_move_out_does_not_rehome_the_moved_page() {
+        let outside = tempfile::tempdir().unwrap();
+        let (_dir, root, _watcher, mut rx) = armed_vault().await;
+        seed(&mut rx, &root, &["page.org", "a.org"]).await;
 
         std::fs::rename(root.join("a.org"), outside.path().join("moved.txt")).unwrap();
-        tokio::time::sleep(Duration::from_millis(800)).await;
         crate::fs_port::write_atomic_blocking(&root.join("page.org"), b"* new").unwrap();
-        tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        let mut seen = Vec::new();
-        while let Ok(change) = rx.try_recv() {
-            seen.push((
-                change
-                    .path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string(),
-                change.kind,
-            ));
-        }
+        let seen = collect_until(&mut rx, &root.join("nudge.org"), |s| {
+            s.iter()
+                .any(|(_, k)| matches!(k, FileChangeKind::Rename { .. }))
+                || (s.contains(&("a.org".to_string(), FileChangeKind::Remove))
+                    && s.iter().any(|(n, _)| n == "page.org"))
+        })
+        .await;
         assert!(
             !seen
                 .iter()
@@ -827,36 +877,18 @@ mod tests {
     /// bought its safety by suppressing real renames.
     #[tokio::test]
     async fn a_live_in_vault_rename_still_arrives_as_one_atomic_rename() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let watcher = NotifyWatcher::new_unarmed().unwrap();
-        let mut rx = watcher.subscribe();
-        watcher.arm(&root).unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
+        let (_dir, root, _watcher, mut rx) = armed_vault().await;
         crate::fs_port::write_atomic_blocking(&root.join("page.org"), b"* seed").unwrap();
-        std::fs::write(root.join("a.org"), b"* a").unwrap();
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        while rx.try_recv().is_ok() {}
+        seed(&mut rx, &root, &["a.org"]).await;
 
         std::fs::rename(root.join("a.org"), root.join("b.org")).unwrap();
-        tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        let mut seen = Vec::new();
-        while let Ok(change) = rx.try_recv() {
-            seen.push((
-                change
-                    .path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string(),
-                change.kind,
-            ));
-        }
+        let is_pair = |(n, k): &(String, FileChangeKind)| {
+            n == "b.org" && matches!(k, FileChangeKind::Rename { from } if from.ends_with("a.org"))
+        };
+        let seen = collect_until(&mut rx, &root.join("nudge.org"), |s| s.iter().any(is_pair)).await;
         assert!(
-            seen.iter().any(|(n, k)| n == "b.org"
-                && matches!(k, FileChangeKind::Rename { from } if from.ends_with("a.org"))),
+            seen.iter().any(is_pair),
             "the in-vault rename lost its pairing: {seen:?}"
         );
     }
