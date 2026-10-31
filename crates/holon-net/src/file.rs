@@ -25,6 +25,9 @@ use serde::Serialize;
 use serde::Serializer;
 use serde::de;
 
+use crate::exec::input_twice;
+use crate::exec::repeated_input;
+
 /// The placeholders a shell effect's log path pattern may name.
 const LOG_PLACEHOLDERS: [&str; 4] = ["transition", "subject", "attempt", "occurrence"];
 
@@ -272,6 +275,18 @@ impl TransitionSpec {
         if self.consumes.is_empty() && self.reads.is_empty() && self.inhibits.is_empty() {
             return Err(NetFileError::NoInputArc {
                 transition: transition.to_owned(),
+            });
+        }
+        if let Some((first, second, place)) = repeated_input([
+            ("consumes", &self.consumes),
+            ("reads", &self.reads),
+            ("inhibits", &self.inhibits),
+        ]) {
+            return Err(NetFileError::InputTwice {
+                transition: transition.to_owned(),
+                first,
+                second,
+                place: place.to_owned(),
             });
         }
         let arcs = [
@@ -671,6 +686,16 @@ pub enum NetFileError {
     )]
     NoInputArc { transition: String },
     #[error(
+        "transition `{transition}`: {}; a place is one input arc of a transition",
+        input_twice(.first, .second, .place)
+    )]
+    InputTwice {
+        transition: String,
+        first: &'static str,
+        second: &'static str,
+        place: String,
+    },
+    #[error(
         "{owner} `{name}`: `{field}` names the place `{place}`, which the file does not declare"
     )]
     UndeclaredPlace {
@@ -727,6 +752,7 @@ impl NetFileError {
                 Some((Section::Places, place))
             }
             Self::NoInputArc { transition }
+            | Self::InputTwice { transition, .. }
             | Self::UndeclaredEffect { transition, .. }
             | Self::EffectWithoutReceiver { transition }
             | Self::ReceiverWithoutEffect { transition }

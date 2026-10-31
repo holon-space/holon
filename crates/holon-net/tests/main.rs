@@ -22,6 +22,7 @@ mod net_load;
 mod net_load_key_comment;
 mod net_load_line;
 mod net_load_probe;
+mod net_repeated_places;
 mod net_rev2_storage;
 mod net_view;
 mod probe_facts;

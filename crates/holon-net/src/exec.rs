@@ -623,6 +623,18 @@ impl NetDef {
             }
         }
         for t in &self.transitions {
+            if let Some((first, second, place)) = repeated_input([
+                ("consumes", &t.consumes),
+                ("reads", &t.reads),
+                ("inhibits", &t.inhibits),
+            ]) {
+                return Err(LoadError::InputTwice {
+                    transition: t.name.to_string(),
+                    first,
+                    second,
+                    place: Place::new(place),
+                });
+            }
             let arcs = t.consumes.iter().chain(&t.reads).chain(&t.inhibits);
             let ports = t.facts.iter().chain(&t.on_failure).chain(&t.on_timeout);
             for p in arcs.clone().chain(ports) {
@@ -692,6 +704,31 @@ impl NetDef {
     }
 }
 
+/// The first place that two input arcs of one transition name: the field of
+/// the first arc, the field of the second, and the place.
+pub(crate) fn repeated_input<'a, P: Borrow<str>>(
+    arcs: [(&'static str, &'a [P]); 3],
+) -> Option<(&'static str, &'static str, &'a str)> {
+    let mut named = BTreeMap::new();
+    for (field, places) in arcs {
+        for place in places {
+            if let Some(first) = named.insert(place.borrow(), field) {
+                return Some((first, field, place.borrow()));
+            }
+        }
+    }
+    None
+}
+
+/// How a refusal says which input arcs name one place.
+pub(crate) fn input_twice(first: &str, second: &str, place: &str) -> String {
+    if first == second {
+        format!("`{first}` names the place `{place}` twice")
+    } else {
+        format!("`{first}` and `{second}` both name the place `{place}`")
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum LoadError {
     #[error("transition '{0}' is declared twice")]
@@ -712,6 +749,16 @@ pub enum LoadError {
     ConsumesData { transition: String, place: Place },
     #[error("transition '{transition}' has an arc on the derived place '{place}'")]
     ArcOnDerived { transition: String, place: Place },
+    #[error(
+        "transition '{transition}': {}; a place is one input arc of a transition",
+        input_twice(.first, .second, .place)
+    )]
+    InputTwice {
+        transition: String,
+        first: &'static str,
+        second: &'static str,
+        place: Place,
+    },
     #[error("auto transition '{0}' has no consume or read arc to find its subjects by")]
     NoSubject(String),
     #[error("'{0}' has a Keyed receiver but no retry count bound")]
