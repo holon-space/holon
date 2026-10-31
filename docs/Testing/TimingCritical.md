@@ -84,6 +84,7 @@ drain twice in one hold.
 | `package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)` | timing-step | `frontends/mcp/src/tools.rs:10382` | an inexact apply answers within its 5 s limit | generous |
 | `package(holon-mcp) & test(=describe_ui_deferred::fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)` | timing-step | `frontends/mcp/tests/describe_ui_deferred.rs:320` | a bounded fan-out pass finishes in < 5 s | generous |
 | `package(holon-mcp-client) & test(=oauth_bootstrap_flow::a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout)` | timing-step | `crates/holon-mcp-client/tests/oauth_bootstrap_flow.rs:899` | a 400 ms timeout returns within 5 s | generous |
+| `package(holon-net-shell) & test(=in_flight_abandon_and_the_runtime_answer_within_the_bound_while_a_pid_file_write_is_held)` | timing-step | `crates/holon-net-shell/tests/pid_file_support/mod.rs:247` | `in_flight`, `abandon` and a runtime tick each answer within `BOUND` = 200 ms while a pid-file write is held — the SLO itself | thin: red on the base at 207 ms |
 | `package(holon-loro) & test(=typed_entity_scale::shape_cost_at_ten_thousand_entities)` | release-bench | `crates/holon-loro/tests/typed_entity_scale.rs:348` | read p95 < 200 ms at 10 000 entities — the SLO itself | thin |
 | `package(holon-loro) & test(=typed_entity_scale::shape_cost_at_ten_thousand_entities)` | release-bench | `crates/holon-loro/tests/typed_entity_scale.rs:354` | write p95 < 5 ms at 10 000 entities | thin |
 

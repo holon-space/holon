@@ -8299,12 +8299,38 @@
           {
             "name": "tests",
             "path": "holon-net-shell/tests",
+            "dirs": [
+              {
+                "name": "pid_file_support",
+                "path": "holon-net-shell/tests/pid_file_support",
+                "c4_level": "unknown",
+                "description": "A runner on a tokio runtime of its own, children the test holds and ends, a pid-file write the test holds, and a crash-restart read of the pid file.",
+                "pattern_status": "planned",
+                "content": "A runner on a tokio runtime of its own, children the test holds and ends,\na pid-file write the test holds, and a crash-restart read of the pid file.",
+                "source_file": "holon-net-shell/tests/pid_file_support/mod.rs",
+                "parent": "holon-net-shell",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "probe_run.rs"
               },
               {
                 "name": "shell_effect.rs"
+              },
+              {
+                "name": "shell_log_paths.rs"
+              },
+              {
+                "name": "shell_pid_file_held_write.rs"
+              },
+              {
+                "name": "shell_pid_file_restart.rs"
               }
             ]
           }

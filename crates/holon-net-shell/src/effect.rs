@@ -21,6 +21,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::Weak;
 use std::time::Duration;
 
 use holon_net::exec::AttemptId;
@@ -100,13 +101,24 @@ pub enum ShellError {
 
 /// Runs the shell effects of one net and owns their process groups.
 pub struct Runner {
+    groups: Arc<Groups>,
+}
+
+struct Groups {
     pid_file: PathBuf,
     live: Mutex<BTreeMap<AttemptId, Live>>,
+    /// Held from the read of `live` until the rename's groups are marked filed,
+    /// so concurrent writes never share the temporary file and land in order.
+    /// Every runner of this process on `pid_file` holds the same lock.
+    write: Arc<Mutex<()>>,
 }
 
 struct Live {
     group: Group,
     abandon: Arc<Notify>,
+    /// The pid file holds the group: only then do `in_flight` and `abandon`
+    /// see it, so a restart reads every group they named.
+    filed: bool,
 }
 
 /// Why a run is over.
@@ -120,6 +132,10 @@ impl Runner {
     /// still running are the leftovers of a runner that died without reaping
     /// them; they are reported, and the file then holds this runner's runs.
     pub fn open(pid_file: PathBuf) -> Result<(Self, Vec<Group>), ShellError> {
+        // Under the write lock, so a write of an earlier runner of this process
+        // on this file is read, and never lands after this runner's own write.
+        let write = write_lock(&pid_file);
+        let held = lock_write(&write);
         let left = match fs::read_to_string(&pid_file) {
             Ok(text) => parse_groups(&text, &pid_file)?,
             Err(source) if source.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -131,10 +147,14 @@ impl Runner {
             }
         };
         let runner = Self {
-            pid_file,
-            live: Mutex::new(BTreeMap::new()),
+            groups: Arc::new(Groups {
+                write: Arc::clone(&write),
+                pid_file,
+                live: Mutex::new(BTreeMap::new()),
+            }),
         };
-        runner.write_pid_file()?;
+        runner.groups.write_held()?;
+        drop(held);
         Ok((runner, left.into_iter().filter(|g| alive(g.pgid)).collect()))
     }
 
@@ -147,9 +167,12 @@ impl Runner {
         request: &EffectRequest,
     ) -> Result<Finished, ShellError> {
         let argv = effect.command.argv.join(" ");
-        let (log, log_path) = create_log(log_path(effect, request)?)?;
+        let log_path = log_path(effect, request)?;
+        let (log, log_path) = tokio::task::spawn_blocking(move || create_log(log_path))
+            .await
+            .expect("creating a log does not panic")?;
         let (mut child, pgid) = spawn(effect, log, &log_path)?;
-        let abandon = self.register(request, pgid)?;
+        let abandon = self.register(request, pgid).await?;
         let stop = tokio::select! {
             status = child.wait() => Stop::Exited(status.map_err(|source| ShellError::Wait {
                 argv: argv.clone(),
@@ -170,22 +193,31 @@ impl Runner {
                 Ended::Killed(kill)
             }
         };
-        self.forget(request.attempt)?;
+        self.forget(request.attempt).await?;
         Ok(Finished { ended, log_path })
     }
 
-    /// The groups running right now.
+    /// The groups running right now that the pid file holds.
     pub fn in_flight(&self) -> Vec<Group> {
-        self.live()
+        self.groups
+            .live()
             .values()
+            .filter(|live| live.filed)
             .map(|live| live.group.clone())
             .collect()
     }
 
     /// Kills the group of `attempt`, whose [`Runner::run`] then reports
-    /// [`Kill::Abandoned`]. `false` when the attempt is no longer running.
+    /// [`Kill::Abandoned`] or the error that ended it. `false` when the attempt
+    /// is no longer running or the pid file does not hold its group yet.
     pub fn abandon(&self, attempt: AttemptId) -> bool {
-        let Some(abandon) = self.live().get(&attempt).map(|l| Arc::clone(&l.abandon)) else {
+        let Some(abandon) = self
+            .groups
+            .live()
+            .get(&attempt)
+            .filter(|l| l.filed)
+            .map(|l| Arc::clone(&l.abandon))
+        else {
             return false;
         };
         abandon.notify_one();
@@ -194,9 +226,13 @@ impl Runner {
 
     /// Takes the group into the pid file, which is what a restart reads: a
     /// run whose group the file cannot hold is killed.
-    fn register(&self, request: &EffectRequest, pgid: Pgid) -> Result<Arc<Notify>, ShellError> {
+    async fn register(
+        &self,
+        request: &EffectRequest,
+        pgid: Pgid,
+    ) -> Result<Arc<Notify>, ShellError> {
         let abandon = Arc::new(Notify::new());
-        self.live().insert(
+        self.groups.live().insert(
             request.attempt,
             Live {
                 group: Group {
@@ -206,50 +242,103 @@ impl Runner {
                     subject: request.subject.to_string(),
                 },
                 abandon: Arc::clone(&abandon),
+                filed: false,
             },
         );
-        match self.write_pid_file() {
-            Ok(()) => Ok(abandon),
-            Err(e) => {
+        let attempt = request.attempt;
+        // The kill runs with the write, so a run dropped during it still kills
+        // a group the file cannot hold.
+        self.blocking(move |groups| {
+            groups.write_pid_file().inspect_err(|_| {
                 signal_group(pgid, libc::SIGKILL);
-                self.live().remove(&request.attempt);
-                Err(e)
-            }
-        }
+                groups.live().remove(&attempt);
+            })
+        })
+        .await?;
+        Ok(abandon)
     }
 
-    fn forget(&self, attempt: AttemptId) -> Result<(), ShellError> {
-        self.live().remove(&attempt);
-        self.write_pid_file()
+    async fn forget(&self, attempt: AttemptId) -> Result<(), ShellError> {
+        self.groups.live().remove(&attempt);
+        self.blocking(Groups::write_pid_file).await
     }
 
+    /// On the blocking pool: a slow pid file stalls neither the async worker
+    /// nor `in_flight` and `abandon`.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        write: impl FnOnce(&Groups) -> T + Send + 'static,
+    ) -> T {
+        let groups = Arc::clone(&self.groups);
+        tokio::task::spawn_blocking(move || write(&groups))
+            .await
+            .expect("writing the pid file does not panic")
+    }
+}
+
+impl Groups {
     fn live(&self) -> MutexGuard<'_, BTreeMap<AttemptId, Live>> {
         self.live
             .lock()
             .expect("the shell effect's group lock is poisoned")
     }
 
-    /// Holds the group lock until the rename, so concurrent runs never share
-    /// the temporary file and the last rename carries the latest groups.
     fn write_pid_file(&self) -> Result<(), ShellError> {
-        let groups = self.live();
-        let text: String = groups
-            .values()
-            .map(|live| {
+        let _held = lock_write(&self.write);
+        self.write_held()
+    }
+
+    /// Blocks on the file system; the caller holds `write`. The group lock is
+    /// held only to read the groups and to mark them filed after the rename,
+    /// so filing does not depend on the run that waits for it.
+    fn write_held(&self) -> Result<(), ShellError> {
+        let (text, written): (String, Vec<_>) = self
+            .live()
+            .iter()
+            .map(|(attempt, live)| {
                 let g = &live.group;
                 let line = serde_json::to_string(&(g.pgid, g.attempt.0, &g.transition, &g.subject))
                     .expect("a group is serializable");
-                line + "\n"
+                (line + "\n", (*attempt, Arc::clone(&live.abandon)))
             })
-            .collect();
+            .unzip();
         let temp = self.pid_file.with_extension("writing");
         let failed = |path: &Path, source: io::Error| ShellError::PidFile {
             path: path.to_owned(),
             source,
         };
         fs::write(&temp, text).map_err(|source| failed(&temp, source))?;
-        fs::rename(&temp, &self.pid_file).map_err(|source| failed(&self.pid_file, source))
+        fs::rename(&temp, &self.pid_file).map_err(|source| failed(&self.pid_file, source))?;
+        let mut live = self.live();
+        for (attempt, abandon) in written {
+            // A run with the same attempt id may have replaced the entry since.
+            if let Some(entry) = live
+                .get_mut(&attempt)
+                .filter(|entry| Arc::ptr_eq(&entry.abandon, &abandon))
+            {
+                entry.filed = true;
+            }
+        }
+        Ok(())
     }
+}
+
+fn lock_write(write: &Mutex<()>) -> MutexGuard<'_, ()> {
+    write
+        .lock()
+        .expect("the shell effect's pid-file lock is poisoned")
+}
+
+fn write_lock(pid_file: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: Mutex<BTreeMap<PathBuf, Weak<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+    let mut locks = LOCKS.lock().expect("the pid-file lock table is poisoned");
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = locks
+        .get(pid_file)
+        .and_then(Weak::upgrade)
+        .unwrap_or_default();
+    locks.insert(pid_file.to_owned(), Arc::downgrade(&lock));
+    lock
 }
 
 /// Ends a group this runner did not spawn: there is no child to reap.

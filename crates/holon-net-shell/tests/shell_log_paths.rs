@@ -15,6 +15,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use holon_net::exec::AttemptId;
 use holon_net::exec::Content;
@@ -41,6 +42,10 @@ const DEPTH: usize = 16;
 /// Longest file name and path the host accepts, in bytes.
 const NAME_MAX: usize = 255;
 const PATH_MAX: usize = 1023;
+
+/// How long a started run may take to create its log on the blocking pool:
+/// far above one file create, so only a run that never creates one hits it.
+const LOG_CREATED: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Placeholder {
@@ -291,6 +296,13 @@ fn entries(dir: &Path) -> BTreeSet<PathBuf> {
         }
     }
     found
+}
+
+fn files(dir: &Path) -> BTreeSet<PathBuf> {
+    entries(dir)
+        .into_iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()))
+        .collect()
 }
 
 fn value_of(request: &EffectRequest, placeholder: Placeholder) -> String {
@@ -1040,13 +1052,23 @@ impl World {
             }
         }
         let (effect, run) = self.sandbox.effect(pattern.text(), tail, timeout);
+        let logs_before = files(&self.sandbox.work);
         let handle = {
             let runner = Arc::clone(&runner);
             let request = request.clone();
             tokio::spawn(async move { runner.run(&effect, &request).await })
         };
-        // The run creates its log on its first poll, before anything else is planted.
-        tokio::task::yield_now().await;
+        // Every earlier run has its log, so a new file under the working dir is
+        // this run's; it is there before anything else is planted.
+        let deadline = tokio::time::Instant::now() + LOG_CREATED;
+        while !handle.is_finished() && files(&self.sandbox.work) == logs_before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the run of pattern {:?} created no log within {LOG_CREATED:?}",
+                pattern.text()
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         Open {
             handle,
             runner,
