@@ -3,12 +3,12 @@
 //! No open deletes a row. A file this binary cannot use as it is loses only
 //! what it computed: its materialized views, rebuilt from the tables they read,
 //! and the `block_derived` cache. That happens when the file was built with a
-//! different [`scalar_fns`] set, or when the engine could not load one of its
-//! views. A damaged file is moved aside, never deleted: the shared-WAL
-//! coordination file or the write-ahead log alone when the error points there,
-//! else every file of the database. Every engine error of the open, from the
-//! file open to the last read, is classified the same way; any failure other
-//! than damage leaves the files where they are.
+//! different [`scalar_fns`] set or engine view-state layout, or when the engine
+//! could not load one of its views. A damaged file is moved aside, never
+//! deleted: the shared-WAL coordination file or the write-ahead log alone when
+//! the error points there, else every file of the database. Every engine error
+//! of the open, from the file open to the last read, is classified the same
+//! way; any failure other than damage leaves the files where they are.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -145,6 +145,9 @@ impl From<OpenFailed> for StorageError {
 pub struct BootOpenOutcome(pub OpenOutcome);
 
 const FN_SET_TABLE: &str = "holon_db_fn_set";
+/// The layout of the engine's stored view state. The engine refuses to maintain
+/// a view whose state another layout wrote, so an open drops such views.
+const VIEW_STATE: &str = "view-state/exact-real-sum";
 /// Values computed with the functions; the derived-field reconciler refills it.
 const DERIVED_CACHE_TABLE: &str = "block_derived";
 
@@ -853,22 +856,29 @@ fn unusable_reason(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Option<String>>
             )));
         }
     };
-    if stored != wanted {
+    let (stored_fns, stored_state) = stored.rsplit_once(';').unwrap_or((&stored, ""));
+    if stored_fns != wanted {
         return Ok(Some(format!(
-            "it was built with the scalar functions [{stored}], this binary registers [{wanted}]"
+            "it was built with the scalar functions [{stored_fns}], this binary registers [{wanted}]"
         )));
     }
     let unusable: Vec<String> = unloadable_views(&conn)?
         .into_iter()
         .map(|(name, why)| format!("{name} ({why})"))
         .collect();
-    if unusable.is_empty() {
-        return Ok(None);
+    if !unusable.is_empty() {
+        return Ok(Some(format!(
+            "the engine cannot load the materialized views {}",
+            unusable.join(", ")
+        )));
     }
-    Ok(Some(format!(
-        "the engine cannot load the materialized views {}",
-        unusable.join(", ")
-    )))
+    if stored_state != VIEW_STATE {
+        return Ok(Some(format!(
+            "its materialized views hold the engine state [{stored_state}], this engine \
+             maintains only [{VIEW_STATE}]"
+        )));
+    }
+    Ok(None)
 }
 
 enum StoredSignature {
@@ -900,17 +910,19 @@ static CRASH_AFTER_DELETE: std::sync::atomic::AtomicBool =
 /// One transaction: a crash inside it leaves the previous record.
 fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<()> {
     let conn = connect(db)?;
-    let wanted = scalar_fns::signature(fns);
-    match stored_signature(&conn)? {
-        StoredSignature::Recorded(stored) if stored == wanted => return Ok(()),
-        // No table reads as the empty set.
-        StoredSignature::Absent if wanted.is_empty() => return Ok(()),
-        _ => {}
+    if matches!(stored_signature(&conn)?, StoredSignature::Recorded(stored) if stored == record(fns))
+    {
+        return Ok(());
     }
     let run = |sql: &str| conn.execute(sql).map_err(engine(sql));
     run("BEGIN IMMEDIATE")?;
     write_signature(&conn, fns)?;
     run("COMMIT")
+}
+
+/// What a file built by `fns` on this engine holds in [`FN_SET_TABLE`].
+fn record(fns: &[ScalarFn]) -> String {
+    format!("{};{VIEW_STATE}", scalar_fns::signature(fns))
 }
 
 /// Inside the caller's transaction.
@@ -928,7 +940,7 @@ fn write_signature(conn: &Arc<Connection>, fns: &[ScalarFn]) -> Step<()> {
     let mut stmt = conn.prepare(&insert).map_err(engine(&insert))?;
     stmt.bind_at(
         1.try_into().expect("1 is non-zero"),
-        Value::build_text(scalar_fns::signature(fns)),
+        Value::build_text(record(fns)),
     )
     .map_err(engine(format!("{insert}: bind")))?;
     stmt.run_ignore_rows().map_err(engine(&insert))
@@ -1051,10 +1063,11 @@ mod tests {
         }
         let db = open(&path, &[], WhenHeld::Wait).unwrap().0;
         assert_eq!(count(&db, "SELECT count(*) FROM t"), 1);
-        assert!(
-            !has(&db, "table", FN_SET_TABLE),
-            "the empty set needs no record"
-        );
+        let conn = connect(&db).unwrap();
+        assert!(matches!(
+            stored_signature(&conn).unwrap(),
+            StoredSignature::Recorded(s) if s == record(&[])
+        ));
     }
 
     #[test]
@@ -1075,7 +1088,7 @@ mod tests {
         let conn = connect(&db).unwrap();
         assert!(matches!(
             stored_signature(&conn).unwrap(),
-            StoredSignature::Recorded(s) if s == "holon_test_double/1/v1"
+            StoredSignature::Recorded(s) if s == record(&[DOUBLE])
         ));
     }
 
@@ -1110,7 +1123,7 @@ mod tests {
         let conn = connect(&db).unwrap();
         assert!(matches!(
             stored_signature(&conn).unwrap(),
-            StoredSignature::Recorded(s) if s == "holon_test_double/1/v2"
+            StoredSignature::Recorded(s) if s == record(&[double_v2])
         ));
         assert!(!has(&db, "view", "v"), "the next open must drop the view");
         assert_eq!(count(&db, "SELECT count(*) FROM t"), 2);
@@ -1132,7 +1145,7 @@ mod tests {
         let conn = connect(&db).unwrap();
         assert!(matches!(
             stored_signature(&conn).unwrap(),
-            StoredSignature::Recorded(s) if s == scalar_fns::signature(scalar_fns::ALL)
+            StoredSignature::Recorded(s) if s == record(scalar_fns::ALL)
                 && s.contains("holon_div/2/v2")
         ));
     }
@@ -1154,11 +1167,7 @@ mod tests {
                 let db = open(&path, &[], WhenHeld::Wait).unwrap().0;
                 exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
                 exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
-                exec(
-                    &db,
-                    &format!("CREATE TABLE {FN_SET_TABLE} (signature TEXT NOT NULL)"),
-                )
-                .unwrap();
+                exec(&db, &format!("DELETE FROM {FN_SET_TABLE}")).unwrap();
                 for value in torn {
                     exec(
                         &db,
@@ -1179,7 +1188,7 @@ mod tests {
             assert!(
                 matches!(
                     stored_signature(&conn).unwrap(),
-                    StoredSignature::Recorded(s) if s == "holon_test_double/1/v1"
+                    StoredSignature::Recorded(s) if s == record(&[DOUBLE])
                 ),
                 "{case}: the record must be written again"
             );
@@ -1274,7 +1283,7 @@ mod tests {
         assert_eq!(count(&db, "SELECT count(*) FROM d"), 1);
         assert!(matches!(
             stored_signature(&conn).unwrap(),
-            StoredSignature::Recorded(s) if s == "holon_test_double/1/v1"
+            StoredSignature::Recorded(s) if s == record(&[DOUBLE])
         ));
         exec(&db, "INSERT INTO t (n) VALUES (3)").expect("the kept view still maintains");
         assert_eq!(count(&db, "SELECT sum(d) FROM v"), 12);
