@@ -13,6 +13,7 @@ pub fn value_to_sql_literal(value: &Value) -> Result<String, NotJson> {
         Value::String(s) | Value::DateTime(s) | Value::Json(s) => {
             format!("'{}'", s.replace('\'', "''"))
         }
+        Value::Quantity(cell) => format!("'{}'", cell.original().replace('\'', "''")),
         // A removal is not a value: `prepare_update`/`set_field` consume the
         // sentinel and emit `json_remove`, so one reaching a literal means the
         // intent was about to be written as data.

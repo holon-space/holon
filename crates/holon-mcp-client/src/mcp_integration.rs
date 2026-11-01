@@ -861,7 +861,7 @@ async fn finish_integration(
             let columns: Vec<(String, String)> = entity_config
                 .schema
                 .iter()
-                .map(|f| (f.name.clone(), f.sql_type.clone()))
+                .map(|f| (f.name.clone(), f.column_type()))
                 .collect();
 
             if columns.is_empty() {

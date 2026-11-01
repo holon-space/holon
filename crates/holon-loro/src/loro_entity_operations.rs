@@ -514,6 +514,7 @@ fn column_to_loro(field: &str, value: &Value) -> anyhow::Result<LoroValue> {
         Value::Float(f) => LoroValue::from(*f),
         Value::Boolean(b) => LoroValue::from(*b),
         Value::Null => LoroValue::Null,
+        Value::Quantity(q) => LoroValue::from(q.original()),
         other => anyhow::bail!("column '{field}' cannot hold {other:?}"),
     })
 }
@@ -723,5 +724,16 @@ mod tests {
             err.to_string().contains("is not a valid entity name"),
             "{err}"
         );
+    }
+
+    proptest::proptest! {
+        // `tsl_count` reads every text, so any string is a quantity text.
+        #[test]
+        fn a_quantity_column_keeps_its_original_text(text in ".*") {
+            let format = holon_api::FieldFormat::named("tsl_count").unwrap();
+            let cell = holon_api::QuantityCell::parse(format, text.clone()).unwrap();
+            let stored = column_to_loro("count", &Value::Quantity(cell)).unwrap();
+            proptest::prop_assert_eq!(column_from_loro("count", &stored), Value::String(text));
+        }
     }
 }

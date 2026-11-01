@@ -16,6 +16,7 @@ members = [
   "crates/holon-net-shell",
   "crates/holon-netd",
   "crates/holon-pattern",
+  "crates/holon-lens",
   "crates/holon-rules",
   "crates/holon-loro-wiring",
   "crates/holon-org-format",
@@ -162,6 +163,7 @@ indexmap = "2.12"
 # budget is reported as an error naming the doc, not an unexplained hang.
 parking_lot = "0.12"
 regex = "1.10"
+regex-syntax = "0.8"
 rand = "0.9"
 once_cell = "1.19"
 similar = "2.7"
@@ -293,6 +295,7 @@ holon-net = { path = "crates/holon-net" }
 holon-net-layout = { path = "crates/holon-net-layout" }
 holon-net-shell = { path = "crates/holon-net-shell" }
 holon-pattern = { path = "crates/holon-pattern" }
+holon-lens = { path = "crates/holon-lens" }
 holon-petri = { path = "crates/holon-petri" }
 holon-rules = { path = "crates/holon-rules" }
 holon-loro-wiring = { path = "crates/holon-loro-wiring" }

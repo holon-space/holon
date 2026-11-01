@@ -215,7 +215,9 @@ pub fn deterministic_intent_key(
 /// objects are rendered with sorted keys so map iteration order never leaks in.
 fn canonical_value(v: &Value) -> String {
     match v {
+        // A quantity cell is its stored text, typed or not.
         Value::String(s) => format!("s:{s}"),
+        Value::Quantity(cell) => format!("s:{}", cell.original()),
         Value::Integer(i) => format!("i:{i}"),
         Value::Float(f) => format!("f:{f}"),
         Value::Boolean(b) => format!("b:{b}"),

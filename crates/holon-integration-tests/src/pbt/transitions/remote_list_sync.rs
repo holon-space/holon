@@ -33,7 +33,19 @@ use crate::pbt::remote_list_fixture::CAT;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 
-const AMOUNTS: &[&str] = &["2kg", "500g", "0,5 l", "4 Zehen", "1", "6"];
+const AMOUNTS: &[&str] = &[
+    "2kg",
+    "500g",
+    "0,5 l",
+    "4 Zehen",
+    "1",
+    "6",
+    "",
+    "1,50",
+    "0,5Kg + 2 Zehen",
+    "2 1/2 Tassen",
+    "eine Prise",
+];
 
 /// Draw weights. The other transitions together weigh over a thousand and a
 /// case runs a few dozen steps at most, so a lower weight leaves most cases

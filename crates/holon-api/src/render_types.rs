@@ -982,6 +982,7 @@ fn escape_rhai_string(s: &str) -> String {
 fn value_to_rhai(value: &Value) -> String {
     match value {
         Value::String(s) => format!("\"{}\"", escape_rhai_string(s)),
+        Value::Quantity(cell) => format!("\"{}\"", escape_rhai_string(cell.original())),
         Value::Integer(n) => n.to_string(),
         Value::Float(f) => format!("{f:?}"),
         Value::Boolean(b) => b.to_string(),

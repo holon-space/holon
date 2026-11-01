@@ -284,6 +284,9 @@ fn as_json(value: &Value) -> serde_json::Value {
         }
         Value::Null => serde_json::Value::Null,
         Value::Removed(_) => panic!("as_json: the removal sentinel is not a certifiable value"),
+        Value::Quantity(cell) => {
+            panic!("as_json: a quantity cell is not a property value: {cell:?}")
+        }
     }
 }
 

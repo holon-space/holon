@@ -34,6 +34,7 @@ chrono.workspace = true
 holon-expr.workspace = true
 holon-macros.workspace = true
 holon-pattern.workspace = true
+holon-lens.workspace = true
 rhai = { version = "1", features = ["sync", "internals"] }
 opentelemetry.workspace = true
 thiserror.workspace = true

@@ -126,6 +126,10 @@ fn hash_value(v: &holon_api::Value, h: &mut impl std::hash::Hasher) {
     std::mem::discriminant(v).hash(h);
     match v {
         Value::String(s) | Value::DateTime(s) | Value::Json(s) => s.hash(h),
+        Value::Quantity(cell) => {
+            cell.format().format().name().hash(h);
+            cell.original().hash(h);
+        }
         Value::Integer(i) => i.hash(h),
         Value::Float(f) => f.to_bits().hash(h),
         Value::Boolean(b) => b.hash(h),

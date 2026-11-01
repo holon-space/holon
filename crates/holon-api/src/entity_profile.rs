@@ -500,6 +500,7 @@ fn eval_condition(
 pub fn value_to_dynamic(value: &Value) -> rhai::Dynamic {
     match value {
         Value::String(s) => rhai::Dynamic::from(s.clone()),
+        Value::Quantity(cell) => rhai::Dynamic::from(cell.original().to_string()),
         Value::Integer(i) => rhai::Dynamic::from(*i),
         Value::Float(f) => rhai::Dynamic::from(*f),
         Value::Boolean(b) => rhai::Dynamic::from(*b),

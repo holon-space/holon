@@ -934,7 +934,7 @@
         "description": "Shared value types, Operation descriptors, Change/CDC types, and entity conversion traits. No frontend deps.",
         "pattern": "Shared Kernel",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Shared Kernel\n@c4 uses holon-expr \"compiled Rhai expressions\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n\nShared value types, Operation descriptors, Change/CDC types, and entity\nconversion traits. No frontend deps.",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Shared Kernel\n@c4 uses holon-expr \"compiled Rhai expressions\" \"Rust\"\n@c4 uses holon-macros \"entity/operation derive macros\" \"Rust\"\n@c4 uses holon-pattern \"guard AST & parser\" \"Rust\"\n@c4 uses holon-lens \"field text formats\" \"Rust\"\n\nShared value types, Operation descriptors, Change/CDC types, and entity\nconversion traits. No frontend deps.",
         "source_file": "holon-api/src/lib.rs",
         "layer": "Core",
         "relationships": [
@@ -951,6 +951,11 @@
           {
             "target": "holon-pattern",
             "label": "guard AST & parser",
+            "protocol": "Rust"
+          },
+          {
+            "target": "holon-lens",
+            "label": "field text formats",
             "protocol": "Rust"
           }
         ],
@@ -1811,6 +1816,9 @@
                 "name": "is_def_var_identifier_corpus.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "person_profile_display_name_seat_a.rs"
               },
               {
@@ -2494,6 +2502,9 @@
                 "name": "condition_replay_order.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "release_build_unwinds.rs"
               },
               {
@@ -2883,6 +2894,9 @@
               },
               {
                 "name": "live_data_entries_ordering_probe.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "private_field_owners.rs"
@@ -5579,6 +5593,12 @@
               {
                 "name": "boot_suite",
                 "path": "holon-integration-tests/tests/boot_suite",
+                "c4_level": "unknown",
+                "description": "Cold-boot, restart, and boot-time ingest regressions.",
+                "pattern_status": "planned",
+                "content": "Cold-boot, restart, and boot-time ingest regressions.\n\nSix members install a `tracing_subscriber::fmt()` subscriber of their own\n(`init_tracing`), which claims the process-global default. That is why no\n`SpanCollector`-based test may join this suite — see `span_capture_suite`.",
+                "source_file": "holon-integration-tests/tests/boot_suite/mod.rs",
+                "parent": "holon-integration-tests",
                 "files": [
                   {
                     "name": "boot_projector_gated_on_scan.rs"
@@ -5605,13 +5625,13 @@
                     "name": "junction_survives_reboot_repro.rs"
                   },
                   {
-                    "name": "main.rs"
-                  },
-                  {
                     "name": "marks_lengthening_batch_no_quarantine.rs"
                   },
                   {
                     "name": "mcp_mirrored_entity_write_authority.rs"
+                  },
+                  {
+                    "name": "mod.rs"
                   },
                   {
                     "name": "pairing_deferred_reimport_boots.rs"
@@ -5630,6 +5650,12 @@
               {
                 "name": "catalog_suite",
                 "path": "holon-integration-tests/tests/catalog_suite",
+                "c4_level": "unknown",
+                "description": "Transition-catalog, step-vocabulary, and replay-harness meta-tests — the tests whose subject is the PBT machinery itself rather than a product surface.",
+                "pattern_status": "planned",
+                "content": "Transition-catalog, step-vocabulary, and replay-harness meta-tests — the\ntests whose subject is the PBT machinery itself rather than a product\nsurface.",
+                "source_file": "holon-integration-tests/tests/catalog_suite/mod.rs",
+                "parent": "holon-integration-tests",
                 "files": [
                   {
                     "name": "advice_dismiss_prod_session_wiring.rs"
@@ -5668,7 +5694,7 @@
                     "name": "logseq_parity_replay.rs"
                   },
                   {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   },
                   {
                     "name": "no_tracked_proptest_regressions.rs"
@@ -5693,6 +5719,12 @@
               {
                 "name": "editing_suite",
                 "path": "holon-integration-tests/tests/editing_suite",
+                "c4_level": "unknown",
+                "description": "Block editing operations: split, merge, undo/redo, task-state cycling.",
+                "pattern_status": "planned",
+                "content": "Block editing operations: split, merge, undo/redo, task-state cycling.",
+                "source_file": "holon-integration-tests/tests/editing_suite/mod.rs",
+                "parent": "holon-integration-tests",
                 "files": [
                   {
                     "name": "cycle_task_state_cold_boot_reingest.rs"
@@ -5710,10 +5742,10 @@
                     "name": "empty_question_loro_arm.rs"
                   },
                   {
-                    "name": "main.rs"
+                    "name": "merge_blocks_pbt.rs"
                   },
                   {
-                    "name": "merge_blocks_pbt.rs"
+                    "name": "mod.rs"
                   },
                   {
                     "name": "multiline_property_write_boundary.rs"
@@ -5818,6 +5850,12 @@
               {
                 "name": "frontend_suite",
                 "path": "holon-integration-tests/tests/frontend_suite",
+                "c4_level": "unknown",
+                "description": "Frontend surface: panels, sidebar, perspectives, integrations rows, layout.",
+                "pattern_status": "planned",
+                "content": "Frontend surface: panels, sidebar, perspectives, integrations rows, layout.",
+                "source_file": "holon-integration-tests/tests/frontend_suite/mod.rs",
+                "parent": "holon-integration-tests",
                 "files": [
                   {
                     "name": "fire_and_forget_dispatch_disclosure.rs"
@@ -5853,7 +5891,7 @@
                     "name": "local_ui_state_precedence.rs"
                   },
                   {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   },
                   {
                     "name": "navigate_back_keeps_panel_populated.rs"
@@ -5890,6 +5928,12 @@
               {
                 "name": "loro_suite",
                 "path": "holon-integration-tests/tests/loro_suite",
+                "c4_level": "unknown",
+                "description": "Loro CRDT store: projection, persistence, restart, and sync-controller tests.",
+                "pattern_status": "planned",
+                "content": "Loro CRDT store: projection, persistence, restart, and sync-controller\ntests.",
+                "source_file": "holon-integration-tests/tests/loro_suite/mod.rs",
+                "parent": "holon-integration-tests",
                 "files": [
                   {
                     "name": "loro_block_type_invalid_values.rs"
@@ -5970,7 +6014,7 @@
                     "name": "loro_writes_on_unheld_blocks.rs"
                   },
                   {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   },
                   {
                     "name": "projection_harness.rs"
@@ -5989,6 +6033,12 @@
               {
                 "name": "org_suite",
                 "path": "holon-integration-tests/tests/org_suite",
+                "c4_level": "unknown",
+                "description": "Org parse / render / write-back and vault-ingest tests.",
+                "pattern_status": "planned",
+                "content": "Org parse / render / write-back and vault-ingest tests.",
+                "source_file": "holon-integration-tests/tests/org_suite/mod.rs",
+                "parent": "holon-integration-tests",
                 "files": [
                   {
                     "name": "bidirectional_sync.rs"
@@ -6021,7 +6071,7 @@
                     "name": "logseq_org_vault_ingest.rs"
                   },
                   {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   },
                   {
                     "name": "multiline_serializer_test.rs"
@@ -6049,6 +6099,12 @@
               {
                 "name": "span_capture_suite",
                 "path": "holon-integration-tests/tests/span_capture_suite",
+                "c4_level": "unknown",
+                "description": "Tests that read back ERROR events and background-worker panics through `test_tracing::SpanCollector`.",
+                "pattern_status": "planned",
+                "content": "Tests that read back ERROR events and background-worker panics through\n`test_tracing::SpanCollector`.\n\n`SpanCollector::global()` installs the process-global subscriber carrying\n`ErrorCaptureLayer` and PANICS if anything else claimed the global default\nfirst. So no member of this suite may install a subscriber of its own, and\nno test that installs one (see `boot_suite`) may move in here. What the\ncollector CAPTURES is per-`TestScope`, not global, so these tests still run\nin parallel in one process.",
+                "source_file": "holon-integration-tests/tests/span_capture_suite/mod.rs",
+                "parent": "holon-integration-tests",
                 "files": [
                   {
                     "name": "declared_column_parity.rs"
@@ -6063,7 +6119,7 @@
                     "name": "interaction_trace_connectivity.rs"
                   },
                   {
-                    "name": "main.rs"
+                    "name": "mod.rs"
                   },
                   {
                     "name": "periodic_reads_outside_budget.rs"
@@ -6085,6 +6141,12 @@
               {
                 "name": "store_suite",
                 "path": "holon-integration-tests/tests/store_suite",
+                "c4_level": "unknown",
+                "description": "Turso store surface: materialized views, watches, FTS, and query equivalence.",
+                "pattern_status": "planned",
+                "content": "Turso store surface: materialized views, watches, FTS, and query\nequivalence.",
+                "source_file": "holon-integration-tests/tests/store_suite/mod.rs",
+                "parent": "holon-integration-tests",
                 "files": [
                   {
                     "name": "chat_view_message_join.rs"
@@ -6093,13 +6155,13 @@
                     "name": "fts_query_block_e2e.rs"
                   },
                   {
-                    "name": "main.rs"
-                  },
-                  {
                     "name": "matview_duplicate_row_repro.rs"
                   },
                   {
                     "name": "matview_reboot_duplicate_repro.rs"
+                  },
+                  {
+                    "name": "mod.rs"
                   },
                   {
                     "name": "query_equivalence_pbt.rs"
@@ -6197,6 +6259,9 @@
               },
               {
                 "name": "logseq_db_import_store.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "mcp_add_subtask_edge_fields.rs"
@@ -6333,6 +6398,9 @@
                 "path": "holon-kitchen/assets/types",
                 "files": [
                   {
+                    "name": "cookware.yaml"
+                  },
+                  {
                     "name": "ingredient_use.yaml"
                   },
                   {
@@ -6343,6 +6411,12 @@
                   },
                   {
                     "name": "recipe_profile.yaml"
+                  },
+                  {
+                    "name": "recipe_section.yaml"
+                  },
+                  {
+                    "name": "recipe_timer.yaml"
                   },
                   {
                     "name": "shopping_item.yaml"
@@ -6490,6 +6564,90 @@
         ]
       },
       {
+        "name": "holon-lens",
+        "path": "holon-lens",
+        "c4_level": "component",
+        "description": "Declared bidirectional text formats (string lenses). One YAML declaration gives a parser, a printer that keeps unchanged parts of the original text byte-for-byte, and a printer for new values. A format binds a TEXT column to the `quantity` value type, defined here.",
+        "pattern": "Interpreter",
+        "pattern_status": "planned",
+        "content": "@c4 component\n@c4 layer Core\nPattern: Interpreter\n\nDeclared bidirectional text formats (string lenses). One YAML declaration\ngives a parser, a printer that keeps unchanged parts of the original text\nbyte-for-byte, and a printer for new values. A format binds a TEXT column\nto the `quantity` value type, defined here.",
+        "source_file": "holon-lens/src/lib.rs",
+        "layer": "Core",
+        "dirs": [
+          {
+            "name": "examples",
+            "path": "holon-lens/examples",
+            "files": [
+              {
+                "name": "measure.rs"
+              }
+            ]
+          },
+          {
+            "name": "formats",
+            "path": "holon-lens/formats",
+            "files": [
+              {
+                "name": "cooklang_quantity.yaml"
+              },
+              {
+                "name": "tsl_count.yaml"
+              }
+            ]
+          },
+          {
+            "name": "src",
+            "path": "holon-lens/src",
+            "files": [
+              {
+                "name": "catalog.rs"
+              },
+              {
+                "name": "cell.rs"
+              },
+              {
+                "name": "format.rs"
+              },
+              {
+                "name": "lang.rs"
+              },
+              {
+                "name": "lens.rs"
+              },
+              {
+                "name": "lib.rs"
+              },
+              {
+                "name": "quantity.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-lens/tests",
+            "files": [
+              {
+                "name": "arithmetic.rs"
+              },
+              {
+                "name": "declarations.rs"
+              },
+              {
+                "name": "examples.rs"
+              },
+              {
+                "name": "props.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
         "name": "holon-logseq-db",
         "path": "holon-logseq-db",
         "c4_level": "component",
@@ -6593,6 +6751,9 @@
               },
               {
                 "name": "kvs_round_trip.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "profile_certification.rs"
@@ -6926,6 +7087,9 @@
                 "name": "layout_migration.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "pairing_boot_degraded.rs"
               },
               {
@@ -6972,6 +7136,9 @@
               },
               {
                 "name": "typed_entity_scale.rs"
+              },
+              {
+                "name": "typed_reads_register_no_root.rs"
               },
               {
                 "name": "undo_history_trim_probe.rs"
@@ -7472,6 +7639,9 @@
                 "name": "logseq_ingest.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "obsidian_ingest.rs"
               },
               {
@@ -7742,6 +7912,9 @@
                 "name": "introduced_secret_namespace.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "mcp_fanout.rs"
               },
               {
@@ -7917,6 +8090,9 @@
                 "name": "discovery_incomplete.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "mcp_mock_e2e.rs"
               }
             ]
@@ -8064,6 +8240,15 @@
             "path": "holon-net/tests",
             "dirs": [
               {
+                "name": "caller_inputs",
+                "path": "holon-net/tests/caller_inputs",
+                "files": [
+                  {
+                    "name": "forms.rs"
+                  }
+                ]
+              },
+              {
                 "name": "exec_support",
                 "path": "holon-net/tests/exec_support",
                 "c4_level": "unknown",
@@ -8112,6 +8297,9 @@
                 "name": "analysis_soundness.rs"
               },
               {
+                "name": "caller_inputs.rs"
+              },
+              {
                 "name": "catalog_totality.rs"
               },
               {
@@ -8157,6 +8345,9 @@
                 "name": "hop_predicate_agreement.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "net_file.rs"
               },
               {
@@ -8170,6 +8361,9 @@
               },
               {
                 "name": "net_load_probe.rs"
+              },
+              {
+                "name": "net_repeated_places.rs"
               },
               {
                 "name": "net_rev2_storage.rs"
@@ -8187,6 +8381,9 @@
                 "name": "probe_retract_parked.rs"
               },
               {
+                "name": "producer_priority.rs"
+              },
+              {
                 "name": "refinement_agreement.rs"
               },
               {
@@ -8194,6 +8391,9 @@
               },
               {
                 "name": "uft_lower.rs"
+              },
+              {
+                "name": "verify_priority_probe.rs"
               },
               {
                 "name": "work_runtime_replay.rs"
@@ -8591,6 +8791,9 @@
                 "name": "inline_marks_proptest.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "org_faithful_probe.rs"
               },
               {
@@ -8759,6 +8962,9 @@
                 "name": "delete_during_first_ingest.rs"
               },
               {
+                "name": "deleted_page_is_not_rewritten_from_a_stale_page_mirror.rs"
+              },
+              {
                 "name": "directory_companion_adoption.rs"
               },
               {
@@ -8787,6 +8993,9 @@
               },
               {
                 "name": "initial_scan_cost.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "name_chain_error_propagation.rs"
@@ -8870,12 +9079,19 @@
         "name": "holon-pattern",
         "path": "holon-pattern",
         "c4_level": "component",
-        "description": "The dual-evaluated guard `Pattern` AST (ADR 0024 / ADR 0031) and the dynamic `Value` it embeds. A leaf crate: `holon-macros` may depend on it to parse guard strings at macro-expansion time, which `holon-api` (a dependent of `holon-macros`) can never allow.",
+        "description": "The dual-evaluated guard `Pattern` AST (ADR 0024 / ADR 0031) and the dynamic `Value` it embeds. Sits below `holon-api`: `holon-macros` may depend on it to parse guard strings at macro-expansion time, which `holon-api` (a dependent of `holon-macros`) can never allow.",
         "pattern": "Shared Kernel",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Core\nPattern: Shared Kernel\n\nThe dual-evaluated guard `Pattern` AST (ADR 0024 / ADR 0031) and the\ndynamic `Value` it embeds. A leaf crate: `holon-macros` may depend on it to\nparse guard strings at macro-expansion time, which `holon-api` (a dependent\nof `holon-macros`) can never allow.\n\n`holon-api` re-exports both, so `holon_api::pattern::*` and\n`holon_api::Value` stay the canonical consumer paths.",
+        "content": "@c4 component\n@c4 layer Core\n@c4 uses holon-lens \"quantity value type and text formats\" \"Rust\"\nPattern: Shared Kernel\n\nThe dual-evaluated guard `Pattern` AST (ADR 0024 / ADR 0031) and the\ndynamic `Value` it embeds. Sits below `holon-api`: `holon-macros` may depend\non it to parse guard strings at macro-expansion time, which `holon-api` (a\ndependent of `holon-macros`) can never allow.\n\n`holon-api` re-exports both, so `holon_api::pattern::*` and\n`holon_api::Value` stay the canonical consumer paths.",
         "source_file": "holon-pattern/src/lib.rs",
         "layer": "Core",
+        "relationships": [
+          {
+            "target": "holon-lens",
+            "label": "quantity value type and text formats",
+            "protocol": "Rust"
+          }
+        ],
         "code_elements": [
           {
             "name": "Value",
@@ -9127,6 +9343,9 @@
                 "name": "join_merge_target_bound.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "widget_snapshot_smoke.rs"
               }
             ]
@@ -9295,6 +9514,12 @@
                 "name": "cook_ingest.rs"
               },
               {
+                "name": "cook_rows.rs"
+              },
+              {
+                "name": "main.rs"
+              },
+              {
                 "name": "plugin_failure_modes.rs"
               },
               {
@@ -9394,6 +9619,9 @@
               },
               {
                 "name": "declared_invariant_policy.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "malformed_type_profile_refusal.rs"
@@ -9666,6 +9894,9 @@
               },
               {
                 "name": "inc56_seams.rs"
+              },
+              {
+                "name": "main.rs"
               }
             ]
           }
@@ -9763,6 +9994,9 @@
             "path": "holon-toon/tests",
             "files": [
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "org_reader_agrees_with_org_format.rs"
               },
               {
@@ -9830,6 +10064,9 @@
             "files": [
               {
                 "name": "contract_forward_references.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "user_transition_contract.rs"
@@ -10009,6 +10246,12 @@
           {
             "name": "tests",
             "path": "holon-turso/tests",
+            "dirs": [
+              {
+                "name": "fixtures",
+                "path": "holon-turso/tests/fixtures"
+              }
+            ],
             "files": [
               {
                 "name": "agg_subquery_matview_spike.rs"
@@ -10062,10 +10305,16 @@
                 "name": "edge_agg_retraction_across_reboot.rs"
               },
               {
+                "name": "edge_values_in_value_order.rs"
+              },
+              {
                 "name": "entity_index_spike.rs"
               },
               {
                 "name": "failed_statement_change_events.rs"
+              },
+              {
+                "name": "formatted_columns.rs"
               },
               {
                 "name": "group_by_matview_spike.rs"
@@ -10104,6 +10353,9 @@
                 "name": "non_finite_float_read.rs"
               },
               {
+                "name": "previous_engine_database_boots.rs"
+              },
+              {
                 "name": "property_kinds_migration.rs"
               },
               {
@@ -10134,7 +10386,16 @@
                 "name": "sql_log_fields_carry_no_literals.rs"
               },
               {
+                "name": "stopped_commit_listener.rs"
+              },
+              {
                 "name": "stuck_actor_watch.rs"
+              },
+              {
+                "name": "sum_avg_matview.rs"
+              },
+              {
+                "name": "time_functions_matview.rs"
               },
               {
                 "name": "type_table_add_column_under_matview.rs"
@@ -10274,6 +10535,9 @@
               },
               {
                 "name": "entity_index_dd_spike.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "plan_law.rs"

@@ -58,3 +58,29 @@ fn single_primary_key_keeps_inline_form() {
     assert!(sql.contains("\"id\" TEXT PRIMARY KEY"), "got: {sql}");
     assert!(!sql.contains("PRIMARY KEY (\"id\")"), "got: {sql}");
 }
+
+#[test]
+fn a_formatted_column_is_created_with_the_type_naming_its_format() {
+    let td = TypeDefinition {
+        name: "counted".to_string(),
+        graph_label: None,
+        primary_key: default_primary_key(),
+        fields: vec![
+            FieldSchema::new("id", "TEXT").primary_key(),
+            FieldSchema {
+                format: Some(holon_lens::FieldFormat::named("tsl_count").expect("bundled")),
+                ..FieldSchema::new("count", "TEXT")
+            },
+        ],
+        id_references: None,
+        profile_variants: vec![],
+        write_authority: WriteAuthority::Local,
+        home: None,
+        soft_delete: None,
+        services: None,
+        default_lifetime: FieldLifetime::default(),
+        source: TypeSource::default(),
+    };
+    let sql = td.to_create_table_sql();
+    assert!(sql.contains("\"count\" TEXT_FMT_tsl_count"), "got: {sql}");
+}

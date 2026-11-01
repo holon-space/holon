@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use holon_api::QuantityCell;
 use holon_api::RemovedTag;
 use holon_api::Value;
 use holon_api::block::SnapshotBlock;
@@ -39,6 +40,7 @@ enum Tagged {
     Boolean(bool),
     DateTime(String),
     Json(String),
+    Quantity(QuantityCell),
     Array(Vec<Tagged>),
     Object(BTreeMap<String, Tagged>),
     Null,
@@ -108,6 +110,7 @@ impl From<&Value> for Tagged {
             Value::Boolean(b) => Tagged::Boolean(*b),
             Value::DateTime(s) => Tagged::DateTime(s.clone()),
             Value::Json(s) => Tagged::Json(s.clone()),
+            Value::Quantity(cell) => Tagged::Quantity(cell.clone()),
             Value::Array(items) => Tagged::Array(items.iter().map(Tagged::from).collect()),
             Value::Object(map) => Tagged::Object(
                 map.iter()
@@ -129,6 +132,7 @@ impl From<Tagged> for Value {
             Tagged::Boolean(b) => Value::Boolean(b),
             Tagged::DateTime(s) => Value::DateTime(s),
             Tagged::Json(s) => Value::Json(s),
+            Tagged::Quantity(cell) => Value::Quantity(cell),
             Tagged::Array(items) => Value::Array(items.into_iter().map(Value::from).collect()),
             Tagged::Object(map) => Value::Object(
                 map.into_iter()

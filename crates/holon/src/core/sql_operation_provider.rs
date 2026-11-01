@@ -2742,11 +2742,12 @@ impl SqlOperationProvider {
                 .query(&sql, HashMap::new())
                 .await
                 .map_err(|e| format!("read_field_old_value({field}): {e}"))?;
-            return Ok(rows
+            let stored = rows
                 .into_iter()
                 .next()
                 .and_then(|mut r| r.remove("v"))
-                .unwrap_or(Value::Null));
+                .unwrap_or(Value::Null);
+            return self.write_schema.typed(field, &stored);
         }
 
         let sql = format!(
@@ -2983,7 +2984,11 @@ impl SqlOperationProvider {
         let params: StorageEntity = row
             .into_iter()
             .filter(|(k, _)| k.as_ref() != "_change_origin")
-            .collect();
+            .map(|(k, v)| {
+                let v = self.write_schema.typed(&k, &v)?;
+                Ok((k, v))
+            })
+            .collect::<Result<_>>()?;
         Ok(Some(params))
     }
 
@@ -3574,6 +3579,12 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     )
                     .into());
                 }
+                let value = if self.write_schema.is_column(field) {
+                    self.write_schema.typed(field, &value)?
+                } else {
+                    value.reject_quantity_cell(field)?;
+                    value
+                };
                 // Deferred: a removal has no SQL literal at all, and the
                 // `json_remove` branch below never asks for one.
                 let sql_value = || Self::value_to_sql(&value).map_err(|e| e.under(field));
@@ -6191,5 +6202,286 @@ mod ancestry_tests {
             .await
             .expect_err("a cyclic chain must not answer");
         assert!(format!("{err}").contains("cycle"), "{err}");
+    }
+}
+
+/// A field declared with `format:` stores the format's text: a write the
+/// format cannot read is refused at the write boundary, naming the column.
+#[cfg(test)]
+mod field_format_write_tests {
+    use holon_api::TypeDefinition;
+    use holon_core::traits::UndoAction;
+
+    use super::*;
+
+    fn counted_type() -> TypeDefinition {
+        serde_yaml::from_str(
+            "name: gen_counted\nprimary_key: id\nfields:\n  \
+             - name: id\n    sql_type: TEXT\n    primary_key: true\n  \
+             - name: count\n    sql_type: TEXT\n    nullable: true\n    format: tsl_count\n  \
+             - name: note\n    sql_type: TEXT\n    nullable: true\n",
+        )
+        .expect("counted type parses")
+    }
+
+    async fn provider() -> (crate::storage::turso::DbHandle, SqlOperationProvider) {
+        let (backend, db) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        db.execute(
+            &format!(
+                "CREATE TABLE gen_counted_raw (id TEXT PRIMARY KEY, count {}, note TEXT)",
+                counted_type().fields[1].column_type()
+            ),
+            vec![],
+        )
+        .await
+        .expect("gen_counted_raw");
+        let provider =
+            SqlOperationProvider::for_type(db.clone(), &counted_type()).expect("the counted type");
+        std::mem::forget(backend);
+        (db, provider)
+    }
+
+    async fn run(
+        provider: &SqlOperationProvider,
+        op: &str,
+        params: &[(&str, Value)],
+    ) -> Result<OperationResult> {
+        provider
+            .execute_operation_with_origin(
+                &EntityName::new("gen_counted"),
+                op,
+                params
+                    .iter()
+                    .map(|(k, v)| ((*k).into(), v.clone()))
+                    .collect(),
+                EventOrigin::Other("test".to_string()),
+            )
+            .await
+    }
+
+    async fn stored_count(db: &crate::storage::turso::DbHandle) -> Value {
+        let rows = db
+            .query(
+                "SELECT count FROM gen_counted_raw WHERE id = 'gen-counted:salt'",
+                HashMap::new(),
+            )
+            .await
+            .expect("query");
+        assert_eq!(rows.len(), 1, "one row: {rows:?}");
+        rows[0].get("count").cloned().expect("count column")
+    }
+
+    fn id() -> (&'static str, Value) {
+        ("id", Value::String("gen-counted:salt".to_string()))
+    }
+
+    /// Create, change one term, write back: the column keeps the bytes of
+    /// every term whose value did not change.
+    #[tokio::test]
+    async fn a_changed_term_prints_into_the_stored_text() {
+        let (db, provider) = provider().await;
+        let format = counted_type().fields[1]
+            .format
+            .clone()
+            .expect("count is formatted");
+        let original = "0,5Kg  +  2 Zehen";
+        run(
+            &provider,
+            "create",
+            &[id(), ("count", Value::String(original.into()))],
+        )
+        .await
+        .expect("create");
+        let stored = stored_count(&db).await;
+        assert_eq!(stored, Value::Quantity(cell("tsl_count", original)));
+
+        let edited = format
+            .format()
+            .parse("0,5Kg + 3 Zehen")
+            .expect("parses")
+            .expect("has an amount");
+        let Value::Quantity(stored) = stored else {
+            panic!("count reads as a quantity: {stored:?}")
+        };
+        let cell = stored.with_value(Some(&edited)).expect("prints");
+        run(
+            &provider,
+            "set_field",
+            &[
+                id(),
+                ("field", Value::String("count".into())),
+                ("value", Value::String(cell.original().into())),
+            ],
+        )
+        .await
+        .expect("set_field");
+
+        assert_eq!(stored_count(&db).await, Value::Quantity(cell.clone()));
+        assert_eq!(cell.original(), "0,5Kg  +  3 Zehen");
+        assert_eq!(cell.value(), Some(&edited));
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_value_the_format_cannot_read() {
+        let (_db, provider) = provider().await;
+        let err = run(&provider, "create", &[id(), ("count", Value::Integer(3))])
+            .await
+            .expect_err("a tsl_count column holds tsl_count text");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("count") && msg.contains("tsl_count"),
+            "the refusal must name the column and the format: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_field_refuses_a_value_the_format_cannot_read() {
+        let (_db, provider) = provider().await;
+        run(
+            &provider,
+            "create",
+            &[id(), ("count", Value::String("2kg".into()))],
+        )
+        .await
+        .expect("create");
+        let err = run(
+            &provider,
+            "set_field",
+            &[
+                id(),
+                ("field", Value::String("count".into())),
+                ("value", Value::Integer(3)),
+            ],
+        )
+        .await
+        .expect_err("a tsl_count column holds tsl_count text");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("count") && msg.contains("tsl_count"),
+            "the refusal must name the column and the format: {msg}"
+        );
+    }
+
+    fn cell(format: &str, text: &str) -> holon_api::QuantityCell {
+        holon_api::QuantityCell::parse(
+            holon_api::FieldFormat::named(format).expect("bundled"),
+            text.to_string(),
+        )
+        .expect("parses")
+    }
+
+    fn set_count(value: Value) -> [(&'static str, Value); 3] {
+        [
+            id(),
+            ("field", Value::String("count".into())),
+            ("value", value),
+        ]
+    }
+
+    /// The column stores the cell's text; the deltas and the inverse carry
+    /// typed cells, also when the write came in as text.
+    #[tokio::test]
+    async fn set_field_stores_a_quantity_cell_as_text_and_reports_typed_cells() {
+        let (db, provider) = provider().await;
+        run(
+            &provider,
+            "create",
+            &[id(), ("count", Value::String("0,5Kg  +  2 Zehen".into()))],
+        )
+        .await
+        .expect("create");
+        let before = cell("tsl_count", "0,5Kg  +  2 Zehen");
+        let three = cell("tsl_count", "0,5Kg + 3 Zehen");
+        let after = before.with_value(three.value()).expect("prints");
+
+        let result = run(
+            &provider,
+            "set_field",
+            &set_count(Value::Quantity(after.clone())),
+        )
+        .await
+        .expect("set_field");
+
+        assert_eq!(
+            stored_count(&db).await,
+            Value::Quantity(cell("tsl_count", "0,5Kg  +  3 Zehen"))
+        );
+        let deltas: Vec<(&str, &Value, &Value)> = result
+            .changes
+            .iter()
+            .map(|d| (d.field.as_str(), &d.old_value, &d.new_value))
+            .collect();
+        assert_eq!(
+            deltas,
+            [(
+                "count",
+                &Value::Quantity(before.clone()),
+                &Value::Quantity(after.clone())
+            )]
+        );
+        let UndoAction::Undo(inverse) = &result.undo else {
+            panic!("set_field is reversible: {:?}", result.undo)
+        };
+        assert_eq!(
+            inverse.params.get("value"),
+            Some(&Value::Quantity(before.clone()))
+        );
+
+        let result = run(
+            &provider,
+            "set_field",
+            &set_count(Value::String("2kg".into())),
+        )
+        .await
+        .expect("set_field as text");
+        assert_eq!(
+            result.changes[0].new_value,
+            Value::Quantity(cell("tsl_count", "2kg"))
+        );
+    }
+
+    /// The delete inverse re-creates the row from a captured row whose
+    /// formatted cells are typed.
+    #[tokio::test]
+    async fn a_captured_row_carries_typed_cells() {
+        let (_db, provider) = provider().await;
+        run(
+            &provider,
+            "create",
+            &[id(), ("count", Value::String("2 Zehen".into()))],
+        )
+        .await
+        .expect("create");
+        let result = run(&provider, "delete", &[id()]).await.expect("delete");
+        let UndoAction::Undo(inverse) = &result.undo else {
+            panic!("a leaf delete is reversible: {:?}", result.undo)
+        };
+        assert_eq!(
+            inverse.params.get("count"),
+            Some(&Value::Quantity(cell("tsl_count", "2 Zehen")))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quantity_cell_outside_its_formatted_column_is_refused() {
+        let (_db, provider) = provider().await;
+        let tsl = Value::Quantity(cell("tsl_count", "2kg"));
+        let cook = Value::Quantity(cell("cooklang_quantity", "2%kg"));
+        for (params, names) in [
+            (vec![id(), ("note", tsl.clone())], "note"),
+            (vec![id(), ("count", cook)], "cooklang_quantity"),
+            (
+                vec![id(), ("note", Value::Array(vec![tsl.clone()]))],
+                "note",
+            ),
+        ] {
+            let err = run(&provider, "create", &params)
+                .await
+                .expect_err("a quantity cell belongs to a column of its format");
+            let msg = err.to_string();
+            assert!(msg.contains(names), "the refusal must name {names}: {msg}");
+        }
     }
 }

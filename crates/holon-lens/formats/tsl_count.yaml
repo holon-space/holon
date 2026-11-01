@@ -1,0 +1,27 @@
+# That Shopping List `count`: "2kg", "500g", "4 Zehen", "1,5Kg"; bare "1" = no amount.
+# Several terms ("0,5Kg + 2 Zehen") are Holon's own convention (D76.a).
+name: tsl_count
+target: quantity
+lens:
+  union:
+    - const: "1"
+    - except:
+        not: "1"
+        reason: 'a bare "1" means "no amount" in That Shopping List'
+        lens:
+          list:
+            min: 1
+            key: unit
+            separator: { const: { match: " *\\+ *", default: " + " } }
+            item:
+              seq:
+                - field: amount
+                  number: { decimal: ",.", print_decimal: ",", round: 2 }
+                - optional:
+                    seq:
+                      - const: { match: " *", default: "" }
+                      - field: unit
+                        copy: "[\\p{L}.]+( [\\p{L}.]+)*"
+  # Anything else, the empty amount of a cleared field too, is opaque text.
+  otherwise:
+    copy: ".*"

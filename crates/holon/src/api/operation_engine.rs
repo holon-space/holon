@@ -613,6 +613,7 @@ fn render_value(v: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Boolean(b) => b.to_string(),
         Value::DateTime(s) | Value::Json(s) => s.clone(),
+        Value::Quantity(cell) => cell.original().to_string(),
         Value::Null => "null".to_string(),
         Value::Removed(_) => "removed".to_string(),
         Value::Array(_) | Value::Object(_) => {

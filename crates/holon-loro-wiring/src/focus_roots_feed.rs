@@ -316,6 +316,7 @@ mod tests {
     use holon_conditions::ConditionBus;
     use holon_conditions::ConditionKind;
     use holon_conditions::condition_bus::VIEW_ENGINE_SUBJECT;
+    use holon_turso::schema_catalog::SchemaCatalog;
     use holon_turso::schema_module::SchemaModule;
     use holon_turso::schema_modules::NavigationSchemaModule;
     use holon_turso::turso::TursoBackend;
@@ -502,10 +503,21 @@ mod tests {
         (clock, conditions, engine, feed)
     }
 
+    fn catalog() -> SchemaCatalog {
+        let catalog = SchemaCatalog::new();
+        catalog.set_columns(
+            RELATION,
+            ["region", "root_id", "added_ts", "history_id"].map(String::from),
+        );
+        catalog
+    }
+
     /// The panic message of delivering `event`, which must panic.
     fn refused(feed: &FocusRootsFeed, event: &RelationChangeEvent) -> String {
-        let panic = catch_unwind(AssertUnwindSafe(|| feed.on_event(CommitEvent::new(event))))
-            .expect_err("an event outside its envelope panics in tests");
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            feed.on_event(CommitEvent::new(event, &catalog()))
+        }))
+        .expect_err("an event outside its envelope panics in tests");
         panic
             .downcast_ref::<String>()
             .cloned()
@@ -642,7 +654,7 @@ mod tests {
         ));
         let feed = FocusRootsFeed::new(clock.clone(), engine.clone());
 
-        feed.on_event(CommitEvent::new(&event(RELATION, 7, 0, 3)));
+        feed.on_event(CommitEvent::new(&event(RELATION, 7, 0, 3), &catalog()));
         let open = clock.high_water();
         assert_eq!(clock.outstanding(CommitSource::Sql), vec![open]);
         let reason = refused(&feed, &event("blocks", 7, 2, 3));
@@ -665,14 +677,15 @@ mod tests {
         assert_eq!(stops(&conditions), vec![error.to_string()]);
         every_stamp_is_fed(&engine, &clock);
 
-        feed.on_event(CommitEvent::new(&event(RELATION, 8, 0, 1)));
+        feed.on_event(CommitEvent::new(&event(RELATION, 8, 0, 1), &catalog()));
         assert_eq!(clock.high_water(), open, "a stopped listener mints nothing");
     }
 
     #[test]
     fn a_commit_nets_its_changes_in_any_order() {
         let (clock, conditions, engine, feed) = unstarted();
-        let deliver = |event: RelationChangeEvent| feed.on_event(CommitEvent::new(&event));
+        let deliver =
+            |event: RelationChangeEvent| feed.on_event(CommitEvent::new(&event, &catalog()));
         deliver(focus_commit(
             1,
             &[
@@ -714,10 +727,10 @@ mod tests {
     fn the_fed_check_waits_for_the_engine_to_take_every_feed_posted_before_it() {
         let (clock, _conditions, engine, feed) = unstarted();
         for commit in 1..=100 {
-            feed.on_event(CommitEvent::new(&focus_commit(
-                commit,
-                &[(Change::Insert, "block:a", commit as i64)],
-            )));
+            feed.on_event(CommitEvent::new(
+                &focus_commit(commit, &[(Change::Insert, "block:a", commit as i64)]),
+                &catalog(),
+            ));
         }
         every_stamp_is_fed(&engine, &clock);
     }
@@ -725,13 +738,16 @@ mod tests {
     #[test]
     fn changes_that_net_to_two_rows_for_one_history_stop_the_engine() {
         let (clock, conditions, engine, feed) = unstarted();
-        feed.on_event(CommitEvent::new(&focus_commit(
-            1,
-            &[
-                (Change::Insert, "block:a", 1),
-                (Change::Insert, "block:b", 1),
-            ],
-        )));
+        feed.on_event(CommitEvent::new(
+            &focus_commit(
+                1,
+                &[
+                    (Change::Insert, "block:a", 1),
+                    (Change::Insert, "block:b", 1),
+                ],
+            ),
+            &catalog(),
+        ));
 
         let error = stop_error(&engine);
         assert!(

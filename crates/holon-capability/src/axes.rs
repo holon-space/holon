@@ -167,6 +167,11 @@ impl ValueKind {
             holon_api::Value::Removed(_) => {
                 panic!("ValueKind::from: Value::REMOVED is a removal sentinel, not a value kind")
             }
+            // A quantity cell lives in its formatted column, never in a
+            // property bag, which is what this axis describes.
+            holon_api::Value::Quantity(cell) => {
+                panic!("ValueKind::from: a quantity cell ({cell:?}) never reaches a property bag")
+            }
         }
     }
 }

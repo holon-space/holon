@@ -22,6 +22,7 @@ use holon_connections::CommitBatch;
 use holon_connections::CompiledListSync;
 use holon_connections::ListSnapshot;
 use holon_connections::ListSyncSpec;
+use holon_connections::LocalIntent;
 use holon_connections::LocalRow;
 use holon_connections::LocalRowReader;
 use holon_connections::RemoteListPeer;
@@ -85,6 +86,8 @@ fn now_rfc3339() -> String {
 struct PeerState {
     /// `(name, cat)`, the active list.
     items: Vec<(String, String)>,
+    /// The amount the peer serves per item name, absent for none.
+    counts: HashMap<String, String>,
     version: i64,
     /// Every command the peer was told about, in order.
     received: Vec<(String, String)>,
@@ -104,10 +107,19 @@ impl FakePeer {
                     .iter()
                     .map(|(n, c)| (n.to_string(), c.to_string()))
                     .collect(),
+                counts: HashMap::new(),
                 version: 7,
                 received: Vec::new(),
             })),
         }
+    }
+
+    fn with_counts(self, counts: &[(&str, &str)]) -> Self {
+        self.state.lock().expect("peer state").counts = counts
+            .iter()
+            .map(|(n, c)| (n.to_string(), c.to_string()))
+            .collect();
+        self
     }
 
     /// `(verb, name)` for every command this peer has been sent.
@@ -132,7 +144,10 @@ impl RemoteListPeer for FakePeer {
         let items: Vec<serde_json::Value> = state
             .items
             .iter()
-            .map(|(name, cat)| serde_json::json!({"name": name, "cat": cat}))
+            .map(|(name, cat)| match state.counts.get(name) {
+                Some(count) => serde_json::json!({"name": name, "cat": cat, "count": count}),
+                None => serde_json::json!({"name": name, "cat": cat}),
+            })
             .collect();
         let body = serde_json::json!({
             "items": items,
@@ -192,7 +207,7 @@ impl LocalRowReader for Rows<'_> {
             .query(
                 format!(
                     "SELECT id, name, cat, count, checked, product_id, deleted_at, \
-                     last_seen_remote FROM {TABLE}"
+                     last_seen_remote, remote_base FROM {TABLE}"
                 ),
                 QueryLanguage::HolonSql,
                 HashMap::new(),
@@ -321,11 +336,88 @@ async fn adding_a_shopping_item_through_the_generic_surface_stores_it() -> Resul
             HashMap::new(),
         )
         .await?;
+    match counts[0].get("count") {
+        Some(Value::Quantity(cell)) => assert_eq!(
+            cell.original(),
+            "2kg",
+            "the amount keeps the text it was written as"
+        ),
+        other => panic!("the amount must read back as a quantity, got {other:?}"),
+    }
+    Ok(())
+}
+
+/// Every local row as `(name, count)`, sorted.
+async fn stored_counts(ctx: &E2ETestContext) -> Result<Vec<(String, Value)>> {
+    let rows = ctx
+        .query(
+            format!("SELECT name, count FROM {TABLE}"),
+            QueryLanguage::HolonSql,
+            HashMap::new(),
+        )
+        .await?;
+    let mut out: Vec<(String, Value)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["name"]
+                    .as_string()
+                    .expect("a row has a name")
+                    .to_string(),
+                row["count"].clone(),
+            )
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pulled_amount_is_stored_as_a_quantity_that_keeps_the_peers_text() -> Result<()> {
+    let ctx = E2ETestContext::new().await?;
+    let peer = FakePeer::seeded(&[("Knoblauch", "R"), ("Mehl", "Trocken"), ("Salz", "R")])
+        .with_counts(&[("Knoblauch", "4 Zehen + 1 Knolle"), ("Mehl", "0,5kg")]);
+    let reconciler = RemoteListReconciler::new(connection());
+
+    sync_round(&ctx, &peer, &reconciler).await?;
+    let first = stored_counts(&ctx).await?;
+    let shown: Vec<(&str, Option<&str>, Option<String>)> = first
+        .iter()
+        .map(|(name, count)| match count {
+            Value::Quantity(cell) => (
+                name.as_str(),
+                Some(cell.original()),
+                cell.value().map(ToString::to_string),
+            ),
+            Value::Null => (name.as_str(), None, None),
+            other => panic!("{name}: count must be a quantity or absent, got {other:?}"),
+        })
+        .collect();
     assert_eq!(
-        counts[0].get("count"),
-        Some(&Value::String("2kg".to_string())),
-        "the amount is stored as the text it was written as"
+        shown,
+        vec![
+            (
+                "Knoblauch",
+                Some("4 Zehen + 1 Knolle"),
+                Some("4 Zehen + 1 Knolle".to_string())
+            ),
+            ("Mehl", Some("0,5kg"), Some("1/2 kg".to_string())),
+            ("Salz", None, None),
+        ]
     );
+
+    let again = sync_round(&ctx, &peer, &reconciler).await?;
+    let rewrites: Vec<_> = again
+        .local
+        .iter()
+        .filter(|intent| !matches!(intent, LocalIntent::TouchWatermark { .. }))
+        .collect();
+    assert!(
+        rewrites.is_empty() && peer.commands().is_empty(),
+        "an unchanged list must not be rewritten on either side; local {rewrites:?}, sent {:?}",
+        peer.commands()
+    );
+    assert_eq!(stored_counts(&ctx).await?, first);
     Ok(())
 }
 

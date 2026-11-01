@@ -3112,6 +3112,7 @@ dependencies = [
  "futures",
  "futures-signals",
  "holon-expr",
+ "holon-lens",
  "holon-macros",
  "holon-pattern",
  "icu_casemap",
@@ -3238,6 +3239,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "holon-lens"
+version = "0.1.0"
+dependencies = [
+ "regex-syntax",
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.21",
+ "workspace-hack",
+]
+
+[[package]]
 name = "holon-macros"
 version = "0.1.0"
 dependencies = [
@@ -3321,6 +3333,7 @@ name = "holon-pattern"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "holon-lens",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

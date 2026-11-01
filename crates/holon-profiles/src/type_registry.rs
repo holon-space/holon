@@ -778,6 +778,7 @@ fn check_declaration(admitted: &Admitted, type_def: &TypeDefinition) -> Result<(
         services.check_fields(type_def)?;
     }
     check_computed_types_match_columns(type_def)?;
+    check_formats_on_text_columns(type_def)?;
     check_against_vault_profiles(
         admitted.claims(),
         &TableName::from_scheme(&type_def.name),
@@ -831,6 +832,25 @@ fn check_computed_types_match_columns(type_def: &TypeDefinition) -> Result<()> {
                     type_def.name
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+/// A format is text in, text out: the column holding it must be TEXT.
+fn check_formats_on_text_columns(type_def: &TypeDefinition) -> Result<()> {
+    for field in &type_def.fields {
+        if let Some(format) = &field.format
+            && !field.sql_type.eq_ignore_ascii_case("TEXT")
+        {
+            anyhow::bail!(
+                "field '{}' on entity '{}' declares format '{}', but its column is {}; a \
+                 format's cells are TEXT",
+                field.name,
+                type_def.name,
+                format.format().name(),
+                field.sql_type
+            );
         }
     }
     Ok(())
@@ -1235,6 +1255,37 @@ mod tests {
                 variant.render
             );
         }
+    }
+
+    fn formatted_type(sql_type: &str, format: &str) -> serde_yaml::Result<TypeDefinition> {
+        serde_yaml::from_str(&format!(
+            "name: t_formatted\nprimary_key: id\nfields:\n  \
+             - name: id\n    sql_type: TEXT\n    primary_key: true\n  \
+             - name: count\n    sql_type: {sql_type}\n    nullable: true\n    format: {format}\n"
+        ))
+    }
+
+    #[test]
+    fn an_unknown_field_format_is_a_load_error() {
+        let err = formatted_type("TEXT", "no_such_format")
+            .expect_err("a type naming an unknown format must not load");
+        assert!(
+            err.to_string().contains("no_such_format"),
+            "the error must name the format: {err}"
+        );
+    }
+
+    #[test]
+    fn a_format_on_a_non_text_column_is_refused_at_registration() {
+        let td = formatted_type("INTEGER", "tsl_count").expect("parses");
+        let err = TypeRegistry::new()
+            .register(td)
+            .expect_err("a format reads and writes TEXT; an INTEGER column cannot hold it");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("count") && msg.contains("tsl_count"),
+            "the refusal must name the field and the format: {msg}"
+        );
     }
 
     #[test]

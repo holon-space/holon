@@ -4,6 +4,7 @@
 //! @c4 uses holon-expr "compiled Rhai expressions" "Rust"
 //! @c4 uses holon-macros "entity/operation derive macros" "Rust"
 //! @c4 uses holon-pattern "guard AST & parser" "Rust"
+//! @c4 uses holon-lens "field text formats" "Rust"
 //!
 //! Shared value types, Operation descriptors, Change/CDC types, and entity
 //! conversion traits. No frontend deps.
@@ -266,6 +267,12 @@ pub use holon_expr::bounded_engine;
 pub use holon_expr::referenced_functions;
 pub use holon_expr::unguarded_columns;
 pub use holon_expr::unoptimized_engine;
+pub use holon_lens::FieldFormat;
+pub use holon_lens::FormatError;
+pub use holon_lens::QUANTITY_MARKER_KEY;
+pub use holon_lens::Quantity;
+pub use holon_lens::QuantityCell;
+pub use holon_lens::quantity;
 // The guard AST, the transition-arc vocabulary and the dynamic `Value` live in
 // the leaf crate `holon-pattern` (reachable from `holon-macros`, which parses
 // both declaration surfaces at expansion time); these are their canonical paths.

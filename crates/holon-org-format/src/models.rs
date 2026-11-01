@@ -672,6 +672,7 @@ fn format_header_args_value(args: &HashMap<String, holon_api::Value>) -> String 
                 holon_api::Value::Null => String::new(),
                 holon_api::Value::Json(j) => j.to_string(),
                 holon_api::Value::DateTime(dt) => dt.to_string(),
+                holon_api::Value::Quantity(cell) => cell.original().to_string(),
                 holon_api::Value::Array(_) => "[array]".to_string(),
                 holon_api::Value::Object(_) => "[object]".to_string(),
                 holon_api::Value::Removed(_) => panic!(

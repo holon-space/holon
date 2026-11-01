@@ -29,6 +29,17 @@ pub struct LocalRow {
 }
 
 impl LocalRow {
+    /// This row as the peer reads it: a typed amount is the text it was
+    /// written as.
+    pub fn as_peer_text(mut self) -> LocalRow {
+        for value in self.columns.values_mut() {
+            if let Value::Quantity(cell) = value {
+                *value = Value::String(cell.original().to_string());
+            }
+        }
+        self
+    }
+
     pub fn column(&self, name: &str) -> Option<&Value> {
         self.columns.get(name)
     }

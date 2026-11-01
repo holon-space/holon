@@ -13,6 +13,7 @@ pub(crate) fn value_to_display(v: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::DateTime(s) => s.clone(),
         Value::Json(s) => s.clone(),
+        Value::Quantity(cell) => cell.original().to_string(),
         Value::Array(arr) => arr
             .iter()
             .map(value_to_display)

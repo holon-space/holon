@@ -366,6 +366,9 @@ fn holon_to_json_value(v: &Value) -> Result<serde_json::Value, NotJson> {
         ),
         Value::Boolean(b) => serde_json::Value::Bool(*b),
         Value::DateTime(s) => serde_json::Value::String(s.clone()),
+        // The stored text: an agent writes it back as text, never as the
+        // engine-only quantity envelope.
+        Value::Quantity(cell) => serde_json::Value::String(cell.original().to_string()),
         Value::Json(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::String(s.clone())),
         Value::Array(arr) => serde_json::Value::Array(
             arr.iter()

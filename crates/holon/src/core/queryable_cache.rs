@@ -1282,7 +1282,7 @@ fn generate_create_table_sql_with_change_origin(type_def: &TypeDefinition) -> St
 
     let mut columns = Vec::new();
     for field in &type_def.fields {
-        let mut col = format!("{} {}", q(&field.name), field.sql_type);
+        let mut col = format!("{} {}", q(&field.name), field.column_type());
         if field.primary_key && inline_pk {
             col.push_str(" PRIMARY KEY");
         }

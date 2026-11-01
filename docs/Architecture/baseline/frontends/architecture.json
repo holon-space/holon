@@ -1276,6 +1276,9 @@
                 "name": "foreign_host_or_origin_is_refused.rs"
               },
               {
+                "name": "main.rs"
+              },
+              {
                 "name": "sigterm_shuts_the_session_down.rs"
               }
             ]
@@ -1407,6 +1410,9 @@
             "files": [
               {
                 "name": "boot_refusals.rs"
+              },
+              {
+                "name": "main.rs"
               },
               {
                 "name": "screenshot_painter.rs"

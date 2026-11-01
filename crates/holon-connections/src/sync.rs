@@ -22,6 +22,7 @@ use crate::reconcile::LocalIntent;
 use crate::reconcile::PushIntent;
 use crate::reconcile::RemoteListReconciler;
 use crate::snapshot::ListSnapshot;
+use crate::snapshot::LocalRow;
 use crate::snapshot::LocalRowReader;
 use crate::snapshot::json_of;
 use crate::spec::CompiledListSync;
@@ -262,7 +263,12 @@ pub async fn sync_once(
 ) -> Result<SyncOutcome> {
     const MAX_COMMITS: i64 = 2;
 
-    let local = rows.load().await?;
+    let local: Vec<LocalRow> = rows
+        .load()
+        .await?
+        .into_iter()
+        .map(LocalRow::as_peer_text)
+        .collect();
     let mut snapshot = peer.pull().await?;
     let mut committed = 0;
     let mut retried = false;

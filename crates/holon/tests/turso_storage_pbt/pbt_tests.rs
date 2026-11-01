@@ -895,12 +895,15 @@ async fn apply_to_turso_inner(
             Err("EnableCDC cannot be executed concurrently".to_string())
         }
         StorageTransition::CreateMaterializedView { view_name, entity } => {
-            let conn = backend.get_connection().map_err(|e| e.to_string())?;
             let sql = format!(
                 "CREATE MATERIALIZED VIEW {} AS SELECT * FROM {}",
                 view_name, entity
             );
-            conn.execute(&sql, ()).await.map_err(|e| e.to_string())?;
+            backend
+                .handle()
+                .execute_ddl(&sql)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(None)
         }
         StorageTransition::CreateViewStream { view_name: _ } => {
@@ -909,8 +912,9 @@ async fn apply_to_turso_inner(
         }
         StorageTransition::CreateRecursiveCTEView => {
             // Create the recursive CTE view that triggers JoinOperator in IVM
-            let conn = backend.get_connection().map_err(|e| e.to_string())?;
-            conn.execute(RECURSIVE_CTE_VIEW_SQL, ())
+            backend
+                .handle()
+                .execute_ddl(RECURSIVE_CTE_VIEW_SQL)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(None)
@@ -1092,8 +1096,9 @@ async fn apply_to_turso(
         }
         StorageTransition::CreateRecursiveCTEView => {
             // Create the recursive CTE view that triggers JoinOperator in IVM
-            let conn = backend.get_connection().map_err(|e| e.to_string())?;
-            conn.execute(RECURSIVE_CTE_VIEW_SQL, ())
+            backend
+                .handle()
+                .execute_ddl(RECURSIVE_CTE_VIEW_SQL)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(None)

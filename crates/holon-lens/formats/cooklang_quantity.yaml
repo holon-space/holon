@@ -1,0 +1,26 @@
+# The text inside a cooklang component's braces: "200%g", "1/2%cup", "1 1/2 % cups",
+# "2-3%cloves", "a pinch", "3", "" (no amount).
+name: cooklang_quantity
+target: quantity
+lens:
+  union:
+    - const: ""
+    - seq:
+        - field: amount
+          union:
+            - seq:
+                - field: from
+                  number: { decimal: "." }
+                - const: { match: " *- *", default: "-" }
+                - field: to
+                  number: { decimal: "." }
+            - fraction: {}
+            - number: { decimal: "." }
+          # like cooklang: anything else is opaque text ("a pinch", "½", "1,5")
+          otherwise:
+            copy: "[^%\\s]([^%]*[^%\\s])?"
+        - optional:
+            seq:
+              - const: { match: " *% *", default: "%" }
+              - field: unit
+                copy: "[^%\\s]([^%]*[^%\\s])?"

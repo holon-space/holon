@@ -18,6 +18,7 @@ mod edge_agg_retraction_across_reboot;
 mod edge_values_in_value_order;
 mod entity_index_spike;
 mod failed_statement_change_events;
+mod formatted_columns;
 mod group_by_matview_spike;
 mod integration_state_presentation_columns;
 mod json_extract_matview_spike;

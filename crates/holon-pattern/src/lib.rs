@@ -1,11 +1,12 @@
 //! @c4 component
 //! @c4 layer Core
+//! @c4 uses holon-lens "quantity value type and text formats" "Rust"
 //! Pattern: Shared Kernel
 //!
 //! The dual-evaluated guard `Pattern` AST (ADR 0024 / ADR 0031) and the
-//! dynamic `Value` it embeds. A leaf crate: `holon-macros` may depend on it to
-//! parse guard strings at macro-expansion time, which `holon-api` (a dependent
-//! of `holon-macros`) can never allow.
+//! dynamic `Value` it embeds. Sits below `holon-api`: `holon-macros` may depend
+//! on it to parse guard strings at macro-expansion time, which `holon-api` (a
+//! dependent of `holon-macros`) can never allow.
 //!
 //! `holon-api` re-exports both, so `holon_api::pattern::*` and
 //! `holon_api::Value` stay the canonical consumer paths.

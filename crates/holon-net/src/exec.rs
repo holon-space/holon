@@ -3896,5 +3896,39 @@ fn encode_value(h: &mut blake3::Hasher, v: &Value) {
         Value::Null => {
             h.update(&[9]);
         }
+        Value::Quantity(cell) => {
+            h.update(&[10]);
+            encode_str(h, cell.format().format().name());
+            encode_str(h, cell.original());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_api::FieldFormat;
+    use holon_api::QuantityCell;
+
+    use super::*;
+
+    fn hash_of(v: &Value) -> blake3::Hash {
+        let mut h = blake3::Hasher::new();
+        encode_value(&mut h, v);
+        h.finalize()
+    }
+
+    fn count(original: &str) -> Value {
+        let format = FieldFormat::named("tsl_count").unwrap();
+        Value::Quantity(QuantityCell::parse(format, original.to_string()).unwrap())
+    }
+
+    #[test]
+    fn quantities_with_different_text_hash_differently() {
+        assert_eq!(hash_of(&count("2kg")), hash_of(&count("2kg")));
+        assert_ne!(hash_of(&count("2kg")), hash_of(&count("2 kg")));
+        assert_ne!(
+            hash_of(&count("2kg")),
+            hash_of(&Value::String("2kg".into()))
+        );
     }
 }

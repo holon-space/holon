@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use holon_lens::QUANTITY_MARKER_KEY;
+use holon_lens::QuantityCell;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -64,6 +66,9 @@ pub enum Value {
     /// deserialization takes the first matching variant and `Object` would
     /// otherwise swallow the marker map.
     Removed(RemovedTag),
+    /// A cell of a formatted TEXT column. Declared before `Object` for the
+    /// same reason as `Removed`: its wire shape is a one-key map.
+    Quantity(QuantityCell),
     String(String),
     Integer(i64),
     Float(#[serde(serialize_with = "serialize_finite_float")] f64),
@@ -77,8 +82,23 @@ pub enum Value {
     // serde_json::Value
     Json(String),
     Array(Vec<Value>),
-    Object(HashMap<String, Value>),
+    Object(#[serde(deserialize_with = "deserialize_unmarked_object")] HashMap<String, Value>),
     Null,
+}
+
+/// A map carrying the quantity marker is a [`Value::Quantity`] or an error,
+/// never an object.
+fn deserialize_unmarked_object<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, Value>, D::Error> {
+    let map = HashMap::<String, Value>::deserialize(deserializer)?;
+    if map.contains_key(QUANTITY_MARKER_KEY) {
+        return Err(serde::de::Error::custom(format!(
+            "an object carrying \"{QUANTITY_MARKER_KEY}\" must be exactly \
+             {{\"{QUANTITY_MARKER_KEY}\": {{\"format\": <name>, \"original\": <text the format reads>}}}}"
+        )));
+    }
+    Ok(map)
 }
 
 /// serde_json writes a non-finite `f64` as `null`.
@@ -322,6 +342,19 @@ impl Value {
     /// into a removal instruction would delete the author's data and report
     /// success. Callers are the WRITE legs, where the author is present.
     pub fn reject_reserved_marker(&self, key: &str) -> Result<(), String> {
+        if let Some((path, _)) = self
+            .path_to(&|v| matches!(v, Value::Object(map) if map.contains_key(QUANTITY_MARKER_KEY)))
+        {
+            let full = if path.is_empty() {
+                key.to_string()
+            } else {
+                format!("{key}.{path}")
+            };
+            return Err(format!(
+                "property '{full}' carries the reserved key \"{QUANTITY_MARKER_KEY}\" and cannot \
+                 be stored as a value — it would read back as a quantity cell"
+            ));
+        }
         match self.reserved_marker_path() {
             None => Ok(()),
             Some(path) => {
@@ -363,6 +396,29 @@ impl Value {
         }
     }
 
+    /// Refuse this value if it holds a [`Value::Quantity`] at any depth: a
+    /// quantity cell is stored only in a column of its format.
+    pub fn reject_quantity_cell(&self, key: &str) -> Result<(), String> {
+        match self.path_to(&|v| matches!(v, Value::Quantity(_))) {
+            None => Ok(()),
+            Some((path, Value::Quantity(cell))) => {
+                let full = if path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{key}.{path}")
+                };
+                Err(format!(
+                    "'{full}' is not a {} column, so it cannot store the quantity cell {:?}",
+                    cell.format().format().name(),
+                    cell.original()
+                ))
+            }
+            Some((_, other)) => {
+                unreachable!("the predicate matched only quantity cells, got {other:?}")
+            }
+        }
+    }
+
     /// Refuse this value if it holds a NaN or infinite float at any depth. The
     /// error's path starts at the property `key`.
     pub fn reject_non_finite_float(&self, key: &str) -> Result<(), NotJson> {
@@ -399,6 +455,7 @@ impl Value {
             Value::DateTime(dt) => dt.clone(),
             Value::Null => String::new(),
             Value::Json(j) => j.clone(),
+            Value::Quantity(cell) => cell.original().to_string(),
             Value::Array(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
                 parts.join(", ")
@@ -721,6 +778,9 @@ impl Value {
             },
             Value::Boolean(b) => serde_json::Value::Bool(b),
             Value::DateTime(s) => serde_json::Value::String(s.clone()),
+            Value::Quantity(cell) => {
+                serde_json::to_value(&cell).expect("a quantity cell serializes as two strings")
+            }
             Value::Json(text) => match serde_json::from_str(&text) {
                 Ok(json) => json,
                 Err(e) => {
@@ -935,5 +995,55 @@ mod non_finite_float_tests {
         let shown = value.to_display_string();
         assert!(shown.contains("not displayable"), "{shown}");
         assert!(shown.contains("Value::Float NaN"), "{shown}");
+    }
+}
+
+#[cfg(test)]
+mod quantity_cell_tests {
+    use super::*;
+
+    const ENVELOPE: &str =
+        r#"{"__holon_quantity":{"format":"tsl_count","original":"0,5Kg  +  2 Zehen"}}"#;
+
+    /// The wire form names the format and carries the text; the value is
+    /// parsed from the text, so the stored bytes come back unchanged.
+    #[test]
+    fn a_quantity_cell_round_trips_its_original_bytes() {
+        let value: Value = serde_json::from_str(ENVELOPE).expect("deserialize");
+        assert_eq!(value.to_display_string(), "0,5Kg  +  2 Zehen");
+        assert_eq!(serde_json::to_string(&value).expect("serialize"), ENVELOPE);
+        let Value::Quantity(cell) = value else {
+            panic!("the envelope reads as a quantity cell: {value:?}")
+        };
+        assert_eq!(cell.value().expect("has an amount").terms().len(), 2);
+    }
+
+    /// A marker map whose text the format cannot read, or that carries more
+    /// than `{format, original}`, is no value at all — not an object.
+    #[test]
+    fn a_forged_quantity_envelope_does_not_deserialize() {
+        for forged in [
+            r#"{"__holon_quantity":{"format":"cooklang_quantity","original":"200%"}}"#,
+            r#"{"__holon_quantity":{"format":"no_such_format","original":"2kg"}}"#,
+            r#"{"__holon_quantity":{"format":"tsl_count","original":"2kg","value":[]}}"#,
+            r#"{"__holon_quantity":{"format":"tsl_count","original":"2kg"},"x":1}"#,
+        ] {
+            let read = serde_json::from_str::<Value>(forged);
+            assert!(read.is_err(), "{forged} read as {read:?}");
+        }
+    }
+
+    #[test]
+    fn an_authored_quantity_marker_is_refused_at_any_depth() {
+        let authored = Value::from_json_value(serde_json::json!({
+            "a": {"__holon_quantity": {"format": "tsl_count", "original": "2kg"}}
+        }));
+        let err = authored
+            .reject_reserved_marker("p")
+            .expect_err("the quantity marker is engine-only");
+        assert!(
+            err.contains("'p.a'") && err.contains(QUANTITY_MARKER_KEY),
+            "{err}"
+        );
     }
 }

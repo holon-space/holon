@@ -45,6 +45,7 @@ pub fn value_to_header_arg_string(value: &Value) -> Result<String, serde_json::E
         Value::Boolean(b) => if *b { "yes" } else { "no" }.to_string(),
         Value::Null => String::new(),
         Value::DateTime(dt) => dt.clone(),
+        Value::Quantity(cell) => cell.original().to_string(),
         Value::Array(arr) => arr
             .iter()
             .map(value_to_header_arg_string)

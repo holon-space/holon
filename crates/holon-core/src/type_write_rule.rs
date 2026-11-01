@@ -44,6 +44,8 @@ pub struct WriteSchema {
     update_references: Vec<OperationParam>,
     /// What `set_field`'s `value` is, by the field it writes.
     set_field_value: TypeHint,
+    /// The declared text format of each formatted column.
+    formats: HashMap<String, holon_api::FieldFormat>,
 }
 
 /// A write's params, routed by [`WriteSchema::partition`].
@@ -72,6 +74,7 @@ impl WriteSchema {
             create_references,
             update_references,
             set_field_value,
+            formats: HashMap::new(),
         }
     }
 
@@ -95,6 +98,11 @@ impl WriteSchema {
                 .soft_delete
                 .as_ref()
                 .map(|s| s.tombstone_field.to_string()),
+            formats: type_def
+                .persistent_fields()
+                .into_iter()
+                .filter_map(|f| Some((f.name.clone(), f.format.clone()?)))
+                .collect(),
             ..Self::from_references(
                 type_def
                     .persistent_fields()
@@ -107,6 +115,28 @@ impl WriteSchema {
 
     pub fn is_column(&self, name: &str) -> bool {
         self.columns.contains(name)
+    }
+
+    /// `value` as `column` holds it: a formatted column's text becomes a
+    /// [`Value::Quantity`], and a quantity cell anywhere else is refused. Both
+    /// legs go through here, so reads and writes agree on the typed form.
+    pub fn typed(&self, column: &str, value: &Value) -> Result<Value> {
+        let Some(format) = self.formats.get(column) else {
+            value.reject_quantity_cell(column)?;
+            return Ok(value.clone());
+        };
+        match value {
+            Value::Null => Ok(Value::Null),
+            Value::String(text) => holon_api::QuantityCell::parse(format.clone(), text.clone())
+                .map(Value::Quantity)
+                .map_err(|e| format!("column '{column}': {e}").into()),
+            Value::Quantity(cell) if cell.format() == format => Ok(value.clone()),
+            other => Err(format!(
+                "column '{column}': a {name} cell holds {name} text, got {other:?}",
+                name = format.format().name(),
+            )
+            .into()),
+        }
     }
 
     pub fn has_overflow(&self) -> bool {
@@ -181,7 +211,7 @@ impl WriteSchema {
                 // the "interpreted, not stored" set has exactly one definition.
             } else if claim(key, value)? {
             } else if self.is_column(key) {
-                columns.push((key.to_string(), value.clone()));
+                columns.push((key.to_string(), self.typed(key, value)?));
             } else {
                 self.require_write_route(entity, store, key)?;
                 overflow.insert(key.to_string(), value.clone());
@@ -203,6 +233,7 @@ impl WriteSchema {
         // storage would be a removal INSTRUCTION in stored state.
         for (key, value) in &overflow {
             value.reject_reserved_marker(key)?;
+            value.reject_quantity_cell(key)?;
             value.reject_non_finite_float(key)?;
         }
 

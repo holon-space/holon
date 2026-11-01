@@ -458,6 +458,10 @@ pub struct FieldSchema {
     /// field against the destination, where a field-level home has no say.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub home: Option<HomeProfileId>,
+    /// The text format this TEXT column's cells are written in: every write
+    /// must parse through it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub format: Option<holon_lens::FieldFormat>,
 }
 
 fn text_sql_type() -> String {
@@ -489,6 +493,7 @@ impl Default for FieldSchema {
             edge_name: None,
             reference_target: None,
             home: None,
+            format: None,
         }
     }
 }
@@ -499,6 +504,15 @@ impl FieldSchema {
             name: name.into(),
             sql_type: sql_type.into(),
             ..Default::default()
+        }
+    }
+
+    /// The type this field's column is created with: a formatted field's
+    /// type names its format, so every read can type the cell.
+    pub fn column_type(&self) -> String {
+        match &self.format {
+            Some(format) => format.declared_type(),
+            None => self.sql_type.clone(),
         }
     }
 
@@ -842,7 +856,7 @@ impl TypeDefinition {
             .fields
             .iter()
             .map(|f| {
-                let mut col = format!("\"{}\" {}", f.name, f.sql_type);
+                let mut col = format!("\"{}\" {}", f.name, f.column_type());
                 if f.primary_key && inline_pk {
                     col.push_str(" PRIMARY KEY");
                     if let Some(ref target) = self.id_references {

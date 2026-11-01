@@ -674,6 +674,7 @@ fn value_to_sql_literal(v: &Value, placeholder: usize, sql: &str) -> Result<Stri
         Value::String(s) | Value::DateTime(s) | Value::Json(s) => {
             format!("'{}'", s.replace('\'', "''"))
         }
+        Value::Quantity(cell) => format!("'{}'", cell.original().replace('\'', "''")),
         Value::Removed(_) | Value::Null | Value::Array(_) | Value::Object(_) => {
             return Err(InlineError::NonScalarLiteral { value: v.clone() });
         }
@@ -1036,7 +1037,9 @@ fn kind_of_literal(value: &Value) -> Option<FieldKind> {
     match value {
         // DateTime and Json are carried as TEXT by the SQL leg, which is what
         // the storage class asks about.
-        Value::String(_) | Value::DateTime(_) | Value::Json(_) => Some(FieldKind::Text),
+        Value::String(_) | Value::DateTime(_) | Value::Json(_) | Value::Quantity(_) => {
+            Some(FieldKind::Text)
+        }
         Value::Integer(_) | Value::Float(_) => Some(FieldKind::Numeric),
         Value::Boolean(_) => Some(FieldKind::Boolean),
         Value::Null | Value::Array(_) | Value::Object(_) | Value::Removed(_) => None,
@@ -1182,6 +1185,7 @@ pub fn concat_apply(l: &Value, r: &Value) -> Result<Value, ComputeError> {
 fn concat_text(v: &Value, context: &str) -> Result<String, ComputeError> {
     Ok(match v {
         Value::String(s) | Value::DateTime(s) | Value::Json(s) => s.clone(),
+        Value::Quantity(cell) => cell.original().to_string(),
         Value::Integer(i) => i.to_string(),
         Value::Float(f) => format!("{f:?}"),
         Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),

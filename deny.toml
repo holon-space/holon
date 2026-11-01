@@ -108,6 +108,7 @@ exceptions = [
     { crate = "holon-guest-cooklang", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-guest-testkit", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-integration-tests", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-lens", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-kitchen", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-layout-testing", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-logseq-db", allow = ["FSL-1.1-ALv2"] },

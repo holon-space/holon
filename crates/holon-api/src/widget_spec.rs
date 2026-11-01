@@ -208,9 +208,14 @@ impl RowContentHash {
 /// Fold a `Value` into the hasher in a canonical, key-order-independent way.
 fn canonicalize_value(v: &Value, hasher: &mut Fnv1a) {
     match v {
+        // A quantity cell is its stored text, typed or not.
         Value::String(s) => {
             hasher.write(b"s");
             hasher.write(s.as_bytes());
+        }
+        Value::Quantity(cell) => {
+            hasher.write(b"s");
+            hasher.write(cell.original().as_bytes());
         }
         Value::Integer(i) => {
             hasher.write(b"i");

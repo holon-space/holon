@@ -600,6 +600,9 @@ fn value_to_serde_json(v: &Value) -> serde_json::Value {
         Value::Null => serde_json::Value::Null,
         Value::Removed(_) => panic!("value_to_serde_json: the removal sentinel is not a value"),
         Value::DateTime(s) => serde_json::Value::String(s.clone()),
+        Value::Quantity(cell) => {
+            panic!("value_to_serde_json: no org block holds a quantity cell: {cell:?}")
+        }
         Value::Json(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::Null),
         Value::Array(arr) => {
             serde_json::Value::Array(arr.iter().map(value_to_serde_json).collect())

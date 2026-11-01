@@ -60,7 +60,10 @@ use holon_api::BatchWithMetadata;
 use holon_api::CHANGE_ORIGIN_COLUMN;
 use holon_api::Change;
 use holon_api::ChangeOrigin;
+use holon_api::FieldFormat;
+use holon_api::FormatError;
 use holon_api::NotJson;
+use holon_api::QuantityCell;
 use holon_api::Value;
 use holon_core::storage::Filter;
 use holon_core::storage::Resource;
@@ -77,6 +80,7 @@ use crate::matview_lease::LeaseGrant;
 use crate::matview_lease::MatviewStats;
 use crate::matview_lease::ViewState;
 use crate::matview_lease::ViewWaiter;
+use crate::schema_catalog::CatalogColumn;
 use crate::schema_catalog::SchemaCatalog;
 use crate::sql_parser::extract_created_tables;
 use crate::sql_parser::extract_table_refs;
@@ -1702,6 +1706,7 @@ pub(crate) fn value_to_turso_param(value: &Value) -> std::result::Result<turso::
         Value::Boolean(b) => turso::Value::Integer(if *b { 1 } else { 0 }),
         Value::DateTime(s) => turso::Value::Text(s.clone()),
         Value::Json(s) => turso::Value::Text(s.clone()),
+        Value::Quantity(cell) => turso::Value::Text(cell.original().to_string()),
         Value::Array(_) | Value::Object(_) => turso::Value::Text(value.to_json_string()?),
         Value::Null => turso::Value::Null,
         // Binding a removal as a parameter would write the deletion INTENT into
@@ -1786,6 +1791,76 @@ fn turso_value_to_value(value: turso_core::Value) -> std::result::Result<Value, 
             });
         }
     })
+}
+
+/// Live databases' schema catalogs. Every backend on one database shares
+/// its catalog, because turso hands each commit's change events to every
+/// backend on the database, also for relations another backend created.
+static SCHEMA_CATALOGS: std::sync::Mutex<Vec<(std::sync::Weak<Database>, Arc<SchemaCatalog>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn schema_catalog_of(db: &Arc<Database>) -> Arc<SchemaCatalog> {
+    let mut catalogs = SCHEMA_CATALOGS
+        .lock()
+        .expect("schema catalog registry poisoned");
+    // A dead database can leave its address to a new one.
+    catalogs.retain(|(known, _)| known.strong_count() > 0);
+    if let Some((_, catalog)) = catalogs
+        .iter()
+        .find(|(known, _)| std::ptr::eq(known.as_ptr(), Arc::as_ptr(db)))
+    {
+        return catalog.clone();
+    }
+    let catalog = Arc::new(SchemaCatalog::new());
+    catalogs.push((Arc::downgrade(db), catalog.clone()));
+    catalog
+}
+
+/// The format of each column of a row, by position: `Some` where the
+/// column's declared type names one ([`FieldFormat::of_declared_type`]).
+/// The declared type survives tables, `SELECT *`, aliases, joins, UNION,
+/// and matviews (also over a CTE). It is lost through a plain view, a CTE or
+/// derived subquery in the query, and `json_object` flattening: those cells
+/// read as plain strings.
+pub(crate) fn column_formats<'a>(
+    columns: &[Arc<str>],
+    declared_types: impl IntoIterator<Item = Option<&'a str>>,
+) -> Result<Vec<Option<FieldFormat>>> {
+    columns
+        .iter()
+        .zip(declared_types)
+        .map(|(column, declared)| {
+            declared
+                .map(FieldFormat::of_declared_type)
+                .transpose()
+                .map(Option::flatten)
+                .map_err(|e| {
+                    StorageError::QueryError(format!(
+                        "column '{column}' is declared `{}`: {e}",
+                        declared.unwrap_or_default()
+                    ))
+                })
+        })
+        .collect()
+}
+
+/// A cell as its column holds it: the text of a formatted column is a
+/// [`Value::Quantity`].
+fn typed_cell(
+    value: Value,
+    format: Option<&FieldFormat>,
+) -> std::result::Result<Value, FormatError> {
+    match (format, value) {
+        (None, value) => Ok(value),
+        (Some(_), Value::Null) => Ok(Value::Null),
+        (Some(format), Value::String(text)) => {
+            QuantityCell::parse(format.clone(), text).map(Value::Quantity)
+        }
+        (Some(format), other) => Err(FormatError::NoMatch {
+            format: format.format().name().to_string(),
+            detail: format!("a TEXT-affinity column returned the non-text value {other:?}"),
+        }),
+    }
 }
 
 /// Parse a Value that may be JSON object text or already an Object into a
@@ -2284,6 +2359,8 @@ impl TursoBackend {
             crate::turso_actor_stats::enabled_interval()
                 .map(|_| crate::turso_actor_stats::ActorStats::new());
         let cdc_stats_for_callback = actor_stats.clone();
+        let schema_catalog = schema_catalog_of(&db);
+        let schema_catalog_for_callback = schema_catalog.clone();
         conn.set_change_callback(move |event: &RelationChangeEvent| {
             tracing::trace!(
                 "[TursoBackend CDC] relation='{}' raw_changes={}",
@@ -2291,7 +2368,7 @@ impl TursoBackend {
                 event.changes.len()
             );
             let raw_count = event.changes.len() as u64;
-            let mut batch = Self::process_cdc_event(event);
+            let mut batch = Self::process_cdc_event(event, &schema_catalog_for_callback);
             tracing::trace!(
                 "[TursoBackend CDC] relation='{}' after_coalesce={}",
                 event.relation_name,
@@ -2326,7 +2403,6 @@ impl TursoBackend {
         let actor_stats_for_actor = actor_stats.clone();
         let matview_stats = Arc::new(MatviewStats::default());
         let matview_stats_for_actor = matview_stats.clone();
-        let schema_catalog = Arc::new(SchemaCatalog::new());
         let schema_catalog_for_actor = schema_catalog.clone();
         if let (Some(stats), Some(interval)) = (
             actor_stats.clone(),
@@ -2483,12 +2559,20 @@ impl TursoBackend {
         Self::create_connection_internal(&self.db).map(|(conn, _)| conn)
     }
 
-    /// Helper to parse a row of turso_core::Value into our Entity type using
-    /// schema
+    /// Parse a row of turso_core::Value into our Entity type. `formats` is
+    /// aligned with `columns` ([`column_formats`]).
     pub fn parse_row_values_with_schema(
         values: &[turso_core::Value],
         columns: &[Arc<str>],
+        formats: &[Option<FieldFormat>],
     ) -> Result<StorageEntity> {
+        assert_eq!(
+            formats.len(),
+            columns.len(),
+            "one format slot per column: {} formats for {} columns",
+            formats.len(),
+            columns.len()
+        );
         let mut entity = StorageEntity::with_capacity(values.len());
 
         for (idx, value) in values.iter().enumerate() {
@@ -2504,6 +2588,8 @@ impl TursoBackend {
 
             let our_value =
                 turso_value_to_value(value.clone()).map_err(|e| e.under(&column_name))?;
+            let our_value = typed_cell(our_value, formats[idx].as_ref())
+                .map_err(|e| StorageError::QueryError(format!("column '{column_name}': {e}")))?;
             entity.insert(column_name, our_value);
         }
 
@@ -2564,8 +2650,22 @@ impl TursoBackend {
     // Actor loop and internal handlers
     // ========================================================================
 
+    fn parse_cdc_row(
+        values: &[turso_core::Value],
+        columns: &[Arc<str>],
+        formats: &Result<Vec<Option<FieldFormat>>>,
+    ) -> Result<StorageEntity> {
+        match formats {
+            Ok(formats) => Self::parse_row_values_with_schema(values, columns, formats),
+            Err(e) => Err(StorageError::QueryError(e.to_string())),
+        }
+    }
+
     /// Process a CDC event into a BatchWithMetadata<RowChange>
-    fn process_cdc_event(event: &RelationChangeEvent) -> BatchWithMetadata<RowChange> {
+    fn process_cdc_event(
+        event: &RelationChangeEvent,
+        catalog: &SchemaCatalog,
+    ) -> BatchWithMetadata<RowChange> {
         let mut raw_changes = Vec::new();
         // First-seen order, deduplicated: the batch is attributed to the first
         // writer and linked to the rest (ruling D3.a).
@@ -2584,6 +2684,9 @@ impl TursoBackend {
             .iter()
             .map(|c| Arc::from(c.as_str()))
             .collect();
+
+        let declared = catalog.declared_types(&event.relation_name, &columns);
+        let formats = column_formats(&columns, declared.iter().map(Option::as_deref));
 
         // A change whose record does not parse is a row this batch cannot
         // carry. Silently dropping it desynchronises every consumer from the
@@ -2617,27 +2720,46 @@ impl TursoBackend {
             ));
         }
 
-        for change in event.changes.iter() {
+        // Without the relation's declared types no cell can be typed, and
+        // reading them all as plain text would hide that.
+        let decodable = if catalog.knows(&event.relation_name) {
+            event.changes.len()
+        } else {
+            tracing::error!(
+                relation = %event.relation_name,
+                changes = event.changes.len(),
+                "CDC event for a relation the schema catalog does not know; its changes are \
+                 not decoded. DISCLOSED on the batch's `degraded` field."
+            );
+            parse_failures.push(format!(
+                "relation '{}' is unknown to the schema catalog (created outside the DDL \
+                 funnel?): its {} change record(s) were not decoded",
+                event.relation_name,
+                event.changes.len()
+            ));
+            0
+        };
+
+        for change in event.changes.iter().take(decodable) {
             let mut row_watch_key: Option<String> = None;
             let change_data = match &change.change {
                 DatabaseChangeType::Insert { .. } => match change.parse_record() {
                     Ok(values) => {
-                        let mut data =
-                            match TursoBackend::parse_row_values_with_schema(&values, &columns) {
-                                Ok(data) => data,
-                                Err(e) => {
-                                    note_parse_failure(
-                                        &mut parse_failures,
-                                        &event.relation_name,
-                                        "Insert",
-                                        change.id,
-                                        columns.len(),
-                                        "row omitted from this batch entirely",
-                                        &e,
-                                    );
-                                    continue;
-                                }
-                            };
+                        let mut data = match Self::parse_cdc_row(&values, &columns, &formats) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                note_parse_failure(
+                                    &mut parse_failures,
+                                    &event.relation_name,
+                                    "Insert",
+                                    change.id,
+                                    columns.len(),
+                                    "row omitted from this batch entirely",
+                                    &e,
+                                );
+                                continue;
+                            }
+                        };
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         row_watch_key = take_watch_key(&mut data);
                         let origin = extract_change_origin_from_data(&data);
@@ -2659,22 +2781,21 @@ impl TursoBackend {
                 },
                 DatabaseChangeType::Update { .. } => match change.parse_record() {
                     Ok(values) => {
-                        let mut data =
-                            match TursoBackend::parse_row_values_with_schema(&values, &columns) {
-                                Ok(data) => data,
-                                Err(e) => {
-                                    note_parse_failure(
-                                        &mut parse_failures,
-                                        &event.relation_name,
-                                        "Update",
-                                        change.id,
-                                        columns.len(),
-                                        "row omitted from this batch entirely",
-                                        &e,
-                                    );
-                                    continue;
-                                }
-                            };
+                        let mut data = match Self::parse_cdc_row(&values, &columns, &formats) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                note_parse_failure(
+                                    &mut parse_failures,
+                                    &event.relation_name,
+                                    "Update",
+                                    change.id,
+                                    columns.len(),
+                                    "row omitted from this batch entirely",
+                                    &e,
+                                );
+                                continue;
+                            }
+                        };
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         row_watch_key = take_watch_key(&mut data);
                         let origin = extract_change_origin_from_data(&data);
@@ -2707,22 +2828,21 @@ impl TursoBackend {
                 },
                 DatabaseChangeType::Delete { .. } => match change.parse_record() {
                     Ok(values) => {
-                        let mut data =
-                            match TursoBackend::parse_row_values_with_schema(&values, &columns) {
-                                Ok(data) => data,
-                                Err(e) => {
-                                    note_parse_failure(
-                                        &mut parse_failures,
-                                        &event.relation_name,
-                                        "Delete",
-                                        change.id,
-                                        columns.len(),
-                                        "row omitted from this batch entirely",
-                                        &e,
-                                    );
-                                    continue;
-                                }
-                            };
+                        let mut data = match Self::parse_cdc_row(&values, &columns, &formats) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                note_parse_failure(
+                                    &mut parse_failures,
+                                    &event.relation_name,
+                                    "Delete",
+                                    change.id,
+                                    columns.len(),
+                                    "row omitted from this batch entirely",
+                                    &e,
+                                );
+                                continue;
+                            }
+                        };
                         data.insert("_rowid".into(), Value::String(change.id.to_string()));
                         row_watch_key = take_watch_key(&mut data);
                         let entity_id = data
@@ -3061,10 +3181,11 @@ impl TursoBackend {
                 on_snapshot,
                 response,
             } => {
+                let catalog = state.schema_catalog.clone();
                 let result = async {
                     let id = conn
                         .set_change_callback(move |event: &RelationChangeEvent| {
-                            on_event(CommitEvent::new(event))
+                            on_event(CommitEvent::new(event, &catalog))
                         })
                         .map_err(|e| {
                             StorageError::DatabaseError(format!("register a commit listener: {e}"))
@@ -3232,63 +3353,25 @@ impl TursoBackend {
             .await
             .map_err(|e| StorageError::DatabaseError(format!("Failed to prepare query: {}", e)))?;
 
-        // Convert column names to Arc<str> once per statement; rows below only
-        // Arc::clone
-        let col_names: Vec<Arc<str>> = stmt.columns().iter().map(|c| Arc::from(c.name())).collect();
-
-        let mut rows = stmt
-            .query(param_values)
-            .await
-            .map_err(|e| StorageError::QueryError(format!("Failed to execute query: {}", e)))?;
-
-        let mut results = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| StorageError::QueryError(format!("Failed to fetch row: {}", e)))?
-        {
-            let mut entity = StorageEntity::with_capacity(col_names.len());
-
-            for (idx, col_name) in col_names.iter().enumerate() {
-                let value = row.get_value(idx).map_err(|e| {
-                    StorageError::QueryError(format!("Failed to get column value: {}", e))
-                })?;
-
-                let value = turso_value_to_value(value.into()).map_err(|e| {
-                    StorageError::QueryError(format!(
-                        "{} [query: {}]",
-                        e.under(col_name),
-                        redact_sql_for_logs(sql)
-                    ))
-                })?;
-                entity.insert(Arc::clone(col_name), value);
-            }
-
-            normalize_known_json_columns(&mut entity).map_err(|e| {
-                StorageError::QueryError(format!("stored property kinds are corrupt: {e}"))
-            })?;
-
-            results.push(entity);
-        }
+        let results = Self::read_rows(&mut stmt, param_values, sql).await?;
 
         Ok(results)
     }
 
-    /// Handle a query command with positional parameters
-    async fn handle_query_positional(
-        conn: &turso::Connection,
-        catalog: &SchemaCatalog,
-        sql: &str,
+    /// Run a prepared statement and read its rows. `sql` names the statement
+    /// in errors.
+    async fn read_rows(
+        stmt: &mut turso::Statement,
         params: Vec<turso::Value>,
+        sql: &str,
     ) -> Result<Vec<StorageEntity>> {
-        let mut stmt = conn
-            .prepare(sql)
-            .await
-            .map_err(|e| StorageError::DatabaseError(format!("Failed to prepare query: {}", e)))?;
-
-        // Convert column names to Arc<str> once per statement; rows below only
-        // Arc::clone
-        let col_names: Vec<Arc<str>> = stmt.columns().iter().map(|c| Arc::from(c.name())).collect();
+        let columns = stmt.columns();
+        // Arc<str> once per statement; rows below only Arc::clone
+        let col_names: Vec<Arc<str>> = columns.iter().map(|c| Arc::from(c.name())).collect();
+        let formats =
+            column_formats(&col_names, columns.iter().map(|c| c.decl_type())).map_err(|e| {
+                StorageError::QueryError(format!("{e} [query: {}]", redact_sql_for_logs(sql)))
+            })?;
 
         let mut rows = stmt
             .query(params)
@@ -3315,6 +3398,12 @@ impl TursoBackend {
                         redact_sql_for_logs(sql)
                     ))
                 })?;
+                let value = typed_cell(value, formats[idx].as_ref()).map_err(|e| {
+                    StorageError::QueryError(format!(
+                        "column '{col_name}': {e} [query: {}]",
+                        redact_sql_for_logs(sql)
+                    ))
+                })?;
                 entity.insert(Arc::clone(col_name), value);
             }
 
@@ -3324,6 +3413,22 @@ impl TursoBackend {
 
             results.push(entity);
         }
+        Ok(results)
+    }
+
+    /// Handle a query command with positional parameters
+    async fn handle_query_positional(
+        conn: &turso::Connection,
+        catalog: &SchemaCatalog,
+        sql: &str,
+        params: Vec<turso::Value>,
+    ) -> Result<Vec<StorageEntity>> {
+        let mut stmt = conn
+            .prepare(sql)
+            .await
+            .map_err(|e| StorageError::DatabaseError(format!("Failed to prepare query: {}", e)))?;
+
+        let results = Self::read_rows(&mut stmt, params, sql).await?;
 
         Self::note_statement(conn, catalog, sql).await;
         Ok(results)
@@ -3498,7 +3603,7 @@ impl TursoBackend {
     /// direction is safe (the relation stays unknown, so nothing is projected
     /// for it) and no production DDL renames a relation.
     async fn refresh_relation(conn: &turso::Connection, catalog: &SchemaCatalog, relation: &str) {
-        match Self::column_names_of(conn, relation).await {
+        match Self::columns_of(conn, relation).await {
             Ok(columns) if columns.is_empty() => catalog.forget(relation),
             Ok(columns) => catalog.set_columns(relation, columns),
             Err(e) => {
@@ -3540,7 +3645,7 @@ impl TursoBackend {
 
         let mut fresh = Vec::with_capacity(names.len());
         for name in &names {
-            match Self::column_names_of(conn, name).await {
+            match Self::columns_of(conn, name).await {
                 Ok(columns) if columns.is_empty() => {}
                 Ok(columns) => fresh.push((name.clone(), columns)),
                 Err(e) => tracing::warn!(
@@ -3553,18 +3658,25 @@ impl TursoBackend {
         catalog.replace_all(fresh);
     }
 
-    /// The column names the engine reports for one relation.
-    async fn column_names_of(conn: &turso::Connection, relation: &str) -> Result<Vec<String>> {
+    /// The columns the engine reports for one relation.
+    async fn columns_of(conn: &turso::Connection, relation: &str) -> Result<Vec<CatalogColumn>> {
         let bare = crate::sql_parser::normalize_table_name(relation);
         let rows =
             Self::query_rows(conn, &format!("PRAGMA table_info({bare})"), HashMap::new()).await?;
-        Ok(rows
-            .iter()
-            .filter_map(|row| match row.get("name") {
-                Some(Value::String(name)) => Some(name.clone()),
-                _ => None,
+        rows.iter()
+            .map(|row| match (row.get("name"), row.get("type")) {
+                (Some(Value::String(name)), Some(Value::String(declared_type))) => {
+                    Ok(CatalogColumn {
+                        name: name.clone(),
+                        declared_type: declared_type.clone(),
+                    })
+                }
+                other => Err(StorageError::QueryError(format!(
+                    "PRAGMA table_info({bare}) returned a row without a textual name and type: \
+                     {other:?}"
+                ))),
             })
-            .collect())
+            .collect()
     }
 
     pub(crate) async fn handle_ddl(
@@ -5137,8 +5249,9 @@ mod tests {
             Arc::from("properties"),
         ];
 
-        let entity = TursoBackend::parse_row_values_with_schema(&values, &columns)
-            .expect("the fixture row carries no property kinds");
+        let entity =
+            TursoBackend::parse_row_values_with_schema(&values, &columns, &[None, None, None])
+                .expect("the fixture row carries no property kinds");
 
         assert_eq!(
             entity.get("content"),
