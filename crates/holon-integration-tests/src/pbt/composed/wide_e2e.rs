@@ -3149,16 +3149,39 @@ mod tests {
     /// initial state boots — so a violation surfaces as that assertion instead
     /// of as the `CapMap::expect` abort it causes in a real run.
     ///
-    /// NONDETERMINISTIC by construction: `TestRunner::new` seeds randomly, so
+    /// NONDETERMINISTIC by construction: each run draws a fresh seed, so
     /// which draw carries the trigger varies (~30s). Fail-safe rather than
     /// flaky-green — a seed that never draws a triggering sequence fails on the
     /// `expected the trigger to fail the property` arm instead of passing
-    /// vacuously.
+    /// vacuously. The seed is printed first; `HOLON_SHRINK_WALK_SEED` replays
+    /// it.
     #[test]
     fn the_shrinker_never_yields_a_sequence_its_capmap_cannot_host() {
+        use std::hash::BuildHasher;
+
+        let seed = std::env::var("HOLON_SHRINK_WALK_SEED").map_or_else(
+            |_| std::collections::hash_map::RandomState::new().hash_one(0u8),
+            |seed| seed.parse().expect("HOLON_SHRINK_WALK_SEED must be a u64"),
+        );
+        eprintln!("shrink walk seed: {seed} (replay with HOLON_SHRINK_WALK_SEED={seed})");
+        shrink_walk_keeps_every_transition_hostable(seed);
+    }
+
+    /// A seed whose shrink dropped the row a later remote-list change
+    /// addressed, while that change's precondition still let it through.
+    #[test]
+    fn the_shrinker_keeps_no_remote_list_change_whose_row_it_dropped() {
+        shrink_walk_keeps_every_transition_hostable(REMOTE_LIST_ROW_DROPPED_SEED);
+    }
+
+    const REMOTE_LIST_ROW_DROPPED_SEED: u64 = 7;
+
+    fn shrink_walk_keeps_every_transition_hostable(seed: u64) {
         use proptest::test_runner::Config;
+        use proptest::test_runner::RngAlgorithm;
         use proptest::test_runner::TestCaseError;
         use proptest::test_runner::TestError;
+        use proptest::test_runner::TestRng;
         use proptest::test_runner::TestRunner;
 
         const TRIGGER: &str = "trigger: a shrinkable-wiring draw carries a lifecycle transition";
@@ -3166,11 +3189,19 @@ mod tests {
             dyn holon_pbt_core::capabilities::SutAppLifecycle,
         >();
 
-        let mut runner = TestRunner::new(Config {
-            cases: 512,
-            max_shrink_iters: 8192,
-            ..Config::default()
-        });
+        let mut rng_seed = [0u8; 32];
+        rng_seed[..8].copy_from_slice(&seed.to_le_bytes());
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 512,
+                max_shrink_iters: 8192,
+                // Every walk ends on the trigger by design; a persisted
+                // failure would only replay that.
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &rng_seed),
+        );
         let outcome = runner.run(
             &WideE2EMachine::sequential_strategy(2..10usize),
             |(initial, transitions, seen)| {

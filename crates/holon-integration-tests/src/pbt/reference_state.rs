@@ -939,6 +939,44 @@ impl RemoteListRefState {
             .collect()
     }
 
+    /// Whether the generator could draw `mutation` from this state. A shrink
+    /// that drops an earlier step re-checks the later ones through this.
+    pub fn admits(&self, mutation: &holon_pbt_core::capabilities::RemoteListMutation) -> bool {
+        use holon_pbt_core::capabilities::RemoteListMutation;
+
+        let column = |name: &str| {
+            mutation
+                .columns()
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or_else(|| panic!("a remote-list mutation names no '{name}' column"))
+        };
+        let (name, cat) = (column("name"), column("cat"));
+        let row = self
+            .rows
+            .get(&crate::pbt::remote_list_fixture::row_id(name, cat));
+        let active = || row.is_some_and(|cells| cells[Self::CHECKED] == "0");
+        let ticked_alone =
+            || row.is_some() && self.app.picked.contains_key(name) && !self.app.is_folded(name);
+        match mutation {
+            RemoteListMutation::Add { .. } | RemoteListMutation::AuthorLocally { .. } => {
+                row.is_none()
+            }
+            RemoteListMutation::Remove { .. }
+            | RemoteListMutation::DeleteLocally { .. }
+            | RemoteListMutation::EditLocally { .. }
+            | RemoteListMutation::EditRemotely { .. }
+            | RemoteListMutation::EditBoth { .. } => row.is_some(),
+            RemoteListMutation::AddDuplicate { .. } | RemoteListMutation::TickLocally { .. } => {
+                active()
+            }
+            RemoteListMutation::AddActiveOverTicked { .. }
+            | RemoteListMutation::UntickRemotely { .. }
+            | RemoteListMutation::UntickLocally { .. } => ticked_alone(),
+        }
+    }
+
     /// Apply one change the transition drew, to the app and to the mirror the
     /// round must settle on.
     pub fn apply(&mut self, mutation: &holon_pbt_core::capabilities::RemoteListMutation) {
@@ -4465,4 +4503,37 @@ fn same_page_title(content: &str, title: &str) -> bool {
     let fold =
         |s: &str| holon_api::caseless_fold(&s.split_whitespace().collect::<Vec<_>>().join(" "));
     fold(content.lines().next().unwrap_or("")) == fold(title)
+}
+
+#[cfg(test)]
+mod remote_list_tests {
+    use holon_pbt_core::capabilities::RemoteListMutation;
+
+    use super::*;
+
+    fn columns(checked: Option<&str>) -> Vec<(String, String)> {
+        [("name", "item0"), ("cat", "R"), ("count", "2kg")]
+            .into_iter()
+            .chain(checked.map(|c| ("checked", c)))
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_change_to_a_ticked_row_is_refused_once_the_row_is_gone() {
+        let over_ticked = RemoteListMutation::AddActiveOverTicked {
+            columns: columns(None),
+        };
+        let mut state = RemoteListRefState::default();
+        assert!(!state.admits(&over_ticked), "no row: nothing is ticked");
+        state.apply(&RemoteListMutation::Add {
+            columns: columns(Some("1")),
+        });
+        assert!(state.admits(&over_ticked));
+        state.apply(&over_ticked);
+        assert!(
+            !state.admits(&over_ticked),
+            "the row is active and ticked at once, so it is not ticked alone"
+        );
+    }
 }

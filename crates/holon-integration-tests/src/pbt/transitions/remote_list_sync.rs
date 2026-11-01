@@ -261,10 +261,16 @@ impl TransitionRef<ReferenceState> for RemoteListSync {
     type Reason = Reason;
 
     fn preconditions(&self, state: &ReferenceState) -> Validated<(), Reason> {
-        vec![check(state.app_started(), Reason::AppNotStarted)]
-            .into_iter()
-            .collect::<Validated<Vec<()>, _>>()
-            .map(|_| ())
+        vec![
+            check(state.app_started(), Reason::AppNotStarted),
+            check(
+                state.remote_list.admits(&self.mutation),
+                Reason::PreconditionFailed,
+            ),
+        ]
+        .into_iter()
+        .collect::<Validated<Vec<()>, _>>()
+        .map(|_| ())
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
