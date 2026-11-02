@@ -1,5 +1,6 @@
 mod batch_rollback_guard;
 mod block_source_boundaries;
+mod compacted_peer_receives_concurrent_edits;
 mod field_write_cost;
 mod layout_create_idempotence;
 mod layout_migration;
