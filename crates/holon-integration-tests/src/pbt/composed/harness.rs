@@ -776,31 +776,42 @@ fn ui_create_count(map: &BTreeMap<EntityUri, EntityUri>, burned: &BurnedPairs) -
 }
 
 /// How many UI creates the `block_history` of the database the SUT runs on
-/// does not hold. A boot while another process holds the file runs on an
-/// empty in-memory database; the restart after the release finds the file
-/// without the in-memory session's creates.
+/// does not hold. Every boot while another process holds the file runs on a
+/// fresh empty in-memory database; the restart after the release finds the
+/// file without any creates made since the hold began.
 #[derive(Default)]
 struct UnheldHistory {
     by_current_database: usize,
-    by_file_while_held: Option<usize>,
+    hold: Option<HoldStart>,
+}
+
+struct HoldStart {
+    unheld_by_file: usize,
+    ui_creates: usize,
 }
 
 impl UnheldHistory {
     /// `held_now`: the boot runs on memory while another process holds the
     /// file. `ui_creates`: the [`ui_create_count`] at the boot.
     fn note_boot(&mut self, held_now: bool, ui_creates: usize) {
-        // Ruling: "block_history is DB-file-only state like nav history and pins; the floor counts per DB epoch".
-        match (self.by_file_while_held, held_now) {
+        // Ruling: "block_history is DB-file-only state like nav history and pins; the
+        // floor counts per DB epoch".
+        match (self.hold.take(), held_now) {
             (None, true) => {
-                self.by_file_while_held =
-                    Some(std::mem::replace(&mut self.by_current_database, ui_creates));
+                self.hold = Some(HoldStart {
+                    unheld_by_file: self.by_current_database,
+                    ui_creates,
+                });
+                self.by_current_database = ui_creates;
             }
-            (Some(by_file), false) => {
-                let held_session = ui_creates - self.by_current_database;
-                self.by_current_database = by_file + held_session;
-                self.by_file_while_held = None;
+            (Some(hold), true) => {
+                self.hold = Some(hold);
+                self.by_current_database = ui_creates;
             }
-            (None, false) | (Some(_), true) => {}
+            (Some(hold), false) => {
+                self.by_current_database = hold.unheld_by_file + (ui_creates - hold.ui_creates);
+            }
+            (None, false) => {}
         }
     }
 }
@@ -2337,8 +2348,8 @@ mod unheld_history_tests {
 
     proptest! {
         /// The floor `ui_creates - unheld` equals the creates the database the
-        /// app runs on holds: the file keeps its own, a held session's memory
-        /// database starts empty and is dropped at the release.
+        /// app runs on holds: the file keeps its own, every boot under the hold
+        /// starts an empty memory database, and the release drops them all.
         #[test]
         fn the_floor_counts_the_creates_of_the_current_database(
             steps in prop::collection::vec(step(), 0..40),
@@ -2350,7 +2361,7 @@ mod unheld_history_tests {
                     (Step::Create, None) => { ui_creates += 1; in_file += 1; }
                     (Step::Create, Some(n)) => { ui_creates += 1; in_memory = Some(n + 1); }
                     (Step::Reboot, None) => unheld.note_boot(false, ui_creates),
-                    (Step::HeldReboot, None) => {
+                    (Step::Reboot, Some(_)) | (Step::HeldReboot, None) => {
                         in_memory = Some(0);
                         unheld.note_boot(true, ui_creates);
                     }
@@ -2358,7 +2369,8 @@ mod unheld_history_tests {
                         in_memory = None;
                         unheld.note_boot(false, ui_creates);
                     }
-                    (Step::Reboot | Step::HeldReboot, Some(_)) | (Step::Release, None) => continue,
+                    // The SUT and the reference assert against a second hold and a release without one.
+                    (Step::HeldReboot, Some(_)) | (Step::Release, None) => continue,
                 }
                 let held = in_memory.unwrap_or(in_file);
                 prop_assert_eq!(ui_creates - unheld.by_current_database, held);
