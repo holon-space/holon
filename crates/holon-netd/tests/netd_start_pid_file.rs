@@ -63,7 +63,7 @@ enum Bad {
     PgidOutOfRange(i64),
     AttemptNegative(i64),
     Blank,
-    /// A pgid that names no single group: the base asserts on it at start.
+    /// A pgid that names no single group: netd asserts on it at start.
     NoSingleGroup(i32),
 }
 
@@ -288,7 +288,7 @@ fn held_case() -> impl Strategy<Value = Case> {
         beat(),
         any::<bool>(),
     )
-        // The base asserts on such a pgid (kept as it is); a start that panics
+        // netd asserts on such a pgid; a start that panics
         // holds no write, and the unheld case draws it.
         .prop_filter("no pgid that names no single group", |(_, nets, ..)| {
             !nets.iter().any(|n| {
@@ -348,7 +348,7 @@ enum Want {
     Duplicate {
         net: usize,
     },
-    /// The base asserts on a pgid that names no single group; kept as it is.
+    /// netd asserts on a pgid that names no single group.
     Panic {
         net: usize,
     },
@@ -369,7 +369,7 @@ impl Want {
 
 /// From which net on the files are as before the start: the nets it never
 /// loaded, and the one whose pid file it refused. A pid file the start read
-/// and wrote before it ended (the base's assert, a duplicate name, a failed
+/// and wrote before it ended (the pgid assert, a duplicate name, a failed
 /// rename) is not kept.
 fn kept_from(case: &Case, want: &Want) -> Option<usize> {
     let refused = want.refused_at()?;
