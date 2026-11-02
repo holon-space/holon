@@ -386,6 +386,14 @@ pub enum UftError {
         subject: SubjectName,
         cycle: Vec<String>,
     },
+    /// The answer's bind returns a field the answer itself sets; nothing
+    /// changed.
+    #[error("the answer of '{}' for '{}' binds the field '{field}', which the answer sets itself", transition.0, subject.0)]
+    AnswerBindCollides {
+        transition: TransitionName,
+        subject: SubjectName,
+        field: String,
+    },
     /// The answer applied, but the automatic transitions it caused were
     /// still enabled after `steps` rounds; the net discloses a condition.
     #[error(

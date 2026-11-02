@@ -809,6 +809,8 @@ impl NetDef {
                 .and(place(expired_place(work), false))
                 .and(transition(answer_transition(work), &|t| {
                     t.trigger == Trigger::Manual
+                        && matches!(t.body, Body::Pure(_))
+                        && t.retry.is_none()
                 }))
                 .and(transition(work.to_string(), &|t| {
                     t.consumes.contains(&answered)
@@ -1511,6 +1513,12 @@ pub enum DeriveError {
     ReadsUndeclared { place: Place, read: Place },
     #[error("the derived place '{place}' reads itself through {}", cycle_text(.cycle))]
     Cycle { place: Place, cycle: Vec<Place> },
+    #[error("the row of '{place}' for '{subject}' has no ask hash: {reason}")]
+    AskRowHash {
+        place: Place,
+        subject: String,
+        reason: String,
+    },
 }
 
 fn cycle_text(cycle: &[Place]) -> String {
@@ -1927,10 +1935,8 @@ pub fn hash_text(hash: &AskHash) -> String {
     blake3::Hash::from_bytes(hash.0).to_hex().to_string()
 }
 
-pub fn hash_from_text(text: &str) -> AskHash {
-    let hash = blake3::Hash::from_hex(text)
-        .unwrap_or_else(|e| panic!("'{text}' is no ask hash text: {e}"));
-    AskHash(*hash.as_bytes())
+pub fn hash_from_text(text: &str) -> Result<AskHash, blake3::HexError> {
+    Ok(AskHash(*blake3::Hash::from_hex(text)?.as_bytes()))
 }
 
 impl Executor {
@@ -2130,11 +2136,15 @@ impl Executor {
     }
 
     /// Fires `Answer.T` with the user value; the answer id is the occurrence.
-    /// Three panics stay: a fire refusal the load rules out for a manual pure
-    /// `Answer.T` (the `unreachable!` arm), a firing that puts, with no
-    /// compare-and-set, a different token into an occupied single-token place
-    /// (`refuse_blind_overwrite`), and a value that holds `Value::Removed`,
-    /// which the token hash refuses (`encode_value`).
+    /// Three panics stay. The first is the `unreachable!` arm: the load rules
+    /// out its fire refusals (`NetDef::check` makes `Answer.T` manual, pure and
+    /// without retry, so there is no `InFlight` or `RetryPending`), the clock
+    /// check ran first, and the answer id is the occurrence. The other two are
+    /// a firing that puts, with no compare-and-set, a different token into an
+    /// occupied single-token place (`refuse_blind_overwrite`), and a value that
+    /// holds `Value::Removed`, which the token hash refuses (`encode_value`).
+    /// A bind of `Answer.T` that returns a field the answer sets is a typed
+    /// [`UftError::AnswerBindCollides`].
     pub fn answer(
         &mut self,
         call: AnswerCall,
@@ -2204,12 +2214,16 @@ impl Executor {
                 subject: call.subject,
                 cycle: cycle.iter().map(Place::to_string).collect(),
             }),
+            Err(FireError::ValueCollides { field, .. }) => Err(UftError::AnswerBindCollides {
+                transition: call.transition,
+                subject: call.subject,
+                field,
+            }),
             Err(
                 e @ (FireError::ClockWentBack(_)
                 | FireError::ClockOutOfRange(_)
                 | FireError::UnknownTransition(_)
                 | FireError::NotManual(_)
-                | FireError::ValueCollides { .. }
                 | FireError::AnswerOccurrence { .. }
                 | FireError::NotEnabled {
                     why:
@@ -2220,7 +2234,7 @@ impl Executor {
                     ..
                 }),
             ) => unreachable!(
-                "the clock is set and the load checks that '{work}' has a manual pure Answer: {e}"
+                "the clock is set and the load checks that '{work}' has a manual pure Answer without retry: {e}"
             ),
         }
     }
@@ -2269,16 +2283,19 @@ impl Executor {
         let mut rows = Vec::new();
         for (work, meta) in &self.net.asks {
             for (subject, row) in self.derive_all(&asks_place(work))? {
-                let Some(Value::String(hash)) = row.get(HASH_FIELD) else {
-                    panic!(
-                        "the {} row of {subject} has no '{HASH_FIELD}'",
-                        asks_place(work)
-                    );
-                };
+                let hash = match row.get(HASH_FIELD) {
+                    Some(Value::String(text)) => hash_from_text(text).map_err(|e| e.to_string()),
+                    other => Err(format!("{other:?} is no text")),
+                }
+                .map_err(|reason| DeriveError::AskRowHash {
+                    place: Place::new(&asks_place(work)),
+                    subject: subject.to_string(),
+                    reason,
+                })?;
                 rows.push(AskRow {
                     transition: TransitionName(work.to_string()),
                     subject: SubjectName(subject.to_string()),
-                    hash: hash_from_text(hash),
+                    hash,
                     input: meta.input.clone(),
                     irreversible: meta.irreversible,
                     has_preview: meta.has_preview,

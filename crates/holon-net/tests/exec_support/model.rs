@@ -624,6 +624,11 @@ impl Model {
                     steps,
                 })
             }
+            Err(FireError::ValueCollides { field, .. }) => Err(UftError::AnswerBindCollides {
+                transition: call.transition,
+                subject: call.subject,
+                field,
+            }),
             Err(e) => unreachable!("'{work}' has a manual pure Answer: {e}"),
         }
     }
@@ -680,7 +685,7 @@ impl Model {
                 rows.push(AskRow {
                     transition: TransitionName(work.clone()),
                     subject: SubjectName(subject.to_string()),
-                    hash: hash_from_text(hash),
+                    hash: hash_from_text(hash).expect("the Asks row has a hash text"),
                     input: meta.input.clone(),
                     irreversible: meta.irreversible,
                     has_preview: meta.has_preview,
@@ -1059,6 +1064,12 @@ impl Model {
                 subject: Subject::new(subject),
                 why,
             })?;
+        if let Some(field) = value.keys().find(|k| input.contains_key(*k)) {
+            return Err(FireError::ValueCollides {
+                transition: transition.to_string(),
+                field: field.clone(),
+            });
+        }
         if let Some(work) = self
             .spec
             .asks
@@ -1071,9 +1082,7 @@ impl Model {
             self.answers
                 .insert(id.to_string(), (work.clone(), subject.to_string()));
         }
-        for (k, v) in value {
-            assert!(input.insert(k, v).is_none());
-        }
+        input.extend(value);
         let id = self.start(&t, subject, occurrence.clone(), trace, input, now);
         self.run_body(id, now);
         let requests = self.quiesce(now).map_err(FireError::NoQuiescence)?;

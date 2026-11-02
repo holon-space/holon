@@ -1017,7 +1017,7 @@ pub fn answer_call(d: &Driver, s: &str, id: &str, stale: bool, value: Option<&st
     AnswerCall {
         transition: holon_transition_contract::TransitionName("Accept".to_string()),
         subject: holon_transition_contract::SubjectName(s.to_string()),
-        seen: holon_net::exec::hash_from_text(&hash),
+        seen: holon_net::exec::hash_from_text(&hash).expect("a hash text"),
         answer: AnswerId(id.to_string()),
         value: value.map(text),
     }

@@ -19,12 +19,16 @@ use std::time::Duration;
 
 use holon_api::TypeHint;
 use holon_api::Value;
+use holon_net::exec::AskMeta;
 use holon_net::exec::AttemptId;
+use holon_net::exec::Body;
 use holon_net::exec::Cause;
+use holon_net::exec::Class;
 use holon_net::exec::Content;
 use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
 use holon_net::exec::Executor;
+use holon_net::exec::HASH_FIELD;
 use holon_net::exec::NetDef;
 use holon_net::exec::OUTCOME_UNKNOWN;
 use holon_net::exec::OccurrenceId;
@@ -33,9 +37,16 @@ use holon_net::exec::POOL_SUBJECT;
 use holon_net::exec::Place;
 use holon_net::exec::Reader;
 use holon_net::exec::Resolution;
+use holon_net::exec::Retry;
 use holon_net::exec::SEEN_FIELD;
 use holon_net::exec::Subject;
+use holon_net::exec::TransitionDef;
 use holon_net::exec::WhyNot;
+use holon_net::exec::answer_transition;
+use holon_net::exec::answered_place;
+use holon_net::exec::asks_place;
+use holon_net::exec::expired_place;
+use holon_net::exec::hash_text;
 use holon_net::file::CommandSpec;
 use holon_net::file::DurationSpec;
 use holon_net::file::EffectSpec;
@@ -466,6 +477,86 @@ struct WorkGen {
     undoes: Option<usize>,
     bind: BindProg,
     body: BodyProg,
+    /// `Some`: the ask is built by hand through `NetDef::ask` instead of the
+    /// lowering.
+    hand: Option<HandGen>,
+}
+
+/// A hand-built ask: its `Asks` row and its `Answer` transition are drawn.
+#[derive(Clone, Debug)]
+struct HandGen {
+    row: RowHash,
+    /// The `Answer` binding returns its fields only while the `Asks` row
+    /// stands.
+    gated: bool,
+    bind: BindProg,
+    /// An answer key the `Answer` binding also returns.
+    planted: Option<&'static str>,
+    body: AnswerBody,
+    /// Inhibitor arcs of `Answer` from the work's `Answered`, `Running` and
+    /// `WorkFailed`.
+    inhibits: [bool; 3],
+    /// The run timer and the retry (count bound, backoff) of `Answer`.
+    run_timer: Option<u64>,
+    retry: Option<(u32, u64)>,
+}
+
+/// The hash field of an `Asks` row.
+#[derive(Clone, Debug)]
+enum RowHash {
+    Hash([u8; 32]),
+    Missing,
+    Other(Value),
+}
+
+#[derive(Clone, Debug)]
+enum AnswerBody {
+    /// Puts its input into `Answered`, as the lowered `Answer` does.
+    Answered,
+    Prog(BodyProg),
+    Effectful(Receiver),
+}
+
+fn hand_gen() -> impl Strategy<Value = HandGen> {
+    let ms = 1u64..5_000;
+    (
+        prop_oneof![
+            4 => any::<[u8; 32]>().prop_map(RowHash::Hash),
+            1 => Just(RowHash::Missing),
+            1 => value().prop_map(RowHash::Other),
+        ],
+        any::<bool>(),
+        bind_prog(),
+        prop_oneof![
+            1 => Just(None),
+            1 => select(vec![ANSWER_ID_KEY, SEEN_FIELD, ANSWER_INPUT_KEY]).prop_map(Some),
+        ],
+        prop_oneof![
+            2 => Just(AnswerBody::Answered),
+            1 => body_prog().prop_map(AnswerBody::Prog),
+            2 => prop_oneof![
+                Just(Receiver::Keyed),
+                Just(Receiver::StateProbe),
+                Just(Receiver::None),
+            ]
+            .prop_map(AnswerBody::Effectful),
+        ],
+        any::<[bool; 3]>(),
+        prop::option::of(ms.clone()),
+        prop::option::of((1u32..4, ms)),
+    )
+        .prop_map(
+            |(row, gated, bind, planted, body, inhibits, run_timer, retry)| HandGen {
+                row,
+                gated,
+                bind,
+                planted,
+                body,
+                inhibits,
+                run_timer,
+                retry,
+            },
+        )
 }
 
 fn type_hint() -> impl Strategy<Value = Option<TypeHint>> {
@@ -491,9 +582,10 @@ fn work_gen(places: usize) -> impl Strategy<Value = WorkGen> {
         prop::option::of(0..WORKS.len()),
         bind_prog(),
         body_prog(),
+        prop_oneof![2 => Just(None), 1 => hand_gen().prop_map(Some)],
     )
         .prop_map(
-            |(roles, puts, effect, input, irreversible, undoes, bind, body)| WorkGen {
+            |(roles, puts, effect, input, irreversible, undoes, bind, body, hand)| WorkGen {
                 roles,
                 puts,
                 effect,
@@ -502,6 +594,7 @@ fn work_gen(places: usize) -> impl Strategy<Value = WorkGen> {
                 undoes,
                 bind,
                 body,
+                hand,
             },
         )
 }
@@ -530,6 +623,14 @@ fn net_gen() -> impl Strategy<Value = NetGen> {
                 works,
             })
     })
+}
+
+fn receiver(r: Receiver) -> holon_net::exec::Receiver {
+    match r {
+        Receiver::Keyed => holon_net::exec::Receiver::Keyed,
+        Receiver::StateProbe => holon_net::exec::Receiver::StateProbe,
+        Receiver::None => holon_net::exec::Receiver::None,
+    }
 }
 
 fn duration(ms: u64) -> DurationSpec {
@@ -590,6 +691,15 @@ impl NetGen {
             .iter()
             .map(|w| Generated::Asks.name(w))
             .collect()
+    }
+
+    /// A hand-built ask whose `Asks` row carries no valid hash text.
+    fn has_bad_row_hash(&self) -> bool {
+        self.works.iter().any(|w| {
+            w.hand
+                .as_ref()
+                .is_some_and(|h| !matches!(h.row, RowHash::Hash(_)))
+        })
     }
 
     /// The stored, derived and lowered places.
@@ -744,6 +854,18 @@ impl NetGen {
                     (t.effect == Some(Receiver::Keyed) && retry.is_none()).then_some(10);
                 [run, abandon, retry.map(|r| r.1), keyed_backoff]
             })
+            .chain(
+                self.works
+                    .iter()
+                    .filter_map(|w| w.hand.as_ref())
+                    .flat_map(|h| {
+                        let keyed_backoff =
+                            (matches!(h.body, AnswerBody::Effectful(Receiver::Keyed))
+                                && h.retry.is_none())
+                            .then_some(10);
+                        [h.run_timer, h.retry.map(|r| r.1), keyed_backoff]
+                    }),
+            )
             .flatten()
             .max()
             .unwrap_or(0);
@@ -753,13 +875,17 @@ impl NetGen {
     /// Every transition the net holds, the lowering's included.
     fn transition_names(&self) -> Vec<String> {
         let mut names = self.file_transitions();
-        for w in self.work_names() {
-            for g in [
-                Generated::Answer,
-                Generated::ExpireAnswer,
-                Generated::ReleaseFailed,
-                Generated::ClearFailed,
-            ] {
+        for (w, work) in self.work_names().into_iter().zip(&self.works) {
+            let generated: &[Generated] = match work.hand {
+                Some(_) => &[Generated::Answer],
+                None => &[
+                    Generated::Answer,
+                    Generated::ExpireAnswer,
+                    Generated::ReleaseFailed,
+                    Generated::ClearFailed,
+                ],
+            };
+            for g in generated {
                 names.push(g.name(&w));
             }
             names.push(w);
@@ -982,15 +1108,139 @@ impl NetGen {
         NativeParts {
             bind: self.bind_fn(&w.bind, self.transition_readable()),
             body: match w.effect {
-                Some(r) => NativeBody::Effectful(match r {
-                    Receiver::Keyed => holon_net::exec::Receiver::Keyed,
-                    Receiver::StateProbe => holon_net::exec::Receiver::StateProbe,
-                    Receiver::None => holon_net::exec::Receiver::None,
-                }),
+                Some(r) => NativeBody::Effectful(receiver(r)),
                 None => NativeBody::Pure(w.body.body(WORKS[i], &self.output_places())),
             },
             preview: None,
         }
+    }
+
+    /// Work `i` as an ask built by hand: the places and transitions the load
+    /// checks an ask for, with the drawn `Asks` row and `Answer`.
+    fn hand(&self, net: NetDef, i: usize, h: &HandGen) -> NetDef {
+        let w = &self.works[i];
+        let t = WORKS[i];
+        let names = self.stored();
+        let (answered, failed) = (answered_place(t), Generated::WorkFailed.name(t));
+        let running = Place::running(t).to_string();
+        let arcs = |role: Role| -> Vec<String> {
+            w.roles
+                .iter()
+                .zip(&names)
+                .filter(|(r, _)| **r == role)
+                .map(|(_, p)| p.clone())
+                .collect()
+        };
+        let needs = [arcs(Role::Consumes), arcs(Role::Reads)].concat();
+        let blocks = arcs(Role::Inhibits);
+        let busy = [
+            answered.clone(),
+            running.clone(),
+            Place::retry_pending(t).to_string(),
+            Place::outcome_unknown(t).to_string(),
+            failed.clone(),
+        ];
+        let row = match &h.row {
+            RowHash::Hash(b) => Some(Value::String(hash_text(&AskHash(*b)))),
+            RowHash::Missing => None,
+            RowHash::Other(v) => Some(v.clone()),
+        };
+        let situation = self.bind_fn(&w.bind, self.transition_readable());
+        let asks: holon_net::exec::Read = Arc::new(move |r: &mut Reader<'_>, s: &Subject| {
+            if busy.iter().chain(&blocks).any(|p| r.present(p, s))
+                || needs.iter().any(|p| !r.present(p, s))
+            {
+                return None;
+            }
+            situation(r, s)?;
+            Some(
+                row.iter()
+                    .map(|v| (HASH_FIELD.to_owned(), v.clone()))
+                    .collect(),
+            )
+        });
+
+        let answer_bind: holon_net::exec::Read = {
+            let (prog, readable) = (h.bind.clone(), self.transition_readable());
+            let (gate, gated, planted) = (asks_place(t), h.gated, h.planted);
+            Arc::new(move |r: &mut Reader<'_>, s: &Subject| {
+                for op in &prog.reads {
+                    op.run(r, s, &readable);
+                }
+                if gated && !r.present(&gate, s) {
+                    return None;
+                }
+                let mut bound: Content = prog.out.as_ref()?.iter().cloned().collect();
+                if let Some(k) = planted {
+                    bound.insert(k.to_owned(), Value::String("planted".to_owned()));
+                }
+                Some(bound)
+            })
+        };
+        let answer_body = match &h.body {
+            AnswerBody::Answered => {
+                let answered = answered.clone();
+                Body::pure(move |s, input| Ok(vec![Output::new(&answered, s, input.clone())]))
+            }
+            AnswerBody::Prog(b) => Body::Pure(b.body(&answer_transition(t), &self.output_places())),
+            AnswerBody::Effectful(r) => Body::Effectful(receiver(*r)),
+        };
+        let mut answer = TransitionDef::new(
+            &answer_transition(t),
+            holon_net::exec::Trigger::Manual,
+            answer_bind,
+            answer_body,
+        );
+        for (p, on) in [&answered, &running, &failed].into_iter().zip(h.inhibits) {
+            if on {
+                answer = answer.inhibits(p);
+            }
+        }
+        answer.run_timer = h.run_timer.map(Duration::from_millis);
+        answer.retry = h.retry.map(|(max_attempts, ms)| Retry {
+            backoff: Duration::from_millis(ms),
+            max_attempts,
+        });
+
+        let body = match w.effect {
+            Some(r) => Body::Effectful(receiver(r)),
+            None => Body::Pure(w.body.body(t, &self.output_places())),
+        };
+        let mut work = TransitionDef::new(
+            t,
+            holon_net::exec::Trigger::Auto,
+            self.bind_fn(&w.bind, self.transition_readable()),
+            body,
+        )
+        .consumes(&answered)
+        .on_failure(&failed);
+        for p in arcs(Role::Consumes) {
+            work = work.consumes(&p);
+        }
+        for p in arcs(Role::Reads) {
+            work = work.reads(&p);
+        }
+        for p in arcs(Role::Inhibits) {
+            work = work.inhibits(&p);
+        }
+        for p in &w.puts {
+            work = work.produces(&names[*p]);
+        }
+
+        net.place(&answered, Class::Process)
+            .place(&failed, Class::Process)
+            .place(&expired_place(t), Class::Process)
+            .derived(&asks_place(t), asks)
+            .ask(
+                t,
+                AskMeta {
+                    input: w.input.clone(),
+                    irreversible: w.irreversible,
+                    has_preview: false,
+                },
+            )
+            .transition(answer)
+            .transition(work)
     }
 
     /// The net: the file, its derived places, then each lowered work.
@@ -1002,9 +1252,12 @@ impl NetGen {
         for (i, d) in self.derived.iter().enumerate() {
             net = net.derived(DERIVED[i], self.bind_fn(d, self.transition_readable()));
         }
-        for i in 0..self.works.len() {
-            net = lower(net, &self.descriptor(i), Some(self.parts(i)))
-                .map_err(|e| format!("lower: {e}"))?;
+        for (i, w) in self.works.iter().enumerate() {
+            net = match &w.hand {
+                Some(h) => self.hand(net, i, h),
+                None => lower(net, &self.descriptor(i), Some(self.parts(i)))
+                    .map_err(|e| format!("lower: {e}"))?,
+            };
         }
         Ok(net)
     }
@@ -1098,6 +1351,14 @@ impl NetGen {
             .is_some_and(|b| b.reads.iter().any(|r| self.read_is_ghost(r, &readable)))
     }
 
+    /// Whether `transition` is a work whose ask the lowering builds.
+    fn is_lowered(&self, transition: &str) -> bool {
+        WORKS
+            .iter()
+            .zip(&self.works)
+            .any(|(w, g)| *w == transition && g.hand.is_none())
+    }
+
     /// Whether `transition` is a work whose binding produces the field the
     /// answer of its ask fills.
     fn binds_answer_input(&self, transition: &str) -> bool {
@@ -1114,17 +1375,18 @@ impl NetGen {
             })
     }
 
-    /// Whether `transition` is a work whose binding produces a field of the
-    /// `Answered` token the lowering adds to the work's input.
+    /// Whether `transition` is a lowered work whose binding produces a field
+    /// of the `Answered` token the lowering adds to the work's input.
     fn binds_answer_fields(&self, transition: &str) -> bool {
         WORKS
             .iter()
             .position(|t| *t == transition)
             .is_some_and(|i| {
                 self.works.get(i).is_some_and(|w| {
-                    w.bind.out.as_ref().is_some_and(|f| {
-                        f.iter().any(|(k, _)| k == ANSWER_ID_KEY || k == SEEN_FIELD)
-                    })
+                    w.hand.is_none()
+                        && w.bind.out.as_ref().is_some_and(|f| {
+                            f.iter().any(|(k, _)| k == ANSWER_ID_KEY || k == SEEN_FIELD)
+                        })
                 })
             })
     }
@@ -1891,7 +2153,11 @@ impl Machine {
                     || exec.answer(call, now),
                 )?;
                 self.take_requests(r.as_ref().ok().map(|q| &q.requests));
+                let lowered = self.net.is_lowered(&work);
+                // A hand-built `Answer` has its own binding, which does not
+                // read what the work's binding reads.
                 if !self.check_clock("answer", now, &before, &r)?
+                    && lowered
                     && self.net.reads_undeclared(&work)
                 {
                     self.check_refused(
@@ -1902,14 +2168,15 @@ impl Machine {
                     )?;
                 }
                 // An answer to a changed situation expires instead of putting
-                // `Answered`, so no round refuses the work.
+                // `Answered`, so no round refuses the work. A hand-built
+                // `Answer` may put no `Answered` at all.
                 let expired = self
                     .exec
                     .tokens()
                     .subjects(&Generated::Expired.name(&work))
                     .iter()
                     .any(|t| t.as_str() == id);
-                if r.is_ok() && !expired && self.net.binds_answer_input(&work) {
+                if r.is_ok() && !expired && lowered && self.net.binds_answer_input(&work) {
                     let conditions = format!("{:?}", self.exec.conditions());
                     let why = format!("{:?}", self.exec.why_not(&work, subject));
                     prop_assert!(
@@ -1971,8 +2238,9 @@ impl Machine {
                         let cyclic = self.net.cyclic(false);
                         prop_assert!(
                             reads && e.contains("ReadsUndeclared")
+                                || self.net.has_bad_row_hash() && e.contains("AskRowHash")
                                 || self.net.asks_places().iter().any(|a| cyclic.contains(a)),
-                            "asks was refused as {e}, though no work's binding reads an undeclared place"
+                            "asks was refused as {e}, though no work's binding reads an undeclared place and no Asks row lacks a hash"
                         );
                     }
                 }
@@ -2147,36 +2415,227 @@ fn load(net: &NetGen) -> Result<Option<Executor>, TestCaseError> {
     Ok(no_panic("load", || net.executor())?.ok())
 }
 
+/// No call panics, a call before the clock or past the i64 nanosecond range
+/// is refused and changes nothing, a name the net does not hold is refused, a
+/// write into the executor's own places is refused, no pool exceeds its size,
+/// no token lands in a place the net does not hold, a binding that reads an
+/// undeclared place never fires, and a net whose derived places always
+/// evaluate each other in a cycle does not load.
+fn caller_calls_keep_the_contract(net: NetGen, ops: &[Op]) -> Result<(), TestCaseError> {
+    let cycle = net.cyclic(true);
+    let loaded = load(&net)?;
+    if !cycle.is_empty() {
+        prop_assert!(
+            loaded.is_none(),
+            "the net loaded although {cycle:?} evaluate each other in a cycle on every marking"
+        );
+        return Ok(());
+    }
+    let Some(exec) = loaded else { return Ok(()) };
+    let mut m = Machine::new(net, exec);
+    for op in ops {
+        m.apply(op)?;
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 512, max_shrink_time: 60_000, ..ProptestConfig::default() })]
 
-    /// Any sequence of public calls on any net the format allows: no call
-    /// panics, a call before the clock or past the i64 nanosecond range is
-    /// refused and changes nothing, a name the net does not hold is refused,
-    /// a write into the executor's own places is refused, no pool exceeds its
-    /// size, no token lands in a place the net does not hold, a binding that
-    /// reads an undeclared place never fires, and a net whose derived places
-    /// always evaluate each other in a cycle does not load.
+    /// Any sequence of public calls on any net the format allows, the asks
+    /// lowered or built by hand, keeps the caller contract.
     #[test]
     fn no_sequence_of_caller_calls_panics_on_any_net(
         net in net_gen(),
         ops in prop::collection::vec(op(), 1..24),
     ) {
-        let cycle = net.cyclic(true);
-        let loaded = load(&net)?;
-        if !cycle.is_empty() {
-            prop_assert!(
-                loaded.is_none(),
-                "the net loaded although {cycle:?} evaluate each other in a cycle on every marking"
-            );
-            return Ok(());
-        }
-        let Some(exec) = loaded else { return Ok(()) };
-        let mut m = Machine::new(net, exec);
-        for op in &ops {
-            m.apply(op)?;
+        caller_calls_keep_the_contract(net, &ops)?;
+    }
+}
+
+/// The smallest net with one hand-built ask `W0`, offered while `P0` holds a
+/// token.
+fn hand_net(h: HandGen) -> NetGen {
+    NetGen {
+        places: vec![PlaceGen {
+            capacity: PlaceCapacity::Fifo,
+            pool: None,
+        }],
+        transitions: vec![TransGen {
+            trigger: Trigger::Manual,
+            priority: 0,
+            roles: vec![Role::None],
+            produces: vec![],
+            facts: vec![],
+            on_failure: None,
+            on_timeout: None,
+            effect: None,
+            timers: None,
+            bind: BindProg {
+                reads: vec![],
+                out: None,
+            },
+            body: BodyProg::Outputs(vec![]),
+        }],
+        derived: vec![],
+        works: vec![WorkGen {
+            roles: vec![Role::Reads],
+            puts: vec![],
+            effect: None,
+            input: None,
+            irreversible: false,
+            undoes: None,
+            bind: BindProg {
+                reads: vec![],
+                out: Some(vec![]),
+            },
+            body: BodyProg::Outputs(vec![]),
+            hand: Some(h),
+        }],
+    }
+}
+
+fn plain_hand() -> HandGen {
+    HandGen {
+        row: RowHash::Hash([7; 32]),
+        gated: true,
+        bind: BindProg {
+            reads: vec![],
+            out: Some(vec![]),
+        },
+        planted: None,
+        body: AnswerBody::Answered,
+        inhibits: [true, false, false],
+        run_timer: None,
+        retry: None,
+    }
+}
+
+fn write_p0() -> Op {
+    Op::Write {
+        place: Name::Other(PLACES[0].to_owned()),
+        subject: "s".to_owned(),
+        content: vec![],
+        dt: Dt::Same,
+    }
+}
+
+fn answer_w0(answer: OccGen) -> Op {
+    Op::Answer {
+        work: Name::Other(WORKS[0].to_owned()),
+        subject: "s".to_owned(),
+        seen: SeenGen::Offered(0),
+        answer,
+        value: Some(Value::Integer(1)),
+        dt: Dt::Forward(1_000_000),
+    }
+}
+
+fn complete(result: ResultGen) -> Op {
+    Op::Complete {
+        attempt: Pick::Known(0),
+        result,
+        dt: Dt::Forward(1_000_000),
+    }
+}
+
+/// Hand-built asks the wide machine draws only rarely: an `Answer` binding
+/// that returns an answer key, an effectful `Answer` answered again while it
+/// runs, after a retryable failure and after a definite one, and `Asks` rows
+/// without a hash text. Each keeps the caller contract.
+#[test]
+fn a_hand_built_answer_is_refused_at_load_or_answered_without_panic() {
+    let effectful = |r: Receiver, retry: Option<(u32, u64)>| HandGen {
+        body: AnswerBody::Effectful(r),
+        inhibits: [false; 3],
+        retry,
+        ..plain_hand()
+    };
+    let again = [
+        write_p0(),
+        answer_w0(OccGen::Fresh),
+        answer_w0(OccGen::Fresh),
+        Op::Step {
+            dt: Dt::Forward(1_000_000),
+        },
+    ];
+    let failed = |retryable: bool| {
+        vec![
+            write_p0(),
+            answer_w0(OccGen::Fresh),
+            complete(ResultGen::Failed(retryable)),
+            answer_w0(OccGen::Fresh),
+            answer_w0(OccGen::Reuse(0)),
+        ]
+    };
+    let mut cases: Vec<(String, HandGen, Vec<Op>)> = vec![];
+    for key in [ANSWER_ID_KEY, SEEN_FIELD, ANSWER_INPUT_KEY] {
+        for gated in [true, false] {
+            cases.push((
+                format!("Answer binds {key:?}, gated {gated}"),
+                HandGen {
+                    planted: Some(key),
+                    gated,
+                    ..plain_hand()
+                },
+                again.to_vec(),
+            ));
         }
     }
+    for r in [Receiver::None, Receiver::StateProbe, Receiver::Keyed] {
+        cases.push((
+            format!("effectful {r:?} Answer answered twice"),
+            effectful(r, None),
+            again.to_vec(),
+        ));
+        for retryable in [true, false] {
+            cases.push((
+                format!("effectful {r:?} Answer answered after a failure, retryable {retryable}"),
+                effectful(r, Some((3, 50))),
+                failed(retryable),
+            ));
+            cases.push((
+                format!("effectful {r:?} Answer without retry answered after a failure, retryable {retryable}"),
+                effectful(r, None),
+                failed(retryable),
+            ));
+        }
+    }
+    for retryable in [true, false] {
+        cases.push((
+            format!("pure Answer that fails, retryable {retryable}, answered again"),
+            HandGen {
+                body: AnswerBody::Prog(BodyProg::Fails { retryable }),
+                inhibits: [false; 3],
+                retry: Some((3, 50)),
+                ..plain_hand()
+            },
+            again.to_vec(),
+        ));
+    }
+    for row in [
+        RowHash::Missing,
+        RowHash::Other(Value::Integer(1)),
+        RowHash::Other(Value::String("no hash".to_owned())),
+    ] {
+        cases.push((
+            format!("Asks row hash {row:?}"),
+            HandGen {
+                row,
+                ..plain_hand()
+            },
+            vec![write_p0(), Op::Asks, answer_w0(OccGen::Fresh)],
+        ));
+    }
+    let failures: Vec<String> = cases
+        .into_iter()
+        .filter_map(|(name, h, ops)| {
+            caller_calls_keep_the_contract(hand_net(h), &ops)
+                .err()
+                .map(|e| format!("{name}: {e}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 // ------------------------------------------------------ one defect each
@@ -2288,6 +2747,48 @@ proptest! {
                         && format!("{w:?}").contains(&format!("{ghost:?}"))),
                 "why_not of T0 does not name the undeclared {ghost:?}: {why:?}"
             );
+        }
+    }
+}
+
+// ------------------------------------------------------ ask hash text
+
+fn hex_digit(c: char) -> Option<u8> {
+    c.to_digit(16).map(|d| d as u8)
+}
+
+/// Texts of every shape a caller can pass: arbitrary strings, 64 hex
+/// digits in either case, and 64 characters with one non-hex character.
+fn hash_text_input() -> impl Strategy<Value = String> {
+    prop_oneof![
+        any::<String>(),
+        prop::collection::vec(any::<u8>(), 0..80)
+            .prop_map(|b| b.iter().map(|x| format!("{x:02x}")).collect()),
+        "[0-9a-fA-F]{64}",
+        ("[0-9a-fA-F]{64}", 0usize..64, any::<char>()).prop_map(|(mut s, at, c)| {
+            s.replace_range(at..=at, &c.to_string());
+            s
+        }),
+    ]
+}
+
+proptest! {
+    /// Any text is parsed to the hash it spells or refused; it never panics.
+    #[test]
+    fn an_ask_hash_text_parses_or_is_refused(text in hash_text_input()) {
+        let expected: Option<Vec<u8>> = (text.chars().count() == 64)
+            .then(|| {
+                let digits: Option<Vec<u8>> = text.chars().map(hex_digit).collect();
+                digits.map(|d| d.chunks(2).map(|p| p[0] << 4 | p[1]).collect())
+            })
+            .flatten();
+        let parsed = std::panic::catch_unwind(|| holon_net::exec::hash_from_text(&text))
+            .map_err(|_| TestCaseError::fail(format!("hash_from_text panicked on {text:?}")))?;
+        match (parsed, expected) {
+            (Ok(h), Some(bytes)) => prop_assert_eq!(h.0.to_vec(), bytes),
+            (Err(_), None) => {}
+            (Ok(h), None) => prop_assert!(false, "{text:?} parsed to {:?}", h.0),
+            (Err(e), Some(_)) => prop_assert!(false, "{text:?} refused: {e}"),
         }
     }
 }

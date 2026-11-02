@@ -1,5 +1,6 @@
 mod analysis_pbt;
 mod analysis_soundness;
+mod answer_bind_probe;
 mod caller_input_refusals;
 mod caller_inputs;
 mod caller_inputs_wide;
