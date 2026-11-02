@@ -232,7 +232,10 @@ fn decl(y: &Y, path: &str) -> R<Decl> {
             // The language holds only values `get` can read without overflowing
             // `i128` (below 10^37); a longer number falls to the union's `otherwise`.
             DeclKind::Number {
-                re: Re::parse(&format!("[0-9]{{1,19}}([{class}][0-9]{{1,18}})?"), &p)?,
+                re: Re::parse(
+                    &format!("[0-9]{{1,{INT_DIGITS}}}([{class}][0-9]{{1,18}})?"),
+                    &p,
+                )?,
                 seps,
                 print_sep,
                 round,
@@ -1109,13 +1112,20 @@ fn abs_put(n: &Node, a: &Abs, orig: Option<&str>) -> P<String> {
     Ok(out)
 }
 
+/// The most integer digits the number language holds.
+const INT_DIGITS: u32 = 19;
+
 fn print_decimal(r: Rational, sep: char, round: Option<u32>) -> Result<String, String> {
+    let past_bound = || format!("{r} has more than {INT_DIGITS} integer digits, the number bound");
+    if (r.num() / r.den()).unsigned_abs() >= 10u128.pow(INT_DIGITS) {
+        return Err(past_bound());
+    }
     let (digits, k) = match round {
         Some(k) => r
             .round(k)
             .map_err(|e| e.to_string())?
             .to_decimal(k)
-            .expect("a value rounded to k decimals has a k-decimal form"),
+            .ok_or_else(past_bound)?,
         None => r.to_decimal(18).ok_or_else(|| {
             format!("{r} has no exact decimal form (declare `round:` to allow rounding)")
         })?,

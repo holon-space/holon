@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 
 use holon_lens::Format;
+use holon_lens::FormatError;
 use holon_lens::bundled;
 use holon_lens::quantity::Amount;
 use holon_lens::quantity::Quantity;
@@ -101,7 +102,8 @@ fn cook_text() -> impl Strategy<Value = String> {
 }
 
 /// Below 10^19 the integer part prints inside the number language; a larger
-/// value has no text in either format.
+/// value has no text in either format, and put refuses it
+/// (put_writes_or_refuses_any_value draws such values).
 fn dec(max_decimals: u32) -> impl Strategy<Value = Rational> {
     (0i128..10i128.pow(19), 0..=max_decimals)
         .prop_map(|(n, k)| Rational::new(n, 10i128.pow(k)).unwrap())
@@ -125,7 +127,8 @@ fn tsl_quantity() -> impl Strategy<Value = Option<Quantity>> {
 fn cook_quantity() -> impl Strategy<Value = Option<Quantity>> {
     let amount = prop_oneof![
         dec(3).prop_map(Amount::Exact),
-        // The fraction language's bound: whole part, numerator and denominator below 10^18.
+        // The fraction language's bound: whole part, numerator and denominator below 10^18;
+        // put_writes_or_refuses_any_value draws past it.
         (0i128..10i128.pow(18), 1i128..10i128.pow(18))
             .prop_map(|(n, d)| Amount::Exact(Rational::new(n, d).unwrap())),
         (dec(2), dec(2)).prop_map(|(a, b)| Amount::Range(a, b)),
@@ -136,6 +139,53 @@ fn cook_quantity() -> impl Strategy<Value = Option<Quantity>> {
         8 => (amount, unit).prop_map(|(a, u)| Some(Quantity::one(a, u))),
         1 => Just(None),
     ]
+}
+
+/// Values across the whole `i128` range, both signs, with denominators up to
+/// 10^18.
+fn any_rational() -> impl Strategy<Value = Rational> {
+    (any::<bool>(), 1i128..10, 0u32..38, 1i128..10, 0u32..19).prop_map(|(neg, m, e, dm, de)| {
+        let n = m * 10i128.pow(e);
+        Rational::new(if neg { -n } else { n }, dm * 10i128.pow(de)).unwrap()
+    })
+}
+
+fn any_quantity(range: bool) -> impl Strategy<Value = Quantity> {
+    let exact = any_rational().prop_map(Amount::Exact);
+    let amount = if range {
+        prop_oneof![
+            exact,
+            (any_rational(), any_rational()).prop_map(|(a, b)| Amount::Range(a, b))
+        ]
+        .boxed()
+    } else {
+        exact.boxed()
+    };
+    (
+        amount,
+        prop::option::of(prop::sample::select(&["g", "cup"][..])),
+    )
+        .prop_map(|(a, u)| Quantity::one(a, u))
+}
+
+/// Put writes text the format reads back, or refuses with Unwritable; a value
+/// of 10^19 or more has no text in either format.
+fn writes_or_refuses(f: &Format, q: &Quantity) -> Result<(), TestCaseError> {
+    let big = |r: &Rational| r.num().unsigned_abs() / r.den().unsigned_abs() >= 10u128.pow(19);
+    let past = q.terms().iter().any(|t| match &t.amount {
+        Amount::Exact(r) => big(r),
+        Amount::Range(a, b) => big(a) || big(b),
+        Amount::Text(_) => false,
+    });
+    match f.print(Some(q), None) {
+        Ok(s) => {
+            prop_assert!(!past, "{q} printed as {s:?} past the bound");
+            f.parse(&s).map_err(fail)?;
+        }
+        Err(FormatError::Unwritable { .. }) => {}
+        Err(e) => prop_assert!(false, "{q}: {e}"),
+    }
+    Ok(())
 }
 
 fn fail(e: impl std::fmt::Display) -> TestCaseError {
@@ -196,6 +246,12 @@ proptest! {
         }
     }
 
+    #[test]
+    fn put_writes_or_refuses_any_value(t in any_quantity(false), c in any_quantity(true)) {
+        writes_or_refuses(&TSL, &t)?;
+        writes_or_refuses(&COOK, &c)?;
+    }
+
     /// Rounding is a quotient: PutGet holds up to the declared 2 decimals.
     #[test]
     fn tsl_rounding_put_get(n in 0i128..10i128.pow(19), d in 1i128..10i128.pow(18)) {
@@ -218,5 +274,33 @@ fn every_text_the_format_accepts_reads_back_byte_equal() {
     ] {
         let parsed = f.parse(s).unwrap_or_else(|e| panic!("{s:?}: {e}"));
         assert_eq!(f.print(parsed.as_ref(), Some(s)).unwrap(), s, "GetPut");
+    }
+}
+
+/// A value of 20 or more integer digits has no text in tsl_count's number
+/// language, so put refuses it instead of printing it some other way.
+fn tsl_refuses_past_the_bound(n: i128, d: i128) -> Result<(), TestCaseError> {
+    let q = Quantity::one(Amount::Exact(Rational::new(n, d).unwrap()), Some("g"));
+    let e = TSL.print(Some(&q), None);
+    prop_assert!(
+        matches!(e, Err(FormatError::Unwritable { .. })),
+        "{}/{}: {:?}",
+        n,
+        d,
+        e
+    );
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn put_refuses_a_value_past_the_number_language(
+        m in 1i128..10,
+        e in 22u32..38,
+        d in 1i128..1000,
+    ) {
+        for (n, d) in [(29890635088163560541127132423768202995, 135), (m * 10i128.pow(e), d)] {
+            tsl_refuses_past_the_bound(n, d)?;
+        }
     }
 }
