@@ -122,7 +122,14 @@ pub async fn start(config: Config) -> Result<Netd, NetdError> {
     let mut nets: BTreeMap<String, Arc<HostedNet>> = BTreeMap::new();
     let mut from: BTreeMap<String, String> = BTreeMap::new();
     for path in &config.nets {
-        let net = HostedNet::load(path, &config.state_dir)?;
+        // Loading reads the net file and opens the pid file, which may wait on
+        // a write of another runner: blocking I/O, so off the async worker.
+        let net = {
+            let (path, state_dir) = (path.clone(), config.state_dir.clone());
+            tokio::task::spawn_blocking(move || HostedNet::load(&path, &state_dir))
+                .await
+                .expect("loading a net does not panic")?
+        };
         let shown = path.display().to_string();
         if let Some(first) = from.insert(net.name().to_owned(), shown.clone()) {
             return Err(NetdError::DuplicateNet {

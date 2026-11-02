@@ -77,6 +77,7 @@ OWNER_RECIPES = {
     "package(holon-mcp) & test(=describe_ui_deferred::fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)": "just timing-gate",
     "package(holon-mcp-client) & test(=oauth_bootstrap_flow::a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout)": "just timing-gate",
     "package(holon-net-shell) & test(=in_flight_abandon_and_the_runtime_answer_within_the_bound_while_a_pid_file_write_is_held)": "just timing-gate",
+    "package(holon-netd) & test(=a_task_on_the_runtime_runs_within_the_bound_while_netd_start_waits_for_a_held_pid_file_write)": "just timing-gate",
 }
 
 # Changed-path prefix -> the recipe that checks it: for workspace code, the
