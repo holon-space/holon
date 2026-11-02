@@ -315,7 +315,7 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // when this device moves the mount that places the share (D198.a).
     // +2: tests planting a mount in the global doc, the way an accept does.
     // +1: a test planting a page's `#+TODO` vocabulary, as org ingest stores it.
-    ("crates/holon-loro/src/loro_share_backend.rs", 20),
+    ("crates/holon-loro/src/loro_share_backend.rs", 21),
     // +1: the layout doc's `subscribe_root` registration, same rationale as the
     // global doc's.
     ("crates/holon-loro/src/loro_sync_controller.rs", 2),
