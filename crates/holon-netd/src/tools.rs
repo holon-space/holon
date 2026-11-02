@@ -311,8 +311,20 @@ fn why_not(why: &WhyNot) -> (String, Value) {
             json!({"kind": "reads_undeclared", "place": place.as_str()}),
         ),
         WhyNot::BindsAnswerInput => (
-            "its bind produces the field the answer value fills".to_owned(),
+            "its bind produces a field the answer fills (its value, its id or the seen ask hash)"
+                .to_owned(),
             json!({"kind": "binds_answer_input"}),
+        ),
+        WhyNot::DerivedCycle(cycle) => (
+            format!(
+                "its bind reads a derived place that reads itself through {}",
+                cycle
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ),
+            json!({"kind": "derived_cycle", "cycle": cycle.iter().map(|p| p.as_str()).collect::<Vec<_>>()}),
         ),
     }
 }

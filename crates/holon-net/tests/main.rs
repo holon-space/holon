@@ -1,6 +1,8 @@
 mod analysis_pbt;
 mod analysis_soundness;
+mod caller_input_refusals;
 mod caller_inputs;
+mod caller_inputs_wide;
 mod catalog_totality;
 mod correlated_hop;
 mod enabledness;

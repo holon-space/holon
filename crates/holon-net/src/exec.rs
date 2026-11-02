@@ -183,10 +183,13 @@ pub fn expire_reason_text(reason: ExpireReason) -> &'static str {
 }
 
 fn expire_reason(text: &str) -> ExpireReason {
+    parse_expire_reason(text).unwrap_or_else(|| panic!("'{text}' is no expire reason"))
+}
+
+fn parse_expire_reason(text: &str) -> Option<ExpireReason> {
     [ExpireReason::AskGone, ExpireReason::SituationChanged]
         .into_iter()
         .find(|r| expire_reason_text(*r) == text)
-        .unwrap_or_else(|| panic!("'{text}' is no expire reason"))
 }
 
 /// What the `Asks` row of an ask shows besides its hash.
@@ -428,6 +431,11 @@ pub struct NetDef {
     transitions: Vec<TransitionDef>,
     /// Keyed by the work transition.
     asks: BTreeMap<Arc<str>, AskMeta>,
+    /// The places [`NetDef::check`] declares for the executor's own markers.
+    owned: BTreeSet<Place>,
+    /// The latest `now` whose every timer deadline fits i64 nanoseconds, the
+    /// form a deadline is stored in; set by [`NetDef::check`].
+    last_now: Duration,
 }
 
 impl NetDef {
@@ -566,8 +574,52 @@ impl NetDef {
         match self.places.get(place).map(|d| &d.kind) {
             None => Err(ExecError::UndeclaredPlace(place.to_string())),
             Some(PlaceKind::Derived(_)) => Err(ExecError::DerivedPlace(place.to_string())),
+            Some(PlaceKind::Stored { .. }) if self.owned.contains(place) => {
+                Err(ExecError::ExecutorPlace(place.to_string()))
+            }
             Some(PlaceKind::Stored { .. }) => Ok(()),
         }
+    }
+
+    /// The answer field an `Answered` or `Expired` token in `place` lacks:
+    /// the work's firing reads the answer id and the value, the lowering the
+    /// seen hash, and the answer's settlement the expiry reason.
+    fn missing_answer_field(&self, place: &str, content: &Content) -> Option<&'static str> {
+        let text = |f: &str| matches!(content.get(f), Some(Value::String(_)));
+        let needs = if self.is_answered(place) {
+            vec![
+                (ANSWER_ID_KEY, text(ANSWER_ID_KEY)),
+                (SEEN_FIELD, text(SEEN_FIELD)),
+                (ANSWER_INPUT_KEY, content.contains_key(ANSWER_INPUT_KEY)),
+            ]
+        } else if self.asks.keys().any(|w| expired_place(w) == place) {
+            let reason = matches!(
+                content.get(REASON_FIELD),
+                Some(Value::String(r)) if parse_expire_reason(r).is_some()
+            );
+            vec![(REASON_FIELD, reason)]
+        } else {
+            return None;
+        };
+        needs
+            .into_iter()
+            .find_map(|(field, ok)| (!ok).then_some(field))
+    }
+
+    /// Why a firing may not put `outputs`: a place an outside write may not
+    /// write either.
+    fn refused_output(&self, outputs: &[Output]) -> Option<ExecError> {
+        outputs
+            .iter()
+            .find_map(|o| match self.outside_place(&o.place) {
+                Err(e) => Some(e),
+                Ok(()) => self
+                    .missing_answer_field(&o.place, &o.content)
+                    .map(|field| ExecError::AnswerField {
+                        place: o.place.to_string(),
+                        field,
+                    }),
+            })
     }
 
     fn candidate_of(&self, place: &Place) -> Option<&Place> {
@@ -594,6 +646,7 @@ impl NetDef {
                 if self.places.contains_key(&reserved) {
                     return Err(LoadError::ReservedPlace(reserved));
                 }
+                self.owned.insert(reserved.clone());
                 self.places.insert(
                     reserved,
                     PlaceDef {
@@ -609,6 +662,7 @@ impl NetDef {
         if self.places.contains_key(&unknown) {
             return Err(LoadError::ReservedPlace(unknown));
         }
+        self.owned.insert(unknown.clone());
         self.places.insert(
             unknown,
             PlaceDef {
@@ -655,7 +709,7 @@ impl NetDef {
             }
             let arcs = t.consumes.iter().chain(&t.reads).chain(&t.inhibits);
             let ports = t.facts.iter().chain(&t.on_failure).chain(&t.on_timeout);
-            for p in arcs.clone().chain(ports) {
+            for p in arcs.clone().chain(ports.clone()) {
                 if !self.places.contains_key(p) {
                     return Err(LoadError::UndeclaredPlace {
                         user: t.name.to_string(),
@@ -673,13 +727,39 @@ impl NetDef {
                     place: p.clone(),
                 });
             }
-            for p in arcs {
+            for p in arcs.chain(ports) {
                 if matches!(self.places[p].kind, PlaceKind::Derived(_)) {
                     return Err(LoadError::ArcOnDerived {
                         transition: t.name.to_string(),
                         place: p.clone(),
                     });
                 }
+            }
+            // A read or an inhibitor arc on an executor marker is valid: "not
+            // while T runs" inhibits `T.Running`.
+            let writes = t.consumes.iter().chain(&t.produces).chain(&t.facts);
+            if let Some(p) = writes
+                .chain(&t.on_failure)
+                .chain(&t.on_timeout)
+                .find(|p| self.owned.contains(*p))
+            {
+                return Err(LoadError::WritesExecutorPlace {
+                    transition: t.name.to_string(),
+                    place: p.clone(),
+                });
+            }
+            let cause = cause_content(&Cause::definite(String::new()));
+            if let Some((p, field)) = t
+                .on_failure
+                .iter()
+                .chain(&t.on_timeout)
+                .find_map(|p| Some((p, self.missing_answer_field(p, &cause)?)))
+            {
+                return Err(LoadError::PortLacksAnswerField {
+                    transition: t.name.to_string(),
+                    place: p.clone(),
+                    field,
+                });
             }
             if t.trigger == Trigger::Auto && t.consumes.is_empty() && t.reads.is_empty() {
                 return Err(LoadError::NoSubject(t.name.to_string()));
@@ -688,6 +768,26 @@ impl NetDef {
                 return Err(LoadError::KeyedWithoutCountBound(t.name.to_string()));
             }
         }
+        let longest = self
+            .transitions
+            .iter()
+            .flat_map(|t| [t.retry.map(|r| r.backoff), t.run_timer, t.abandon])
+            .flatten()
+            .max()
+            .unwrap_or_default();
+        self.last_now = MAX_NOW.checked_sub(longest).ok_or_else(|| {
+            let t = self
+                .transitions
+                .iter()
+                .find(|t| {
+                    [t.retry.map(|r| r.backoff), t.run_timer, t.abandon].contains(&Some(longest))
+                })
+                .expect("the longest timer is a transition's");
+            LoadError::TimerOutOfRange {
+                transition: t.name.to_string(),
+                timer: longest,
+            }
+        })?;
         for work in self.asks.keys() {
             let place = |name: String, derived: bool| {
                 self.places
@@ -768,6 +868,18 @@ pub enum LoadError {
     #[error("transition '{transition}' has an arc on the derived place '{place}'")]
     ArcOnDerived { transition: String, place: Place },
     #[error(
+        "transition '{transition}' consumes or puts '{place}', which holds the executor's own markers"
+    )]
+    WritesExecutorPlace { transition: String, place: Place },
+    #[error(
+        "transition '{transition}' has a failure or timeout port on '{place}', whose token needs the field '{field}' that a cause token lacks"
+    )]
+    PortLacksAnswerField {
+        transition: String,
+        place: Place,
+        field: &'static str,
+    },
+    #[error(
         "transition '{transition}': {}; a place is one input arc of a transition",
         input_twice(.first, .second, .place)
     )]
@@ -785,7 +897,18 @@ pub enum LoadError {
         "the ask '{work}' lacks '{missing}': it needs a derived Asks, a stored Answered and Expired, a manual Answer, and a work that consumes Answered"
     )]
     IncompleteAsk { work: String, missing: String },
+    #[error("the derived place '{}' reads itself through {}", .0[0], cycle_text(.0))]
+    DerivedCycle(Vec<Place>),
+    #[error("transition '{transition}' has a timer of {timer:?}, past the i64 nanosecond range")]
+    TimerOutOfRange { transition: String, timer: Duration },
 }
+
+/// The deepest nesting of derived rows one evaluation runs: the bound keeps
+/// a derive that recurses over ever new subjects off the stack's end.
+const MAX_DERIVED_DEPTH: usize = 128;
+
+/// The clock a deadline fits: deadlines are stored as i64 nanoseconds.
+const MAX_NOW: Duration = Duration::from_nanos(i64::MAX as u64);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Token {
@@ -813,6 +936,10 @@ struct Slot {
 /// Who a commit is by: a transition, or `None` for a write from outside the
 /// net (a user edit, an ingest, an undo).
 type Writer<'a> = Option<&'a Arc<str>>;
+
+/// A put into a pool that already holds its size.
+#[derive(Debug)]
+struct PoolFull;
 
 /// The owned marking: a token queue and a version per (place, subject). Only
 /// a [`Capacity::Fifo`] place ever holds more than one token.
@@ -899,29 +1026,36 @@ impl Tokens {
 
     /// Commits `content`; unchanged content is no change and no new version.
     /// A FIFO place appends, so a put never drops a waiting token
-    /// (REV2-cand.c).
-    fn put(&mut self, place: &Place, subject: &Subject, content: Content, by: Writer) {
+    /// (REV2-cand.c). A pool that holds its size, lent tokens included,
+    /// refuses the put and changes nothing.
+    fn put(
+        &mut self,
+        place: &Place,
+        subject: &Subject,
+        content: Content,
+        by: Writer,
+    ) -> Result<(), PoolFull> {
+        if let Some(&size) = self.pools.get(place) {
+            let held = self.slot(place, subject).map_or(0, |s| s.tokens.len());
+            let lent = self.lent.get(place).copied().unwrap_or(0);
+            if held + lent as usize >= size as usize {
+                return Err(PoolFull);
+            }
+        }
         let id = self.next_id;
         let fifo = self.fifo.contains(place);
-        let size = self.pools.get(place).copied();
-        let lent = self.lent.get(place).copied().unwrap_or(0) as usize;
         let slot = self.slot_mut(place, subject);
-        if let Some(size) = size {
-            assert!(
-                slot.tokens.len() + lent < size as usize,
-                "a put into the pool {place} of {size} tokens, none of which is taken"
-            );
-        }
         if fifo {
             slot.tokens.push_back(Token { id, content });
         } else if slot.tokens.front().is_some_and(|t| t.content == content) {
-            return;
+            return Ok(());
         } else {
             slot.tokens = VecDeque::from([Token { id, content }]);
         }
         slot.version += 1;
         slot.writer = by.cloned();
         self.next_id += 1;
+        Ok(())
     }
 
     /// An input goes back with no version change: into a FIFO at the front,
@@ -985,6 +1119,10 @@ pub struct Trace {
     rows: BTreeMap<(Place, Subject), RowRead>,
     /// The first place read that the net does not declare.
     undeclared: Option<Place>,
+    /// The derived rows being evaluated, outermost first.
+    evaluating: Vec<(Place, Subject)>,
+    /// The first derived cycle met: a derived row that reads itself.
+    cycle: Option<Vec<Place>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1100,17 +1238,46 @@ impl Reader<'_> {
         declared
     }
 
+    /// A derived row that reads itself reads as empty and refuses what
+    /// evaluated it.
     fn derived(&mut self, place: &str, s: &Subject) -> Option<Content> {
         let PlaceKind::Derived(derive) = &self.net.place_def(place).kind else {
             panic!("'{place}' is no derived place");
         };
-        derive(self, s)
+        let row = (Place::new(place), s.clone());
+        let stack = &self.trace.evaluating;
+        let cycle: Option<Vec<Place>> = match stack.iter().position(|r| *r == row) {
+            Some(at) => Some(stack[at..].iter().map(|(p, _)| p.clone()).collect()),
+            // shortcut: a recursion this deep over new subjects reads as a cycle
+            // of its places; raise the bound when a real net derives deeper.
+            None if stack.len() >= MAX_DERIVED_DEPTH => {
+                let mut places: Vec<Place> = Vec::new();
+                for (p, _) in stack {
+                    if !places.contains(p) {
+                        places.push(p.clone());
+                    }
+                }
+                Some(places)
+            }
+            None => None,
+        };
+        if let Some(cycle) = cycle {
+            self.trace.cycle.get_or_insert(cycle);
+            return None;
+        }
+        self.trace.evaluating.push(row);
+        let content = derive(self, s);
+        self.trace.evaluating.pop();
+        content
     }
 
     /// Runs `f` and returns, besides its result, the trace of what `f` read,
     /// e.g. for an [`ask_hash`] of a binding. The reads stay in this trace too.
     pub fn traced<R>(&mut self, f: impl FnOnce(&mut Reader<'_>) -> R) -> (R, Trace) {
-        let mut sub = Trace::default();
+        let mut sub = Trace {
+            evaluating: self.trace.evaluating.clone(),
+            ..Trace::default()
+        };
         let r = f(&mut Reader {
             net: self.net,
             tokens: self.tokens,
@@ -1130,6 +1297,9 @@ impl Reader<'_> {
         }
         if self.trace.undeclared.is_none() {
             self.trace.undeclared = sub.undeclared.clone();
+        }
+        if self.trace.cycle.is_none() {
+            self.trace.cycle = sub.cycle.clone();
         }
         (r, sub)
     }
@@ -1162,7 +1332,10 @@ pub enum WhyNot {
     FailedOnThisInput(Cause),
     /// The bind read this place, which the net does not declare.
     ReadsUndeclared(Place),
-    /// The bind of an ask's work produces the field the answer value fills.
+    /// The bind read a derived row that reads itself through these places.
+    DerivedCycle(Vec<Place>),
+    /// The bind of an ask's work produces a field the answer fills: its
+    /// value, its id or the seen ask hash.
     BindsAnswerInput,
 }
 
@@ -1266,6 +1439,8 @@ pub enum FireError {
     UnknownTransition(#[from] UnknownTransition),
     #[error(transparent)]
     ClockWentBack(#[from] ClockWentBack),
+    #[error(transparent)]
+    ClockOutOfRange(#[from] ClockOutOfRange),
     #[error("'{0}' is not a manual transition")]
     NotManual(String),
     #[error("the user input field '{field}' of '{transition}' collides with a bound field")]
@@ -1291,10 +1466,18 @@ pub enum FireError {
 pub enum ExecError {
     #[error(transparent)]
     ClockWentBack(#[from] ClockWentBack),
+    #[error(transparent)]
+    ClockOutOfRange(#[from] ClockOutOfRange),
     #[error("the net does not declare the place '{0}'")]
     UndeclaredPlace(String),
     #[error("'{0}' is a derived place: only the net writes it")]
     DerivedPlace(String),
+    #[error("'{0}' holds the executor's own markers: only the executor writes it")]
+    ExecutorPlace(String),
+    #[error("an '{place}' token needs the answer field '{field}'")]
+    AnswerField { place: String, field: &'static str },
+    #[error("the pool '{place}' already holds its size")]
+    PoolFull { place: String },
     #[error("'{place}' holds no token of '{subject}' to retract")]
     NothingToRetract { place: String, subject: String },
     #[error("the net is still enabled after {0} rounds of one call")]
@@ -1326,6 +1509,13 @@ pub enum DeriveError {
     StoredPlace(String),
     #[error("the derived place '{place}' reads '{read}', which the net does not declare")]
     ReadsUndeclared { place: Place, read: Place },
+    #[error("the derived place '{place}' reads itself through {}", cycle_text(.cycle))]
+    Cycle { place: Place, cycle: Vec<Place> },
+}
+
+fn cycle_text(cycle: &[Place]) -> String {
+    let names: Vec<&str> = cycle.iter().map(Place::as_str).collect();
+    names.join(" -> ")
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -1333,6 +1523,27 @@ pub enum DeriveError {
 pub struct ClockWentBack {
     pub clock: Duration,
     pub now: Duration,
+}
+
+/// A `now` past `last`, the latest one whose timer deadlines this net can
+/// still store.
+#[derive(Debug, thiserror::Error, PartialEq)]
+#[error("the clock {now:?} is past {last:?}, the latest this net's timers allow")]
+pub struct ClockOutOfRange {
+    pub now: Duration,
+    pub last: Duration,
+}
+
+impl From<ClockWentBack> for UftError {
+    fn from(ClockWentBack { clock, now }: ClockWentBack) -> Self {
+        Self::ClockWentBack { clock, now }
+    }
+}
+
+impl From<ClockOutOfRange> for UftError {
+    fn from(ClockOutOfRange { now, last }: ClockOutOfRange) -> Self {
+        Self::ClockOutOfRange { now, last }
+    }
 }
 
 /// What an undo of an answer did (XQ2.a), disclosed in full.
@@ -1363,12 +1574,16 @@ pub enum ReversalOutcome {
     Held(Holder),
     /// Data class has no undo here (inc0): left as it is.
     NotProcessClass,
+    /// The place is a pool that already holds its size: left as it is.
+    PoolFull,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum UndoError {
     #[error(transparent)]
     ClockWentBack(#[from] ClockWentBack),
+    #[error(transparent)]
+    ClockOutOfRange(#[from] ClockOutOfRange),
     #[error("no occurrence '{0}'")]
     UnknownOccurrence(OccurrenceId),
     #[error("'{0}' is no answer")]
@@ -1499,9 +1714,19 @@ pub enum Condition {
         subject: Subject,
         place: Place,
     },
-    /// The bind of the ask's work `work` for `subject` produces the field the
-    /// answer value fills, so the work never fires on an answer.
+    /// The bind of the ask's work `work` for `subject` produces a field the
+    /// answer fills, so the work never fires on an answer.
     BindsAnswerInput { work: Arc<str>, subject: Subject },
+    /// `transition` put a token into the pool `place`, which already held its
+    /// size, so the token was not put.
+    PoolFull { place: Place, transition: Arc<str> },
+    /// The bind of `transition` for `subject` read a derived row that reads
+    /// itself through `cycle`, so the transition does not fire.
+    DerivedCycle {
+        transition: Arc<str>,
+        subject: Subject,
+        cycle: Vec<Place>,
+    },
 }
 
 /// The holder an undo names when that holder used the row.
@@ -1598,8 +1823,23 @@ impl fmt::Display for Condition {
             ),
             Self::BindsAnswerInput { work, subject } => write!(
                 f,
-                "{work} does not fire for {subject}: its bind produces the field the answer value \
-                 fills"
+                "{work} does not fire for {subject}: its bind produces a field the answer fills \
+                 (its value, its id or the seen ask hash)"
+            ),
+            Self::PoolFull { place, transition } => write!(
+                f,
+                "{transition} put a token into the pool {place}, which already held its size: \
+                 the token was not put"
+            ),
+            Self::DerivedCycle {
+                transition,
+                subject,
+                cycle,
+            } => write!(
+                f,
+                "{transition} does not fire for {subject}: its bind reads a derived place that \
+                 reads itself through {}",
+                cycle_text(cycle)
             ),
         }
     }
@@ -1714,7 +1954,9 @@ impl Executor {
         };
         for (place, size) in &pools {
             for _ in 0..*size {
-                tokens.put(place, &Subject::new(POOL_SUBJECT), Content::new(), None);
+                tokens
+                    .put(place, &Subject::new(POOL_SUBJECT), Content::new(), None)
+                    .expect("an empty pool takes its size");
             }
         }
         let mut watchers: BTreeMap<Place, Vec<Arc<str>>> = BTreeMap::new();
@@ -1753,7 +1995,7 @@ impl Executor {
                     .collect()
             })
             .collect();
-        Ok(Self {
+        let exec = Self {
             net,
             tokens,
             marks: BTreeMap::new(),
@@ -1777,7 +2019,26 @@ impl Executor {
             next_minted: 0,
             #[cfg(feature = "naive-twins")]
             twin: None,
-        })
+        };
+        exec.refuse_derived_cycles()?;
+        Ok(exec)
+    }
+
+    /// Evaluates every derived place once on the initial marking: a cycle it
+    /// meets there is a load refusal, one only a later marking reveals
+    /// refuses the call that evaluates it.
+    fn refuse_derived_cycles(&self) -> Result<(), LoadError> {
+        let probe = Subject::new("");
+        for (place, def) in &self.net.places {
+            if let PlaceKind::Derived(_) = def.kind {
+                let mut trace = Trace::default();
+                self.reader(&mut trace).derived(place, &probe);
+                if let Some(cycle) = trace.cycle {
+                    return Err(LoadError::DerivedCycle(cycle));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "naive-twins")]
@@ -1869,15 +2130,17 @@ impl Executor {
     }
 
     /// Fires `Answer.T` with the user value; the answer id is the occurrence.
-    /// A net that does not quiesce is a broken net and panics here.
+    /// Three panics stay: a fire refusal the load rules out for a manual pure
+    /// `Answer.T` (the `unreachable!` arm), a firing that puts, with no
+    /// compare-and-set, a different token into an occupied single-token place
+    /// (`refuse_blind_overwrite`), and a value that holds `Value::Removed`,
+    /// which the token hash refuses (`encode_value`).
     pub fn answer(
         &mut self,
         call: AnswerCall,
         now: Duration,
     ) -> Result<Quiesced<AnswerId>, UftError> {
-        // shortcut: UftError has no clock form yet, so a clock that went back panics
-        // here.
-        self.advance(now).unwrap_or_else(|e| panic!("{e}"));
+        self.advance::<UftError>(now)?;
         let work = call.transition.0.as_str();
         if !self.net.asks.contains_key(work) {
             return Err(UftError::UnknownTransition(call.transition));
@@ -1925,15 +2188,25 @@ impl Executor {
                     steps,
                 })
             }
-            // shortcut: UftError has no form for it yet, so it still panics here.
-            Err(
-                e @ FireError::NotEnabled {
-                    why: WhyNot::ReadsUndeclared(_),
-                    ..
-                },
-            ) => panic!("{e}"),
+            Err(FireError::NotEnabled {
+                why: WhyNot::ReadsUndeclared(place),
+                ..
+            }) => Err(UftError::ReadsUndeclared {
+                transition: call.transition,
+                subject: call.subject,
+                place: place.to_string(),
+            }),
+            Err(FireError::NotEnabled {
+                why: WhyNot::DerivedCycle(cycle),
+                ..
+            }) => Err(UftError::DerivedCycle {
+                transition: call.transition,
+                subject: call.subject,
+                cycle: cycle.iter().map(Place::to_string).collect(),
+            }),
             Err(
                 e @ (FireError::ClockWentBack(_)
+                | FireError::ClockOutOfRange(_)
                 | FireError::UnknownTransition(_)
                 | FireError::NotManual(_)
                 | FireError::ValueCollides { .. }
@@ -2020,12 +2293,16 @@ impl Executor {
         self.derived_place(place)?;
         let mut trace = Trace::default();
         let row = self.reader(&mut trace).derived(place, subject);
-        match trace.undeclared {
-            Some(read) => Err(DeriveError::ReadsUndeclared {
+        match (trace.undeclared, trace.cycle) {
+            (Some(read), _) => Err(DeriveError::ReadsUndeclared {
                 place: Place::new(place),
                 read,
             }),
-            None => Ok(row),
+            (None, Some(cycle)) => Err(DeriveError::Cycle {
+                place: Place::new(place),
+                cycle,
+            }),
+            (None, None) => Ok(row),
         }
     }
 
@@ -2068,7 +2345,7 @@ impl Executor {
         answer: &OccurrenceId,
         now: Duration,
     ) -> Result<Quiesced<Undone>, UndoError> {
-        self.advance(now)?;
+        self.advance::<UndoError>(now)?;
         if !self.occurrences.contains_key(answer) {
             return Err(UndoError::UnknownOccurrence(answer.clone()));
         }
@@ -2104,8 +2381,10 @@ impl Executor {
             } else if let Some(holder) = self.holder(&place, &subject) {
                 ReversalOutcome::Held(holder)
             } else if let Some(content) = before {
-                self.tokens.put(&place, &subject, content, None);
-                ReversalOutcome::Restored
+                match self.tokens.put(&place, &subject, content, None) {
+                    Ok(()) => ReversalOutcome::Restored,
+                    Err(PoolFull) => ReversalOutcome::PoolFull,
+                }
             } else {
                 self.tokens.remove(&place, &subject, None);
                 ReversalOutcome::Removed
@@ -2152,10 +2431,19 @@ impl Executor {
         content: Content,
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
-        self.advance(now)?;
+        self.advance::<ExecError>(now)?;
         self.net.outside_place(place)?;
+        if let Some(field) = self.net.missing_answer_field(place, &content) {
+            return Err(ExecError::AnswerField {
+                place: place.to_string(),
+                field,
+            });
+        }
         self.tokens
-            .put(&Place::new(place), &Subject::new(subject), content, None);
+            .put(&Place::new(place), &Subject::new(subject), content, None)
+            .map_err(|PoolFull| ExecError::PoolFull {
+                place: place.to_string(),
+            })?;
         self.quiesced((), now)
     }
 
@@ -2167,7 +2455,7 @@ impl Executor {
         subject: &str,
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
-        self.advance(now)?;
+        self.advance::<ExecError>(now)?;
         self.net.outside_place(place)?;
         if self.tokens.token(place, subject).is_none() {
             return Err(ExecError::NothingToRetract {
@@ -2192,7 +2480,7 @@ impl Executor {
     /// Runs timers due at `now`, then the auto transitions to quiescence.
     /// Returns the effects to run.
     pub fn step(&mut self, now: Duration) -> Result<Vec<EffectRequest>, ExecError> {
-        self.advance(now)?;
+        self.advance::<ExecError>(now)?;
         self.timers(now);
         self.quiesce(now).map_err(ExecError::NoQuiescence)
     }
@@ -2261,6 +2549,11 @@ impl Executor {
                                 WhyNot::BindsAnswerInput => Some(Condition::BindsAnswerInput {
                                     work: name.clone(),
                                     subject: s.clone(),
+                                }),
+                                WhyNot::DerivedCycle(cycle) => Some(Condition::DerivedCycle {
+                                    transition: name.clone(),
+                                    subject: s.clone(),
+                                    cycle,
                                 }),
                                 _ => None,
                             };
@@ -2353,7 +2646,15 @@ impl Executor {
                         continue;
                     }
                     match before {
-                        Some(content) => self.tokens.put(&place, &subject, content, None),
+                        Some(content) => {
+                            if let Err(PoolFull) = self.tokens.put(&place, &subject, content, None)
+                            {
+                                self.disclose(Condition::PoolFull {
+                                    place,
+                                    transition: work.clone(),
+                                });
+                            }
+                        }
                         None => self.tokens.remove(&place, &subject, None),
                     }
                 }
@@ -2378,7 +2679,7 @@ impl Executor {
         value: Content,
         now: Duration,
     ) -> Result<Quiesced<Accepted>, FireError> {
-        self.advance(now)?;
+        self.advance::<FireError>(now)?;
         let t = self.net.find_transition(transition)?;
         if t.trigger != Trigger::Manual {
             return Err(FireError::NotManual(transition.to_string()));
@@ -2437,7 +2738,7 @@ impl Executor {
         result: EffectResult,
         now: Duration,
     ) -> Result<Quiesced<Completion>, ExecError> {
-        self.advance(now)?;
+        self.advance::<ExecError>(now)?;
         let live = self.in_flight.remove(&attempt);
         let occurrence = match &live {
             Some(a) => a.occurrence.clone(),
@@ -2621,7 +2922,7 @@ impl Executor {
         resolution: Resolution,
         now: Duration,
     ) -> Result<Quiesced<()>, ExecError> {
-        self.advance(now)?;
+        self.advance::<ExecError>(now)?;
         if let (Resolution::Retry, Some(a)) = (&resolution, self.parked.get(occurrence))
             && self
                 .tokens
@@ -2657,12 +2958,24 @@ impl Executor {
         self.quiesced((), now)
     }
 
-    fn advance(&mut self, now: Duration) -> Result<(), ClockWentBack> {
+    /// Moves the clock to `now`, or refuses it and changes nothing.
+    fn advance<E: From<ClockWentBack> + From<ClockOutOfRange>>(
+        &mut self,
+        now: Duration,
+    ) -> Result<(), E> {
         if now < self.now {
             return Err(ClockWentBack {
                 clock: self.now,
                 now,
-            });
+            }
+            .into());
+        }
+        if now > self.net.last_now {
+            return Err(ClockOutOfRange {
+                now,
+                last: self.net.last_now,
+            }
+            .into());
         }
         self.now = now;
         Ok(())
@@ -2785,7 +3098,10 @@ impl Executor {
             return Err(WhyNot::InFlight);
         }
         let bound = self.bind_input(t, s, trace);
-        if matches!(bound, Err(WhyNot::ReadsUndeclared(_))) {
+        if matches!(
+            bound,
+            Err(WhyNot::ReadsUndeclared(_) | WhyNot::DerivedCycle(_))
+        ) {
             return bound;
         }
         let mark = self.marks.get(&(t.name.clone(), s.clone()));
@@ -2853,6 +3169,9 @@ impl Executor {
         let bound = (t.bind)(&mut self.reader(trace), s);
         if let Some(place) = &trace.undeclared {
             return Err(WhyNot::ReadsUndeclared(place.clone()));
+        }
+        if let Some(cycle) = &trace.cycle {
+            return Err(WhyNot::DerivedCycle(cycle.clone()));
         }
         bound.ok_or(WhyNot::Guard)
     }
@@ -3068,6 +3387,10 @@ impl Executor {
     /// or is withheld, and a mark on its input stays: the effect never runs
     /// twice on it.
     fn record(&mut self, a: Attempt, outputs: Vec<Output>, now: Duration) {
+        if let Some(e) = self.net.refused_output(&outputs) {
+            let cause = Cause::definite(format!("'{}' output refused: {e}", a.transition));
+            return self.fail(a, cause, now);
+        }
         let t = self.net.transition_def(&a.transition);
         let pure = matches!(t.body, Body::Pure(_));
         let (facts, rows): (Vec<_>, Vec<_>) = outputs
@@ -3173,8 +3496,24 @@ impl Executor {
         if !self.read_row(a, &f) {
             self.refuse_blind_overwrite(&f);
         }
-        self.tokens
-            .put(&f.place, &f.subject, f.content, Some(&a.transition));
+        self.put_by(&f.place, &f.subject, f.content, &a.transition);
+    }
+
+    /// A firing's put; a token into a full pool is not put, and the net
+    /// discloses it once per place and transition.
+    fn put_by(&mut self, place: &Place, subject: &Subject, content: Content, by: &Arc<str>) {
+        if let Err(PoolFull) = self.tokens.put(place, subject, content, Some(by)) {
+            self.disclose(Condition::PoolFull {
+                place: place.clone(),
+                transition: by.clone(),
+            });
+        }
+    }
+
+    fn disclose(&mut self, c: Condition) {
+        if !self.conditions.contains(&c) {
+            self.conditions.push(c);
+        }
     }
 
     /// Whether the compare-and-set of a fact into a row the firing read fails:
@@ -3261,8 +3600,7 @@ impl Executor {
             self.commit_consumption(p, &a.subject, &a.transition);
         }
         for o in rows {
-            self.tokens
-                .put(&o.place, &o.subject, o.content, Some(&a.transition));
+            self.put_by(&o.place, &o.subject, o.content, &a.transition);
         }
         if !before.is_empty() {
             let delta = before
@@ -3356,8 +3694,7 @@ impl Executor {
         }
         self.end_run(&key);
         if let Some(port) = on_failure {
-            self.tokens
-                .put(&port, subject, cause_content(cause), Some(transition));
+            self.put_by(&port, subject, cause_content(cause), transition);
         }
     }
 
@@ -3439,8 +3776,7 @@ impl Executor {
                 self.end_run(&key);
                 if let Some(port) = on_timeout {
                     let cause = Cause::definite(format!("run timer of '{}' expired", key.0));
-                    self.tokens
-                        .put(&port, &key.1, cause_content(&cause), Some(&key.0));
+                    self.put_by(&port, &key.1, cause_content(&cause), &key.0);
                 }
             } else if self.retry_due(&key.0, &key.1).is_some_and(|due| due <= now) {
                 self.set_retry_due(&key, None);

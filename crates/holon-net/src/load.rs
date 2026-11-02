@@ -80,23 +80,30 @@ pub fn net_def(
         };
     }
     for (name, spec) in &file.transitions {
-        net = net.transition(transition(name, spec, logic(name)));
+        let t = transition(name, spec, logic(name)).map_err(|reason| NetLoadError::Logic {
+            at: at(path, text, Some((Section::Transitions, name))),
+            transition: name.clone(),
+            reason,
+        })?;
+        net = net.transition(t);
     }
     Ok(net)
 }
 
-fn transition(name: &str, spec: &TransitionSpec, logic: Logic) -> TransitionDef {
+/// The transition `spec` declares with the caller's `logic`, or why the
+/// logic does not fit the declaration.
+fn transition(name: &str, spec: &TransitionSpec, logic: Logic) -> Result<TransitionDef, String> {
     let body = match (&spec.effect, logic.body) {
         (None, Some(body)) => Body::Pure(body),
         (Some(_), None) => Body::Effectful(receiver(
             spec.receiver
                 .expect("the format pairs an effect with a receiver"),
         )),
-        (None, None) => {
-            panic!("transition `{name}` declares no effect, so its firing needs a body")
-        }
+        (None, None) => return Err("it declares no effect, so its firing needs a body".to_owned()),
         (Some(effect), Some(_)) => {
-            panic!("transition `{name}` runs the effect `{effect}`, so its firing is not a body")
+            return Err(format!(
+                "it runs the effect `{effect}`, so its firing is not a body"
+            ));
         }
     };
     let mut t =
@@ -136,7 +143,7 @@ fn transition(name: &str, spec: &TransitionSpec, logic: Logic) -> TransitionDef 
             t = t.retry(backoff.duration(), count_bound);
         }
     }
-    t
+    Ok(t)
 }
 
 fn trigger(trigger: crate::file::Trigger) -> Trigger {
@@ -213,5 +220,12 @@ pub enum NetLoadError {
         at: String,
         #[source]
         source: NetFileError,
+    },
+    /// The caller's logic for `transition` does not fit its declaration.
+    #[error("{at}: transition `{transition}`: {reason}")]
+    Logic {
+        at: String,
+        transition: String,
+        reason: String,
     },
 }

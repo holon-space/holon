@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use holon_api::Value;
 use holon_transition_contract::ANSWER_ID_KEY;
+use holon_transition_contract::ANSWER_INPUT_KEY;
 use holon_transition_contract::ArcKind;
 use holon_transition_contract::BodyDecl;
 use holon_transition_contract::ExpireReason;
@@ -330,14 +331,14 @@ fn lower_as(
                 return None;
             }
             let answer = r.text(&answered, s, ANSWER_ID_KEY)?;
-            for (field, value) in [(ANSWER_ID_KEY, answer), (SEEN_FIELD, seen)] {
-                let clash = content.insert(field.to_owned(), Value::String(value));
-                assert!(
-                    clash.is_none(),
-                    "the binding of '{}' returns the reserved field '{field}'",
-                    sit.transition
-                );
+            if content.contains_key(ANSWER_ID_KEY) || content.contains_key(SEEN_FIELD) {
+                // A bind closure has no error channel: the executor refuses a
+                // work input that already holds the answer value.
+                content.insert(ANSWER_INPUT_KEY.to_owned(), Value::Null);
+                return Some(content);
             }
+            content.insert(ANSWER_ID_KEY.to_owned(), Value::String(answer));
+            content.insert(SEEN_FIELD.to_owned(), Value::String(seen));
             Some(content)
         })
     };

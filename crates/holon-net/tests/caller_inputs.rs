@@ -2131,8 +2131,13 @@ proptest! {
         }
         let names = net.stored();
         type Run = (bool, Answer<Option<WhyNot>>, String, String);
+        // A closure's reads are invisible to the loader, so a ghost read never
+        // decides whether the net loads.
         let run = |net: &NetGen| -> Result<Option<Run>, TestCaseError> {
-            let Some(mut exec) = load(net)? else { return Ok(None) };
+            let Some(mut exec) = load(net)? else {
+                prop_assert!(false, "the net does not load: {:?}", no_panic("load", || net.executor().err())?);
+                return Ok(None);
+            };
             let w = no_panic("write", || exec.write(&names[0], &s, Content::new(), Duration::ZERO))?;
             prop_assert!(!names_error(&w, "ClockWentBack"));
             let first = if manual {

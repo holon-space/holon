@@ -13,6 +13,7 @@ use holon_net::exec::Cause;
 use holon_net::exec::Class;
 use holon_net::exec::Content;
 use holon_net::exec::EffectResult;
+use holon_net::exec::ExecError;
 use holon_net::exec::Executor;
 use holon_net::exec::NetDef;
 use holon_net::exec::OccurrenceId;
@@ -143,10 +144,13 @@ fn a_guard_reads_the_free_count() {
 }
 
 #[test]
-#[should_panic(expected = "pool")]
 fn a_put_beyond_the_pool_size_is_refused() {
     let mut ex = Executor::new(pool_net(1)).unwrap();
-    drop(ex.write("Slots", "x", Content::new(), NOW));
+    assert!(matches!(
+        ex.write("Slots", "x", Content::new(), NOW),
+        Err(ExecError::PoolFull { place }) if place == "Slots"
+    ));
+    assert_eq!(ex.tokens().free("Slots"), 1);
 }
 
 #[derive(Clone, Debug)]
@@ -220,12 +224,15 @@ fn effect_net() -> NetDef {
 }
 
 #[test]
-#[should_panic(expected = "pool")]
 fn a_put_while_a_firing_holds_a_token_is_refused() {
     let mut ex = Executor::new(effect_net()).unwrap();
     arrive(&mut ex, "a");
     assert_eq!(ex.tokens().free("Slots"), 0);
-    drop(ex.write("Slots", "x", Content::new(), NOW));
+    assert!(matches!(
+        ex.write("Slots", "x", Content::new(), NOW),
+        Err(ExecError::PoolFull { place }) if place == "Slots"
+    ));
+    assert_eq!(ex.tokens().free("Slots"), 0);
 }
 
 #[test]

@@ -363,6 +363,29 @@ pub enum UftError {
     UnknownAnswer(AnswerId),
     #[error("no user-facing transition '{}'", .0.0)]
     UnknownTransition(TransitionName),
+    /// The call's `now` is before the executor's clock; nothing changed.
+    #[error("the clock went back from {clock:?} to {now:?}")]
+    ClockWentBack { clock: Duration, now: Duration },
+    /// The call's `now` is past `last`, the latest the net's timer deadlines
+    /// allow; nothing changed.
+    #[error("the clock {now:?} is past {last:?}, the latest the net's timers allow")]
+    ClockOutOfRange { now: Duration, last: Duration },
+    /// The answer's bind reads a place the net does not declare; nothing
+    /// changed.
+    #[error("the answer of '{}' for '{}' reads the undeclared place '{place}'", transition.0, subject.0)]
+    ReadsUndeclared {
+        transition: TransitionName,
+        subject: SubjectName,
+        place: String,
+    },
+    /// The answer's bind read a derived place that reads itself through
+    /// `cycle`; nothing changed.
+    #[error("the answer of '{}' for '{}' reads a derived place that reads itself through {}", transition.0, subject.0, cycle.join(" -> "))]
+    DerivedCycle {
+        transition: TransitionName,
+        subject: SubjectName,
+        cycle: Vec<String>,
+    },
     /// The answer applied, but the automatic transitions it caused were
     /// still enabled after `steps` rounds; the net discloses a condition.
     #[error(
