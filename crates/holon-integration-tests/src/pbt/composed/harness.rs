@@ -514,6 +514,7 @@ pub trait ComposedSlice: 'static {
         resolver: &IdResolver,
         burned: &BurnedPairs,
         redo_burned: &BTreeSet<EntityUri>,
+        unheld_history: usize,
         scaffold_ids: &BTreeSet<EntityUri>,
         ref_state: &ReferenceState,
     ) -> RunReport {
@@ -523,6 +524,7 @@ pub trait ComposedSlice: 'static {
             resolver,
             burned,
             redo_burned,
+            unheld_history,
             scaffold_ids,
             ref_state,
         )
@@ -531,12 +533,14 @@ pub trait ComposedSlice: 'static {
 }
 
 /// [`ComposedSlice::run_report`]'s default over any part of the catalog.
+#[allow(clippy::too_many_arguments)]
 async fn catalog_report(
     catalog: &[Box<dyn CapInvariant>],
     caps: &CapMap,
     resolver: &IdResolver,
     burned: &BurnedPairs,
     redo_burned: &BTreeSet<EntityUri>,
+    unheld_history: usize,
     scaffold_ids: &BTreeSet<EntityUri>,
     ref_state: &ReferenceState,
 ) -> RunReport {
@@ -546,9 +550,8 @@ async fn catalog_report(
     // C2 provenance oracle: stash the id-reconcile map's expectation into the
     // resolved ref so `RefHistoryExpectation` can surface it. `ever_created`
     // = every real id the oracle minted (phantom-history anchor).
-    // `min_op_groups` counts only synthetic→real reconciled (UI-driven)
-    // creates — born-equal external/peer ids (key == value) are excluded, as
-    // their org-ingest / Loro path records no engine history.
+    // `min_op_groups` = the UI creates the current database holds (see
+    // `ui_create_count` and `UnheldHistory`).
     {
         let inner = resolved.inner_mut();
         inner.history_ever_created = map
@@ -556,8 +559,7 @@ async fn catalog_report(
             .chain(burned.iter().map(|(_, real)| real))
             .cloned()
             .collect();
-        inner.history_min_op_groups = map.iter().filter(|(k, v)| k != v).count()
-            + burned.iter().filter(|(syn, real)| syn != real).count();
+        inner.history_min_op_groups = ui_create_count(&map, burned) - unheld_history;
         // Undo→redo round-trip oracle: the real ids a `Redo` re-minted away
         // from — the REDO-GATED set, not the cumulative existence-divergence
         // one. `inv-undo-redo-reference-heal` asserts no SUT reference site
@@ -765,6 +767,44 @@ pub type SettleHook = Box<dyn Fn() + Send>;
 /// C2 provenance oracle (`history_ever_created` / `history_min_op_groups`).
 pub type BurnedPairs = BTreeSet<(EntityUri, EntityUri)>;
 
+/// The UI creates the run drove so far: the synthetic→real reconciled pairs.
+/// Born-equal external/peer ids (key == value) are excluded, as their
+/// org-ingest / Loro path records no engine history.
+fn ui_create_count(map: &BTreeMap<EntityUri, EntityUri>, burned: &BurnedPairs) -> usize {
+    map.iter().filter(|(k, v)| k != v).count()
+        + burned.iter().filter(|(syn, real)| syn != real).count()
+}
+
+/// How many UI creates the `block_history` of the database the SUT runs on
+/// does not hold. A boot while another process holds the file runs on an
+/// empty in-memory database; the restart after the release finds the file
+/// without the in-memory session's creates.
+#[derive(Default)]
+struct UnheldHistory {
+    by_current_database: usize,
+    by_file_while_held: Option<usize>,
+}
+
+impl UnheldHistory {
+    /// `held_now`: the boot runs on memory while another process holds the
+    /// file. `ui_creates`: the [`ui_create_count`] at the boot.
+    fn note_boot(&mut self, held_now: bool, ui_creates: usize) {
+        // Ruling: "block_history is DB-file-only state like nav history and pins; the floor counts per DB epoch".
+        match (self.by_file_while_held, held_now) {
+            (None, true) => {
+                self.by_file_while_held =
+                    Some(std::mem::replace(&mut self.by_current_database, ui_creates));
+            }
+            (Some(by_file), false) => {
+                let held_session = ui_creates - self.by_current_database;
+                self.by_current_database = by_file + held_session;
+                self.by_file_while_held = None;
+            }
+            (None, false) | (Some(_), true) => {}
+        }
+    }
+}
+
 /// The SUT's tokio runtime. Dropped during a panic, it shuts down in the
 /// background: a worker spinning inside a wedged store never yields, so a
 /// blocking shutdown would turn the failing case into a hang.
@@ -813,6 +853,7 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// Synthetic ids of creates the dispatch hold failed: the SUT never mints
     /// them, so they leave the 1:1 pairing for the rest of the run.
     failed_create_synthetics: BTreeSet<EntityUri>,
+    unheld_history: UnheldHistory,
     rt: SutRuntime,
     /// Pumps an attached gpui window to a fixed point before each
     /// `check_invariants` read; a no-op for the headless path. See
@@ -1238,6 +1279,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             scaffold_ids,
             foreign_ids,
             failed_create_synthetics,
+            mut unheld_history,
             rt,
             settle,
             engaged,
@@ -1250,6 +1292,10 @@ impl<S: ComposedSlice> ComposedSut<S> {
             _slice,
         } = self;
         reboot_pending.set(true);
+        unheld_history.note_boot(
+            ref_state.ui.rows_of_held_database.is_some(),
+            ui_create_count(&resolver.lock().expect("resolver lock"), &burned),
+        );
         let action = action_label(transition);
         let record_label = super::telemetry::telemetry_enabled().then(|| action.clone());
         tick.set(tick.get() + 1);
@@ -1321,6 +1367,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             scaffold_ids,
             foreign_ids,
             failed_create_synthetics,
+            unheld_history,
             rt,
             settle,
             engaged,
@@ -1381,6 +1428,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             scaffold_ids,
             foreign_ids: BTreeSet::new(),
             failed_create_synthetics: BTreeSet::new(),
+            unheld_history: UnheldHistory::default(),
             rt: SutRuntime(Some(rt)),
             settle,
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -1441,6 +1489,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             &self.resolver,
             &self.burned,
             &self.redo_burned,
+            self.unheld_history.by_current_database,
             &unmodeled,
             ref_state,
         ))
@@ -1686,6 +1735,7 @@ impl ComposedSut<super::wide_e2e::WideE2E> {
                 &sut.resolver,
                 &sut.burned,
                 &sut.redo_burned,
+                sut.unheld_history.by_current_database,
                 unmodeled,
                 ref_state,
             ));
@@ -1819,6 +1869,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             scaffold_ids,
             foreign_ids: BTreeSet::new(),
             failed_create_synthetics: BTreeSet::new(),
+            unheld_history: UnheldHistory::default(),
             rt: SutRuntime(Some(rt)),
             settle: Box::new(|| {}),
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -1849,6 +1900,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 &sut.resolver,
                 &sut.burned,
                 &sut.redo_burned,
+                sut.unheld_history.by_current_database,
                 unmodeled,
                 ref_state,
             ))
@@ -2257,6 +2309,61 @@ mod pairing_tests {
             String::new,
         );
         assert_eq!(released, vec![(s1, r1)]);
+    }
+}
+
+#[cfg(test)]
+mod unheld_history_tests {
+    use proptest::prelude::*;
+
+    use super::UnheldHistory;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Step {
+        Create,
+        Reboot,
+        HeldReboot,
+        Release,
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            3 => Just(Step::Create),
+            1 => Just(Step::Reboot),
+            1 => Just(Step::HeldReboot),
+            1 => Just(Step::Release),
+        ]
+    }
+
+    proptest! {
+        /// The floor `ui_creates - unheld` equals the creates the database the
+        /// app runs on holds: the file keeps its own, a held session's memory
+        /// database starts empty and is dropped at the release.
+        #[test]
+        fn the_floor_counts_the_creates_of_the_current_database(
+            steps in prop::collection::vec(step(), 0..40),
+        ) {
+            let mut unheld = UnheldHistory::default();
+            let (mut ui_creates, mut in_file, mut in_memory) = (0, 0, None::<usize>);
+            for step in steps {
+                match (step, in_memory) {
+                    (Step::Create, None) => { ui_creates += 1; in_file += 1; }
+                    (Step::Create, Some(n)) => { ui_creates += 1; in_memory = Some(n + 1); }
+                    (Step::Reboot, None) => unheld.note_boot(false, ui_creates),
+                    (Step::HeldReboot, None) => {
+                        in_memory = Some(0);
+                        unheld.note_boot(true, ui_creates);
+                    }
+                    (Step::Release, Some(_)) => {
+                        in_memory = None;
+                        unheld.note_boot(false, ui_creates);
+                    }
+                    (Step::Reboot | Step::HeldReboot, Some(_)) | (Step::Release, None) => continue,
+                }
+                let held = in_memory.unwrap_or(in_file);
+                prop_assert_eq!(ui_creates - unheld.by_current_database, held);
+            }
+        }
     }
 }
 

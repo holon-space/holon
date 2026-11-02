@@ -482,6 +482,7 @@ impl ComposedSlice for FrontendNavigation {
         _: &IdResolver,
         _: &crate::pbt::composed::harness::BurnedPairs,
         _: &BTreeSet<EntityUri>,
+        _: usize,
         _: &BTreeSet<EntityUri>,
         ref_state: &ReferenceState,
     ) -> RunReport {

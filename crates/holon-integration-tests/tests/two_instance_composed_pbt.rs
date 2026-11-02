@@ -303,6 +303,7 @@ fn both_sharing_invariants_are_selected_and_run() {
             &resolver,
             &Default::default(),
             &Default::default(),
+            0,
             &scaffold,
             &ref_state,
         ),

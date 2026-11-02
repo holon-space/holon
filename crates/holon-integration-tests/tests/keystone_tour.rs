@@ -148,14 +148,6 @@ const NOT_TOURED: &[(&str, &str)] = &[
         "ExternalWriteSameBlockFocused",
         "red: the editor text and caret diverge from the reference after the external write",
     ),
-    (
-        "RebootWhileDatabaseHeld",
-        "red: block_history is empty after the held-database reboot",
-    ),
-    (
-        "ReleaseDatabaseAndRestart",
-        "follows RebootWhileDatabaseHeld, which is not toured",
-    ),
 ];
 
 #[derive(Debug, serde::Deserialize)]

@@ -3034,6 +3034,7 @@ mod tests {
                 &resolver,
                 &BurnedPairs::new(),
                 &std::collections::BTreeSet::new(),
+                0,
                 &scaffold,
                 &ref_state,
             )
@@ -3462,6 +3463,7 @@ mod tests {
                 &resolver,
                 &BurnedPairs::new(),
                 &std::collections::BTreeSet::new(),
+                0,
                 &scaffold,
                 &ref_state,
             )
@@ -3693,6 +3695,7 @@ mod tests {
                 &resolver,
                 &BurnedPairs::new(),
                 &std::collections::BTreeSet::new(),
+                0,
                 &scaffold,
                 &oracle,
             )
