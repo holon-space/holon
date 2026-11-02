@@ -18,6 +18,8 @@ use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
 
+mod isolation;
+
 pub const BOOTING: &str = "Starting TUI frontend...";
 pub const BOOTED: &str = "Session ready";
 pub const SHUT_DOWN: &str = "session shut down";
@@ -45,7 +47,6 @@ pub enum Launcher {
 }
 
 pub struct Launch {
-    mcp_port: u16,
     launcher: Launcher,
     vault_root: Option<PathBuf>,
     home: Option<PathBuf>,
@@ -54,10 +55,8 @@ pub struct Launch {
 }
 
 impl Launch {
-    /// Each instance serves MCP on its own `mcp_port` when MCP is on.
-    pub fn new(mcp_port: u16) -> Self {
+    pub fn new() -> Self {
         Self {
-            mcp_port,
             launcher: Launcher::Exec,
             vault_root: None,
             home: None,
@@ -115,6 +114,7 @@ impl Launch {
             Launcher::ClosedStdin => Some("stty rows 40 cols 120 && true | \"$0\" \"$@\""),
             Launcher::DeadOutput => None,
         };
+        let mcp_port = free_port();
         let tui = env!("CARGO_BIN_EXE_holon-tui");
         let (mut command, input_terminal) = match shell {
             Some(shell) => {
@@ -161,13 +161,14 @@ impl Launch {
             .arg(vault_root)
             .args(&self.args)
             .env("HOME", &home)
-            .env("MCP_SERVER_PORT", self.mcp_port.to_string())
+            .env("MCP_SERVER_PORT", mcp_port.to_string())
             .env("TERM", "xterm-256color")
             .envs(self.envs)
             .spawn()
             .expect("spawn holon-tui");
         Tui {
             process,
+            mcp_port,
             input_terminal,
             launcher: self.launcher,
             log,
@@ -176,6 +177,31 @@ impl Launch {
             state,
         }
     }
+}
+
+/// A port that no listener holds now, so never one that another run's
+/// `holon-tui` still serves.
+/// shortcut: the port is free when picked, not when holon-tui binds it; if
+/// races show, let holon-tui bind port 0 and report the port it got.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind a port the OS picks")
+        .local_addr()
+        .expect("read the picked port")
+        .port()
+}
+
+fn children_of(parent: &str) -> Vec<String> {
+    let out = Command::new("pgrep")
+        .arg("-P")
+        .arg(parent)
+        .output()
+        .expect("run pgrep");
+    String::from_utf8(out.stdout)
+        .expect("pgrep prints pids")
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// A 40 x 120 pseudo-terminal: its controlling side and the side a process
@@ -216,6 +242,7 @@ fn pseudo_terminal() -> (OwnedFd, OwnedFd) {
 pub struct Tui {
     /// `script`, or `holon-tui` itself under [`Launcher::DeadOutput`].
     process: Child,
+    mcp_port: u16,
     /// Keeps the [`Launcher::DeadOutput`] stdin terminal alive.
     input_terminal: Option<OwnedFd>,
     launcher: Launcher,
@@ -229,6 +256,21 @@ impl Tui {
     /// The `HOME` this instance runs on.
     pub fn home(&self) -> &Path {
         self.state.path()
+    }
+
+    /// The port this instance serves MCP on when MCP is on.
+    pub fn mcp_port(&self) -> u16 {
+        self.mcp_port
+    }
+
+    /// A client of this instance's MCP server.
+    pub fn mcp(&self) -> Mcp {
+        Mcp::connect(self.mcp_port)
+    }
+
+    /// `script`, or `holon-tui` itself under [`Launcher::DeadOutput`].
+    pub fn script_pid(&self) -> String {
+        self.process.id().to_string()
     }
 
     pub fn vault(&self) -> &Path {
@@ -275,29 +317,17 @@ impl Tui {
     }
 
     pub fn tui_pid(&self) -> String {
-        let child_of = |parent: &str| {
-            let out = Command::new("pgrep")
-                .arg("-P")
-                .arg(parent)
-                .output()
-                .expect("run pgrep");
-            String::from_utf8(out.stdout)
-                .expect("pgrep prints pids")
-                .lines()
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        };
         if let Launcher::DeadOutput = self.launcher {
             return self.process.id().to_string();
         }
-        let mut pids = child_of(&self.process.id().to_string());
+        let mut pids = children_of(&self.process.id().to_string());
         if let Launcher::HupIgnoringShell = self.launcher {
             assert_eq!(
                 pids.len(),
                 1,
                 "script must run exactly one shell; got {pids:?}"
             );
-            pids = child_of(&pids[0]);
+            pids = children_of(&pids[0]);
         }
         assert_eq!(
             pids.len(),
@@ -343,6 +373,39 @@ impl Tui {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+}
+
+impl Drop for Tui {
+    /// Kills every process group of the instance, so a test that panics
+    /// leaves no `holon-tui` that serves its vault and port.
+    fn drop(&mut self) {
+        if self.process.try_wait().expect("poll script").is_some() {
+            return;
+        }
+        // `script` runs its child as the leader of a new session; the shell
+        // and holon-tui share that child's process group.
+        let leaders = match self.launcher {
+            Launcher::DeadOutput => vec![self.script_pid()],
+            _ => children_of(&self.script_pid()),
+        };
+        for leader in leaders {
+            let group: libc::pid_t = leader.parse().expect("pgrep prints pids");
+            // SAFETY: a plain syscall on a pid.
+            let error = (unsafe { libc::killpg(group, libc::SIGKILL) } != 0)
+                .then(std::io::Error::last_os_error)
+                .filter(|e| e.raw_os_error() != Some(libc::ESRCH));
+            if let Some(error) = error {
+                let message = format!("killing the TUI's process group {group}: {error}");
+                if std::thread::panicking() {
+                    eprintln!("{message}");
+                } else {
+                    panic!("{message}");
+                }
+            }
+        }
+        self.process.kill().expect("kill script");
+        self.process.wait().expect("reap script");
     }
 }
 

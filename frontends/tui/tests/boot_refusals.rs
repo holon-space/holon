@@ -15,7 +15,7 @@ use crate::tui_process;
 fn a_missing_vault_root_refuses_to_start_and_names_it() {
     let parent = tempfile::tempdir().expect("parent dir");
     let missing = parent.path().join("mistyped-vault");
-    let mut tui = Launch::new(18767).vault_root(missing.clone()).spawn(|_| {});
+    let mut tui = Launch::new().vault_root(missing.clone()).spawn(|_| {});
     let status = tui.wait_for_exit("a boot on a missing vault");
 
     let refusal = format!(
@@ -61,12 +61,12 @@ fn a_missing_vault_root_refuses_to_start_and_names_it() {
 
 #[test]
 fn mcp_disabled_serves_no_mcp() {
-    let port = 18768;
-    let mut tui = Launch::new(port)
+    let mut tui = Launch::new()
         .arg("--mcp-enabled")
         .arg("false")
         .spawn(|_| {});
     tui.wait_for_log(BOOTED);
+    let port = tui.mcp_port();
     // An enabled server binds shortly after the boot reports ready.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let mut listener = std::net::TcpStream::connect(("127.0.0.1", port));
@@ -95,11 +95,11 @@ fn mcp_disabled_serves_no_mcp() {
 
 #[test]
 fn a_refused_second_instance_leaves_the_running_instances_log_intact() {
-    let mut first = Launch::new(18769).spawn(|_| {});
+    let mut first = Launch::new().spawn(|_| {});
     first.wait_for_log(BOOTED);
     let before = first.log_text();
 
-    let mut second = Launch::new(18770)
+    let mut second = Launch::new()
         .home(first.home().to_path_buf())
         .vault_root(first.vault().to_path_buf())
         .spawn(|_| {});

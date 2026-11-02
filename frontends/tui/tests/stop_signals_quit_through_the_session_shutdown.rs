@@ -23,8 +23,8 @@ use tui_process::SHUT_DOWN;
 
 use crate::tui_process;
 
-fn a_signal_quits_through_the_session_shutdown(name: &str, after: &str, mcp_port: u16) {
-    let mut tui = Launch::new(mcp_port).spawn(|_| {});
+fn a_signal_quits_through_the_session_shutdown(name: &str, after: &str) {
+    let mut tui = Launch::new().spawn(|_| {});
     tui.wait_for_log(after);
     tui.signal(name);
     let status = tui.wait_for_exit(&format!("SIG{name}"));
@@ -38,28 +38,27 @@ fn a_signal_quits_through_the_session_shutdown(name: &str, after: &str, mcp_port
 
 #[test]
 fn ctrl_c_ends_the_tui_through_the_session_shutdown() {
-    a_signal_quits_through_the_session_shutdown("INT", BOOTED, 18761);
+    a_signal_quits_through_the_session_shutdown("INT", BOOTED);
 }
 
 #[test]
 fn sigterm_ends_the_tui_through_the_session_shutdown() {
-    a_signal_quits_through_the_session_shutdown("TERM", BOOTED, 18762);
+    a_signal_quits_through_the_session_shutdown("TERM", BOOTED);
 }
 
 #[test]
 fn sighup_ends_the_tui_through_the_session_shutdown() {
-    a_signal_quits_through_the_session_shutdown("HUP", BOOTED, 18763);
+    a_signal_quits_through_the_session_shutdown("HUP", BOOTED);
 }
 
 #[test]
 fn sigterm_during_boot_ends_the_tui_through_the_session_shutdown() {
-    a_signal_quits_through_the_session_shutdown("TERM", BOOTING, 18764);
+    a_signal_quits_through_the_session_shutdown("TERM", BOOTING);
 }
 
 #[test]
 fn a_refused_write_back_is_in_the_log_after_the_terminal_hung_up() {
-    let port = 18765;
-    let mut tui = Launch::new(port).spawn(tui_process::write_locked_page);
+    let mut tui = Launch::new().spawn(tui_process::write_locked_page);
     tui.wait_for_log(BOOTED);
     let locked = tui.vault().join("locked");
     let page = locked.join("locked.org");
@@ -78,7 +77,7 @@ fn a_refused_write_back_is_in_the_log_after_the_terminal_hung_up() {
     // The atomic write cannot create its temp file beside the page.
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
         .expect("make the page's dir read-only");
-    let ack = tui_process::Mcp::connect(port).set_content("block:locked-child", "EDITED-READ-ONLY");
+    let ack = tui.mcp().set_content("block:locked-child", "EDITED-READ-ONLY");
     tui.signal("HUP");
     let status = tui.wait_for_exit("SIGHUP");
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
@@ -107,7 +106,7 @@ fn a_refused_write_back_is_in_the_log_after_the_terminal_hung_up() {
 
 #[test]
 fn a_dead_terminal_ends_the_tui_through_the_session_shutdown() {
-    let mut tui = Launch::new(18766)
+    let mut tui = Launch::new()
         .launcher(Launcher::HupIgnoringShell)
         .spawn(|_| {});
     tui.wait_for_log(BOOTED);
@@ -138,7 +137,7 @@ fn a_dead_terminal_ends_the_tui_through_the_session_shutdown() {
 
 #[test]
 fn a_stderr_write_while_the_tui_draws_lands_in_the_log() {
-    let mut tui = Launch::new(18769)
+    let mut tui = Launch::new()
         .env("HOLON_DEBUG_CHORD", "1")
         .spawn(|_| {});
     tui.wait_for_log(BOOTED);
@@ -173,7 +172,7 @@ fn a_stderr_write_while_the_tui_draws_lands_in_the_log() {
 /// shutdown, so a failed draw must not panic.
 #[test]
 fn a_draw_to_a_dead_terminal_ends_the_tui_through_the_session_shutdown() {
-    let mut tui = Launch::new(18770)
+    let mut tui = Launch::new()
         .launcher(Launcher::DeadOutput)
         .spawn(|_| {});
     tui.wait_for_log(BOOTED);
@@ -207,7 +206,7 @@ fn a_draw_to_a_dead_terminal_ends_the_tui_through_the_session_shutdown() {
 /// `true | holon-tui` panics in crossterm's event reader.
 #[test]
 fn a_panic_reaches_the_terminal() {
-    let mut tui = Launch::new(18771)
+    let mut tui = Launch::new()
         .launcher(Launcher::ClosedStdin)
         .spawn(|_| {});
     let status = tui.wait_for_exit("a boot on a closed stdin");
