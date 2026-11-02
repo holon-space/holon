@@ -4,6 +4,8 @@
 #![allow(dead_code)] // each test file uses its own subset
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -24,7 +26,7 @@ pub type Store = Arc<Mutex<HashMap<EntityUri, Block>>>;
 
 /// Child ids by parent, so a document's blocks are found without a walk over
 /// every stored block of a many-file vault.
-type Children = Arc<Mutex<HashMap<EntityUri, Vec<EntityUri>>>>;
+pub type Children = Arc<Mutex<HashMap<EntityUri, Vec<EntityUri>>>>;
 
 /// Applies creates, updates AND deletes. The delete leg is the point: it is the
 /// operation a 0-byte parse emits for every block of the document.
@@ -160,6 +162,26 @@ impl BlockReader for StoreReader {
     }
     async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
         Ok(Vec::new())
+    }
+}
+
+/// The alias a file's ingest records, as production's registrar keeps it.
+#[derive(Default)]
+pub struct MapAliasRegistrar(Mutex<HashMap<EntityUri, PathBuf>>);
+
+#[async_trait]
+impl holon_filesystem::sync_ports::AliasRegistrar for MapAliasRegistrar {
+    async fn register_alias(&self, doc_id: &EntityUri, path: &Path) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(doc_id.clone(), path.to_path_buf());
+    }
+    async fn forget_aliases_to(&self, path: &Path) {
+        self.0.lock().unwrap().retain(|_, p| p != path);
+    }
+    async fn resolve_alias_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf> {
+        self.0.lock().unwrap().get(doc_id).cloned()
     }
 }
 
@@ -323,6 +345,7 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
 pub struct Vault {
     pub controller: holon_filesystem::FileSyncController,
     pub store: Store,
+    pub children: Children,
     pub docs: PageStore,
     pub path: std::path::PathBuf,
     pub disclosures: Arc<Disclosures>,
@@ -345,6 +368,43 @@ impl Vault {
         ids.sort();
         ids
     }
+
+    pub fn with_alias_registrar(self, registrar: Arc<MapAliasRegistrar>) -> Self {
+        Self {
+            controller: self.controller.with_alias_registrar(registrar),
+            ..self
+        }
+    }
+
+    /// Store `block` under its parent, as a Holon write does; a page also
+    /// enters the page registry.
+    pub fn put(&self, block: Block) {
+        self.forget(&block.id);
+        self.children
+            .lock()
+            .unwrap()
+            .entry(block.parent_id.clone())
+            .or_default()
+            .push(block.id.clone());
+        if block.is_page() {
+            self.docs
+                .by_id
+                .lock()
+                .unwrap()
+                .insert(block.id.clone(), block.clone());
+        }
+        self.store.lock().unwrap().insert(block.id.clone(), block);
+    }
+
+    /// Delete `id` from the store and the page registry.
+    pub fn forget(&self, id: &EntityUri) {
+        self.docs.by_id.lock().unwrap().remove(id);
+        if let Some(old) = self.store.lock().unwrap().remove(id) {
+            if let Some(siblings) = self.children.lock().unwrap().get_mut(&old.parent_id) {
+                siblings.retain(|c| c != id);
+            }
+        }
+    }
 }
 
 pub fn vault() -> Vault {
@@ -358,10 +418,11 @@ pub fn vault() -> Vault {
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let path = root.join("Notes.org");
     std::fs::write(&path, full_content()).unwrap();
-    let (controller, store, disclosures, net) = controller_at(root, &docs);
+    let (controller, store, children, disclosures, net) = parts_at(root, &docs);
     Vault {
         controller,
         store,
+        children,
         docs,
         path,
         disclosures,
@@ -380,6 +441,20 @@ pub fn controller_at(
     Arc<Disclosures>,
     holon_net_shell::Shell,
 ) {
+    let (controller, store, _, disclosures, net) = parts_at(root, docs);
+    (controller, store, disclosures, net)
+}
+
+fn parts_at(
+    root: std::path::PathBuf,
+    docs: &PageStore,
+) -> (
+    holon_filesystem::FileSyncController,
+    Store,
+    Children,
+    Arc<Disclosures>,
+    holon_net_shell::Shell,
+) {
     let ordering = ApplyingOrdering::default();
     let store = ordering.store.clone();
     let children = ordering.children.clone();
@@ -387,7 +462,7 @@ pub fn controller_at(
     let net = holon_net_shell::Shell::new(holon_filesystem::writeback_net::net())
         .expect("the write-back net loads");
     let controller = new_org_sync_controller(
-        Arc::new(StoreReader(store.clone(), children)),
+        Arc::new(StoreReader(store.clone(), children.clone())),
         Arc::new(docs.clone()),
         root,
         Arc::new(ordering),
@@ -395,7 +470,7 @@ pub fn controller_at(
     )
     .with_writeback_disclosure(disclosures.clone())
     .with_writeback_net(net.clone());
-    (controller, store, disclosures, net)
+    (controller, store, children, disclosures, net)
 }
 
 /// The controller's initial scan as the file-sync task runs it: initialize, the

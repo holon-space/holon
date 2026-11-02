@@ -1,3 +1,4 @@
+mod a_deleted_page_leaves_no_file;
 mod a_lagging_page_registry_keeps_the_page_header;
 mod a_retracted_page_root_keeps_the_page_header;
 mod asset_seed_header_pass_cost;

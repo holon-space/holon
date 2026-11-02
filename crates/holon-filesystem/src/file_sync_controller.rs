@@ -9536,8 +9536,6 @@ impl FileSyncController {
         if self.gate_virtual_seed_write(page_id, &canonical, &rendered, false) {
             return Ok(());
         }
-        // A skip returns early WITHOUT registering the alias — a path that
-        // could not be written does not own a file to advertise.
         if self
             .write_back_or_skip_readonly(page_id, &vault_path, &basis, &rendered, true)
             .await?
@@ -9546,14 +9544,6 @@ impl FileSyncController {
             return Ok(());
         }
         self.run_post_write_hook(&path);
-        // Register the UUID → file-path alias NOW (mirrors the ingest path's
-        // `register_alias`), so the page immediately OWNS its file in the alias
-        // registry — `inv-every-page-has-its-own-file` (and every file-tracking
-        // consumer) reads that registry, and a runtime materialize must not wait for
-        // a watcher re-ingest round-trip to surface the file.
-        if let Some(ref registrar) = self.alias_registrar {
-            registrar.register_alias(page_id, &path).await;
-        }
         // Remove the orphaned old files left by a page rename (see `prior_paths`).
         // Each removal is gated on a fresh OWNERSHIP proof: a stale home record
         // says where the page USED to live, never who owns those bytes now.
@@ -10432,12 +10422,12 @@ impl FileSyncController {
         intent: PathIntent,
     ) -> Result<Option<VaultPath>> {
         // Try alias registrar first (fastest path). An alias records where a
-        // document's file was actually INGESTED FROM, where the name chain
-        // below only says where a page of that title would go, so a doc that
-        // has one is routed by it. An alias is only ever registered from an
-        // ingested vault file, so containment must already hold — assert it
-        // here rather than trust it, so NO path this function yields can name
-        // a file outside the vault.
+        // document's file actually is (ingested or written), where the name
+        // chain below only says where a page of that title would go, so a doc that
+        // has one is routed by it. An alias is only ever registered for a
+        // vault file Holon ingested or wrote, so containment must already
+        // hold — assert it here rather than trust it, so NO path this function
+        // yields can name a file outside the vault.
         if let Some(ref registrar) = self.alias_registrar {
             if let Some(path) = registrar.resolve_alias_to_path(doc_id).await {
                 let path = VaultPath::inside(&self.root_dir, path)
@@ -10674,6 +10664,11 @@ impl FileSyncController {
                 // returned before this write, so this only ever records a
                 // writable home (which drops any membership).
                 self.note_doc_home(doc_id, path, HomeMembership::Untouched)?;
+                // A deleted page has no name chain, so this alias is the only
+                // route its deletion has to the file written here.
+                if let Some(ref registrar) = self.alias_registrar {
+                    registrar.register_alias(doc_id, path).await;
+                }
                 if store_edit {
                     self.disclose_share_inlined_into(doc_id, path, rendered.as_bytes())
                         .await;

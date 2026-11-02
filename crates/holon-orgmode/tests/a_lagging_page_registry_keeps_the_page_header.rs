@@ -6,39 +6,15 @@
 //! feed that drives write-back. Sharing a page re-projects it, so a change of
 //! that page can arrive while the registry briefly lacks it.
 
-use std::collections::HashMap;
-use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
-use async_trait::async_trait;
 use holon_api::entity_uri::EntityUri;
 use holon_filesystem::BlockDelta;
 use org_vault_double::DOC_ID;
+use org_vault_double::MapAliasRegistrar;
 use org_vault_double::vault;
 
 use crate::org_vault_double;
-
-/// The alias a file's ingest records, as production's registrar keeps it.
-#[derive(Default)]
-struct MapAliasRegistrar(Mutex<HashMap<EntityUri, PathBuf>>);
-
-#[async_trait]
-impl holon_filesystem::sync_ports::AliasRegistrar for MapAliasRegistrar {
-    async fn register_alias(&self, doc_id: &EntityUri, path: &Path) {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(doc_id.clone(), path.to_path_buf());
-    }
-    async fn forget_aliases_to(&self, path: &Path) {
-        self.0.lock().unwrap().retain(|_, p| p != path);
-    }
-    async fn resolve_alias_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf> {
-        self.0.lock().unwrap().get(doc_id).cloned()
-    }
-}
 
 #[tokio::test]
 async fn a_page_missing_from_the_registry_keeps_its_id_header_on_write_back() {
