@@ -14,6 +14,7 @@ use anyhow::Context;
 use anyhow::Result;
 use holon_api::sharing::Capabilities;
 use holon_conditions::ConditionBus;
+use holon_conditions::ConditionKind;
 use holon_loro::ContainerRegistry;
 use holon_loro::DocScope;
 use holon_loro::LoroDocument;
@@ -31,6 +32,7 @@ use holon_loro::iroh_sync_adapter::sync_doc_initiate_enrolled;
 use holon_loro::share_enrollment::CapabilitySecret;
 use holon_loro::share_enrollment::ExpiryTime;
 use holon_loro::share_enrollment::ShareRoster;
+use loro::LoroError;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
@@ -172,11 +174,13 @@ async fn advertise(
 /// comes back as the dial's error.
 async fn sync(peers: &[Peer], from: usize, to: usize, cap: &CapabilitySecret) -> Result<()> {
     let alpn = make_alpn(ALPN_PREFIX, ROOT_CONTAINER_ID);
+    // A reference clone of the same doc, as the transport needs an owned handle.
+    let doc = peers[to].doc.with_read(|d| Ok(Arc::new(d.clone())))?;
     tokio::time::timeout(
         DIAL_BUDGET,
         sync_doc_initiate_enrolled(
             &peers[to].dialer,
-            &peers[to].doc.doc(),
+            &doc,
             &alpn,
             peers[from].addr.clone(),
             cap,
@@ -226,18 +230,38 @@ async fn run(case: &Case) -> Result<Result<(), String>> {
 
     // Two full rounds: the second shows whether a refused delta is resent and
     // refused again.
-    let mut full_sync_errors = vec![Vec::new(), Vec::new()];
+    let mut full_sync_errors: [Vec<(usize, usize, anyhow::Error)>; 2] = [Vec::new(), Vec::new()];
     for round in &mut full_sync_errors {
         for from in 0..case.peers {
             for to in 0..case.peers {
                 if from != to
                     && let Err(e) = sync(&peers, from, to, &cap).await
                 {
-                    round.push(format!("{to} dialing {from}: {e:#}"));
+                    round.push((to, from, e));
                 }
             }
         }
     }
+    // (dialer, peer it dialed) of every dial whose import the shallow history
+    // refused.
+    let refusals = |round: &[(usize, usize, anyhow::Error)]| -> Vec<(usize, usize)> {
+        round
+            .iter()
+            .filter(|(_, _, e)| {
+                e.chain().any(|c| {
+                    matches!(
+                        c.downcast_ref::<LoroError>(),
+                        Some(LoroError::ImportUpdatesThatDependsOnOutdatedVersion)
+                    )
+                })
+            })
+            .map(|(to, from, _)| (*to, *from))
+            .collect()
+    };
+    let refused = [
+        refusals(&full_sync_errors[0]),
+        refusals(&full_sync_errors[1]),
+    ];
 
     let mut lost_by_author = Vec::new();
     let mut missing = Vec::new();
@@ -262,15 +286,53 @@ async fn run(case: &Case) -> Result<Result<(), String>> {
                 conditions.push(format!("peer {p}: {c:?}"));
             }
         }
+        let rounds: Vec<Vec<String>> = full_sync_errors
+            .iter()
+            .map(|round| {
+                round
+                    .iter()
+                    .map(|(to, from, e)| format!("{to} dialing {from}: {e:#}"))
+                    .collect()
+            })
+            .collect();
         Ok(format!(
             "{case:?}\nmissing: {missing:?}\n{}\nconditions raised: {conditions:?}\n\
              sync errors during ops: {sync_errors:#?}\n\
              full sync round 1 errors: {:#?}\nfull sync round 2 errors: {:#?}",
             shallow.join(", "),
-            full_sync_errors[0],
-            full_sync_errors[1],
+            rounds[0],
+            rounds[1],
         ))
     };
+    let disclosed: Vec<String> = refused
+        .iter()
+        .flatten()
+        .flat_map(|(to, _)| {
+            peers[*to]
+                .bus
+                .current()
+                .into_iter()
+                .filter(|c| !matches!(c.reason, ConditionKind::BearerTicketEnrollment { .. }))
+                .map(move |c| format!("peer {to}: {c:?}"))
+        })
+        .collect();
+    if !disclosed.is_empty() {
+        return Ok(Err(format!(
+            "observed fact changed: a refused import now raises a condition {disclosed:?}\n{}",
+            report()?
+        )));
+    }
+    let not_repeated: Vec<_> = refused[0]
+        .iter()
+        .filter(|r| !refused[1].contains(r))
+        .collect();
+    if !not_repeated.is_empty() {
+        return Ok(Err(format!(
+            "observed fact changed: round 2 no longer repeats the refusals {not_repeated:?} \
+             (dialer, dialed) of round 1\n{}",
+            report()?
+        )));
+    }
     if !lost_by_author.is_empty() {
         return Ok(Err(format!(
             "an author no longer holds its own edits {lost_by_author:?}\n{}",
