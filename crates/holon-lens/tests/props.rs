@@ -16,10 +16,22 @@ use proptest::prelude::*;
 static TSL: LazyLock<Arc<Format>> = LazyLock::new(|| bundled("tsl_count").unwrap());
 static COOK: LazyLock<Arc<Format>> = LazyLock::new(|| bundled("cooklang_quantity").unwrap());
 
-fn decimal_text(seps: &'static [char]) -> impl Strategy<Value = String> + Clone {
+/// Digit runs as typed, leading zeros included. `LONG` digits reach past both
+/// `i128` (39 digits) and the number language's bound, so texts on each side
+/// of it are drawn.
+fn digits(max: usize) -> impl Strategy<Value = String> + Clone {
+    prop_oneof![
+        "[0-9]{1,4}",
+        prop::string::string_regex(&format!("[0-9]{{1,{max}}}")).unwrap()
+    ]
+}
+
+const LONG: usize = 60;
+
+fn decimal_text(seps: &'static [char], max: usize) -> impl Strategy<Value = String> + Clone {
     (
-        0u32..3000,
-        prop::option::of((prop::sample::select(seps), "[0-9]{1,3}")),
+        digits(max),
+        prop::option::of((prop::sample::select(seps), digits(max))),
     )
         .prop_map(|(i, f)| match f {
             Some((s, d)) => format!("{i}{s}{d}"),
@@ -29,9 +41,9 @@ fn decimal_text(seps: &'static [char]) -> impl Strategy<Value = String> + Clone 
 
 const UNITS: &[&str] = &["kg", "Kg", "g", "Zehen", "Stück", "fl oz", "Pck.", "EL"];
 
-fn tsl_terms_text(more: std::ops::Range<usize>) -> impl Strategy<Value = String> {
+fn tsl_terms_text(more: std::ops::Range<usize>, max: usize) -> impl Strategy<Value = String> {
     let term = (
-        decimal_text(&[',', '.']),
+        decimal_text(&[',', '.'], max),
         prop::option::of((" {0,2}", prop::sample::select(UNITS))),
     )
         .prop_map(|(n, u)| match u {
@@ -54,7 +66,7 @@ fn tsl_terms_text(more: std::ops::Range<usize>) -> impl Strategy<Value = String>
 
 fn tsl_text() -> impl Strategy<Value = String> {
     prop_oneof![
-        6 => tsl_terms_text(0..4),
+        6 => tsl_terms_text(0..4, LONG),
         1 => Just("1".to_string()),
         1 => Just(String::new()),
         1 => "[a-zäö][a-zäö ]{0,8}",
@@ -63,13 +75,14 @@ fn tsl_text() -> impl Strategy<Value = String> {
 
 fn cook_text() -> impl Strategy<Value = String> {
     let amount = prop_oneof![
-        decimal_text(&['.']),
-        (1u32..9, 2u32..9).prop_map(|(n, d)| format!("{n}/{d}")),
-        (1u32..5, 1u32..9, 2u32..9).prop_map(|(w, n, d)| format!("{w} {n}/{d}")),
+        decimal_text(&['.'], LONG),
+        (digits(LONG), " {0,2}/ {0,2}", digits(LONG)).prop_map(|(n, s, d)| format!("{n}{s}{d}")),
+        (digits(LONG), " {1,2}", digits(LONG), digits(LONG))
+            .prop_map(|(w, s, n, d)| format!("{w}{s}{n}/{d}")),
         (
-            decimal_text(&['.']),
+            decimal_text(&['.'], LONG),
             prop::sample::select(&["-", " - ", "- "][..]),
-            decimal_text(&['.'])
+            decimal_text(&['.'], LONG)
         )
             .prop_map(|(a, s, b)| format!("{a}{s}{b}")),
         "[a-z][a-z ]{0,6}[a-z]",
@@ -87,8 +100,11 @@ fn cook_text() -> impl Strategy<Value = String> {
     ]
 }
 
+/// Below 10^19 the integer part prints inside the number language; a larger
+/// value has no text in either format.
 fn dec(max_decimals: u32) -> impl Strategy<Value = Rational> {
-    (0i128..300_000, 0..=max_decimals).prop_map(|(n, k)| Rational::new(n, 10i128.pow(k)).unwrap())
+    (0i128..10i128.pow(19), 0..=max_decimals)
+        .prop_map(|(n, k)| Rational::new(n, 10i128.pow(k)).unwrap())
 }
 
 fn tsl_quantity() -> impl Strategy<Value = Option<Quantity>> {
@@ -109,7 +125,9 @@ fn tsl_quantity() -> impl Strategy<Value = Option<Quantity>> {
 fn cook_quantity() -> impl Strategy<Value = Option<Quantity>> {
     let amount = prop_oneof![
         dec(3).prop_map(Amount::Exact),
-        (1i128..50, 1i128..12).prop_map(|(n, d)| Amount::Exact(Rational::new(n, d).unwrap())),
+        // The fraction language's bound: whole part, numerator and denominator below 10^18.
+        (0i128..10i128.pow(18), 1i128..10i128.pow(18))
+            .prop_map(|(n, d)| Amount::Exact(Rational::new(n, d).unwrap())),
         (dec(2), dec(2)).prop_map(|(a, b)| Amount::Range(a, b)),
         "[a-z][a-z ]{0,6}[a-z]".prop_map(Amount::Text),
     ];
@@ -157,9 +175,11 @@ proptest! {
     }
 
     /// Changing one term keeps every other term's bytes, separators included.
+    /// 18 digits: a longer run is outside the number language, so the whole
+    /// text reads as opaque text, which has no terms to keep.
     #[test]
     fn tsl_untouched_terms_byte_identical(
-        s in tsl_terms_text(1..4),
+        s in tsl_terms_text(1..4, 18),
         i in any::<prop::sample::Index>(),
         r in dec(2),
     ) {
@@ -178,10 +198,25 @@ proptest! {
 
     /// Rounding is a quotient: PutGet holds up to the declared 2 decimals.
     #[test]
-    fn tsl_rounding_put_get(n in 0i128..100_000, d in 1i128..1000) {
+    fn tsl_rounding_put_get(n in 0i128..10i128.pow(19), d in 1i128..10i128.pow(18)) {
         let r = Rational::new(n, d).unwrap();
         let q = Quantity::one(Amount::Exact(r), Some("g"));
         let back = TSL.parse(&TSL.print(Some(&q), None).unwrap()).unwrap();
         prop_assert_eq!(back, Some(Quantity::one(Amount::Exact(r.round(2).unwrap()), Some("g"))));
+    }
+}
+
+/// GetPut on texts each format's language accepts: digit runs past `i128`,
+/// fraction digits past `10^38`, and a zero denominator.
+#[test]
+fn every_text_the_format_accepts_reads_back_byte_equal() {
+    for (f, s) in [
+        (&*TSL, "99999999999999999999999999999999999999999kg"),
+        (&*TSL, "1,00000000000000000000000000000000000000001kg"),
+        (&*COOK, "1/0%cup"),
+        (&*COOK, "99999999999999999999999999999999999999999%g"),
+    ] {
+        let parsed = f.parse(s).unwrap_or_else(|e| panic!("{s:?}: {e}"));
+        assert_eq!(f.print(parsed.as_ref(), Some(s)).unwrap(), s, "GetPut");
     }
 }

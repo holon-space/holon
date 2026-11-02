@@ -437,3 +437,22 @@ async fn a_change_on_a_relation_another_backend_created_is_typed() {
     );
     std::mem::forget((creator, observer));
 }
+
+#[tokio::test]
+async fn a_cell_whose_digits_overflow_does_not_fail_the_query() {
+    let handle = handle().await;
+    formatted_table_and_view(&handle).await;
+    insert_amount(&handle, "a", Some(AMOUNT)).await;
+    insert_amount(
+        &handle,
+        "z",
+        Some("99999999999999999999999999999999999999999kg"),
+    )
+    .await;
+
+    let rows = handle
+        .query("SELECT id, c FROM t ORDER BY id", HashMap::new())
+        .await
+        .expect("one odd cell must not fail the read of every row");
+    assert_quantity(rows[0].get("c"), AMOUNT, "row a");
+}
