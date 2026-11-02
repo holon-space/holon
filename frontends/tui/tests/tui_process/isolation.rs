@@ -84,3 +84,10 @@ fn the_mcp_client_never_reaches_a_listener_that_another_run_holds() {
         "the instance's own server did not answer tools/list: {response}"
     );
 }
+
+#[test]
+fn concurrent_instances_serve_mcp_on_distinct_ports() {
+    let first = Launch::new().spawn(|_| {});
+    let second = Launch::new().spawn(|_| {});
+    assert_ne!(first.mcp_port(), second.mcp_port());
+}

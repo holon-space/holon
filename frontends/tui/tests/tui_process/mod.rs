@@ -6,6 +6,7 @@
 //! Each test target uses part of it.
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -180,15 +182,22 @@ impl Launch {
 }
 
 /// A port that no listener holds now, so never one that another run's
-/// `holon-tui` still serves.
-/// shortcut: the port is free when picked, not when holon-tui binds it; if
+/// `holon-tui` still serves, and never one this process handed out before.
+/// shortcut: another process can take the port before holon-tui binds it; if
 /// races show, let holon-tui bind port 0 and report the port it got.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind a port the OS picks")
-        .local_addr()
-        .expect("read the picked port")
-        .port()
+    static HANDED_OUT: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
+    let mut handed_out = HANDED_OUT.lock().expect("the handed-out ports");
+    loop {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind a port the OS picks")
+            .local_addr()
+            .expect("read the picked port")
+            .port();
+        if handed_out.insert(port) {
+            return port;
+        }
+    }
 }
 
 fn children_of(parent: &str) -> Vec<String> {

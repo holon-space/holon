@@ -77,7 +77,9 @@ fn a_refused_write_back_is_in_the_log_after_the_terminal_hung_up() {
     // The atomic write cannot create its temp file beside the page.
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
         .expect("make the page's dir read-only");
-    let ack = tui.mcp().set_content("block:locked-child", "EDITED-READ-ONLY");
+    let ack = tui
+        .mcp()
+        .set_content("block:locked-child", "EDITED-READ-ONLY");
     tui.signal("HUP");
     let status = tui.wait_for_exit("SIGHUP");
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
@@ -137,9 +139,7 @@ fn a_dead_terminal_ends_the_tui_through_the_session_shutdown() {
 
 #[test]
 fn a_stderr_write_while_the_tui_draws_lands_in_the_log() {
-    let mut tui = Launch::new()
-        .env("HOLON_DEBUG_CHORD", "1")
-        .spawn(|_| {});
+    let mut tui = Launch::new().env("HOLON_DEBUG_CHORD", "1").spawn(|_| {});
     tui.wait_for_log(BOOTED);
     // Alt+i: indent, which reports on stderr under HOLON_DEBUG_CHORD.
     tui.type_keys(b"\x1bi");
@@ -172,9 +172,7 @@ fn a_stderr_write_while_the_tui_draws_lands_in_the_log() {
 /// shutdown, so a failed draw must not panic.
 #[test]
 fn a_draw_to_a_dead_terminal_ends_the_tui_through_the_session_shutdown() {
-    let mut tui = Launch::new()
-        .launcher(Launcher::DeadOutput)
-        .spawn(|_| {});
+    let mut tui = Launch::new().launcher(Launcher::DeadOutput).spawn(|_| {});
     tui.wait_for_log(BOOTED);
 
     let failed_draw = "Failed to write ANSI bytes";
@@ -206,9 +204,7 @@ fn a_draw_to_a_dead_terminal_ends_the_tui_through_the_session_shutdown() {
 /// `true | holon-tui` panics in crossterm's event reader.
 #[test]
 fn a_panic_reaches_the_terminal() {
-    let mut tui = Launch::new()
-        .launcher(Launcher::ClosedStdin)
-        .spawn(|_| {});
+    let mut tui = Launch::new().launcher(Launcher::ClosedStdin).spawn(|_| {});
     let status = tui.wait_for_exit("a boot on a closed stdin");
     let terminal = tui.terminal_text();
     assert!(
