@@ -1,9 +1,11 @@
 //! A page Holon deletes leaves no file behind, whichever writer created its
-//! file: the render of the page's blocks, or the page's identity-file
-//! materializer. A page that is not deleted keeps its file.
+//! file, in whatever order the deletion's changes arrive, and while the page
+//! registry still lists the deleted page. A page that is not deleted keeps its
+//! file.
 //!
-//! The inputs are the product of two small sets (four creation orders, two
-//! deletions), so every case runs instead of a sample.
+//! Production's page registry is a view with its own CDC stream, apart from
+//! the block feed that drives write-back, so it can still list a page the
+//! store has already deleted.
 
 use std::sync::Arc;
 
@@ -14,6 +16,7 @@ use org_vault_double::DOC_ID;
 use org_vault_double::MapAliasRegistrar;
 use org_vault_double::Vault;
 use org_vault_double::vault;
+use proptest::prelude::*;
 
 use crate::org_vault_double;
 
@@ -25,13 +28,6 @@ enum Writer {
     Materialize,
 }
 
-const CREATIONS: [&[Writer]; 4] = [
-    &[Writer::Render],
-    &[Writer::Materialize],
-    &[Writer::Render, Writer::Materialize],
-    &[Writer::Materialize, Writer::Render],
-];
-
 #[derive(Clone, Copy, Debug)]
 enum Deletion {
     /// The undo of "turn into page": the page goes, its block returns to the
@@ -41,7 +37,17 @@ enum Deletion {
     Delete,
 }
 
-const DELETIONS: [Deletion; 2] = [Deletion::UndoConvert, Deletion::Delete];
+#[derive(Clone, Debug)]
+struct Case {
+    creation: Vec<Writer>,
+    deletion: Deletion,
+    /// The order the deletion's changes reach the controller, as indexes into
+    /// `deletion_changes`.
+    order: Vec<usize>,
+    /// How many of those changes reach the controller while the registry
+    /// still lists the deleted page.
+    registry_lag: usize,
+}
 
 struct MintedPage {
     page: Block,
@@ -57,11 +63,23 @@ impl MintedPage {
     }
 }
 
-async fn change(v: &mut Vault, doc: &EntityUri, delta: BlockDelta) -> bool {
-    v.controller
-        .on_block_changed(doc, &delta)
-        .await
-        .unwrap_or_else(|e| panic!("on_block_changed({doc}): {e:#}"))
+/// The changes a deletion sends, each with the document it is homed in.
+fn deletion_changes(minted: &MintedPage, deletion: Deletion) -> Vec<(EntityUri, BlockDelta)> {
+    let page = &minted.page.id;
+    let mut changes = vec![
+        (page.clone(), BlockDelta::Remove(minted.kid.id.clone())),
+        (page.clone(), BlockDelta::Remove(page.clone())),
+    ];
+    if let Deletion::UndoConvert = deletion {
+        changes.push((EntityUri::block(DOC_ID), upsert(&kid_back_home(minted))));
+    }
+    changes
+}
+
+fn kid_back_home(minted: &MintedPage) -> Block {
+    let mut back = minted.kid.clone();
+    back.parent_id = EntityUri::block(DOC_ID);
+    back
 }
 
 fn upsert(block: &Block) -> BlockDelta {
@@ -69,6 +87,13 @@ fn upsert(block: &Block) -> BlockDelta {
         block: block.clone(),
         prev: None,
     }
+}
+
+async fn change(v: &mut Vault, doc: &EntityUri, delta: &BlockDelta) -> bool {
+    v.controller
+        .on_block_changed(doc, delta)
+        .await
+        .unwrap_or_else(|e| panic!("on_block_changed({doc}): {e:#}"))
 }
 
 async fn create(v: &mut Vault, minted: &MintedPage, creation: &[Writer]) {
@@ -79,29 +104,33 @@ async fn create(v: &mut Vault, minted: &MintedPage, creation: &[Writer]) {
             Writer::Render => &minted.kid,
             Writer::Materialize => &minted.page,
         };
-        change(v, &minted.page.id, upsert(block)).await;
+        change(v, &minted.page.id, &upsert(block)).await;
     }
 }
 
-/// Returns whether any change asked for the bulk pass.
-async fn delete(v: &mut Vault, minted: &MintedPage, deletion: Deletion) -> bool {
+/// Deletes the page in the store at once and in the registry after
+/// `case.registry_lag` changes. Returns whether any change asked for the bulk
+/// pass.
+async fn delete(v: &mut Vault, minted: &MintedPage, case: &Case) -> bool {
     let page = &minted.page.id;
-    let mut handled = true;
+    let listed = v.docs.by_id.lock().unwrap()[page].clone();
     v.forget(page);
-    match deletion {
-        Deletion::UndoConvert => {
-            let mut back = minted.kid.clone();
-            back.parent_id = EntityUri::block(DOC_ID);
-            v.put(back.clone());
-            handled &= change(v, page, BlockDelta::Remove(minted.kid.id.clone())).await;
-            handled &= change(v, &EntityUri::block(DOC_ID), upsert(&back)).await;
-        }
-        Deletion::Delete => {
-            v.forget(&minted.kid.id);
-            handled &= change(v, page, BlockDelta::Remove(minted.kid.id.clone())).await;
-        }
+    match case.deletion {
+        Deletion::UndoConvert => v.put(kid_back_home(minted)),
+        Deletion::Delete => v.forget(&minted.kid.id),
     }
-    handled &= change(v, page, BlockDelta::Remove(page.clone())).await;
+    v.docs.by_id.lock().unwrap().insert(page.clone(), listed);
+
+    let changes = deletion_changes(minted, case.deletion);
+    let mut handled = true;
+    for (sent, &i) in case.order.iter().enumerate() {
+        if sent == case.registry_lag {
+            v.docs.by_id.lock().unwrap().remove(page);
+        }
+        let (doc, delta) = &changes[i];
+        handled &= change(v, doc, delta).await;
+    }
+    v.docs.by_id.lock().unwrap().remove(page);
     !handled
 }
 
@@ -126,20 +155,20 @@ fn files_naming(v: &Vault, page: &EntityUri) -> Vec<String> {
     found
 }
 
-/// What one case left on disk that it should not have, or `None`.
-async fn run(creation: &[Writer], deletion: Deletion) -> Option<String> {
+/// What the case left on disk that it should not have, or `None`.
+async fn run(case: &Case) -> Option<String> {
     let mut v = vault().with_alias_registrar(Arc::new(MapAliasRegistrar::default()));
     let notes = v.path.clone();
     let _ = v.controller.on_file_changed(&notes).await.unwrap();
 
     let doomed = MintedPage::new("20261102T100000", "20261102T100001", "Origin");
     let keeper = MintedPage::new("20261102T110000", "20261102T110001", "Keeper");
-    create(&mut v, &doomed, creation).await;
-    create(&mut v, &keeper, creation).await;
+    create(&mut v, &doomed, &case.creation).await;
+    create(&mut v, &keeper, &case.creation).await;
     let before = files_naming(&v, &doomed.page.id);
     assert_eq!(before.len(), 1, "the new page owns one file: {before:?}");
 
-    if delete(&mut v, &doomed, deletion).await {
+    if delete(&mut v, &doomed, case).await {
         v.controller
             .re_render_all_tracked(&Default::default())
             .await
@@ -152,17 +181,68 @@ async fn run(creation: &[Writer], deletion: Deletion) -> Option<String> {
         .then(|| format!("deleted page still in {doomed_files:?}; live page in {keeper_files:?}"))
 }
 
-#[tokio::test]
-async fn a_deleted_page_leaves_no_file_and_a_live_page_keeps_its_file() {
-    let mut failures = Vec::new();
-    for creation in CREATIONS {
-        for deletion in DELETIONS {
-            if let Some(failure) = run(creation, deletion).await {
-                failures.push(format!(
-                    "created by {creation:?}, removed by {deletion:?}: {failure}"
-                ));
-            }
-        }
+fn check(case: &Case) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    if let Some(failure) = rt.block_on(run(case)) {
+        panic!("{case:?}: {failure}");
     }
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn case_strategy() -> impl Strategy<Value = Case> {
+    let writer = prop_oneof![Just(Writer::Render), Just(Writer::Materialize)];
+    let deletion = prop_oneof![Just(Deletion::UndoConvert), Just(Deletion::Delete)];
+    (prop::collection::vec(writer, 1..=3), deletion).prop_flat_map(|(creation, deletion)| {
+        // A delete removes leaves before their parent
+        // (holon-loro loro_sync_controller.rs, "Delete leaves first"); a page
+        // removed before its block is ungrounded and the removal guard refuses it.
+        let (n, order) = match deletion {
+            Deletion::UndoConvert => (3usize, Just(vec![0, 1, 2]).prop_shuffle().boxed()),
+            Deletion::Delete => (2, Just(vec![0, 1]).boxed()),
+        };
+        (order, 0..=n).prop_map(move |(order, registry_lag)| Case {
+            creation: creation.clone(),
+            deletion,
+            order,
+            registry_lag,
+        })
+    })
+}
+
+/// Cases kept from earlier failures, run through the same property first.
+fn fixed_cases() -> Vec<Case> {
+    let in_order = |creation: Vec<Writer>, deletion, n, registry_lag| Case {
+        creation,
+        deletion,
+        order: (0..n).collect(),
+        registry_lag,
+    };
+    vec![
+        // The render path wrote the page's file without recording its alias.
+        in_order(vec![Writer::Render], Deletion::UndoConvert, 3, 0),
+        in_order(vec![Writer::Render], Deletion::Delete, 2, 0),
+        // The registry still listed the deleted page when its removal was
+        // rendered, so the file kept the page's header.
+        in_order(vec![Writer::Materialize], Deletion::UndoConvert, 3, 3),
+        in_order(vec![Writer::Render], Deletion::UndoConvert, 3, 3),
+    ]
+}
+
+#[test]
+fn a_deleted_page_leaves_no_file_fixed_cases() {
+    for case in fixed_cases() {
+        check(&case);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn a_deleted_page_leaves_no_file_and_a_live_page_keeps_its_file(case in case_strategy()) {
+        check(&case);
+    }
 }

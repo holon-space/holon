@@ -155,6 +155,9 @@ struct HeldBlock {
 #[derive(Debug, Default)]
 struct DocOrder {
     blocks: HashMap<EntityUri, HeldBlock>,
+    /// The feed removed the document's own root, so the page registry, fed
+    /// apart from the holder, may still list a page that is gone.
+    root_removed: bool,
 }
 
 impl DocOrder {
@@ -8677,6 +8680,9 @@ impl FileSyncController {
         let entry = self.holder.entry(doc.clone()).or_default();
         match delta {
             BlockDelta::Upsert { block, prev } => {
+                if block.id == *doc {
+                    entry.root_removed = false;
+                }
                 entry.blocks.insert(
                     block.id.clone(),
                     HeldBlock {
@@ -8692,6 +8698,9 @@ impl FileSyncController {
                 }
             }
             BlockDelta::Remove(id) => {
+                if id == doc {
+                    entry.root_removed = true;
+                }
                 entry.blocks.remove(id);
                 self.pending_removals
                     .entry(doc.clone())
@@ -8944,15 +8953,27 @@ impl FileSyncController {
             )
         })?;
         let blocks = held.document_order(doc_id);
-        match held.blocks.get(doc_id).filter(|root| root.block.is_page()) {
-            Some(root) => self.disclose_render(
+        if let Some(root) = held.blocks.get(doc_id).filter(|root| root.block.is_page()) {
+            return self.disclose_render(
                 path,
                 self.renderer
                     .render_document_block(&root.block, &blocks, path)
                     .await,
-            ),
-            None => self.render_doc_blocks(doc_id, path, &blocks).await,
+            );
         }
+        // A retracted root is still held by the authority; a deleted one is
+        // not, and the registry can still list it.
+        if held.root_removed
+            && self
+                .block_reader
+                .get_block_authoritative(doc_id)
+                .await?
+                .is_none()
+        {
+            return self
+                .disclose_render(path, self.renderer.render_body(doc_id, path, &blocks).await);
+        }
+        self.render_doc_blocks(doc_id, path, &blocks).await
     }
 
     /// Poll all tracked files for pending external changes that the file
