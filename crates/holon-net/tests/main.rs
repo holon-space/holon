@@ -20,6 +20,7 @@ mod exec_undo;
 mod exec_unknown;
 mod guard_classifier_pbt;
 mod hop_predicate_agreement;
+mod nested_ask_probe;
 mod net_file;
 mod net_load;
 mod net_load_key_comment;

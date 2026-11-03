@@ -789,6 +789,12 @@ impl NetDef {
             }
         })?;
         for work in self.asks.keys() {
+            if let Some(of) = self.work_of_answer(work) {
+                return Err(LoadError::AskWorkIsAnswer {
+                    work: work.to_string(),
+                    of: of.to_string(),
+                });
+            }
             let place = |name: String, derived: bool| {
                 self.places
                     .get(name.as_str())
@@ -899,6 +905,10 @@ pub enum LoadError {
         "the ask '{work}' lacks '{missing}': it needs a derived Asks, a stored Answered and Expired, a manual Answer, and a work that consumes Answered"
     )]
     IncompleteAsk { work: String, missing: String },
+    #[error(
+        "the ask '{work}' is the Answer transition of the ask '{of}'; an Answer is fired by the caller, never as a work"
+    )]
+    AskWorkIsAnswer { work: String, of: String },
     #[error("the derived place '{}' reads itself through {}", .0[0], cycle_text(.0))]
     DerivedCycle(Vec<Place>),
     #[error("transition '{transition}' has a timer of {timer:?}, past the i64 nanosecond range")]
@@ -2136,10 +2146,15 @@ impl Executor {
     }
 
     /// Fires `Answer.T` with the user value; the answer id is the occurrence.
-    /// Three panics stay. The first is the `unreachable!` arm: the load rules
-    /// out its fire refusals (`NetDef::check` makes `Answer.T` manual, pure and
-    /// without retry, so there is no `InFlight` or `RetryPending`), the clock
-    /// check ran first, and the answer id is the occurrence. The other two are
+    /// Three panics stay. The first is the `unreachable!` arm; the load rules
+    /// out each of its refusals: the clock check ran first (`ClockWentBack`,
+    /// `ClockOutOfRange`), `UnknownTransition` and `NotManual` by the `asks`
+    /// lookup and `NetDef::check` (`Answer.T` exists and is manual), `InFlight`
+    /// and `RetryPending` because `Answer.T` is pure without retry,
+    /// `AnswerOccurrence` because the occurrence is the answer id,
+    /// `FailedOnThisInput` because `Answer.T` is not auto, and
+    /// `BindsAnswerInput` because no ask's work is an `Answer.T`
+    /// (`LoadError::AskWorkIsAnswer`). The other two are
     /// a firing that puts, with no compare-and-set, a different token into an
     /// occupied single-token place (`refuse_blind_overwrite`), and a value that
     /// holds `Value::Removed`, which the token hash refuses (`encode_value`).

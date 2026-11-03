@@ -480,6 +480,10 @@ struct WorkGen {
     /// `Some`: the ask is built by hand through `NetDef::ask` instead of the
     /// lowering.
     hand: Option<HandGen>,
+    /// `Some((role, j))`: the work is named `<role>.<name of work j>`, a name
+    /// the executor also derives for work `j`; `j` is taken modulo the
+    /// work's index, so names do not refer to each other in a cycle.
+    named: Option<(Generated, usize)>,
 }
 
 /// A hand-built ask: its `Asks` row and its `Answer` transition are drawn.
@@ -583,9 +587,13 @@ fn work_gen(places: usize) -> impl Strategy<Value = WorkGen> {
         bind_prog(),
         body_prog(),
         prop_oneof![2 => Just(None), 1 => hand_gen().prop_map(Some)],
+        prop_oneof![
+            2 => Just(None),
+            1 => (select(Generated::ALL.to_vec()), 0..WORKS.len()).prop_map(Some),
+        ],
     )
         .prop_map(
-            |(roles, puts, effect, input, irreversible, undoes, bind, body, hand)| WorkGen {
+            |(roles, puts, effect, input, irreversible, undoes, bind, body, hand, named)| WorkGen {
                 roles,
                 puts,
                 effect,
@@ -595,6 +603,7 @@ fn work_gen(places: usize) -> impl Strategy<Value = WorkGen> {
                 bind,
                 body,
                 hand,
+                named,
             },
         )
 }
@@ -667,8 +676,22 @@ impl NetGen {
             .collect()
     }
 
+    fn work_name(&self, i: usize) -> String {
+        match self.works[i].named {
+            Some((role, j)) if i > 0 => role.name(&self.work_name(j % i)),
+            _ => WORKS[i].to_owned(),
+        }
+    }
+
     fn work_names(&self) -> Vec<String> {
-        (0..self.works.len()).map(|i| WORKS[i].to_owned()).collect()
+        (0..self.works.len()).map(|i| self.work_name(i)).collect()
+    }
+
+    /// Whether another work is named `Answer.<name of work i>`: that work's
+    /// transition is then the `Answer` of work `i`'s ask.
+    fn answer_is_a_work(&self, i: usize) -> bool {
+        let answer = answer_transition(&self.work_name(i));
+        self.work_names().contains(&answer)
     }
 
     /// The stored places the lowering adds for each work.
@@ -798,7 +821,7 @@ impl NetGen {
                     || (matches!(r, Role::Inhibits) && p.pool.is_some())
             });
             edges.push((
-                Generated::Asks.name(WORKS[k]),
+                Generated::Asks.name(&self.work_name(k)),
                 always,
                 evaluated(&w.bind.reads, &self.transition_readable(), &nodes),
             ));
@@ -1082,7 +1105,7 @@ impl NetGen {
             place: PlaceName(names[*p].clone()),
         }));
         TransitionDescriptor {
-            name: TransitionName(WORKS[i].to_owned()),
+            name: TransitionName(self.work_name(i)),
             arcs,
             body: BodyDecl::Native {
                 symbol: NativeRef(format!("work{i}")),
@@ -1099,7 +1122,7 @@ impl NetGen {
             undoes: w
                 .undoes
                 .filter(|u| *u != i && *u < self.works.len())
-                .map(|u| TransitionName(WORKS[u].to_owned())),
+                .map(|u| TransitionName(self.work_name(u))),
         }
     }
 
@@ -1109,7 +1132,7 @@ impl NetGen {
             bind: self.bind_fn(&w.bind, self.transition_readable()),
             body: match w.effect {
                 Some(r) => NativeBody::Effectful(receiver(r)),
-                None => NativeBody::Pure(w.body.body(WORKS[i], &self.output_places())),
+                None => NativeBody::Pure(w.body.body(&self.work_name(i), &self.output_places())),
             },
             preview: None,
         }
@@ -1119,7 +1142,8 @@ impl NetGen {
     /// checks an ask for, with the drawn `Asks` row and `Answer`.
     fn hand(&self, net: NetDef, i: usize, h: &HandGen) -> NetDef {
         let w = &self.works[i];
-        let t = WORKS[i];
+        let name = self.work_name(i);
+        let t = name.as_str();
         let names = self.stored();
         let (answered, failed) = (answered_place(t), Generated::WorkFailed.name(t));
         let running = Place::running(t).to_string();
@@ -1206,9 +1230,15 @@ impl NetGen {
             Some(r) => Body::Effectful(receiver(r)),
             None => Body::Pure(w.body.body(t, &self.output_places())),
         };
+        // A work that is the `Answer` of another ask is manual, as an `Answer` is.
+        let plays_answer = self.work_names().iter().any(|o| answer_transition(o) == t);
         let mut work = TransitionDef::new(
             t,
-            holon_net::exec::Trigger::Auto,
+            if plays_answer {
+                holon_net::exec::Trigger::Manual
+            } else {
+                holon_net::exec::Trigger::Auto
+            },
             self.bind_fn(&w.bind, self.transition_readable()),
             body,
         )
@@ -1227,7 +1257,8 @@ impl NetGen {
             work = work.produces(&names[*p]);
         }
 
-        net.place(&answered, Class::Process)
+        let net = net
+            .place(&answered, Class::Process)
             .place(&failed, Class::Process)
             .place(&expired_place(t), Class::Process)
             .derived(&asks_place(t), asks)
@@ -1238,9 +1269,13 @@ impl NetGen {
                     irreversible: w.irreversible,
                     has_preview: false,
                 },
-            )
-            .transition(answer)
-            .transition(work)
+            );
+        let net = if self.answer_is_a_work(i) {
+            net
+        } else {
+            net.transition(answer)
+        };
+        net.transition(work)
     }
 
     /// The net: the file, its derived places, then each lowered work.
@@ -1339,7 +1374,7 @@ impl NetGen {
         if let Some(i) = TRANSITIONS.iter().position(|t| *t == transition) {
             return self.transitions.get(i).map(|t| &t.bind);
         }
-        let i = WORKS.iter().position(|t| *t == transition)?;
+        let i = self.work_names().iter().position(|t| t == transition)?;
         self.works.get(i).map(|w| &w.bind)
     }
 
@@ -1353,18 +1388,18 @@ impl NetGen {
 
     /// Whether `transition` is a work whose ask the lowering builds.
     fn is_lowered(&self, transition: &str) -> bool {
-        WORKS
+        self.work_names()
             .iter()
             .zip(&self.works)
-            .any(|(w, g)| *w == transition && g.hand.is_none())
+            .any(|(w, g)| w == transition && g.hand.is_none())
     }
 
     /// Whether `transition` is a work whose binding produces the field the
     /// answer of its ask fills.
     fn binds_answer_input(&self, transition: &str) -> bool {
-        WORKS
+        self.work_names()
             .iter()
-            .position(|t| *t == transition)
+            .position(|t| t == transition)
             .is_some_and(|i| {
                 self.works.get(i).is_some_and(|w| {
                     w.bind
@@ -1378,9 +1413,9 @@ impl NetGen {
     /// Whether `transition` is a lowered work whose binding produces a field
     /// of the `Answered` token the lowering adds to the work's input.
     fn binds_answer_fields(&self, transition: &str) -> bool {
-        WORKS
+        self.work_names()
             .iter()
-            .position(|t| *t == transition)
+            .position(|t| t == transition)
             .is_some_and(|i| {
                 self.works.get(i).is_some_and(|w| {
                     w.hand.is_none()
@@ -2339,8 +2374,8 @@ impl Machine {
                     .net
                     .work_names()
                     .iter()
-                    .any(|w| self.net.binds_answer_input(w)),
-            "a BindsAnswerInput condition, though no work binds the answer input: {conditions}"
+                    .any(|w| self.net.binds_answer_input(w) || self.net.binds_answer_fields(w)),
+            "a BindsAnswerInput condition, though no work binds the answer input or a field of the answer: {conditions}"
         );
         let ghosts = self.net.ghost_transitions();
         let by = producers(&self.exec, &self.net);
@@ -2491,8 +2526,25 @@ fn hand_net(h: HandGen) -> NetGen {
             },
             body: BodyProg::Outputs(vec![]),
             hand: Some(h),
+            named: None,
         }],
     }
+}
+
+/// `hand_net` with a second work named `<role>.W0`, whose binding returns
+/// `key`; `hand` says which ask is built by hand, the others are lowered.
+fn role_named_net(role: Generated, key: &str, hand: [bool; 2]) -> NetGen {
+    let mut net = hand_net(plain_hand());
+    let mut second = net.works[0].clone();
+    second.named = Some((role, 0));
+    second.bind.out = Some(vec![(key.to_owned(), Value::String("planted".to_owned()))]);
+    net.works.push(second);
+    for (w, by_hand) in net.works.iter_mut().zip(hand) {
+        if !by_hand {
+            w.hand = None;
+        }
+    }
+    net
 }
 
 fn plain_hand() -> HandGen {
@@ -2521,8 +2573,12 @@ fn write_p0() -> Op {
 }
 
 fn answer_w0(answer: OccGen) -> Op {
+    answer_of(WORKS[0].to_owned(), answer)
+}
+
+fn answer_of(work: String, answer: OccGen) -> Op {
     Op::Answer {
-        work: Name::Other(WORKS[0].to_owned()),
+        work: Name::Other(work),
         subject: "s".to_owned(),
         seen: SeenGen::Offered(0),
         answer,
@@ -2791,4 +2847,40 @@ proptest! {
             (Err(e), Some(_)) => prop_assert!(false, "{text:?} refused: {e}"),
         }
     }
+}
+
+/// A work named after a role the executor derives for another work
+/// (`Answer.W0`, `Asks.W0`, ...), its binding returning an answer key, both
+/// asks built by hand or lowered: the load refuses, or each call is a typed
+/// error. The inner ask is answered before the outer one, so an `Answer.W0`
+/// that is a work has its own answer when `W0` is answered.
+#[test]
+fn a_work_named_after_a_role_of_another_work_keeps_the_caller_contract() {
+    let mut failures = vec![];
+    for role in Generated::ALL {
+        let second = role.name(WORKS[0]);
+        let ops = [
+            write_p0(),
+            Op::Asks,
+            answer_of(second.clone(), OccGen::Fresh),
+            Op::Step {
+                dt: Dt::Forward(1_000_000),
+            },
+            answer_w0(OccGen::Fresh),
+            Op::Step {
+                dt: Dt::Forward(1_000_000),
+            },
+            answer_of(second.clone(), OccGen::Fresh),
+        ];
+        for key in [ANSWER_INPUT_KEY, ANSWER_ID_KEY, SEEN_FIELD, "x"] {
+            for hand in [[true, true], [true, false], [false, true], [false, false]] {
+                if let Err(e) =
+                    caller_calls_keep_the_contract(role_named_net(role, key, hand), &ops)
+                {
+                    failures.push(format!("{second}, binds {key:?}, by hand {hand:?}: {e}"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

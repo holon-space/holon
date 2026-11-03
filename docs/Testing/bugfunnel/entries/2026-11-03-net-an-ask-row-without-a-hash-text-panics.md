@@ -19,4 +19,3 @@ The wide machine never drew a hand-built `Asks.T` derive. Litmus: COVERAGE, beca
 
 ## Remedy
 `hash_from_text` returns `Result`; `Executor::asks` maps a missing or non-hex hash text to the typed `DeriveError::AskRowHash`.
-Improvement candidates: 1

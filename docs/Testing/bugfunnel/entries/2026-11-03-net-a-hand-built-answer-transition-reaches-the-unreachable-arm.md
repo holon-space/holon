@@ -18,5 +18,4 @@ The verifier of card #882 found it in round 1 by reading the load check against 
 The wide machine built asks only through `lower()`, whose `Answer.T` has an empty bind and a pure body, so no case drew a hand-built `Answer.T`. Litmus: COVERAGE, because no case reached the state; the no-panic oracle would have gone red had one reached it.
 
 ## Remedy
-`NetDef::check` refuses an ask whose `Answer.T` is not manual, pure and without retry (`LoadError::IncompleteAsk`). A bind that returns an answer field cannot be seen by the load, so the answer is the typed `UftError::AnswerBindCollides`. The wide generator draws hand-built `Answer.T` transitions.
-Improvement candidates: 1
+`NetDef::check` refuses an ask whose `Answer.T` is not manual, pure and without retry (`LoadError::IncompleteAsk`). A bind that returns an answer field cannot be seen by the load, so the answer is the typed `UftError::AnswerBindCollides`. `NetDef::check` also refuses an ask whose work is the `Answer.T` of another ask (`LoadError::AskWorkIsAnswer`), so the `unreachable!` arm of `Executor::answer` holds. The wide generator draws hand-built `Answer.T` transitions.
