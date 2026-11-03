@@ -274,7 +274,7 @@ impl Tui {
 
     /// A client of this instance's MCP server.
     pub fn mcp(&self) -> Mcp {
-        Mcp::connect(self.mcp_port)
+        Mcp::connect(self.mcp_port, || self.log_text())
     }
 
     /// `script`, or `holon-tui` itself under [`Launcher::DeadOutput`].
@@ -448,7 +448,19 @@ pub struct Mcp {
 }
 
 impl Mcp {
-    pub fn connect(port: u16) -> Self {
+    /// Waits up to 60 s for a listener on `port`, since holon-tui binds it
+    /// only after the boot reports ready; the panic for no listener quotes
+    /// `log`.
+    pub fn connect(port: u16, log: impl Fn() -> String) -> Self {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while let Err(e) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            assert!(
+                Instant::now() < deadline,
+                "no MCP listener on port {port} within 60 s: {e}; log:\n{}",
+                log()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
         let mut mcp = Self {
             port,
             session: None,
