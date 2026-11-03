@@ -70,7 +70,7 @@ impl DocHomes {
         Some((other, &self.by_doc[other]))
     }
 
-    fn docs_at(&self, home: &CanonicalPath) -> Vec<EntityUri> {
+    pub(crate) fn docs_at(&self, home: &CanonicalPath) -> Vec<EntityUri> {
         self.by_key
             .get(&PathCollisionKey::of(home.as_path_buf()))
             .into_iter()

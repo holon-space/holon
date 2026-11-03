@@ -8242,6 +8242,14 @@ impl FileSyncController {
         !self.owed_hash_stamps().is_empty()
     }
 
+    /// Whether `path` is still a document's recorded home or holds a last
+    /// projection.
+    pub fn tracks_file(&self, path: &Path) -> bool {
+        let canonical = CanonicalPath::new(path);
+        self.last_projection.contains_key(&canonical)
+            || self.doc_home.values().any(|home| *home == canonical)
+    }
+
     /// Record in each `file` row the write-back left with the empty hash the
     /// hash of the bytes Holon wrote last, so the next boot skips the file
     /// while it holds them. A failure is disclosed on the vault, naming every
@@ -9311,7 +9319,10 @@ impl FileSyncController {
             };
             let doc = match declared {
                 Some(id) => match self.doc_manager.get_by_id(&id).await {
-                    Ok(Some(doc)) => Some(doc),
+                    Ok(Some(doc)) => Some(doc.id),
+                    // Without an alias, only the home record still names a
+                    // deleted page's file; its empty render removes it.
+                    Ok(None) if self.is_deleted_page_homed_at(&id, &canonical).await? => Some(id),
                     Ok(None) => None,
                     Err(e) => {
                         warn!(
@@ -9329,7 +9340,7 @@ impl FileSyncController {
             let doc = match doc {
                 Some(doc) => doc,
                 None => match self.doc_manager.find_by_name_chain(&segment_refs).await {
-                    Ok(Some(doc)) => doc,
+                    Ok(Some(doc)) => doc.id,
                     Ok(None) => {
                         // Path was tracked but no document entity exists (e.g.
                         // empty file was registered before the skip-empty guard).
@@ -9355,25 +9366,43 @@ impl FileSyncController {
                 },
             };
 
-            let rendered = match self.render_file_by_doc_id(&doc.id, &path).await {
+            let rendered = match self.render_file_by_doc_id(&doc, &path).await {
                 Ok(rendered) => {
-                    self.clear_failure(&doc.id, BATCH_RENDER_SITE);
+                    self.clear_failure(&doc, BATCH_RENDER_SITE);
                     rendered
                 }
                 Err(e) => {
-                    self.disclose_batch_render_failure(&doc.id, &path, &e, "re_render_all_tracked");
+                    self.disclose_batch_render_failure(&doc, &path, &e, "re_render_all_tracked");
                     continue;
                 }
             };
             let rendered = self.keep_copies(&path, &canonical, rendered, &disk_content)?;
 
             self.pending_removals
-                .entry(doc.id.clone())
+                .entry(doc.clone())
                 .or_default()
                 .extend(sanctioned_removals.iter().cloned());
-            self.owe_render(&doc.id, &canonical, rendered, true);
+            self.owe_render(&doc, &canonical, rendered, true);
         }
         self.drive_writeback_net().await
+    }
+
+    /// Whether `doc` is gone from the store while `canonical` is still its
+    /// recorded home.
+    async fn is_deleted_page_homed_at(
+        &self,
+        doc: &EntityUri,
+        canonical: &CanonicalPath,
+    ) -> Result<bool> {
+        if self.doc_home.get(doc) != Some(canonical) {
+            return Ok(false);
+        }
+        let held = self
+            .block_reader
+            .get_block_authoritative(doc)
+            .await
+            .with_context(|| format!("[re_render_all_tracked] reading {doc}"))?;
+        Ok(held.is_none())
     }
 
     /// Build a page's `/`-joined title chain reading ONLY the authoritative
@@ -10597,30 +10626,7 @@ impl FileSyncController {
         // second is what stops an org twin: a `.cook`-homed page derives
         // `<title>.org` from its name chain, and that path is a writable
         // format, so only the home test catches it.
-        if !self.home_is_writable(doc_id) {
-            let home = self
-                .doc_home
-                .get(doc_id)
-                .map(|h| h.as_path_buf().clone())
-                .unwrap_or_else(|| path.to_path_buf());
-            self.note_readonly_skip(doc_id, &home, "write_back");
-            return Ok(ProjectionWrite::SkippedReadOnly);
-        }
-        if self
-            .formats
-            .adapter_for(path)
-            .is_some_and(|a| a.write_tier() == WriteTier::ReadOnly)
-        {
-            self.note_readonly_skip(doc_id, path, "write_back_target");
-            return Ok(ProjectionWrite::SkippedReadOnly);
-        }
-
-        if self.writeback_readonly.contains(&canonical) {
-            tracing::debug!(
-                doc_id = %doc_id,
-                path = %path.display(),
-                "[FileSyncController] write-back skipped for read-only path                  (already disclosed once)",
-            );
+        if self.refuses_projection_change(doc_id, path, &canonical) {
             return Ok(ProjectionWrite::SkippedReadOnly);
         }
         if let Some(parent) = path.parent() {
@@ -10910,6 +10916,43 @@ impl FileSyncController {
                  disclosed once at ERROR)",
             );
         }
+    }
+
+    /// Whether `path` is read-only for a projection of `doc_id`: its home is
+    /// in a read-only format, the target is one, or the file system refused a
+    /// write there before.
+    fn refuses_projection_change(
+        &self,
+        doc_id: &EntityUri,
+        path: &Path,
+        canonical: &CanonicalPath,
+    ) -> bool {
+        if !self.home_is_writable(doc_id) {
+            let home = self
+                .doc_home
+                .get(doc_id)
+                .map(|h| h.as_path_buf().clone())
+                .unwrap_or_else(|| path.to_path_buf());
+            self.note_readonly_skip(doc_id, &home, "write_back");
+            return true;
+        }
+        if self
+            .formats
+            .adapter_for(path)
+            .is_some_and(|a| a.write_tier() == WriteTier::ReadOnly)
+        {
+            self.note_readonly_skip(doc_id, path, "write_back_target");
+            return true;
+        }
+        if self.writeback_readonly.contains(canonical) {
+            tracing::debug!(
+                doc_id = %doc_id,
+                path = %path.display(),
+                "[FileSyncController] write-back skipped for read-only path                  (already disclosed once)",
+            );
+            return true;
+        }
+        false
     }
 
     /// Record `path` as read-only for write-back and emit the ONE loud ERROR

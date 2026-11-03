@@ -97,6 +97,13 @@ impl FileSyncController {
             held.clone().unwrap_or_else(|| wn::SEED.to_string())
         };
         let subject = doc.as_str();
+        // Each write quiesces the net, so `OnDisk` leaves first: a `Base`
+        // that moved past the old `OnDisk` would fire an ingest of a stale read.
+        if self.net_token(wn::ON_DISK, doc, "hash").is_some() {
+            self.net
+                .apply(|exec, now| exec.retract(wn::ON_DISK, subject, now).map(|q| q.requests))
+                .expect("the OnDisk token was just read");
+        }
         if self.net_token(wn::AUTHORITY, doc, "hash").is_none() {
             self.net
                 .write(wn::AUTHORITY, subject, wn::content([("hash", wn::SEED)]));
@@ -426,6 +433,17 @@ impl FileSyncController {
                 }
             }
         }
+        if rendered.trim().is_empty() {
+            match self.block_reader.get_block_authoritative(doc).await {
+                Ok(None) => {
+                    return self
+                        .remove_deleted_page_file(subject, doc, &vault_path, base_hash, authority)
+                        .await;
+                }
+                Ok(Some(_)) => {}
+                Err(e) => return EffectResult::Failed(Cause::retryable(format!("{e:#}"))),
+            }
+        }
         let written = self
             .write_back_or_skip_readonly(doc, &vault_path, &basis, &rendered, !normalizes)
             .await;
@@ -517,6 +535,83 @@ impl FileSyncController {
                 ])
             }
         }
+    }
+
+    /// A page the store no longer holds leaves no file: its file is removed
+    /// and its path records are forgotten, so an undo writes it anew. Only a
+    /// writable file that this page alone owns is removed.
+    async fn remove_deleted_page_file(
+        &mut self,
+        subject: &Subject,
+        doc: &EntityUri,
+        vault_path: &super::VaultPath,
+        base_hash: &str,
+        authority: &str,
+    ) -> EffectResult {
+        let path = vault_path.as_path().to_path_buf();
+        let canonical = CanonicalPath::new(&path);
+        let unchanged = || EffectResult::Done(vec![base(subject, base_hash, authority)]);
+        if self.refuses_projection_change(doc, &path, &canonical) {
+            self.owed.remove(doc);
+            return unchanged();
+        }
+        let exists = self.fs.exists(&path);
+        let refusal = match self
+            .doc_home
+            .docs_at(&canonical)
+            .into_iter()
+            .find(|d| d != doc)
+        {
+            Some(other) => Some(format!("{other} has its home there")),
+            None if !exists => None,
+            None => match self.stale_home_ownership(doc, &path, &canonical).await {
+                Ok(super::StaleHomeOwner::Refused(reason)) => Some(reason),
+                Ok(_) => None,
+                Err(e) => return EffectResult::Failed(Cause::definite(format!("{e:#}"))),
+            },
+        };
+        if let Some(reason) = refusal {
+            warn!(
+                doc = %doc,
+                path = %path.display(),
+                "[FileSyncController] REFUSED to remove the file of a deleted page: {reason}. \
+                 The file stays in the vault.",
+            );
+            self.owed.remove(doc);
+            return unchanged();
+        }
+        let removed = match exists {
+            true => self.fs.remove(&path).await,
+            false => Ok(()),
+        };
+        match removed {
+            Ok(()) => {}
+            Err(e) if super::is_read_only_fs(&e) => {
+                self.mark_readonly_writeback(doc, &path, &e, canonical);
+                self.owed.remove(doc);
+                return unchanged();
+            }
+            Err(e) => {
+                let cause = format!("removing {}: {e}", path.display());
+                self.disclose_stall(doc, &path, &cause);
+                return EffectResult::Failed(Cause::retryable(cause));
+            }
+        }
+        self.owed.remove(doc);
+        self.pending_removals.remove(doc);
+        // This effect's outputs set the net's tokens: unhomed first, the
+        // forget writes none of its own over the tokens this firing read.
+        self.doc_home.remove_at(&canonical);
+        self.forget_file_state(&canonical).await;
+        self.run_post_write_hook(&path);
+        info!(
+            "[FileSyncController] Removed {}: its page is deleted",
+            path.display()
+        );
+        EffectResult::Done(vec![
+            base(subject, wn::ABSENT, authority),
+            on_disk(subject, wn::ABSENT),
+        ])
     }
 
     fn disclose_stall(&mut self, doc: &EntityUri, path: &Path, cause: &str) {

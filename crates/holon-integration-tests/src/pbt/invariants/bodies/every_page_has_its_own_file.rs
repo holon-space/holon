@@ -6,12 +6,17 @@
 //! than one (a DOUBLE-HOMED page — the same id `#+ID:`-rooting two files, a
 //! duplicate/split-identity hazard) is allowed.
 //!
+//! The converse holds too: every file on disk roots a block the reference
+//! holds. A deleted page leaves no file behind, neither one that still carries
+//! its `#+ID:` nor an emptied one.
+//!
 //! @pbt oracle correspondence
 //! @pbt covers page materialization — every ref `Page` doc-root owns exactly
-//!   one `#+ID:`-rooted file (not fileless, not double-homed)
+//!   one `#+ID:`-rooted file (not fileless, not double-homed), and every file
+//!   roots a block the ref holds
 //! @pbt slips-if-removed a nested page stays store-only (fileless, row 137) and
 //!   vanishes on store-rebuild-from-disk, or double-homes across two files and
-//!   splits its identity
+//!   splits its identity, or a deleted page's file stays in the vault
 //!
 //! This is the materialization-side twin of
 //! `inv-companion-has-no-child-page-headings`: the companion oracle asserts the
@@ -40,6 +45,7 @@
 
 use std::collections::HashMap;
 
+use holon_pbt_core::capabilities::EntityUri;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefCopies;
 use holon_pbt_core::capabilities::SutOrgRender;
@@ -67,16 +73,27 @@ where
         let held = ref_.write_held();
         // Index every on-disk file by its own doc-root `#+ID:` (bare).
         let mut files_by_root: HashMap<String, Vec<String>> = HashMap::new();
+        let mut violations: Vec<String> = Vec::new();
         for (path, disk, _rendered) in sut.snapshot_org_render_pairs(&Default::default()).await {
             if held.holds(std::path::Path::new(&path)) {
                 continue;
             }
+            if disk.trim().is_empty() {
+                violations.push(format!(
+                    "file `{path}` is empty: a deleted page's file stays in the vault"
+                ));
+            }
             if let Some(root) = file_root_id(&disk) {
+                if ref_.block_content(&EntityUri::block(&root)).is_none() {
+                    violations.push(format!(
+                        "file `{path}` roots `#+ID: {root}`, a block the reference does not hold \
+                         (a deleted page's file stays in the vault)"
+                    ));
+                }
                 files_by_root.entry(root).or_default().push(path);
             }
         }
 
-        let mut violations: Vec<String> = Vec::new();
         for page in ref_.all_non_seed_block_ids() {
             if !ref_.is_page_block(&page) || held.blocks.contains(&page) {
                 continue;
@@ -102,7 +119,7 @@ where
             return InvariantResult::Ok;
         }
         InvariantResult::Fail(format!(
-            "[inv-every-page-has-its-own-file] {} page(s) not homed to exactly one own file: {:?}",
+            "[inv-every-page-has-its-own-file] {} page(s) or file(s) not homed one to one: {:?}",
             violations.len(),
             violations.iter().take(10).collect::<Vec<_>>(),
         ))
@@ -122,13 +139,12 @@ mod tests {
     use std::collections::BTreeSet;
 
     use holon_pbt_core::capabilities::CapRegion;
-    use holon_pbt_core::capabilities::EntityUri;
 
     use super::*;
 
-    /// Minimal `RefBlockTree` modeling a fixed page set. Only the two methods
-    /// this invariant calls (`all_non_seed_block_ids`, `is_page_block`) are
-    /// meaningful; the rest are inert.
+    /// Minimal `RefBlockTree` modeling a fixed page set. Only the methods this
+    /// invariant calls (`all_non_seed_block_ids`, `is_page_block`,
+    /// `block_content`) are meaningful; the rest are inert.
     struct RefStub {
         pages: BTreeSet<EntityUri>,
     }
@@ -140,8 +156,8 @@ mod tests {
         }
     }
     impl RefBlockTree for RefStub {
-        fn block_content(&self, _: &EntityUri) -> Option<&str> {
-            None
+        fn block_content(&self, id: &EntityUri) -> Option<&str> {
+            self.pages.contains(id).then_some("")
         }
         fn editor_surface_text(&self, _: &EntityUri) -> String {
             unreachable!("this stub holds no text blocks")
@@ -284,8 +300,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_pages_is_vacuously_ok() {
-        let r = check(&[], &[("index.org", "#+ID: index\n")]).await;
+    async fn no_pages_and_no_files_is_vacuously_ok() {
+        let r = check(&[], &[]).await;
         assert!(matches!(r, InvariantResult::Ok), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn a_file_rooting_a_block_the_ref_lacks_fails() {
+        let r = check(
+            &["keeper"],
+            &[
+                ("Keeper.org", "#+ID: keeper\n"),
+                ("Origin.org", "#+ID: origin\n"),
+            ],
+        )
+        .await;
+        match r {
+            InvariantResult::Fail(m) => assert!(
+                m.contains("Origin.org") && !m.contains("Keeper.org"),
+                "message must name only the orphaned file: {m}"
+            ),
+            other => panic!("a file of a deleted page must FAIL, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_emptied_file_fails() {
+        let r = check(
+            &["keeper"],
+            &[("Keeper.org", "#+ID: keeper\n"), ("Origin.org", "")],
+        )
+        .await;
+        match r {
+            InvariantResult::Fail(m) => assert!(
+                m.contains("Origin.org") && m.contains("empty"),
+                "message must name the empty file: {m}"
+            ),
+            other => panic!("an emptied file must FAIL, got {other:?}"),
+        }
     }
 }

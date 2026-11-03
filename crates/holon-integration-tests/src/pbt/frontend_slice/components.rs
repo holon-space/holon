@@ -3453,7 +3453,21 @@ impl SutOrgRender for HeadlessFrontendComponent {
                 OrgRenderer::render_document(doc_block, &descendants, &path, &doc_block.id)
                     .expect("org render")
                     .text;
+            emitted_paths.insert(path.clone());
             out.push((path.to_string_lossy().to_string(), disk, rendered));
+        }
+
+        // A file that roots no block the store holds (an emptied file, or one
+        // whose page is deleted) renders as nothing.
+        let default_doc_bare = holon_api::default_doc_block_uri().id().to_string();
+        for (path, id) in self.disk_org_files().await {
+            if emitted_paths.contains(&path) || id.as_deref() == Some(default_doc_bare.as_str()) {
+                continue;
+            }
+            let disk = FileSystem::read_to_string(self.org_fs().as_ref(), &path)
+                .await
+                .expect("SutOrgRender: read unrooted org file");
+            out.push((path.to_string_lossy().to_string(), disk, String::new()));
         }
         out
     }
