@@ -282,13 +282,23 @@ struct Run {
     spawned: PathBuf,
 }
 
+/// The entries that stay through the walk: a runner still at work replaces
+/// files by rename, so an entry may be gone before its stat.
 fn entries(dir: &Path) -> BTreeSet<PathBuf> {
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
     let mut found = BTreeSet::new();
     let mut stack = vec![dir.to_owned()];
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).expect("a sandbox dir is readable") {
+        let listing = match std::fs::read_dir(&dir) {
+            Err(e) if gone(&e) => continue,
+            listing => listing.expect("a sandbox dir is readable"),
+        };
+        for entry in listing {
             let path = entry.expect("a sandbox entry is readable").path();
-            let meta = std::fs::symlink_metadata(&path).expect("a sandbox entry has metadata");
+            let meta = match std::fs::symlink_metadata(&path) {
+                Err(e) if gone(&e) => continue,
+                meta => meta.expect("a sandbox entry has metadata"),
+            };
             if meta.is_dir() {
                 stack.push(path.clone());
             }
@@ -851,9 +861,9 @@ enum Op {
     InFlight {
         runner: Index,
     },
-    /// A new runner on the same pid file takes the place of the newest one.
+    /// A new runner on the same pid file takes the place of the live one.
     Restart,
-    /// A second runner on the same pid file next to the live ones.
+    /// A second runner on the same pid file next to the live one.
     SecondRunner,
     /// Puts an entry where a reused path of an earlier log would go.
     PlantBesideLog {
@@ -1205,18 +1215,16 @@ impl World {
                 runner.get(&self.runners).in_flight();
             }
             Op::Restart => {
-                self.runners.pop();
-                let (runner, _) =
-                    Runner::open(self.sandbox.pid_file()).expect("the pid file reopens");
-                self.runners.push(Arc::new(runner));
-            }
-            Op::SecondRunner => {
-                if self.runners.len() < 3 {
+                if self.open.is_empty() {
+                    self.runners.pop();
                     let (runner, _) =
-                        Runner::open(self.sandbox.pid_file()).expect("the pid file opens again");
+                        Runner::open(self.sandbox.pid_file()).expect("the pid file reopens");
                     self.runners.push(Arc::new(runner));
+                } else {
+                    self.assert_refused("while open runs hold the runner");
                 }
             }
+            Op::SecondRunner => self.assert_refused("next to the live runner"),
             Op::PlantBesideLog { log, suffix, plant } => {
                 if !self.logs.is_empty() {
                     let (path, _) = log.get(&self.logs);
@@ -1242,6 +1250,25 @@ impl World {
                 }
             }
         }
+    }
+
+    /// A runner holds its pid file until it is dropped: another open is
+    /// refused, naming the pid file and the holding process.
+    fn assert_refused(&self, context: &str) {
+        let pid_file = self.sandbox.pid_file();
+        let error = match Runner::open(pid_file.clone()) {
+            Ok(_) => panic!(
+                "expected an open of {} {context} to be refused",
+                pid_file.display()
+            ),
+            Err(e) => e.to_string(),
+        };
+        let holder = std::process::id().to_string();
+        assert!(
+            error.contains(&pid_file.display().to_string()) && error.contains(&holder),
+            "expected the refusal of an open {context} to name {} and the holder {holder}: {error}",
+            pid_file.display()
+        );
     }
 
     fn at(&self, runner: &Index) -> usize {
@@ -1331,7 +1358,9 @@ fn drive(names: Vec<Names>, patterns: Vec<Pattern>, ops: &[Op]) {
 }
 
 proptest! {
-    #![proptest_config(Config { cases: 64, failure_persistence: None, ..Config::default() })]
+    // A refused open waits a second for the holder to let go; nextest ends a
+    // test at two minutes.
+    #![proptest_config(Config { cases: 40, failure_persistence: None, ..Config::default() })]
 
     #[test]
     fn every_attempt_keeps_its_own_log_across_runs_restarts_and_runners(
@@ -1477,7 +1506,6 @@ fn a_restarted_runner_keeps_the_log_of_the_earlier_attempt() {
         world.apply(&Op::Restart).await;
         world.run_now(0, 1, 0, 0, 0).await;
         world.apply(&Op::SecondRunner).await;
-        world.run_now(1, 1, 0, 0, 0).await;
         world.run_now(0, 1, 0, 0, 0).await;
         world.close().await;
     });

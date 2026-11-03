@@ -1,6 +1,7 @@
 //! One hosted net: its executor behind a [`Shell`], its shell effects and its
 //! probes, and the loop that runs them.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -46,8 +47,14 @@ enum RunEnded {
 
 impl HostedNet {
     /// Loads the net file at `path`. Its shell effects keep their pid file
-    /// as `<state_dir>/<net>.pid`.
-    pub fn load(path: &Path, state_dir: &Path) -> Result<Self, NetdError> {
+    /// as `<state_dir>/<net>.pid`. `loaded` maps the names of the nets this
+    /// start loaded to their files: a net of the same name is refused before
+    /// it opens that pid file.
+    pub fn load(
+        path: &Path,
+        state_dir: &Path,
+        loaded: &BTreeMap<String, String>,
+    ) -> Result<Self, NetdError> {
         let shown = path.display().to_string();
         let text = std::fs::read_to_string(path).map_err(|e| NetLoadError::Unreadable {
             path: shown.clone(),
@@ -62,9 +69,16 @@ impl HostedNet {
         })?;
         let net = net_def(&shown, &text, |t| crate::logic(&file.transitions[t]))?;
         let shell = Shell::new(net).map_err(|source| NetdError::Net {
-            path: shown,
+            path: shown.clone(),
             source,
         })?;
+        if let Some(first) = loaded.get(&file.name) {
+            return Err(NetdError::DuplicateNet {
+                path: shown,
+                name: file.name.clone(),
+                first: first.clone(),
+            });
+        }
         let (runner, leftovers) = Runner::open(state_dir.join(format!("{}.pid", file.name)))
             .map_err(|source| NetdError::Shell {
                 net: file.name.clone(),

@@ -125,19 +125,12 @@ pub async fn start(config: Config) -> Result<Netd, NetdError> {
         // Loading reads the net file and opens the pid file, which may wait on
         // a write of another runner: blocking I/O, so off the async worker.
         let net = {
-            let (path, state_dir) = (path.clone(), config.state_dir.clone());
-            tokio::task::spawn_blocking(move || HostedNet::load(&path, &state_dir))
+            let (path, state_dir, loaded) = (path.clone(), config.state_dir.clone(), from.clone());
+            tokio::task::spawn_blocking(move || HostedNet::load(&path, &state_dir, &loaded))
                 .await
                 .expect("loading a net does not panic")?
         };
-        let shown = path.display().to_string();
-        if let Some(first) = from.insert(net.name().to_owned(), shown.clone()) {
-            return Err(NetdError::DuplicateNet {
-                path: shown,
-                name: net.name().to_owned(),
-                first,
-            });
-        }
+        from.insert(net.name().to_owned(), path.display().to_string());
         nets.insert(net.name().to_owned(), Arc::new(net));
     }
     for net in nets.values() {

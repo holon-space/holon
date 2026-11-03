@@ -9,7 +9,9 @@
 //! descriptor, as a child process group. [`probe`] runs a probe's command
 //! the same way and hands back its stdout.
 
+#[cfg(unix)]
 pub mod effect;
+#[cfg(unix)]
 pub mod probe;
 
 use std::sync::Arc;

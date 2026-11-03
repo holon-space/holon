@@ -11,6 +11,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::effect::Pgid;
+use crate::effect::child_started;
 use crate::effect::end_group;
 
 /// Runs `command` once. Only exit 0 yields its stdout; every other end is a
@@ -38,6 +39,10 @@ pub async fn run(command: &CommandSpec) -> ProbeOutcome {
     let pgid = child
         .id()
         .expect("a child that has not been waited for has a pid") as Pgid;
+    let started = match child_started(pgid) {
+        Ok(started) => started,
+        Err(e) => return ProbeOutcome::Failed(format!("cannot follow {argv}: {e}")),
+    };
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let mut stderr = child.stderr.take().expect("stderr is piped");
     let ended = tokio::select! {
@@ -46,10 +51,12 @@ pub async fn run(command: &CommandSpec) -> ProbeOutcome {
     };
     let Some((status, out, err)) = ended else {
         let timed_out = format!("{argv} timed out after {}", command.timeout);
-        return ProbeOutcome::Failed(match end_group(pgid, Some(&mut child)).await {
-            Ok(()) => timed_out,
-            Err(e) => format!("{timed_out}; ending its process group failed: {e}"),
-        });
+        return ProbeOutcome::Failed(
+            match end_group(pgid, started, Some((&mut child, &argv))).await {
+                Ok(()) => timed_out,
+                Err(e) => format!("{timed_out}; ending its process group failed: {e}"),
+            },
+        );
     };
     let (status, out, err) = match (status, out, err) {
         (Ok(status), Ok(out), Ok(err)) => (status, out, err),

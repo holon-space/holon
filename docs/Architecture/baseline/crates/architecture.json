@@ -8484,6 +8484,17 @@
           {
             "name": "src",
             "path": "holon-net-shell/src",
+            "dirs": [
+              {
+                "name": "effect",
+                "path": "holon-net-shell/src/effect",
+                "files": [
+                  {
+                    "name": "process.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "effect.rs"
@@ -8514,6 +8525,21 @@
                     "name": "mod.rs"
                   }
                 ]
+              },
+              {
+                "name": "restart_support",
+                "path": "holon-net-shell/tests/restart_support",
+                "c4_level": "unknown",
+                "description": "A host process that drives one [`Runner`] from commands on its stdin, so a test can SIGKILL the host at any step and restart it on the same pid file, and the children, generators and process checks the restart tests share.",
+                "pattern_status": "planned",
+                "content": "A host process that drives one [`Runner`] from commands on its stdin, so a\ntest can SIGKILL the host at any step and restart it on the same pid file,\nand the children, generators and process checks the restart tests share.\n\nEvery child carries a token in its arguments, so a test finds what it\nstarted and kills only that.",
+                "source_file": "holon-net-shell/tests/restart_support/mod.rs",
+                "parent": "holon-net-shell",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
               }
             ],
             "files": [
@@ -8531,6 +8557,9 @@
               },
               {
                 "name": "shell_pid_file_restart.rs"
+              },
+              {
+                "name": "shell_restart_no_orphan.rs"
               }
             ]
           }

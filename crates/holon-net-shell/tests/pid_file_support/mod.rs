@@ -14,6 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
@@ -149,11 +150,14 @@ fn descriptor(plan: &ChildPlan, ctl: &Path, working_dir: &Path) -> ShellEffect {
         Exit::Code(code) => format!("exit {code}"),
         Exit::Signal(signal) => format!("kill -{signal} $$"),
     };
-    // The marker tells the test that the run has spawned its group.
+    // The marker tells the test that the run has spawned its group, and names
+    // the group: the shell leads it. It appears whole, so a reader never sees
+    // it empty.
+    let mark = "echo $$ > \"$0.started.w\" && mv \"$0.started.w\" \"$0.started\"";
     let script = if plan.held {
-        format!(": > \"$0.started\"; while [ ! -e \"$0\" ]; do sleep 0.02; done; {end}")
+        format!("{mark}; while [ ! -e \"$0\" ]; do sleep 0.02; done; {end}")
     } else {
-        format!(": > \"$0.started\"; {end}")
+        format!("{mark}; {end}")
     };
     serde_json::from_value(serde_json::json!({
         "command": {
@@ -178,6 +182,8 @@ pub struct Run {
     ctl: PathBuf,
     result: mpsc::Receiver<RunResult>,
     task: tokio::task::JoinHandle<()>,
+    /// When the test first saw the task ended.
+    ended_at: OnceLock<Instant>,
 }
 
 impl Run {
@@ -200,9 +206,18 @@ impl Run {
 
     /// Whether the child has started.
     pub fn started(&self) -> bool {
+        self.marker().exists()
+    }
+
+    /// The group the child leads, once its marker names it.
+    pub fn group(&self) -> Option<Pgid> {
+        fs::read_to_string(self.marker()).ok()?.trim().parse().ok()
+    }
+
+    fn marker(&self) -> PathBuf {
         let mut marker = self.ctl.clone().into_os_string();
         marker.push(".started");
-        PathBuf::from(marker).exists()
+        PathBuf::from(marker)
     }
 
     /// Drops the run's future wherever it waits.
@@ -215,6 +230,7 @@ impl Run {
     pub fn wait_task_ended(&self) -> Result<(), String> {
         eventually(|| {
             if self.task.is_finished() {
+                self.ended_at.get_or_init(Instant::now);
                 Ok(())
             } else {
                 Err(format!("the task of run {} has not ended", self.attempt))
@@ -343,6 +359,7 @@ impl Lab {
             ctl,
             result,
             task,
+            ended_at: OnceLock::new(),
         }
     }
 
@@ -492,6 +509,53 @@ pub fn alive(pgid: Pgid) -> bool {
     unsafe { libc::kill(-pgid, 0) == 0 }
 }
 
+/// How long a dropped run's group may outlive the drop: the kill grace plus
+/// scheduling slack.
+pub const DROP_KILL: Duration = Duration::from_secs(1);
+
+/// Once the dropped run's task has ended, the group its child leads is dead
+/// within [`DROP_KILL`]. A child forked before the drop may write its marker
+/// after the task ended; the test waits [`DROP_KILL`] for it.
+pub fn dropped_group_dies(run: &Run) -> Result<(), String> {
+    run.wait_task_ended()?;
+    let marker_by = *run.ended_at.get().expect("the task ended") + DROP_KILL;
+    let deadline = Instant::now() + DROP_KILL;
+    loop {
+        match run.group() {
+            None if Instant::now() >= marker_by => return Ok(()),
+            Some(pgid) if !alive(pgid) => return Ok(()),
+            Some(pgid) if Instant::now() >= deadline => {
+                return Err(format!(
+                    "the group {pgid} of the dropped run {} lives {DROP_KILL:?} after the drop",
+                    run.attempt
+                ));
+            }
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+/// Whether a restart that read `left` read the listed group `g`. A group whose
+/// leader is gone has no provable start, so the restart reads it without one.
+pub fn read_back(left: &[Group], g: &Group) -> bool {
+    left.iter().any(|l| {
+        (l.pgid, &l.attempt, &l.transition, &l.subject)
+            == (g.pgid, &g.attempt, &g.transition, &g.subject)
+            && (l.started == g.started || (l.started.is_none() && !leader_runs(g.pgid)))
+    })
+}
+
+/// Whether the leader of the group runs: its pid is listed and is no zombie.
+fn leader_runs(pgid: Pgid) -> bool {
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pgid.to_string()])
+        .output()
+        .expect("ps runs");
+    let stat = String::from_utf8_lossy(&out.stdout);
+    let stat = stat.trim();
+    !stat.is_empty() && !stat.starts_with('Z')
+}
+
 /// Polls `check` until it holds, for at most [`SETTLE`]; the last mismatch
 /// otherwise.
 pub fn eventually(mut check: impl FnMut() -> Result<(), String>) -> Result<(), String> {
@@ -558,7 +622,9 @@ impl Blocked {
 
 impl Hold {
     pub fn new(pid_file: &Path) -> Self {
-        let fifo = pid_file.with_extension("writing");
+        let mut fifo = pid_file.as_os_str().to_owned();
+        fifo.push(".writing");
+        let fifo = PathBuf::from(fifo);
         let path = CString::new(fifo.to_str().expect("the temporary path is utf-8")).unwrap();
         // SAFETY: a valid C path and a mode.
         let made = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };

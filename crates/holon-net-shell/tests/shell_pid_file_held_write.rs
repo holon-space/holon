@@ -1,8 +1,9 @@
 //! While one pid-file write of a runner is held, `in_flight`, `abandon` and the
 //! runner's tokio runtime answer within the bound, and they answer what the
 //! pid file holds: a group is listed only once its record is written. After
-//! the release every run ends as its child and the abandons say, and a
-//! restart reads the groups that still run.
+//! the release every run ends as its child and the abandons say, a dropped
+//! run's group is killed and never listed, and a restart reads the groups
+//! that still run.
 
 mod pid_file_support;
 
@@ -28,10 +29,12 @@ use pid_file_support::abandoned;
 use pid_file_support::alive;
 use pid_file_support::caller;
 use pid_file_support::child_plan;
+use pid_file_support::dropped_group_dies;
 use pid_file_support::ended;
 use pid_file_support::eventually;
 use pid_file_support::flavor;
 use pid_file_support::held_plan;
+use pid_file_support::read_back;
 use pid_file_support::release;
 use proptest::prelude::*;
 use proptest::test_runner::Config;
@@ -259,6 +262,7 @@ impl Model {
     /// written. While the hold lasts, no register write completes.
     fn listed(run: &RunModel, holding: bool) -> bool {
         match run.kind {
+            _ if run.dropped => false,
             Kind::Before => run.plan.held && !run.told && !run.abandoned,
             Kind::Stalled | Kind::During if holding => false,
             Kind::Stalled | Kind::During => {
@@ -287,48 +291,21 @@ impl Model {
         }
     }
 
-    /// Compares a listing with the model. A dropped run's group is listed
-    /// exactly while it is alive and its record written.
-    fn check_listing(&self, lab: &Lab, groups: &[Group]) -> Result<(), String> {
-        let skip = |a: u64| self.shared(a) || self.runs.iter().any(|r| r.attempt == a && r.dropped);
+    /// Compares a listing with the model.
+    fn check_listing(&self, groups: &[Group]) -> Result<(), String> {
         let got: BTreeSet<_> = groups
             .iter()
-            .filter(|g| !skip(g.attempt.0))
+            .filter(|g| !self.shared(g.attempt.0))
             .map(|g| (g.attempt.0, g.transition.clone(), g.subject.clone()))
             .collect();
         let want: BTreeSet<_> = self
             .runs
             .iter()
-            .filter(|r| !skip(r.attempt) && Self::listed(r, self.holding))
+            .filter(|r| !self.shared(r.attempt) && Self::listed(r, self.holding))
             .map(|r| (r.attempt, r.plan.transition.clone(), r.plan.subject.clone()))
             .collect();
         if got != want {
             return Err(format!("listed {got:?}, expected {want:?}"));
-        }
-        for r in self
-            .runs
-            .iter()
-            .filter(|r| r.dropped && !self.shared(r.attempt))
-        {
-            let listed = groups.iter().any(|g| g.attempt.0 == r.attempt);
-            let Some(pgid) = lab.pgid(r.attempt) else {
-                // A held child nobody told to end is alive.
-                if !self.holding && !r.write_fails && r.plan.held && !r.told {
-                    return Err(format!(
-                        "the dropped run {} is not listed, though its record is written and its child runs",
-                        r.attempt
-                    ));
-                }
-                continue;
-            };
-            let want = !self.holding && !r.write_fails && alive(pgid);
-            if listed != want {
-                return Err(format!(
-                    "the dropped run {} is listed: {listed}, expected {want} (group alive: {})",
-                    r.attempt,
-                    alive(pgid)
-                ));
-            }
         }
         Ok(())
     }
@@ -343,7 +320,7 @@ fn listed_are_recorded(lab: &Lab, model: &Model, groups: &[Group]) -> Result<(),
         return Ok(());
     };
     for g in groups {
-        if !left.contains(g) && alive(g.pgid) {
+        if !read_back(&left, g) && alive(g.pgid) {
             // A replaced or forgotten group leaves the listing for good, so a
             // group still listed after the read was listed and unrecorded at once.
             if model.shared(g.attempt.0) {
@@ -395,7 +372,7 @@ fn settle(lab: &Lab, model: &Model, when: &str) -> Result<(), Halt> {
                 lab.note_seen(&groups);
                 listed_are_recorded(lab, model, &groups)
                     .map_err(|e| Halt::Wrong(format!("in_flight {when}: {e}")))?;
-                match model.check_listing(lab, &groups) {
+                match model.check_listing(&groups) {
                     Ok(()) => return Ok(()),
                     Err(e) if Instant::now() >= deadline => {
                         return Err(Halt::Wrong(format!(
@@ -409,8 +386,7 @@ fn settle(lab: &Lab, model: &Model, when: &str) -> Result<(), Halt> {
     }
 }
 
-/// A crash-restart read names the groups the model lists; a dropped run's
-/// group exactly while it is alive and its record written.
+/// A crash-restart read names the groups the model lists.
 fn durable(lab: &Lab, model: &Model, when: &str) -> Result<(), String> {
     eventually(|| {
         if let Answer::InTime(groups) = lab.in_flight(Caller::Thread).within(BOUND) {
@@ -428,7 +404,7 @@ fn durable(lab: &Lab, model: &Model, when: &str) -> Result<(), String> {
             }
         }
         model
-            .check_listing(lab, &left)
+            .check_listing(&left)
             .map_err(|e| format!("a restart {when}: {e}"))
     })
 }
@@ -582,12 +558,15 @@ fn play(s: &Scenario) -> Vec<String> {
             Step::DropStalled => {
                 runs[stalled].drop_future();
                 model.runs[stalled].dropped = true;
+                if let Err(e) = dropped_group_dies(&runs[stalled]) {
+                    failures.push(format!("the drop while {what_held} is held: {e}"));
+                }
             }
             Step::Ask(caller, Ask::InFlight) => match lab.in_flight(*caller).within(BOUND) {
                 Answer::InTime(groups) => {
                     lab.note_seen(&groups);
                     if let Err(e) = listed_are_recorded(&lab, &model, &groups)
-                        .and_then(|()| model.check_listing(&lab, &groups))
+                        .and_then(|()| model.check_listing(&groups))
                     {
                         failures.push(format!("in_flight while {what_held} is held: {e}"));
                     }
@@ -713,10 +692,6 @@ fn play(s: &Scenario) -> Vec<String> {
     }
     for t in &s.after {
         let a = t.attempt(model.runs[stalled].attempt);
-        // Nothing waits on a dropped run's abandon.
-        if model.runs.iter().any(|r| r.attempt == a && r.dropped) {
-            continue;
-        }
         let want = model.listed_attempt(a);
         match lab.abandon(Caller::Thread, a).within(BOUND) {
             Answer::InTime(got) => {
@@ -773,8 +748,8 @@ fn mark_abandoned(model: &mut Model, attempt: u64, got: bool) {
     }
 }
 
-/// Tells every child that is not dropped to end, checks each run's end, and
-/// that nothing is listed or recorded but the live groups of dropped runs.
+/// Tells every child that is not dropped to end, checks each run's end, that
+/// every dropped run's group is dead, and that nothing is listed or recorded.
 fn end(lab: &Lab, model: &mut Model, runs: &[Run], failures: &mut Vec<String>) {
     for (i, run) in runs.iter().enumerate() {
         if !model.runs[i].dropped {
@@ -786,6 +761,9 @@ fn end(lab: &Lab, model: &mut Model, runs: &[Run], failures: &mut Vec<String>) {
             failures.extend(check_end(run, model, i));
         }
         model.runs[i].told = true;
+        if model.runs[i].dropped {
+            failures.extend(dropped_group_dies(run).err());
+        }
     }
     if let Err(Halt::Wrong(e)) = settle(lab, model, "after every run ended") {
         failures.push(e);

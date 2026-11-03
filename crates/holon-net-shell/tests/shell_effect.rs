@@ -1,5 +1,5 @@
-//! The shell effect against real children: the exit-code map, the two kills
-//! and what a runner that died without reaping leaves behind.
+//! The shell effect against real children: the exit-code map and the two
+//! kills.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -17,7 +17,6 @@ use holon_net_shell::effect::Ended;
 use holon_net_shell::effect::Kill;
 use holon_net_shell::effect::Pgid;
 use holon_net_shell::effect::Runner;
-use holon_net_shell::effect::kill_group;
 
 /// `3` is the one failing code, so every other non-zero code is unknown.
 fn descriptor(argv: &[&str], timeout: &str, working_dir: &Path) -> ShellEffect {
@@ -35,15 +34,11 @@ fn descriptor(argv: &[&str], timeout: &str, working_dir: &Path) -> ShellEffect {
 }
 
 fn request(attempt: u64) -> EffectRequest {
-    request_for(attempt, "a")
-}
-
-fn request_for(attempt: u64, subject: &str) -> EffectRequest {
     EffectRequest {
         attempt: AttemptId(attempt),
         occurrence: OccurrenceId::caller("op-1"),
         transition: Arc::from("Run"),
-        subject: Subject::new(subject),
+        subject: Subject::new("a"),
         input: Content::new(),
         probe: false,
     }
@@ -177,35 +172,6 @@ async fn an_abandoned_attempt_is_killed_with_its_process_group() {
 }
 
 #[tokio::test]
-async fn a_restarted_runner_reports_the_group_a_dead_runner_left() {
-    let dir = tempfile::tempdir().unwrap();
-    let dead = Arc::new(runner(dir.path()));
-    let effect = descriptor(&["/bin/sleep", "60"], "10s", dir.path());
-    let run = {
-        let dead = Arc::clone(&dead);
-        tokio::spawn(async move { dead.run(&effect, &request(7)).await })
-    };
-    until("started", || !dead.in_flight().is_empty()).await;
-
-    // The runner is gone without reaping: its child keeps running.
-    run.abort();
-    let _ = run.await;
-    drop(dead);
-
-    let (_restarted, left) =
-        Runner::open(dir.path().join("groups.pid")).expect("the pid file is readable");
-
-    assert_eq!(left.len(), 1, "the leftover group is reported: {left:?}");
-    assert_eq!(left[0].attempt, AttemptId(7));
-    assert_eq!(left[0].transition, "Run");
-    assert_eq!(left[0].subject, "a");
-    assert!(alive(left[0].pgid), "the leftover group is still running");
-
-    kill_group(left[0].pgid).await;
-    until("was killed", || !alive(left[0].pgid)).await;
-}
-
-#[tokio::test]
 async fn a_group_member_that_ignores_sigterm_is_killed_before_the_run_ends() {
     let dir = tempfile::tempdir().unwrap();
     let runner = runner(dir.path());
@@ -231,31 +197,6 @@ async fn a_group_member_that_ignores_sigterm_is_killed_before_the_run_ends() {
         libc::kill(stubborn, 0) != 0
     })
     .await;
-}
-
-#[tokio::test]
-async fn a_pid_file_round_trips_every_subject() {
-    for subject in ["a\tb", "a\nb", "", "h\u{e9}llo"] {
-        let dir = tempfile::tempdir().unwrap();
-        let dead = Arc::new(runner(dir.path()));
-        let effect = descriptor(&["/bin/sleep", "60"], "10s", dir.path());
-        let run = {
-            let dead = Arc::clone(&dead);
-            tokio::spawn(async move { dead.run(&effect, &request_for(7, subject)).await })
-        };
-        until("started", || !dead.in_flight().is_empty()).await;
-        run.abort();
-        let _ = run.await;
-        drop(dead);
-
-        let (_restarted, left) =
-            Runner::open(dir.path().join("groups.pid")).expect("the pid file is readable");
-
-        assert_eq!(left.len(), 1, "the leftover group is reported: {left:?}");
-        assert_eq!(left[0].subject, subject);
-        kill_group(left[0].pgid).await;
-        until("was killed", || !alive(left[0].pgid)).await;
-    }
 }
 
 #[test]

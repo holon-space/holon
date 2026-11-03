@@ -1,6 +1,7 @@
 //! With no write held, any sequence of starts, child ends, abandons, dropped
 //! runs and crash-restarts leaves a pid file that a restart reads as exactly
-//! the groups the runner still runs: every register and forget write lands.
+//! the groups the runner still runs: every register and forget write lands,
+//! and a dropped run's group is killed and leaves the listing.
 
 mod pid_file_support;
 
@@ -20,10 +21,12 @@ use pid_file_support::abandoned;
 use pid_file_support::alive;
 use pid_file_support::caller;
 use pid_file_support::child_plan;
+use pid_file_support::dropped_group_dies;
 use pid_file_support::ended;
 use pid_file_support::eventually;
 use pid_file_support::flavor;
 use pid_file_support::held_plan;
+use pid_file_support::read_back;
 use pid_file_support::record;
 use pid_file_support::records;
 use proptest::prelude::*;
@@ -45,8 +48,6 @@ const DROP_DELAYS: [Duration; 5] = [
     Duration::from_millis(20),
     Duration::from_millis(100),
 ];
-/// How long a child that no listing names gets to show that it started.
-const NO_CHILD: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 enum Target {
@@ -113,15 +114,12 @@ struct RunModel {
     told: bool,
     abandoned: bool,
     dropped: bool,
-    /// False for a run dropped before it spawned its group.
-    spawned: bool,
     checked: bool,
 }
 
 impl RunModel {
-    /// A dropped run's group stays listed: nothing ends it or forgets it.
     fn listed(&self) -> bool {
-        self.plan.held && self.spawned && !self.told && !self.abandoned
+        self.plan.held && !self.told && !self.abandoned && !self.dropped
     }
 }
 
@@ -182,7 +180,7 @@ fn listed_are_recorded(lab: &Lab, model: &Model, groups: &[Group]) -> Result<(),
         return Ok(());
     };
     for g in groups {
-        if !left.contains(g) && alive(g.pgid) {
+        if !read_back(&left, g) && alive(g.pgid) {
             // A replaced or forgotten group leaves the listing for good, so a
             // group still listed after the read was listed and unrecorded at once.
             if model.shared(g.attempt.0) {
@@ -288,7 +286,6 @@ fn play(s: &Scenario) -> Vec<String> {
                         told: false,
                         abandoned: false,
                         dropped: false,
-                        spawned: true,
                         checked: false,
                     });
                 }
@@ -317,20 +314,11 @@ fn play(s: &Scenario) -> Vec<String> {
             Op::Abandon(caller, target) => {
                 let attempt = match target {
                     Target::Run(pick) if !runs.is_empty() => {
-                        let i = pick.index(runs.len());
-                        if model.runs[i].dropped {
-                            continue;
-                        }
-                        model.runs[i].attempt
+                        model.runs[pick.index(runs.len())].attempt
                     }
                     Target::Run(_) => continue,
                     Target::Unknown(a) => *a,
                 };
-                let shared_with_dropped =
-                    model.runs.iter().any(|r| r.attempt == attempt && r.dropped);
-                if shared_with_dropped {
-                    continue;
-                }
                 let want = model.listed_attempt(attempt);
                 match lab.abandon(*caller, attempt).within(SETTLE) {
                     Answer::InTime(got) => {
@@ -361,6 +349,10 @@ fn play(s: &Scenario) -> Vec<String> {
                 }
                 runs[i].drop_future();
                 model.runs[i].dropped = true;
+                model.runs[i].checked = true;
+                if let Err(e) = dropped_group_dies(&runs[i]) {
+                    failures.push(format!("{when}: {e}"));
+                }
             }
             Op::DropAtStart(attempt, plan, delay) => {
                 let taken = |a: u64| model.runs.iter().any(|r| r.attempt == a);
@@ -372,7 +364,7 @@ fn play(s: &Scenario) -> Vec<String> {
                 let run = lab.start(*attempt, plan.clone());
                 std::thread::sleep(DROP_DELAYS[*delay]);
                 run.drop_future();
-                if let Err(e) = run.wait_task_ended() {
+                if let Err(e) = dropped_group_dies(&run) {
                     failures.push(format!("{when}: {e}"));
                     runs.push(run);
                     break;
@@ -390,43 +382,17 @@ fn play(s: &Scenario) -> Vec<String> {
                     told: false,
                     abandoned: false,
                     dropped: false,
-                    spawned: true,
                     checked: false,
                 });
                 let i = runs.len() - 1;
                 failures.extend(check_end(&runs[i], &mut model, i));
-                let spawned = match lab.in_flight(Caller::Thread).within(SETTLE) {
-                    Answer::InTime(groups) => {
-                        lab.note_seen(&groups);
-                        groups.iter().any(|g| g.attempt.0 == *attempt)
-                    }
-                    Answer::Late(_) => {
-                        failures.push(format!("in_flight {when} never answered"));
-                        false
-                    }
-                };
-                if spawned {
-                    failures.extend(
-                        run.wait_started()
-                            .err()
-                            .map(|e| format!("{when}: listed, but {e}")),
-                    );
-                } else {
-                    std::thread::sleep(NO_CHILD);
-                    if run.started() {
-                        failures.push(format!(
-                            "{when}: the dropped run started a child that in_flight does not list"
-                        ));
-                    }
-                }
                 model.runs.push(RunModel {
                     attempt: *attempt,
                     plan: plan.clone(),
                     told: false,
                     abandoned: false,
                     dropped: true,
-                    spawned,
-                    checked: !spawned,
+                    checked: true,
                 });
                 runs.push(run);
             }
@@ -488,7 +454,12 @@ fn play(s: &Scenario) -> Vec<String> {
     if let Err(e) = settle(&lab, &model, "after every run ended") {
         failures.push(e);
     }
-    // What a restart after a crash right now finds: the dropped runs' groups.
+    // A child that started only after its run's drop returned is dead by now too.
+    for (i, run) in runs.iter().enumerate() {
+        if model.runs[i].dropped {
+            failures.extend(dropped_group_dies(run).err());
+        }
+    }
     if let Err(e) = durable(&lab, &model, true, "after every run ended") {
         failures.push(e);
     }

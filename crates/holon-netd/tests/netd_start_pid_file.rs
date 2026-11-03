@@ -5,6 +5,7 @@
 #[path = "../../holon-net-shell/tests/pid_file_support/mod.rs"]
 mod pid_file_support;
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
@@ -137,6 +138,16 @@ enum End {
     /// The start's future is dropped while the write is held, which then goes
     /// through.
     DropStart,
+    /// As `DropStart`, and a new start begins before the held access goes
+    /// through.
+    RestartWhileHeld,
+}
+
+impl End {
+    /// A new start follows the dropped one.
+    fn restarts(self) -> bool {
+        matches!(self, End::DropStart | End::RestartWhileHeld)
+    }
 }
 
 /// Where the task that must keep running comes from.
@@ -267,7 +278,8 @@ fn end() -> impl Strategy<Value = End> {
     prop_oneof![
         Just(End::Write),
         Just(End::FailRename),
-        Just(End::DropStart)
+        Just(End::DropStart),
+        Just(End::RestartWhileHeld),
     ]
 }
 
@@ -282,7 +294,12 @@ fn held_case() -> impl Strategy<Value = Case> {
         any::<prop::sample::Index>(),
         prop_oneof![
             // A read that fails is a prior the unheld case draws.
-            prop_oneof![Just(End::Write), Just(End::DropStart)].prop_map(|end| (Point::Read, end)),
+            prop_oneof![
+                Just(End::Write),
+                Just(End::DropStart),
+                Just(End::RestartWhileHeld)
+            ]
+            .prop_map(|end| (Point::Read, end)),
             end().prop_map(|end| (Point::Write, end)),
         ],
         beat(),
@@ -352,6 +369,10 @@ enum Want {
     Panic {
         net: usize,
     },
+    /// A live start of this process holds the net's pid file.
+    InUse {
+        net: usize,
+    },
 }
 
 impl Want {
@@ -361,7 +382,8 @@ impl Want {
             | Want::Unreadable { net }
             | Want::Unwritable { net }
             | Want::Duplicate { net }
-            | Want::Panic { net } => Some(*net),
+            | Want::Panic { net }
+            | Want::InUse { net } => Some(*net),
             Want::Started => None,
         }
     }
@@ -437,7 +459,7 @@ fn pid_path(state: &Path, name: &str) -> PathBuf {
 }
 
 fn temp_path(state: &Path, name: &str) -> PathBuf {
-    state.join(format!("{name}.writing"))
+    state.join(format!("{name}.pid.writing"))
 }
 
 /// A process group the test starts, and ends when dropped.
@@ -472,10 +494,14 @@ impl Drop for Group {
 struct Leftovers {
     groups: Vec<Group>,
     dead: Vec<i32>,
+    /// Per net name, the line of each live group its prior records, in the
+    /// form a runner keeps a leftover: a line without the group's identity
+    /// keeps `null` for it.
+    kept: HashMap<String, Vec<serde_json::Value>>,
 }
 
 impl Leftovers {
-    fn lines(&mut self, records: &[Record]) -> Vec<String> {
+    fn lines(&mut self, name: &str, records: &[Record]) -> Vec<String> {
         records
             .iter()
             .map(|(live, attempt, transition, subject)| {
@@ -488,6 +514,12 @@ impl Leftovers {
                         let group = Group::start();
                         let pgid = group.pgid();
                         self.groups.push(group);
+                        self.kept
+                            .entry(name.to_owned())
+                            .or_default()
+                            .push(serde_json::json!([
+                                pgid, null, attempt, transition, subject
+                            ]));
                         pgid
                     }
                 };
@@ -506,7 +538,7 @@ fn stage(state: &Path, name: &str, prior: &Prior, leftovers: &mut Leftovers) {
             trailing_newline,
             stale_temp,
         } => {
-            let mut text = leftovers.lines(records).join("\n");
+            let mut text = leftovers.lines(name, records).join("\n");
             if *trailing_newline && !records.is_empty() {
                 text.push('\n');
             }
@@ -516,12 +548,12 @@ fn stage(state: &Path, name: &str, prior: &Prior, leftovers: &mut Leftovers) {
             }
         }
         Prior::BadLine { before, bad } => {
-            let mut lines = leftovers.lines(before);
+            let mut lines = leftovers.lines(name, before);
             lines.push(bad.line());
             fs::write(&pid, lines.join("\n") + "\n").unwrap();
         }
         Prior::NotUtf8 { before, bytes } => {
-            let mut content = leftovers.lines(before).join("\n").into_bytes();
+            let mut content = leftovers.lines(name, before).join("\n").into_bytes();
             if !content.is_empty() {
                 content.push(b'\n');
             }
@@ -691,6 +723,8 @@ fn largest_gap(from: Instant, to: Instant, beats: &[Instant]) -> Duration {
 /// its rename has put the FIFO at the pid file path.
 struct Feeder {
     stop: Arc<AtomicBool>,
+    /// A start opened the staged FIFO at the pid-file path and read EOF.
+    fed: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -698,6 +732,8 @@ impl Feeder {
     fn new(pid: PathBuf) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
+        let fed = Arc::new(AtomicBool::new(false));
+        let feeding = Arc::clone(&fed);
         let path = CString::new(pid.to_str().expect("the temporary path is utf-8")).unwrap();
         let thread = std::thread::spawn(move || {
             while !stopping.load(Ordering::SeqCst) {
@@ -706,6 +742,12 @@ impl Feeder {
                     unsafe {
                         let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK);
                         if fd >= 0 {
+                            // A rename after the FIFO check may have put a regular file there.
+                            let mut stat = std::mem::zeroed::<libc::stat>();
+                            assert_eq!(libc::fstat(fd, &mut stat), 0, "fstat the pid path");
+                            if stat.st_mode & libc::S_IFMT == libc::S_IFIFO {
+                                feeding.store(true, Ordering::SeqCst);
+                            }
                             libc::close(fd);
                         }
                     }
@@ -715,6 +757,7 @@ impl Feeder {
         });
         Self {
             stop,
+            fed,
             thread: Some(thread),
         }
     }
@@ -778,6 +821,20 @@ impl ReadHold {
                 if fd < 0 {
                     std::thread::sleep(Duration::from_millis(1));
                     continue;
+                }
+                // A rename after the FIFO check puts the start's own file at
+                // the path; the staged bytes must never land in it.
+                // SAFETY: the descriptor is open and `stat` is a valid buffer.
+                let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+                assert_eq!(
+                    unsafe { libc::fstat(fd, &mut stat) },
+                    0,
+                    "fstat the held pid path"
+                );
+                if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+                    // SAFETY: the descriptor is open.
+                    unsafe { libc::close(fd) };
+                    break;
                 }
                 // SAFETY: the descriptor is open and the buffer is valid.
                 let sent = unsafe { libc::write(fd, self.bytes.as_ptr().cast(), self.bytes.len()) };
@@ -919,9 +976,19 @@ fn mismatch(lab: &Lab, want: &Want, outcome: &Outcome, which: &str) -> Option<St
                 net: named,
                 source: ShellError::PidFile { path, .. },
             }),
-        ) => *named == lab.names[*net] && *path == lab.temp(*net),
+        ) => {
+            let mut lock = lab.pid(*net).into_os_string();
+            lock.push(".lock");
+            *named == lab.names[*net] && path.as_os_str() == lock
+        }
         (Want::Duplicate { net }, Err(NetdError::DuplicateNet { name, path, .. })) => {
             *name == lab.names[*net] && *path == lab.net_files[*net].display().to_string()
+        }
+        (Want::InUse { net }, Err(NetdError::Shell { net: named, source })) => {
+            let text = source.to_string();
+            *named == lab.names[*net]
+                && text.contains(&lab.pid(*net).display().to_string())
+                && text.contains(&std::process::id().to_string())
         }
         _ => false,
     };
@@ -931,23 +998,77 @@ fn mismatch(lab: &Lab, want: &Want, outcome: &Outcome, which: &str) -> Option<St
     })
 }
 
+/// What the test saw of a held pid-file write: the bytes it drained, and
+/// whether a start read the staged FIFO at the pid-file path.
+struct WriteSeen<'a> {
+    drained: Option<&'a [u8]>,
+    fifo_read: bool,
+}
+
 /// The pid files after a start that `want` names.
 fn check_disk(
     lab: &Lab,
     case: &Case,
     want: &Want,
     before: &[(Disk, Disk)],
-    drained: Option<&[u8]>,
+    WriteSeen { drained, fifo_read }: WriteSeen<'_>,
+    leftovers: &Leftovers,
     failures: &mut Vec<String>,
 ) {
-    // A net that loaded leaves the empty pid file of a runner with no runs.
+    // A net that loaded leaves the pid file of a runner with no runs of its
+    // own: it keeps the line of every live group the prior recorded.
     let loaded = |net: usize, failures: &mut Vec<String>| {
-        match (disk(&lab.pid(net)), drained) {
-            (Disk::File(bytes), _) if bytes.is_empty() => {}
-            (Disk::Fifo, Some([])) => {}
-            (found, _) => failures.push(format!(
-                "net {net} ({want:?}): the pid file of a runner with no runs holds {found:?} (held write sent {drained:?})"
-            )),
+        let written = match (disk(&lab.pid(net)), drained) {
+            (Disk::File(bytes), _) => Some(bytes),
+            (Disk::Fifo, Some(bytes)) => Some(bytes.to_vec()),
+            _ => None,
+        };
+        let mut want_lines = leftovers
+            .kept
+            .get(&lab.names[net])
+            .cloned()
+            .unwrap_or_default();
+        want_lines.sort_by_key(ToString::to_string);
+        let parse = |bytes: &[u8]| -> Option<Vec<serde_json::Value>> {
+            let mut lines = std::str::from_utf8(bytes)
+                .ok()?
+                .lines()
+                .map(|line| serde_json::from_str(line).ok())
+                .collect::<Option<Vec<serde_json::Value>>>()?;
+            lines.sort_by_key(ToString::to_string);
+            Some(lines)
+        };
+        // A start that read the staged FIFO at the pid-file path read EOF, as
+        // the test drained the held write's bytes: production never stages a
+        // FIFO. The held write itself carries every kept line.
+        let reread = fifo_read && case.hold.as_ref().is_some_and(|h| h.net == net);
+        // The FIFO of a held read sends its bytes again on each open of its
+        // write end, so a slow read can take the staged lines several times.
+        let read_held = case
+            .hold
+            .as_ref()
+            .is_some_and(|h| h.net == net && h.point == Point::Read);
+        let got_lines = written.as_deref().and_then(parse).map(|mut lines| {
+            if read_held {
+                lines.dedup();
+            }
+            lines
+        });
+        let empty_iff_no_line = written
+            .as_ref()
+            .is_some_and(|bytes| bytes.is_empty() == want_lines.is_empty());
+        let as_wanted = match reread {
+            false => got_lines.as_ref() == Some(&want_lines) && empty_iff_no_line,
+            true => {
+                drained.and_then(parse).as_ref() == Some(&want_lines)
+                    && got_lines.is_some_and(|got| got.iter().all(|l| want_lines.contains(l)))
+            }
+        };
+        if !as_wanted {
+            failures.push(format!(
+                "net {net} ({want:?}): the pid file of a runner with no runs of its own holds {:?}, wanted the lines {want_lines:?} (held write sent {drained:?})",
+                written.as_ref().map(|b| String::from_utf8_lossy(b).into_owned())
+            ));
         }
         let temp = disk(&lab.temp(net));
         if temp != Disk::Absent {
@@ -1059,6 +1180,7 @@ fn play(case: &Case) -> Vec<String> {
     let mut failures = Vec::new();
     let mut outcomes = Vec::new();
     let mut drained_bytes = None;
+    let mut fifo_read = false;
     match hold {
         None => {
             let outcome = rt.start(lab.config(), None).outcome();
@@ -1082,8 +1204,11 @@ fn play(case: &Case) -> Vec<String> {
                 lab.config(),
                 (plan.beat == Beat::SameTask).then(|| Arc::clone(&beats)),
             );
+            // The second start comes once the first holds the access, so the
+            // first holds every pid file up to the held one.
+            std::thread::sleep(WINDOW / 2);
             let second = plan.second.then(|| rt.start(lab.config(), None));
-            std::thread::sleep(WINDOW);
+            std::thread::sleep(WINDOW / 2);
             let to = Instant::now();
             let gap = largest_gap(from, to, &beats.lock().unwrap());
             if gap > BOUND {
@@ -1098,9 +1223,10 @@ fn play(case: &Case) -> Vec<String> {
                     plan.point
                 ));
             }
-            if plan.end == End::DropStart {
+            if plan.end.restarts() {
                 first.task.abort();
             }
+            let early = (plan.end == End::RestartWhileHeld).then(|| rt.start(lab.config(), None));
             if plan.end == End::FailRename {
                 let pid = lab.pid(plan.net);
                 if pid.exists() {
@@ -1121,7 +1247,7 @@ fn play(case: &Case) -> Vec<String> {
                     Held::Write(hold) => {
                         let how = match plan.end {
                             End::FailRename => Release::FailRename,
-                            End::Write | End::DropStart => Release::Write,
+                            End::Write | End::DropStart | End::RestartWhileHeld => Release::Write,
                         };
                         (
                             hold.release(how)
@@ -1132,56 +1258,98 @@ fn play(case: &Case) -> Vec<String> {
                         )
                     }
                 };
-            if plan.end == End::DropStart {
+            let main = if plan.end.restarts() {
                 eventually(|| match first.task.is_finished() {
                     true => Ok(()),
                     false => Err("the dropped start's task has not ended".to_owned()),
                 })
                 .expect("an aborted task ends once its write is released");
-                let restart = rt.start(lab.config(), None).outcome();
-                if let Some(m) = mismatch(&lab, &want, &restart, "the start after a dropped one") {
-                    failures.push(m);
-                }
-                outcomes.push(restart);
+                let restart = early.unwrap_or_else(|| rt.start(lab.config(), None));
+                ("the start after a dropped one", restart.outcome())
             } else {
-                let outcome = first.outcome();
-                if let Some(m) = mismatch(&lab, &want, &outcome, "start") {
-                    failures.push(m);
+                ("start", first.outcome())
+            };
+            let second = second.map(|s| ("the second start", s.outcome()));
+            // A start that succeeds holds its pid files: a second start that
+            // waits for them while it lives is refused at the first net.
+            let in_use = Want::InUse { net: 0 };
+            match (&want, second) {
+                (Want::Started, Some(second)) if plan.end.restarts() => {
+                    // The restart and the second start both wait for the pid
+                    // files the dropped start lets go: one of them gets them.
+                    let wins = |o: &(&str, Outcome)| mismatch(&lab, &want, &o.1, o.0).is_none();
+                    let loses = |o: &(&str, Outcome)| mismatch(&lab, &in_use, &o.1, o.0).is_none();
+                    if !(wins(&main) && loses(&second) || wins(&second) && loses(&main)) {
+                        failures.push(format!(
+                            "of {} and {}, exactly one must start and the other be refused as {in_use:?}: {:?} and {:?}",
+                            main.0,
+                            second.0,
+                            mismatch(&lab, &want, &main.1, main.0),
+                            mismatch(&lab, &want, &second.1, second.0),
+                        ));
+                    }
+                    outcomes.extend([main.1, second.1]);
                 }
-                outcomes.push(outcome);
-            }
-            if let Some(second) = second {
-                let outcome = second.outcome();
-                if let Some(m) = mismatch(&lab, &want, &outcome, "the second start") {
-                    failures.push(m);
+                (_, second) => {
+                    let second_want = match want {
+                        Want::Started => in_use.clone(),
+                        _ => want.clone(),
+                    };
+                    failures.extend(mismatch(&lab, &want, &main.1, main.0));
+                    outcomes.push(main.1);
+                    if let Some((which, outcome)) = second {
+                        failures.extend(mismatch(&lab, &second_want, &outcome, which));
+                        outcomes.push(outcome);
+                    }
                 }
-                outcomes.push(outcome);
             }
             drained_bytes = drained.as_ref().map(|d| d.first.clone());
+            fifo_read = _feeder
+                .as_ref()
+                .is_some_and(|f| f.fed.load(Ordering::SeqCst));
             if let Some(drained) = drained {
                 drained.stop();
             }
         }
     }
+    {
+        let _context = rt.handle.enter();
+        drop(outcomes);
+    }
+    // An aborted start's open runs on in the blocking pool and may write the
+    // pid file after every later start returned; the runtime's end waits for it.
+    drop(rt);
     check_disk(
         &lab,
         case,
         &want,
         &before,
-        drained_bytes.as_deref(),
+        WriteSeen {
+            drained: drained_bytes.as_deref(),
+            fifo_read,
+        },
+        &leftovers,
         &mut failures,
     );
     check_warnings(&want, &leftovers, &mut failures);
-    {
-        let _context = rt.handle.enter();
-        drop(outcomes);
+    for group in &mut leftovers.groups {
+        if group
+            .0
+            .try_wait()
+            .expect("the test waits on its own group")
+            .is_some()
+        {
+            failures.push(format!(
+                "the leftover group {} ended, but no start may signal it ({want:?})",
+                group.pgid()
+            ));
+        }
     }
-    drop(rt);
     failures
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 48, failure_persistence: None, ..ProptestConfig::default() })]
 
     #[test]
     fn a_task_on_the_runtime_runs_within_the_bound_while_netd_start_waits_for_a_held_pid_file_write(
@@ -1196,7 +1364,7 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 128, failure_persistence: None, ..ProptestConfig::default() })]
 
     #[test]
     fn netd_start_reads_every_pid_file_a_runner_writes_and_refuses_every_other_by_name(
