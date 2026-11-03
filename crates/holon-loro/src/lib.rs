@@ -99,6 +99,8 @@ pub mod pairing_swap;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub mod peer_import;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod peer_versions;
 #[cfg(test)]
 mod revert_to_rollback_probe;
 #[cfg(all(

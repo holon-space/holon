@@ -2298,6 +2298,20 @@ mod tests {
             seed(&a, "p1", Some("root-a"), "Parent one").await;
             seed(&a, "c1", Some("p1"), "Child one").await;
             seed(&a, "c2", Some("p1"), "Child two").await;
+            // A store trims only below what a recorded peer holds.
+            let vv =
+                a.be.test_global_doc()
+                    .await
+                    .with_read(|d| Ok(d.oplog_vv()))
+                    .unwrap();
+            let paired = holon_loro::peer_versions::PeerVersions::in_memory(2);
+            a.store
+                .read()
+                .await
+                .peer_versions()
+                .unwrap()
+                .record(&paired.hello(&vv))
+                .unwrap();
             a.store.read().await.save_all().await.unwrap();
             drop(a);
             let a = backend_at(dir_a.path(), bus_a.clone()).await;

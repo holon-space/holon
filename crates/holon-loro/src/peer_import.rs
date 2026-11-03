@@ -26,7 +26,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Context;
 use anyhow::Result;
 use holon_api::sharing::Capabilities;
 use holon_api::sharing::Capability;
@@ -144,6 +143,17 @@ pub struct PeerAccessRefused {
     pub attempted: String,
 }
 
+/// A peer's update that this replica did not import, for example because it
+/// depends on history this replica trimmed.
+#[derive(Debug, thiserror::Error)]
+#[error("refused the {bytes}-byte update of peer {peer:?} for container `{container}`: {error}")]
+pub struct PeerUpdateRefused {
+    pub peer: PeerFingerprint,
+    pub container: String,
+    pub bytes: usize,
+    pub error: String,
+}
+
 /// Apply an admitted peer's delta into `doc`.
 ///
 /// Two things happen here that a bare `LoroDoc::import` does not do: the
@@ -169,14 +179,14 @@ pub fn import_peer_delta(doc: &Arc<LoroDoc>, admitted: &AdmittedPeer, delta: &[u
     }
     LoroDocument::from_existing(doc.clone(), admitted.container.clone())
         .apply_update_with_origin(WriteOrigin::SyncImport, delta)
-        .with_context(|| {
-            format!(
-                "importing an ADMITTED {}-byte delta from peer {:?} into container `{}` — \
-                 admission succeeded, so a failure here is corruption, not authorization",
-                delta.len(),
-                admitted.peer,
-                admitted.container
-            )
+        .map_err(|e| {
+            PeerUpdateRefused {
+                peer: admitted.peer,
+                container: admitted.container.clone(),
+                bytes: delta.len(),
+                error: format!("{e:#}"),
+            }
+            .into()
         })
 }
 

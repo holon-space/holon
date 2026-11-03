@@ -54,6 +54,7 @@ use crate::iroh_advertiser::ShareAdmission;
 use crate::iroh_advertiser::SharedRoster;
 use crate::iroh_sync_adapter::SharedTreeSyncManager;
 use crate::iroh_sync_adapter::create_endpoint;
+use crate::iroh_sync_adapter::disclose_sync_refusal;
 use crate::iroh_sync_adapter::make_alpn;
 use crate::iroh_sync_adapter::sync_doc_initiate_enrolled;
 use crate::loro_document_store::DocScope;
@@ -1526,6 +1527,7 @@ impl LoroShareBackend {
                 Some(self.peer_connected_callback()),
                 preferred_port,
                 admission,
+                None,
             )
             .await?;
         let bound_port = addr.addrs.iter().find_map(|t| match t {
@@ -1623,6 +1625,7 @@ impl LoroShareBackend {
                 &capability,
                 shared_tree_id,
                 Capabilities::read_write(),
+                None,
             );
             match timeout(CONNECT_TIMEOUT, fut).await {
                 Ok(Ok(conn)) => {
@@ -1635,7 +1638,11 @@ impl LoroShareBackend {
                     drop(conn);
                     synced += 1;
                 }
-                Ok(Err(e)) => warn!("[share] sync with peer failed: {e:#}"),
+                Ok(Err(e)) => {
+                    if !disclose_sync_refusal(&self.degraded_bus, shared_tree_id, &e) {
+                        warn!("[share] sync with peer failed: {e:#}");
+                    }
+                }
                 Err(_) => warn!("[share] sync with peer timed out"),
             }
         }
@@ -2396,11 +2403,15 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             &t.capability,
             &shared_tree_id,
             Capabilities::read_write(),
+            None,
         );
         let conn = timeout(CONNECT_TIMEOUT, initiate)
             .await
             .map_err(|_| err("initial sync timed out"))?
-            .map_err(|e| err(format!("initial sync failed: {e:#}")))?;
+            .map_err(|e| {
+                disclose_sync_refusal(&self.degraded_bus, &shared_tree_id, &e);
+                err(format!("initial sync failed: {e:#}"))
+            })?;
 
         // Pin the author we just dialed. QUIC authenticated it as the node key
         // the ticket named and it accepted our capability proof, so its later
@@ -5080,6 +5091,7 @@ mod tests {
             &ticket.capability,
             &shared_tree_id,
             Capabilities::read_write(),
+            None,
         )
         .await
         .expect("a peer holding the ticket's capability must enroll and sync");

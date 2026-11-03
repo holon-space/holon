@@ -1,12 +1,15 @@
 //! Paired own devices replicating the root container over iroh converge on
-//! every edit, whatever saves and restarts happened in between.
+//! every edit, whatever saves, restarts and history compactions happened in
+//! between, and each device's compaction floor keeps up with its peers.
 //!
 //! Each peer is a `LoroDocumentStore` on its own dir: its saves and restarts
 //! run the production persistence path, whose first snapshot of a session is
-//! history-compacted. Sync is `ContainerRegistry::replicate_all` on the
-//! acceptor and `sync_doc_initiate_enrolled` on the dialer, as a paired device
-//! runs them.
+//! history-compacted below the version every recorded peer holds. Sync is
+//! `ContainerRegistry::replicate_all` on the acceptor and
+//! `sync_doc_initiate_enrolled` on the dialer, as a paired device runs them.
 
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,12 +30,14 @@ use holon_loro::iroh_advertiser::EndpointAddr;
 use holon_loro::iroh_advertiser::IrohAdvertiser;
 use holon_loro::iroh_advertiser::SharedRoster;
 use holon_loro::iroh_sync_adapter::create_endpoint;
+use holon_loro::iroh_sync_adapter::disclose_sync_refusal;
 use holon_loro::iroh_sync_adapter::make_alpn;
 use holon_loro::iroh_sync_adapter::sync_doc_initiate_enrolled;
+use holon_loro::peer_versions::Hello;
 use holon_loro::share_enrollment::CapabilitySecret;
 use holon_loro::share_enrollment::ExpiryTime;
 use holon_loro::share_enrollment::ShareRoster;
-use loro::LoroError;
+use loro::VersionVector;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
@@ -40,60 +45,217 @@ use serial_test::serial;
 use tempfile::TempDir;
 
 const EDITS: &str = "edits";
+const LEDGER_FILE: &str = "peer-versions.json";
 const DIAL_BUDGET: Duration = Duration::from_secs(20);
+
+/// Which device pairs sync with each other.
+#[derive(Clone, Copy, Debug)]
+enum Topology {
+    Single,
+    Pair,
+    Star3,
+    Chain3,
+    Cycle3,
+}
+
+impl Topology {
+    fn peers(self) -> usize {
+        match self {
+            Topology::Single => 1,
+            Topology::Pair => 2,
+            Topology::Star3 | Topology::Chain3 | Topology::Cycle3 => 3,
+        }
+    }
+
+    fn edges(self) -> &'static [(usize, usize)] {
+        match self {
+            Topology::Single => &[],
+            Topology::Pair => &[(0, 1)],
+            Topology::Star3 => &[(0, 1), (0, 2)],
+            Topology::Chain3 => &[(0, 1), (1, 2)],
+            Topology::Cycle3 => &[(0, 1), (1, 2), (2, 0)],
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 enum Op {
-    Edit { peer: usize },
-    Save { peer: usize },
-    Restart { peer: usize },
-    Sync { from: usize, to: usize },
+    Edit {
+        peer: usize,
+    },
+    Save {
+        peer: usize,
+    },
+    Restart {
+        peer: usize,
+    },
+    /// `to` dials `from`.
+    Sync {
+        from: usize,
+        to: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Expect {
+    /// No import is refused and every edit reaches every peer.
+    Converge,
+    /// A device that joined without adopting the trimmed history is refused
+    /// with a condition, and keeps its own edits.
+    Refused,
 }
 
 #[derive(Clone, Debug)]
 struct Case {
-    peers: usize,
+    topology: Topology,
+    /// Peers `0..adopted` share peer 0's history from the start, as a paired
+    /// device does after adoption; the others start an independent history.
+    adopted: usize,
     ops: Vec<Op>,
+    expect: Expect,
+}
+
+impl Case {
+    fn adopted(topology: Topology, ops: Vec<Op>) -> Self {
+        Self {
+            topology,
+            adopted: topology.peers(),
+            ops,
+            expect: Expect::Converge,
+        }
+    }
 }
 
 /// Fixed cases run before the random ones; each is a failure the generator
 /// found or a shape worth pinning.
 fn static_examples() -> Vec<Case> {
+    let independent = |ops| Case {
+        topology: Topology::Pair,
+        adopted: 1,
+        ops,
+        expect: Expect::Converge,
+    };
     vec![
-        // Peer 1 compacts on restart; peer 0's concurrent edit can then never
-        // be imported into it.
-        Case {
-            peers: 2,
-            ops: vec![
+        // Peer 1 restarts after a concurrent edit of peer 0; with no recorded
+        // peer it must not trim.
+        independent(vec![
+            Op::Edit { peer: 1 },
+            Op::Edit { peer: 0 },
+            Op::Restart { peer: 1 },
+        ]),
+        independent(vec![Op::Restart { peer: 1 }, Op::Edit { peer: 0 }]),
+        independent(vec![Op::Edit { peer: 0 }, Op::Restart { peer: 0 }]),
+        // The same shape after adoption: peer 1 records peer 0 at the
+        // adopted version and trims at most down to it.
+        Case::adopted(
+            Topology::Pair,
+            vec![
                 Op::Edit { peer: 1 },
                 Op::Edit { peer: 0 },
                 Op::Restart { peer: 1 },
             ],
-        },
-        // Shrunk by the generator: the compacted peer authored nothing, yet
-        // the other peer's history (its schema init) is concurrent to the trim.
+        ),
+        // B (1) trims after syncing A (0); C's (2) edit is concurrent to that
+        // trim and reaches B only through A.
+        Case::adopted(
+            Topology::Star3,
+            vec![
+                Op::Edit { peer: 0 },
+                Op::Sync { from: 0, to: 1 },
+                Op::Restart { peer: 1 },
+                Op::Edit { peer: 2 },
+                Op::Sync { from: 0, to: 2 },
+                Op::Sync { from: 0, to: 1 },
+            ],
+        ),
+        // The ledger written before a restart drives the compaction after it.
+        Case::adopted(
+            Topology::Pair,
+            vec![
+                Op::Edit { peer: 1 },
+                Op::Sync { from: 0, to: 1 },
+                Op::Restart { peer: 1 },
+                Op::Edit { peer: 0 },
+                Op::Restart { peer: 1 },
+            ],
+        ),
+        // Peer 2 never syncs during the ops: the others trim no history above
+        // its last version, so its late edit still imports everywhere.
+        Case::adopted(
+            Topology::Star3,
+            vec![
+                Op::Edit { peer: 2 },
+                Op::Sync { from: 0, to: 1 },
+                Op::Restart { peer: 0 },
+                Op::Restart { peer: 1 },
+                Op::Edit { peer: 0 },
+                Op::Sync { from: 0, to: 1 },
+                Op::Restart { peer: 0 },
+                Op::Restart { peer: 1 },
+                Op::Edit { peer: 2 },
+            ],
+        ),
+        // Peer 0 trims below peer 1's hello, whose head is concurrent to peer
+        // 0's own edit; the trimmed snapshot must still load on restart.
+        Case::adopted(
+            Topology::Pair,
+            vec![
+                Op::Edit { peer: 0 },
+                Op::Edit { peer: 1 },
+                Op::Sync { from: 0, to: 1 },
+                Op::Restart { peer: 0 },
+            ],
+        ),
+        // A device with no recorded peer never trims.
+        Case::adopted(
+            Topology::Single,
+            vec![
+                Op::Edit { peer: 0 },
+                Op::Restart { peer: 0 },
+                Op::Edit { peer: 0 },
+                Op::Restart { peer: 0 },
+            ],
+        ),
+        // Peer 2 joins after peer 0 trimmed, without adopting its history.
         Case {
-            peers: 2,
-            ops: vec![Op::Restart { peer: 1 }, Op::Edit { peer: 0 }],
-        },
-        Case {
-            peers: 2,
-            ops: vec![Op::Edit { peer: 0 }, Op::Restart { peer: 0 }],
+            topology: Topology::Star3,
+            adopted: 2,
+            ops: vec![
+                Op::Edit { peer: 0 },
+                Op::Sync { from: 0, to: 1 },
+                Op::Sync { from: 1, to: 0 },
+                Op::Restart { peer: 0 },
+                Op::Edit { peer: 2 },
+                Op::Sync { from: 0, to: 2 },
+            ],
+            expect: Expect::Refused,
         },
     ]
 }
 
+/// Every device is adopted: production pairs only by adoption, and pairing
+/// with a trimmed owner is refused (`pairing_refuses_trimmed_owner`). Syncs
+/// run only along the topology's edges, in either direction.
 fn case_strategy() -> impl Strategy<Value = Case> {
-    (2usize..=3).prop_flat_map(|peers| {
+    prop_oneof![
+        Just(Topology::Pair),
+        Just(Topology::Star3),
+        Just(Topology::Chain3),
+        Just(Topology::Cycle3),
+    ]
+    .prop_flat_map(|topology| {
+        let peers = topology.peers();
+        let edges = topology.edges();
         let op = prop_oneof![
             3 => (0..peers).prop_map(|peer| Op::Edit { peer }),
             1 => (0..peers).prop_map(|peer| Op::Save { peer }),
             1 => (0..peers).prop_map(|peer| Op::Restart { peer }),
-            2 => (0..peers, 0..peers)
-                .prop_filter("a peer does not dial itself", |(a, b)| a != b)
-                .prop_map(|(from, to)| Op::Sync { from, to }),
+            2 => (0..edges.len(), any::<bool>()).prop_map(move |(e, flip)| {
+                let (a, b) = edges[e];
+                if flip { Op::Sync { from: b, to: a } } else { Op::Sync { from: a, to: b } }
+            }),
         ];
-        prop::collection::vec(op, 0..12).prop_map(move |ops| Case { peers, ops })
+        prop::collection::vec(op, 0..12).prop_map(move |ops| Case::adopted(topology, ops))
     })
 }
 
@@ -150,8 +312,40 @@ impl Peer {
             .with_read(|d| Ok(d.get_map(EDITS).get(key).is_some()))
     }
 
+    fn version(&self) -> Result<VersionVector> {
+        self.doc.with_read(|d| Ok(d.oplog_vv()))
+    }
+
+    fn trimmed_below(&self) -> Result<VersionVector> {
+        self.doc.with_read(|d| Ok(d.shallow_since_vv().to_vv()))
+    }
+
     fn is_shallow(&self) -> Result<bool> {
         self.doc.with_read(|d| Ok(d.is_shallow()))
+    }
+
+    fn known(&self) -> Result<BTreeMap<u64, VersionVector>> {
+        Ok(self.store.peer_versions()?.known())
+    }
+
+    /// The version this device would compact below now, as persistence
+    /// computes it; `None` when it would not compact.
+    fn floor(&self) -> Result<Option<VersionVector>> {
+        let vv = self.version()?;
+        Ok(self
+            .store
+            .peer_versions()?
+            .floor()
+            .map(|floor| floor.intersection(&vv)))
+    }
+
+    fn refusals(&self) -> Vec<String> {
+        self.bus
+            .current()
+            .into_iter()
+            .filter(|c| matches!(c.reason, ConditionKind::PeerUpdateRefused { .. }))
+            .map(|c| format!("{c:?}"))
+            .collect()
     }
 }
 
@@ -170,13 +364,45 @@ async fn advertise(
     Ok(addr.clone())
 }
 
-/// `to` dials `from`; both sides import the other's delta. A refused import
-/// comes back as the dial's error.
+/// The joiner starts from the owner's stored history, without its ledger.
+fn adopt(owner: &Peer, joiner_dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(owner.dir.path())? {
+        let entry = entry?;
+        anyhow::ensure!(
+            entry.file_type()?.is_file(),
+            "the store dir holds a non-file {}",
+            entry.path().display()
+        );
+        if entry.file_name() != LEDGER_FILE {
+            std::fs::copy(entry.path(), joiner_dir.join(entry.file_name()))
+                .with_context(|| format!("copy {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Each side records the other as pairing does: the owner records the joiner
+/// at an empty version, the joiner records the owner's hello.
+fn record_pairing(owner: &Peer, joiner: &Peer) -> Result<()> {
+    let owner_versions = owner.store.peer_versions()?;
+    let joiner_versions = joiner.store.peer_versions()?;
+    owner_versions.record(&Hello {
+        device: Some(joiner_versions.device()),
+        vv: VersionVector::new().encode(),
+        known: Vec::new(),
+    })?;
+    joiner_versions.record(&owner_versions.hello(&owner.version()?))
+}
+
+/// `to` dials `from`; both sides import the other's delta and record the
+/// other's hello. A failed dial is disclosed on the dialer's bus as the
+/// production dialers do, and comes back as the dial's error.
 async fn sync(peers: &[Peer], from: usize, to: usize, cap: &CapabilitySecret) -> Result<()> {
     let alpn = make_alpn(ALPN_PREFIX, ROOT_CONTAINER_ID);
     // A reference clone of the same doc, as the transport needs an owned handle.
     let doc = peers[to].doc.with_read(|d| Ok(Arc::new(d.clone())))?;
-    tokio::time::timeout(
+    let versions = peers[to].store.peer_versions()?;
+    let dialed = tokio::time::timeout(
         DIAL_BUDGET,
         sync_doc_initiate_enrolled(
             &peers[to].dialer,
@@ -186,166 +412,264 @@ async fn sync(peers: &[Peer], from: usize, to: usize, cap: &CapabilitySecret) ->
             cap,
             ROOT_CONTAINER_ID,
             Capabilities::read_write(),
+            Some(&versions),
         ),
     )
     .await
-    .with_context(|| format!("peer {to} dialing peer {from} took over {DIAL_BUDGET:?}"))??;
-    // The acceptor imports after the dialer returns.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    .with_context(|| format!("peer {to} dialing peer {from} took over {DIAL_BUDGET:?}"))?;
+    if let Err(e) = dialed {
+        disclose_sync_refusal(&peers[to].bus, ROOT_CONTAINER_ID, &e);
+        // The acceptor discloses its own refusal after the dialer returns.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        return Err(e);
+    }
     Ok(())
 }
 
-async fn run(case: &Case) -> Result<Result<(), String>> {
-    let cap = CapabilitySecret::generate();
-    let roster: SharedRoster = Arc::new(tokio::sync::Mutex::new(ShareRoster::new(
-        ROOT_CONTAINER_ID,
-        cap.clone(),
-        ExpiryTime(chrono::Utc::now().timestamp() + 3600),
-        64,
-    )));
-    let mut peers = Vec::new();
-    for p in 0..case.peers {
-        peers.push(Peer::open(TempDir::new()?, 1000 + p as u64, &roster).await?);
+/// The invariants that hold after every step: no device trimmed history some
+/// paired device lacks, a device with no recorded peer is not trimmed.
+fn trim_violations(peers: &[Peer], adopted: usize) -> Result<Vec<String>> {
+    let mut violations = Vec::new();
+    for (d, peer) in peers.iter().enumerate() {
+        if peer.known()?.is_empty() && peer.is_shallow()? {
+            violations.push(format!("peer {d} trimmed with no recorded peer"));
+        }
+        if d >= adopted {
+            continue;
+        }
+        let trimmed = peer.trimmed_below()?;
+        for (e, other) in peers.iter().enumerate().take(adopted) {
+            if e != d && !other.version()?.includes_vv(&trimmed) {
+                violations.push(format!(
+                    "peer {d} trimmed below {trimmed:?}, which peer {e} at {:?} lacks",
+                    other.version()?
+                ));
+            }
+        }
     }
-    let mut sync_errors = Vec::new();
-    for op in &case.ops {
+    Ok(violations)
+}
+
+struct Run {
+    case: Case,
+    peers: Vec<Peer>,
+    cap: CapabilitySecret,
+    roster: SharedRoster,
+    log: Vec<String>,
+}
+
+impl Run {
+    async fn open(case: &Case) -> Result<Self> {
+        let cap = CapabilitySecret::generate();
+        let roster: SharedRoster = Arc::new(tokio::sync::Mutex::new(ShareRoster::new(
+            ROOT_CONTAINER_ID,
+            cap.clone(),
+            ExpiryTime(chrono::Utc::now().timestamp() + 3600),
+            64,
+        )));
+        let mut peers = vec![Peer::open(TempDir::new()?, 1000, &roster).await?];
+        if case.adopted > 1 {
+            // A fresh session, so the owner's next restart is its first
+            // snapshot of a session, as for every other peer.
+            peers[0].restart(&roster).await?;
+        }
+        for p in 1..case.topology.peers() {
+            let dir = TempDir::new()?;
+            if p < case.adopted {
+                adopt(&peers[0], dir.path())?;
+            }
+            peers.push(Peer::open(dir, 1000 + p as u64, &roster).await?);
+            if p < case.adopted {
+                record_pairing(&peers[0], &peers[p])?;
+            }
+        }
+        Ok(Self {
+            case: case.clone(),
+            peers,
+            cap,
+            roster,
+            log: Vec::new(),
+        })
+    }
+
+    /// Runs `op`; an `Err` is a broken invariant.
+    async fn step(&mut self, op: &Op) -> Result<Result<(), String>> {
         match *op {
             Op::Edit { peer } => {
-                let key = format!("p{peer}-e{}", peers[peer].authored.len());
-                peers[peer].doc.with_write(WriteOrigin::BlockOps, |txn| {
-                    txn.get_map(EDITS).insert(&key, true)?;
-                    Ok(())
-                })?;
-                peers[peer].authored.push(key);
+                let key = format!("p{peer}-e{}", self.peers[peer].authored.len());
+                self.peers[peer]
+                    .doc
+                    .with_write(WriteOrigin::BlockOps, |txn| {
+                        txn.get_map(EDITS).insert(&key, true)?;
+                        Ok(())
+                    })?;
+                self.peers[peer].authored.push(key);
             }
-            Op::Save { peer } => peers[peer].store.save_all().await?,
-            Op::Restart { peer } => peers[peer].restart(&roster).await?,
+            Op::Save { peer } => self.peers[peer].store.save_all().await?,
+            Op::Restart { peer } => {
+                let before = self.peers[peer].known()?;
+                self.peers[peer].restart(&self.roster).await?;
+                let after = self.peers[peer].known()?;
+                if before != after {
+                    return Ok(Err(format!(
+                        "peer {peer}'s ledger changed across a restart: {before:?} -> {after:?}"
+                    )));
+                }
+            }
             Op::Sync { from, to } => {
-                if let Err(e) = sync(&peers, from, to, &cap).await {
-                    sync_errors.push(format!("during ops, {to} dialing {from}: {e:#}"));
+                if let Err(e) = sync(&self.peers, from, to, &self.cap).await {
+                    self.log.push(format!("{op:?}: {e:#}"));
+                    return Ok(Err(format!("{to} dialing {from} failed: {e:#}")));
                 }
             }
         }
+        let violations = trim_violations(&self.peers, self.case.adopted)?;
+        if !violations.is_empty() {
+            return Ok(Err(format!("after {op:?}: {violations:?}")));
+        }
+        Ok(Ok(()))
     }
 
-    // Two full rounds: the second shows whether a refused delta is resent and
-    // refused again.
-    let mut full_sync_errors: [Vec<(usize, usize, anyhow::Error)>; 2] = [Vec::new(), Vec::new()];
-    for round in &mut full_sync_errors {
-        for from in 0..case.peers {
-            for to in 0..case.peers {
-                if from != to
-                    && let Err(e) = sync(&peers, from, to, &cap).await
+    /// Every edge syncs once each way.
+    async fn full_round(&mut self) -> Result<Result<(), String>> {
+        for &(a, b) in self.case.topology.edges() {
+            for op in [Op::Sync { from: a, to: b }, Op::Sync { from: b, to: a }] {
+                if let Err(e) = self.step(&op).await? {
+                    return Ok(Err(format!("full round: {e}")));
+                }
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    fn floors(&self) -> Result<Vec<Option<VersionVector>>> {
+        self.peers.iter().map(Peer::floor).collect()
+    }
+
+    fn report(&self) -> Result<String> {
+        let mut lines = vec![format!("{:?}", self.case)];
+        for (p, peer) in self.peers.iter().enumerate() {
+            lines.push(format!(
+                "peer {p}: shallow={} version={:?} floor={:?} known={:?} conditions={:?}",
+                peer.is_shallow()?,
+                peer.version()?,
+                peer.floor()?,
+                peer.known()?,
+                peer.bus.current(),
+            ));
+        }
+        lines.push(format!("sync errors: {:#?}", self.log));
+        Ok(lines.join("\n"))
+    }
+
+    async fn check(&mut self) -> Result<Result<(), String>> {
+        for op in self.case.ops.clone() {
+            let stepped = self.step(&op).await?;
+            match (self.case.expect, stepped) {
+                (_, Ok(())) => {}
+                (Expect::Refused, Err(_)) if matches!(op, Op::Sync { .. }) => {}
+                (_, Err(e)) => return Ok(Err(e)),
+            }
+        }
+        if self.case.expect == Expect::Refused {
+            return self.check_refused();
+        }
+
+        // Enough rounds for an edit to cross the longest path.
+        for _ in 1..self.case.topology.peers() {
+            if let Err(e) = self.full_round().await? {
+                return Ok(Err(e));
+            }
+        }
+        let mut missing = Vec::new();
+        for author in &self.peers {
+            for key in &author.authored {
+                for (p, peer) in self.peers.iter().enumerate() {
+                    if !peer.holds(key)? {
+                        missing.push(format!("{key} on peer {p}"));
+                    }
+                }
+            }
+        }
+        if !missing.is_empty() {
+            return Ok(Err(format!(
+                "after a full sync these edits are missing: {missing:?}"
+            )));
+        }
+
+        // Liveness: with no new edits, rounds of syncs lift every floor to
+        // the converged version, and no floor moves down on the way.
+        if self.case.topology.edges().is_empty() {
+            return Ok(Ok(()));
+        }
+        let mut floors = self.floors()?;
+        for _ in 0..2 * self.peers.len() + 1 {
+            let reached = self
+                .peers
+                .iter()
+                .zip(&floors)
+                .map(|(peer, floor)| Ok(floor.as_ref() == Some(&peer.version()?)))
+                .collect::<Result<Vec<bool>>>()?;
+            if reached.iter().all(|r| *r) {
+                return Ok(Ok(()));
+            }
+            if let Err(e) = self.full_round().await? {
+                return Ok(Err(e));
+            }
+            let next = self.floors()?;
+            for (p, (old, new)) in floors.iter().zip(&next).enumerate() {
+                if let (Some(old), Some(new)) = (old, new)
+                    && !new.includes_vv(old)
                 {
-                    round.push((to, from, e));
+                    return Ok(Err(format!(
+                        "peer {p}'s floor moved down: {old:?} -> {new:?}"
+                    )));
                 }
             }
+            floors = next;
         }
+        Ok(Err(format!(
+            "the floors never reached the converged version: {floors:?}"
+        )))
     }
-    // (dialer, peer it dialed) of every dial whose import the shallow history
-    // refused.
-    let refusals = |round: &[(usize, usize, anyhow::Error)]| -> Vec<(usize, usize)> {
-        round
-            .iter()
-            .filter(|(_, _, e)| {
-                e.chain().any(|c| {
-                    matches!(
-                        c.downcast_ref::<LoroError>(),
-                        Some(LoroError::ImportUpdatesThatDependsOnOutdatedVersion)
-                    )
-                })
-            })
-            .map(|(to, from, _)| (*to, *from))
-            .collect()
-    };
-    let refused = [
-        refusals(&full_sync_errors[0]),
-        refusals(&full_sync_errors[1]),
-    ];
 
-    let mut lost_by_author = Vec::new();
-    let mut missing = Vec::new();
-    for author in &peers {
-        for key in &author.authored {
-            if !author.holds(key)? {
-                lost_by_author.push(key.clone());
-            }
-            for (p, peer) in peers.iter().enumerate() {
-                if !peer.holds(key)? {
-                    missing.push(format!("{key} on peer {p}"));
-                }
+    fn check_refused(&self) -> Result<Result<(), String>> {
+        let late = self.case.adopted;
+        anyhow::ensure!(
+            self.peers[0].is_shallow()?,
+            "peer 0 did not trim before the late join; the example proves nothing"
+        );
+        if self.log.is_empty() {
+            return Ok(Err("the late join synced without an error".into()));
+        }
+        let refusals: Vec<String> = self.peers.iter().flat_map(Peer::refusals).collect();
+        if refusals.is_empty() {
+            return Ok(Err(
+                "the refused late join raised no refusal condition".into()
+            ));
+        }
+        for key in &self.peers[late].authored {
+            if !self.peers[late].holds(key)? {
+                return Ok(Err(format!("the late joiner lost its own edit {key}")));
             }
         }
+        Ok(Ok(()))
     }
-    let report = || -> Result<String> {
-        let mut shallow = Vec::new();
-        let mut conditions = Vec::new();
-        for (p, peer) in peers.iter().enumerate() {
-            shallow.push(format!("peer {p}: shallow={}", peer.is_shallow()?));
-            for c in peer.bus.current() {
-                conditions.push(format!("peer {p}: {c:?}"));
-            }
+}
+
+async fn run(case: &Case) -> Result<Result<(), String>> {
+    let mut run = Run::open(case).await?;
+    let mut verdict = run.check().await?;
+    if verdict.is_ok() && case.expect == Expect::Converge {
+        let refusals: Vec<String> = run.peers.iter().flat_map(Peer::refusals).collect();
+        if !refusals.is_empty() {
+            verdict = Err(format!("a refusal condition was raised: {refusals:?}"));
         }
-        let rounds: Vec<Vec<String>> = full_sync_errors
-            .iter()
-            .map(|round| {
-                round
-                    .iter()
-                    .map(|(to, from, e)| format!("{to} dialing {from}: {e:#}"))
-                    .collect()
-            })
-            .collect();
-        Ok(format!(
-            "{case:?}\nmissing: {missing:?}\n{}\nconditions raised: {conditions:?}\n\
-             sync errors during ops: {sync_errors:#?}\n\
-             full sync round 1 errors: {:#?}\nfull sync round 2 errors: {:#?}",
-            shallow.join(", "),
-            rounds[0],
-            rounds[1],
-        ))
-    };
-    let disclosed: Vec<String> = refused
-        .iter()
-        .flatten()
-        .flat_map(|(to, _)| {
-            peers[*to]
-                .bus
-                .current()
-                .into_iter()
-                .filter(|c| !matches!(c.reason, ConditionKind::BearerTicketEnrollment { .. }))
-                .map(move |c| format!("peer {to}: {c:?}"))
-        })
-        .collect();
-    if !disclosed.is_empty() {
-        return Ok(Err(format!(
-            "observed fact changed: a refused import now raises a condition {disclosed:?}\n{}",
-            report()?
-        )));
     }
-    let not_repeated: Vec<_> = refused[0]
-        .iter()
-        .filter(|r| !refused[1].contains(r))
-        .collect();
-    if !not_repeated.is_empty() {
-        return Ok(Err(format!(
-            "observed fact changed: round 2 no longer repeats the refusals {not_repeated:?} \
-             (dialer, dialed) of round 1\n{}",
-            report()?
-        )));
-    }
-    if !lost_by_author.is_empty() {
-        return Ok(Err(format!(
-            "an author no longer holds its own edits {lost_by_author:?}\n{}",
-            report()?
-        )));
-    }
-    if !missing.is_empty() {
-        return Ok(Err(format!(
-            "after a full sync not every edit is on every peer\n{}",
-            report()?
-        )));
-    }
-    Ok(Ok(()))
+    Ok(match verdict {
+        Ok(()) => Ok(()),
+        Err(e) => Err(format!("{e}\n{}", run.report()?)),
+    })
 }
 
 fn check(rt: &tokio::runtime::Runtime, case: &Case) -> Result<(), TestCaseError> {
@@ -354,7 +678,7 @@ fn check(rt: &tokio::runtime::Runtime, case: &Case) -> Result<(), TestCaseError>
         .map_err(TestCaseError::fail)
 }
 
-fn every_edit_reaches_every_peer() {
+fn every_edit_reaches_every_peer(compaction: bool) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -362,6 +686,8 @@ fn every_edit_reaches_every_peer() {
         .unwrap();
     let mut failures: Vec<String> = static_examples()
         .iter()
+        // Without compaction nothing is trimmed, so nothing refuses a late join.
+        .filter(|case| compaction || case.expect == Expect::Converge)
         .filter_map(|case| check(&rt, case).err())
         .map(|e| format!("static example: {e}"))
         .collect();
@@ -382,7 +708,7 @@ fn every_edit_reaches_every_peer() {
 fn every_edit_reaches_every_peer_with_history_compaction() {
     // SAFETY: serialized with the only other test that touches this variable.
     unsafe { std::env::remove_var("HOLON_LORO_COMPACT") };
-    every_edit_reaches_every_peer();
+    every_edit_reaches_every_peer(true);
 }
 
 /// The exclusion check: with compaction off the same property holds, so a red
@@ -392,6 +718,6 @@ fn every_edit_reaches_every_peer_with_history_compaction() {
 fn every_edit_reaches_every_peer_without_history_compaction() {
     // SAFETY: serialized with the only other test that touches this variable.
     unsafe { std::env::set_var("HOLON_LORO_COMPACT", "off") };
-    every_edit_reaches_every_peer();
+    every_edit_reaches_every_peer(false);
     unsafe { std::env::remove_var("HOLON_LORO_COMPACT") };
 }

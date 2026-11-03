@@ -1,9 +1,13 @@
 //! Iroh P2P sync for shared LoroTree collaboration.
 //!
 //! Protocol (incremental, version-vector-based) and explicit close handshake:
-//! 1. Initiator sends its VersionVector (VV)
-//! 2. Acceptor receives VV, computes delta, sends delta + its own VV
-//! 3. Initiator applies delta, computes its delta using peer's VV, sends it
+//! 1. Initiator sends its hello: `holon-sync/2`, its VersionVector (VV) and its
+//!    map of what each paired device holds ([`crate::peer_versions`])
+//! 2. Acceptor receives the hello, computes delta, sends delta + its own hello.
+//!    A first frame that is no hello is an older protocol: the acceptor closes
+//!    the connection with [`PROTOCOL_MISMATCH_CODE`]
+//! 3. Initiator applies delta, computes its delta using peer's VV, sends it.
+//!    Each side records the peer's hello once it imported the peer's delta
 //! 4. Both sides call `send.finish()` after their last framed write and drain
 //!    the receive stream until `Ok(None)` — observing the peer's EOF proves the
 //!    peer consumed everything we wrote (in this protocol, both sides call
@@ -40,6 +44,9 @@ mod adapter {
     use anyhow::Context;
     use anyhow::Result;
     use holon_api::sharing::Capabilities;
+    use holon_conditions::condition_bus::Condition;
+    use holon_conditions::condition_bus::ConditionBus;
+    use holon_conditions::condition_bus::ConditionKind;
     use iroh::Endpoint;
     use iroh::EndpointAddr;
     use loro::ExportMode;
@@ -53,12 +60,77 @@ mod adapter {
 
     use crate::peer_import::AdmittedPeer;
     use crate::peer_import::PeerReadAccess;
+    use crate::peer_import::PeerUpdateRefused;
     use crate::peer_import::authorize_peer_read;
     use crate::peer_import::import_peer_delta;
+    use crate::peer_versions::Hello;
+    use crate::peer_versions::PeerVersions;
+    use crate::share_enrollment::PeerFingerprint;
     use crate::share_enrollment::peer_fingerprint;
     use crate::shared_tree::SharedTreeStore;
 
     const MAX_MSG_SIZE: usize = 10 * 1024 * 1024;
+
+    const HELLO_MAGIC: &[u8] = b"holon-sync/2\n";
+
+    /// The QUIC close code of an acceptor that refused a peer's protocol.
+    pub const PROTOCOL_MISMATCH_CODE: u32 = 3;
+
+    /// A peer whose handshake frame is no `holon-sync/2` hello.
+    #[derive(Debug, thiserror::Error)]
+    #[error(
+        "peer {peer:?} speaks another sync protocol: its {bytes}-byte handshake frame is no \
+         `holon-sync/2` hello; refusing"
+    )]
+    pub struct SyncProtocolMismatch {
+        pub peer: PeerFingerprint,
+        pub bytes: usize,
+    }
+
+    fn encode_hello(versions: Option<&PeerVersions>, doc: &LoroDoc) -> Result<Vec<u8>> {
+        let vv = doc.oplog_vv();
+        let hello = match versions {
+            Some(versions) => versions.hello(&vv),
+            None => Hello::untracked(&vv),
+        };
+        let mut frame = HELLO_MAGIC.to_vec();
+        serde_json::to_writer(&mut frame, &hello)?;
+        Ok(frame)
+    }
+
+    fn decode_hello(frame: &[u8], peer: PeerFingerprint) -> Result<Hello> {
+        let Some(body) = frame.strip_prefix(HELLO_MAGIC) else {
+            return Err(SyncProtocolMismatch {
+                peer,
+                bytes: frame.len(),
+            }
+            .into());
+        };
+        serde_json::from_slice(body).with_context(|| format!("decode the sync hello of {peer:?}"))
+    }
+
+    /// Raise on `bus` the condition a failed sync stands for, when it is a
+    /// refused peer update or a protocol mismatch. Returns whether it was one.
+    pub fn disclose_sync_refusal(bus: &ConditionBus, subject: &str, err: &anyhow::Error) -> bool {
+        let reason = if let Some(refused) = err.downcast_ref::<PeerUpdateRefused>() {
+            ConditionKind::PeerUpdateRefused {
+                peer: format!("{:?}", refused.peer),
+                error: refused.error.clone(),
+            }
+        } else if let Some(mismatch) = err.downcast_ref::<SyncProtocolMismatch>() {
+            ConditionKind::SyncProtocolMismatch {
+                peer: format!("{:?}", mismatch.peer),
+            }
+        } else {
+            return false;
+        };
+        warn!("[sync] {subject}: {err:#}");
+        bus.emit(Condition {
+            subject: subject.to_string(),
+            reason,
+        });
+        true
+    }
 
     /// Upper bound on any single acceptor-side network await. The initiator is
     /// already bounded by `CONNECT_TIMEOUT` at its call sites; this stops a
@@ -262,7 +334,7 @@ mod adapter {
         // The peer identity comes off the QUIC-authenticated connection, never
         // off the addr we aimed at, so the witness names who actually answered.
         let admitted = AdmittedPeer::dialed(container, peer_fingerprint(&conn), grant);
-        sync_on_connection_initiator(conn, doc, &admitted).await
+        sync_on_connection_initiator(conn, doc, &admitted, None).await
     }
 
     /// Initiator side WITH enrollment (ADR 0028 H5 acceptor gate): connect,
@@ -271,6 +343,7 @@ mod adapter {
     /// stream before the sync stream, so a peer that cannot prove the
     /// capability never reaches the sync primitive — closing the
     /// bearer-`shared_tree_id` forgery hole.
+    #[allow(clippy::too_many_arguments)]
     pub async fn sync_doc_initiate_enrolled(
         endpoint: &Endpoint,
         doc: &Arc<LoroDoc>,
@@ -279,6 +352,7 @@ mod adapter {
         capability: &crate::share_enrollment::CapabilitySecret,
         shared_tree_id: &str,
         grant: Capabilities,
+        versions: Option<&PeerVersions>,
     ) -> Result<iroh::endpoint::Connection> {
         debug!("[init] connecting (enrolled)...");
         let conn = endpoint
@@ -299,7 +373,7 @@ mod adapter {
             );
         }
         let admitted = AdmittedPeer::dialed(shared_tree_id, peer_fingerprint(&conn), grant);
-        sync_on_connection_initiator(conn, doc, &admitted).await
+        sync_on_connection_initiator(conn, doc, &admitted, versions).await
     }
 
     /// Run the initiator side of the VV sync protocol on an already-connected
@@ -308,6 +382,7 @@ mod adapter {
         conn: iroh::endpoint::Connection,
         doc: &Arc<LoroDoc>,
         admitted: &AdmittedPeer,
+        versions: Option<&PeerVersions>,
     ) -> Result<iroh::endpoint::Connection> {
         // Our VV and delta go out on this stream, so the peer reads us here.
         authorize_peer_read(admitted).context("[init] peer may not read this container")?;
@@ -316,33 +391,33 @@ mod adapter {
             .open_bi()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to open bi stream: {e}"))?;
-        debug!("[init] bi open, sending VV...");
+        debug!("[init] bi open, sending hello...");
 
-        let our_vv = doc.oplog_vv();
-        write_framed(&mut send, &our_vv.encode()).await?;
-        debug!("[init] VV sent, reading peer delta...");
+        write_framed(&mut send, &encode_hello(versions, doc)?).await?;
+        debug!("[init] hello sent, reading peer delta...");
 
         let peer_delta = read_framed(&mut recv)
             .await
             .context("[init] Failed to read peer delta")?;
         debug!(
-            "[init] got delta ({} bytes), reading peer VV...",
+            "[init] got delta ({} bytes), reading peer hello...",
             peer_delta.len()
         );
-        let peer_vv_bytes = read_framed(&mut recv)
+        let peer_hello_frame = read_framed(&mut recv)
             .await
-            .context("[init] Failed to read peer VV")?;
-        debug!(
-            "[init] got VV ({} bytes), importing delta...",
-            peer_vv_bytes.len()
-        );
+            .context("[init] Failed to read peer hello")?;
+        let peer_hello = decode_hello(&peer_hello_frame, admitted.peer())?;
+        debug!("[init] got hello, importing delta...");
 
         if !peer_delta.is_empty() {
             import_peer_delta(doc, admitted, &peer_delta)
                 .context("[init] Failed to import peer delta")?;
         }
+        if let Some(versions) = versions {
+            versions.record(&peer_hello)?;
+        }
 
-        let peer_vv = loro::VersionVector::decode(&peer_vv_bytes)?;
+        let peer_vv = peer_hello.version()?;
         let our_delta = export_delta_or_full_snapshot(doc, &peer_vv, "init")?;
         debug!("[init] sending our delta ({} bytes)...", our_delta.len());
         write_framed(&mut send, &our_delta).await?;
@@ -399,7 +474,7 @@ mod adapter {
         let admitted = AdmittedPeer::ungated(container, peer_fingerprint(&conn), grant);
         let access =
             authorize_peer_read(&admitted).context("[accept] peer may not read this container")?;
-        sync_doc_handle_connection(conn, doc, &access).await
+        sync_doc_handle_connection(conn, doc, &access, None).await
     }
 
     /// Extract an addressable `EndpointAddr` for the peer of an active
@@ -441,6 +516,7 @@ mod adapter {
         conn: iroh::endpoint::Connection,
         doc: &Arc<LoroDoc>,
         access: &PeerReadAccess,
+        versions: Option<&PeerVersions>,
     ) -> Result<()> {
         let admitted = access.admitted();
         debug!("[accept] connected, accepting bi...");
@@ -450,23 +526,28 @@ mod adapter {
         };
         debug!("[accept] bi stream open");
 
-        // Receive peer's VV
-        debug!("[accept] reading peer VV...");
-        let peer_vv_bytes = with_accept_timeout("read peer VV", read_framed(&mut recv))
+        debug!("[accept] reading peer hello...");
+        let peer_hello_frame = with_accept_timeout("read peer hello", read_framed(&mut recv))
             .await
-            .context("[accept] Failed to read peer VV")?;
-        debug!("[accept] got peer VV ({} bytes)", peer_vv_bytes.len());
-        let peer_vv = loro::VersionVector::decode(&peer_vv_bytes)
-            .context("[accept] Failed to decode peer VV")?;
+            .context("[accept] Failed to read peer hello")?;
+        let peer_hello = match decode_hello(&peer_hello_frame, admitted.peer()) {
+            Ok(hello) => hello,
+            Err(e) => {
+                if e.downcast_ref::<SyncProtocolMismatch>().is_some() {
+                    conn.close(PROTOCOL_MISMATCH_CODE.into(), b"sync protocol mismatch");
+                }
+                return Err(e);
+            }
+        };
+        let peer_vv = peer_hello.version()?;
 
-        // Compute delta + send our VV
         let our_delta = export_delta_or_full_snapshot(doc, &peer_vv, "accept")?;
-        let our_vv = doc.oplog_vv();
-        debug!("[accept] sending delta ({} bytes) + VV", our_delta.len());
+        let our_hello = encode_hello(versions, doc)?;
+        debug!("[accept] sending delta ({} bytes) + hello", our_delta.len());
         // Bound the writes too: a peer that stops reading stalls `write_all`
         // once QUIC flow control fills the send buffer (a write-side slowloris).
         with_accept_timeout("send delta", write_framed(&mut send, &our_delta)).await?;
-        with_accept_timeout("send VV", write_framed(&mut send, &our_vv.encode())).await?;
+        with_accept_timeout("send hello", write_framed(&mut send, &our_hello)).await?;
 
         // Receive peer's delta
         debug!("[accept] reading peer delta...");
@@ -478,6 +559,9 @@ mod adapter {
             import_peer_delta(doc, admitted, &peer_delta)
                 .context("[accept] Failed to import peer delta")?;
             debug!("Applied {} bytes from peer", peer_delta.len());
+        }
+        if let Some(versions) = versions {
+            versions.record(&peer_hello)?;
         }
 
         send.finish()?;
@@ -1136,10 +1220,17 @@ pub use adapter::DirectSync;
     any(test, feature = "test-helpers")
 ))]
 pub use adapter::IrohSync;
+// `sync_doc_accept` — the one un-gated acceptor left — is deliberately NOT
+// re-exported: it is reachable only from inside the private `adapter` module,
+// and only in a build where `test` or `test-helpers` is on.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use adapter::PROTOCOL_MISMATCH_CODE;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::SharedTreeSyncManager;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::SyncBackend;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use adapter::SyncProtocolMismatch;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::connection_remote_addr;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -1147,10 +1238,9 @@ pub use adapter::create_endpoint;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::create_endpoint_with_key;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub use adapter::disclose_sync_refusal;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::make_alpn;
-// `sync_doc_accept` — the one un-gated acceptor left — is deliberately NOT
-// re-exported: it is reachable only from inside the private `adapter` module,
-// and only in a build where `test` or `test-helpers` is on.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use adapter::sync_doc_handle_connection;
 // The un-enrolled dialer is reachable only under `cfg(test)`, and only from

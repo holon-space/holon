@@ -5,6 +5,7 @@ mod field_write_cost;
 mod layout_create_idempotence;
 mod layout_migration;
 mod pairing_boot_degraded;
+mod pairing_refuses_trimmed_owner;
 mod persisted_read_is_consistent;
 mod projected_blocks_commits_nothing;
 mod shape_gate_cost;

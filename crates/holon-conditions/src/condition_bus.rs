@@ -418,6 +418,19 @@ pub enum ConditionKind {
     /// joined, and it ends only when the share is unshared or the peer
     /// revoked.
     BearerTicketEnrollment { peer: String },
+    /// This device refused a peer's update: the update depends on history
+    /// this device no longer holds, so the peer's edits do not reach it.
+    /// `peer` is the peer's node key; `error` is the import error.
+    ///
+    /// All-clear: never automatic — the refused edits stay on the peer until
+    /// it pairs again.
+    PeerUpdateRefused { peer: String, error: String },
+    /// A peer spoke a sync protocol this device does not speak, so the sync
+    /// was refused before any data was exchanged. `peer` is its node key.
+    ///
+    /// All-clear: never automatic — it ends when both devices run the same
+    /// Holon version.
+    SyncProtocolMismatch { peer: String },
     /// This device minted its owner identity key on its first share, and the
     /// one-time recovery code that key produced could not be shown to anyone —
     /// no surface exists yet that can display it (ADR 0028 D1 defers the mint
@@ -799,6 +812,8 @@ impl ConditionKind {
     pub const EDIT_REFUSED_BY_SHAPE: &'static str = "edit-refused-by-shape";
     pub const LOCAL_EDIT_NOT_APPLIED: &'static str = "local-edit-not-applied";
     pub const BEARER_TICKET_ENROLLMENT: &'static str = "bearer-ticket-enrollment";
+    pub const PEER_UPDATE_REFUSED: &'static str = "peer-update-refused";
+    pub const SYNC_PROTOCOL_MISMATCH: &'static str = "sync-protocol-mismatch";
     pub const OWNER_RECOVERY_CODE_NOT_SHOWN: &'static str = "owner-recovery-code-not-shown";
     pub const NESTED_SHARE_LOADED: &'static str = "nested-share-loaded";
     pub const DUPLICATE_MOUNT: &'static str = "duplicate-mount";
@@ -891,6 +906,8 @@ impl ConditionKind {
             Self::EditRefusedByShape { .. } => Self::EDIT_REFUSED_BY_SHAPE,
             Self::LocalEditNotApplied { .. } => Self::LOCAL_EDIT_NOT_APPLIED,
             Self::BearerTicketEnrollment { .. } => Self::BEARER_TICKET_ENROLLMENT,
+            Self::PeerUpdateRefused { .. } => Self::PEER_UPDATE_REFUSED,
+            Self::SyncProtocolMismatch { .. } => Self::SYNC_PROTOCOL_MISMATCH,
             Self::OwnerRecoveryCodeNotShown => Self::OWNER_RECOVERY_CODE_NOT_SHOWN,
             Self::NestedShareLoaded { .. } => Self::NESTED_SHARE_LOADED,
             Self::DuplicateMount { .. } => Self::DUPLICATE_MOUNT,

@@ -360,6 +360,19 @@ impl ConditionKind {
                  was not intended"
             )),
 
+            Self::PeerUpdateRefused { peer, error } => ConditionDetail::with_body(
+                format!(
+                    "this device refused edits from peer {peer}: they build on history this \
+                     device no longer holds. The edits stay on the peer"
+                ),
+                vec![error.clone()],
+            ),
+
+            Self::SyncProtocolMismatch { peer } => ConditionDetail::prose(format!(
+                "peer {peer} runs another sync protocol, so nothing was synced. Update Holon on \
+                 both devices to the same version"
+            )),
+
             // Says what is and is not at risk, because "no recovery code"
             // reads as "my data is one keychain away from gone" and that is
             // not what happened.

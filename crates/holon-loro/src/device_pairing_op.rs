@@ -203,6 +203,15 @@ pub enum PairingRefused {
     #[error("this device is not offering a pair, so there is nothing to cancel")]
     NoLiveOffer,
 
+    /// The owner trimmed its history, so it refuses the first changes this
+    /// device keeps when it adopts the owner's document. Refused before the
+    /// live store changes, so the pair never half succeeds.
+    #[error(
+        "the owner {owner} compacted its history and would refuse this device's edits, so the \
+         pair is refused: {error}"
+    )]
+    OwnerTrimmedHistory { owner: String, error: String },
+
     /// Nothing is owed: no pairing marker, so no archive is waiting to be
     /// re-imported. Refused rather than reported as a no-op success, because
     /// the only reason to press retry is a banner that says work is owed.
@@ -684,7 +693,11 @@ impl DevicePairing {
         &self,
         invite: &PairingInvite,
         stamp: &str,
-    ) -> anyhow::Result<(std::path::PathBuf, std::sync::Arc<crate::LoroDocument>)> {
+    ) -> anyhow::Result<(
+        std::path::PathBuf,
+        std::sync::Arc<crate::LoroDocument>,
+        crate::peer_versions::PeerVersions,
+    )> {
         let dir = self.store.storage_dir().join(format!("staging-{stamp}"));
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating the pairing staging directory {}", dir.display()))?;
@@ -711,6 +724,10 @@ impl DevicePairing {
         let endpoint = create_endpoint(alpns)
             .await
             .context("creating this device's iroh endpoint for pairing")?;
+        // Under this device's id, so the owner records it as a paired device
+        // that holds none of the owner's history yet.
+        let versions =
+            crate::peer_versions::PeerVersions::in_memory(self.store.peer_versions()?.device());
 
         for ticket in &invite.containers {
             // ALLOW(loro_doc_escape): the iroh sync adapter owns the document
@@ -729,6 +746,7 @@ impl DevicePairing {
                     // owner authors into the staging doc we just built for it
                     // (D72.a: an own device is a full writer).
                     Capabilities::read_write(),
+                    Some(&versions),
                 ),
             )
             .await
@@ -744,7 +762,39 @@ impl DevicePairing {
         staged
             .save_to_file(&crate::pairing_swap::global_snapshot(&dir))
             .context("writing the owner's document to the pairing staging directory")?;
-        Ok((dir, staged))
+        Ok((dir, staged, versions))
+    }
+
+    /// Refuse the pair when the owner would refuse this device's edits. The
+    /// adoption keeps this device's own first changes, and an owner that
+    /// trimmed its history refuses them (they share no history with it).
+    async fn refuse_trimmed_owner(
+        &self,
+        invite: &PairingInvite,
+        staged: &crate::LoroDocument,
+    ) -> anyhow::Result<()> {
+        let own = self.store.get_doc(DocScope::Global).await?.with_read(|d| {
+            d.export(loro::ExportMode::all_updates())
+                .map_err(|e| anyhow::anyhow!("exporting this device's history: {e}"))
+        })?;
+        let refusal = staged.with_read(|owner_doc| {
+            if !owner_doc.is_shallow() {
+                return Ok(None);
+            }
+            Ok(owner_doc.fork().import(&own).err().map(|e| e.to_string()))
+        })?;
+        let Some(error) = refusal else {
+            return Ok(());
+        };
+        let owner = owner_endpoint(invite);
+        self.bus.emit(Condition {
+            subject: DEVICE_ENTITY.to_string(),
+            reason: ConditionKind::PeerUpdateRefused {
+                peer: owner.clone(),
+                error: error.clone(),
+            },
+        });
+        Err(PairingRefused::OwnerTrimmedHistory { owner, error }.into())
     }
 
     /// Empty the live global document and replay the owner's history into it.
@@ -1160,6 +1210,7 @@ impl DevicePairingOperations<()> for DevicePairing {
                     Capabilities::read_write(),
                     None,
                     None,
+                    self.registry().peer_versions_of(&container.id)?,
                 )
                 .await;
             let addr = match advertised {
@@ -1264,7 +1315,8 @@ impl DevicePairingOperations<()> for DevicePairing {
         self.refuse_unpairable(&invite).await?;
 
         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
-        let (staging, staged) = self.stage_owner_documents(&invite, &stamp).await?;
+        let (staging, staged, versions) = self.stage_owner_documents(&invite, &stamp).await?;
+        self.refuse_trimmed_owner(&invite, &staged).await?;
         // A share accepted while the dial ran would be wiped below.
         self.refuse_holding_mounts().await?;
 
@@ -1290,6 +1342,7 @@ impl DevicePairingOperations<()> for DevicePairing {
             .context("archiving this device's global document for the owner's")?;
 
         self.adopt_staged_document(&staged).await?;
+        self.store.peer_versions()?.merge_from(&versions)?;
         let reimported = self.reimport_from_archive(&marker.archive).await?;
 
         self.store

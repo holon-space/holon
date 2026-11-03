@@ -94,6 +94,10 @@ pub struct LoroDocumentStore {
     /// text side from inside other runtimes, where an async read would have to
     /// block on one executor from within another.
     text_undo: Arc<std::sync::OnceLock<Arc<TextUndo>>>,
+    /// What every paired device holds of the global doc; compaction trims
+    /// only below it. Loaded on first use.
+    #[cfg(not(target_arch = "wasm32"))]
+    peer_versions: Arc<std::sync::OnceLock<Arc<crate::peer_versions::PeerVersions>>>,
 }
 
 /// What one doc's snapshot plus update log hold on disk.
@@ -127,7 +131,20 @@ impl LoroDocumentStore {
             conditions: None,
             peer_id: None,
             text_undo: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            peer_versions: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// The version map of the global doc's paired devices, stored beside its
+    /// snapshot.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn peer_versions(&self) -> Result<Arc<crate::peer_versions::PeerVersions>> {
+        if let Some(ledger) = self.peer_versions.get() {
+            return Ok(ledger.clone());
+        }
+        let ledger = Arc::new(crate::peer_versions::PeerVersions::open(&self.storage_dir)?);
+        Ok(self.peer_versions.get_or_init(|| ledger).clone())
     }
 
     /// Pin the peer id the global doc is minted under (the session-config
@@ -483,21 +500,25 @@ impl LoroDocumentStore {
         }
 
         // Periodic history compaction: every Nth snapshot (incl. the first of
-        // a session, which sheds history accumulated in prior sessions) is
-        // shallow. Holon undo replays the inverse-command log, so trimmed Loro
-        // history is never needed locally; stale P2P peers get a full snapshot
-        // via the delta-export guard in `iroh_sync_adapter`. Kill-switch:
-        // HOLON_LORO_COMPACT=off.
+        // a session, which sheds history accumulated in prior sessions) of the
+        // replicated doc trims the history every paired device already holds;
+        // the device-local layout doc trims all of it. Holon undo replays the
+        // inverse-command log, so trimmed Loro history is never needed
+        // locally. Kill-switch: HOLON_LORO_COMPACT=off.
         const COMPACT_EVERY: u64 = 64;
         let n = self.save_counter.fetch_add(1, Ordering::Relaxed);
         let compact = std::env::var("HOLON_LORO_COMPACT")
             .map(|v| v != "off")
             .unwrap_or(true)
             && n.is_multiple_of(COMPACT_EVERY);
-        let full = doc.export_for_save(if compact {
-            SaveExport::CompactSnapshot
-        } else {
-            SaveExport::Snapshot
+        let floor = match (compact, scope) {
+            (true, DocScope::Global) => self.peer_versions()?.floor(),
+            _ => None,
+        };
+        let full = doc.export_for_save(match (compact, scope, &floor) {
+            (true, DocScope::Layout, _) => SaveExport::CompactSnapshot,
+            (true, DocScope::Global, Some(floor)) => SaveExport::CompactSnapshotBelow(floor),
+            _ => SaveExport::Snapshot,
         })?;
         std::fs::create_dir_all(&self.storage_dir)
             .with_context(|| format!("create the Loro dir {}", self.storage_dir.display()))?;

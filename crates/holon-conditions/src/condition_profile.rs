@@ -683,6 +683,24 @@ const BEARER_TICKET_ENROLLMENT: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const PEER_UPDATE_REFUSED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A peer's edits were refused",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const SYNC_PROTOCOL_MISMATCH: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A peer runs another sync protocol",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const OWNER_RECOVERY_CODE_NOT_SHOWN: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Sharing key has no recovery code",
@@ -1063,6 +1081,8 @@ impl ConditionKind {
             Self::DeletedSharedPage { .. } => DELETED_SHARED_PAGE,
             Self::PairingReimportDeferred { .. } => PAIRING_REIMPORT_DEFERRED,
             Self::BearerTicketEnrollment { .. } => BEARER_TICKET_ENROLLMENT,
+            Self::PeerUpdateRefused { .. } => PEER_UPDATE_REFUSED,
+            Self::SyncProtocolMismatch { .. } => SYNC_PROTOCOL_MISMATCH,
             Self::OwnerRecoveryCodeNotShown => OWNER_RECOVERY_CODE_NOT_SHOWN,
             Self::NestedShareLoaded { .. } => NESTED_SHARE_LOADED,
             Self::DuplicateMount { .. } => DUPLICATE_MOUNT,

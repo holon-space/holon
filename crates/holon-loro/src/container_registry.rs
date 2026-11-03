@@ -218,8 +218,20 @@ mod replicate {
     use super::*;
     use crate::iroh_advertiser::IrohAdvertiser;
     use crate::iroh_advertiser::SharedRoster;
+    use crate::peer_versions::PeerVersions;
 
     impl ContainerRegistry {
+        /// The ledger of what each paired device holds of container `id`. Only
+        /// the root container keeps one: a share container is never trimmed
+        /// below its peers' history by this rule.
+        pub fn peer_versions_of(&self, id: &str) -> Result<Option<Arc<PeerVersions>>> {
+            if id == ROOT_CONTAINER_ID {
+                Ok(Some(self.store.peer_versions()?))
+            } else {
+                Ok(None)
+            }
+        }
+
         /// The everything-policy fast path (ADR C1). Advertises **every**
         /// container in the replication set, each gated by the self-device
         /// `roster`. Returns each container's `(id, addr)`.
@@ -256,6 +268,7 @@ mod replicate {
                         Capabilities::read_write(),
                         None,
                         None,
+                        self.peer_versions_of(&container.id)?,
                     )
                     .await?;
                 advertised.push((container.id, addr));

@@ -3,7 +3,7 @@ id: 2026-11-02-compacted-peer-refuses-concurrent-edits
 date: 2026-11-02
 gap: COVERAGE
 secondary: ENVIRONMENT
-status: OPEN
+status: FIXED
 summary: >-
   A peer that reloaded its history-compacted snapshot refuses every edit a paired peer made concurrently to the trim, and the other peer silently does not receive the compacted peer's edits, so the two never converge.
 ---
@@ -36,4 +36,10 @@ Pinned by `crates/holon-loro/tests/compacted_peer_receives_concurrent_edits.rs`
 - Does the failing code path run in the keystone's wiring? Yes, the sync path does (`replicate_all`, `sync_doc_initiate_enrolled`). The shallow reload does not.
 
 ## Remedy
-Open. Fix options wait for a ruling on card #916.
+FIXED in change zqnkqrqo.
+- The store keeps each paired peer's last version vector (`crates/holon-loro/src/peer_versions.rs`), persisted across a restart. The sync handshake carries the sender's version and its map device -> version; the receiver merges per device the larger vector.
+- The shallow snapshot trims only below the meet of the own version and every recorded vector. A store with no recorded peer does not trim.
+- A refused import raises a `PeerUpdateRefused` condition that names the peer and the Loro error. A peer with the old protocol is refused at the handshake with a `SyncProtocolMismatch` condition.
+- Pairing with an owner whose history is trimmed fails visibly and changes nothing.
+- Pinned by `crates/holon-loro/tests/compacted_peer_receives_concurrent_edits.rs` (pair, star, chain and 3-cycle topologies with restarts; safety: no refusal; liveness: the trim floor advances) and `crates/holon-loro/tests/pairing_refuses_trimmed_owner.rs`.
+- Open: a late join of a device that did not pair by adoption (#927).

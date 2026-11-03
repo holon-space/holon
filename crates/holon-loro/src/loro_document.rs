@@ -457,10 +457,15 @@ impl LoroDocument {
                 .set_next_commit_origin(&WriteOrigin::SnapshotFlush.as_origin());
             self.doc.commit();
             let frontiers = self.doc.oplog_frontiers();
-            let mode = match kind {
-                SaveExport::Snapshot => loro::ExportMode::Snapshot,
-                SaveExport::CompactSnapshot => loro::ExportMode::shallow_snapshot(&frontiers),
-                SaveExport::UpdatesSince(vv) => loro::ExportMode::updates(vv),
+            let trim_at = match kind {
+                SaveExport::CompactSnapshotBelow(peers) => self.trim_frontiers(peers),
+                _ => None,
+            };
+            let mode = match (kind, &trim_at) {
+                (SaveExport::UpdatesSince(vv), _) => loro::ExportMode::updates(vv),
+                (SaveExport::CompactSnapshot, _) => loro::ExportMode::shallow_snapshot(&frontiers),
+                (_, Some(at)) => loro::ExportMode::shallow_snapshot(at),
+                (_, None) => loro::ExportMode::Snapshot,
             };
             Ok(SaveExported {
                 bytes: self.doc.export(mode)?,
@@ -468,6 +473,30 @@ impl LoroDocument {
                 frontiers,
             })
         })
+    }
+
+    /// Where a compaction below `peers` starts: the heads of the meet of
+    /// `peers` and this doc's version, plus the doc's own heads. Loro starts
+    /// at their common ancestor, so every edit above the meet descends from
+    /// the start, as an importable snapshot needs. `None` when the meet keeps
+    /// all history, or when the doc is already trimmed at or above it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn trim_frontiers(&self, peers: &loro::VersionVector) -> Option<loro::Frontiers> {
+        let floor = peers.intersection(&self.doc.oplog_vv());
+        let trimmed = self.doc.shallow_since_vv().to_vv();
+        if floor.is_empty() || !floor.includes_vv(&trimmed) || floor == trimmed {
+            return None;
+        }
+        let mut heads = self.doc.vv_to_frontiers(&floor);
+        if heads == self.doc.shallow_since_frontiers() {
+            return None;
+        }
+        for id in self.doc.oplog_frontiers().iter() {
+            if !heads.contains(&id) {
+                heads.push(id);
+            }
+        }
+        Some(heads)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -535,6 +564,9 @@ pub enum SaveExport<'a> {
     /// A snapshot without the history before its frontiers (see
     /// [`LoroDocument::export_compact_snapshot`]).
     CompactSnapshot,
+    /// A snapshot without the history below both this version and the doc's
+    /// own; a full snapshot when that trims nothing new.
+    CompactSnapshotBelow(&'a loro::VersionVector),
     UpdatesSince(&'a loro::VersionVector),
 }
 

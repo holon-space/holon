@@ -33,11 +33,13 @@ use tracing::warn;
 use crate::iroh_sync_adapter::connection_remote_addr;
 use crate::iroh_sync_adapter::create_endpoint;
 use crate::iroh_sync_adapter::create_endpoint_with_key;
+use crate::iroh_sync_adapter::disclose_sync_refusal;
 use crate::iroh_sync_adapter::make_alpn;
 use crate::iroh_sync_adapter::sync_doc_handle_connection;
 use crate::peer_import::AdmittedPeer;
 use crate::peer_import::PeerReadAccess;
 use crate::peer_import::authorize_peer_read;
+use crate::peer_versions::PeerVersions;
 use crate::share_enrollment::AcceptorRefused;
 use crate::share_enrollment::AdmissionBasis;
 use crate::share_enrollment::AuthorizedPeer;
@@ -166,6 +168,7 @@ impl IrohAdvertiser {
             None,
             None,
             ShareAdmission::Ungated { capabilities },
+            None,
         )
         .await
     }
@@ -173,7 +176,9 @@ impl IrohAdvertiser {
     /// Start advertising WITH an enrollment roster: every inbound peer must
     /// prove the share capability (or present an owner-signed device entry)
     /// before any sync, and is then admitted with `capabilities`. This is the
-    /// enforced (H5) boundary.
+    /// enforced (H5) boundary. `versions` is the ledger of what each paired
+    /// device holds of `doc`, which every sync round updates.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_share_gated(
         &self,
         shared_tree_id: String,
@@ -182,6 +187,7 @@ impl IrohAdvertiser {
         capabilities: Capabilities,
         on_peer_connected: Option<OnPeerConnected>,
         preferred_port: Option<u16>,
+        versions: Option<Arc<PeerVersions>>,
     ) -> Result<EndpointAddr> {
         self.start_share_with_callback(
             shared_tree_id,
@@ -192,6 +198,7 @@ impl IrohAdvertiser {
                 roster,
                 capabilities,
             },
+            versions,
         )
         .await
     }
@@ -222,6 +229,7 @@ impl IrohAdvertiser {
         on_peer_connected: Option<OnPeerConnected>,
         preferred_port: Option<u16>,
         admission: ShareAdmission,
+        versions: Option<Arc<PeerVersions>>,
     ) -> Result<EndpointAddr> {
         // Gated with the variant it reports: a production build cannot construct
         // an un-gated share, so this disclosure only has a subject under `test`.
@@ -268,6 +276,7 @@ impl IrohAdvertiser {
             on_peer_connected,
             admission,
             self.degraded_bus.clone(),
+            versions,
         ));
 
         guard.insert(
@@ -376,6 +385,7 @@ async fn accept_loop(
     on_peer_connected: Option<OnPeerConnected>,
     admission: ShareAdmission,
     degraded_bus: Option<Arc<ConditionBus>>,
+    versions: Option<Arc<PeerVersions>>,
 ) {
     debug!("[advertiser:{shared_tree_id}] accept loop started");
     while let Some(incoming) = endpoint.accept().await {
@@ -384,6 +394,7 @@ async fn accept_loop(
         let cb = on_peer_connected.clone();
         let admission = admission.clone();
         let bus = degraded_bus.clone();
+        let versions = versions.clone();
         tokio::spawn(async move {
             let conn = match incoming.await {
                 Ok(c) => c,
@@ -484,8 +495,13 @@ async fn accept_loop(
             if let Some(ref cb) = cb {
                 cb(&access, remote);
             }
-            if let Err(e) = sync_doc_handle_connection(conn, &doc, &access).await {
-                warn!("[advertiser:{id}] sync connection failed: {e:#}");
+            if let Err(e) =
+                sync_doc_handle_connection(conn, &doc, &access, versions.as_deref()).await
+            {
+                match bus.as_deref() {
+                    Some(bus) if disclose_sync_refusal(bus, &id, &e) => {}
+                    _ => warn!("[advertiser:{id}] sync connection failed: {e:#}"),
+                }
             }
         });
     }
@@ -521,6 +537,7 @@ mod tests {
             capability,
             shared_tree_id,
             Capabilities::read_write(),
+            None,
         )
         .await
     }
@@ -633,6 +650,7 @@ mod tests {
                     ShareAdmission::Ungated {
                         capabilities: granted,
                     },
+                    None,
                 )
                 .await?;
 
@@ -724,6 +742,7 @@ mod tests {
                 Capabilities::read_write(),
                 None,
                 None,
+                None,
             )
             .await?;
         let alpn = make_alpn(ALPN_PREFIX, tree_id);
@@ -767,6 +786,91 @@ mod tests {
             "a bearer-ticket admission must be disclosed exactly once: raised on the enrolling \
              dial, not re-raised on the reconnect that rides the pin"
         );
+        Ok(())
+    }
+
+    /// A dialer on the protocol before the sync hello sends its bare version
+    /// vector. The acceptor refuses it at the handshake, raises the mismatch on
+    /// its bus and closes with the mismatch code, so the dialer ends instead of
+    /// waiting for a delta.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_old_protocol_peer_is_refused_at_the_handshake_with_a_condition() -> Result<()> {
+        use holon_conditions::condition_bus::ConditionBus;
+        use holon_conditions::condition_bus::ConditionKind;
+
+        use crate::iroh_sync_adapter::PROTOCOL_MISMATCH_CODE;
+        use crate::share_enrollment::CapabilitySecret;
+        use crate::share_enrollment::ExpiryTime;
+        use crate::share_enrollment::ShareRoster;
+        use crate::share_enrollment::initiator_enroll;
+
+        let tree_id = "oldProtocol";
+        let bus = Arc::new(ConditionBus::new());
+        let server_doc = Arc::new(LoroDoc::new());
+        server_doc.set_peer_id(11)?;
+        let capability = CapabilitySecret::generate();
+        let roster = Arc::new(tokio::sync::Mutex::new(ShareRoster::new(
+            tree_id,
+            capability.clone(),
+            ExpiryTime(chrono::Utc::now().timestamp() + 3600),
+            4,
+        )));
+        let adv = IrohAdvertiser::new().with_degraded_bus(bus.clone());
+        let addr = adv
+            .start_share_gated(
+                tree_id.into(),
+                server_doc,
+                roster,
+                Capabilities::read_write(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let alpn = make_alpn(ALPN_PREFIX, tree_id);
+        let client_ep = create_endpoint(vec![alpn.clone()]).await?;
+        let client_doc = LoroDoc::new();
+        client_doc.set_peer_id(22)?;
+
+        let (answered, closed) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let conn = client_ep.connect(addr, &alpn).await?;
+            initiator_enroll(&conn, &capability, tree_id).await?;
+            let (mut send, mut recv) = conn.open_bi().await?;
+            let old_hello = client_doc.oplog_vv().encode();
+            send.write_all(&(old_hello.len() as u32).to_be_bytes())
+                .await?;
+            send.write_all(&old_hello).await?;
+            let mut len = [0u8; 4];
+            let answered = recv.read_exact(&mut len).await.is_ok();
+            anyhow::Ok((answered, conn.closed().await))
+        })
+        .await
+        .context("an old-protocol dialer was left waiting")??;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        adv.drop_share(tree_id).await?;
+
+        assert!(!answered, "the acceptor answered an old-protocol hello");
+        assert!(
+            matches!(
+                closed,
+                iroh::endpoint::ConnectionError::ApplicationClosed(ref frame)
+                    if frame.error_code == PROTOCOL_MISMATCH_CODE.into()
+            ),
+            "the acceptor closed without the mismatch code: {closed:?}"
+        );
+        let mismatches: Vec<_> = bus
+            .current()
+            .into_iter()
+            .filter(|c| matches!(c.reason, ConditionKind::SyncProtocolMismatch { .. }))
+            .collect();
+        assert_eq!(
+            mismatches.len(),
+            1,
+            "the refused handshake raises one protocol-mismatch condition, got {:?}",
+            bus.current()
+        );
+        assert_eq!(mismatches[0].subject, tree_id);
         Ok(())
     }
 
@@ -835,6 +939,7 @@ mod tests {
                 Capabilities::read_write(),
                 None,
                 None,
+                None,
             )
             .await?;
         let alpn = make_alpn(ALPN_PREFIX, tree_id);
@@ -876,6 +981,7 @@ mod tests {
             &forged_cap,
             tree_id,
             Capabilities::read_write(),
+            None,
         )
         .await;
         assert!(
@@ -901,6 +1007,7 @@ mod tests {
             &real_cap,
             tree_id,
             Capabilities::read_write(),
+            None,
         )
         .await
         .context("honest recipient with the real capability must enroll and sync")?;
@@ -962,6 +1069,7 @@ mod tests {
                 server_doc.clone(),
                 roster.clone(),
                 Capabilities::read_only(),
+                None,
                 None,
                 None,
             )
@@ -1076,6 +1184,7 @@ mod tests {
                 Capabilities::read_write(),
                 None,
                 None,
+                None,
             )
             .await?;
         let alpn = make_alpn(ALPN_PREFIX, tree_id);
@@ -1091,6 +1200,7 @@ mod tests {
             &forged,
             tree_id,
             Capabilities::read_write(),
+            None,
         )
         .await
         .expect_err("a forged capability must be refused");
@@ -1199,6 +1309,7 @@ mod tests {
                 Capabilities::read_write(),
                 None,
                 None,
+                None,
             )
             .await?;
         let exp_alpn = make_alpn(ALPN_PREFIX, exp_id);
@@ -1240,6 +1351,7 @@ mod tests {
                 cap_doc.clone(),
                 capped_roster.clone(),
                 Capabilities::read_write(),
+                None,
                 None,
                 None,
             )

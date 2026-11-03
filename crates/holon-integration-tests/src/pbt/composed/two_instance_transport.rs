@@ -460,6 +460,7 @@ impl TwoInstanceTransport for IrohTransport {
             // watermark reads around it go through the doc boundary.
             let doc = container.doc.doc();
             let before = container.doc.with_read(|d| Ok(d.oplog_vv()))?;
+            let versions = req.consumer.peer_versions_of(id)?;
 
             self.dials.fetch_add(1, Ordering::SeqCst);
             let dial = tokio::time::timeout(
@@ -475,6 +476,7 @@ impl TwoInstanceTransport for IrohTransport {
                     // authors into the other (the property under test is
                     // convergence under concurrent edits).
                     holon_api::sharing::Capabilities::read_write(),
+                    versions.as_deref(),
                 ),
             )
             .await

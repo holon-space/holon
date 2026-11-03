@@ -219,6 +219,8 @@ See [ADR 0001: Hybrid Sync Architecture](../adr/0001-hybrid-sync-architecture.md
 
 Iroh P2P is independently optional (bundled with Loro; future: separate env var). On WASM, Iroh is unavailable and documents operate in local-only mode.
 
+**History trim rule.** Each sync handshake (`holon-sync/2`) carries the sender's version vector and its map `device -> last known version vector` (`crates/holon-loro/src/peer_versions.rs`); the receiver merges it, per device the larger vector, after it imported the sender's delta, and persists it beside the store. The global document's compacting snapshot trims only below the meet of that map and its own version, so no paired device can send an update that depends on trimmed history. A device with no recorded peer does not trim. A peer the store would still refuse (one that joined after a trim without adopting the history, or one that speaks an older protocol) raises a `PeerUpdateRefused` or `SyncProtocolMismatch` condition on the refusing device.
+
 ### LoroBackend (Document Repository)
 
 The high-level repository implementation that provides the primary API for block document operations. `LoroBackend` wraps `LoroDocument` (an internal thin wrapper around `loro::LoroDoc`) and implements the repository trait hierarchy.
