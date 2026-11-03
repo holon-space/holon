@@ -180,11 +180,13 @@ impl RemoteListSut {
             .collect()
     }
 
-    /// A mirrored cell as the oracle spells it: text verbatim, a latch as
-    /// `0`/`1` whichever way the column reads back.
+    /// A mirrored cell as the oracle spells it: text verbatim (a formatted
+    /// amount as its stored text), a latch as `0`/`1` whichever way the column
+    /// reads back.
     fn canonical_cell(value: Option<&Value>) -> String {
         match value {
             Some(Value::String(s)) => s.clone(),
+            Some(Value::Quantity(cell)) => cell.original().to_owned(),
             Some(Value::Integer(n)) => n.to_string(),
             Some(Value::Boolean(b)) => u8::from(*b).to_string(),
             Some(Value::Null) | None => String::new(),
@@ -317,5 +319,17 @@ impl SutRemoteListSync for RemoteListSut {
 
     async fn remote_list_peer_entries(&self) -> Vec<Vec<String>> {
         self.app.list().entries()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // One fixed case, not a PBT: the claim is that the fall-through arm stays loud.
+    #[test]
+    #[should_panic(expected = "a mirrored cell of an unexpected kind: Float(1.5)")]
+    fn a_cell_kind_the_mirror_does_not_spell_stays_loud() {
+        RemoteListSut::canonical_cell(Some(&Value::Float(1.5)));
     }
 }
