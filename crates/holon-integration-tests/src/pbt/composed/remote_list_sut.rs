@@ -186,7 +186,13 @@ impl RemoteListSut {
     fn canonical_cell(value: Option<&Value>) -> String {
         match value {
             Some(Value::String(s)) => s.clone(),
-            Some(Value::Quantity(cell)) => cell.original().to_owned(),
+            Some(Value::Quantity(cell)) => {
+                eprintln!(
+                    "[reach] remote-list-mirror-quantity-cell: {}",
+                    cell.original()
+                );
+                cell.original().to_owned()
+            }
             Some(Value::Integer(n)) => n.to_string(),
             Some(Value::Boolean(b)) => u8::from(*b).to_string(),
             Some(Value::Null) | None => String::new(),
