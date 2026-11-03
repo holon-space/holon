@@ -66,6 +66,19 @@ fn general_e2e_composed_pbt() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(16);
 
+    // The settle waits for targets; the product watchdogs must not fire first
+    // on a loaded host.
+    for (var, ms) in [
+        ("HOLON_ACTOR_HANG_MS", "600000"),
+        ("HOLON_BOOT_GATE_WATCHDOG_MS", "3600000"),
+    ] {
+        if std::env::var(var).is_err() {
+            // SAFETY: nextest runs this test alone in its process, before the
+            // PBT spawns any thread that reads the environment.
+            unsafe { std::env::set_var(var, ms) };
+        }
+    }
+
     let mut guard = RunResultGuard::new("keystone", cases);
 
     let mut config = proptest::test_runner::contextualize_config(Config {

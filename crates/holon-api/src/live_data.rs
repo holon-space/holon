@@ -662,6 +662,67 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
 /// modes — the backing matview exists with or without Loro.
 pub struct BlockFeed(pub Arc<LiveData<crate::block::Block>>);
 
+/// One CDC subscription's progress: the last batch `seq` routed to it, and
+/// the last one its consumer applied.
+#[derive(Debug, Default)]
+pub struct DeliveryCursor {
+    sent: AtomicU64,
+    applied: AtomicU64,
+}
+
+impl DeliveryCursor {
+    pub fn sent(&self) -> u64 {
+        self.sent.load(Ordering::Acquire)
+    }
+
+    pub fn applied(&self) -> u64 {
+        self.applied.load(Ordering::Acquire)
+    }
+
+    pub fn is_lagging(&self) -> bool {
+        self.applied() < self.sent()
+    }
+
+    /// Called by the router before it hands the subscriber batch `seq`.
+    pub fn routed(&self, seq: u64) {
+        self.sent.fetch_max(seq, Ordering::Release);
+    }
+
+    /// Called by the consumer once batch `seq` is applied.
+    pub fn applied_through(&self, seq: u64) {
+        self.applied.fetch_max(seq, Ordering::Release);
+    }
+
+    /// Called by the router for a batch that holds nothing for this
+    /// subscriber: a caught-up subscriber is settled through it too.
+    pub fn skipped(&self, seq: u64) {
+        // Safe without a lock: the consumer only applies seqs up to `sent`,
+        // and the router is the only writer of `sent`.
+        if !self.is_lagging() {
+            self.sent.fetch_max(seq, Ordering::Release);
+            self.applied.fetch_max(seq, Ordering::Release);
+        }
+    }
+}
+
+tokio::task_local! {
+    static REPORTING_CURSOR: Arc<DeliveryCursor>;
+}
+
+/// Run `subscribe` so that the CDC subscription it makes reports to `cursor`;
+/// its consumer then calls [`DeliveryCursor::applied_through`] per batch.
+pub async fn reporting_to<F: std::future::Future>(
+    cursor: Arc<DeliveryCursor>,
+    subscribe: F,
+) -> F::Output {
+    REPORTING_CURSOR.scope(cursor, subscribe).await
+}
+
+/// The cursor of the enclosing [`reporting_to`], if any.
+pub fn reporting_cursor() -> Option<Arc<DeliveryCursor>> {
+    REPORTING_CURSOR.try_with(Arc::clone).ok() // ALLOW(ok): outside a scope no consumer reports
+}
+
 /// A [`LiveData`] whose HOLDER is the authority — the handle
 /// [`LiveData::in_memory`] returns.
 ///

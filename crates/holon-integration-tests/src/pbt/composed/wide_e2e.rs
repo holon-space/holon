@@ -277,29 +277,24 @@ async fn converge_projections(handle: &WideHandle, budget: Duration) {
 async fn converge_projections_until(handle: &WideHandle, patience: Patience) {
     // The frontend accessors are queried at settle time, not at boot: the sync
     // controller / idle signal resolve on a spawned `post_ready_work` task.
-    let (sync, org_idle, block_feed) = match &handle.frontend {
-        Some(comp) => (
-            comp.loro_sync_handle(),
-            comp.org_idle_signal(),
-            comp.block_feed(),
-        ),
-        None => (None, None, None),
+    let signals = match &handle.frontend {
+        Some(comp) => crate::pbt::convergence::Signals {
+            engine: handle.engine.as_ref(),
+            sync: comp.loro_sync_handle(),
+            org_idle: comp.org_idle_signal(),
+            org_files: Some(comp.org_files()),
+            block_feed: comp.block_feed(),
+        },
+        None => crate::pbt::convergence::Signals {
+            engine: handle.engine.as_ref(),
+            sync: None,
+            org_idle: None,
+            org_files: None,
+            block_feed: None,
+        },
     };
-    // The reactive engine whose watch-consumer drain the settle must also wait
-    // out (see `converge_signals`' reactive-epoch stage): its `snapshot()` is
-    // what the ViewModel invariants read.
-    let reactive = handle.reactive();
-    // A settled SUT still returns in ~one quiet floor.
-    if let Err(gave_up) = crate::pbt::convergence::converge_signals(
-        handle.engine.as_ref(),
-        sync,
-        org_idle,
-        block_feed,
-        reactive.as_ref(),
-        patience,
-    )
-    .await
-    {
+    let settle_started = std::time::Instant::now();
+    if let Err(gave_up) = crate::pbt::convergence::converge_signals(signals, patience).await {
         panic!(
             "[converge_projections] projections did not reach a combined fixed point {gave_up}: \
              the Loro->SQL sort_key projection / Turso CDC / org re-render are still churning. \
@@ -308,6 +303,8 @@ async fn converge_projections_until(handle: &WideHandle, patience: Patience) {
              swallow."
         );
     }
+
+    tracing::debug!(target: "holon_settle", ms = settle_started.elapsed().as_secs_f64() * 1e3, "settled");
 
     // Advice weave (ADR 0022): now that CDC has converged (the `advice_rule_{slug}`
     // matview + `advice_suppressed` reflect the settled SQL state), recompute the

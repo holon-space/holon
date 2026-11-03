@@ -138,6 +138,17 @@ pub mod projection_stats {
 const BOOT_GATE_WARN_EVERY: Duration = Duration::from_secs(60);
 const BOOT_GATE_WATCHDOG: Duration = Duration::from_secs(600);
 
+/// [`BOOT_GATE_WATCHDOG`], or `HOLON_BOOT_GATE_WATCHDOG_MS` when set.
+fn boot_gate_watchdog() -> Duration {
+    match std::env::var("HOLON_BOOT_GATE_WATCHDOG_MS") {
+        Ok(ms) => Duration::from_millis(
+            ms.parse()
+                .expect("HOLON_BOOT_GATE_WATCHDOG_MS must be a u64 millisecond count"),
+        ),
+        Err(_) => BOOT_GATE_WATCHDOG,
+    }
+}
+
 /// Why [`wait_for_boot_gate`] stopped waiting. Every variant proceeds to run
 /// the loop — a projector that never starts strands every Loro change short of
 /// the SQL sink, which is strictly worse than reconciling during a scan.
@@ -573,7 +584,7 @@ impl LoroSyncController {
                 tokio::select! {
                     biased;
                     () = cancelled_at_gate => return,
-                    _outcome = wait_for_boot_gate(watcher, BOOT_GATE_WARN_EVERY, BOOT_GATE_WATCHDOG) => {}
+                    _outcome = wait_for_boot_gate(watcher, BOOT_GATE_WARN_EVERY, boot_gate_watchdog()) => {}
                 }
                 started_for_task.store(true, Ordering::SeqCst);
                 self.run_loop(shutdown_for_task).await;

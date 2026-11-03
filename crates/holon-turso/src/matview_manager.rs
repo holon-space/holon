@@ -18,6 +18,7 @@ use anyhow::Context;
 use anyhow::Result;
 use holon_api::BatchWithMetadata;
 use holon_api::Value;
+use holon_api::live_data::DeliveryCursor;
 use holon_core::storage::Resource;
 use holon_core::storage::StorageEntity;
 use tokio::sync::broadcast;
@@ -604,6 +605,7 @@ enum DemuxCommand {
         /// pre-existing subscriber.
         watch_key: Option<String>,
         tx: mpsc::Sender<BatchWithMetadata<RowChange>>,
+        cursor: Arc<DeliveryCursor>,
         ack: oneshot::Sender<()>,
     },
 }
@@ -636,6 +638,7 @@ pub struct MatviewManager {
     /// Shared because the manager that drops a view is often not the one
     /// whose demux delivers to its subscribers.
     subscriptions: Arc<std::sync::Mutex<Subscriptions>>,
+    delivery: Arc<std::sync::Mutex<Delivery>>,
     /// Counters for measuring cache effectiveness. `cache_hits` is the number
     /// of `ensure_view`/`preload` calls that returned via the in-memory cache
     /// without a `view_exists` SQL round trip. `exists_calls` is the number of
@@ -661,7 +664,38 @@ struct SharedViewState {
     known_views: Arc<tokio::sync::RwLock<KnownViews>>,
     view_sql: Arc<std::sync::Mutex<HashMap<String, String>>>,
     subscriptions: Arc<std::sync::Mutex<Subscriptions>>,
+    delivery: Arc<std::sync::Mutex<Delivery>>,
     ddl_mutex: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// How far CDC delivery has got on one database: each demux's last routed
+/// batch, and every subscription's [`DeliveryCursor`].
+#[derive(Default)]
+struct Delivery {
+    routed: Vec<std::sync::Weak<AtomicU64>>,
+    cursors: Vec<DeliveryEntry>,
+}
+
+struct DeliveryEntry {
+    view_name: String,
+    cursor: std::sync::Weak<DeliveryCursor>,
+    reports_applied: bool,
+}
+
+/// What [`MatviewManager::settled_up_to`] found.
+#[derive(Debug)]
+pub struct SettledUpTo {
+    /// Every demux of the database has routed each batch up to this `seq`.
+    pub routed_through: u64,
+    /// Subscriptions whose consumer has not applied every batch routed to it.
+    pub lagging: Vec<LaggingSubscription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaggingSubscription {
+    pub view_name: String,
+    pub sent: u64,
+    pub applied: u64,
 }
 
 /// Weak handles on the CDC subscriptions of one database, by view. Weak so
@@ -743,6 +777,7 @@ fn shared_for_database(
         })),
         view_sql: Arc::new(std::sync::Mutex::new(HashMap::new())),
         subscriptions: Arc::new(std::sync::Mutex::new(Subscriptions::default())),
+        delivery: Arc::new(std::sync::Mutex::new(Delivery::default())),
         ddl_mutex: seed_mutex,
     };
     table.insert(key, (witness, state.clone()));
@@ -754,8 +789,17 @@ impl MatviewManager {
     /// manager on it; a later manager adopts the one already there, so two
     /// managers can never serialise their DDL against different locks.
     pub fn new(db_handle: DbHandle, ddl_mutex: Arc<tokio::sync::Mutex<()>>) -> Self {
-        let demux_cmd_tx = Self::spawn_demux(db_handle.cdc_broadcast().clone());
+        let routed = Arc::new(AtomicU64::new(0));
+        let demux_cmd_tx = Self::spawn_demux(db_handle.cdc_broadcast().clone(), routed.clone());
+        // The demux sees only batches broadcast after its subscription.
+        routed.fetch_max(db_handle.cdc_emitted_watermark(), Ordering::Release);
         let shared = shared_for_database(&db_handle, ddl_mutex);
+        shared
+            .delivery
+            .lock()
+            .expect("delivery mutex")
+            .routed
+            .push(Arc::downgrade(&routed));
         Self {
             db_handle,
             demux_cmd_tx,
@@ -766,10 +810,55 @@ impl MatviewManager {
             known_views: shared.known_views,
             view_sql: shared.view_sql,
             subscriptions: shared.subscriptions,
+            delivery: shared.delivery,
             cache_hits: Arc::new(AtomicU64::new(0)),
             exists_calls: Arc::new(AtomicU64::new(0)),
             ddl_creates: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// How far this database's CDC delivery has settled: what every demux has
+    /// routed, and which reporting subscriptions still owe an apply.
+    pub fn settled_up_to(&self) -> SettledUpTo {
+        let mut delivery = self.delivery.lock().expect("delivery mutex");
+        delivery.routed.retain(|r| r.strong_count() > 0);
+        delivery.cursors.retain(|e| e.cursor.strong_count() > 0);
+        let routed_through = delivery
+            .routed
+            .iter()
+            .filter_map(|r| r.upgrade())
+            .map(|r| r.load(Ordering::Acquire))
+            .min()
+            .expect("the calling manager's demux is registered while the manager lives");
+        let lagging = delivery
+            .cursors
+            .iter()
+            .filter(|e| e.reports_applied)
+            .filter_map(|e| Some((e, e.cursor.upgrade()?)))
+            .filter(|(_, c)| c.is_lagging())
+            .map(|(e, c)| LaggingSubscription {
+                view_name: e.view_name.clone(),
+                sent: c.sent(),
+                applied: c.applied(),
+            })
+            .collect();
+        SettledUpTo {
+            routed_through,
+            lagging,
+        }
+    }
+
+    /// The last batch `seq` routed to any subscription of `view_name`.
+    pub fn last_routed(&self, view_name: &str) -> u64 {
+        let delivery = self.delivery.lock().expect("delivery mutex");
+        delivery
+            .cursors
+            .iter()
+            .filter(|e| e.view_name == view_name)
+            .filter_map(|e| e.cursor.upgrade())
+            .map(|c| c.sent())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Snapshot of (cache_hits, exists_calls, ddl_creates). Useful for tests
@@ -817,6 +906,7 @@ impl MatviewManager {
     /// owned by its `WatchContextGuard` instead.
     fn spawn_demux(
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
+        routed: Arc<AtomicU64>,
     ) -> mpsc::Sender<DemuxCommand> {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<DemuxCommand>(64);
         let mut broadcast_rx = cdc_broadcast.subscribe();
@@ -825,6 +915,7 @@ impl MatviewManager {
             struct Sub {
                 watch_key: Option<String>,
                 tx: mpsc::Sender<BatchWithMetadata<RowChange>>,
+                cursor: Arc<DeliveryCursor>,
             }
             /// Deliver one batch. `false` means this subscriber is finished and
             /// must be dropped.
@@ -865,12 +956,12 @@ impl MatviewManager {
                     // Process new subscriber registrations (only when channel is open)
                     maybe_cmd = cmd_rx.recv(), if cmd_rx_open => {
                         match maybe_cmd {
-                            Some(DemuxCommand::Subscribe { view_name, watch_key, tx, ack }) => {
+                            Some(DemuxCommand::Subscribe { view_name, watch_key, tx, cursor, ack }) => {
                                 tracing::info!(
                                     "[Demux] Registered subscriber for '{}' key={:?}",
                                     view_name, watch_key
                                 );
-                                subscribers.entry(view_name).or_default().push(Sub { watch_key, tx });
+                                subscribers.entry(view_name).or_default().push(Sub { watch_key, tx, cursor });
                                 // Receiver gone = caller aborted before registration
                                 // completed; nothing to notify.
                                 let _ = ack.send(());
@@ -886,6 +977,7 @@ impl MatviewManager {
                     result = broadcast_rx.recv() => {
                         match result {
                             Ok(batch) => {
+                                let seq = batch.metadata.seq;
                                 let view_name = &batch.metadata.relation_name;
                                 let sub_count = subscribers.get(view_name).map(|s| s.len()).unwrap_or(0);
                                 if !batch.inner.items.is_empty() {
@@ -918,7 +1010,10 @@ impl MatviewManager {
                                     // quiet and this loop only ever runs on a
                                     // write.
                                     senders.retain(|sub| match &sub.watch_key {
-                                        None => send_batch(&sub.tx, batch.clone(), view_name),
+                                        None => {
+                                            sub.cursor.routed(seq);
+                                            send_batch(&sub.tx, batch.clone(), view_name)
+                                        }
                                         Some(key) => {
                                             let mut mine = batch.clone();
                                             mine.inner.items.retain(|item| {
@@ -927,8 +1022,10 @@ impl MatviewManager {
                                             if mine.inner.items.is_empty()
                                                 && mine.metadata.degraded.is_none()
                                             {
+                                                sub.cursor.skipped(seq);
                                                 !sub.tx.is_closed()
                                             } else {
+                                                sub.cursor.routed(seq);
                                                 send_batch(&sub.tx, mine, view_name)
                                             }
                                         }
@@ -937,6 +1034,7 @@ impl MatviewManager {
                                         subscribers.remove(view_name);
                                     }
                                 }
+                                routed.fetch_max(seq, Ordering::Release);
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
                                 // A broadcast lag means the demux missed `n` CDC
@@ -1403,6 +1501,18 @@ impl MatviewManager {
             .lock()
             .expect("subscriptions mutex")
             .add(view_name, &tx);
+        let reporting = holon_api::live_data::reporting_cursor();
+        let reports_applied = reporting.is_some();
+        let cursor = reporting.unwrap_or_default();
+        self.delivery
+            .lock()
+            .expect("delivery mutex")
+            .cursors
+            .push(DeliveryEntry {
+                view_name: view_name.to_string(),
+                cursor: Arc::downgrade(&cursor),
+                reports_applied,
+            });
         let (ack_tx, ack_rx) = oneshot::channel();
         tracing::info!(
             "[MatviewManager] subscribe_cdc('{}') key={:?}",
@@ -1414,6 +1524,7 @@ impl MatviewManager {
                 view_name: view_name.to_string(),
                 watch_key: watch_key.map(str::to_string),
                 tx,
+                cursor,
                 ack: ack_tx,
             })
             .await

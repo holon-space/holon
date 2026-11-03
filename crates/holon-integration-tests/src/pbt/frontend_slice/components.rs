@@ -179,6 +179,7 @@ pub fn keystone_boot_journal_id() -> EntityUri {
 pub struct HeadlessStore {
     temp: TempDir,
     org_fs: Arc<holon_filesystem::InMemoryFileSystem>,
+    org_emitted: crate::pbt::convergence::EmittedChanges,
     org_root: PathBuf,
     /// Tracked user-doc org files. `soak-*` load files are deliberately absent
     /// (see `new_impl`).
@@ -209,6 +210,7 @@ struct BootedSession {
     driver: Arc<ReactiveEngineDriver>,
     session: Arc<FrontendSession>,
     injector: fluxdi::Injector,
+    org_scanned_through: u64,
 }
 
 /// The boot inputs a reboot must reproduce exactly. Held so the second boot
@@ -876,6 +878,7 @@ impl HeadlessFrontendComponent {
 
         let store = Arc::new(HeadlessStore {
             temp,
+            org_emitted: crate::pbt::convergence::EmittedChanges::watch(&org_fs),
             org_fs,
             org_root,
             org_paths,
@@ -948,6 +951,7 @@ impl HeadlessFrontendComponent {
 
         let temp_path = store.temp.path();
         let org_fs = &store.org_fs;
+        let org_scanned_through = org_fs.last_change_seq();
         let loro_enabled = params.loro_enabled;
         let settle = params.settle;
 
@@ -1099,6 +1103,10 @@ impl HeadlessFrontendComponent {
                 injector_slot
                     .get()
                     .expect("DI injector captured during build"),
+                crate::pbt::convergence::OrgFiles {
+                    emitted: &store.org_emitted,
+                    scanned_through: org_scanned_through,
+                },
                 settle,
             )
             .await;
@@ -1115,6 +1123,7 @@ impl HeadlessFrontendComponent {
                 .get()
                 .expect("DI injector captured during build")
                 .clone(),
+            org_scanned_through,
         }
     }
 
@@ -1153,6 +1162,7 @@ impl HeadlessFrontendComponent {
     async fn converge_boot(
         engine: &Arc<BackendEngine>,
         injector: &fluxdi::Injector,
+        org_files: crate::pbt::convergence::OrgFiles<'_>,
         budget: Duration,
     ) -> bool {
         let deadline = tokio::time::Instant::now() + budget;
@@ -1170,16 +1180,16 @@ impl HeadlessFrontendComponent {
             .ok(); // ALLOW(ok): optional DI service — absent when Loro/sync is off
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         crate::pbt::convergence::converge_signals(
-            Some(engine),
-            sync,
-            org_idle,
-            injector
-                .try_resolve::<holon_api::live_data::BlockFeed>()
-                .ok() // ALLOW(ok): optional DI service — absent without a block matview
-                .map(|bf| bf.0.clone()),
-            // A boot registers only the sidebar page-list watch; the reactive
-            // consumer-drain stage matters for per-transition settles.
-            None,
+            crate::pbt::convergence::Signals {
+                engine: Some(engine),
+                sync,
+                org_idle,
+                org_files: Some(org_files),
+                block_feed: injector
+                    .try_resolve::<holon_api::live_data::BlockFeed>()
+                    .ok() // ALLOW(ok): optional DI service — absent without a block matview
+                    .map(|bf| bf.0.clone()),
+            },
             crate::pbt::convergence::Patience::Budget(remaining),
         )
         .await
@@ -1457,7 +1467,8 @@ impl HeadlessFrontendComponent {
         if !backlog_held {
             Self::await_vault_backlog(&booted.injector, wedge).await;
         }
-        let converged = Self::converge_boot(&booted.engine, &booted.injector, wedge).await;
+        let converged =
+            Self::converge_boot(&booted.engine, &booted.injector, self.org_files(), wedge).await;
         drop(booted);
         assert!(
             converged,
@@ -1577,6 +1588,13 @@ impl HeadlessFrontendComponent {
 
     pub(crate) fn org_fs(&self) -> &Arc<holon_filesystem::InMemoryFileSystem> {
         &self.store.org_fs
+    }
+
+    pub(crate) fn org_files(&self) -> crate::pbt::convergence::OrgFiles<'_> {
+        crate::pbt::convergence::OrgFiles {
+            emitted: &self.store.org_emitted,
+            scanned_through: self.booted().org_scanned_through,
+        }
     }
 
     pub(crate) fn org_root(&self) -> &PathBuf {

@@ -561,3 +561,58 @@ fn test_signal_map_notifies() {
         other => panic!("Expected Ready(Some(Insert)), got {:?}", other),
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+enum DeliveryStep {
+    /// The router hands the subscriber the next batch.
+    Route,
+    /// The router sees the next batch, which holds nothing for this subscriber.
+    Skip,
+    /// The consumer applies the oldest batch it holds, if any.
+    Apply,
+}
+
+proptest::proptest! {
+    /// The cursor lags exactly while the consumer holds an unapplied batch,
+    /// and a batch with nothing for a caught-up subscriber settles it through
+    /// that batch.
+    #[test]
+    fn a_cursor_lags_exactly_while_a_routed_batch_is_unapplied(
+        steps in proptest::collection::vec(
+            proptest::prop_oneof![
+                proptest::strategy::Just(DeliveryStep::Route),
+                proptest::strategy::Just(DeliveryStep::Skip),
+                proptest::strategy::Just(DeliveryStep::Apply),
+            ],
+            0..40,
+        )
+    ) {
+        let cursor = DeliveryCursor::default();
+        let mut held = std::collections::VecDeque::new();
+        let mut seq = 0;
+        for step in steps {
+            match step {
+                DeliveryStep::Route => {
+                    seq += 1;
+                    cursor.routed(seq);
+                    held.push_back(seq);
+                }
+                DeliveryStep::Skip => {
+                    seq += 1;
+                    let caught_up = held.is_empty();
+                    cursor.skipped(seq);
+                    if caught_up {
+                        proptest::prop_assert_eq!((cursor.sent(), cursor.applied()), (seq, seq));
+                    }
+                }
+                DeliveryStep::Apply => {
+                    if let Some(applied) = held.pop_front() {
+                        cursor.applied_through(applied);
+                    }
+                }
+            }
+            proptest::prop_assert!(cursor.applied() <= cursor.sent());
+            proptest::prop_assert_eq!(cursor.is_lagging(), !held.is_empty());
+        }
+    }
+}

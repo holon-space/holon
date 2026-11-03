@@ -90,6 +90,22 @@ struct WatchContextGuard {
     nonce: String,
 }
 
+/// Counts one piece of work while it runs, also when its future is dropped.
+struct InFlight(Arc<std::sync::atomic::AtomicU64>);
+
+impl InFlight {
+    fn enter(count: &Arc<std::sync::atomic::AtomicU64>) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(count.clone())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// One engine's tally of the membership rows its watches gave up.
 #[derive(Default)]
 struct WatchReleases {
@@ -309,6 +325,9 @@ pub struct BackendEngine {
     /// subtraction.
     watch_opens: Arc<std::sync::atomic::AtomicU64>,
     watch_releases: Arc<WatchReleases>,
+    /// Registrations that claimed their place but have not written its row
+    /// yet; until then the row still carries the previous nonce.
+    watch_registrations_in_flight: Arc<std::sync::atomic::AtomicU64>,
     /// Keeps the clock scheduler's ticking task alive (ADR 0024 P5,
     /// time-as-data). `None` until installed in
     /// `create_initialized_engine`; the boot guard there fails loud if it
@@ -373,6 +392,7 @@ impl BackendEngine {
             watch_places: Arc::new(std::sync::Mutex::new(HashMap::new())),
             watch_opens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             watch_releases: Arc::new(WatchReleases::default()),
+            watch_registrations_in_flight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             _advice_reconciler: None,
             _clock_scheduler: None,
             session_clock_grains: std::sync::Mutex::new(Vec::new()),
@@ -472,6 +492,10 @@ impl BackendEngine {
     /// Get the database handle for direct database operations
     pub fn db_handle(&self) -> &DbHandle {
         &self.db_handle
+    }
+
+    pub fn matview_manager(&self) -> &crate::sync::MatviewManager {
+        &self.matview_manager
     }
 
     pub fn search(&self) -> &Arc<dyn holon_api::EntitySearch> {
@@ -577,6 +601,12 @@ impl BackendEngine {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Watch registrations whose row write has not finished yet.
+    pub fn watch_registrations_in_flight(&self) -> u64 {
+        self.watch_registrations_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Release DELETEs this engine has issued, ever: one per place its
     /// watches stopped watching.
     pub fn watch_releases_issued(&self) -> u64 {
@@ -652,6 +682,7 @@ impl BackendEngine {
         // session-scoped UI row, not an entity; it never enters Loro, org or a
         // block id.
         let nonce = uuid::Uuid::new_v4().to_string();
+        let _registering = InFlight::enter(&self.watch_registrations_in_flight);
         // Claimed BEFORE the write, so a concurrent last-owner drop on the
         // same place cannot see an empty set and delete the row this watch is
         // about to depend on. The claim also becomes the row's nonce: the
