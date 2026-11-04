@@ -59,7 +59,8 @@ expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 
 # `just` and `cargo` stubs append each call, its HOLON_PBT_TIMING and the quiet
 # marker's content to $GATE_PROBE; `just timing-gate-build` prints $BUILD_OUT
-# and `just $STUB_RED` exits 1. HOME is a scratch dir, so the hold's marker,
+# and `just $STUB_RED` exits 1; with STUB_RED_NEXTEST set, every nextest run
+# fails one org_suite test no known-red row lists. HOME is a scratch dir, so the hold's marker,
 # lock, log and slot walk are scratch files and no real build is lowered.
 home="$scratch/home" stubs="$scratch/stubs" probe="$scratch/probe.log"
 orch="$home/.claude/skills/orchestrator/scripts"
@@ -79,6 +80,7 @@ for tool in just cargo; do
 echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
 [ "$*" != "${STUB_RED:-}" ] || exit 1
+[ -z "${STUB_RED_NEXTEST:-}" ] || [ "${1:-} ${2:-}" != "nextest run" ] || { echo "        FAIL [   1.000s] holon-integration-tests::integration org_suite::stub_red"; exit 100; }
 EOF
 done
 chmod +x "$stubs"/*
@@ -120,6 +122,18 @@ unmeasured_just=$(sed -n 's/^just \([^ ]*\) | timing=\([^ |]*\) | .*/\1 \2/p' "$
 done)
 expect "runs every just test arm with measure${unmeasured_just:+, not: $unmeasured_just}" [ -z "$unmeasured_just" ]
 expect "marks the target for the sweep" [ -f "$integ/target/.gc-mark" ]
+# The org_suite tests block only through the extra nextest run: it must select
+# the whole workspace with the integration tests' features, narrowed by nothing.
+extra_runs=$(grep -E '^cargo nextest run .*--workspace .*--features [^ ]*holon-integration-tests/pbt' "$probe" || true)
+expect "runs one whole-workspace nextest with the integration features (got: ${extra_runs:-none})" [ "$(grep -c . <<<"$extra_runs")" = 1 ]
+narrowed=$(grep -E -- ' (-E|--filterset|--exclude|-p|--package|--test|--lib|--bins?|--skip) ' <<<"${extra_runs%% | *}" || true)
+expect "narrows that run by no filter or package${narrowed:+, got: $narrowed}" [ -z "$narrowed" ]
+
+echo "== the integrate run with a red org_suite test"
+rc=0; in_stubs STUB_RED_NEXTEST=1 "$integrate" g3 "1 2" "$tip" >"$scratch/integrate-org.out" 2>&1 || rc=$?
+expect "exits 12 (got $rc)" [ "$rc" = 12 ]
+expect "names the novel red" grep -qx 'EXTRA NEXTEST NOVEL RED' "$scratch/integrate-org.out"
+expect "names no candidate tip" [ -z "$(grep '^candidate tip' "$scratch/integrate-org.out")" ]
 
 echo "== the integrate run with one red step after gate-compile"
 rc=0; in_stubs STUB_RED=gate-arch "$integrate" g2 "1 2" "$tip" >"$scratch/integrate-red.out" 2>&1 || rc=$?

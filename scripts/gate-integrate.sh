@@ -18,7 +18,7 @@
 # its exit code; 9 = the checkout is not <tip>, 8 = free disk below the floor.
 # After gate-compile every step runs to its end, each red step is named, and
 # the run exits with the code of the first red one in TRACKS order; a red extra
-# nextest alone exits 12 or 13 after the information step.
+# nextest alone exits 12 or 13.
 set -euo pipefail
 
 # Steps that are pipelines run as `"$0" --<name>`: `step` runs one command.
@@ -137,9 +137,6 @@ for entry in "${STEPS[@]}"; do
   else red=${red:-$rc}; fi
 done
 [ -z "$red" ] || exit "$red"
-
-echo "== information only: org_suite (compare its reds with the known reds) =="
-HOLON_PBT_TIMING=measure cargo nextest run -p holon-integration-tests --test integration -E 'test(/^org_suite::/)' --no-fail-fast --features pbt,web-arm || echo "ORG_SUITE RED"
 [ -z "$extra_red" ] || exit "$extra_red"
 echo "INTEGRATE GREEN"
 echo "candidate tip: $tip"
