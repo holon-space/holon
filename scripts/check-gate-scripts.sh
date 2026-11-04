@@ -126,8 +126,8 @@ expect "marks the target for the sweep" [ -f "$integ/target/.gc-mark" ]
 # the whole workspace with the integration tests' features, narrowed by nothing.
 extra_runs=$(grep -E '^cargo nextest run .*--workspace .*--features [^ ]*holon-integration-tests/pbt' "$probe" || true)
 expect "runs one whole-workspace nextest with the integration features (got: ${extra_runs:-none})" [ "$(grep -c . <<<"$extra_runs")" = 1 ]
-narrowed=$(grep -E -- ' (-E|--filterset|--exclude|-p|--package|--test|--lib|--bins?|--skip) ' <<<"${extra_runs%% | *}" || true)
-expect "narrows that run by no filter or package${narrowed:+, got: $narrowed}" [ -z "$narrowed" ]
+extra_argv="${extra_runs%% | *}"
+expect "narrows that run by no filter or package (got: $extra_argv)" grep -qxE 'cargo nextest run --profile load-tolerant --no-fail-fast --workspace --features [^ ]*holon-integration-tests/pbt[^ ]*' <<<"$extra_argv"
 
 echo "== the integrate run with a red org_suite test"
 rc=0; in_stubs STUB_RED_NEXTEST=1 "$integrate" g3 "1 2" "$tip" >"$scratch/integrate-org.out" 2>&1 || rc=$?
