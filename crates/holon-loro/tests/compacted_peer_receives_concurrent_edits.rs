@@ -20,6 +20,7 @@ use holon_conditions::ConditionBus;
 use holon_conditions::ConditionKind;
 use holon_loro::ContainerRegistry;
 use holon_loro::DocScope;
+use holon_loro::GLOBAL_SNAPSHOT_NAME;
 use holon_loro::LoroDocument;
 use holon_loro::LoroDocumentStore;
 use holon_loro::WriteOrigin;
@@ -216,6 +217,29 @@ fn static_examples() -> Vec<Case> {
                 Op::Restart { peer: 0 },
             ],
         ),
+        // Three concurrent first changes with no merge above them; the full
+        // sync and the compacting restarts of `check` follow. The trim below
+        // all three has no common ancestor to start at.
+        Case::adopted(
+            Topology::Cycle3,
+            vec![
+                Op::Edit { peer: 0 },
+                Op::Edit { peer: 1 },
+                Op::Edit { peer: 2 },
+            ],
+        ),
+        // The same roots with a merge above them: the trim starts at it.
+        Case::adopted(
+            Topology::Cycle3,
+            vec![
+                Op::Edit { peer: 0 },
+                Op::Edit { peer: 1 },
+                Op::Edit { peer: 2 },
+                Op::Sync { from: 1, to: 0 },
+                Op::Sync { from: 2, to: 0 },
+                Op::Edit { peer: 0 },
+            ],
+        ),
         // Peer 2 joins after peer 0 trimmed, without adopting its history.
         Case {
             topology: Topology::Star3,
@@ -235,7 +259,9 @@ fn static_examples() -> Vec<Case> {
 
 /// Every device is adopted: production pairs only by adoption, and pairing
 /// with a trimmed owner is refused (`pairing_refuses_trimmed_owner`). Syncs
-/// run only along the topology's edges, in either direction.
+/// run only along the topology's edges, in either direction. The adopted
+/// history is empty, so the drawn first changes before any op are concurrent
+/// roots.
 fn case_strategy() -> impl Strategy<Value = Case> {
     prop_oneof![
         Just(Topology::Pair),
@@ -255,7 +281,17 @@ fn case_strategy() -> impl Strategy<Value = Case> {
                 if flip { Op::Sync { from: b, to: a } } else { Op::Sync { from: a, to: b } }
             }),
         ];
-        prop::collection::vec(op, 0..12).prop_map(move |ops| Case::adopted(topology, ops))
+        (
+            // Weighted so that most cases start from a concurrent root on every peer.
+            prop::collection::vec(prop::bool::weighted(0.8), peers),
+            prop::collection::vec(op, 0..12),
+        )
+            .prop_map(move |(first, ops)| {
+                let first = (0..peers)
+                    .filter(|&p| first[p])
+                    .map(|peer| Op::Edit { peer });
+                Case::adopted(topology, first.chain(ops).collect())
+            })
     })
 }
 
@@ -322,6 +358,24 @@ impl Peer {
 
     fn is_shallow(&self) -> Result<bool> {
         self.doc.with_read(|d| Ok(d.is_shallow()))
+    }
+
+    fn heads(&self) -> Result<loro::Frontiers> {
+        self.doc.with_read(|d| Ok(d.oplog_frontiers()))
+    }
+
+    fn trimmed_at(&self) -> Result<loro::Frontiers> {
+        self.doc.with_read(|d| Ok(d.shallow_since_frontiers()))
+    }
+
+    /// Whether the snapshot file the last save wrote imports into a fresh doc.
+    fn snapshot_loads(&self) -> Result<Result<(), String>> {
+        let path = self.dir.path().join(GLOBAL_SNAPSHOT_NAME);
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        Ok(loro::LoroDoc::new()
+            .import(&bytes)
+            .map(|_| ())
+            .map_err(|e| format!("a fresh doc refuses {}: {e}", path.display())))
     }
 
     fn known(&self) -> Result<BTreeMap<u64, VersionVector>> {
@@ -452,6 +506,7 @@ fn trim_violations(peers: &[Peer], adopted: usize) -> Result<Vec<String>> {
 
 struct Run {
     case: Case,
+    compaction: bool,
     peers: Vec<Peer>,
     cap: CapabilitySecret,
     roster: SharedRoster,
@@ -459,7 +514,7 @@ struct Run {
 }
 
 impl Run {
-    async fn open(case: &Case) -> Result<Self> {
+    async fn open(case: &Case, compaction: bool) -> Result<Self> {
         let cap = CapabilitySecret::generate();
         let roster: SharedRoster = Arc::new(tokio::sync::Mutex::new(ShareRoster::new(
             ROOT_CONTAINER_ID,
@@ -485,6 +540,7 @@ impl Run {
         }
         Ok(Self {
             case: case.clone(),
+            compaction,
             peers,
             cap,
             roster,
@@ -505,7 +561,12 @@ impl Run {
                     })?;
                 self.peers[peer].authored.push(key);
             }
-            Op::Save { peer } => self.peers[peer].store.save_all().await?,
+            Op::Save { peer } => {
+                self.peers[peer].store.save_all().await?;
+                if let Err(e) = self.peers[peer].snapshot_loads()? {
+                    return Ok(Err(format!("after {op:?}: {e}")));
+                }
+            }
             Op::Restart { peer } => {
                 let before = self.peers[peer].known()?;
                 self.peers[peer].restart(&self.roster).await?;
@@ -611,7 +672,7 @@ impl Run {
                 .map(|(peer, floor)| Ok(floor.as_ref() == Some(&peer.version()?)))
                 .collect::<Result<Vec<bool>>>()?;
             if reached.iter().all(|r| *r) {
-                return Ok(Ok(()));
+                return self.check_trim_advances().await;
             }
             if let Err(e) = self.full_round().await? {
                 return Ok(Err(e));
@@ -631,6 +692,29 @@ impl Run {
         Ok(Err(format!(
             "the floors never reached the converged version: {floors:?}"
         )))
+    }
+
+    /// With every floor at the converged version, a compaction save of a doc
+    /// with a single head trims all history below it, and any compaction
+    /// loads on restart. The second restart's checkpoint is its store's first
+    /// save, so a compaction.
+    async fn check_trim_advances(&mut self) -> Result<Result<(), String>> {
+        if !self.compaction {
+            return Ok(Ok(()));
+        }
+        for p in 0..self.peers.len() {
+            let heads = self.peers[p].heads()?;
+            for _ in 0..2 {
+                self.peers[p].restart(&self.roster).await?;
+            }
+            let trimmed_at = self.peers[p].trimmed_at()?;
+            if heads.len() == 1 && trimmed_at != heads {
+                return Ok(Err(format!(
+                    "peer {p}'s compaction at the single head {heads:?} trimmed only at {trimmed_at:?}"
+                )));
+            }
+        }
+        Ok(Ok(()))
     }
 
     fn check_refused(&self) -> Result<Result<(), String>> {
@@ -657,8 +741,8 @@ impl Run {
     }
 }
 
-async fn run(case: &Case) -> Result<Result<(), String>> {
-    let mut run = Run::open(case).await?;
+async fn run(case: &Case, compaction: bool) -> Result<Result<(), String>> {
+    let mut run = Run::open(case, compaction).await?;
     let mut verdict = run.check().await?;
     if verdict.is_ok() && case.expect == Expect::Converge {
         let refusals: Vec<String> = run.peers.iter().flat_map(Peer::refusals).collect();
@@ -672,8 +756,8 @@ async fn run(case: &Case) -> Result<Result<(), String>> {
     })
 }
 
-fn check(rt: &tokio::runtime::Runtime, case: &Case) -> Result<(), TestCaseError> {
-    rt.block_on(run(case))
+fn check(rt: &tokio::runtime::Runtime, case: &Case, compaction: bool) -> Result<(), TestCaseError> {
+    rt.block_on(run(case, compaction))
         .map_err(|e| TestCaseError::fail(format!("harness error on {case:?}: {e:#}")))?
         .map_err(TestCaseError::fail)
 }
@@ -688,7 +772,7 @@ fn every_edit_reaches_every_peer(compaction: bool) {
         .iter()
         // Without compaction nothing is trimmed, so nothing refuses a late join.
         .filter(|case| compaction || case.expect == Expect::Converge)
-        .filter_map(|case| check(&rt, case).err())
+        .filter_map(|case| check(&rt, case, compaction).err())
         .map(|e| format!("static example: {e}"))
         .collect();
     let mut runner = TestRunner::new(ProptestConfig {
@@ -697,7 +781,7 @@ fn every_edit_reaches_every_peer(compaction: bool) {
         failure_persistence: None,
         ..ProptestConfig::default()
     });
-    if let Err(e) = runner.run(&case_strategy(), |case| check(&rt, &case)) {
+    if let Err(e) = runner.run(&case_strategy(), |case| check(&rt, &case, compaction)) {
         failures.push(format!("generated (shrunk): {e}"));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

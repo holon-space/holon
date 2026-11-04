@@ -458,28 +458,49 @@ impl LoroDocument {
             self.doc.commit();
             let frontiers = self.doc.oplog_frontiers();
             let trim_at = match kind {
+                SaveExport::CompactSnapshot => Some(frontiers.clone()),
                 SaveExport::CompactSnapshotBelow(peers) => self.trim_frontiers(peers),
-                _ => None,
+                SaveExport::Snapshot | SaveExport::UpdatesSince(_) => None,
             };
-            let mode = match (kind, &trim_at) {
-                (SaveExport::UpdatesSince(vv), _) => loro::ExportMode::updates(vv),
-                (SaveExport::CompactSnapshot, _) => loro::ExportMode::shallow_snapshot(&frontiers),
-                (_, Some(at)) => loro::ExportMode::shallow_snapshot(at),
-                (_, None) => loro::ExportMode::Snapshot,
+            let bytes = match (kind, &trim_at) {
+                (SaveExport::UpdatesSince(vv), _) => {
+                    self.doc.export(loro::ExportMode::updates(vv))?
+                }
+                (_, Some(at)) => self.loadable_shallow_snapshot(at)?,
+                (_, None) => self.doc.export(loro::ExportMode::Snapshot)?,
             };
             Ok(SaveExported {
-                bytes: self.doc.export(mode)?,
+                bytes,
                 vv: self.doc.oplog_vv(),
                 frontiers,
             })
         })
     }
 
+    /// A snapshot without the history before `at`, or the full snapshot when
+    /// a fresh doc refuses it, so a save never writes a file the next load
+    /// cannot import.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn loadable_shallow_snapshot(&self, at: &loro::Frontiers) -> Result<Vec<u8>> {
+        let bytes = self.doc.export(loro::ExportMode::shallow_snapshot(at))?;
+        match LoroDoc::new().import(&bytes) {
+            Ok(_) => Ok(bytes),
+            Err(refused) => {
+                tracing::warn!(
+                    "{}: a fresh doc refuses the snapshot trimmed at {at:?} ({refused}); saving the full history, the next compaction trims again",
+                    self.doc_id
+                );
+                Ok(self.doc.export(loro::ExportMode::Snapshot)?)
+            }
+        }
+    }
+
     /// Where a compaction below `peers` starts: the heads of the meet of
-    /// `peers` and this doc's version, plus the doc's own heads. Loro starts
-    /// at their common ancestor, so every edit above the meet descends from
-    /// the start, as an importable snapshot needs. `None` when the meet keeps
-    /// all history, or when the doc is already trimmed at or above it.
+    /// `peers` and this doc's version, plus the doc's own heads. Loro reduces
+    /// these heads to a start; concurrent roots with no merge above them can
+    /// give a start that a fresh doc refuses, which `export_for_save` catches.
+    /// `None` when the meet keeps all history, or when the doc is already
+    /// trimmed at or above it.
     #[cfg(not(target_arch = "wasm32"))]
     fn trim_frontiers(&self, peers: &loro::VersionVector) -> Option<loro::Frontiers> {
         let floor = peers.intersection(&self.doc.oplog_vv());
