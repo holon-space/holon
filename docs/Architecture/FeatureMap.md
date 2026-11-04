@@ -443,6 +443,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `two-instance-one-way-share-receiver-org-missing`
 - `two-instance-receiver-outside-sanctioned-audience`
 - `typechars-sql-reads-budget`
+- `undo-create-sibling-order`
 - `undo-prod-session-source-block-marks`
 - `undo-prod-session-stale-dropped`
 - `undo-redo-reference-heal-teeth-load-timeout`

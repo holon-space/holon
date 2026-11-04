@@ -3458,7 +3458,7 @@ impl SutOrgRender for HeadlessFrontendComponent {
         }
 
         // A file that roots no block the store holds (an emptied file, or one
-        // whose page is deleted) renders as nothing.
+        // whose page is deleted) renders as its own bytes.
         let default_doc_bare = holon_api::default_doc_block_uri().id().to_string();
         for (path, id) in self.disk_org_files().await {
             if emitted_paths.contains(&path) || id.as_deref() == Some(default_doc_bare.as_str()) {
@@ -3467,7 +3467,7 @@ impl SutOrgRender for HeadlessFrontendComponent {
             let disk = FileSystem::read_to_string(self.org_fs().as_ref(), &path)
                 .await
                 .expect("SutOrgRender: read unrooted org file");
-            out.push((path.to_string_lossy().to_string(), disk, String::new()));
+            out.push((path.to_string_lossy().to_string(), disk.clone(), disk));
         }
         out
     }

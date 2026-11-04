@@ -38,3 +38,83 @@ pub fn wire() -> Box<dyn CapInvariant> {
         Attribution::at(Layer::OrgRoundTrip, file!()),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use holon_filesystem::FileSystem;
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
+
+    /// Bytes of a file the store roots no block for: empty, an `#+ID:` the
+    /// store never held, or no `#+ID:` at all.
+    fn unrooted_file_bytes() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just(String::new()),
+            "[a-z]{3,8}( [A-Za-z]{1,8}){0,3}"
+                .prop_map(|s| format!("#+ID: stray-{}\n* {s}\n", s.replace(' ', "-"))),
+            "[A-Za-z]{1,8}( [A-Za-z]{1,8}){0,5}\n",
+        ]
+    }
+
+    fn check(files: &[String]) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let comp = HeadlessFrontendComponent::new(
+                &[("Keeper.org", "#+ID: keeper\n* Keeper\n")],
+                Duration::from_millis(300),
+            )
+            .await;
+            // The watcher misses each write, so nothing ingests these files.
+            for (i, bytes) in files.iter().enumerate() {
+                let path = comp.org_root().join(format!("Stray{i}.org"));
+                comp.org_fs().lose_next_change(&path);
+                FileSystem::write(comp.org_fs().as_ref(), &path, bytes.as_bytes())
+                    .await
+                    .expect("write unrooted file");
+            }
+            let pairs = comp.snapshot_org_render_pairs(&Default::default()).await;
+            for (i, bytes) in files.iter().enumerate() {
+                let name = format!("Stray{i}.org");
+                let (_, disk, rendered) = pairs
+                    .iter()
+                    .find(|(path, _, _)| path.ends_with(&name))
+                    .unwrap_or_else(|| panic!("{name} missing from the render pairs"));
+                assert_eq!(disk, bytes, "{name}: disk side");
+                assert_eq!(
+                    rendered, bytes,
+                    "{name}: an unrooted file renders as its bytes"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn an_unrooted_file_renders_as_its_own_bytes_fixed_cases() {
+        check(&[
+            "#+ID: stray-axv-CvDGdwMf\n* axv CvDGdwMf\n".to_string(),
+            String::new(),
+        ]);
+    }
+
+    // Each case boots a full headless session, so the case count stays small.
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 4,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+        #[test]
+        fn an_unrooted_file_renders_as_its_own_bytes(
+            files in proptest::collection::vec(unrooted_file_bytes(), 1..4)
+        ) {
+            check(&files);
+        }
+    }
+}
