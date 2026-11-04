@@ -69,8 +69,6 @@ track() {
     case $name in
       featuremap) set -- /usr/bin/python3 scripts/featuremap.py check ;;
       keystone-smoke | hand-authored | extra-nextest) set -- "$0" "--$name" ;;
-      keystone-tour) set -- env HOLON_PBT_TIMING=measure "HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}" cargo test --workspace --features "$PBT_FEATURES" \
-        --test integration keystone_tour:: -- --include-ignored --nocapture ;;
       loro-suite | projector-lag-lock) set -- env HOLON_PBT_TIMING=measure just "$name" ;;
       *) set -- just "$name" ;;
     esac

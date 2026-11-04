@@ -625,6 +625,24 @@ def dropped_module_owner_problems(root):
     return found
 
 
+def keystone_tour_problems(root):
+    """A change to the code the keystone tour settles through prints its owner line; a change to other keystone code
+    or outside it does not."""
+    meta = load_metadata()
+    pbt = f"crates/{INTEGRATION}/src/pbt"
+    found = []
+    for changed, want in (([f"{pbt}/convergence.rs"], True), ([f"{pbt}/composed/wide_e2e.rs"], True),
+                          ([f"crates/{INTEGRATION}/tests/keystone_tour.rs"], True),
+                          ([f"crates/{INTEGRATION}/hand-authored-regressions/keystone-tour.ndjson"], True),
+                          ([f"{pbt}/generators.rs"], False), (["crates/holon-loro/src/lib.rs"], False),
+                          (["docs/Testing/Testing.md"], False)):
+        with contextlib.redirect_stderr(io.StringIO()):
+            lines = selection(root, meta, changed)
+        if ("keystone-tour: just keystone-tour" in lines) != want:
+            found.append(f"{changed}: the `keystone-tour:` line is {'missing' if want else 'printed'}: {lines}")
+    return found
+
+
 def contract_problems(root):
     """The output contract of the real command on this tree: a valid base, and a base that does not resolve."""
     script = Path(__file__).resolve()
@@ -658,11 +676,12 @@ def self_check():
         meta = fixture_workspace(root)
         found = golden_problems(root, meta) + never_owner_problems(root, meta)
     cwd = Path.cwd()
-    found += removed_binary_problems(cwd) + dropped_module_owner_problems(cwd) + contract_problems(cwd)
+    found += removed_binary_problems(cwd) + dropped_module_owner_problems(cwd) + keystone_tour_problems(cwd)
+    found += contract_problems(cwd)
     for line in found:
         print(f"[select-tests] FAIL {line}")
     print(f"[select-tests] self-check {'FAIL' if found else 'PASS'}: {len(GOLDEN)} golden cases,"
-          f" the never-owner set, the integration test targets, the dropped modules' owner lines,"
+          f" the never-owner set, the integration test targets, the dropped modules' owner lines, the keystone tour,"
           f" the output contract")
     return 1 if found else 0
 

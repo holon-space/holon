@@ -87,6 +87,10 @@ OWNER_RECIPES = {
 PATH_RECIPES = {
     "crates/holon-integration-tests/src/pbt/": "keystone-smoke",
     "crates/holon-integration-tests/tests/hand_authored_regressions.rs": "keystone-smoke",
+    "crates/holon-integration-tests/src/pbt/convergence.rs": "keystone-tour",
+    "crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs": "keystone-tour",
+    "crates/holon-integration-tests/tests/keystone_tour.rs": "keystone-tour",
+    "crates/holon-integration-tests/hand-authored-regressions/keystone-tour.ndjson": "keystone-tour",
     "frontends/dioxus-web/Cargo.lock": "check-dioxus-web-wasm",
     "frontends/holon-worker/": "check-worker-wasm",
     "frontends/waterui/Cargo.lock": "deny",

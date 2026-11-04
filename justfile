@@ -210,6 +210,12 @@ keystone-smoke:
         exit 1
     }
 
+# Land-gate battery member: one fixed replay through the transition alphabet
+# (crates/holon-integration-tests/tests/keystone_tour.rs).
+keystone-tour:
+    HOLON_PBT_TIMING=measure HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1} cargo test {{CANON}} \
+        --test integration keystone_tour:: -- --include-ignored --nocapture
+
 # Land-gate battery member: the Loro consolidator suite (projection atomicity,
 # kind fidelity, unseeded-vault split, consolidator-epoch restart). It was in no
 # gate recipe until 2026-09-01, so two of its tests sat red on `main` — a stale
