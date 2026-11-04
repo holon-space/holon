@@ -22,7 +22,7 @@
 //! primitive: not a user action) and `drop_entity` (no keyboard DnD).
 //! Both delegate to the inner [`ReactiveEngineDriver`], which also
 //! provides the engine-quiescence barrier (`warm_for_block` /
-//! `snapshot_emission_tick` / `wait_emissions_quiesced`) the TUI driver
+//! `snapshot_emission_tick` / `settle_after`) the TUI driver
 //! needs after dispatching a chord through the input pipeline. The
 //! TUI helpers `tokio::spawn` engine dispatches; a render barrier alone
 //! is NOT proof the engine has settled.
@@ -106,7 +106,7 @@ pub struct TuiUserDriver {
     /// - `synthetic_dispatch` (test-setup) and `drop_entity` (no keyboard DnD)
     ///   targets.
     /// - The engine-quiescence barrier (`warm_for_block`,
-    ///   `snapshot_emission_tick`, `wait_emissions_quiesced`) — the TUI helpers
+    ///   `snapshot_emission_tick`, `settle_after`) — the TUI helpers
     ///   `tokio::spawn` engine dispatches, so a render barrier alone is
     ///   insufficient. The driver routes chord-resolved ops through the real
     ///   input pipeline (NOT through `inner`'s `send_key_chord`), but then
@@ -212,20 +212,34 @@ impl TuiUserDriver {
         //    tokio::spawn'd engine dispatches may still be in flight.
         self.await_render(deadline).await?;
 
-        // 3. Engine-quiescence barrier — wait for the emission tick to advance past
-        //    `pre_tick` and then stay stable for the configured window. Catches the
-        //    spawn-vs-render race.
-        let timeout = deadline.saturating_duration_since(Instant::now());
-        if timeout.is_zero() {
-            bail!("await_chord_settled: no time left for quiescence wait");
+        // 3. The spawned dispatch had an effect and its CDC deliveries reached the
+        //    router; then every dispatch it chained settled.
+        self.inner
+            .settle_after(pre_tick)
+            .await
+            .context("await_chord_settled")?;
+        let journal = self.engine.ui_state().dispatch_journal();
+        loop {
+            let pending = journal.pending();
+            let open_chains = journal.open_chains();
+            if pending.is_empty() && open_chains == 0 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "await_chord_settled: dispatch journal at {} pending and {open_chains} open \
+                     chains, target 0 and 0; pending: {pending:?}",
+                    pending.len()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
-        match tokio::time::timeout(timeout, self.inner.wait_emissions_quiesced(pre_tick)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e).context("await_chord_settled: engine did not quiesce"),
-            Err(_) => bail!("await_chord_settled: engine quiesce wait timed out"),
-        }
+        self.inner
+            .settle_delivery()
+            .await
+            .context("await_chord_settled")?;
 
-        // 4. One more render so we observe the post-quiesce state.
+        // 4. One more render so we observe the settled state.
         self.await_render(deadline).await?;
         Ok(())
     }

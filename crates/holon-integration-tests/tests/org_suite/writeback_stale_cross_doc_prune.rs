@@ -36,6 +36,8 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
     )
 }
 
+/// Hang deadline of the waits on crash points and conditions.
+const HANG: Duration = Duration::from_secs(20);
 const STALE_ID: &str = "block:bulk-0-0";
 const DAY_PAGE: &str = "block:area-daypage";
 
@@ -126,7 +128,7 @@ fn stale_cross_doc_copy_is_disclosed_and_kept() {
             Some(DAY_PAGE),
             "precondition: bulk-0-0 must be owned by the day-page before the phantom appears"
         );
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        env.settle().await;
 
         env.write_org_file("Overview.org", OVERVIEW_ORG)
             .await
@@ -134,7 +136,7 @@ fn stale_cross_doc_copy_is_disclosed_and_kept() {
         let seq = env.org_fs.last_change_seq();
         env.wait_for_org_change_processed(seq, Duration::from_secs(20))
             .await;
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        env.settle().await;
 
         let overview_disk = read_file(&env, "Overview.org").await;
         let day_disk = read_file(&env, "DayPage.org").await;
@@ -160,7 +162,7 @@ fn stale_cross_doc_copy_is_disclosed_and_kept() {
             "the copy in Overview.org must be disclosed as a block in two files"
         );
 
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        env.settle().await;
         assert_eq!(
             read_file(&env, "Overview.org").await,
             overview_disk,
@@ -238,7 +240,7 @@ async fn wait_for_row(env: &TestEnvironment, id: &str) {
         assert!(std::time::Instant::now() < deadline, "{id} never landed");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    env.settle().await;
 }
 
 async fn save_and_settle(env: &TestEnvironment, name: &str, body: &str) {
@@ -248,7 +250,7 @@ async fn save_and_settle(env: &TestEnvironment, name: &str, body: &str) {
     let seq = env.org_fs.last_change_seq();
     env.wait_for_org_change_processed(seq, Duration::from_secs(20))
         .await;
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    env.settle().await;
 }
 
 async fn started_with_day_page(
@@ -347,7 +349,7 @@ fn a_missing_owner_file_does_not_hand_the_block_away() {
         let seq = env.org_fs.last_change_seq();
         env.wait_for_org_change_processed(seq, Duration::from_secs(20))
             .await;
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        env.settle().await;
 
         let mut raised = Vec::new();
         while let Ok(change) = changes.try_recv() {
@@ -425,7 +427,8 @@ fn three_files_holding_one_block_keep_every_copy() {
         env.update_block_content("block:overview-own", "Overview edited in Holon")
             .await
             .expect("edit a block Overview.org owns");
-        tokio::time::sleep(Duration::from_millis(2000)).await;
+        eventually_on_disk(&env, "Overview.org", "Overview edited in Holon").await;
+        env.settle().await;
 
         for name in ["DayPage.org", "Overview.org", "Third.org"] {
             let disk = read_file(&env, name).await;
@@ -775,7 +778,7 @@ fn a_block_deleted_in_holon_lives_on_in_its_copy() {
         env.delete_block(STALE_ID)
             .await
             .expect("delete the copied block in Holon");
-        tokio::time::sleep(Duration::from_millis(2000)).await;
+        env.settle().await;
 
         assert_eq!(
             parent_of(&env, STALE_ID).await.as_deref(),
@@ -799,7 +802,7 @@ fn a_block_deleted_in_holon_lives_on_in_its_copy() {
         env.delete_block(STALE_ID)
             .await
             .expect("delete it again, now from Overview");
-        tokio::time::sleep(Duration::from_millis(2000)).await;
+        env.settle().await;
         assert_eq!(count_rows(&env, STALE_ID).await, 0);
         assert!(
             copy_conditions(&env).is_empty(),
@@ -839,7 +842,7 @@ fn moved_while_closed_is_adopted(copy_file: &'static str) {
             .expect("save the block into the other file");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
 
         assert_eq!(
             parent_of(&env, STALE_ID).await.as_deref(),
@@ -925,7 +928,7 @@ fn a_child_deleted_in_holon_stays_deleted_when_its_copy_is_adopted() {
         env.delete_block(KID)
             .await
             .expect("delete the child in Holon");
-        tokio::time::sleep(Duration::from_millis(2000)).await;
+        env.settle().await;
         assert_eq!(
             count_rows(&env, KID).await,
             0,
@@ -1344,7 +1347,7 @@ fn an_undone_deletion_stands_when_the_other_copy_file_is_deleted() {
         let seq = env.org_fs.last_change_seq();
         env.wait_for_org_change_processed(seq, Duration::from_secs(20))
             .await;
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        env.settle().await;
         assert_eq!(
             count_rows(&env, KID).await,
             1,
@@ -1499,7 +1502,7 @@ fn an_undone_deletion_stands_when_the_copy_lets_go_while_closed() {
             .expect("remove the child from the copy");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert_the_deletion_stands(&env).await;
         assert_eq!(
             copy_conditions(&env),
@@ -1521,7 +1524,7 @@ fn an_undone_deletion_survives_a_restart() {
         let mut env = undone_then_closed(rt).await;
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert!(
             copy_conditions(&env).contains(&(
                 KID.to_string(),
@@ -1558,7 +1561,7 @@ fn an_unreadable_undone_deletions_record(bytes: &'static str) {
             .expect("damage the record");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
 
         let unreadable = condition_subjects(
             &env,
@@ -1614,6 +1617,35 @@ fn an_empty_undone_deletions_record_is_set_aside_and_disclosed() {
 /// Stop a session whose file-sync controller died or never ran. What it had
 /// queued is never written, and the shutdown names it; whether anything was
 /// queued depends on where the controller died, so both outcomes are accepted.
+async fn crash_point_reached() {
+    holon_integration_tests::polling::wait_until("the armed crash point fired", HANG, || async {
+        match holon_filesystem::crash_injection::armed() {
+            None => holon_integration_tests::polling::Probe::Reached(()),
+            Some(point) => {
+                holon_integration_tests::polling::Probe::NotYet(format!("{point} still armed"))
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|hung| panic!("{hung}"));
+}
+
+async fn condition_raised(env: &TestEnvironment, kind: &str) {
+    holon_integration_tests::polling::wait_until(
+        &format!("condition {kind} raised"),
+        HANG,
+        || async {
+            if condition_subjects(env, kind).is_empty() {
+                holon_integration_tests::polling::Probe::NotYet(format!("no {kind} condition"))
+            } else {
+                holon_integration_tests::polling::Probe::Reached(())
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|hung| panic!("{hung}"));
+}
+
 async fn stop_after_the_controller_died(env: &mut TestEnvironment) {
     if let Err(e) = env.stop_app().await {
         assert!(
@@ -1641,7 +1673,11 @@ fn a_file_sync_controller_that_cannot_start_is_disclosed() {
         .await
         .expect("write a sync-conflict artifact");
         env.start_app(true).await.expect("start_app");
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        condition_raised(
+            &env,
+            holon_conditions::ConditionKind::VAULT_SYNC_NOT_STARTED,
+        )
+        .await;
         let not_started = condition_subjects(
             &env,
             holon_conditions::ConditionKind::VAULT_SYNC_NOT_STARTED,
@@ -1670,7 +1706,7 @@ fn an_undone_deletion_survives_a_crash_at(crash_point: &'static str, put_back_be
         env.write_org_file("DayPage.org", DAY_PAGE_KID_REMOVED)
             .await
             .expect("delete the child from DayPage.org");
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        crash_point_reached().await;
         assert_eq!(
             read_file(&env, "DayPage.org")
                 .await
@@ -1683,7 +1719,7 @@ fn an_undone_deletion_survives_a_crash_at(crash_point: &'static str, put_back_be
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
         eventually_on_disk(&env, "DayPage.org", "bulk-0-0-kid").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert!(
             copy_conditions(&env).contains(&(
                 KID.to_string(),
@@ -1724,7 +1760,11 @@ fn a_vault_that_cannot_be_watched_is_disclosed() {
             .expect("write DayPage.org");
         holon_filesystem::crash_injection::arm("arm_watcher");
         env.start_app(true).await.expect("start_app");
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        condition_raised(
+            &env,
+            holon_conditions::ConditionKind::VAULT_SYNC_NOT_STARTED,
+        )
+        .await;
         let not_started = condition_subjects(
             &env,
             holon_conditions::ConditionKind::VAULT_SYNC_NOT_STARTED,
@@ -1793,7 +1833,7 @@ fn a_standing_deletion_survives_a_crash_at(ending: Ending, crash_point: &'static
         );
         holon_filesystem::crash_injection::arm(crash_point);
         end_the_undone_deletion(&env, ending).await;
-        tokio::time::sleep(Duration::from_millis(2000)).await;
+        crash_point_reached().await;
         assert_eq!(
             holon_filesystem::crash_injection::armed(),
             None,
@@ -1803,7 +1843,7 @@ fn a_standing_deletion_survives_a_crash_at(ending: Ending, crash_point: &'static
 
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert_the_deletion_stands(&env).await;
         if matches!(ending, Ending::CopyAdopted) {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1893,7 +1933,7 @@ fn an_undone_deletion_stays_while_its_copy_file_cannot_be_read() {
             .expect("give Overview.org a page id Holon refuses");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert_eq!(
             ingest_refusals(&env).len(),
             1,
@@ -1970,7 +2010,7 @@ fn an_undone_deletion_record_outside_the_vault_is_refused_alone() {
         .expect("write the record");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
 
         let unreadable = condition_subjects(
             &env,
@@ -2019,7 +2059,12 @@ fn a_failed_start_step_of_the_vault_is_disclosed() {
         holon_filesystem::crash_injection::arm("settle_undone_deletions");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        crash_point_reached().await;
+        condition_raised(
+            &env,
+            holon_conditions::ConditionKind::VAULT_START_INCOMPLETE,
+        )
+        .await;
         assert_eq!(
             holon_filesystem::crash_injection::armed(),
             None,
@@ -2095,7 +2140,7 @@ fn a_child_typed_back_with_new_text_while_closed_keeps_the_new_text() {
             .expect("the user types the child back with new text");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert_the_deletion_ended_by_edit(&env, "child line I typed again on purpose").await;
         assert!(
             !read_file(&env, ".loro/undone-deletions.json")
@@ -2139,7 +2184,7 @@ fn an_unread_copy_file_the_user_deletes_lets_the_deletion_stand() {
             .expect("give Overview.org a page id Holon refuses");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert_eq!(
             count_rows(&env, KID).await,
             1,
@@ -2148,7 +2193,7 @@ fn an_unread_copy_file_the_user_deletes_lets_the_deletion_stand() {
         env.org_fs
             .remove_file(&env.org_root().join("Overview.org"))
             .expect("delete Overview.org");
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert_the_deletion_stands(&env).await;
         env.stop_app().await.expect("stop_app");
     });
@@ -2164,7 +2209,12 @@ fn a_vault_walk_that_fails_at_boot_is_disclosed() {
         holon_filesystem::crash_injection::arm("scan_vault_files");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        crash_point_reached().await;
+        condition_raised(
+            &env,
+            holon_conditions::ConditionKind::VAULT_START_INCOMPLETE,
+        )
+        .await;
         assert_eq!(
             holon_filesystem::crash_injection::armed(),
             None,
@@ -2418,7 +2468,7 @@ fn an_edit_of_a_put_back_grandchild_ends_the_put_back_child_too() {
             .await
             .expect("edit the put-back grandchild in Holon");
         eventually_on_disk(&env, "DayPage.org", "grandchild edited in Holon").await;
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        env.settle().await;
         let mut ended = condition_subjects(
             &env,
             holon_conditions::ConditionKind::DELETION_ENDED_BY_EDIT,
@@ -2453,14 +2503,14 @@ fn a_restore_of_earlier_bytes_while_closed_is_read_at_boot() {
             .await
             .expect("edit notes-1 in Holon");
         eventually_on_disk(&env, "Notes.org", "Note edited in Holon").await;
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        env.settle().await;
         env.stop_app().await.expect("stop_app");
         env.write_org_file("Notes.org", &read_before_the_edit)
             .await
             .expect("restore the earlier bytes while closed");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert_eq!(
             read_file(&env, "Notes.org").await,
             read_before_the_edit,
@@ -2492,7 +2542,7 @@ fn a_restore_inside_the_crash_window_between_write_and_stamp_keeps_the_stores_ed
             .await
             .expect("edit notes-1 in Holon");
         eventually_on_disk(&env, "Notes.org", "Note edited in Holon").await;
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        crash_point_reached().await;
         assert_eq!(
             holon_filesystem::crash_injection::armed(),
             None,
@@ -2504,7 +2554,7 @@ fn a_restore_inside_the_crash_window_between_write_and_stamp_keeps_the_stores_ed
             .expect("restore the earlier bytes while closed");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert_eq!(
             column_of(&env, "block:notes-1", "content").await,
             "Note edited in Holon",
@@ -2553,7 +2603,7 @@ fn a_write_back_the_file_table_cannot_record_is_not_written_and_says_why() {
         env.update_block_content("block:notes-1", "Edited after the drop")
             .await
             .expect("edit notes-1 in Holon");
-        tokio::time::sleep(Duration::from_millis(2000)).await;
+        condition_raised(&env, holon_conditions::ConditionKind::WRITEBACK_DEGRADED).await;
         assert_eq!(
             read_file(&env, "Notes.org").await,
             before,
@@ -2607,14 +2657,14 @@ fn a_restore_of_pre_paste_bytes_while_closed_is_read_at_boot() {
             .await
             .expect("edit notes-1 in Holon");
         eventually_on_disk(&env, "Notes.org", "Note edited in Holon").await;
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        env.settle().await;
         env.stop_app().await.expect("stop_app");
         env.write_org_file("Notes.org", &before_the_paste)
             .await
             .expect("restore the bytes from before the paste");
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        env.settle().await;
         assert_eq!(
             column_of(&env, "block:notes-1", "content").await,
             "Note one",

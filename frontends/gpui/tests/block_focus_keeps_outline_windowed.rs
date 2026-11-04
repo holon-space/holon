@@ -269,8 +269,7 @@ fn raising_the_keyboard_must_not_hide_the_block_rows() {
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft the outline the panel draws");
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let sut = window_wide(Box::new(bounds.clone()), engine.clone());
@@ -403,8 +402,7 @@ fn a_short_window_still_paints_the_outline() {
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft the outline the panel draws");
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let sut = window_wide(Box::new(bounds.clone()), engine.clone());

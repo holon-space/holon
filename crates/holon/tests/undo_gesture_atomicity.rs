@@ -312,9 +312,14 @@ async fn engine_with(
         race: reader_race,
     });
     Arc::new(
-        DispatchingOperationEngine::new_persistent(dispatcher, reader, Arc::new(NoStore))
-            .await
-            .expect("persistent engine"),
+        DispatchingOperationEngine::new_persistent(
+            dispatcher,
+            reader,
+            Arc::new(NoStore),
+            Arc::new(holon_api::SystemClock),
+        )
+        .await
+        .expect("persistent engine"),
     )
 }
 

@@ -309,17 +309,11 @@ impl Default for BootSeedGate {
 ///
 /// The controller's background task calls [`mark_progress`] after each
 /// iteration where it actually processed an event (file change or block
-/// change). Tests use [`wait_quiescent`] to wait until the loop has had no
-/// activity for a short window — proving that all org-file writes triggered
-/// by recent SQL mutations have already landed on disk.
-///
-/// This replaces filesystem mtime polling on the hot path (~30 ms per call)
-/// with an event signal that completes in ~1 ms when the loop is genuinely
-/// idle. Callers that don't have access to the signal (or want extra safety)
-/// fall back to mtime polling.
+/// change). A settle reads the targets it carries: the processed-change
+/// watermark and [`writeback_unsettled`].
 ///
 /// [`mark_progress`]: OrgSyncIdleSignal::mark_progress
-/// [`wait_quiescent`]: OrgSyncIdleSignal::wait_quiescent
+/// [`writeback_unsettled`]: OrgSyncIdleSignal::writeback_unsettled
 #[derive(Debug)]
 pub struct OrgSyncIdleSignal {
     /// Mid-fold state of the `home_by` stream that feeds the write-back loop.
@@ -332,7 +326,7 @@ pub struct OrgSyncIdleSignal {
     /// Monotonic count of completed loop iterations. Bumped after every
     /// processed event (file or block change).
     tick: std::sync::atomic::AtomicU64,
-    /// Wakes any task waiting in [`wait_quiescent`] whenever the tick advances.
+    /// Wakes the tasks waiting in [`Self::wait_for_change_seq`].
     notify: tokio::sync::Notify,
     /// Highest fully-processed `FileChange.seq` (ADR 0011). Advanced by the
     /// controller loop after each change — forwarded ones after
@@ -491,11 +485,7 @@ impl OrgSyncIdleSignal {
     }
 
     /// Wait until the processed-change watermark reaches `seq`, or `timeout`
-    /// elapses. Returns `true` when the watermark was reached. Deterministic
-    /// counterpart to [`wait_quiescent`] for changes whose seq the caller
-    /// knows (e.g. an in-memory write it just made).
-    ///
-    /// [`wait_quiescent`]: Self::wait_quiescent
+    /// elapses. Returns `true` when the watermark was reached.
     pub async fn wait_for_change_seq(&self, seq: u64, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -538,54 +528,6 @@ impl OrgSyncIdleSignal {
     pub fn mark_progress(&self) {
         self.tick.fetch_add(1, std::sync::atomic::Ordering::Release);
         self.notify.notify_waiters();
-    }
-
-    /// Wait until the controller loop has been idle (no [`mark_progress`]
-    /// call) for `quiescence`, or `timeout` elapses. Returns `true` if
-    /// quiescence was reached, `false` on timeout.
-    ///
-    /// Cost when already idle: one `tokio::time::timeout` of `quiescence`.
-    /// Cost when busy: as long as it takes for the loop to drain, capped by
-    /// `timeout`.
-    ///
-    /// [`mark_progress`]: Self::mark_progress
-    pub async fn wait_quiescent(
-        &self,
-        quiescence: std::time::Duration,
-        timeout: std::time::Duration,
-    ) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let snapshot = self.current_tick();
-            // Subscribe BEFORE re-reading the tick to avoid missing a wake.
-            let notified = self.notify.notified();
-            if self.current_tick() != snapshot {
-                // Activity already happened; loop again.
-                if tokio::time::Instant::now() >= deadline {
-                    return false;
-                }
-                continue;
-            }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let wait = quiescence.min(remaining);
-            match tokio::time::timeout(wait, notified).await {
-                Err(_) => {
-                    // No notification within `quiescence` — the loop is idle.
-                    if self.current_tick() == snapshot {
-                        return true;
-                    }
-                    // A wake landed between the timeout firing and the
-                    // re-check; treat it as activity and
-                    // loop.
-                }
-                Ok(()) => {
-                    // Got woken — keep waiting unless we ran out of time.
-                    if tokio::time::Instant::now() >= deadline {
-                        return false;
-                    }
-                }
-            }
-        }
     }
 }
 

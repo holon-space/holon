@@ -11,6 +11,7 @@ crates/holon/src/sync/clock_scheduler.rs	liveness	tokio::time::Instant::now() < 
 crates/holon/src/sync/clock_scheduler.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon/src/sync/clock_scheduler.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon/src/testing/database_stuck_guard.rs	liveness	std::time::Instant::now() < deadline,
+crates/holon-api/src/clock/tests.rs	lower-bound	.timeout(Duration::from_millis(10), futures::future::pending::<()>())
 crates/holon-api/src/latency_slo.rs	lower-bound	drain.elapsed > Duration::ZERO,
 crates/holon-frontend/src/reactive_view.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-frontend/src/reactive_view.rs	liveness	std::time::Instant::now() < deadline,
@@ -43,6 +44,7 @@ crates/holon-integration-tests/src/pbt/frontend_slice/structural_pbt.rs	liveness
 crates/holon-integration-tests/src/pbt/invariants/bodies/settle_budget.rs	harness	assert!(hard_budget() > SLO, "default slack must exceed 1");
 crates/holon-integration-tests/src/pbt/ui_harness.rs	liveness	Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt_mcp_fake.rs	liveness	std::time::Instant::now() < deadline,
+crates/holon-integration-tests/src/polling.rs	lower-bound	assert!(hung.waited >= Duration::from_millis(50), "{message}");
 crates/holon-integration-tests/src/test_environment.rs	liveness	start.elapsed() < timeout,
 crates/holon-loro/src/loro_backend.rs	lower-bound	waited >= Duration::from_millis(WIDENED_BIRTH_MS / 4),
 crates/holon-loro/src/loro_backend.rs	lower-bound	guarded_waited >= Duration::from_millis(WIDENED_BIRTH_MS / 4),

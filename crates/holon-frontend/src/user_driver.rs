@@ -868,24 +868,29 @@ impl ReactiveEngineDriver {
             .context("block contents not populated within timeout")
     }
 
-    /// Snapshot the engine's emission tick. Pair with
-    /// [`wait_emissions_quiesced`] to barrier on CDC settling. Wrapper around
-    /// the same `current_tick`/`wait_for_quiescence` pair used internally by
-    /// `send_key_chord`'s post-dispatch barrier.
+    /// Snapshot the engine's emission tick. Pair with [`settle_after`]
+    /// to barrier on a gesture's effect, as `send_key_chord` does.
     pub fn snapshot_emission_tick(&self) -> u64 {
         self.router.current_tick()
     }
 
-    /// Wait until the emission tick has advanced past `snapshot` AND then
-    /// stayed stable for the configured quiescence window. Returns an error
-    /// (per project's fail-loud policy) if the pipeline never advances or
-    /// keeps churning past `timeout`.
-    pub async fn wait_emissions_quiesced(&self, snapshot: u64) -> Result<()> {
-        let (window, timeout) = quiescence_config();
+    /// Wait until the emission tick has advanced past `snapshot` (the gesture
+    /// had an effect), then until the engine owes no CDC delivery and the
+    /// router has drained every emission.
+    pub async fn settle_after(&self, snapshot: u64) -> Result<()> {
         self.router
-            .wait_for_quiescence(snapshot, window, timeout)
+            .settle_after(snapshot)
             .await
-            .context("emissions did not quiesce after dispatch — CDC pipeline stuck?")
+            .context("the router did not settle after dispatch")
+    }
+
+    /// Wait until the engine owes no CDC delivery and the router has drained
+    /// every emission.
+    pub async fn settle_delivery(&self) -> Result<()> {
+        self.router
+            .settle_delivery(Instant::now() + SETTLE_HANG_DEADLINE)
+            .await
+            .context("the router did not settle")
     }
 }
 
@@ -1397,11 +1402,7 @@ impl UserDriver for ReactiveEngineDriver {
                 let tick_snapshot = self.router.current_tick();
                 self.synthetic_dispatch(&entity_name, &operation.name, params)
                     .await?;
-                let (window, timeout) = quiescence_config();
-                self.router
-                    .wait_for_quiescence(tick_snapshot, window, timeout)
-                    .await
-                    .context("emissions did not quiesce after dispatch — CDC pipeline stuck?")?;
+                self.settle_after(tick_snapshot).await?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -1532,11 +1533,9 @@ impl UserDriver for ReactiveEngineDriver {
             );
         };
         self.apply_intent(intent).await?;
-        let (window, timeout) = quiescence_config();
-        self.router
-            .wait_for_quiescence(tick_snapshot, window, timeout)
+        self.settle_after(tick_snapshot)
             .await
-            .context("emissions did not quiesce after drop dispatch — CDC pipeline stuck?")?;
+            .context("drop dispatch")?;
         Ok(true)
     }
 
@@ -1700,28 +1699,30 @@ fn region_panel_block_id(region: holon_api::Region) -> EntityUri {
 /// `bubble_input` — no flattened index, no splice/shift bookkeeping.
 struct HeadlessInputRouter {
     engine: Arc<ReactiveEngine>,
+    /// `None` in a session without Turso: it has no CDC to wait for.
+    query_engine: Option<Arc<dyn holon_api::QueryEngine>>,
     /// Per-block content snapshots. Updated by drain tasks on each emission.
     block_contents: Arc<Mutex<HashMap<EntityUri, Arc<ReactiveViewModel>>>>,
-    /// block_id → drain task handle.
-    watches: Arc<Mutex<HashMap<EntityUri, tokio::task::JoinHandle<()>>>>,
+    /// block_id → its drain task's barrier.
+    watches: Arc<Mutex<HashMap<EntityUri, DrainBarrier>>>,
     /// Set when the first emission has been applied.
     ready: Arc<tokio::sync::Notify>,
     /// Root block id, established on the first `ensure_block_watch` call.
     root_block_id: OnceLock<EntityUri>,
-    /// F2: monotonic counter bumped after every emission. Readers snapshot,
-    /// trigger a dispatch, then wait until the counter advances past the
-    /// snapshot and stabilizes.
+    /// Bumped after every emission. Readers snapshot it before a dispatch to
+    /// see that the dispatch had an effect.
     last_patch_tick: AtomicU64,
     /// F_drop: cancellation notifier for drain tasks.
     cancel: Arc<tokio::sync::Notify>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Quiescence window for F2 — how long the router must remain silent after
-/// a dispatched mutation before we consider it settled. 20ms default,
-/// override via `HOLON_PBT_QUIESCENCE_MS` for slower CI.
-const DEFAULT_QUIESCENCE_MS: u64 = 20;
-const DEFAULT_QUIESCENCE_TIMEOUT_MS: u64 = 2000;
+/// Only detects a hang: `settle_after` returns as soon as its targets hold.
+const SETTLE_HANG_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Asks a drain task to apply every emission its stream holds ready and to
+/// answer with how many it applied.
+type DrainBarrier = tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<usize>>;
 
 /// How long `drop_entity` polls `block_contents` for the source/target
 /// widgets before bailing. Override via `HOLON_PBT_DROP_TIMEOUT_MS`.
@@ -1735,25 +1736,12 @@ fn drop_widget_timeout() -> Duration {
     Duration::from_millis(ms)
 }
 
-fn quiescence_config() -> (Duration, Duration) {
-    let window = std::env::var("HOLON_PBT_QUIESCENCE_MS")
-        .ok()
-        .and_then(|s| s.parse().ok()) // ALLOW(ok): malformed env var → use default
-        .unwrap_or(DEFAULT_QUIESCENCE_MS);
-    let timeout = std::env::var("HOLON_PBT_QUIESCENCE_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse().ok()) // ALLOW(ok): malformed env var → use default
-        .unwrap_or(DEFAULT_QUIESCENCE_TIMEOUT_MS);
-    (
-        Duration::from_millis(window),
-        Duration::from_millis(timeout),
-    )
-}
-
 impl HeadlessInputRouter {
     fn new(engine: Arc<ReactiveEngine>) -> Arc<Self> {
+        let query_engine = engine.session().query_engine();
         Arc::new(Self {
             engine,
+            query_engine,
             block_contents: Arc::new(Mutex::new(HashMap::new())),
             watches: Arc::new(Mutex::new(HashMap::new())),
             ready: Arc::new(tokio::sync::Notify::new()),
@@ -1800,31 +1788,73 @@ impl HeadlessInputRouter {
         }
     }
 
-    /// F2: approximate post-dispatch barrier. Waits for the emission tick to
-    /// advance past `snapshot` and then stay stable for `window`.
-    async fn wait_for_quiescence(
-        &self,
-        snapshot: u64,
-        window: Duration,
-        timeout: Duration,
-    ) -> Result<()> {
-        let deadline = Instant::now() + timeout;
+    async fn settle_after(&self, snapshot: u64) -> Result<()> {
+        let deadline = Instant::now() + SETTLE_HANG_DEADLINE;
         while self.current_tick() == snapshot {
             if Instant::now() >= deadline {
-                anyhow::bail!("emissions did not advance past tick {snapshot} within {timeout:?}");
+                anyhow::bail!(
+                    "the gesture had no effect: emission tick still at {snapshot} after \
+                     {SETTLE_HANG_DEADLINE:?}"
+                );
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
+        self.settle_delivery(deadline).await
+    }
+
+    async fn settle_delivery(&self, deadline: Instant) -> Result<()> {
         loop {
-            let before = self.current_tick();
-            tokio::time::sleep(window).await;
-            if self.current_tick() == before {
-                return Ok(());
-            }
+            let owed = match &self.query_engine {
+                Some(engine) => engine.delivery_owed().await?,
+                None => Vec::new(),
+            };
+            let drained = if owed.is_empty() {
+                let drained = self.drain_round().await;
+                if drained == 0 {
+                    return Ok(());
+                }
+                drained
+            } else {
+                0
+            };
             if Instant::now() >= deadline {
-                anyhow::bail!("emissions did not quiesce (kept advancing) within {timeout:?}");
+                if owed.is_empty() {
+                    anyhow::bail!(
+                        "not settled within {SETTLE_HANG_DEADLINE:?}; stage router-drain at \
+                         {drained} emissions applied in the last round, target 0"
+                    );
+                }
+                anyhow::bail!(
+                    "not settled within {SETTLE_HANG_DEADLINE:?}; owed: [{}]",
+                    owed.join("; ")
+                );
+            }
+            if !owed.is_empty() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
         }
+    }
+
+    /// Ask every drain task to apply what its stream holds ready; the sum of
+    /// emissions they applied.
+    async fn drain_round(&self) -> usize {
+        let acks: Vec<_> = {
+            let watches = self.watches.lock().unwrap();
+            watches
+                .values()
+                .filter_map(|barrier| {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    // A closed barrier is a task whose stream ended: it has
+                    // nothing left to apply.
+                    barrier.send(tx).is_ok().then_some(rx)
+                })
+                .collect()
+        };
+        let mut drained = 0;
+        for ack in acks {
+            drained += ack.await.unwrap_or(0); // ALLOW(fallback): a task that ended while asked has nothing left to apply
+        }
+        drained
     }
 
     /// Human-readable summary of what the router has populated. Used by
@@ -1893,10 +1923,20 @@ impl HeadlessInputRouter {
         let cancel = self.cancel.clone();
         let cancelled = self.cancelled.clone();
         let bid = block_id.clone();
+        let (barrier, mut barrier_rx) =
+            tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<usize>>();
 
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
+            use futures::FutureExt;
             use futures::StreamExt;
             let mut stream = stream;
+            let apply = |rvm| {
+                let Some(router) = router_weak.upgrade() else {
+                    return false;
+                };
+                router.process_emission(&bid, Arc::new(rvm));
+                true
+            };
             loop {
                 if cancelled.load(Ordering::Acquire) {
                     break;
@@ -1905,10 +1945,23 @@ impl HeadlessInputRouter {
                 tokio::select! {
                     maybe_rvm = stream.next() => {
                         let Some(rvm) = maybe_rvm else { break };
-                        let Some(router) = router_weak.upgrade() else { break };
-                        let rvm_arc = Arc::new(rvm);
-                        router.process_emission(&bid, rvm_arc);
-                        drop(router);
+                        if !apply(rvm) { break }
+                    }
+                    Some(ack) = barrier_rx.recv() => {
+                        let mut applied = 0;
+                        let mut ended = false;
+                        loop {
+                            match stream.next().now_or_never() {
+                                Some(Some(rvm)) => {
+                                    if !apply(rvm) { ended = true; break }
+                                    applied += 1;
+                                }
+                                Some(None) => { ended = true; break }
+                                None => break,
+                            }
+                        }
+                        let _ = ack.send(applied); // ALLOW(fallback): the asker gave up waiting
+                        if ended { break }
                     }
                     _ = notified => break,
                 }
@@ -1918,7 +1971,7 @@ impl HeadlessInputRouter {
         self.watches
             .lock()
             .unwrap()
-            .insert(block_id.clone(), handle);
+            .insert(block_id.clone(), barrier);
     }
 
     fn process_emission(self: &Arc<Self>, block_id: &EntityUri, rvm: Arc<ReactiveViewModel>) {

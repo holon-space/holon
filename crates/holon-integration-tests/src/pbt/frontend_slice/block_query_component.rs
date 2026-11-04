@@ -92,6 +92,7 @@ impl BlockQueryFrontendComponent {
         let injector = build_no_turso_container(
             ":memory:".into(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+            Default::default(),
             {
                 let backend = backend.clone();
                 move |inj| {

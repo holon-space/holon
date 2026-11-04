@@ -58,6 +58,10 @@ use holon_pbt_core::types::LoroCorruptionType;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
+/// Only detects a hang: a session that is making progress reaches its
+/// targets long before it.
+const SETTLE_HANG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Give `session` an in-memory secret store, so its secret writes have
 /// somewhere to go.
 ///
@@ -140,8 +144,8 @@ pub struct TestEnvironment {
     /// Provides BuilderServices, keybinding registry, operation dispatch.
     pub reactive_engine: OnceCell<Arc<holon_frontend::reactive::ReactiveEngine>>,
 
-    /// Idle signal for the FileSyncController loop. When present, lets
-    /// `wait_for_org_files_stable` skip filesystem polling on the hot path.
+    /// Idle signal for the FileSyncController loop: the org-ingest and
+    /// org-writeback stages of `settle`.
     org_sync_idle: OnceCell<Arc<holon_orgmode::OrgSyncIdleSignal>>,
 
     /// The E2ETestContext for operations (wraps BackendEngine) - only valid
@@ -255,6 +259,14 @@ pub struct TestEnvironment {
     /// on completion, making org sync deterministic (no fsevents debounce,
     /// no partial-write window). Survives app restarts within one env.
     pub org_fs: Arc<holon_filesystem::InMemoryFileSystem>,
+
+    /// The org ingest target: what `org_fs` broadcast to the sync loop.
+    /// Watched from construction on, so no write escapes it.
+    org_emitted: crate::pbt::convergence::EmittedChanges,
+
+    /// `org_fs`'s last change seq when the session booted; the boot scan
+    /// covers every change up to it.
+    org_scanned_through: Cell<u64>,
 
     /// Canonicalized temp-dir path — the org root as the controller sees it
     /// (`OrgModeConfig::new` canonicalizes; macOS `/var` → `/private/var`).
@@ -431,6 +443,7 @@ impl TestEnvironmentBuilder {
             holon_filesystem::PathCase::Insensitive,
         ));
         org_fs.mkdir_all(&org_root);
+        let org_emitted = crate::pbt::convergence::EmittedChanges::watch(&org_fs);
 
         // Write pre-populated org files BEFORE engine initialization
         // This is the key to reproducing the Flutter bug
@@ -447,6 +460,8 @@ impl TestEnvironmentBuilder {
             let doc_uri = EntityUri::file(filename);
             documents.insert(doc_uri, file_path);
         }
+
+        let org_scanned_through = org_fs.last_change_seq();
 
         if self.hold_initial_scan {
             org_fs.hold_scans();
@@ -481,61 +496,54 @@ impl TestEnvironmentBuilder {
         let secret_namespace = config_dir.clone();
         let clock_for_di = self.clock.clone();
 
-        let (
-            session,
-            backend_engine,
-            (doc_store, reactive_engine, sync_handle, idle_signal, injector),
-        ) = holon_app::new_from_config_with_di(
-            holon_config,
-            session_config,
-            config_dir,
-            std::collections::HashSet::new(),
-            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
-            move |injector| {
-                holon::testing::database_stuck_guard::report_database_stuck_in(injector);
-                install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
-                holon_mcp::di::register_debug_services(injector);
-                if let Some(clock) = clock_for_di.clone() {
-                    let injected = holon_api::InjectedClock(clock);
-                    injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
-                        move |_| injected.clone().into(),
-                    ));
-                }
-                Ok(())
-            },
-            move |injector| {
-                let engine = publish_reactive_builder_services(injector);
+        let (session, backend_engine, (doc_store, reactive_engine, idle_signal, injector)) =
+            holon_app::new_from_config_with_di(
+                holon_config,
+                session_config,
+                config_dir,
+                std::collections::HashSet::new(),
+                std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+                move |injector| {
+                    holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+                    install_headless_render_interpreter(
+                        injector,
+                        &org_fs_for_di,
+                        &secret_namespace,
+                    );
+                    holon_mcp::di::register_debug_services(injector);
+                    if let Some(clock) = clock_for_di.clone() {
+                        let injected = holon_api::InjectedClock(clock);
+                        injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
+                            move |_| injected.clone().into(),
+                        ));
+                    }
+                    Ok(())
+                },
+                move |injector| {
+                    let engine = publish_reactive_builder_services(injector);
 
-                let doc_store = if enable_loro {
-                    injector
-                        .try_resolve::<LoroDocumentStore>()
-                        .ok() // ALLOW(ok): optional DI service
-                        .map(|store| Arc::new(RwLock::new((*store).clone())))
-                } else {
-                    None
-                };
-                let sync_handle = if enable_loro {
-                    injector
-                        .try_resolve::<holon_loro::LoroSyncControllerHandle>()
-                        .ok()
-                } else {
-                    None
-                };
-                let idle_signal = injector
-                    .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
-                    .ok();
-                (
-                    doc_store,
-                    engine,
-                    sync_handle,
-                    idle_signal,
-                    injector.clone(),
-                )
-            },
-        )
-        .await?;
+                    let doc_store = if enable_loro {
+                        injector
+                            .try_resolve::<LoroDocumentStore>()
+                            .ok() // ALLOW(ok): optional DI service
+                            .map(|store| Arc::new(RwLock::new((*store).clone())))
+                    } else {
+                        None
+                    };
+                    let idle_signal = injector
+                        .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                        .ok();
+                    (doc_store, engine, idle_signal, injector.clone())
+                },
+            )
+            .await?;
         let debug_services =
             holon_mcp::di::populate_debug_services(&injector, Some(reactive_engine.clone())).await;
+        let sync_handle = if enable_loro {
+            Some(loro_sync_handle(&injector).await)
+        } else {
+            None
+        };
         if self.wait_for_file_watcher {
             wait_for_vault_backlog(&injector).await?;
         }
@@ -555,6 +563,8 @@ impl TestEnvironmentBuilder {
             org_root,
             temp_dir,
             runtime,
+            org_emitted,
+            org_scanned_through: Cell::new(org_scanned_through),
             session: filled_once_cell({
                 bind_test_secret_store(&session);
                 session
@@ -590,6 +600,37 @@ impl TestEnvironmentBuilder {
 /// A session is ready once the writable files are in (D108.a); a test that
 /// waits for the boot also waits for the read-only backlog, so recipes are in
 /// the store as before.
+/// The handle has an async provider: only an async resolve builds it when
+/// nothing resolved it yet, as on a boot that does not wait for ready.
+async fn loro_sync_handle(
+    injector: &fluxdi::Injector,
+) -> Arc<holon_loro::LoroSyncControllerHandle> {
+    injector
+        .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
+        .await
+        .unwrap_or_else(|e| panic!("Loro is wired but its sync controller handle is missing: {e}"))
+}
+
+/// The share backend once something built it. Before that no share has a
+/// projection worker, so there is nothing to wait for.
+fn built_share_backend(
+    injector: &fluxdi::Injector,
+) -> Option<Arc<holon_loro::loro_share_backend::LoroShareBackend>> {
+    match injector.try_resolve::<Arc<holon_loro::loro_share_backend::LoroShareBackend>>() {
+        Ok(backend) => Some((*backend).clone()),
+        Err(e)
+            if matches!(
+                e.kind,
+                fluxdi::ErrorKind::ServiceNotProvided
+                    | fluxdi::ErrorKind::AsyncFactoryRequiresAsyncResolve
+            ) =>
+        {
+            None
+        }
+        Err(e) => panic!("the share backend failed to resolve: {e}"),
+    }
+}
+
 async fn wait_for_vault_backlog(injector: &fluxdi::Injector) -> Result<()> {
     let outcome = injector
         .resolve::<holon_orgmode::VaultBacklogDrained>()
@@ -889,12 +930,16 @@ impl TestEnvironment {
             holon_filesystem::PathCase::Insensitive,
         ));
         org_fs.mkdir_all(&org_root);
+        let org_emitted = crate::pbt::convergence::EmittedChanges::watch(&org_fs);
+        let org_scanned_through = org_fs.last_change_seq();
 
         Ok(Self {
             org_fs,
             org_root,
             temp_dir,
             runtime,
+            org_emitted,
+            org_scanned_through: Cell::new(org_scanned_through),
             session: OnceCell::new(),
             injector: OnceCell::new(),
             loro_doc_store: OnceCell::new(),
@@ -1104,6 +1149,7 @@ impl TestEnvironment {
     #[tracing::instrument(skip(self), fields(wait_for_ready), name = "test_env.start_app")]
     pub async fn start_app(&self, wait_for_ready: bool) -> Result<()> {
         assert!(self.session.get().is_none(), "App already started");
+        self.org_scanned_through.set(self.org_fs.last_change_seq());
         holon_frontend::shadow_builders::register_render_dsl_widget_names();
 
         if self.storage == StorageSelector::LoroMemory {
@@ -1131,55 +1177,48 @@ impl TestEnvironment {
         let secret_namespace = config_dir.clone();
 
         let enable_loro = self.enable_loro.get();
-        let (
-            session,
-            backend_engine,
-            (doc_store, reactive_engine, sync_handle, idle_signal, injector),
-        ) = holon_app::new_from_config_with_di(
-            holon_config,
-            session_config,
-            config_dir,
-            std::collections::HashSet::new(),
-            std::sync::Arc::new(holon_conditions::ConditionBus::new()),
-            move |injector| {
-                holon::testing::database_stuck_guard::report_database_stuck_in(injector);
-                install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
-                holon_mcp::di::register_debug_services(injector);
-                Ok(())
-            },
-            move |injector| {
-                let engine = publish_reactive_builder_services(injector);
+        let (session, backend_engine, (doc_store, reactive_engine, idle_signal, injector)) =
+            holon_app::new_from_config_with_di(
+                holon_config,
+                session_config,
+                config_dir,
+                std::collections::HashSet::new(),
+                std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+                move |injector| {
+                    holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+                    install_headless_render_interpreter(
+                        injector,
+                        &org_fs_for_di,
+                        &secret_namespace,
+                    );
+                    holon_mcp::di::register_debug_services(injector);
+                    Ok(())
+                },
+                move |injector| {
+                    let engine = publish_reactive_builder_services(injector);
 
-                let doc_store = if enable_loro {
-                    injector
-                        .try_resolve::<LoroDocumentStore>()
-                        .ok() // ALLOW(ok): optional DI service
-                        .map(|store| Arc::new(RwLock::new((*store).clone())))
-                } else {
-                    None
-                };
-                let sync_handle = if enable_loro {
-                    injector
-                        .try_resolve::<holon_loro::LoroSyncControllerHandle>()
-                        .ok()
-                } else {
-                    None
-                };
-                let idle_signal = injector
-                    .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
-                    .ok();
-                (
-                    doc_store,
-                    engine,
-                    sync_handle,
-                    idle_signal,
-                    injector.clone(),
-                )
-            },
-        )
-        .await?;
+                    let doc_store = if enable_loro {
+                        injector
+                            .try_resolve::<LoroDocumentStore>()
+                            .ok() // ALLOW(ok): optional DI service
+                            .map(|store| Arc::new(RwLock::new((*store).clone())))
+                    } else {
+                        None
+                    };
+                    let idle_signal = injector
+                        .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                        .ok();
+                    (doc_store, engine, idle_signal, injector.clone())
+                },
+            )
+            .await?;
         let debug_services =
             holon_mcp::di::populate_debug_services(&injector, Some(reactive_engine.clone())).await;
+        let sync_handle = if enable_loro {
+            Some(loro_sync_handle(&injector).await)
+        } else {
+            None
+        };
         if wait_for_ready {
             wait_for_vault_backlog(&injector).await?;
         }
@@ -1301,6 +1340,7 @@ impl TestEnvironment {
         let injector = build_no_turso_container(
             storage_dir,
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+            Default::default(),
             {
                 let backend = backend.clone();
                 let shared_store = shared_store.clone();
@@ -1579,47 +1619,6 @@ impl TestEnvironment {
             .unwrap_or(0)
     }
 
-    /// Wait until the Turso CDC emission watermark stops advancing for
-    /// `quiet_for`, bounded by `timeout`.
-    ///
-    /// A watermark-free settle barrier (replaces the former
-    /// `wait_for_consumers` event-bus ack-watermark wait — that per-consumer
-    /// ack watermark was test-only scaffolding). It proves every matview CDC
-    /// batch the latest transition produced — block, region, **and
-    /// file/directory** — has been *emitted* before the caller samples
-    /// `target_seq` in [`Self::assert_cdc_quiescent`], so legitimate
-    /// file/directory CDC isn't mistaken for post-settlement churn. It reads
-    /// the same `cdc_emitted_watermark` the quiescence assert itself trusts.
-    ///
-    /// Best-effort: returns on timeout (the hard gate is
-    /// `assert_cdc_quiescent`). No-op when the app isn't running
-    /// (pre-`StartApp` transitions).
-    pub async fn wait_for_cdc_quiescent(
-        &self,
-        quiet_for: std::time::Duration,
-        timeout: std::time::Duration,
-    ) {
-        let Some(ctx) = self.ctx.get() else { return };
-        let start = tokio::time::Instant::now();
-        let mut last = ctx.engine().db_handle().cdc_emitted_watermark();
-        let mut stable_since = tokio::time::Instant::now();
-        loop {
-            if start.elapsed() >= timeout {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            let now = ctx.engine().db_handle().cdc_emitted_watermark();
-            if now == last {
-                if stable_since.elapsed() >= quiet_for {
-                    return;
-                }
-            } else {
-                last = now;
-                stable_since = tokio::time::Instant::now();
-            }
-        }
-    }
-
     /// Wait for the `LoroSyncController` to reach quiescence
     /// ([`holon_loro::LoroSyncControllerHandle::is_settled`]). No-op when Loro
     /// is disabled.
@@ -1630,6 +1629,101 @@ impl TestEnvironment {
         holon_loro_testing::quiescence::wait_for_loro_quiescence_on(handle, timeout)
             .await
             .expect("wait_for_loro_quiescence: loro sync did not quiesce before the deadline");
+    }
+
+    /// Wait until every stage this session wires reached the target of the
+    /// writes made so far: Loro synced, every emitted CDC batch routed and
+    /// applied by each reporting subscriber, the block feed caught up, org
+    /// ingest through the last file change, and the write-back with nothing
+    /// owed. Returns at once before `start_app`. Panics, naming each stage
+    /// short of its target, when the session hangs.
+    pub async fn settle(&self) {
+        if let Err(gave_up) = self.settle_within(SETTLE_HANG_DEADLINE).await {
+            panic!("settle: the session did not reach its targets {gave_up}");
+        }
+    }
+
+    /// The evidence for "an earlier store write did NOT reach the disk":
+    /// writes `sentinel` into org block `block_id` through the store, waits
+    /// until `file_name` holds it, then settles. Write-back runs in feed
+    /// order, so once the sentinel is on disk every earlier write has passed
+    /// write-back too.
+    pub async fn sentinel_writeback(&self, file_name: &str, block_id: &str, sentinel: &str) {
+        self.test_ctx()
+            .query(
+                format!("UPDATE block_raw SET content = '{sentinel}' WHERE id = '{block_id}'"),
+                QueryLanguage::HolonSql,
+                HashMap::new(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("sentinel write into {block_id}: {e:#}"));
+        crate::polling::wait_until(
+            &format!("sentinel {sentinel:?} written back to {file_name}"),
+            SETTLE_HANG_DEADLINE,
+            || async {
+                let scanned = self
+                    .org_fs
+                    .scan_directory(self.org_root())
+                    .await
+                    .expect("scan the vault root");
+                let Some(path) = scanned
+                    .files
+                    .iter()
+                    .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(file_name))
+                else {
+                    return crate::polling::Probe::NotYet(format!("no file {file_name}"));
+                };
+                let content = self
+                    .org_fs
+                    .read_to_string(path)
+                    .await
+                    .expect("read a vault file the scan just listed");
+                if content.contains(sentinel) {
+                    crate::polling::Probe::Reached(())
+                } else {
+                    crate::polling::Probe::NotYet(content)
+                }
+            },
+        )
+        .await
+        .unwrap_or_else(|hung| panic!("{hung}"));
+        self.settle().await;
+    }
+
+    pub(crate) async fn settle_within(
+        &self,
+        deadline: std::time::Duration,
+    ) -> std::result::Result<(), crate::pbt::convergence::GaveUp> {
+        let engine = self.ctx.get().map(|ctx| ctx.engine());
+        let org_idle = self
+            .org_sync_idle
+            .get()
+            .or(self.loro_org_idle.get())
+            .cloned();
+        let org_files = org_idle
+            .as_ref()
+            .map(|_| crate::pbt::convergence::OrgFiles {
+                emitted: &self.org_emitted,
+                scanned_through: self.org_scanned_through.get(),
+            });
+        let block_feed = self.injector.get().and_then(|injector| {
+            injector
+                .try_resolve::<holon_api::live_data::BlockFeed>()
+                .ok() // ALLOW(ok): optional DI service — absent without a block matview
+                .map(|feed| feed.0.clone())
+        });
+        crate::pbt::convergence::converge_signals(
+            crate::pbt::convergence::Signals {
+                engine,
+                sync: self.loro_sync_handle.get().cloned(),
+                shares: self.injector.get().and_then(built_share_backend),
+                org_idle,
+                org_files,
+                block_feed,
+            },
+            crate::pbt::convergence::Patience::Budget(deadline),
+        )
+        .await
     }
 
     /// Create an org file in the temp directory (requires running app).
@@ -2097,139 +2191,16 @@ impl TestEnvironment {
         self.query_with_context(content, language, &parent_id).await
     }
 
-    /// Create a document and wait for the external_processing window to close.
-    ///
-    /// This is useful for PBT tests that need to ensure the file watcher has
-    /// fully processed the new document before proceeding.
+    /// Create a document and settle on its write targets.
     pub async fn create_document_with_sync_wait(&mut self, file_name: &str) -> Result<EntityUri> {
         let doc_uri = self.create_document(file_name).await?;
-        self.wait_for_org_files_stable(25, std::time::Duration::from_millis(5000))
-            .await;
+        self.settle().await;
         Ok(doc_uri)
-    }
-
-    /// Pre-drain delivery barrier shared by `drain_cdc_events` /
-    /// `drain_region_cdc_events`: wait for the Turso CDC emission watermark
-    /// to go quiet (5 ms stable, 500 ms cap) so the subsequent non-blocking
-    /// poll doesn't race mid-emission producers. Without a Turso ctx
-    /// (no-Turso wiring / pre-StartApp) fall back to the former flat 5 ms —
-    /// there is no watermark to consult, and producers (Loro sync) still
-    /// need real wall time.
-    pub async fn drain_delivery_barrier(&self) {
-        if self.ctx.get().is_some() {
-            self.wait_for_cdc_quiescent(
-                std::time::Duration::from_millis(5),
-                std::time::Duration::from_millis(500),
-            )
-            .await;
-        } else {
-            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-        }
-    }
-
-    /// Drain CDC events from all active watches and update ui_model.
-    #[tracing::instrument(skip(self), name = "pbt.drain_cdc_events")]
-    pub async fn drain_cdc_events(&mut self) {
-        use futures::FutureExt;
-
-        // Drain CDC events without blocking: barrier on the CDC emission
-        // watermark (the same signal `assert_cdc_quiescent` trusts) instead
-        // of a flat 5 ms sleep, so we don't poll while producers are
-        // mid-emission and don't flake when they need longer. Then
-        // `now_or_never` every poll so an empty channel exits immediately.
-        // No-Turso (no ctx) keeps the former short sleep — the watermark is
-        // Turso-side, and pure `yield_now` caused Loro quiescence races in
-        // the cross-executor PBT variant.
-        //
-        // Correctness gate: inv-backend-blocks-match-ref (SQL = ref),
-        // inv-watch-rows-match-ref (UI model = ref), and inv-region-focus-roots
-        // (region focus roots) all start failing if the producer hasn't
-        // actually delivered events by the time we poll.
-        self.drain_delivery_barrier().await;
-
-        // Hold the `active_watches` borrow for the loop; borrow `ui_model`
-        // (a distinct cell) inside each hit. No `.await` in this loop, so the
-        // guards never cross a suspension point; both drop before the
-        // `all_blocks_stream` (`&mut self`) access below.
-        for (query_id, stream) in self.active_watches.borrow_mut().iter_mut() {
-            let mut event_count = 0;
-            loop {
-                match stream.next().now_or_never() {
-                    Some(Some(batch)) => {
-                        event_count += batch.inner.items.len();
-                        if let Some(ui_data) = self.ui_model.borrow_mut().get_mut(query_id) {
-                            for change in &batch.inner.items {
-                                if let holon_api::Change::Updated { id, data, .. } = &change.change
-                                    && let Some(content) =
-                                        data.get("content").and_then(|v| v.as_string())
-                                {
-                                    eprintln!(
-                                        "[drain_cdc] watch '{}': Updated id={} content={:?}",
-                                        query_id, id, content
-                                    );
-                                }
-                                ui_data.apply_change(rekey_change(change.change.clone()));
-                            }
-                        }
-                    }
-                    Some(None) => break, // stream closed
-                    None => break,       // nothing immediately ready
-                }
-            }
-            if event_count > 0 {
-                eprintln!(
-                    "[drain_cdc] watch '{}': drained {} CDC events",
-                    query_id, event_count
-                );
-            }
-        }
-
-        if let (Some(stream), Some(acc)) = (
-            self.all_blocks_stream.borrow_mut().as_mut(),
-            self.all_blocks.borrow_mut().as_mut(),
-        ) {
-            while let Some(Some(batch)) = stream.next().now_or_never() {
-                for change in batch.inner.items {
-                    acc.apply_change(rekey_change(change.change));
-                }
-            }
-        }
-    }
-
-    /// Drain CDC events from all region streams and update region_data.
-    #[tracing::instrument(skip(self), name = "pbt.drain_region_cdc_events")]
-    pub async fn drain_region_cdc_events(&mut self) {
-        use futures::FutureExt;
-
-        self.drain_delivery_barrier().await;
-
-        // No `.await` inside the loop (`now_or_never` polls synchronously), so
-        // holding both RefCell borrows across it is sound.
-        let mut region_streams = self.region_streams.borrow_mut();
-        let mut region_data = self.region_data.borrow_mut();
-        for (region_id, stream) in region_streams.iter_mut() {
-            let mut event_count = 0;
-            while let Some(Some(batch)) = stream.next().now_or_never() {
-                event_count += batch.inner.items.len();
-                if let Some(region_data) = region_data.get_mut(region_id) {
-                    for change in &batch.inner.items {
-                        region_data.apply_change(rekey_change(change.change.clone()));
-                    }
-                }
-            }
-            if event_count > 0 {
-                tracing::trace!(
-                    "[drain_region_cdc] region '{}': drained {} CDC events",
-                    region_id,
-                    event_count
-                );
-            }
-        }
     }
 
     /// Assert no spurious CDC events arrive after the system has settled.
     ///
-    /// Called after `drain_cdc_events` + `drain_region_cdc_events`. Sleeps to
+    /// Called after `settle`. Sleeps to
     /// give producers real wall time, then polls all CDC streams. Any event
     /// arriving after settlement indicates the backend is churning — emitting
     /// add/remove cycles for data that hasn't actually changed.
@@ -2667,9 +2638,11 @@ impl TestEnvironment {
     // =========================================================================
 
     /// Wait until a specific block exists in the database.
-    pub async fn wait_for_block(&self, block_id: &str, timeout: std::time::Duration) -> bool {
-        use crate::wait_until;
-
+    pub async fn wait_for_block(
+        &self,
+        block_id: &str,
+        deadline: std::time::Duration,
+    ) -> std::result::Result<(), crate::WaitHung> {
         // Callers address blocks by the bare id written in org files
         // (e.g. "block-1"); `block_raw` stores the schemed form
         // ("block:block-1"). Normalize at this boundary — idempotent for
@@ -2679,19 +2652,17 @@ impl TestEnvironment {
         // bare→schemed normalization at boundary
         let schemed = EntityUri::from_raw(block_id).to_string();
         let sql = format!("SELECT id FROM block_raw WHERE id = '{}'", schemed);
-        let poll_interval = std::time::Duration::from_millis(50);
-
-        wait_until(
-            || async {
-                self.test_ctx()
-                    .query(sql.clone(), QueryLanguage::HolonSql, HashMap::new())
-                    .await
-                    .map(|rows| !rows.is_empty())
-                    .unwrap_or(false)
-            },
-            timeout,
-            poll_interval,
-        )
+        crate::wait_until(&format!("{schemed} in block_raw"), deadline, || async {
+            match self
+                .test_ctx()
+                .query(sql.clone(), QueryLanguage::HolonSql, HashMap::new())
+                .await
+            {
+                Ok(rows) if !rows.is_empty() => crate::Probe::Reached(()),
+                Ok(_) => crate::Probe::NotYet("absent".to_string()),
+                Err(e) => crate::Probe::NotYet(format!("query failed: {e:#}")),
+            }
+        })
         .await
     }
 
@@ -2914,8 +2885,7 @@ impl TestEnvironment {
             start.elapsed()
         );
 
-        self.wait_for_org_files_stable(25, std::time::Duration::from_millis(5000))
-            .await;
+        self.settle().await;
 
         Ok(())
     }
@@ -2966,130 +2936,6 @@ impl TestEnvironment {
         tracing::trace!("[apply_external_mutation] File written, polling will wait for sync");
         Ok(())
     }
-
-    /// Wait for the FileSyncController to be done re-rendering files.
-    ///
-    /// Fast path: if the controller's `OrgSyncIdleSignal` was wired through DI,
-    /// wait until its loop has been idle for ~5 ms (event-driven). Then do a
-    /// short mtime sanity check to catch the rare case where an EventBus
-    /// publish hasn't yet reached the controller's subscriber channel.
-    ///
-    /// Fallback: if no signal is available (or the signal call times out),
-    /// fall back to filesystem mtime polling for `stability_ms` quiescence.
-    #[tracing::instrument(skip(self), name = "pbt.wait_for_org_files_stable")]
-    pub async fn wait_for_org_files_stable(&self, stability_ms: u64, timeout: std::time::Duration) {
-        let start = std::time::Instant::now();
-
-        // Phase 5: the former "strongest gate" (org consumer's EventBus ack
-        // watermark) is gone — org no longer consumes block events, it
-        // re-renders from the `LiveData<Block>` feed. Block settle is now
-        // covered by `wait_for_live_data_mirrors` (the feed) at the call sites,
-        // and the idle-signal gate below (which fires on the controller's
-        // feed-driven `mark_progress`) plus the mtime fallback prove the
-        // re-render itself drained. Polling a watermark the org consumer never
-        // advances would only burn the full timeout.
-
-        // Fast path: event-driven idle signal.
-        if let Some(signal) = self.org_sync_idle.get() {
-            // Use caller-supplied stability_ms instead of a hardcoded 5 ms —
-            // the controller's event_bus delivery can have >5 ms latency
-            // under PBT load (BulkExternalAdd flushes many events
-            // sequentially), causing wait_quiescent to return "idle"
-            // between events while a new event is still in-flight in the
-            // mpsc channel. Symptoms: "Org file diverged from reference"
-            // where actual blocks are missing entries that ref_state
-            // expects (devlog/2026-05-05-110313.md). The stability_ms
-            // parameter (callers pass 25 ms) was already plumbed through to
-            // the mtime-polling fallback; threading it through here keeps
-            // the two paths consistent.
-            let signal_quiescence = std::time::Duration::from_millis(stability_ms);
-            let signal_budget = std::time::Duration::from_millis(2000).min(timeout);
-            let became_idle = signal
-                .wait_quiescent(signal_quiescence, signal_budget)
-                .await;
-            if became_idle {
-                // Controller is idle; verify mtime is also stable for a tiny
-                // window to catch in-flight EventBus → subscriber latency.
-                let remaining = timeout.saturating_sub(start.elapsed());
-                self.poll_org_file_mtime_stable(
-                    5,
-                    remaining.min(std::time::Duration::from_millis(100)),
-                )
-                .await;
-                return;
-            }
-            eprintln!(
-                "[wait_for_org_files_stable] Idle signal did not quiesce within {:?}, falling \
-                 back to mtime polling",
-                signal_budget
-            );
-        }
-
-        // Fallback: full mtime polling.
-        let remaining = timeout.saturating_sub(start.elapsed());
-        self.poll_org_file_mtime_stable(stability_ms, remaining)
-            .await;
-    }
-
-    /// Poll until all org files stop changing (mtime stabilizes).
-    ///
-    /// Used as the fallback path of `wait_for_org_files_stable` and as a
-    /// safety check after the event-driven idle signal fires.
-    async fn poll_org_file_mtime_stable(&self, stability_ms: u64, timeout: std::time::Duration) {
-        let start = std::time::Instant::now();
-        let stability_duration = std::time::Duration::from_millis(stability_ms);
-        let poll_interval = std::time::Duration::from_millis(5);
-
-        let mut last_snapshot: HashMap<PathBuf, Option<std::time::SystemTime>> = HashMap::new();
-        let mut stable_since = std::time::Instant::now();
-
-        loop {
-            if start.elapsed() > timeout {
-                eprintln!(
-                    "[poll_org_file_mtime_stable] Timed out after {:?} (stability={}ms)",
-                    timeout, stability_ms
-                );
-                break;
-            }
-
-            let mut current_snapshot: HashMap<PathBuf, Option<std::time::SystemTime>> =
-                HashMap::new();
-            let file_paths: Vec<PathBuf> = self.documents.borrow().values().cloned().collect();
-            for file_path in &file_paths {
-                let mtime = self
-                    .org_fs
-                    .metadata(file_path)
-                    .await
-                    .ok() // ALLOW(ok): file may not exist
-                    .map(|m| m.modified);
-                current_snapshot.insert(file_path.clone(), mtime);
-            }
-
-            if current_snapshot == last_snapshot {
-                if stable_since.elapsed() >= stability_duration {
-                    break;
-                }
-            } else {
-                stable_since = std::time::Instant::now();
-                last_snapshot = current_snapshot;
-            }
-
-            tokio::time::sleep(poll_interval).await;
-        }
-    }
-
-    /// Poll until org files stop changing. Convenience wrapper with default
-    /// parameters.
-    pub async fn wait_for_write_window_expiry(&self) {
-        self.wait_for_org_files_stable(25, std::time::Duration::from_millis(5000))
-            .await;
-    }
-
-    /// Poll until org files stop changing after external processing.
-    pub async fn wait_for_external_processing_expiry(&self) {
-        self.wait_for_org_files_stable(25, std::time::Duration::from_millis(5000))
-            .await;
-    }
 }
 
 // =============================================================================
@@ -3102,10 +2948,8 @@ pub type TestContext = TestEnvironment;
 /// Alias for backward compatibility
 pub type TestContextBuilder = TestEnvironmentBuilder;
 
-/// The CDC-quiescence "silence window" the PBT harness waits to confirm a
-/// settled point (no new batch for this long ⇒ quiescent). Used by the three
-/// test-only apply-path barriers — `CdcMirrors::wait_quiescent`, the
-/// `wait_for_cdc_quiescent` call, and `assert_cdc_quiescent`'s catch-up grace.
+/// The catch-up grace of `assert_cdc_quiescent`: a batch that arrives within
+/// it after the target seq counts as the benign tail, not as churn.
 ///
 /// Defaults to 25ms. The previous 50ms was the conservative starting floor;
 /// 25ms validated green across a 192-transition / 8-case sweep with zero

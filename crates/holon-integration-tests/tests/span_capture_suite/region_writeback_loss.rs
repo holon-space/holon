@@ -154,11 +154,9 @@ fn three_mode_region_survives_ingest_and_writeback() {
             .expect("boot");
 
         // A block deep in the ba5ad62d subtree must ingest.
-        assert!(
-            env.wait_for_block("capture-mode-overlay", SYNC_TIMEOUT)
-                .await,
-            "ba5ad62d child must ingest on boot"
-        );
+        env.wait_for_block("capture-mode-overlay", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("ba5ad62d child must ingest on boot: {hung}"));
 
         let path = env.org_file_path("Projects/Holon/Frontends/GPUI.org");
 
@@ -182,10 +180,9 @@ fn three_mode_region_survives_ingest_and_writeback() {
         env.write_org_file("Projects/Holon/Frontends/GPUI.org", &appended)
             .await
             .expect("rewrite gpui");
-        assert!(
-            env.wait_for_block("appended-block", SYNC_TIMEOUT).await,
-            "appended block must ingest on re-scan"
-        );
+        env.wait_for_block("appended-block", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("appended block must ingest on re-scan: {hung}"));
         let rows2 = env.non_page_block_rows().await;
         let disk2 = env.org_fs.read_to_string(&path).await.expect("read gpui 2");
         assert_region_survives(&rows2, &disk2, "re-ingest");
@@ -215,21 +212,27 @@ fn quarantine_disclosed_for(file_name: &str) -> bool {
     })
 }
 
-/// Poll until `cond` holds, up to `SYNC_TIMEOUT`. `wait_for_org_files_stable`
-/// cannot serve here: a file the watcher has not picked up yet is trivially
-/// "stable", so it returns before the ingest under test has even started.
-/// Returns whether the condition was reached, so the caller still asserts.
-async fn wait_until(mut cond: impl AsyncFnMut() -> bool) -> bool {
-    let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
-    loop {
-        if cond().await {
-            return true;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+/// Wait until the write-back quarantine disclosure names `file_name`.
+async fn quarantine_disclosed(file_name: &str) {
+    holon_integration_tests::polling::wait_until(
+        &format!("write-back quarantine disclosed for {file_name}"),
+        SYNC_TIMEOUT,
+        || async {
+            if quarantine_disclosed_for(file_name) {
+                holon_integration_tests::polling::Probe::Reached(())
+            } else {
+                holon_integration_tests::polling::Probe::NotYet(captured_errors())
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|hung| {
+        panic!(
+            "the refused write-back must be DISCLOSED naming {file_name} — a silent outcome is \
+             the data-loss bug, and a disclosure about some OTHER file must not satisfy this: \
+             {hung}"
+        )
+    });
 }
 
 /// Assert every authored `:ID:` and every authored body line is still on disk.
@@ -319,11 +322,10 @@ fn partial_ingest_does_not_rewrite_the_file() {
             .build(rt.clone())
             .await
             .expect("boot");
-        assert!(
-            env.wait_for_block(SPLIT_FIXBUGS, SYNC_TIMEOUT).await,
-            "precondition: the chain must ingest first"
-        );
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.wait_for_block(SPLIT_FIXBUGS, SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("precondition: the chain must ingest first: {hung}"));
+        env.settle().await;
 
         let delme_path = env.org_file_path(SPLIT_DELME_PATH);
         env.org_fs
@@ -338,11 +340,12 @@ fn partial_ingest_does_not_rewrite_the_file() {
         // Sequenced, not raced: the anchor's sole child must already be a page
         // when the split-root file is ingested — that is what empties the
         // anchor's candidate read and forces the mint decision.
-        assert!(
-            env.wait_for_block(SPLIT_DELME, SYNC_TIMEOUT).await,
-            "precondition: DeleteMe.org must ingest before the split-root file"
-        );
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.wait_for_block(SPLIT_DELME, SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("precondition: DeleteMe.org must ingest before the split-root file: {hung}")
+            });
+        env.settle().await;
 
         let page_path = env.org_file_path(SPLIT_PAGE_PATH);
         FileSystem::write(env.org_fs.as_ref(), &page_path, split_page_org().as_bytes())
@@ -351,16 +354,8 @@ fn partial_ingest_does_not_rewrite_the_file() {
         // (1) The premise: the ingest really was refused and the file really is
         // quarantined. Without this, (2) would also hold for a file that simply
         // ingested cleanly, and the test would prove nothing.
-        let quarantined =
-            wait_until(async || quarantine_disclosed_for("Prepare personal usage.org")).await;
-        assert!(
-            quarantined,
-            "expected the write-back quarantine disclosure to NAME the split-root page file — \
-             without it the fixture no longer stages a refused ingest (and a disclosure about some \
-             OTHER file must not satisfy this). Captured ERRORs:\n{}",
-            captured_errors()
-        );
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        quarantine_disclosed("Prepare personal usage.org").await;
+        env.settle().await;
 
         let on_disk = env
             .org_fs
@@ -428,11 +423,10 @@ async fn companion_env(
         .build(rt)
         .await
         .expect("boot");
-    assert!(
-        env.wait_for_block("page-owned-child", SYNC_TIMEOUT).await,
-        "precondition: the page-file must ingest first"
-    );
-    env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+    env.wait_for_block("page-owned-child", SYNC_TIMEOUT)
+        .await
+        .unwrap_or_else(|hung| panic!("precondition: the page-file must ingest first: {hung}"));
+    env.settle().await;
 
     let companion_path = env.org_file_path(COMPANION_PATH);
     FileSystem::write(
@@ -444,11 +438,12 @@ async fn companion_env(
     .expect("write companion");
     // The companion's OWN blocks landing is the signal that its ingest ran;
     // only then is the write-back's treatment of the inlined subtree decided.
-    assert!(
-        env.wait_for_block("companion-tail", SYNC_TIMEOUT).await,
-        "precondition: the companion's own blocks must ingest"
-    );
-    env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+    env.wait_for_block("companion-tail", SYNC_TIMEOUT)
+        .await
+        .unwrap_or_else(|hung| {
+            panic!("precondition: the companion's own blocks must ingest: {hung}")
+        });
+    env.settle().await;
     env
 }
 
@@ -464,14 +459,8 @@ fn companion_inlining_a_foreign_page_root_keeps_its_blocks() {
         // (1) The refusal is LOUD and names THIS file. Asserted first: a
         // companion that merely happened to keep its blocks (e.g. because no
         // write-back ran at all) must not pass for a guarded one.
-        let disclosed = wait_until(async || quarantine_disclosed_for("Frontends.org")).await;
-        assert!(
-            disclosed,
-            "the ungrounded removal of the inlined subtree must be refused and DISCLOSED for the \
-             companion — a silent outcome is the data-loss bug. Captured ERRORs:\n{}",
-            captured_errors()
-        );
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        quarantine_disclosed("Frontends.org").await;
+        env.settle().await;
 
         let on_disk = env
             .org_fs
@@ -548,11 +537,10 @@ fn writeback_keeps_a_stale_cross_doc_copy() {
             .build(rt.clone())
             .await
             .expect("boot");
-        assert!(
-            env.wait_for_block("stale-top", SYNC_TIMEOUT).await,
-            "the stale file's own blocks must ingest"
-        );
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.wait_for_block("stale-top", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("the stale file's own blocks must ingest: {hung}"));
+        env.settle().await;
         let on_disk = env
             .org_fs
             .read_to_string(&env.org_file_path("zzz_stale.org"))

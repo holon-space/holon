@@ -241,6 +241,7 @@ async fn create_initialized_engine(
             }],
             unserved.clone(),
         )),
+        clock.clone(),
     )
     .context("Failed to create BackendEngine")?;
     engine.install_integration_attribution(attribution);

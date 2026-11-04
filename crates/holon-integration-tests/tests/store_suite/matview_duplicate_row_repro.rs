@@ -113,9 +113,7 @@ async fn edge_backend(env: &TestEnvironment) -> LoroBackend {
 /// Settle the Loro→SQL projection: wait for the sync controller to drain the
 /// commit into SQL, then for the matview CDC to go quiescent.
 async fn settle(env: &TestEnvironment) {
-    env.wait_for_loro_quiescence(Duration::from_secs(15)).await;
-    env.wait_for_cdc_quiescent(Duration::from_millis(250), Duration::from_secs(15))
-        .await;
+    env.settle().await;
     // Small extra floor so the last CDC batch fully lands in the matview.
     tokio::time::sleep(Duration::from_millis(100)).await;
 }

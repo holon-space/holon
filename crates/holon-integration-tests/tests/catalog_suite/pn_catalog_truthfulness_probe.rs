@@ -362,7 +362,7 @@ fn declared_transition_arcs_are_diffed_against_the_real_operations() {
             .build(rt.clone())
             .await
             .expect("boot the production DI graph");
-        env.wait_for_cdc_quiescent(Duration::from_millis(400), Duration::from_secs(20))
+        env.settle()
             .await;
 
         let net_path = env.temp_path().join("pn_catalog.yaml");
@@ -435,7 +435,7 @@ fn declared_transition_arcs_are_diffed_against_the_real_operations() {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        env.wait_for_cdc_quiescent(Duration::from_millis(400), Duration::from_secs(20))
+        env.settle()
             .await;
         let post = snapshot_blocks(&env).await;
 
@@ -498,7 +498,7 @@ fn declared_transition_arcs_are_diffed_against_the_real_operations() {
                 .await
                 .expect("seed the template subtree");
         }
-        env.wait_for_cdc_quiescent(Duration::from_millis(400), Duration::from_secs(20))
+        env.settle()
             .await;
 
         let pre2 = snapshot_blocks(&env).await;
@@ -516,7 +516,7 @@ fn declared_transition_arcs_are_diffed_against_the_real_operations() {
         env.execute_operation("block", "instantiate_template", params)
             .await
             .expect("instantiate_template dispatch");
-        env.wait_for_cdc_quiescent(Duration::from_millis(400), Duration::from_secs(20))
+        env.settle()
             .await;
         let post2 = snapshot_blocks(&env).await;
 

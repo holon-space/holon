@@ -62,10 +62,9 @@ fn watch_ui_emits_structure_event_for_block_with_query_source() {
             .await
             .expect("Failed to build environment");
 
-        assert!(
-            env.wait_for_block("query-heading", SYNC_TIMEOUT).await,
-            "query-heading block should sync"
-        );
+        env.wait_for_block("query-heading", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("query-heading block should sync: {hung}"));
 
         let (render_expr, _watch) = env
             .watch_ui_first_structure(&EntityUri::block("query-heading"))
@@ -134,10 +133,9 @@ fn watch_ui_emits_data_events_after_structure() {
             .await
             .expect("Failed to build environment");
 
-        assert!(
-            env.wait_for_block("data-heading", SYNC_TIMEOUT).await,
-            "data-heading block should sync"
-        );
+        env.wait_for_block("data-heading", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("data-heading block should sync: {hung}"));
 
         let (_render_expr, mut watch) = env
             .watch_ui_first_structure(&EntityUri::block("data-heading"))
@@ -157,10 +155,9 @@ fn watch_ui_emits_data_events_after_structure() {
         .await
         .expect("write extra.org");
 
-        assert!(
-            env.wait_for_block("extra-1", SYNC_TIMEOUT).await,
-            "extra-1 block should sync"
-        );
+        env.wait_for_block("extra-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("extra-1 block should sync: {hung}"));
 
         // Wait for a Data event (the new block should appear in the query results)
         let deadline = tokio::time::timeout(Duration::from_secs(5), async {
@@ -207,10 +204,9 @@ fn watch_ui_error_recovery_on_nonexistent_block() {
             .await
             .expect("Failed to build environment");
 
-        assert!(
-            env.wait_for_block("placeholder", SYNC_TIMEOUT).await,
-            "placeholder should sync"
-        );
+        env.wait_for_block("placeholder", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("placeholder should sync: {hung}"));
 
         // Watch a block that doesn't exist yet — should get an error Structure event
         let (error_render_expr, mut watch) = env
@@ -242,10 +238,9 @@ fn watch_ui_error_recovery_on_nonexistent_block() {
         .await
         .expect("write missing.org");
 
-        assert!(
-            env.wait_for_block("missing-block", SYNC_TIMEOUT).await,
-            "missing-block should sync"
-        );
+        env.wait_for_block("missing-block", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("missing-block should sync: {hung}"));
 
         // The watcher should emit a new Structure event once the block appears
         let recovered_render_expr =
@@ -283,10 +278,9 @@ fn a_just_created_blocks_first_render_is_not_the_missing_row_widget() {
             .await
             .expect("Failed to build environment");
 
-        assert!(
-            env.wait_for_block("placeholder", SYNC_TIMEOUT).await,
-            "placeholder should sync"
-        );
+        env.wait_for_block("placeholder", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("placeholder should sync: {hung}"));
 
         env.create_block("newborn", "placeholder", "just typed")
             .await
@@ -346,10 +340,9 @@ fn a_render_failure_that_is_not_a_missing_row_stays_at_the_error_tier() {
             .await
             .expect("Failed to build environment");
 
-        assert!(
-            env.wait_for_block("broken-query", SYNC_TIMEOUT).await,
-            "broken-query should sync"
-        );
+        env.wait_for_block("broken-query", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("broken-query should sync: {hung}"));
 
         let (render_expr, _watch) = env
             .watch_ui_first_structure(&EntityUri::block("broken-query"))
@@ -417,10 +410,9 @@ fn watch_ui_structural_change_triggers_new_structure_event() {
             .await
             .expect("Failed to build environment");
 
-        assert!(
-            env.wait_for_block("evolving-heading", SYNC_TIMEOUT).await,
-            "evolving-heading should sync"
-        );
+        env.wait_for_block("evolving-heading", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("evolving-heading should sync: {hung}"));
 
         let (_first_render_expr, mut watch) = env
             .watch_ui_first_structure(&EntityUri::block("evolving-heading"))
@@ -485,10 +477,9 @@ fn trigger_presence_on_editable_text_nodes() {
             .await
             .expect("Failed to build environment");
 
-        assert!(
-            env.wait_for_block("heading-1", SYNC_TIMEOUT).await,
-            "heading-1 should sync"
-        );
+        env.wait_for_block("heading-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("heading-1 should sync: {hung}"));
 
         // Render and shadow interpret
         let (render_expr, _watch) = env

@@ -131,24 +131,6 @@ pub mod projection_stats {
     }
 }
 
-/// How often to re-warn while the reconcile loop is still parked behind the
-/// boot gate, and the absolute ceiling after which it starts anyway in
-/// disclosed degraded mode. Same shape and same values as the sibling gate
-/// waiter `await_gate` in `holon-mcp-client` — one gate-escape policy, not two.
-const BOOT_GATE_WARN_EVERY: Duration = Duration::from_secs(60);
-const BOOT_GATE_WATCHDOG: Duration = Duration::from_secs(600);
-
-/// [`BOOT_GATE_WATCHDOG`], or `HOLON_BOOT_GATE_WATCHDOG_MS` when set.
-fn boot_gate_watchdog() -> Duration {
-    match std::env::var("HOLON_BOOT_GATE_WATCHDOG_MS") {
-        Ok(ms) => Duration::from_millis(
-            ms.parse()
-                .expect("HOLON_BOOT_GATE_WATCHDOG_MS must be a u64 millisecond count"),
-        ),
-        Err(_) => BOOT_GATE_WATCHDOG,
-    }
-}
-
 /// Why [`wait_for_boot_gate`] stopped waiting. Every variant proceeds to run
 /// the loop — a projector that never starts strands every Loro change short of
 /// the SQL sink, which is strictly worse than reconciling during a scan.
@@ -419,6 +401,8 @@ pub struct LoroSyncController {
     /// handle exposes it via `last_synced_frontiers`).
     last_synced: Arc<StdMutex<Frontiers>>,
     wake: Arc<Notify>,
+    /// The boot gate's warn period and watchdog.
+    timings: Arc<holon_api::Timings>,
     error_count: Arc<AtomicUsize>,
     /// Where a projection that will not converge becomes a banner. Required,
     /// not optional: a stalled projection means SQL — everything the UI reads —
@@ -489,6 +473,7 @@ impl LoroSyncController {
     pub fn new(
         projection: Arc<LoroProjection>,
         degraded: Arc<holon_conditions::condition_bus::ConditionBus>,
+        timings: Arc<holon_api::Timings>,
     ) -> Self {
         let last_synced = projection.last_synced();
         let wake = projection.wake_handle();
@@ -496,6 +481,7 @@ impl LoroSyncController {
             projection,
             last_synced,
             wake,
+            timings,
             error_count: Arc::new(AtomicUsize::new(0)),
             degraded,
         }
@@ -584,7 +570,7 @@ impl LoroSyncController {
                 tokio::select! {
                     biased;
                     () = cancelled_at_gate => return,
-                    _outcome = wait_for_boot_gate(watcher, BOOT_GATE_WARN_EVERY, boot_gate_watchdog()) => {}
+                    _outcome = wait_for_boot_gate(watcher, self.timings.boot_gate_warn_every, self.timings.boot_gate_watchdog) => {}
                 }
                 started_for_task.store(true, Ordering::SeqCst);
                 self.run_loop(shutdown_for_task).await;
@@ -2539,8 +2525,7 @@ mod sidecar_tests {
 mod boot_gate_tests {
     use super::*;
 
-    /// Short stand-ins for `BOOT_GATE_WARN_EVERY` / `BOOT_GATE_WATCHDOG`; the
-    /// production values (60 s / 600 s) are the same shape, just slower.
+    /// Short stand-ins for the `Timings` boot-gate durations.
     const WARN: Duration = Duration::from_millis(20);
     const WATCHDOG: Duration = Duration::from_millis(200);
 

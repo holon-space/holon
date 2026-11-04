@@ -74,8 +74,7 @@ fn idonly_folder_companions_ingest_with_their_filename_titles() {
             .collect();
         env.wait_for_blocks_synced(&expected, Duration::from_secs(20))
             .await;
-        env.wait_for_org_files_stable(150, Duration::from_secs(20))
-            .await;
+        env.settle().await;
         assert_titles(&env).await;
 
         // The org files must still sit where the user put them. A page left
@@ -106,8 +105,7 @@ fn idonly_folder_companions_ingest_with_their_filename_titles() {
         env.simulate_restart(&expected)
             .await
             .expect("restart over the healed vault");
-        env.wait_for_org_files_stable(150, Duration::from_secs(20))
-            .await;
+        env.settle().await;
         assert_titles(&env).await;
     });
 }

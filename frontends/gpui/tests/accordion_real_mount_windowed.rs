@@ -181,8 +181,7 @@ fn with_seeded_window(window_size: &str, run: impl FnOnce(&BoundsRegistry)) {
             .await
             .expect("focus Main on the page before the window opens");
     });
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
 
     let session = env.session_arc();
     let engine = env

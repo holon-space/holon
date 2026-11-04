@@ -90,6 +90,7 @@ where
         db_path,
         crate::di::DatabaseRole::DurableStore,
         conditions.clone(),
+        Default::default(),
         setup_fn,
     )
     .await?;
@@ -115,6 +116,7 @@ where
         db_path,
         crate::di::DatabaseRole::DurableStore,
         conditions.clone(),
+        Default::default(),
         setup_fn,
         extra_resolve,
     )

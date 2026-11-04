@@ -237,8 +237,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         .block_on(graft_empty_journal_day(&env, "jday-empty", "2026-02-02"))
         .expect("graft empty day");
     feed.push(empty_day.clone());
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(120)));
+    runtime.block_on(env.settle());
     settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     // Click the journals page in the sidebar to focus the Main panel on the
@@ -293,8 +292,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         .block_on(env.create_block(LATE_ENTRY_ID, &late_day.0, "late day entry"))
         .expect("graft the late day's entry row");
     feed.push(late_day.clone());
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(120)));
+    runtime.block_on(env.settle());
     settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     // Rename to another date that still sorts FIRST — a real content change, so
@@ -304,8 +302,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         .block_on(env.update_block_content(&late_day.0, LATE_DAY_RENAMED))
         .expect("rename the late day");
     feed.last_mut().expect("late day in feed").1 = LATE_DAY_RENAMED.to_string();
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(120)));
+    runtime.block_on(env.settle());
     settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     // Converge the frame, don't just settle it. `settle` stops at the first

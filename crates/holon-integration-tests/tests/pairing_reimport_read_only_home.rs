@@ -114,10 +114,8 @@ fn a_reimported_block_under_a_read_only_document_inherits_its_refusal() {
             .await
             .expect("a vault holding a `.cook` file must boot");
 
-        assert!(
-            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
-            "{RECIPE_STEP} never ingested — the fixture, not the seam, is what this run measured"
-        );
+        env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await
+            .unwrap_or_else(|hung| panic!("{RECIPE_STEP} never ingested — the fixture, not the seam, is what this run measured: {hung}"));
 
         let injector = env.injector().expect("the booted injector").clone();
         let authority = injector

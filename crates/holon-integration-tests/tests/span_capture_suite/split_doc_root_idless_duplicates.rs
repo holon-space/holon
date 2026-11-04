@@ -46,7 +46,6 @@
 //! minted (dogfood 2026-07-28, BugFunnel)
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_api::QueryLanguage;
 use holon_filesystem::FileSystem;
@@ -69,9 +68,6 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
     attach_scope_to_runtime(&mut builder, scope);
     Arc::new(builder.build().expect("Failed to create runtime"))
 }
-
-const SYNC_TIMEOUT: Duration = Duration::from_secs(10);
-const SETTLE: Duration = Duration::from_millis(500);
 
 const HOLON: &str = "11111111-1111-1111-1111-111111111111";
 const TASKS: &str = "22222222-2222-2222-2222-222222222222";
@@ -199,7 +195,7 @@ async fn split_root_env(rt: Arc<tokio::runtime::Runtime>) -> TestEnvironment {
         .build(rt)
         .await
         .expect("boot");
-    env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+    env.settle().await;
 
     let page_path = env.org_file_path(PAGE_PATH);
     let delme_path = env.org_file_path(DELME_PATH);
@@ -214,8 +210,7 @@ async fn split_root_env(rt: Arc<tokio::runtime::Runtime>) -> TestEnvironment {
     FileSystem::write(env.org_fs.as_ref(), &page_path, page_org("").as_bytes())
         .await
         .expect("write page file");
-    env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
-    tokio::time::sleep(SETTLE).await;
+    env.settle().await;
 
     assert!(
         page_tagged(&env, PPU_PAGE).await,
@@ -251,8 +246,7 @@ async fn write_idless(env: &TestEnvironment, label: &str) -> String {
     FileSystem::write(env.org_fs.as_ref(), &page_path, body.as_bytes())
         .await
         .unwrap_or_else(|e| panic!("write page file [{label}]: {e}"));
-    env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
-    tokio::time::sleep(SETTLE).await;
+    env.settle().await;
     body
 }
 
@@ -389,8 +383,7 @@ fn disputed_slug_is_refused_whole() {
         FileSystem::write(env.org_fs.as_ref(), &third_path, third_org().as_bytes())
             .await
             .expect("write Third.org");
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
-        tokio::time::sleep(SETTLE).await;
+        env.settle().await;
 
         let ingested = ids_with_content(&env, THIRD_HEADLINE).await;
         assert!(
@@ -445,8 +438,7 @@ fn healthy_doc_root_still_mints_once() {
             .build(rt.clone())
             .await
             .expect("boot");
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
-        tokio::time::sleep(SETTLE).await;
+        env.settle().await;
 
         let first = ids_with_content(&env, HEALTHY_PROBE).await;
         assert_eq!(
@@ -464,8 +456,7 @@ fn healthy_doc_root_still_mints_once() {
         )
         .await
         .expect("re-write healthy file");
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
-        tokio::time::sleep(SETTLE).await;
+        env.settle().await;
 
         let second = ids_with_content(&env, HEALTHY_PROBE).await;
         assert_eq!(

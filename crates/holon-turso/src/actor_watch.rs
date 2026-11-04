@@ -1,5 +1,5 @@
 //! Watches the SQL actor for a command that runs past a bound
-//! (`HOLON_ACTOR_HANG_MS`, default 30 s) and discloses it: a log record in the
+//! ([`holon_api::Timings::actor_hang`]) and discloses it: a log record in the
 //! span of the code that sent the command, and
 //! [`ConditionKind::DatabaseStuck`] on the bus a [`DbHandle`] attaches.
 //!
@@ -40,9 +40,6 @@ use web_time::Instant;
 
 use crate::turso::DbCommand;
 
-const DEFAULT_BOUND: Duration = Duration::from_secs(30);
-/// When the first warning is logged, if the bound is later than that.
-const FIRST_WARNING: Duration = Duration::from_secs(5);
 const RECENT_COMMANDS: usize = 16;
 const RECENT_HEAD_BYTES: usize = 120;
 const REPORTED_STATEMENTS: usize = 4;
@@ -107,6 +104,8 @@ pub(crate) struct ActorWatch {
     /// The condition subject, one per actor in the process.
     subject: String,
     bound: Duration,
+    /// When the first warning is logged, if the bound is later than that.
+    first_warning: Duration,
     /// Weak, so the watch never keeps the actor's queue open.
     queue: mpsc::WeakSender<Envelope>,
     commands: Mutex<Commands>,
@@ -165,14 +164,14 @@ struct Disclosure {
 
 impl ActorWatch {
     /// A watch over the actor whose queue `tx` feeds, bounded by
-    /// `HOLON_ACTOR_HANG_MS`, already watched by the process's watchdog.
-    pub(crate) fn start(tx: &ActorSender) -> Arc<Self> {
-        let watch = Self::new(bound_from_env(), tx);
+    /// `timings.actor_hang`, already watched by the process's watchdog.
+    pub(crate) fn start(tx: &ActorSender, timings: &holon_api::Timings) -> Arc<Self> {
+        let watch = Self::new(timings.actor_hang, timings.actor_first_warning, tx);
         watchdog::watch(&watch);
         watch
     }
 
-    fn new(bound: Duration, tx: &ActorSender) -> Arc<Self> {
+    fn new(bound: Duration, first_warning: Duration, tx: &ActorSender) -> Arc<Self> {
         static NEXT_ACTOR: AtomicU64 = AtomicU64::new(1);
         Arc::new(Self {
             subject: format!(
@@ -180,6 +179,7 @@ impl ActorWatch {
                 NEXT_ACTOR.fetch_add(1, Ordering::Relaxed)
             ),
             bound,
+            first_warning,
             queue: tx.0.downgrade(),
             commands: Mutex::new(Commands {
                 next_seq: 1,
@@ -363,7 +363,7 @@ impl ActorWatch {
                     Some((seq, kind, _)) => Disclosure {
                         seq,
                         kind,
-                        next_report: FIRST_WARNING.min(self.bound),
+                        next_report: self.first_warning.min(self.bound),
                         past_bound: false,
                         on_bus: false,
                     },
@@ -635,16 +635,6 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
     i
 }
 
-fn bound_from_env() -> Duration {
-    match std::env::var("HOLON_ACTOR_HANG_MS") {
-        Ok(ms) => Duration::from_millis(
-            ms.parse()
-                .expect("HOLON_ACTOR_HANG_MS must be a u64 millisecond count"),
-        ),
-        Err(_) => DEFAULT_BOUND,
-    }
-}
-
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod watchdog {
     use std::convert::Infallible;
@@ -828,7 +818,7 @@ mod tests {
 
     fn watched_on(bus: &Arc<ConditionBus>) -> (Arc<ActorWatch>, ActorSender) {
         let (tx, _rx) = ActorSender::channel(4);
-        let watch = ActorWatch::new(BOUND, &tx);
+        let watch = ActorWatch::new(BOUND, BOUND, &tx);
         watch.disclose_on(bus.clone());
         (watch, tx)
     }
@@ -977,7 +967,7 @@ mod tests {
     #[test]
     fn a_watch_that_failed_before_its_bus_was_attached_raises_on_attach() {
         let (tx, _rx) = ActorSender::channel(4);
-        let watch = ActorWatch::new(BOUND, &tx);
+        let watch = ActorWatch::new(BOUND, BOUND, &tx);
         watch.poison();
         let began = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             watch.begin(&envelope("SELECT 1 AS any_command"))

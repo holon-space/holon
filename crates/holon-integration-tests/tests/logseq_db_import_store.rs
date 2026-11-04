@@ -219,9 +219,7 @@ fn logseq_db_graph_imports_into_a_real_store() {
         // every sibling order is a long burst of ops, so wait on the real
         // barriers rather than a guessed sleep — a fixed sleep here reads as
         // "the order was not applied" when it only means "not yet projected".
-        env.wait_for_loro_quiescence(Duration::from_secs(60)).await;
-        env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60))
-            .await;
+        env.settle().await;
 
         // --- 1. every projected block exists as a row ---
         let rows = query(

@@ -386,6 +386,37 @@ impl QueryEngine for BackendEngine {
         .declared_keywords(id.as_str())
         .await
     }
+
+    async fn delivery_owed(&self) -> Result<Vec<String>> {
+        let emitted = self.db_handle().cdc_emitted_watermark();
+        let settled = self.matview_manager().settled_up_to();
+        let mut owed = Vec::new();
+        if settled.routed_through < emitted {
+            owed.push(format!(
+                "cdc-routed: target emitted seq {emitted}, at routed seq {}",
+                settled.routed_through
+            ));
+        }
+        for lag in settled.lagging {
+            owed.push(format!(
+                "cdc-applied: target sent seq {} to view {}, at applied seq {}",
+                lag.sent, lag.view_name, lag.applied
+            ));
+        }
+        let releases = self.watch_releases_in_flight();
+        if releases > 0 {
+            owed.push(format!(
+                "watch-release: target 0 in flight, at {releases} in flight"
+            ));
+        }
+        let registrations = self.watch_registrations_in_flight();
+        if registrations > 0 {
+            owed.push(format!(
+                "watch-register: target 0 in flight, at {registrations} in flight"
+            ));
+        }
+        Ok(owed)
+    }
 }
 
 #[async_trait]

@@ -265,6 +265,21 @@ mod backend {
             holon_api::SystemClock.now_millis()
         }
 
+        fn now(&self) -> holon_api::Mono {
+            holon_api::SystemClock.now()
+        }
+
+        fn sleep_until(
+            &self,
+            deadline: holon_api::Mono,
+        ) -> futures::future::BoxFuture<'static, ()> {
+            holon_api::SystemClock.sleep_until(deadline)
+        }
+
+        fn sleep_blocking(&self, d: std::time::Duration) {
+            holon_api::SystemClock.sleep_blocking(d)
+        }
+
         fn utc_offset_seconds_at(&self, _: i64) -> i32 {
             self.utc_offset_seconds
         }
@@ -348,7 +363,7 @@ mod backend {
                 create_backend_engine_with_extras(
                     path,
                     holon::di::DatabaseRole::DurableStore,
-                    std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+                    std::sync::Arc::new(holon_conditions::ConditionBus::new()), Default::default(),
                     |injector| {
                         use fluxdi::Module as _;
 

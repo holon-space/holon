@@ -102,6 +102,7 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
             dir.path().join("fresh.db"),
             holon::di::DatabaseRole::DurableStore,
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+            Default::default(),
             move |injector| {
                 // The same block-CRUD + event wiring `integration_state_projection`
                 // builds, so the seed has an ordering authority to write through.

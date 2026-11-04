@@ -63,3 +63,4 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 wasm-bindgen-futures = "0.4"
+web-time = "1"

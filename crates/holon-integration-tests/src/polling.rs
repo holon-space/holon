@@ -1,6 +1,5 @@
 //! Polling utilities for waiting on async conditions
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
@@ -8,117 +7,87 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
-use holon::api::RowChange;
-use holon::api::RowChangeStream;
-use holon::testing::e2e_test_helpers::E2ETestContext;
-use holon_api::QueryLanguage;
-use holon_api::Value;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
-use tokio_stream::StreamExt;
 
-use crate::widget_state::WidgetLocator;
-use crate::widget_state::WidgetStateModel;
+/// One look at a wait's target.
+pub enum Probe<T> {
+    Reached(T),
+    /// The target is not reached; the value names where it stands now.
+    NotYet(String),
+}
 
-/// Wait until a condition is met or timeout expires.
-/// Returns true if condition was met, false if timed out.
-pub async fn wait_until<F, Fut>(predicate: F, timeout: Duration, poll_interval: Duration) -> bool
+/// A wait whose target was not reached before its hang deadline.
+#[derive(Debug)]
+pub struct WaitHung {
+    pub target: String,
+    pub waited: Duration,
+    pub last_value: String,
+}
+
+impl std::fmt::Display for WaitHung {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "target {} not reached after {:?}; last value: {}",
+            self.target, self.waited, self.last_value
+        )
+    }
+}
+
+impl std::error::Error for WaitHung {}
+
+/// Probe `target` until it is reached. `deadline` only detects a hang: the
+/// `Err` names the target and the last value the probe saw.
+pub async fn wait_until<T, F, Fut>(
+    target: &str,
+    deadline: Duration,
+    mut probe: F,
+) -> Result<T, WaitHung>
 where
-    F: Fn() -> Fut,
-    Fut: Future<Output = bool>,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Probe<T>>,
 {
     let start = Instant::now();
-    while start.elapsed() < timeout {
-        if predicate().await {
-            return true;
+    loop {
+        let last_value = match probe().await {
+            Probe::Reached(value) => return Ok(value),
+            Probe::NotYet(last_value) => last_value,
+        };
+        if start.elapsed() >= deadline {
+            return Err(WaitHung {
+                target: target.to_string(),
+                waited: start.elapsed(),
+                last_value,
+            });
         }
-        tokio::time::sleep(poll_interval).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    false
 }
 
-/// Wait until expected block count is reached in a query result.
-pub async fn wait_for_block_count(
-    ctx: &E2ETestContext,
-    prql: &str,
-    expected_count: usize,
-    timeout: Duration,
-) -> Vec<HashMap<String, Value>> {
-    let poll_interval = Duration::from_millis(10);
-    let start = Instant::now();
-    let mut last_result = Vec::new();
-
-    while start.elapsed() < timeout {
-        if let Ok(rows) = ctx
-            .query(prql.to_string(), QueryLanguage::HolonPrql, HashMap::new())
-            .await
-        {
-            if rows.len() == expected_count {
-                return rows;
-            }
-            last_result = rows;
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
-    last_result
-}
-
-/// Wait until a specific block exists in the database.
-pub async fn wait_for_block(ctx: &E2ETestContext, block_id: &str, timeout: Duration) -> bool {
-    let sql = format!("SELECT id FROM block WHERE id = '{}'", block_id);
-    let poll_interval = Duration::from_millis(50);
-
-    wait_until(
-        || async {
-            ctx.query(sql.clone(), QueryLanguage::HolonSql, HashMap::new())
-                .await
-                .map(|rows| !rows.is_empty())
-                .unwrap_or(false)
-        },
-        timeout,
-        poll_interval,
-    )
-    .await
-}
-
-/// Wait until file content matches a condition (reads through the
+/// Wait until the file content satisfies `condition` (reads through the
 /// `FileSystem` port — ADR 0011).
 pub async fn wait_for_file_condition<F>(
     fs: &dyn holon_filesystem::FileSystem,
     file_path: &Path,
     condition: F,
-    timeout: Duration,
-) -> bool
+    deadline: Duration,
+) -> Result<String, WaitHung>
 where
     F: Fn(&str) -> bool,
 {
-    let poll_interval = Duration::from_millis(10);
-    let start = Instant::now();
-
-    while start.elapsed() < timeout {
-        if let Ok(content) = fs.read_to_string(file_path).await
-            && condition(&content)
-        {
-            return true;
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
-    false
-}
-
-/// Drain all pending events from a CDC stream without blocking.
-///
-/// Returns all events that were available immediately. Use this to
-/// process any pending changes before making assertions.
-pub async fn drain_stream(stream: &mut RowChangeStream) -> Vec<RowChange> {
-    let mut changes = Vec::new();
-    let drain_timeout = Duration::from_millis(10);
-
-    while let Ok(Some(batch)) = tokio::time::timeout(drain_timeout, stream.next()).await {
-        changes.extend(batch.inner.items);
-    }
-
-    changes
+    wait_until(
+        &format!("content of {} matches the condition", file_path.display()),
+        deadline,
+        || async {
+            match fs.read_to_string(file_path).await {
+                Ok(content) if condition(&content) => Probe::Reached(content),
+                Ok(content) => Probe::NotYet(content),
+                Err(e) => Probe::NotYet(format!("unreadable: {e}")),
+            }
+        },
+    )
+    .await
 }
 
 /// Wait until `BoundsRegistry` has committed bounds for the given block
@@ -156,42 +125,57 @@ pub async fn wait_for_element_bounds(
     }
 }
 
-/// Wait until a widget matching the locator contains the expected text.
-///
-/// Drains CDC events and applies them to the state model until the text
-/// is found or timeout expires.
-///
-/// Returns true if text was found, false if timed out.
-pub async fn wait_for_text_in_widget(
-    stream: &mut RowChangeStream,
-    state: &mut WidgetStateModel,
-    locator: &WidgetLocator,
-    expected_text: &str,
-    timeout: Duration,
-) -> bool {
-    let deadline = Instant::now() + timeout;
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
 
-    // First check current state
-    if state.contains_text(locator, expected_text) {
-        return true;
-    }
+    use proptest::prelude::*;
 
-    // Then wait for changes
-    while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, stream.next()).await {
-            Ok(Some(batch)) => {
-                for change in batch.inner.items {
-                    state.apply_change(&change);
-                }
-                if state.contains_text(locator, expected_text) {
-                    return true;
+    use super::*;
+
+    /// A target the probe reaches on its `reached_at`-th look, or never.
+    async fn wait_for_count(reached_at: Option<u32>, deadline: Duration) -> Result<u32, WaitHung> {
+        let looks = Cell::new(0u32);
+        wait_until("the counter", deadline, || {
+            looks.set(looks.get() + 1);
+            let look = looks.get();
+            async move {
+                match reached_at {
+                    Some(at) if look >= at => Probe::Reached(look),
+                    _ => Probe::NotYet(format!("look {look}")),
                 }
             }
-            Ok(None) => break,
-            Err(_) => break,
+        })
+        .await
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+
+        /// A reachable target returns its value on the first look that
+        /// reaches it, however long that takes within the deadline.
+        #[test]
+        fn a_reached_target_returns_the_probe_value(at in 1u32..20) {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+            let got = rt.block_on(wait_for_count(Some(at), Duration::from_secs(30)));
+            prop_assert_eq!(got.map_err(|e| e.to_string()), Ok(at));
         }
     }
 
-    false
+    /// A target never reached fails at the deadline, and the error names the
+    /// target and the last value the probe saw.
+    #[tokio::test]
+    async fn a_hang_names_the_target_and_its_last_value() {
+        let hung = wait_for_count(None, Duration::from_millis(50))
+            .await
+            .expect_err("the counter is never reached");
+        let message = hung.to_string();
+        assert!(
+            message.starts_with("target the counter not reached after ")
+                && message.ends_with(&format!("last value: {}", hung.last_value))
+                && hung.last_value.starts_with("look "),
+            "{message}"
+        );
+        assert!(hung.waited >= Duration::from_millis(50), "{message}");
+    }
 }

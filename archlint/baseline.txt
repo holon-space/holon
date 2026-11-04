@@ -5,16 +5,16 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 69 violation(s) across 10 rule(s).
+# Snapshot total: 393 violation(s) across 10 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
 #   fallback: 7
-#   frontend-provider-dep: 1
-#   frontend-raw-sql: 3
+#   frontend-raw-sql: 2
 #   loro_doc_escape: 17
 #   no-underscore-params: 22
 #   ok: 4
+#   physical_time: 326
 #   raw_sql_in_frontend: 3
 #   sole_block_writer: 1
 
@@ -36,10 +36,8 @@ fallback	frontends/dioxus-web/src/render/builders/mod.rs	/// Fallback arm emitte
 fallback	frontends/gpui/src/user_driver.rs	/// (with a short poll fallback for idle windows, whose `changed()` may not
 fallback	frontends/gpui/src/user_driver.rs	/// Fallback (virtualized lists): if the wheel produced no visible movement
 fallback	frontends/gpui/src/user_driver.rs	/// unchanged (caller decides whether that is a fallback case or fails
-frontend-provider-dep	frontends/gpui/Cargo.toml	holon-orgmode.workspace = true
 frontend-raw-sql	crates/holon-frontend/src/advice_weaver.rs	"SELECT v.anchor_id, v.lesson_id, c.content FROM {view} v LEFT JOIN advice_suppressed s \
 frontend-raw-sql	crates/holon-frontend/src/advice_weaver.rs	"SELECT v.lesson_id AS id, v.anchor_id, c.content FROM {view} v LEFT JOIN \
-frontend-raw-sql	crates/holon-frontend/src/lib.rs	"SELECT * FROM journal_feed ORDER BY content DESC",
 loro_doc_escape	crates/holon-loro/src/deleted_container_purge.rs	let a_vv = a.doc().oplog_vv();
 loro_doc_escape	crates/holon-loro/src/deleted_container_purge.rs	let b_vv = b.doc().oplog_vv();
 loro_doc_escape	crates/holon-loro/src/import_atomicity_probe.rs	let raw = doc.doc();
@@ -83,6 +81,332 @@ ok	crates/holon-frontend/src/advice_weaver.rs	let rows = query_engine
 ok	crates/holon-loro/src/multi_peer.rs	let meta = tree.get_meta(node).ok()?;
 ok	crates/holon-markdown/src/logseq.rs	path.strip_prefix(root)
 ok	frontends/gpui/src/render/builders/render_entity.rs	any.clone()
+physical_time	crates/holon-api/src/block.rs	executed_at: crate::clock::now_millis(),
+physical_time	crates/holon-api/src/block.rs	executed_at: crate::clock::now_millis(),
+physical_time	crates/holon-api/src/block.rs	executed_at: crate::clock::now_millis(),
+physical_time	crates/holon-api/src/block.rs	let now = crate::clock::now_millis();
+physical_time	crates/holon-api/src/block.rs	self.updated_at = crate::clock::now_millis();
+physical_time	crates/holon-api/src/block.rs	self.updated_at = crate::clock::now_millis();
+physical_time	crates/holon-api/src/block.rs	self.updated_at = crate::clock::now_millis();
+physical_time	crates/holon-api/src/block.rs	self.updated_at = crate::clock::now_millis();
+physical_time	crates/holon-api/src/block.rs	self.updated_at = crate::clock::now_millis();
+physical_time	crates/holon-api/src/latency_e2e.rs	Instant::now(),
+physical_time	crates/holon-api/src/latency_e2e.rs	let now = Instant::now();
+physical_time	crates/holon-api/src/latency_e2e.rs	let retired = retire_failed(registry.slot(origin), action, target, Instant::now());
+physical_time	crates/holon-api/src/lifecycle.rs	let deadline = tokio::time::Instant::now() + timeout;
+physical_time	crates/holon-api/src/lifecycle.rs	match tokio::time::timeout_at(deadline, handle).await {
+physical_time	crates/holon-api/src/live_data.rs	let overall = tokio::time::sleep(timeout);
+physical_time	crates/holon-api/src/live_data.rs	let overall = tokio::time::sleep(timeout);
+physical_time	crates/holon-api/src/live_data.rs	let quiet = tokio::time::sleep(quiet_for);
+physical_time	crates/holon-api/src/live_data.rs	let received_at = std::time::Instant::now();
+physical_time	crates/holon-api/src/live_data.rs	let t_rows = std::time::Instant::now();
+physical_time	crates/holon-api/src/live_data.rs	std::thread::sleep(d * change_count.max(1) as u32);
+physical_time	crates/holon-api/src/live_data/supervision.rs	let now = Instant::now();
+physical_time	crates/holon-api/src/reactive.rs	_ = tokio::time::sleep_until(deadline) => {
+physical_time	crates/holon-api/src/reactive.rs	let deadline = tokio::time::Instant::now() + window;
+physical_time	crates/holon-app/src/consolidator_epoch.rs	let created_at_unix = std::time::SystemTime::now()
+physical_time	crates/holon-app/src/integration_projection.rs	let read_at = std::time::Instant::now();
+physical_time	crates/holon-app/src/mcp_integrations.rs	let joined = match tokio::time::timeout(KEYCHAIN_SLOW, &mut resolving).await {
+physical_time	crates/holon-app/src/mcp_integrations.rs	match tokio::time::timeout(CONNECT_SLOW, &mut connect).await {
+physical_time	crates/holon-app/src/remote_list.rs	ListSnapshot::from_rows(&self.compiled, &rows, chrono::Utc::now().to_rfc3339())?;
+physical_time	crates/holon-app/src/remote_list.rs	serde_json::json!(chrono::Utc::now().timestamp_millis()),
+physical_time	crates/holon-app/src/session.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	crates/holon-app/src/session.rs	let deadline = tokio::time::Instant::now() + budget;
+physical_time	crates/holon-app/src/session.rs	let mut quiet_since = tokio::time::Instant::now();
+physical_time	crates/holon-app/src/session.rs	quiet_since = tokio::time::Instant::now();
+physical_time	crates/holon-app/src/session.rs	tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+physical_time	crates/holon-app/src/vault_lock.rs	"started_at": chrono::Utc::now().to_rfc3339(),
+physical_time	crates/holon-connections/src/provider.rs	chrono::Utc::now().timestamp_millis()
+physical_time	crates/holon-core/src/operation_log.rs	let now = holon_api::clock::now_millis();
+physical_time	crates/holon-core/src/traits.rs	let now = holon_api::clock::now_millis();
+physical_time	crates/holon-filesystem/src/change_source.rs	let now = Instant::now();
+physical_time	crates/holon-filesystem/src/file_sync_controller.rs	if tokio::time::Instant::now() >= propagate_deadline {
+physical_time	crates/holon-filesystem/src/file_sync_controller.rs	let t = std::time::Instant::now();
+physical_time	crates/holon-filesystem/src/file_sync_controller.rs	let t = std::time::Instant::now();
+physical_time	crates/holon-filesystem/src/file_sync_controller.rs	let t_ingest = std::time::Instant::now();
+physical_time	crates/holon-filesystem/src/file_sync_controller.rs	let t_place = std::time::Instant::now();
+physical_time	crates/holon-filesystem/src/file_sync_controller.rs	let t_write = std::time::Instant::now();
+physical_time	crates/holon-filesystem/src/file_sync_controller.rs	tokio::time::Instant::now() + tokio::time::Duration::from_millis(2000);
+physical_time	crates/holon-filesystem/src/file_sync_controller.rs	tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+physical_time	crates/holon-filesystem/src/ingest_progress.rs	let mut since = Instant::now();
+physical_time	crates/holon-filesystem/src/ingest_progress.rs	since = Instant::now();
+physical_time	crates/holon-filesystem/src/ingest_progress.rs	since = Instant::now();
+physical_time	crates/holon-filesystem/src/ingest_progress.rs	started: Instant::now(),
+physical_time	crates/holon-filesystem/src/ingest_progress.rs	tokio::time::sleep(WATCHDOG_TICK).await;
+physical_time	crates/holon-frontend/src/geometry.rs	/// fixed-interval sleep, wrapped in a short `tokio::time::timeout` so a
+physical_time	crates/holon-frontend/src/geometry.rs	Box::pin(tokio::time::sleep(std::time::Duration::from_millis(20)))
+physical_time	crates/holon-frontend/src/memory_monitor.rs	let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+physical_time	crates/holon-frontend/src/memory_monitor.rs	tokio::time::sleep(Duration::from_secs(INTERVAL_SECS)).await;
+physical_time	crates/holon-frontend/src/reactive.rs	let t_dispatch = std::time::Instant::now();
+physical_time	crates/holon-frontend/src/reactive.rs	let t_dispatch = std::time::Instant::now();
+physical_time	crates/holon-frontend/src/reactive.rs	tokio::time::sleep(backoff).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	.settle_delivery(Instant::now() + SETTLE_HANG_DEADLINE)
+physical_time	crates/holon-frontend/src/user_driver.rs	_ = tokio::time::sleep(remaining) => {
+physical_time	crates/holon-frontend/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = Instant::now() + Duration::from_secs(2);
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = Instant::now() + Duration::from_secs(2);
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = Instant::now() + Duration::from_secs(2);
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = Instant::now() + Duration::from_secs(2);
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = Instant::now() + SETTLE_HANG_DEADLINE;
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = Instant::now() + drop_widget_timeout();
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = Instant::now() + resolve_budget;
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = Instant::now() + timeout;
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+physical_time	crates/holon-frontend/src/user_driver.rs	let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+physical_time	crates/holon-frontend/src/user_driver.rs	let remaining = deadline.saturating_duration_since(Instant::now());
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(1)).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(10)).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(120)).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(120)).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(2)).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(20)).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(20)).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(20)).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(20)).await;
+physical_time	crates/holon-frontend/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(20)).await;
+physical_time	crates/holon-loro-wiring/src/loro_ui_watcher.rs	() = tokio::time::sleep(LORO_WATCH_POLL) => {}
+physical_time	crates/holon-loro-wiring/src/loro_ui_watcher.rs	tokio::time::sleep(LORO_WATCH_POLL).await;
+physical_time	crates/holon-loro/src/debounced_commit_worker.rs	tokio::time::sleep(debounce).await;
+physical_time	crates/holon-loro/src/device_pairing_op.rs	let expires_at = ExpiryTime(chrono::Utc::now().timestamp() + INVITE_TTL_SECS);
+physical_time	crates/holon-loro/src/device_pairing_op.rs	let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
+physical_time	crates/holon-loro/src/device_pairing_op.rs	tokio::time::timeout(
+physical_time	crates/holon-loro/src/event_ring.rs	match tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(payload))
+physical_time	crates/holon-loro/src/iroh_advertiser.rs	let now = chrono::Utc::now().timestamp();
+physical_time	crates/holon-loro/src/iroh_advertiser.rs	tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+physical_time	crates/holon-loro/src/iroh_sync_adapter.rs	use tokio::time::sleep;
+physical_time	crates/holon-loro/src/iroh_sync_adapter.rs	use tokio::time::timeout;
+physical_time	crates/holon-loro/src/loro_backend.rs	std::thread::sleep(std::time::Duration::from_millis(ms));
+physical_time	crates/holon-loro/src/loro_blocks_datasource.rs	tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+physical_time	crates/holon-loro/src/loro_entity_operations.rs	let at = Value::String(chrono::Utc::now().to_rfc3339());
+physical_time	crates/holon-loro/src/loro_entity_operations.rs	let at = Value::String(chrono::Utc::now().to_rfc3339());
+physical_time	crates/holon-loro/src/loro_share_backend.rs	ExpiryTime(chrono::Utc::now().timestamp() + DEFAULT_ENROLLMENT_WINDOW_SECS);
+physical_time	crates/holon-loro/src/loro_share_backend.rs	guard.close_enrollment(chrono::Utc::now().timestamp());
+physical_time	crates/holon-loro/src/loro_share_backend.rs	tokio::time::sleep(delay).await;
+physical_time	crates/holon-loro/src/loro_share_backend.rs	use tokio::time::timeout;
+physical_time	crates/holon-loro/src/loro_sync_controller.rs	let mut warn_tick = tokio::time::interval_at(started + warn_every, warn_every);
+physical_time	crates/holon-loro/src/loro_sync_controller.rs	let now = holon_api::clock::now_millis();
+physical_time	crates/holon-loro/src/loro_sync_controller.rs	let now = holon_api::clock::now_millis();
+physical_time	crates/holon-loro/src/loro_sync_controller.rs	let started = tokio::time::Instant::now();
+physical_time	crates/holon-loro/src/loro_sync_controller.rs	let t0 = std::time::Instant::now();
+physical_time	crates/holon-loro/src/loro_sync_controller.rs	let watchdog = tokio::time::sleep(watchdog);
+physical_time	crates/holon-loro/src/loro_sync_controller.rs	tokio::time::sleep(backoff).await;
+physical_time	crates/holon-loro/src/loro_sync_controller.rs	tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+physical_time	crates/holon-loro/src/share_enrollment.rs	/// `chrono::Utc::now().timestamp()`; kept as a parameter so the state
+physical_time	crates/holon-loro/src/share_enrollment.rs	use tokio::time::timeout;
+physical_time	crates/holon-markdown/src/params.rs	let now = holon_api::clock::now_millis();
+physical_time	crates/holon-mcp-client/src/child_transport.rs	match tokio::time::timeout(GRACEFUL_EXIT, child.wait()).await {
+physical_time	crates/holon-mcp-client/src/credential_store.rs	chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	crates/holon-mcp-client/src/mcp_http_client.rs	deadline: Box::pin(tokio::time::sleep(timeout)),
+physical_time	crates/holon-mcp-client/src/mcp_http_client.rs	match tokio::time::timeout(timeout, budget.clone().acquire_owned()).await {
+physical_time	crates/holon-mcp-client/src/mcp_http_client.rs	tokio::time::timeout(
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	Some(d) => tokio::time::sleep_until(d).await,
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	hard = Some(tokio::time::Instant::now() + tuning.max_coalesce);
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	hard = Some(tokio::time::Instant::now() + tuning.max_coalesce);
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	hard = Some(tokio::time::Instant::now() + tuning.max_coalesce);
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	let mut tick = tokio::time::interval(every);
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	let started = tokio::time::Instant::now();
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	let watchdog = tokio::time::sleep(tuning.gate_watchdog);
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	tokio::time::interval_at(started + tuning.gate_warn_every, tuning.gate_warn_every);
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	trailing = Some(tokio::time::Instant::now() + tuning.debounce);
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	trailing = Some(tokio::time::Instant::now() + tuning.debounce);
+physical_time	crates/holon-mcp-client/src/mcp_integration.rs	trailing = Some(tokio::time::Instant::now() + tuning.debounce);
+physical_time	crates/holon-mcp-client/src/mcp_request.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	crates/holon-mcp-client/src/mcp_request.rs	let (items, next) = match tokio::time::timeout_at(deadline, page(cursor)).await {
+physical_time	crates/holon-mcp-client/src/mcp_request.rs	let deadline = (tokio::time::Instant::now() + REQUEST_TIMEOUT).min(self.connect_deadline);
+physical_time	crates/holon-mcp-client/src/mcp_request.rs	match tokio::time::timeout(REQUEST_TIMEOUT, handle.await_response()).await {
+physical_time	crates/holon-mcp-client/src/mcp_request.rs	match tokio::time::timeout_at(deadline, serve).await {
+physical_time	crates/holon-mcp-client/src/oauth_bootstrap.rs	deadline.min(tokio::time::Instant::now() + PER_CONNECTION_READ_BUDGET);
+physical_time	crates/holon-mcp-client/src/oauth_bootstrap.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	crates/holon-mcp-client/src/oauth_bootstrap.rs	let accepted = tokio::time::timeout_at(deadline, self.listener.accept())
+physical_time	crates/holon-mcp-client/src/oauth_bootstrap.rs	let deadline = tokio::time::Instant::now() + timeout;
+physical_time	crates/holon-mcp-client/src/oauth_bootstrap.rs	match tokio::time::timeout_at(read_budget, read_request_target(&mut sock)).await {
+physical_time	crates/holon-mcp-client/src/peer_budget.rs	connect_deadline: tokio::time::Instant::now() + CONNECT_BUDGET,
+physical_time	crates/holon-mcp-client/src/rest_oauth2.rs	&& Instant::now() < tok.refresh_after
+physical_time	crates/holon-mcp-client/src/rest_oauth2.rs	let refresh_after = Instant::now() + lifetime.mul_f64(0.9);
+physical_time	crates/holon-mcp-client/src/rest_transport.rs	chrono::DateTime::<chrono::Utc>::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	crates/holon-mcp-client/src/rest_transport.rs	let entries = crate::ics::decode(&body, call.ics_window, chrono::Utc::now())
+physical_time	crates/holon-net-shell/src/effect.rs	() = tokio::time::sleep(effect.command.timeout.duration()) => Stop::Kill(Kill::Timeout),
+physical_time	crates/holon-net-shell/src/effect.rs	if std::time::Instant::now() >= deadline {
+physical_time	crates/holon-net-shell/src/effect.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	crates/holon-net-shell/src/effect.rs	let deadline = std::time::Instant::now() + OWN_WAIT;
+physical_time	crates/holon-net-shell/src/effect.rs	let deadline = tokio::time::Instant::now() + KILL_GRACE;
+physical_time	crates/holon-net-shell/src/effect.rs	std::thread::sleep(Duration::from_millis(1));
+physical_time	crates/holon-net-shell/src/effect.rs	std::thread::sleep(Duration::from_millis(1));
+physical_time	crates/holon-net-shell/src/effect.rs	std::thread::sleep(Duration::from_millis(1));
+physical_time	crates/holon-net-shell/src/effect.rs	tokio::time::sleep(POLL).await;
+physical_time	crates/holon-net-shell/src/lib.rs	epoch: Instant::now(),
+physical_time	crates/holon-net-shell/src/probe.rs	() = tokio::time::sleep(command.timeout.duration()) => None,
+physical_time	crates/holon-netd/src/host.rs	() = tokio::time::sleep(TICK) => {}
+physical_time	crates/holon-org-format/src/models.rs	self.updated_at = holon_api::clock::now_millis();
+physical_time	crates/holon-org-format/src/parser.rs	let now = holon_api::clock::now_millis();
+physical_time	crates/holon-org-format/src/parser.rs	let now = holon_api::clock::now_millis();
+physical_time	crates/holon-orgmode/src/block_params.rs	let now = holon_api::clock::now_millis();
+physical_time	crates/holon-orgmode/src/di.rs	backlog_disclosed_at = std::time::Instant::now();
+physical_time	crates/holon-orgmode/src/di.rs	let _ = tokio::time::timeout(remaining, notified).await;
+physical_time	crates/holon-orgmode/src/di.rs	let deadline = tokio::time::Instant::now() + timeout;
+physical_time	crates/holon-orgmode/src/di.rs	let mut backlog_disclosed_at = std::time::Instant::now();
+physical_time	crates/holon-orgmode/src/di.rs	let mut discovery_tick = tokio::time::interval(tokio::time::Duration::from_secs(2));
+physical_time	crates/holon-orgmode/src/di.rs	let mut poll_tick = tokio::time::interval(tokio::time::Duration::from_millis(100));
+physical_time	crates/holon-orgmode/src/di.rs	let mut rerender_flush_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
+physical_time	crates/holon-orgmode/src/di.rs	let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+physical_time	crates/holon-orgmode/src/di.rs	let t_file = std::time::Instant::now();
+physical_time	crates/holon-orgmode/src/di.rs	let t_file = std::time::Instant::now();
+physical_time	crates/holon-orgmode/src/di.rs	let t_scan = std::time::Instant::now();
+physical_time	crates/holon-petri/src/lib.rs	DateTime::from_timestamp_millis(holon_api::clock::now_millis()).expect("now within range"),
+physical_time	crates/holon-plugin-host/src/params.rs	let now = holon_api::clock::now_millis();
+physical_time	crates/holon-sharing/src/lease.rs	//! **never `SystemTime::now()` inside this module**. That is what lets the
+physical_time	crates/holon-turso/src/actor_watch.rs	enqueued: Instant::now(),
+physical_time	crates/holon-turso/src/actor_watch.rs	started: Instant::now(),
+physical_time	crates/holon-turso/src/db_open.rs	chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+physical_time	crates/holon-turso/src/db_open.rs	std::thread::sleep(LOCK_RETRY);
+physical_time	crates/holon-turso/src/table_shape.rs	turso::Value::Text(chrono::Utc::now().to_rfc3339()),
+physical_time	crates/holon-turso/src/turso.rs	// so tokio::time::timeout would panic — await directly there.
+physical_time	crates/holon-turso/src/turso.rs	/// fixed `tokio::time::sleep(50ms)` "let CDC settle" pattern.
+physical_time	crates/holon-turso/src/turso.rs	let t_ddl = std::time::Instant::now();
+physical_time	crates/holon-turso/src/turso.rs	let ts = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	crates/holon-turso/src/turso.rs	let ts = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	crates/holon-turso/src/turso.rs	let ts = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	crates/holon-turso/src/turso.rs	let ts = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	crates/holon-turso/src/turso.rs	match tokio::time::timeout(DEPENDENCY_TIMEOUT, response_rx).await {
+physical_time	crates/holon-turso/src/turso.rs	match tokio::time::timeout(DEPENDENCY_TIMEOUT, response_rx).await {
+physical_time	crates/holon-turso/src/turso.rs	match tokio::time::timeout(DEPENDENCY_TIMEOUT, response_rx).await {
+physical_time	crates/holon-turso/src/turso.rs	match tokio::time::timeout(timeout, conn.execute(sql, ())).await {
+physical_time	crates/holon-turso/src/turso.rs	std::time::Instant::now(),
+physical_time	crates/holon-turso/src/turso_actor_stats.rs	let mut tick = tokio::time::interval(interval);
+physical_time	crates/holon/src/api/backend_engine.rs	tokio::time::sleep(std::time::Duration::from_millis(
+physical_time	crates/holon/src/api/backend_engine.rs	tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+physical_time	crates/holon/src/api/dispatch_hold.rs	std::thread::sleep(delay);
+physical_time	crates/holon/src/api/dispatch_hold.rs	tokio::time::timeout(within, parked.wait_for(|n| *n >= expect_parked)).await,
+physical_time	crates/holon/src/api/holon_service.rs	let t0 = crate::util::MonotonicInstant::now();
+physical_time	crates/holon/src/api/holon_service.rs	let t0 = crate::util::MonotonicInstant::now();
+physical_time	crates/holon/src/api/operation_engine.rs	tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+physical_time	crates/holon/src/api/operation_engine.rs	tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+physical_time	crates/holon/src/api/operation_engine.rs	tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+physical_time	crates/holon/src/api/operation_engine.rs	tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+physical_time	crates/holon/src/core/queryable_cache.rs	tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+physical_time	crates/holon/src/core/queryable_cache.rs	tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+physical_time	crates/holon/src/core/sql_operation_provider.rs	let _tx_t0 = std::time::Instant::now();
+physical_time	crates/holon/src/di/lifecycle.rs	_ = tokio::time::sleep(HELD_PROBE_INTERVAL) => {}
+physical_time	crates/holon/src/di/lifecycle.rs	let start = crate::util::MonotonicInstant::now();
+physical_time	crates/holon/src/storage/sync_token_store.rs	chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	crates/holon/src/sync/clock_scheduler.rs	let mut ticker = tokio::time::interval(interval);
+physical_time	crates/holon/src/testing/database_stuck_guard.rs	std::thread::sleep(wait);
+physical_time	crates/holon/src/testing/e2e_test_helpers.rs	let deadline = tokio::time::Instant::now() + timeout_duration;
+physical_time	crates/holon/src/testing/e2e_test_helpers.rs	let deadline = tokio::time::Instant::now() + timeout_duration;
+physical_time	crates/holon/src/testing/e2e_test_helpers.rs	let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+physical_time	crates/holon/src/testing/e2e_test_helpers.rs	let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+physical_time	crates/holon/src/testing/e2e_test_helpers.rs	use tokio::time::timeout;
+physical_time	frontends/dioxus-web/src/bridge.rs	gloo_timers::future::TimeoutFuture::new(READY_TIMEOUT_MS),
+physical_time	frontends/dioxus-web/src/editor.rs	gloo_timers::future::TimeoutFuture::new(16).await;
+physical_time	frontends/dioxus-web/src/editor.rs	use gloo_timers::callback::Timeout;
+physical_time	frontends/dioxus-web/src/main.rs	gloo_timers::future::TimeoutFuture::new(1000).await;
+physical_time	frontends/dioxus-web/src/main.rs	gloo_timers::future::TimeoutFuture::new(1000).await;
+physical_time	frontends/dioxus-web/src/main.rs	gloo_timers::future::TimeoutFuture::new(16).await;
+physical_time	frontends/dioxus-web/src/main.rs	gloo_timers::future::TimeoutFuture::new(250).await;
+physical_time	frontends/dioxus-web/src/main.rs	gloo_timers::future::TimeoutFuture::new(300).await;
+physical_time	frontends/dioxus-web/src/main.rs	gloo_timers::future::TimeoutFuture::new(WATCH_READY_TIMEOUT_MS).await;
+physical_time	frontends/dioxus-web/src/main.rs	let utc_offset_seconds = -js_sys::Date::new_0().get_timezone_offset() * 60.0;
+physical_time	frontends/dioxus-web/src/render/builders/live_block.rs	gloo_timers::future::TimeoutFuture::new(16).await;
+physical_time	frontends/gpui/src/lib.rs	.timer(std::time::Duration::from_millis(50))
+physical_time	frontends/gpui/src/lib.rs	let now = std::time::Instant::now();
+physical_time	frontends/gpui/src/lib.rs	let prewarm_start = std::time::Instant::now();
+physical_time	frontends/gpui/src/lib.rs	let timeout = bg_executor.timer(prewarm_max - elapsed);
+physical_time	frontends/gpui/src/main.rs	match tokio::time::timeout(timeout, app.bootstrap()).await {
+physical_time	frontends/gpui/src/main.rs	match tokio::time::timeout(timeout, app.shutdown()).await {
+physical_time	frontends/gpui/src/render/builders/answer_form.rs	cx.background_executor().timer(POLL_EVERY).await;
+physical_time	frontends/gpui/src/render/builders/input_box.rs	chrono::Local::now().format("%H:%M").to_string()
+physical_time	frontends/gpui/src/render/builders/tree_item.rs	let t_toggle = std::time::Instant::now();
+physical_time	frontends/gpui/src/reset.rs	tokio::time::sleep(settle).await;
+physical_time	frontends/gpui/src/soft_keyboard.rs	cx.background_executor().timer(KEYBOARD_HIDE_GRACE).await;
+physical_time	frontends/gpui/src/tab_strip.rs	.timer(SLOW_WRITE_DISCLOSE_AFTER)
+physical_time	frontends/gpui/src/tab_strip.rs	s.oldest_write_started = Some(std::time::Instant::now() - SLOW_WRITE_DISCLOSE_AFTER);
+physical_time	frontends/gpui/src/user_driver.rs	Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
+physical_time	frontends/gpui/src/user_driver.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	frontends/gpui/src/user_driver.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	frontends/gpui/src/user_driver.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	frontends/gpui/src/user_driver.rs	if tokio::time::Instant::now() >= overall_deadline {
+physical_time	frontends/gpui/src/user_driver.rs	let _ = tokio::time::timeout(Duration::from_millis(100), self.geometry.changed()).await;
+physical_time	frontends/gpui/src/user_driver.rs	let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+physical_time	frontends/gpui/src/user_driver.rs	let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+physical_time	frontends/gpui/src/user_driver.rs	let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+physical_time	frontends/gpui/src/user_driver.rs	let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+physical_time	frontends/gpui/src/user_driver.rs	let _ = tokio::time::timeout(Duration::from_millis(50), self.geometry.changed()).await;
+physical_time	frontends/gpui/src/user_driver.rs	let deadline = tokio::time::Instant::now() + SCROLL_SETTLE_TIMEOUT;
+physical_time	frontends/gpui/src/user_driver.rs	let deadline = tokio::time::Instant::now() + timeout;
+physical_time	frontends/gpui/src/user_driver.rs	let deadline = tokio::time::Instant::now() + timeout;
+physical_time	frontends/gpui/src/user_driver.rs	let deadline = tokio::time::Instant::now() + timeout;
+physical_time	frontends/gpui/src/user_driver.rs	let overall_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+physical_time	frontends/gpui/src/user_driver.rs	match tokio::time::timeout_at(attempt_deadline, focus_stream.next()).await {
+physical_time	frontends/gpui/src/user_driver.rs	tokio::time::Instant::now() + Duration::from_secs(1),
+physical_time	frontends/gpui/src/user_driver.rs	tokio::time::timeout(Duration::from_millis(100), self.geometry.changed())
+physical_time	frontends/holon-worker/src/lib.rs	// context (block_on's async block), else `tokio::time::sleep`
+physical_time	frontends/holon-worker/src/lib.rs	let _ = tokio::time::timeout(
+physical_time	frontends/holon-worker/src/lib.rs	let _ = tokio::time::timeout(
+physical_time	frontends/holon-worker/src/lib.rs	let mut stable_since = std::time::Instant::now();
+physical_time	frontends/holon-worker/src/lib.rs	let start = std::time::Instant::now();
+physical_time	frontends/holon-worker/src/lib.rs	runtime.block_on(async { tokio::time::sleep(std::time::Duration::ZERO).await });
+physical_time	frontends/holon-worker/src/lib.rs	stable_since = std::time::Instant::now();
+physical_time	frontends/holon-worker/src/lib.rs	tokio::time::sleep(Duration::from_millis(10)).await;
+physical_time	frontends/holon-worker/src/lib.rs	tokio::time::sleep(Duration::from_millis(50)).await;
+physical_time	frontends/holon-worker/src/lib.rs	tokio::time::sleep(budget).await;
+physical_time	frontends/holon-worker/src/lib.rs	tokio::time::sleep(std::time::Duration::from_millis(2)).await
+physical_time	frontends/holon-worker/src/seed.rs	let now = std::time::SystemTime::now()
+physical_time	frontends/holon-worker/src/seed.rs	std::time::SystemTime::now()
+physical_time	frontends/holon-worker/src/turso_browser_shim.rs	MonotonicInstant::now()
+physical_time	frontends/mcp/src/browser_relay.rs	match tokio::time::timeout(FORWARD_TIMEOUT, rx).await {
+physical_time	frontends/mcp/src/browser_relay.rs	tokio::time::sleep(Duration::from_secs(1)).await;
+physical_time	frontends/mcp/src/dense_projection.rs	created: Instant::now(),
+physical_time	frontends/mcp/src/describe_ui_expand.rs	deadline: std::time::Instant::now() + wall_clock,
+physical_time	frontends/mcp/src/describe_ui_expand.rs	if std::time::Instant::now() > self.deadline {
+physical_time	frontends/mcp/src/di.rs	if tokio::time::Instant::now() >= deadline {
+physical_time	frontends/mcp/src/di.rs	let deadline = tokio::time::Instant::now() + SESSION_END_DEADLINE;
+physical_time	frontends/mcp/src/di.rs	match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
+physical_time	frontends/mcp/src/di.rs	tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+physical_time	frontends/mcp/src/main.rs	let timestamp = std::time::SystemTime::now()
+physical_time	frontends/mcp/src/tools.rs	&& std::time::Instant::now() < settle_deadline
+physical_time	frontends/mcp/src/tools.rs	Progress::Pending(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+physical_time	frontends/mcp/src/tools.rs	Progress::Pending(_) if tokio::time::Instant::now() >= deadline => {
+physical_time	frontends/mcp/src/tools.rs	if !mismatched.is_empty() && tokio::time::Instant::now() >= deadline {
+physical_time	frontends/mcp/src/tools.rs	let completed_iso = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	frontends/mcp/src/tools.rs	let datestamp = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	frontends/mcp/src/tools.rs	let deadline = tokio::time::Instant::now() + READBACK_WINDOW;
+physical_time	frontends/mcp/src/tools.rs	let mut last_activity = tokio::time::Instant::now();
+physical_time	frontends/mcp/src/tools.rs	let now = tokio::time::Instant::now();
+physical_time	frontends/mcp/src/tools.rs	let now_iso = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+physical_time	frontends/mcp/src/tools.rs	let settle_deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+physical_time	frontends/mcp/src/tools.rs	let start = tokio::time::Instant::now();
+physical_time	frontends/mcp/src/tools.rs	tokio::time::Instant::now() + std::time::Duration::from_millis(params.timeout_ms);
+physical_time	frontends/mcp/src/tools.rs	tokio::time::sleep(poll).await;
+physical_time	frontends/mcp/src/tools.rs	tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+physical_time	frontends/mcp/src/tools.rs	tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+physical_time	frontends/mcp/src/tools.rs	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+physical_time	frontends/mcp/src/tools.rs	tokio::time::timeout(
+physical_time	frontends/mcp/src/tools.rs	tokio::time::timeout(std::time::Duration::from_secs(30), ack_rx)
+physical_time	frontends/tui/src/app_main.rs	let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(100));
+physical_time	frontends/tui/src/main.rs	match tokio::time::timeout(timeout, app.shutdown()).await {
+physical_time	frontends/tui/src/terminal_hangup.rs	let mut tick = tokio::time::interval(POLL_PERIOD);
+physical_time	frontends/tui/src/user_driver.rs	/// `tokio::time::timeout` is silently lost (documented tokio gotcha).
+physical_time	frontends/tui/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	frontends/tui/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	frontends/tui/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	frontends/tui/src/user_driver.rs	if Instant::now() >= deadline {
+physical_time	frontends/tui/src/user_driver.rs	let deadline = Instant::now() + Duration::from_secs(5);
+physical_time	frontends/tui/src/user_driver.rs	let deadline = Instant::now() + Duration::from_secs(5);
+physical_time	frontends/tui/src/user_driver.rs	let deadline = Instant::now() + Duration::from_secs(5);
+physical_time	frontends/tui/src/user_driver.rs	let deadline = Instant::now() + Duration::from_secs(5);
+physical_time	frontends/tui/src/user_driver.rs	let deadline = Instant::now() + Duration::from_secs(5);
+physical_time	frontends/tui/src/user_driver.rs	let timeout = deadline.saturating_duration_since(Instant::now());
+physical_time	frontends/tui/src/user_driver.rs	tokio::time::sleep(Duration::from_millis(2)).await;
+physical_time	frontends/tui/src/user_driver.rs	tokio::time::timeout(timeout, notified)
 raw_sql_in_frontend	frontends/gpui/src/oracles_ui.rs	let sql = format!("SELECT id, content_type, source_language FROM {BLOCK_WRITE_TABLE}");
 raw_sql_in_frontend	frontends/gpui/src/oracles_ui.rs	let sql = format!("SELECT id, parent_id FROM {table}");
 raw_sql_in_frontend	frontends/holon-worker/src/seed.rs	"SELECT b.* FROM block b JOIN block_tags bt ON bt.block_id = b.id WHERE bt.tag = \

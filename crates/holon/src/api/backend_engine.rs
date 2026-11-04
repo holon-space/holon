@@ -336,6 +336,9 @@ pub struct BackendEngine {
     /// Fine clock grains the session reads for its whole life (a sidecar view
     /// that joins the `clock` row of its grain).
     session_clock_grains: std::sync::Mutex<Vec<crate::sync::clock_scheduler::GrainSubscription>>,
+    /// Stamps the operations of the persistent engine that undo persistence
+    /// installs.
+    clock: Arc<dyn holon_api::Clock>,
 }
 
 impl BackendEngine {
@@ -347,6 +350,7 @@ impl BackendEngine {
     ///
     /// The database actor stays alive as long as any `DbHandle` clone exists,
     /// since `DbHandle` holds an `mpsc::Sender` to the actor's command channel.
+    #[allow(clippy::too_many_arguments)] // DI constructor; each arg is a distinct subsystem
     pub fn new(
         db_handle: DbHandle,
         dispatcher: Arc<OperationDispatcher>,
@@ -355,6 +359,7 @@ impl BackendEngine {
         graph_schema_registry: crate::storage::graph_schema::GraphSchemaRegistry,
         block_write_authority: Arc<dyn holon_core::WriteAuthorityReads>,
         search: Arc<dyn holon_api::EntitySearch>,
+        clock: Arc<dyn holon_api::Clock>,
     ) -> Result<Self> {
         let ddl_mutex = Arc::new(tokio::sync::Mutex::new(()));
         let matview_manager = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex);
@@ -368,6 +373,7 @@ impl BackendEngine {
             db_handle.clone(),
         ));
         let op_engine = DispatchingOperationEngine::new(dispatcher.clone())
+            .with_clock(clock.clone())
             .with_history_store(history)
             .with_write_authority(block_write_authority.clone());
         Ok(Self {
@@ -396,6 +402,7 @@ impl BackendEngine {
             _advice_reconciler: None,
             _clock_scheduler: None,
             session_clock_grains: std::sync::Mutex::new(Vec::new()),
+            clock,
         })
     }
 
@@ -1802,6 +1809,7 @@ impl BackendEngine {
             self.dispatcher.clone(),
             reader,
             store,
+            self.clock.clone(),
         )
         .await?
         .with_history_store(history)

@@ -21,7 +21,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
 
 use holon_api::EntityUri;
 use holon_api::Value;
@@ -95,12 +94,7 @@ fn a_focus_root_is_released_no_earlier_than_its_block() {
             .build(rt.clone())
             .await
             .expect("boot the vault");
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
         let engine = world
             .injector()
             .expect("the world booted")
@@ -147,12 +141,7 @@ fn a_focus_root_is_released_no_earlier_than_its_block() {
              window at all — raise HOLON_TEST_PROJECTOR_LAG_MS"
         );
 
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
         engine
             .snapshot_and_subscribe(View::Row)
             .expect("the view engine still runs");

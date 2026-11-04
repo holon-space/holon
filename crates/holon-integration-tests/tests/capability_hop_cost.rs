@@ -233,12 +233,7 @@ fn destination_capability_clause_cost() {
             blocks > d,
             "only {blocks} blocks landed from {d} files - the corpus never ingested"
         );
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
 
         let injector = world
             .injector()

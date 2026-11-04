@@ -350,8 +350,7 @@ fn with_action_bar_window(window_size: &str, run: impl FnOnce(&mut Fixture<'_>))
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft the outline the panel draws");
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let app_ptr: *const HeadlessAppContext = &app;

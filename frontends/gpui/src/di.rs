@@ -65,6 +65,7 @@ impl GpuiModule {
             db_path: self.holon_config.resolve_db_path(&self.config_dir),
             role: holon::di::DatabaseRole::for_crdt_enabled(self.holon_config.crdt_enabled()),
             conditions: self.conditions.clone(),
+            timings: self.session_config.timings.clone(),
         }
     }
 

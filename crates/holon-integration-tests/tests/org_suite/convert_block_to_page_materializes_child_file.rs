@@ -36,7 +36,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_api::Value;
 use holon_integration_tests::TestEnvironmentBuilder;
@@ -83,10 +82,7 @@ fn runtime_convert_block_to_page_materializes_rehomed_child_file() {
             .build(rt.clone())
             .await
             .expect("boot");
-        env.wait_for_cdc_quiescent(Duration::from_millis(400), Duration::from_secs(10))
-            .await;
-        env.wait_for_org_files_stable(300, Duration::from_secs(10))
-            .await;
+        env.settle().await;
 
         // Convert the MIDDLE block into a page. P is minted under the date page;
         // la-2 (its child) is re-homed under P; la-1 becomes a link to P.
@@ -96,10 +92,7 @@ fn runtime_convert_block_to_page_materializes_rehomed_child_file() {
             .await
             .expect("convert_block_to_page dispatch");
 
-        env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(10))
-            .await;
-        env.wait_for_org_files_stable(300, Duration::from_secs(10))
-            .await;
+        env.settle().await;
 
         // The new page P: the sole Page whose content is the origin title.
         let page_rows = env

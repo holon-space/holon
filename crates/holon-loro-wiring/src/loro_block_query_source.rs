@@ -354,6 +354,7 @@ mod tests {
         let injector = build_no_turso_container(
             ":memory:".into(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+            Default::default(),
             move |inj| {
                 register_loro_block_query_source(inj, backend);
                 Ok(())
@@ -384,6 +385,7 @@ mod tests {
         let injector = build_no_turso_container(
             ":memory:".into(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+            Default::default(),
             |_| Ok(()),
         )
         .await

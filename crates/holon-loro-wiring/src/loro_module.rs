@@ -512,7 +512,8 @@ impl Module for LoroModule {
             // will not converge leaves the UI reading stale rows, so it becomes
             // a banner rather than a log line.
             let degraded = resolver.resolve::<Arc<holon_conditions::condition_bus::ConditionBus>>();
-            let controller = LoroSyncController::new(projection, (*degraded).clone());
+            let timings = resolver.resolve::<holon_api::InjectedTimings>().0.clone();
+            let controller = LoroSyncController::new(projection, (*degraded).clone(), timings);
 
             // Phase 4: resolve the shared convergent block feed (built once in
             // `EventInfraModule` as `BlockFeed`, available in both modes) and

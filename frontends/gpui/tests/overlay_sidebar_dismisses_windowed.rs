@@ -205,8 +205,7 @@ fn boot(title: &'static str, window_size: &str) -> Harness {
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft a page and navigate Main onto it");
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let interaction_tx = debug_services
@@ -263,10 +262,7 @@ impl Harness {
     fn navigate_to(&mut self, target: &EntityUri) {
         let services: Arc<dyn BuilderServices> = self.engine.clone();
         navigate_main_to(&services, target);
-        self.runtime.block_on(
-            self.env
-                .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-        );
+        self.runtime.block_on(self.env.settle());
         self.settle();
     }
 
@@ -298,10 +294,7 @@ impl Harness {
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
         ));
-        self.runtime.block_on(
-            self.env
-                .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-        );
+        self.runtime.block_on(self.env.settle());
         self.settle();
     }
 
@@ -604,10 +597,7 @@ fn a_sidebar_beside_an_overlay_drawer_keeps_its_own_clicks() {
         .into_iter()
         .collect(),
     ));
-    h.runtime.block_on(
-        h.env
-            .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-    );
+    h.runtime.block_on(h.env.settle());
     h.settle();
     eprintln!(
         "[overlay-dismiss/pin] focus {focus_after_caret:?} -> {:?} right_open={}",

@@ -371,8 +371,7 @@ fn boot_two_tab_window(title: &str) -> TwoTabWindow {
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft a page and navigate Main onto it");
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let services: Arc<dyn BuilderServices> = engine.clone();
@@ -387,8 +386,7 @@ fn boot_two_tab_window(title: &str) -> TwoTabWindow {
             ),
         ],
     );
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     TwoTabWindow {
@@ -590,10 +588,7 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
         .map(|(_, info)| center_of(info))
         .expect("the list draws a row for the tab being switched to");
     click_at(&mut w.app, window, target_row, "tab list row");
-    w.runtime.block_on(
-        w.env
-            .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-    );
+    w.runtime.block_on(w.env.settle());
     settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
 
     let switched_root = active_main_root(&w.env, &w.runtime);
@@ -647,10 +642,7 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
         center_of(&close_control),
         "tab list close",
     );
-    w.runtime.block_on(
-        w.env
-            .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-    );
+    w.runtime.block_on(w.env.settle());
     settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
 
     let open_after_close = open_main_tabs(&w.env, &w.runtime);
@@ -687,10 +679,7 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
         .element_info(TAB_LIST_NEW)
         .expect("closing a tab keeps the list open, so its new-tab action is still drawn");
     click_at(&mut w.app, window, center_of(&new_button), "new tab");
-    w.runtime.block_on(
-        w.env
-            .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-    );
+    w.runtime.block_on(w.env.settle());
     settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
 
     let list_after_new: Vec<i64> = tab_list_rows(&w.bounds)
@@ -792,10 +781,7 @@ fn the_count_button_shows_the_failure_not_a_plausible_zero() {
                 ("history_id", Value::Integer(cursor)),
             ],
         );
-        w.runtime.block_on(
-            w.env
-                .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-        );
+        w.runtime.block_on(w.env.settle());
         // An engine-side generation bump notifies nothing by itself, so the
         // window would never re-render and never re-read. A real gesture always
         // carries a notify; stand in for one.
@@ -850,10 +836,7 @@ fn the_count_button_shows_the_failure_not_a_plausible_zero() {
                 ("history_id", Value::Integer(cursor)),
             ],
         );
-        w.runtime.block_on(
-            w.env
-                .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-        );
+        w.runtime.block_on(w.env.settle());
         let rebind = &w.rebind;
         w.app.update(|cx| rebind.set_safe_area_bottom(0.0, cx));
         settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
@@ -969,10 +952,7 @@ fn closing_the_active_tab_counts_down_and_moves_the_highlight() {
         center_of(&close_control),
         "close active tab",
     );
-    w.runtime.block_on(
-        w.env
-            .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-    );
+    w.runtime.block_on(w.env.settle());
     let count = count_settles_to(&mut w, "▤ 1");
     let rebind = &w.rebind;
     let highlighted = w.app.update(|cx| rebind.drawn_active_tab(cx));
@@ -1036,10 +1016,7 @@ fn a_no_op_tab_switch_costs_one_read() {
         + 1;
     let rebind = &w.rebind;
     w.app.update(|cx| rebind.jump_to_tab(nth, cx));
-    w.runtime.block_on(
-        w.env
-            .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-    );
+    w.runtime.block_on(w.env.settle());
     for _ in 0..6 {
         let rebind = &w.rebind;
         w.app.update(|cx| rebind.set_safe_area_bottom(0.0, cx));
@@ -1121,10 +1098,7 @@ fn a_refused_tab_write_keeps_saying_so() {
     let rebind = &w.rebind;
     w.app
         .update(|cx| rebind.activate_tab_for_test(survivor, cx));
-    w.runtime.block_on(
-        w.env
-            .wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)),
-    );
+    w.runtime.block_on(w.env.settle());
     let cleared = count_settles_to(&mut w, "▤ 2");
     eprintln!("[chrome-refused-write] after a good write: {cleared:?}");
 

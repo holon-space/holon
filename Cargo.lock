@@ -5199,6 +5199,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wasm-bindgen-futures",
+ "web-time",
  "workspace-hack 0.1.0",
 ]
 
@@ -5344,7 +5345,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "web-time",
  "workspace-hack 0.1.0",
 ]
 

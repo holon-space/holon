@@ -157,8 +157,7 @@ fn journals_feed_expands_only_the_day_pages_on_screen() {
     // A hundred new pages are a hundred new documents: let the CDC/org-writeback
     // wave finish before asking the window for a stable frame, or the settle
     // chases a backend that is still moving.
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(120)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(180));
 
     // Navigate through the sidebar, not a synthesized dispatch: the click's

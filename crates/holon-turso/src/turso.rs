@@ -2332,6 +2332,15 @@ impl TursoBackend {
         db: Arc<Database>,
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
     ) -> Result<(Self, DbHandle)> {
+        Self::new_with_timings(db, cdc_broadcast, &holon_api::Timings::default())
+    }
+
+    /// [`Self::new`] with the actor-hang bound of `timings`.
+    pub fn new_with_timings(
+        db: Arc<Database>,
+        cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
+        timings: &holon_api::Timings,
+    ) -> Result<(Self, DbHandle)> {
         use std::sync::atomic::AtomicU64;
         use std::sync::atomic::Ordering;
         // Create connection for actor
@@ -2393,7 +2402,7 @@ impl TursoBackend {
         .map_err(|e| StorageError::DatabaseError(format!("Failed to set CDC callback: {}", e)))?;
 
         let (tx, rx) = ActorSender::channel(256);
-        let watch = ActorWatch::start(&tx);
+        let watch = ActorWatch::start(&tx, timings);
 
         // Spawn actor loop. On wasm32 tokio's single-threaded runtime is
         // not actually polled (Dioxus-web drives futures via

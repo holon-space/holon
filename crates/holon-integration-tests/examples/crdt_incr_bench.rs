@@ -63,8 +63,7 @@ fn main() -> anyhow::Result<()> {
             .await?;
 
         let last = format!("soak-{}", seed - 1);
-        let ok = env.wait_for_block(&last, Duration::from_secs(300)).await;
-        anyhow::ensure!(ok, "last block {last} never projected");
+        env.wait_for_block(&last, Duration::from_secs(300)).await?;
         env.wait_for_loro_quiescence(Duration::from_secs(60)).await;
         eprintln!("[bench] ingest complete for {seed} blocks; steady-state edits begin");
 

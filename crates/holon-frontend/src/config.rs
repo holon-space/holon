@@ -272,6 +272,7 @@ pub struct SessionConfig {
     /// sessions reading it would author under the SAME peer id and their CRDT
     /// histories would silently fail to converge.
     pub loro_peer_id: Option<u64>,
+    pub timings: std::sync::Arc<holon_api::Timings>,
 }
 
 impl SessionConfig {
@@ -280,6 +281,7 @@ impl SessionConfig {
             ui_info,
             wait_for_ready: true,
             loro_peer_id: None,
+            timings: Default::default(),
         }
     }
 
@@ -290,6 +292,11 @@ impl SessionConfig {
 
     pub fn with_loro_peer_id(mut self, peer_id: u64) -> Self {
         self.loro_peer_id = Some(peer_id);
+        self
+    }
+
+    pub fn with_timings(mut self, timings: holon_api::Timings) -> Self {
+        self.timings = std::sync::Arc::new(timings);
         self
     }
 }

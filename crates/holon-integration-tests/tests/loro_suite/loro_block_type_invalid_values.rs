@@ -338,11 +338,9 @@ fn a_block_type_drawer_is_refused(value: &str) {
         env.start_app(true)
             .await
             .expect("start_app with the drawer");
-        assert!(
-            env.wait_for_block("bt-drawer-probe", Duration::from_secs(20))
-                .await,
-            "the drawer probe never arrived"
-        );
+        env.wait_for_block("bt-drawer-probe", Duration::from_secs(20))
+            .await
+            .unwrap_or_else(|hung| panic!("the drawer probe never arrived: {hung}"));
         env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
 
         let mut failures: Vec<String> = Vec::new();
@@ -374,20 +372,20 @@ fn a_block_type_drawer_is_refused(value: &str) {
             .await
             .unwrap_or_else(|e| panic!("editing the content must land: {e:#}"));
         let path = env.org_file_path("drawer.org");
-        // A quiet-window settle can return before a write-back a loaded host delays.
-        let arrived = wait_for_file_condition(
+        let file = match wait_for_file_condition(
             env.org_fs.as_ref(),
             &path,
             |c| c.contains("drawer edited"),
             Duration::from_secs(30),
         )
-        .await;
-        let file = holon_filesystem::FileSystem::read_to_string(env.org_fs.as_ref(), &path)
-            .await
-            .expect("read drawer.org");
-        if !arrived {
-            failures.push(format!("the edit never reached the file:\n{file}"));
-        }
+        .await
+        {
+            Ok(file) => file,
+            Err(hung) => {
+                failures.push(format!("the edit never reached the file: {hung}"));
+                hung.last_value
+            }
+        };
         if file.contains(":block_type:") {
             failures.push(format!("the write-back carries the refused key:\n{file}"));
         }

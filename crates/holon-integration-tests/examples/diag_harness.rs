@@ -357,13 +357,8 @@ fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         } else {
-            let ok = env
-                .wait_for_block(&last_block, Duration::from_secs(wait_secs))
-                .await;
-            anyhow::ensure!(
-                ok,
-                "last block {last_block} never projected in {wait_secs}s"
-            );
+            env.wait_for_block(&last_block, Duration::from_secs(wait_secs))
+                .await?;
         }
         eprintln!(
             "[diag] BOOT-TO-PAGES-COMPLETE: {} ms  ({} files, {} blocks/file)",

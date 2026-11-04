@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc fe897e83e82c41b426a69adec224df5ce2deab94ae90dd7ccdb0035ac43f4b8c # shrinks to p = Progress { loro_settled: Some(true), shares_idle: Some(true), cdc: Some(CdcProgress { emitted: 0, routed_through: 0, lagging: [], watch_releases_in_flight: 0, watch_registrations_in_flight: 0 }), block_feed: Some(FeedProgress { routed: 0, consumed: 0 }), org: Some(OrgProgress { changed: 0, processed: 0, writeback_unsettled: [] }) }, stage = "share-projection", by = 1

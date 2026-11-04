@@ -87,9 +87,9 @@ use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
 // consume it: page_root/SETTLE/WIDE_TREE_ORG/structural_ref{,_wired}/wide_ref/
 // boot_and_seed_wide/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
 use crate::pbt::composed::wide_e2e::{
-    SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, folder_journal_page, frontend_wired, page_root,
-    seed_folder_companion, seed_folder_companion_subdir, structural_ref, subdir_journal_page,
-    wide_e2e_ref, wide_ref,
+    SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, converge_handle, folder_journal_page,
+    frontend_wired, page_root, seed_folder_companion, seed_folder_companion_subdir, structural_ref,
+    subdir_journal_page, wide_e2e_ref, wide_ref,
 };
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::is_synthetic_ref_id;
@@ -236,7 +236,9 @@ impl ReferenceStateMachine for StructMachine {
 /// booted scaffold ids (to seed-inject into the oracle). Shared by the
 /// StateMachineTest `init_test` and the teeth so they exercise the exact same
 /// SUT-swap target.
-async fn boot_and_seed(resolver: &IdResolver) -> (CapMap, BTreeSet<EntityUri>) {
+async fn boot_and_seed(
+    resolver: &IdResolver,
+) -> (CapMap, Arc<HeadlessFrontendComponent>, BTreeSet<EntityUri>) {
     let comp = Arc::new(
         HeadlessFrontendComponent::new(
             &[("doc0.org", "#+ID: ref-doc-0\n* Doc zero\n")],
@@ -278,15 +280,15 @@ async fn boot_and_seed(resolver: &IdResolver) -> (CapMap, BTreeSet<EntityUri>) {
     seeder.create_block(&ids.parent, &page_root(), PARENT).await;
     seeder.create_block(&ids.c1, &page_root(), C1).await;
     seeder.create_block(&ids.c2, &page_root(), C2).await;
-    tokio::time::sleep(SETTLE).await;
+    comp.settle().await;
 
     let mut caps = CapMap::new();
-    caps.insert(comp as Arc<dyn SutBackend>);
+    caps.insert(comp.clone() as Arc<dyn SutBackend>);
     caps.insert(
         Arc::new(OpDispatchWriter::with_resolver(engine, resolver.clone()))
             as Arc<dyn SutBlockTreeWrite>,
     );
-    (caps, scaffold_ids)
+    (caps, comp, scaffold_ids)
 }
 
 /// The frontend structural slice as a thin [`ComposedSlice`] — the alphabet
@@ -299,13 +301,19 @@ struct FrontendStructural;
 impl ComposedSlice for FrontendStructural {
     type Transition = StructTransition;
     type Machine = StructMachine;
-    type Handle = ();
+    type Handle = Arc<HeadlessFrontendComponent>;
     const REQUIRED_INVARIANTS: &'static [&'static str] = REQUIRED_INVARIANTS;
     const SETTLE: Duration = SETTLE;
 
-    async fn build(resolver: &IdResolver, _: &ReferenceState) -> (CapMap, (), BTreeSet<EntityUri>) {
-        let (caps, scaffold) = boot_and_seed(resolver).await;
-        (caps, (), scaffold)
+    async fn build(
+        resolver: &IdResolver,
+        _: &ReferenceState,
+    ) -> (CapMap, Arc<HeadlessFrontendComponent>, BTreeSet<EntityUri>) {
+        boot_and_seed(resolver).await
+    }
+
+    async fn settle_after_apply(comp: &Arc<HeadlessFrontendComponent>, _: &CapMap) {
+        comp.settle().await;
     }
 
     async fn apply_transition(
@@ -683,7 +691,7 @@ fn editor_ref() -> ReferenceState {
 async fn boot_and_seed_editor(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
-) -> (CapMap, BTreeSet<EntityUri>) {
+) -> (CapMap, Arc<HeadlessFrontendComponent>, BTreeSet<EntityUri>) {
     // Pin the boot clock to the fixed keystone day so the boot auto-create rule
     // mints a DETERMINISTIC journal day-page id (`keystone_boot_journal_id`), not
     // one keyed on the host's real date. The plain `new_with_loro` boot uses the
@@ -768,9 +776,9 @@ async fn boot_and_seed_editor(
         &mut caps,
     )
     .await;
-    tokio::time::sleep(SETTLE).await;
+    comp.settle().await;
 
-    (caps, scaffold)
+    (caps, comp, scaffold)
 }
 
 // The standalone editor PBT (`WideEditor`/`frontend_editor_pbt`) has been
@@ -851,8 +859,8 @@ mod teeth {
             "topology precondition: the date page must be seeded into the oracle"
         );
 
-        let (caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
-        tokio::time::sleep(SETTLE).await;
+        let (caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -942,8 +950,8 @@ mod teeth {
             "topology precondition: the fileless subdir date page must be seeded"
         );
 
-        let (caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
-        tokio::time::sleep(SETTLE).await;
+        let (caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -996,7 +1004,7 @@ mod teeth {
             engine.clone(),
             resolver.clone(),
         )) as Arc<dyn SutBlockTreeWrite>);
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
         (caps, comp)
     }
 
@@ -1238,7 +1246,8 @@ mod teeth {
             true,
         )
         .await;
-        tokio::time::sleep(SETTLE).await;
+        let comp = Arc::new(comp);
+        comp.settle().await;
 
         let contents = comp.disk_org_contents().await;
         let all_text = contents
@@ -1479,7 +1488,7 @@ mod teeth {
         }
         .apply_to_sut(&oracle, &mut caps)
         .await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -1713,7 +1722,7 @@ mod teeth {
         }
         .apply_to_sut(&oracle, &mut caps)
         .await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2022,7 +2031,7 @@ entities:
             Some(&new_id),
         )
         .await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
         params.insert("id".into(), holon_api::Value::String(new_id.to_string()));
@@ -2040,7 +2049,7 @@ entities:
             )
             .await
             .expect("set_field(content) with an entity link must succeed");
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let rows = engine
             .db_handle()
@@ -2146,7 +2155,7 @@ entities:
             engine.clone(),
             resolver.clone(),
         )) as Arc<dyn SutBlockTreeWrite>);
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         // Ingest happened, and it happened BEFORE registration. Pin that the
         // scan actually landed the block and parsed a mark, so a red below is
@@ -2181,7 +2190,7 @@ entities:
         let registry = comp.type_registry().await;
         holon_mcp_client::register_sidecar_entity_types(&sidecar, "structural-pbt", &registry)
             .expect("sidecar entities register");
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let rows = engine
             .db_handle()
@@ -2234,7 +2243,7 @@ entities:
     #[tokio::test(flavor = "multi_thread")]
     async fn frontend_structural_split_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let (mut caps, scaffold_ids) = boot_and_seed(&resolver).await;
+        let (mut caps, comp, scaffold_ids) = boot_and_seed(&resolver).await;
         let mut oracle = structural_ref();
 
         let before = sut_ids(&caps).await;
@@ -2244,7 +2253,7 @@ entities:
         };
         split.apply_to_ref(&mut oracle); // mints synthetic block::split-N
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await; // mints real uuid
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
         let after = sut_ids(&caps).await;
 
         // Reconcile the one synthetic ↔ one real id.
@@ -2288,7 +2297,7 @@ entities:
     #[tokio::test(flavor = "multi_thread")]
     async fn frontend_structural_sut_only_split_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let (mut caps, scaffold_ids) = boot_and_seed(&resolver).await;
+        let (mut caps, comp, scaffold_ids) = boot_and_seed(&resolver).await;
         let oracle = structural_ref();
 
         // Drive the split on the SUT only — DON'T advance the oracle, DON'T reconcile.
@@ -2297,7 +2306,7 @@ entities:
             position: 1,
         };
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2337,7 +2346,7 @@ entities:
     async fn wide_frontend_sut_only_navigate_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let oracle = frontend_wired(structural_ref()); // focused on the page root
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // SUT-only NavigateFocus to the sidebar-listed `journals` page — DON'T advance
         // the oracle (which stays on the structural-page root).
@@ -2346,7 +2355,7 @@ entities:
             block_id: EntityUri::parse("block:journals").expect("journals id"),
         };
         TransitionImpl::apply_to_sut(&nav, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2380,7 +2389,7 @@ entities:
     async fn wide_frontend_toggle_state_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(structural_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let toggle = ToggleState {
             block_id: fixed_ids().c1,
@@ -2388,7 +2397,7 @@ entities:
         };
         toggle.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&toggle, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2447,7 +2456,7 @@ entities:
     async fn wide_frontend_sut_only_toggle_state_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let oracle = frontend_wired(structural_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // SUT-only toggle — DON'T advance the oracle.
         let toggle = ToggleState {
@@ -2455,7 +2464,7 @@ entities:
             new_state: CycleTarget::Todo,
         };
         TransitionImpl::apply_to_sut(&toggle, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2515,12 +2524,12 @@ entities:
     async fn wide_frontend_setup_watch_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(structural_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let watch = all_blocks_watch("query-allblocks");
         watch.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&watch, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2550,7 +2559,7 @@ entities:
     async fn wide_frontend_sut_only_watch_rows_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(structural_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // Watch on BOTH sides (so the subscription set agrees) ...
         let watch = all_blocks_watch("query-allblocks");
@@ -2564,7 +2573,7 @@ entities:
             position: 1,
         };
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2590,14 +2599,14 @@ entities:
     async fn editor_type_chars_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = editor_ref();
-        let (mut caps, scaffold_ids) = boot_and_seed_editor(&resolver, &oracle).await;
+        let (mut caps, comp, scaffold_ids) = boot_and_seed_editor(&resolver, &oracle).await;
 
         let typ = TypeChars {
             text: "Z".to_string(),
         };
         typ.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&typ, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2634,14 +2643,14 @@ entities:
     async fn editor_sut_only_type_chars_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let oracle = editor_ref();
-        let (mut caps, scaffold_ids) = boot_and_seed_editor(&resolver, &oracle).await;
+        let (mut caps, comp, scaffold_ids) = boot_and_seed_editor(&resolver, &oracle).await;
 
         // SUT-only type — DON'T advance the oracle.
         let typ = TypeChars {
             text: "Z".to_string(),
         };
         TransitionImpl::apply_to_sut(&typ, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2674,7 +2683,7 @@ entities:
     async fn wide_split_then_type_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // Split `c1` at position 1 — the new block (the "1" tail of "c1") becomes the
         // focused, active editor at caret 0 on BOTH sides.
@@ -2685,7 +2694,7 @@ entities:
         };
         split.apply_to_ref(&mut oracle); // mints synthetic block::split-N, focuses + opens it
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await; // focus-handoff focuses real new
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
         let after = sut_ids(&caps).await;
 
         // Reconcile the one synthetic split id ↔ the one real minted id.
@@ -2710,7 +2719,7 @@ entities:
         };
         typ.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&typ, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&map);
         drop_ref_off_thread(oracle);
@@ -2874,6 +2883,10 @@ entities:
             &[],
         )
         .await;
+        let comp = bundle
+            .frontend
+            .clone()
+            .expect("the full headless set boots a frontend");
         let mut caps = bundle.caps;
 
         // The oracle models the boot-fired journal day-block (`frontend_wired` →
@@ -2921,7 +2934,7 @@ entities:
             &mut caps,
         )
         .await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2996,6 +3009,10 @@ entities:
             &[],
         )
         .await;
+        let comp = bundle
+            .frontend
+            .clone()
+            .expect("the full headless set boots a frontend");
         let caps = bundle.caps;
 
         {
@@ -3009,7 +3026,7 @@ entities:
             loro.apply_sync_with_peer(1).await;
             loro.apply_sync_with_peer(0).await;
         }
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        comp.settle().await;
 
         let loro_order = caps
             .expect::<dyn SutLoroLog>()
@@ -3215,6 +3232,10 @@ entities:
             &[],
         )
         .await;
+        let comp = bundle
+            .frontend
+            .clone()
+            .expect("the full headless set boots a frontend");
         let mut caps = bundle.caps;
         let mut oracle = frontend_wired(wide_ref());
 
@@ -3269,7 +3290,7 @@ entities:
         };
         focus.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&focus, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         // Pad the shadow to the height the primary edit will land at, THEN
         // mirror it (lamport-exact), THEN let the SUT type.
@@ -3287,7 +3308,7 @@ entities:
             multi_peer::update_block(&shadow_primary, node, &oracle_c1);
         }
         TransitionImpl::apply_to_sut(&typ, &oracle, &mut caps).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        comp.settle().await;
 
         // Guard: the oracle's predicted primary content must match the SUT's
         // committed content BEFORE the merge — otherwise the mechanism test
@@ -3311,7 +3332,7 @@ entities:
         pad_to_height(&shadow_primary, h);
         sync_docs_direct(&shadow_primary, &shadow_peer);
         caps.expect::<dyn SutLoro>().apply_sync_with_peer(0).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        comp.settle().await;
 
         let sut_c1 = caps
             .expect::<dyn SutLoroLog>()
@@ -3345,7 +3366,7 @@ entities:
     async fn wide_create_document_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let before = sut_ids(&caps).await;
         let cd = CreateDocument {
@@ -3353,7 +3374,7 @@ entities:
         };
         cd.apply_to_ref(&mut oracle); // mints synthetic block:ref-doc-N page
         TransitionImpl::apply_to_sut(&cd, &oracle, &mut caps).await; // writes file → watcher mints page
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
         let after = sut_ids(&caps).await;
 
         // Reconcile the one synthetic doc-uri ↔ the one real minted page id (the
@@ -3402,14 +3423,14 @@ entities:
     async fn wide_sut_only_create_document_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let oracle = frontend_wired(wide_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         // SUT-only create — DON'T advance the oracle, DON'T reconcile.
         let cd = CreateDocument {
             file_name: "sr1-spurious.org".to_string(),
         };
         TransitionImpl::apply_to_sut(&cd, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -3437,7 +3458,7 @@ entities:
     async fn wide_pin_block_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let pin = PinBlock {
             region: Region::RightSidebar,
@@ -3445,7 +3466,7 @@ entities:
         };
         pin.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&pin, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -3472,14 +3493,14 @@ entities:
     async fn wide_sut_only_pin_block_is_caught() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let oracle = frontend_wired(wide_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let pin = PinBlock {
             region: Region::RightSidebar,
             block_id: fixed_ids().c1,
         };
         TransitionImpl::apply_to_sut(&pin, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -3507,7 +3528,7 @@ entities:
     async fn wide_indent_outdent_roundtrip_lockstep() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         for t in [
             E2ETransition::Indent(Indent {
@@ -3519,7 +3540,7 @@ entities:
         ] {
             t.apply_to_ref(&mut oracle);
             TransitionImpl::apply_to_sut(&t, &oracle, &mut caps).await;
-            tokio::time::sleep(SETTLE).await;
+            converge_handle(&handle, SETTLE).await;
         }
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
@@ -3544,14 +3565,14 @@ entities:
     async fn wide_indent_then_split_parent_lockstep() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let indent = E2ETransition::Indent(Indent {
             block_id: fixed_ids().c2,
         });
         indent.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&indent, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
 
         let before = sut_ids(&caps).await;
         let split = E2ETransition::SplitBlock(SplitBlock {
@@ -3560,7 +3581,7 @@ entities:
         });
         split.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
         let after = sut_ids(&caps).await;
 
         // Reconcile the one synthetic split id ↔ the one real minted id.
@@ -3601,13 +3622,13 @@ entities:
     async fn wide_simulate_restart_lockstep_stays_green() {
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let mut oracle = frontend_wired(wide_ref());
-        let (mut caps, _handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
+        let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
         let before = sut_ids(&caps).await;
         let restart = SimulateRestart;
         restart.apply_to_ref(&mut oracle); // no-op (blocks preserved)
         TransitionImpl::apply_to_sut(&restart, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        converge_handle(&handle, SETTLE).await;
         let after = sut_ids(&caps).await;
         assert_eq!(
             before, after,
@@ -3729,7 +3750,7 @@ entities:
         use crate::pbt::transitions::E2ETransition;
 
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let (mut caps, scaffold_ids) = boot_and_seed(&resolver).await;
+        let (mut caps, comp, scaffold_ids) = boot_and_seed(&resolver).await;
         // The cap gate's RHS — wired exactly as the eventual E2ESut→CapMap swap will.
         let mut oracle = structural_ref().with_cap_set(caps.cap_set());
 
@@ -3751,7 +3772,7 @@ entities:
         split.apply_to_ref(&mut oracle); // wide enum → SplitBlock::apply_to_ref (synthetic id)
         // The whole point: drive the WIDE enum over `&mut CapMap`.
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
         let after = sut_ids(&caps).await;
 
         // Reconcile the one synthetic ↔ one real id (same kernel as the slice).
@@ -3837,14 +3858,14 @@ entities:
         comp.clone()
             .register_gesture_writes(&mut caps, comp.driver());
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let container = holon_api::EntityUri::block("structural-page");
         let date_page = holon_api::EntityUri::block("test-date-page");
         let child = holon_api::EntityUri::block("test-date-child");
 
         comp.apply_navigate_focus(CapRegion::Main, &container).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         (comp, caps, container, date_page, child)
     }
@@ -3961,7 +3982,7 @@ entities:
             .set_block_expanded(&date_page, true)
             .await
             .expect("set_block_expanded must succeed for embedded page toggle");
-        tokio::time::sleep(Duration::from_millis(3000)).await;
+        comp.settle().await;
 
         let resolved_b = {
             let mut oracle = embedded_page_ref(&container, &date_page, &child);
@@ -4036,18 +4057,18 @@ entities:
             )
             .await,
         );
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let page = holon_api::EntityUri::block("mounted-page");
         let toggle = holon_api::EntityUri::block("mounted-toggle");
         comp.apply_navigate_focus(CapRegion::Main, &page).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         comp.driver()
             .set_block_expanded(&toggle, false)
             .await
             .expect("set_block_expanded must succeed for a mounted expand_toggle");
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        comp.settle().await;
 
         let rows = comp
             .sql_query("SELECT id, collapsed FROM block_raw WHERE id = 'block:mounted-toggle'")
@@ -4115,14 +4136,14 @@ entities:
         comp.clone()
             .register_gesture_writes(&mut caps, comp.driver());
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let journals = holon_api::EntityUri::block("journals");
         let day_page = holon_api::EntityUri::block("day-0714");
         let child = holon_api::EntityUri::block("day-0714-child");
 
         comp.apply_navigate_focus(CapRegion::Main, &journals).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         (comp, caps, journals, day_page, child)
     }
@@ -4268,7 +4289,7 @@ entities:
         comp.clone()
             .register_gesture_writes(&mut caps, comp.driver());
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let journals = holon_api::EntityUri::block("journals");
         let day_page = holon_api::EntityUri::block("day-0714");
@@ -4276,7 +4297,7 @@ entities:
         let stray = holon_api::EntityUri::block("stray-note");
 
         comp.apply_navigate_focus(CapRegion::Main, &journals).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         (comp, caps, journals, day_page, child, stray)
     }
@@ -4424,7 +4445,7 @@ entities:
             )
             .await,
         );
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let journals = EntityUri::parse("block:journals").expect("journals id");
 
@@ -4440,7 +4461,7 @@ entities:
             if feed.collect_by_kind("expand_toggle").len() >= 2 {
                 break;
             }
-            tokio::time::sleep(SETTLE).await;
+            comp.settle().await;
             feed = comp
                 .widget_tree_for(&journals)
                 .await
@@ -4481,7 +4502,7 @@ entities:
         // ── Prong (b): a plain embedded page elsewhere stays COLLAPSED.
         let notebook = EntityUri::parse("block:plain-notebook").expect("notebook id");
         comp.apply_navigate_focus(CapRegion::Main, &notebook).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
         let root = comp.widget_tree_snapshot().await;
         let plain_toggle = root
             .collect_by_kind("expand_toggle")
@@ -4538,7 +4559,7 @@ entities:
             )
             .await,
         );
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let journals = EntityUri::parse("block:journals").expect("journals id");
         let mut feed = comp
@@ -4746,11 +4767,11 @@ entities:
             )
             .await,
         );
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let journals = EntityUri::parse("block:journals").expect("journals id");
         comp.apply_navigate_focus(CapRegion::Main, &journals).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let root = comp.widget_tree_snapshot().await;
 
@@ -4864,7 +4885,7 @@ entities:
             )
             .await,
         );
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         // The claim is the ORDER of the two rows, so poll until both have
         // populated: the sidebar's live_query lands asynchronously and under
@@ -4891,7 +4912,7 @@ entities:
             {
                 break;
             }
-            tokio::time::sleep(SETTLE).await;
+            comp.settle().await;
         }
         let pos = |needle: &str| order.iter().position(|e| e.contains(needle));
         let apple = pos("ssort-apple");
@@ -4978,7 +4999,7 @@ entities:
             )
             .await,
         );
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         let zebra = EntityUri::parse("block:rsort-zebra").expect("zebra id");
         let apple = EntityUri::parse("block:rsort-apple").expect("apple id");
@@ -4995,10 +5016,10 @@ entities:
         .await;
         comp.await_main_pin_intent(&zebra).await;
         SutNavHistoryDrive::pin_block(comp.as_ref(), Region::RightSidebar, &zebra).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
         comp.await_main_pin_intent(&apple).await;
         SutNavHistoryDrive::pin_block(comp.as_ref(), Region::RightSidebar, &apple).await;
-        tokio::time::sleep(SETTLE).await;
+        comp.settle().await;
 
         // Render the FULL layout via the RECURSIVE snapshot (like the
         // left-sidebar oracle) — `widget_tree_for` uses the shallow
@@ -5027,7 +5048,7 @@ entities:
             if has_both {
                 break;
             }
-            tokio::time::sleep(SETTLE).await;
+            comp.settle().await;
         }
         order
     }

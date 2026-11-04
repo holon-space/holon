@@ -8,12 +8,6 @@ use std::collections::VecDeque;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use std::time::Instant as MonotonicInstant;
 
-/// Wall-clock milliseconds since Unix epoch.
-///
-/// On native this calls `std::time::SystemTime::now()`. On wasm32, where
-/// `std::time` panics, it routes through `web_time` which forwards to the
-/// browser's `Date.now()`.
-pub use holon_core::util::now_unix_millis;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use web_time::Instant as MonotonicInstant;
 

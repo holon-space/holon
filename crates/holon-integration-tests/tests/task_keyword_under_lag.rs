@@ -17,7 +17,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_api::Value;
 use holon_integration_tests::TestEnvironmentBuilder;
@@ -68,12 +67,7 @@ fn a_keystroke_after_a_demotion_does_not_clear_the_task_state_again() {
             .build(rt.clone())
             .await
             .expect("boot the vault");
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
         let before = world
             .query_sql(TASK_STATE_WRITES)
             .await
@@ -105,12 +99,7 @@ fn a_keystroke_after_a_demotion_does_not_clear_the_task_state_again() {
             .await
             .expect("type one more character");
 
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
         let writes = world
             .query_sql(TASK_STATE_WRITES)
             .await

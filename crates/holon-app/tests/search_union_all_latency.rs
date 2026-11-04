@@ -48,6 +48,7 @@ async fn fresh_engine(
         db_path,
         holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+        Default::default(),
         |injector| {
             EventInfraModule
                 .configure(injector)

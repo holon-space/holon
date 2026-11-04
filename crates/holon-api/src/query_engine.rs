@@ -188,6 +188,12 @@ pub trait QueryEngine: Send + Sync {
     /// `None` when the row hasn't materialised yet.
     async fn block_content_by_id(&self, id: &EntityUri) -> Result<Option<String>>;
 
+    /// Every CDC delivery this engine still owes, one line per stage:
+    /// `"<stage>: target <target>, at <value>"`. Empty when each change up to
+    /// the emitted watermark is routed and applied, and no watch registration
+    /// or release is in flight. A test driver waits for empty after a gesture.
+    async fn delivery_owed(&self) -> Result<Vec<String>>;
+
     /// Non-settling read of a single block's stored task keyword
     /// (`properties.task_state`), the companion of
     /// [`Self::block_content_by_id`]. An editor needs it to run the live

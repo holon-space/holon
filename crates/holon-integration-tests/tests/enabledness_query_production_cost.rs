@@ -189,9 +189,7 @@ fn enabledness_query_cost_in_the_production_composition() {
              figure below would be at the wrong scale"
         );
 
-        env.wait_for_loro_quiescence(Duration::from_secs(120)).await;
-        env.wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        env.settle().await;
 
         let engine = env.engine();
         let subject_raw = block_id(d / 2, h / 2);

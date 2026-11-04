@@ -15,7 +15,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_api::EntityUri;
 use holon_api::Value;
@@ -59,12 +58,7 @@ fn instantiate_template_finds_a_template_the_projection_has_not_reached() {
             .build(rt.clone())
             .await
             .expect("boot the vault");
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
         assert_eq!(
             world
                 .query_sql(&format!("SELECT id FROM block_raw WHERE id = '{TARGET}'"))
@@ -160,12 +154,7 @@ fn instantiate_template_finds_a_template_the_projection_has_not_reached() {
             .await
             .expect("instantiate a template the projection has not reached yet");
 
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
 
         let with_mood: Vec<(String, String)> = bindings
             .iter()

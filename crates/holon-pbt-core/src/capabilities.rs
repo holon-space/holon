@@ -2527,8 +2527,8 @@ pub trait SutOrgRead {
     /// Wait for the FileSyncController's background re-render to settle, then
     /// parse every tracked org file on disk back into `holon_api::Block`s.
     ///
-    /// Folds the monolith's `wait_for_org_files_stable` +
-    /// `parse_org_file_blocks` into one snapshot, mirroring the other
+    /// Folds the monolith's settle + `parse_org_file_blocks` into one
+    /// snapshot, mirroring the other
     /// block-store snapshot caps ([`SutBackend::block_raw_snapshot`],
     /// [`SutLoroLog::loro_block_snapshot`]). The org parser produces
     /// `block:<uuid>` parents for `#+ID:`-resolved docs

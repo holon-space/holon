@@ -254,9 +254,7 @@ fn share_answers_follow_the_file_model() {
         env.wait_for_loro_quiescence(Duration::from_secs(60)).await;
         let block_mount = share(&env, "block:shr-gamma").await;
         let page_mount = share(&env, "block:shr-page").await;
-        env.wait_for_loro_quiescence(Duration::from_secs(60)).await;
-        env.wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(60))
-            .await;
+        env.settle().await;
         let loro = env
             .injector()
             .expect("booted injector")

@@ -1,10 +1,7 @@
 //! Contract: a command that keeps the SQL actor busy past the hang bound
-//! (`HOLON_ACTOR_HANG_MS`) is disclosed as `DatabaseStuck`, naming its kind
+//! (`Timings::actor_hang`) is disclosed as `DatabaseStuck`, naming its kind
 //! and its SQL with the literals blanked, and the disclosure clears when the
 //! command finishes.
-//!
-//! The bound is read from the environment when a backend starts; nextest runs
-//! every test in its own process.
 //!
 //! A spinning command never yields, so a runtime that owns it can never finish
 //! a drop: each runtime is `ManuallyDrop` and ends with `shutdown_background`,
@@ -49,15 +46,16 @@ fn runtime() -> ManuallyDrop<tokio::runtime::Runtime> {
     )
 }
 
-fn set_hang_bound(bound: Duration) {
-    // SAFETY: no runtime is alive. The only other thread is the SQL actor
-    // watchdog, which does not read the environment.
-    unsafe { std::env::set_var("HOLON_ACTOR_HANG_MS", bound.as_millis().max(1).to_string()) };
-}
-
-fn open(rt: &tokio::runtime::Runtime, bus: &Arc<ConditionBus>) -> DbHandle {
+fn open(rt: &tokio::runtime::Runtime, bus: &Arc<ConditionBus>, hang_bound: Duration) -> DbHandle {
     rt.block_on(async {
-        let (backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+        let db = TursoBackend::open_database(":memory:").expect("in-memory db");
+        let (cdc_tx, _) = tokio::sync::broadcast::channel(1024);
+        let timings = holon_api::Timings {
+            actor_hang: hang_bound,
+            ..Default::default()
+        };
+        let (backend, handle) =
+            TursoBackend::new_with_timings(db, cdc_tx, &timings).expect("backend");
         // The actor lives as long as a handle does; the backend only owns the
         // database file, which an in-memory database does not have.
         std::mem::forget(backend);
@@ -191,10 +189,9 @@ fn stuck_changes(changes: &mut tokio::sync::broadcast::Receiver<ConditionChange>
 
 #[test]
 fn a_spinning_commit_is_disclosed_with_its_command_kind_and_redacted_sql() {
-    set_hang_bound(Duration::from_millis(500));
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
-    let handle = open(&rt, &bus);
+    let handle = open(&rt, &bus, Duration::from_millis(500));
     rt.block_on(async {
         handle
             .execute_ddl("CREATE TABLE block (id TEXT PRIMARY KEY, parent_id TEXT)")
@@ -244,10 +241,9 @@ fn a_spinning_commit_is_disclosed_with_its_command_kind_and_redacted_sql() {
 fn a_slow_healthy_command_past_the_bound_is_disclosed_then_cleared() {
     let slow = calibrate_slow_query();
     let bound = slow.fastest / 4;
-    set_hang_bound(bound);
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
-    let handle = open(&rt, &bus);
+    let handle = open(&rt, &bus, bound);
     let mut changes = bus.subscribe().changes;
 
     let took = run_slow_query(&rt, &handle, slow.rows * 4);
@@ -290,10 +286,9 @@ fn the_stuck_report_is_logged_in_the_span_of_the_code_that_sent_the_command() {
         )
         .init();
     let slow = calibrate_slow_query();
-    set_hang_bound(slow.fastest / 4);
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
-    let handle = open(&rt, &bus);
+    let handle = open(&rt, &bus, slow.fastest / 4);
 
     rt.block_on(
         async move {
@@ -327,10 +322,9 @@ fn a_slow_healthy_command_under_the_bound_is_not_disclosed() {
     // Eight busy threads per core, from the end of the calibration on, slow
     // the query about 23x.
     let bound = slow.slowest * 8 * 64;
-    set_hang_bound(bound);
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
-    let handle = open(&rt, &bus);
+    let handle = open(&rt, &bus, bound);
     let mut changes = bus.subscribe().changes;
 
     let took = run_slow_query(&rt, &handle, rows);

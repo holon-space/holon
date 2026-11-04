@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_api::Value;
 use holon_filesystem::FileSystem;
@@ -43,14 +42,6 @@ const RING_ORG: &str = "\
 
 const RING_LINE: &str = "#+TODO: TODO WAITING | DONE";
 
-async fn settle(env: &TestEnvironment) {
-    env.wait_for_loro_quiescence(Duration::from_secs(15)).await;
-    env.wait_for_cdc_quiescent(Duration::from_millis(400), Duration::from_secs(15))
-        .await;
-    env.wait_for_org_files_stable(300, Duration::from_secs(15))
-        .await;
-}
-
 /// Every org file as `(path, content)`.
 async fn files(env: &TestEnvironment) -> Vec<(String, String)> {
     let scan = FileSystem::scan_directory(env.org_fs.as_ref(), env.org_root())
@@ -82,14 +73,14 @@ fn a_converted_page_file_declares_its_source_documents_ring() {
             .build(rt.clone())
             .await
             .expect("boot");
-        settle(&env).await;
+        env.settle().await;
 
         let mut params: HashMap<String, Value> = HashMap::new();
         params.insert("target".into(), Value::String("block:origin".into()));
         env.execute_operation("block", "convert_block_to_page", params)
             .await
             .expect("convert_block_to_page applies");
-        settle(&env).await;
+        env.settle().await;
 
         let rows = env
             .query_sql("SELECT parent_id FROM block_raw WHERE id = 'block:kid'")
@@ -115,7 +106,7 @@ fn a_converted_page_file_declares_its_source_documents_ring() {
 
         let outcome = env.engine().undo().await.expect("undo the convert");
         assert!(outcome.applied(), "undo applies, got {outcome:?}");
-        settle(&env).await;
+        env.settle().await;
         let undone = files(&env).await;
         assert!(
             !undone

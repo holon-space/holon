@@ -363,6 +363,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `crash-restore-window-not-disclosed`
 - `create-sql-read-repeat-budget`
 - `cut-paste-duplicate-block-id`
+- `decision-edit-sends-unresolved-split-id`
 - `deletebackward-sql-reads-budget`
 - `deleted-file-recreated-by-stale-page-mirror`
 - `deleted-page-rewritten-from-stale-page-mirror-pin`
@@ -383,6 +384,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `hand-authored-hm4-reboot-settle-load-timeout`
 - `hand-authored-renamed-recipe-refusal-not-disclosed-load`
 - `identity-transfer-in-place-edit-misbound-load`
+- `indent-writes-no-loro-op`
 - `integration-toggle-load`
 - `invite-refusal-unmapped-focus-root`
 - `iroh-accept-drain-recv-stream`
@@ -404,6 +406,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `mirrored-entity-authority-ops-missing`
 - `multiline-property-create-block-missing-load`
 - `no-proptest-regressions-seed-file-under-load`
+- `open-tab-panel-keeps-empty-cursor-subtree`
 - `org-deep-text-ratio-under-load`
 - `org-suite-backward-sync-ui-delete-load-timeout`
 - `orgmode-file-watcher-no-event`
@@ -415,6 +418,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `proptest-sm-shrink-seen-transitions`
 - `quick-open-vault-scale-timeout`
 - `read-model-never-seeded-sql-rows`
+- `reaper-deletes-saved-headless-newborn`
 - `ref-diverge-content-ref-empty`
 - `ref-diverge-content-text-drift`
 - `ref-diverge-parent-reparent`
@@ -448,6 +452,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `undo-prod-session-stale-dropped`
 - `undo-redo-reference-heal-teeth-load-timeout`
 - `vault-scale-main-panel-delivery`
+- `watch-ui-newborn-first-render-missing-row-load`
 - `wb-d6-stall-resurrects-deleted-line`
 - `wb-d7-stall-splits-edited-line`
 - `wide-e2e-shrinker-list-app-item-missing`

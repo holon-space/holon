@@ -417,12 +417,7 @@ fn one_hop_cost_in_the_production_composition() {
              figure below would be at the wrong scale"
         );
 
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
 
         // The fan-out the hop actually faces, reported rather than assumed.
         let families = world

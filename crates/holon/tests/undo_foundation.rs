@@ -267,6 +267,7 @@ async fn fixture() -> Fixture {
         dispatcher.clone(),
         reader.clone(),
         store.clone(),
+        Arc::new(holon_api::SystemClock),
     )
     .await
     .expect("fresh persistent engine");
@@ -453,6 +454,7 @@ async fn a_restart_discards_the_journal_and_counts_what_it_dropped() {
         fx.dispatcher.clone(),
         fx.reader.clone(),
         fx.store.clone(),
+        Arc::new(holon_api::SystemClock),
     )
     .await
     .expect("reloaded engine");
@@ -487,6 +489,7 @@ async fn a_second_restart_has_nothing_left_to_discard() {
         fx.dispatcher.clone(),
         fx.reader.clone(),
         fx.store.clone(),
+        Arc::new(holon_api::SystemClock),
     )
     .await
     .expect("second boot");
@@ -496,6 +499,7 @@ async fn a_second_restart_has_nothing_left_to_discard() {
         fx.dispatcher.clone(),
         fx.reader.clone(),
         fx.store.clone(),
+        Arc::new(holon_api::SystemClock),
     )
     .await
     .expect("third boot");

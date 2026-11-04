@@ -107,13 +107,14 @@ fn bulk_add_five_siblings_under_one_parent_at_startup() {
         // Wait for every block to land in SQL.
         for i in 0..5 {
             let id = format!("bulk-0-{i}");
-            assert!(
-                env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
-                    .await,
-                "block {} did not sync from org file to backend within {:?}",
-                id,
-                SYNC_TIMEOUT
-            );
+            env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
+                .await
+                .unwrap_or_else(|hung| {
+                    panic!(
+                        "block {} did not sync from org file to backend within {:?}: {hung}",
+                        id, SYNC_TIMEOUT
+                    )
+                });
         }
 
         // If `[PHANTOM-LORO-TRACE]` lines appeared on stderr during this
@@ -160,12 +161,9 @@ fn two_consecutive_bulk_batches_under_one_parent() {
         .await
         .expect("write batch 1");
         for id in ["bulk-A", "bulk-B", "bulk-C"] {
-            assert!(
-                env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
-                    .await,
-                "batch 1: block {} did not sync",
-                id
-            );
+            env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
+                .await
+                .unwrap_or_else(|hung| panic!("batch 1: block {} did not sync: {hung}", id));
         }
 
         // Batch 2: extend with 5 more siblings; existing 3 stay.
@@ -209,12 +207,9 @@ fn two_consecutive_bulk_batches_under_one_parent() {
         .await
         .expect("write batch 2");
         for id in ["bulk-D", "bulk-E", "bulk-F", "bulk-G", "bulk-H"] {
-            assert!(
-                env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
-                    .await,
-                "batch 2: block {} did not sync",
-                id
-            );
+            env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
+                .await
+                .unwrap_or_else(|hung| panic!("batch 2: block {} did not sync: {hung}", id));
         }
     });
 }

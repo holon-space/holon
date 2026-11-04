@@ -142,20 +142,16 @@ fn a_refused_file_does_not_skip_the_default_layout_seed() {
             "the scan failure must name the refused file; got: {scan_error}"
         );
 
-        assert!(
-            env.wait_for_block("block:good-root", SYNC_TIMEOUT).await,
-            "the clean file did not ingest"
-        );
+        env.wait_for_block("block:good-root", SYNC_TIMEOUT).await
+            .unwrap_or_else(|hung| panic!("the clean file did not ingest: {hung}"));
         for id in [
             "block:root-layout",
             "block:journals::src::0",
             "block:journals::auto-create",
         ] {
-            assert!(
-                env.wait_for_block(id, SYNC_TIMEOUT).await,
-                "seeded block {id} is missing: one refused file skipped the whole default-layout \
-                 seed"
-            );
+            env.wait_for_block(id, SYNC_TIMEOUT).await
+            .unwrap_or_else(|hung| panic!("seeded block {id} is missing: one refused file skipped the whole default-layout \
+                 seed: {hung}"));
         }
     });
 }
@@ -180,11 +176,9 @@ fn one_bad_file_does_not_kill_sync_for_others() {
 
         // (b) The clean file's blocks ingested despite the bad file.
         for id in ["good-root", "good-child", "other-root"] {
-            assert!(
-                env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
-                    .await,
-                "clean-file block {id} did not sync — a bad file killed sync for others"
-            );
+            env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
+                    .await
+            .unwrap_or_else(|hung| panic!("clean-file block {id} did not sync — a bad file killed sync for others: {hung}"));
         }
 
         // (c) Runtime sync survived: the watch loop is armed, so a NEW file
@@ -196,11 +190,9 @@ fn one_bad_file_does_not_kill_sync_for_others() {
         )
         .await
         .expect("write post-boot file");
-        assert!(
-            env.wait_for_block("block:post-boot-block", SYNC_TIMEOUT)
-                .await,
-            "post-boot edit did not sync — the file-watch loop was not armed (sync is dead after \
-             a bad file)"
-        );
+        env.wait_for_block("block:post-boot-block", SYNC_TIMEOUT)
+                .await
+            .unwrap_or_else(|hung| panic!("post-boot edit did not sync — the file-watch loop was not armed (sync is dead after \
+             a bad file): {hung}"));
     });
 }

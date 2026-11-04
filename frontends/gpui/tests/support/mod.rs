@@ -1489,6 +1489,10 @@ impl holon_api::QueryEngine for DeclaresNothingQueryEngine {
         anyhow::bail!("DeclaresNothingQueryEngine does not watch queries")
     }
 
+    async fn delivery_owed(&self) -> Result<Vec<String>> {
+        anyhow::bail!("DeclaresNothingQueryEngine does not track delivery")
+    }
+
     async fn search_link_candidates(&self, _: &str) -> Result<Vec<holon_api::LinkCandidate>> {
         Ok(Vec::new())
     }

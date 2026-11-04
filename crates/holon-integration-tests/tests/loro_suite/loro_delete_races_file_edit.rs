@@ -213,9 +213,7 @@ async fn holon_change_races_edit(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
-    env.wait_for_org_files_stable(100, Duration::from_secs(10))
-        .await;
+    env.settle().await;
 
     env.write_org_file("bulk.org", &bulk_file())
         .await
@@ -331,14 +329,10 @@ async fn holon_change_races_edit(
         copy.display()
     );
 
-    env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
-    env.wait_for_org_files_stable(100, Duration::from_secs(10))
-        .await;
+    env.settle().await;
     env.stop_app().await.expect("stop_app");
     env.start_app(true).await.expect("restart");
-    env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
-    env.wait_for_org_files_stable(100, Duration::from_secs(10))
-        .await;
+    env.settle().await;
     let after_restart = conflict_copies(&env).await;
     assert_eq!(
         after_restart, copies,
@@ -403,9 +397,7 @@ fn a_parent_delete_keeping_its_child_racing_an_external_edit_keeps_the_child() {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
-        env.wait_for_org_files_stable(100, Duration::from_secs(10))
-            .await;
+        env.settle().await;
         let doc = row(&env, "block:d92-alpha").await.expect("Alpha row").1;
 
         env.write_org_file("bulk.org", &bulk_file())
@@ -513,9 +505,7 @@ fn a_demote_under_a_holon_deleted_parent_converges() {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
-        env.wait_for_org_files_stable(100, Duration::from_secs(10))
-            .await;
+        env.settle().await;
         let doc = row(&env, "block:d93-alpha").await.expect("Alpha row").1;
 
         env.write_org_file("bulk.org", &bulk_file())
@@ -597,9 +587,7 @@ fn a_restart_then_a_file_still_holding_a_holon_deleted_block_keeps_it_deleted() 
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
-        env.wait_for_org_files_stable(100, Duration::from_secs(10))
-            .await;
+        env.settle().await;
         let with_beta = disk(&env, &path).await;
 
         env.delete_block("d91-beta").await.expect("delete Beta");
@@ -611,8 +599,7 @@ fn a_restart_then_a_file_still_holding_a_holon_deleted_block_keeps_it_deleted() 
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        env.wait_for_org_files_stable(100, Duration::from_secs(10))
-            .await;
+        env.settle().await;
 
         env.stop_app().await.expect("stop_app");
         let restored = with_beta.replacen("* Alpha", "* Alpha edited outside", 1);
@@ -634,9 +621,7 @@ fn a_restart_then_a_file_still_holding_a_holon_deleted_block_keeps_it_deleted() 
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
-        env.wait_for_org_files_stable(100, Duration::from_secs(10))
-            .await;
+        env.settle().await;
         let beta = row(&env, "block:d91-beta").await;
         let on_disk = disk(&env, &path).await;
         assert!(

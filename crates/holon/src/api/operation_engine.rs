@@ -730,8 +730,8 @@ impl DispatchingOperationEngine {
         self.footprint(entity_name, op_name, |key| params.get(key))
     }
 
-    /// Override the provenance-stamp clock (test determinism). Production keeps
-    /// the [`SystemClock`] default so stamps carry real wall-clock time.
+    /// Replace the provenance-stamp clock that [`Self::new`] defaults to
+    /// [`SystemClock`].
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.state_mut().clock = clock;
         self
@@ -790,6 +790,7 @@ impl DispatchingOperationEngine {
         dispatcher: Arc<OperationDispatcher>,
         reader: Arc<dyn UndoStateReader>,
         store: Arc<dyn UndoStore>,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self> {
         // D116.a: undo does NOT survive a restart. The CRDT's text-undo manager
         // is rebuilt empty at every boot, so a text-epoch marker from a previous
@@ -826,7 +827,7 @@ impl DispatchingOperationEngine {
             reader: Some(reader),
             store: Some(store),
             seq: AtomicI64::new(seq),
-            clock: Arc::new(SystemClock),
+            clock,
             text_undo: std::sync::OnceLock::new(),
             history: None,
             write_authority: None,

@@ -518,7 +518,7 @@ async fn run_case(rt: Arc<tokio::runtime::Runtime>, case: MergeCase) {
         .build(rt)
         .await
         .expect("boot");
-    env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+    env.settle().await;
 
     seed_tree(&env, &case).await;
 

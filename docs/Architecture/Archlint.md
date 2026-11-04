@@ -235,6 +235,7 @@ definitions: `grep '^id = ' archlint/smells/*.toml`,
 | `order_minting` | smell | `order_minting` | `gen_key_between` / `new_child_anchor` outside the sibling-set's order owner (Model.md invariants 2/10) |
 | `sole_block_writer` | smell | `sole_block_writer` | Raw SQL write to `block`/`block_raw` outside the sanctioned single writer |
 | `deleted_cell_symbol` | smell | `deleted_cell_symbol` | Pre-Phase-2 symbols reappearing (`BlockContentResolver`, `live_content`, watermark fields) |
+| `physical_time` | smell | `physical_time` | A direct clock read or timer (`Instant::now`, `SystemTime::now`, `tokio::time::sleep`, `thread::sleep`, …) outside the `Clock` port in `holon-api/src/clock.rs`; product code only, test code excluded |
 | `pbt-transition-helper-concrete-ref` | smell | `pbt-transition-helper-concrete-ref` | PBT transition helpers binding to concrete `ReferenceState` instead of capability traits |
 | `pbt-slice-invariant-foreign-module` | smell | `pbt-slice-invariant-foreign-module` | Slice test importing `Inv*` from outside `invariants::bodies::` |
 | `pbt-transition-apply-intent` | smell | `pbt-transition-apply-intent` | PBT transition bodies calling `.apply_intent(...)` (bypasses user-input pipeline) |

@@ -2619,6 +2619,7 @@ dependencies = [
  "tracing-opentelemetry",
  "uuid",
  "wasm-bindgen-futures",
+ "web-time",
  "workspace-hack",
 ]
 
@@ -2652,7 +2653,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
- "web-time",
  "workspace-hack",
 ]
 

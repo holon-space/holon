@@ -76,9 +76,7 @@ async fn booted(rt: Arc<tokio::runtime::Runtime>) -> TestEnvironment {
 }
 
 async fn settle(env: &TestEnvironment) {
-    env.wait_for_loro_quiescence(Duration::from_secs(15)).await;
-    env.wait_for_cdc_quiescent(Duration::from_millis(250), Duration::from_secs(15))
-        .await;
+    env.settle().await;
 }
 
 async fn run(env: &TestEnvironment, op: &str, params: &[(&str, &str)]) -> anyhow::Result<()> {

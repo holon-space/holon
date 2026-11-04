@@ -66,10 +66,7 @@ impl TursoBlockQuerySource {
     /// upstream write path has already driven the CDC *emission* stream to
     /// quiescence — so this mirror only has to drain batches that were emitted
     /// strictly earlier, never await an in-flight one. Confirming a drained
-    /// broadcast receiver needs only a short silence window; the same `block`
-    /// matview mirror is settled at 50ms by the PBT harness
-    /// (`CdcMirrors::wait_quiescent`) without issue. The previous 150ms was an
-    /// unexamined conservative default that cost ~100ms on every settle.
+    /// broadcast receiver needs only a short silence window.
     pub const DEFAULT_QUIET_FOR: Duration = Duration::from_millis(50);
     pub const DEFAULT_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 

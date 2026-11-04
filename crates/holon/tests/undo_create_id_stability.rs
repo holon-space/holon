@@ -194,6 +194,7 @@ async fn redo_of_create_recreates_the_same_id() {
         dispatcher.clone(),
         reader.clone(),
         Arc::new(NoopStore),
+        Arc::new(holon_api::SystemClock),
     )
     .await
     .expect("engine");

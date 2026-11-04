@@ -993,7 +993,6 @@ impl SpanCollector {
                 .sum()
         };
         let inv10_watch_drain = sum_span("pbt.inv10_watch_drain");
-        let wait_files_stable = sum_span("pbt.wait_for_org_files_stable");
         let mark_processed_total = sum_span("events.mark_processed");
         let mark_processed_count = spans
             .iter()
@@ -1002,8 +1001,6 @@ impl SpanCollector {
         let apply_transition_total = sum_span("pbt.apply_transition");
         let check_invariants_total = sum_span("pbt.check_invariants");
         let settle_total = sum_span("pbt.settle");
-        let drain_cdc_total =
-            sum_span("pbt.drain_cdc_events") + sum_span("pbt.drain_region_cdc_events");
         let pre_inv16_settle_total = sum_span("pbt.pre_inv16_settle");
         let live_mirrors_total = sum_span("pbt.wait_for_live_data_mirrors");
         let assert_quiescent_total = sum_span("pbt.assert_cdc_quiescent");
@@ -1028,13 +1025,11 @@ impl SpanCollector {
             cdc_ingest_count,
             cdc_emission_count,
             inv10_watch_drain,
-            wait_files_stable,
             mark_processed_total,
             mark_processed_count,
             apply_transition_total,
             check_invariants_total,
             settle_total,
-            drain_cdc_total,
             pre_inv16_settle_total,
             live_mirrors_total,
             assert_quiescent_total,
@@ -1285,9 +1280,6 @@ pub struct TransitionMetrics {
     /// Time spent inside the inv-viewmodel-snapshot reactive.watch + drain
     /// block (sut.rs:2820).
     pub inv10_watch_drain: Duration,
-    /// Time spent inside `wait_for_org_files_stable` (called from both apply
-    /// and check).
-    pub wait_files_stable: Duration,
     /// Cumulative time inside `events.mark_processed` (the suspected N+1
     /// update).
     pub mark_processed_total: Duration,
@@ -1301,9 +1293,6 @@ pub struct TransitionMetrics {
     /// Time inside `settle_before_invariants` — the Loro→SQL convergence poll
     /// (`pbt.settle` span). Budgeted as the `settle_ms` NFR metric.
     pub settle_total: Duration,
-    /// Total time inside `drain_cdc_events` + `drain_region_cdc_events`
-    /// (1s/200ms timeouts).
-    pub drain_cdc_total: Duration,
     /// Time inside the `pbt.pre_inv16_settle` block in `apply_transition_async`
     /// (loro/cdc quiescence + mirror drain). The bulk of `apply` for non-file
     /// txns.

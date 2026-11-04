@@ -1,3 +1,5 @@
+use proptest::prelude::*;
+
 use super::*;
 #[test]
 fn test_clock_is_deterministic() {
@@ -59,6 +61,15 @@ fn calendar_date_follows_the_clocks_offset_not_the_host_zone() {
     impl Clock for FixedZoneClock {
         fn now_millis(&self) -> i64 {
             self.0
+        }
+        fn now(&self) -> Mono {
+            SystemClock.now()
+        }
+        fn sleep_until(&self, deadline: Mono) -> futures::future::BoxFuture<'static, ()> {
+            SystemClock.sleep_until(deadline)
+        }
+        fn sleep_blocking(&self, d: Duration) {
+            SystemClock.sleep_blocking(d)
         }
         fn utc_offset_seconds_at(&self, _: i64) -> i32 {
             self.1
@@ -189,4 +200,53 @@ fn recurrence_desugars_to_clock_read_arc() {
         "{daily:?}"
     );
     assert!(daily.read_arc_sql.contains("grain = 'day'"), "{daily:?}");
+}
+
+proptest! {
+    #[test]
+    fn mono_arithmetic_round_trips(origin_ms in 0u64..1 << 40, d_ms in 0u64..1 << 40) {
+        let t = Mono::from_origin(Duration::from_millis(origin_ms));
+        let d = Duration::from_millis(d_ms);
+        prop_assert_eq!((t + d) - t, d);
+        prop_assert!(t + d >= t);
+    }
+
+    #[test]
+    fn a_late_tick_skips_to_the_next_grid_point_after_now(
+        deadline_ms in 0u64..1 << 30,
+        late_ms in 0u64..1 << 30,
+        period_ms in 1u64..1 << 20,
+    ) {
+        let deadline = Mono::from_origin(Duration::from_millis(deadline_ms));
+        let now = deadline + Duration::from_millis(late_ms);
+        let period = Duration::from_millis(period_ms);
+        let next = next_tick_skipping(deadline, now, period);
+        prop_assert!(next > now);
+        prop_assert!(next - now <= period);
+        prop_assert_eq!((next - deadline).as_millis() % period.as_millis(), 0);
+    }
+}
+
+#[test]
+#[should_panic(expected = "Mono subtraction went negative")]
+fn an_earlier_minus_a_later_mono_panics() {
+    let t = Mono::from_origin(Duration::from_millis(5));
+    let _ = t - (t + Duration::from_millis(1));
+}
+
+/// Example test: it pins the real-timer wiring of `timeout`, which has no
+/// input space beyond "the future finishes first or the deadline does".
+#[tokio::test]
+async fn timeout_returns_the_value_or_elapsed() {
+    let clock = SystemClock;
+    assert_eq!(
+        clock.timeout(Duration::from_secs(5), async { 7 }).await,
+        Ok(7)
+    );
+    assert_eq!(
+        clock
+            .timeout(Duration::from_millis(10), futures::future::pending::<()>())
+            .await,
+        Err(Elapsed)
+    );
 }

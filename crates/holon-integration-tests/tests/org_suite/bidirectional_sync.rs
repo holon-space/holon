@@ -46,10 +46,9 @@ fn forward_sync_pre_existing_file_syncs_on_startup() {
             .await
             .expect("Failed to build environment");
 
-        assert!(
-            env.wait_for_block("block-1", SYNC_TIMEOUT).await,
-            "Pre-existing block should sync on startup"
-        );
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("Pre-existing block should sync on startup: {hung}"));
 
         let rows = env
             .query(
@@ -76,7 +75,9 @@ fn forward_sync_external_edit_adds_block() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // Externally add a second block
         let new_content = "\
@@ -98,10 +99,11 @@ fn forward_sync_external_edit_adds_block() {
         .await
         .expect("write failed");
 
-        assert!(
-            env.wait_for_block("block-2", SYNC_TIMEOUT).await,
-            "Externally added block should appear in backend"
-        );
+        env.wait_for_block("block-2", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("Externally added block should appear in backend: {hung}")
+            });
     });
 }
 
@@ -118,7 +120,9 @@ fn forward_sync_external_edit_updates_content() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // Externally modify block content
         let new_content = "* Updated Content\n:PROPERTIES:\n:ID: block-1\n:END:\n";
@@ -168,8 +172,12 @@ fn forward_sync_external_delete_removes_block() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
-        env.wait_for_block("block-2", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
+        env.wait_for_block("block-2", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // Externally remove block-2
         let new_content = "* First\n:PROPERTIES:\n:ID: block-1\n:END:\n";
@@ -221,7 +229,9 @@ fn forward_sync_source_block() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // Wait for the source block to appear. The env seeds the default
         // layout (which contains its own source blocks), so select the test's
@@ -269,7 +279,9 @@ fn backward_sync_ui_create_writes_to_org_file() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // Get document URI for block-1's parent
         let rows = env
@@ -330,7 +342,9 @@ fn backward_sync_ui_update_writes_to_org_file() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // UI updates block content
         env.update_block_content("block-1", "Modified Title")
@@ -379,8 +393,12 @@ fn backward_sync_ui_delete_removes_from_org_file() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
-        env.wait_for_block("block-2", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
+        env.wait_for_block("block-2", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // UI deletes block-2
         env.delete_block("block-2").await.expect("delete failed");
@@ -430,7 +448,9 @@ fn roundtrip_external_add_then_ui_update_then_verify_org() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // Step 1: External add of block-2
         let new_content = "\
@@ -452,13 +472,12 @@ fn roundtrip_external_add_then_ui_update_then_verify_org() {
         .await
         .expect("write failed");
 
-        assert!(
-            env.wait_for_block("block-2", SYNC_TIMEOUT).await,
-            "External block-2 should sync"
-        );
+        env.wait_for_block("block-2", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("External block-2 should sync: {hung}"));
 
         // Step 2: Wait for write window so UI mutation proceeds cleanly
-        env.wait_for_write_window_expiry().await;
+        env.settle().await;
 
         // Step 3: UI updates block-2 content
         env.update_block_content("block-2", "Modified By UI")
@@ -507,7 +526,9 @@ fn roundtrip_ui_create_then_external_update_then_verify_backend() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // Step 1: UI creates block-2
         let rows = env
@@ -545,7 +566,7 @@ fn roundtrip_ui_create_then_external_update_then_verify_backend() {
         }
 
         // Step 2: Wait for write window to expire
-        env.wait_for_write_window_expiry().await;
+        env.settle().await;
 
         // Step 3: External edit changes block-2 content
         let content = env
@@ -599,8 +620,12 @@ fn stability_no_duplicate_blocks_after_ui_mutation() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
-        env.wait_for_block("block-2", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
+        env.wait_for_block("block-2", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // UI update — this triggers FileSyncController → org file write → file watcher
         // ReadDisk does not parse the echo: its hash equals the file's Base
@@ -667,7 +692,9 @@ fn stability_multiple_rapid_ui_updates_converge() {
             .await
             .expect("Failed to build environment");
 
-        env.wait_for_block("block-1", SYNC_TIMEOUT).await;
+        env.wait_for_block("block-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("{hung}"));
 
         // Rapid-fire 5 UI updates
         for i in 1..=5 {
@@ -779,18 +806,20 @@ fn shadow_completes_at_least_one_quiescent_comparison() {
             .await
             .expect("Failed to build environment");
 
-        assert!(
-            env.wait_for_block("shadow-1", SYNC_TIMEOUT).await,
-            "block must sync before the shadow can be quiescent"
-        );
+        env.wait_for_block("shadow-1", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("block must sync before the shadow can be quiescent: {hung}")
+            });
 
         // Let both sides go still long enough for consecutive quiescent ticks.
         tokio::time::sleep(Duration::from_millis(2500)).await;
 
-        assert!(
-            env.wait_for_block("shadow-2", SYNC_TIMEOUT).await,
-            "nested child must sync so the fixture has >=2 sibling groups"
-        );
+        env.wait_for_block("shadow-2", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("nested child must sync so the fixture has >=2 sibling groups: {hung}")
+            });
 
         // Holder-path liveness. The `home_by` holder is now the ONLY write-back
         // path, so the differential shadow that used to guard this suite has

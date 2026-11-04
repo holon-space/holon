@@ -151,6 +151,16 @@ pub fn keystone_boot_clock() -> Arc<holon_api::TestClock> {
     ))
 }
 
+/// The keystone's settle waits for its targets, so the product watchdogs must
+/// not fire first on a loaded host.
+pub fn keystone_boot_timings() -> Arc<holon_api::Timings> {
+    Arc::new(holon_api::Timings {
+        actor_hang: Duration::from_secs(600),
+        boot_gate_watchdog: Duration::from_secs(3600),
+        ..Default::default()
+    })
+}
+
 /// The civil date (`YYYY-MM-DD`) the keystone boot clock reports as "today" —
 /// the `content` of the journal day-block the boot rule creates.
 pub fn keystone_boot_journal_date() -> String {
@@ -223,6 +233,7 @@ struct BootParams {
     clock: Option<Arc<holon_api::TestClock>>,
     peer_id: Option<u64>,
     sidecar_yaml: Option<String>,
+    timings: Arc<holon_api::Timings>,
 }
 
 /// What a reboot does while the vault is free: after the old session shut
@@ -652,7 +663,7 @@ impl HeadlessFrontendComponent {
         )
         .await
         .unwrap_or_else(|e| panic!("[pump_watcher_over_disk_path] touch {path:?} failed: {e:#}"));
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        self.await_ingest(path, "pump_watcher_over_disk_path").await;
         FileSystem::write(self.org_fs().as_ref(), path, content.as_bytes())
             .await
             .unwrap_or_else(|e| {
@@ -763,6 +774,7 @@ impl HeadlessFrontendComponent {
             None,
             Some(connect),
             boot_fault,
+            keystone_boot_timings(),
         )
         .await
     }
@@ -822,6 +834,7 @@ impl HeadlessFrontendComponent {
             sidecar_yaml,
             None,
             &holon_pbt_core::BootFault::None,
+            Default::default(),
         )
         .await
     }
@@ -837,6 +850,7 @@ impl HeadlessFrontendComponent {
         sidecar_yaml: Option<&str>,
         connect: Option<IntegrationConnectTiming>,
         boot_fault: &holon_pbt_core::BootFault,
+        timings: Arc<holon_api::Timings>,
     ) -> Self {
         assert!(
             loro_enabled || editor_leg == holon_pbt_core::EditorLeg::Dispatch,
@@ -899,6 +913,7 @@ impl HeadlessFrontendComponent {
             clock,
             peer_id,
             sidecar_yaml: sidecar_yaml.map(str::to_string),
+            timings,
         };
         let integration_peer = match connect {
             Some(timing) => {
@@ -973,6 +988,7 @@ impl HeadlessFrontendComponent {
         let conditions = holon_frontend::panic_record::install(&config_dir);
         let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
         session_config.loro_peer_id = params.peer_id;
+        session_config.timings = params.timings.clone();
         let org_fs_for_di = org_fs.clone();
         let secret_namespace = config_dir.clone();
         // Capture the DI injector (for `SutOrgRender`'s `QueryableCache<Block>` →
@@ -1183,6 +1199,7 @@ impl HeadlessFrontendComponent {
             crate::pbt::convergence::Signals {
                 engine: Some(engine),
                 sync,
+                shares: None,
                 org_idle,
                 org_files: Some(org_files),
                 block_feed: injector
@@ -1575,6 +1592,18 @@ impl HeadlessFrontendComponent {
         self.booted().engine.clone()
     }
 
+    /// Waits until every projection of this session reached the target of the
+    /// writes made so far; panics naming the stuck stage when one never does.
+    #[cfg(test)]
+    pub(crate) async fn settle(self: &Arc<Self>) {
+        let handle = crate::pbt::composed::wide_e2e::WideHandle::of_frontend(self.clone());
+        crate::pbt::composed::wide_e2e::converge_handle(
+            &handle,
+            crate::pbt::composed::wide_e2e::SETTLE,
+        )
+        .await;
+    }
+
     /// The live boot. Every handle read goes through here, so a `reboot` swap
     /// is observed by the next call rather than by whoever happened to
     /// clone first.
@@ -1797,9 +1826,8 @@ impl HeadlessFrontendComponent {
             .ok() // ALLOW(ok): optional DI service — absent when Loro/sync is disabled
     }
 
-    /// The file-sync controller's [`OrgSyncIdleSignal`] — advanced
-    /// (`mark_progress`) after every processed file/block change, so a
-    /// settle can `wait_quiescent` on it instead of a flat sleep. `None`
+    /// The file-sync controller's [`OrgSyncIdleSignal`]: the org stages a
+    /// settle waits for. `None`
     /// when this build has no org file-sync wired. Resolved lazily (like
     /// [`Self::loro_sync_handle`]): the controller is started on a
     /// spawned `post_ready_work` task, so callers that settle after a write get
@@ -7057,6 +7085,7 @@ mod tests {
             clock.clone(),
         )
         .await;
+        let comp = Arc::new(comp);
 
         // Boot fired today's journal page (Page-tagged, name = the boot date).
         let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
@@ -7117,7 +7146,7 @@ mod tests {
             )
             .await
             .expect("rename journal via block.set_field(content)");
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        comp.settle().await;
         assert_eq!(
             read_title().await.as_deref(),
             Some("Renamed"),
@@ -7203,6 +7232,7 @@ mod tests {
             clock.clone(),
         )
         .await;
+        let comp = Arc::new(comp);
 
         // Boot fired today's journal page (Page-tagged, name = the boot date).
         let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
@@ -7264,7 +7294,7 @@ mod tests {
             )
             .await
             .expect("rename journal via block.set_field(content)");
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        comp.settle().await;
         assert_eq!(
             read_title().await.as_deref(),
             Some("Renamed"),
@@ -7336,6 +7366,7 @@ mod tests {
             clock.clone(),
         )
         .await;
+        let comp = Arc::new(comp);
 
         // The boot journal DATE PAGE (own `Journals/{boot day}.org` materialized).
         let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
@@ -7349,7 +7380,7 @@ mod tests {
 
         // Let the reactive writeback route + persist the child.
         comp.settle_block_ids_stable(Duration::from_secs(5)).await;
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        comp.settle().await;
 
         // DISK TRUTH: the child must be in the date page's OWN file, and the
         // `Journals.org` companion must NOT swallow it (it is a child of a Page).
@@ -7583,6 +7614,7 @@ mod tests {
             Duration::from_millis(300),
         )
         .await;
+        let comp = Arc::new(comp);
 
         // Discover the actual doc-block id for doc1 from `block_raw` (robust to the
         // scheme the parser assigns) — this is the id we navigate focus to.
@@ -7624,8 +7656,7 @@ mod tests {
             result.err()
         );
 
-        // Settle CDC so the matview projection lands.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        comp.settle().await;
 
         let focus_rows = comp
             .engine()
@@ -8277,6 +8308,7 @@ mod tests {
             true,
         )
         .await;
+        let comp = Arc::new(comp);
 
         async fn nav_rows(comp: &HeadlessFrontendComponent) -> Vec<(i64, String, String)> {
             let rows = comp
@@ -8309,23 +8341,23 @@ mod tests {
         eprintln!("[navid-probe/boot] {boot:?}");
 
         SutFocusWrite::apply_navigate_focus(
-            &comp,
+            &*comp,
             CapRegion::Main,
             &EntityUri::parse("block:structural-page").unwrap(),
         )
         .await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        comp.settle().await;
         let after_nav = nav_rows(&comp).await;
         eprintln!("[navid-probe/after-nav-page] {after_nav:?}");
 
-        SutFocusWrite::apply_focus_editable_text(&comp, &EntityUri::parse("block:c1").unwrap())
+        SutFocusWrite::apply_focus_editable_text(&*comp, &EntityUri::parse("block:c1").unwrap())
             .await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        comp.settle().await;
         let after_editor = nav_rows(&comp).await;
         eprintln!("[navid-probe/after-focus-editable] {after_editor:?}");
 
-        SutAppLifecycle::create_document(&comp, "probe-doc.org").await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        SutAppLifecycle::create_document(&*comp, "probe-doc.org").await;
+        comp.settle().await;
         let after_doc = nav_rows(&comp).await;
         eprintln!("[navid-probe/after-create-doc] {after_doc:?}");
 
@@ -8402,6 +8434,7 @@ mod tests {
             Duration::from_millis(300),
         )
         .await;
+        let comp = Arc::new(comp);
         dump(&comp, "after-boot").await;
 
         // Capture the booted scaffold ids (everything present BEFORE we seed the
@@ -8432,7 +8465,7 @@ mod tests {
             .await;
         seeder.create_block(&ids.c1, &ids.parent, C1).await;
         seeder.create_block(&ids.c2, &ids.parent, C2).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        comp.settle().await;
         dump(&comp, "after-seed").await;
 
         // Build a MINIMAL structural capmap: the component as `SutBackend` + the
@@ -8440,7 +8473,6 @@ mod tests {
         // `sql_structural_wide`, sourced from the headless component.
         let resolver: IdResolver =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
-        let comp = std::sync::Arc::new(comp);
         let mut caps = CapMap::new();
         caps.insert(comp.clone() as Arc<dyn SutBackend>);
         caps.insert(Arc::new(OpDispatchWriter::with_resolver(
@@ -8516,7 +8548,7 @@ mod tests {
         };
         split.apply_to_ref(&mut oracle); // oracle mints synthetic block::split-N
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await; // SUT mints uuid
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        comp.settle().await;
         let after = sut_ids(&caps).await;
 
         let synthetic: Vec<EntityUri> = oracle

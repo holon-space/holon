@@ -139,10 +139,9 @@ fn turso_arm_renders_render_children_and_shows_parse_errors() {
             format!("{BAD_WITH_QUERY}::src::0"),
             format!("{BAD_ONLY}::render::0"),
         ] {
-            assert!(
-                env.wait_for_block(&id, SYNC_TIMEOUT).await,
-                "{id} must sync"
-            );
+            env.wait_for_block(&id, SYNC_TIMEOUT)
+                .await
+                .unwrap_or_else(|hung| panic!("{id} must sync: {hung}"));
         }
         let watcher = env.engine().clone() as Arc<dyn UiWatcher>;
 
@@ -218,10 +217,9 @@ fn turso_arm_focus_root_draws_its_render_over_its_subtree() {
             .await
             .expect("build environment");
         for id in [format!("{FOCUSED}::render::0"), FOCUSED_KID.to_string()] {
-            assert!(
-                env.wait_for_block(&id, SYNC_TIMEOUT).await,
-                "{id} must sync"
-            );
+            env.wait_for_block(&id, SYNC_TIMEOUT)
+                .await
+                .unwrap_or_else(|hung| panic!("{id} must sync: {hung}"));
         }
         let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
         params.insert("region".into(), Value::from(holon_api::Region::Main));
@@ -292,11 +290,9 @@ fn turso_arm_bundled_render_only_blocks_draw_their_render() {
         let watcher = env.engine().clone() as Arc<dyn UiWatcher>;
         let mut wrong = Vec::new();
         for (id, dsl) in &bundled {
-            assert!(
-                env.wait_for_block(&format!("{id}::render::0"), SYNC_TIMEOUT)
-                    .await,
-                "{id}::render::0 must be seeded"
-            );
+            env.wait_for_block(&format!("{id}::render::0"), SYNC_TIMEOUT)
+                .await
+                .unwrap_or_else(|hung| panic!("{id}::render::0 must be seeded: {hung}"));
             let expected = holon_api::render_dsl::parse_render_dsl(dsl)
                 .unwrap_or_else(|e| panic!("bundled render of {id} does not parse: {e}"));
             let drawn = first_structure(watcher.clone(), id).await;

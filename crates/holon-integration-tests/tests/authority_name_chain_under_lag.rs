@@ -29,7 +29,6 @@
 //! answered by the write authority under projection lag
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_filesystem::DocumentManager;
 use holon_integration_tests::TestEnvironmentBuilder;
@@ -133,12 +132,7 @@ fn the_write_authority_answers_a_path_shaped_existence_test_under_lag() {
 
         // And the projection catches up eventually, which is what makes the
         // disagreement above a lag rather than a loss.
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
         let settled = world
             .query_sql(&format!("SELECT id FROM block_raw WHERE id = '{doc_uri}'"))
             .await

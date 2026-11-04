@@ -271,16 +271,14 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft a page and navigate Main onto it");
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     // Navigating Main moves the bar with the view.
     let services: Arc<dyn BuilderServices> = engine.clone();
     let zoom = EntityUri::block(ZOOM_ROW);
     navigate_main_to(&services, &zoom);
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let zoomed_root = active_main_root(&env, &runtime);
@@ -365,8 +363,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
         "go_back",
         vec![("region", Value::String("main".into()))],
     );
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let back_root = active_main_root(&env, &runtime);
@@ -406,8 +403,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
             ("block_id", Value::String(zoom.to_string())),
         ],
     );
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let tabs = open_main_tabs(&env, &runtime);
@@ -428,8 +424,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
             ("history_id", Value::Integer(target_id)),
         ],
     );
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let switched_root = active_main_root(&env, &runtime);
@@ -472,8 +467,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
         "close",
         vec![("history_id", Value::Integer(background))],
     );
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     let root_after_close = active_main_root(&env, &runtime);
@@ -511,8 +505,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
             .into_iter()
             .collect(),
     ));
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     assert_eq!(

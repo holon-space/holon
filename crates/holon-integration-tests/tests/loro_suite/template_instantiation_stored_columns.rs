@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_api::EntityUri;
 use holon_api::Value;
@@ -37,11 +36,7 @@ fn params(pairs: Vec<(&str, Value)>) -> HashMap<String, Value> {
 }
 
 async fn settle(env: &TestEnvironment) {
-    if env.loro_enabled() {
-        env.wait_for_loro_quiescence(Duration::from_secs(60)).await;
-    }
-    env.wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(60))
-        .await;
+    env.settle().await;
 }
 
 async fn boot(rt: Arc<tokio::runtime::Runtime>, loro: bool) -> TestEnvironment {

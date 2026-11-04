@@ -123,8 +123,7 @@ fn adopted_block_loses_what_the_file_does_not_author(loro: bool) {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
-        t.wait_for_org_files_stable(300, Duration::from_secs(10))
-            .await;
+        t.settle().await;
         let (_, bag_after_settle) = stored_row(&t).await.expect("the adopted block is gone");
         assert_eq!(bag, bag_after_settle, "the stored bag was still changing");
 

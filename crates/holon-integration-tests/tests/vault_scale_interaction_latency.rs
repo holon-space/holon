@@ -321,11 +321,7 @@ fn a_keystroke_and_a_page_switch_stay_inside_the_budget_at_vault_scale() {
             stats.full_passes,
         );
 
-        // Steady state: every rung below measures a warm pipeline, not the
-        // tail of boot's reseed.
-        env.wait_for_loro_quiescence(Duration::from_secs(120)).await;
-        env.wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        env.settle().await;
 
         // Targets come from the INGESTED page rows, not from file names: a
         // vault file whose name holds a space percent-encodes into an
@@ -345,13 +341,21 @@ fn a_keystroke_and_a_page_switch_stay_inside_the_budget_at_vault_scale() {
         // switch and measures something else, so a small corpus yields fewer
         // than `n` samples rather than repeating one.
         const MIN_NAVIGATE_SAMPLES: usize = 8;
+        // The rungs measure a warm pipeline: these switches go to pages no
+        // sample visits, so every sampled switch stays a first visit.
+        const WARM_UP_NAVIGATES: usize = 2;
         assert!(
-            pages.len() >= MIN_NAVIGATE_SAMPLES,
-            "only {} page(s) ingested from {file_count} files — too few for a median",
+            pages.len() >= WARM_UP_NAVIGATES + MIN_NAVIGATE_SAMPLES,
+            "only {} page(s) ingested from {file_count} files — too few for {WARM_UP_NAVIGATES} \
+             warm-up switches and a median",
             pages.len(),
         );
+        let (warm_up, sampled) = pages.split_at(WARM_UP_NAVIGATES);
+        for page in warm_up {
+            navigate_visible(&env, page).await;
+        }
         let mut navigates = Vec::new();
-        for page in pages.iter().take(n) {
+        for page in sampled.iter().take(n) {
             navigates.push(navigate_visible(&env, page).await);
         }
         let nav_p50 = report("navigate", navigates);

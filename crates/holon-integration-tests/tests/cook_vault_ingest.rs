@@ -122,11 +122,9 @@ fn a_cook_file_in_the_vault_ingests_beside_org() {
 
         // The org leg is unaffected.
         for id in ["notes-root", "notes-child"] {
-            assert!(
-                env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
-                    .await,
-                "org block {id} did not sync — widening the format registry broke the org leg"
-            );
+            env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
+                    .await
+            .unwrap_or_else(|hung| panic!("org block {id} did not sync — widening the format registry broke the org leg: {hung}"));
         }
 
         // The recipe's document. The cooklang plugin's parse ids the document
@@ -203,11 +201,11 @@ fn a_cook_file_is_never_written_back_and_grows_no_second_home() {
             .await
             .expect("a vault holding a `.cook` file must boot");
 
-        assert!(
-            env.wait_for_block("block:Pancakes.cook::b::0", SYNC_TIMEOUT)
-                .await,
-            "precondition: the recipe's first step must be in the store"
-        );
+        env.wait_for_block("block:Pancakes.cook::b::0", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("precondition: the recipe's first step must be in the store: {hung}")
+            });
 
         // Read through the FileSystem port and address files by NAME: the
         // vault root is an in-memory tree whose paths are canonicalized, so a
@@ -229,9 +227,12 @@ fn a_cook_file_is_never_written_back_and_grows_no_second_home() {
             .await
             .expect("edit a recipe block in the store");
 
-        // Give write-back every chance to happen before asserting it did not.
-        env.wait_for_org_files_stable(25, Duration::from_millis(3000))
-            .await;
+        env.sentinel_writeback(
+            "Notes.org",
+            "block:notes-child",
+            "SENTINEL AFTER THE RECIPE EDIT",
+        )
+        .await;
 
         let after = read_vault_file(&env, "Pancakes.cook")
             .await
@@ -405,11 +406,9 @@ fn a_vault_recipe_produces_typed_rows_and_answers_cookable_now() {
             .await
             .expect("a vault holding `.cook` files must boot");
 
-        assert!(
-            env.wait_for_block("block:Pancakes.cook::b::0", SYNC_TIMEOUT)
-                .await,
-            "precondition: the recipe's first step must be in the store"
-        );
+        env.wait_for_block("block:Pancakes.cook::b::0", SYNC_TIMEOUT)
+                .await
+            .unwrap_or_else(|hung| panic!("precondition: the recipe's first step must be in the store: {hung}"));
 
         // Both recipes, titled from cooklang metadata rather than the filename.
         let recipes = rows_eventually(
@@ -546,8 +545,7 @@ async fn re_save(env: &holon_integration_tests::TestEnvironment, content: &str) 
     env.write_org_file("Pancakes.cook", content)
         .await
         .expect("re-save the recipe");
-    env.wait_for_org_files_stable(25, Duration::from_millis(3000))
-        .await;
+    env.settle().await;
 }
 
 /// Red 4 — re-ingest is a REPLACEMENT, and ids survive it.
@@ -1072,10 +1070,11 @@ fn an_edit_to_a_recipe_block_is_refused_at_the_dispatcher() {
             .await
             .expect("a vault holding a `.cook` file must boot");
 
-        assert!(
-            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
-            "precondition: the recipe's first step must be in the store"
-        );
+        env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("precondition: the recipe's first step must be in the store: {hung}")
+            });
         let before = stored_content(&env, RECIPE_STEP)
             .await
             .expect("the step row must exist before the edit");
@@ -1105,8 +1104,12 @@ fn an_edit_to_a_recipe_block_is_refused_at_the_dispatcher() {
             "the refusal must name the format and the authoritative file, got: {refusal}"
         );
 
-        env.wait_for_org_files_stable(25, Duration::from_millis(1500))
-            .await;
+        env.sentinel_writeback(
+            "Notes.org",
+            "block:notes-child",
+            "SENTINEL AFTER THE REFUSAL",
+        )
+        .await;
         assert_eq!(
             stored_content(&env, RECIPE_STEP).await.as_deref(),
             Some(before.as_str()),
@@ -1248,10 +1251,11 @@ fn a_recipe_edit_is_refused_after_a_reboot() {
             .await
             .expect("a vault holding a `.cook` file must boot");
 
-        assert!(
-            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
-            "precondition: the recipe's first step must be in the store"
-        );
+        env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("precondition: the recipe's first step must be in the store: {hung}")
+            });
         arm_the_cold_boot_skip(&env, PANCAKES_COOK_V2).await;
 
         // The premise of the whole test: boot-1 stamped BOTH halves of the
@@ -1283,12 +1287,10 @@ fn a_recipe_edit_is_refused_after_a_reboot() {
 
         env.stop_app().await.expect("stop_app after boot-1");
         env.start_app(true).await.expect("boot-2 start_app");
-        assert!(
-            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
-            "the recipe's blocks must survive the reboot"
-        );
-        env.wait_for_org_files_stable(25, Duration::from_millis(1500))
-            .await;
+        env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("the recipe's blocks must survive the reboot: {hung}"));
+        env.settle().await;
 
         let before = stored_content(&env, RECIPE_STEP)
             .await
@@ -1335,10 +1337,11 @@ fn a_file_row_missing_its_membership_is_rewritten_by_the_next_boot() {
             .await
             .expect("a vault holding a `.cook` file must boot");
 
-        assert!(
-            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
-            "precondition: the recipe's first step must be in the store"
-        );
+        env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("precondition: the recipe's first step must be in the store: {hung}")
+            });
         arm_the_cold_boot_skip(&env, PANCAKES_COOK_V2).await;
 
         // Damage the membership ONLY: the hash stays, so the next boot's fast
@@ -1349,12 +1352,10 @@ fn a_file_row_missing_its_membership_is_rewritten_by_the_next_boot() {
 
         env.stop_app().await.expect("stop_app after boot-1");
         env.start_app(true).await.expect("boot-2 start_app");
-        assert!(
-            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
-            "the recipe's blocks must survive the reboot"
-        );
-        env.wait_for_org_files_stable(25, Duration::from_millis(1500))
-            .await;
+        env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("the recipe's blocks must survive the reboot: {hung}"));
+        env.settle().await;
 
         let refusal = edit_refusal(&env, RECIPE_STEP)
             .await
@@ -1387,10 +1388,11 @@ fn a_refused_recipe_edit_raises_a_degraded_condition() {
             .await
             .expect("a vault holding a `.cook` file must boot");
 
-        assert!(
-            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
-            "precondition: the recipe's first step must be in the store"
-        );
+        env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("precondition: the recipe's first step must be in the store: {hung}")
+            });
 
         let bus = env
             .injector()
@@ -1453,8 +1455,7 @@ fn booting_a_vault_of_recipes_logs_no_write_back_refusal() {
             .expect("a vault holding `.cook` files must boot");
 
         rows_eventually(&env, "SELECT id FROM recipe", 2, "both recipes ingested").await;
-        env.wait_for_org_files_stable(25, Duration::from_millis(2000))
-            .await;
+        env.settle().await;
 
         let refusals: Vec<String> = collector
             .captured_problems()
@@ -1488,10 +1489,11 @@ fn a_keystroke_on_a_recipe_block_is_refused_at_the_cell() {
             .await
             .expect("a vault holding a `.cook` file must boot");
 
-        assert!(
-            env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT).await,
-            "precondition: the recipe's first step must be in the store"
-        );
+        env.wait_for_block(RECIPE_STEP, SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("precondition: the recipe's first step must be in the store: {hung}")
+            });
         let injector = env.injector().expect("a booted app has an injector");
         let reader = injector
             .resolve_async::<dyn holon_filesystem::BlockReader>()
@@ -1965,8 +1967,7 @@ async fn refusals_once(
     app: &holon_integration_tests::TestEnvironment,
     settled: impl Fn(&[holon_conditions::Condition]) -> bool,
 ) -> Vec<holon_conditions::Condition> {
-    app.wait_for_org_files_stable(25, Duration::from_millis(3000))
-        .await;
+    app.settle().await;
     let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
     loop {
         let refusals = ingest_refusals(app);
@@ -2285,9 +2286,10 @@ fn an_ingested_recipe_edited_into_a_refusal_logs_no_error() {
             .await
             .expect("break Good.cook");
         let refusals = refusals_once(&app, cooklang_counts(1, 1)).await;
-        // Past several poll ticks, so the poll backstop has re-read the file.
-        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
-            .await;
+        app.settle().await;
+        // Time behavior: the poll backstop re-reads a file only on its own
+        // ticks, so several of them must pass before the log is checked.
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         let one = names(&["Good.cook"]);
         assert_eq!(
@@ -2396,8 +2398,7 @@ fn an_org_page_and_a_same_stem_recipe_stay_two_files_at_boot() {
                 .build(rt.clone())
                 .await
                 .expect("a vault holding a same-stem org page and recipe must boot");
-            app.wait_for_org_files_stable(25, Duration::from_millis(3000))
-                .await;
+            app.settle().await;
 
             assert_eq!(
                 edit_refusal(&app, "block:pasta-note").await,
@@ -2447,17 +2448,16 @@ fn an_org_file_written_beside_an_ingested_recipe_is_refused() {
             .build(rt.clone())
             .await
             .expect("a vault holding a recipe must boot");
-        assert!(
-            app.wait_for_block("block:Pasta.cook::b::0", SYNC_TIMEOUT)
-                .await,
-            "precondition: the recipe's step must be in the store"
-        );
+        app.wait_for_block("block:Pasta.cook::b::0", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("precondition: the recipe's step must be in the store: {hung}")
+            });
 
         app.write_org_file("Pasta.org", PASTA_ORG_WITHOUT_ID)
             .await
             .expect("write Pasta.org beside the recipe");
-        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
-            .await;
+        app.settle().await;
 
         assert_eq!(
             read_vault_file(&app, "Pasta.org").await.as_deref(),
@@ -2495,8 +2495,7 @@ fn an_org_file_added_beside_a_recipe_between_boots_is_refused() {
             .await
             .expect("write Pasta.org while the app is stopped");
         app.start_app(true).await.expect("boot 2 start_app");
-        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
-            .await;
+        app.settle().await;
 
         assert_eq!(
             read_vault_file(&app, "Pasta.org").await.as_deref(),
@@ -2535,8 +2534,7 @@ fn an_org_file_beside_a_recipe_is_refused_when_the_recorded_file_state_is_unread
             .expect("write Pasta.org while the app is stopped");
         holon_filesystem::crash_injection::arm("load_file_projections");
         app.start_app(true).await.expect("boot 2 start_app");
-        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
-            .await;
+        app.settle().await;
         assert_eq!(
             holon_filesystem::crash_injection::armed(),
             None,
@@ -2600,8 +2598,7 @@ fn an_org_file_refused_for_an_unrecorded_page_home_is_reported_once() {
             .expect("write Pasta.org while the app is stopped");
         holon_filesystem::crash_injection::arm("load_file_projections");
         app.start_app(true).await.expect("boot 2 start_app");
-        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
-            .await;
+        app.settle().await;
         // Several discovery ticks (2 s each) past the first rediscovery.
         tokio::time::sleep(Duration::from_secs(7)).await;
         assert_eq!(
@@ -2654,8 +2651,7 @@ fn an_org_file_without_ids_keeps_its_page_when_the_recorded_file_state_is_unread
             .expect("drop the ids from Notes.org while the app is stopped");
         holon_filesystem::crash_injection::arm("load_file_projections");
         app.start_app(true).await.expect("boot 2 start_app");
-        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
-            .await;
+        app.settle().await;
         assert_eq!(
             holon_filesystem::crash_injection::armed(),
             None,
@@ -2689,11 +2685,11 @@ async fn boot_a_recorded_recipe(
         .build(rt)
         .await
         .expect("a vault holding a recipe must boot");
-    assert!(
-        app.wait_for_block("block:Pasta.cook::b::0", SYNC_TIMEOUT)
-            .await,
-        "precondition: the recipe's step must be in the store"
-    );
+    app.wait_for_block("block:Pasta.cook::b::0", SYNC_TIMEOUT)
+        .await
+        .unwrap_or_else(|hung| {
+            panic!("precondition: the recipe's step must be in the store: {hung}")
+        });
     let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
     while file_document_homes(&app)
         .await
@@ -2734,8 +2730,7 @@ async fn assert_the_org_file_owns_the_vacated_name(
     app: &holon_integration_tests::TestEnvironment,
     leg: &str,
 ) {
-    app.wait_for_org_files_stable(25, Duration::from_millis(3000))
-        .await;
+    app.settle().await;
     let on_disk = read_vault_file(app, "Pasta.org")
         .await
         .expect("Pasta.org stays on disk");
@@ -2974,8 +2969,7 @@ fn a_recipe_page_waiting_in_the_backlog_gets_no_org_twin() {
             );
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        app.wait_for_org_files_stable(500, Duration::from_secs(30))
-            .await;
+        app.settle().await;
         let twin = app.org_root().join("Resources").join("R0000.org");
         let while_held = app.org_fs.read_to_string(&twin).await;
         app.org_fs.release_reads_with_extension("cook");
@@ -2989,8 +2983,7 @@ fn a_recipe_page_waiting_in_the_backlog_gets_no_org_twin() {
             .wait_drained()
             .await
             .expect("the backlog drains once the recipe reads go through");
-        app.wait_for_org_files_stable(500, Duration::from_secs(30))
-            .await;
+        app.settle().await;
         assert!(
             app.org_fs.read_to_string(&twin).await.is_err(),
             "the ingested recipe owns its page, yet a page file was written beside it"
@@ -3028,8 +3021,7 @@ async fn boot_with_recipe_reads_held(app: &mut holon_integration_tests::TestEnvi
         .wait_ready()
         .await
         .expect("the writable files are ingested while the recipe reads are held");
-    app.wait_for_org_files_stable(25, Duration::from_millis(1500))
-        .await;
+    app.settle().await;
 }
 
 /// A refused recipe keeps its refusal on its `file` row; the repair clears

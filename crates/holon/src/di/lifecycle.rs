@@ -189,7 +189,12 @@ pub fn open_and_register_core(
     storage: StorageSelector,
     role: DatabaseRole,
     conditions: Arc<holon_conditions::ConditionBus>,
+    timings: Arc<holon_api::Timings>,
 ) -> Result<()> {
+    let injected_timings = holon_api::InjectedTimings(timings.clone());
+    injector.provide::<holon_api::InjectedTimings>(fluxdi::Provider::root(move |_| {
+        fluxdi::Shared::new(injected_timings.clone())
+    }));
     // Registered before the storage substrate so no wiring can spawn
     // session-scoped work without a shutdown to register it against.
     injector.provide::<holon_api::lifecycle::SessionShutdown>(fluxdi::Provider::root(|_| {
@@ -233,7 +238,8 @@ pub fn open_and_register_core(
             let (cdc_tx, _) = tokio::sync::broadcast::channel(1024);
 
             tracing::debug!("[DI] Creating TursoBackend...");
-            let (backend_inner, db_handle) = TursoBackend::new(db, cdc_tx).map_err(|e| {
+            let (backend_inner, db_handle) = TursoBackend::new_with_timings(db, cdc_tx, &timings)
+                .map_err(|e| {
                 anyhow::anyhow!(
                     "Failed to create TursoBackend for {}: {e}",
                     db_path.display()
@@ -276,6 +282,7 @@ pub struct CoreInfraModule {
     pub role: DatabaseRole,
     /// The frontend core's bus, created before any storage opens.
     pub conditions: Arc<holon_conditions::ConditionBus>,
+    pub timings: Arc<holon_api::Timings>,
 }
 
 impl Module for CoreInfraModule {
@@ -286,6 +293,7 @@ impl Module for CoreInfraModule {
             StorageSelector::Turso,
             self.role,
             self.conditions.clone(),
+            self.timings.clone(),
         )
         .map_err(|e| {
             fluxdi::Error::module_lifecycle_failed(
@@ -305,6 +313,7 @@ async fn build_di_container<F>(
     db_path: PathBuf,
     role: DatabaseRole,
     conditions: Arc<holon_conditions::ConditionBus>,
+    timings: Arc<holon_api::Timings>,
     setup_fn: F,
 ) -> Result<Arc<Injector>>
 where
@@ -312,7 +321,14 @@ where
 {
     let injector = Injector::root();
 
-    open_and_register_core(&injector, db_path, StorageSelector::Turso, role, conditions)?;
+    open_and_register_core(
+        &injector,
+        db_path,
+        StorageSelector::Turso,
+        role,
+        conditions,
+        timings,
+    )?;
 
     setup_fn(&injector)?;
     super::guard_bindings::complete_guard_composition(&injector);
@@ -333,6 +349,7 @@ where
 pub async fn build_no_turso_container<F>(
     db_path: PathBuf,
     conditions: Arc<holon_conditions::ConditionBus>,
+    timings: Arc<holon_api::Timings>,
     setup_fn: F,
 ) -> Result<Arc<Injector>>
 where
@@ -345,6 +362,7 @@ where
         StorageSelector::LoroMemory,
         DatabaseRole::Projection,
         conditions,
+        timings,
     )?;
     setup_fn(&injector)?;
     super::guard_bindings::complete_guard_composition(&injector);
@@ -360,14 +378,21 @@ pub async fn create_backend_engine<F>(
     db_path: PathBuf,
     role: DatabaseRole,
     conditions: Arc<holon_conditions::ConditionBus>,
+    timings: Arc<holon_api::Timings>,
     setup_fn: F,
 ) -> Result<Arc<BackendEngine>>
 where
     F: FnOnce(&Injector) -> Result<()>,
 {
-    let (engine, ()) =
-        create_backend_engine_with_extras(db_path, role, conditions, setup_fn, |_| async {})
-            .await?;
+    let (engine, ()) = create_backend_engine_with_extras(
+        db_path,
+        role,
+        conditions,
+        timings,
+        setup_fn,
+        |_| async {},
+    )
+    .await?;
     Ok(engine)
 }
 
@@ -381,13 +406,14 @@ where
 /// they don't share dependencies (e.g. CacheEventSubscriber wiring is
 /// independent of engine creation).
 #[tracing::instrument(
-    skip(conditions, setup_fn, extra_resolve),
+    skip(conditions, timings, setup_fn, extra_resolve),
     name = "di.create_backend_engine"
 )]
 pub async fn create_backend_engine_with_extras<F, G, Fut, T>(
     db_path: PathBuf,
     role: DatabaseRole,
     conditions: Arc<holon_conditions::ConditionBus>,
+    timings: Arc<holon_api::Timings>,
     setup_fn: F,
     extra_resolve: G,
 ) -> Result<(Arc<BackendEngine>, T)>
@@ -397,7 +423,7 @@ where
     Fut: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let injector = build_di_container(db_path, role, conditions, setup_fn).await?;
+    let injector = build_di_container(db_path, role, conditions, timings, setup_fn).await?;
 
     // Resolve BackendEngine FIRST, then extras. Resolving in parallel causes
     // a fluxdi TOCTOU race: both tasks call resolve_async::<BackendEngine>,
@@ -446,6 +472,7 @@ mod no_turso_tests {
         let injector = build_no_turso_container(
             ":memory:".into(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+            Default::default(),
             move |inj| {
                 inj.provide::<dyn BlockQuerySource>(Provider::root(move |_| {
                     let blocks = blocks.clone();

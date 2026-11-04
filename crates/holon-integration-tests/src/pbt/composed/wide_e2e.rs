@@ -149,6 +149,15 @@ impl WideHandle {
         self.frontend.as_ref()
     }
 
+    /// The settle handle of one booted frontend session, without the
+    /// per-tick snapshot memo (only the harness clears that memo).
+    pub fn of_frontend(frontend: Arc<HeadlessFrontendComponent>) -> Self {
+        Self {
+            engine: Some(frontend.engine()),
+            frontend: Some(frontend),
+        }
+    }
+
     /// Build the settle handle from a booted builder bundle — the windowed
     /// harness ([`windowed_composed_sut`]) reuses the base session's
     /// engine/frontend so its per-apply settle converges the same three
@@ -281,6 +290,7 @@ async fn converge_projections_until(handle: &WideHandle, patience: Patience) {
         Some(comp) => crate::pbt::convergence::Signals {
             engine: handle.engine.as_ref(),
             sync: comp.loro_sync_handle(),
+            shares: None,
             org_idle: comp.org_idle_signal(),
             org_files: Some(comp.org_files()),
             block_feed: comp.block_feed(),
@@ -288,6 +298,7 @@ async fn converge_projections_until(handle: &WideHandle, patience: Patience) {
         None => crate::pbt::convergence::Signals {
             engine: handle.engine.as_ref(),
             sync: None,
+            shares: None,
             org_idle: None,
             org_files: None,
             block_feed: None,

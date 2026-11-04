@@ -19,7 +19,6 @@
 #![cfg(feature = "pbt")]
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_integration_tests::TestEnvironmentBuilder;
 
@@ -77,10 +76,7 @@ fn hand_written_page_inlining_page_tagged_children_de_inlines_instead_of_quarant
             .build(rt.clone())
             .await
             .expect("boot");
-        env.wait_for_cdc_quiescent(Duration::from_millis(400), Duration::from_secs(20))
-            .await;
-        env.wait_for_org_files_stable(300, Duration::from_secs(20))
-            .await;
+        env.settle().await;
 
         // The initial scan's own verdict — the value `holon-app` turns into the
         // red degraded banner. A quarantined file reports here as a failed file,

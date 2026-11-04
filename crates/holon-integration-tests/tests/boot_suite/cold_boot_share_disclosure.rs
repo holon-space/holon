@@ -133,12 +133,10 @@ fn cold_boot_over_a_shared_subtree_discloses_nothing() {
         // this the assertion below would also pass on a boot that scanned
         // nothing at all.
         for id in ["share-mount-block", "share-child-one", "share-child-two"] {
-            assert!(
-                env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
-                    .await,
-                "shared block {id} did not ingest — the fixture never reached the projection, so \
-                 this test proves nothing"
-            );
+            env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
+                    .await
+            .unwrap_or_else(|hung| panic!("shared block {id} did not ingest — the fixture never reached the projection, so \
+                 this test proves nothing: {hung}"));
         }
 
         let disclosed = not_materialized_subjects(&env);
@@ -169,11 +167,9 @@ fn a_post_boot_edit_to_an_unmaterialized_share_still_discloses() {
             .expect("cold boot over a vault with a shared subtree must succeed");
 
         for id in ["share-mount-block", "share-child-one"] {
-            assert!(
-                env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
-                    .await,
-                "shared block {id} did not ingest"
-            );
+            env.wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
+                .await
+                .unwrap_or_else(|hung| panic!("shared block {id} did not ingest: {hung}"));
         }
         assert!(
             not_materialized_subjects(&env).is_empty(),
@@ -228,12 +224,12 @@ fn a_warm_restart_over_the_same_vault_discloses_nothing() {
             .expect("cold boot over a vault with a shared subtree must succeed");
 
         for id in ["share-mount-block", "share-child-one"] {
-            assert!(
-                harness
-                    .wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
-                    .await,
-                "shared block {id} did not ingest on the first boot"
-            );
+            harness
+                .wait_for_block(&format!("block:{id}"), SYNC_TIMEOUT)
+                .await
+                .unwrap_or_else(|hung| {
+                    panic!("shared block {id} did not ingest on the first boot: {hung}")
+                });
         }
         assert!(
             not_materialized_subjects(&harness).is_empty(),
@@ -246,12 +242,12 @@ fn a_warm_restart_over_the_same_vault_discloses_nothing() {
             .await
             .expect("restart over the same vault");
 
-        assert!(
-            harness
-                .wait_for_block("block:share-child-one", SYNC_TIMEOUT)
-                .await,
-            "the shared blocks must still be present after the restart"
-        );
+        harness
+            .wait_for_block("block:share-child-one", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("the shared blocks must still be present after the restart: {hung}")
+            });
         let disclosed = not_materialized_subjects(&harness);
         assert!(
             disclosed.is_empty(),

@@ -10,7 +10,6 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_api::SnapshotBlock;
 use holon_api::SourceKeystroke;
@@ -50,9 +49,7 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 }
 
 async fn settle(env: &TestEnvironment) {
-    env.wait_for_loro_quiescence(Duration::from_secs(15)).await;
-    env.wait_for_cdc_quiescent(Duration::from_millis(250), Duration::from_secs(15))
-        .await;
+    env.settle().await;
 }
 
 async fn loro_blocks(env: &TestEnvironment) -> HashMap<String, SnapshotBlock> {

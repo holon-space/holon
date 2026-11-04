@@ -223,10 +223,15 @@ pub use change_set::agrees_with_ops;
 pub use change_set::source_op_names;
 pub use clock::CalendarDate;
 pub use clock::Clock;
+pub use clock::ClockExt;
+pub use clock::Elapsed;
 pub use clock::Grain;
 pub use clock::InjectedClock;
+pub use clock::InjectedTimings;
+pub use clock::Mono;
 pub use clock::SystemClock;
 pub use clock::TestClock;
+pub use clock::Timings;
 // Re-export the block edge-field category
 pub use edge_field::{BlockEdges, EdgeField, EdgeFieldUpdate};
 // Re-export entity types (for Entity derive macro)

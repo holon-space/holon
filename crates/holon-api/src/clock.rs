@@ -1,14 +1,29 @@
+use std::future::Future;
+use std::ops::Add;
+use std::ops::Sub;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
+use std::task::Context as TaskContext;
+use std::task::Poll;
+use std::time::Duration;
 
 use anyhow::Context;
+use futures::future::BoxFuture;
 
-/// Wall-clock authority. Passed as a typed value so timestamps are
-/// deterministic in tests instead of reaching for the ambient system clock.
+/// The one port for physical time, wall and monotonic. Passed as a typed
+/// value so a test can drive every timer instead of the ambient system clock.
 pub trait Clock: Send + Sync + std::fmt::Debug {
     /// Milliseconds since the Unix epoch.
     fn now_millis(&self) -> i64;
+
+    fn now(&self) -> Mono;
+
+    fn sleep_until(&self, deadline: Mono) -> BoxFuture<'static, ()>;
+
+    /// For threads that are not on an async runtime.
+    fn sleep_blocking(&self, d: Duration);
 
     /// Seconds to add to UTC for the user's local wall clock at `millis`.
     /// Carried by the clock rather than read from `chrono::Local` at the use
@@ -55,14 +70,202 @@ impl std::fmt::Debug for InjectedClock {
     }
 }
 
+/// Monotonic instant: the offset from the clock's origin. Values from
+/// different clock implementations are not comparable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Mono(Duration);
+
+impl Mono {
+    pub const fn from_origin(offset: Duration) -> Self {
+        Self(offset)
+    }
+
+    pub const fn since_origin(self) -> Duration {
+        self.0
+    }
+}
+
+impl Add<Duration> for Mono {
+    type Output = Mono;
+
+    fn add(self, rhs: Duration) -> Mono {
+        Mono(
+            self.0
+                .checked_add(rhs)
+                .unwrap_or_else(|| panic!("Mono overflow: {:?} + {rhs:?}", self.0)),
+        )
+    }
+}
+
+impl Sub<Mono> for Mono {
+    type Output = Duration;
+
+    fn sub(self, rhs: Mono) -> Duration {
+        self.0.checked_sub(rhs.0).unwrap_or_else(|| {
+            panic!(
+                "Mono subtraction went negative: {:?} - {:?} (rhs is later)",
+                self.0, rhs.0
+            )
+        })
+    }
+}
+
+/// Returned by [`ClockExt::timeout`] when the deadline passed first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("deadline elapsed")]
+pub struct Elapsed;
+
+/// Derived timer helpers. Generic methods would make `Clock` not object-safe,
+/// so they live here, and every `Clock` (including `dyn Clock`) gets them.
+pub trait ClockExt: Clock {
+    fn sleep(&self, d: Duration) -> BoxFuture<'static, ()> {
+        self.sleep_until(self.now() + d)
+    }
+
+    fn timeout<F: Future>(&self, d: Duration, f: F) -> Timeout<F> {
+        Timeout {
+            future: Box::pin(f),
+            deadline: self.sleep(d),
+        }
+    }
+
+    /// First tick is immediate; a late tick skips the missed ticks, like
+    /// tokio's `MissedTickBehavior::Skip`.
+    fn interval(self: &Arc<Self>, period: Duration) -> Interval<Self> {
+        assert!(!period.is_zero(), "interval period must be non-zero");
+        Interval {
+            next: self.now(),
+            clock: Arc::clone(self),
+            period,
+        }
+    }
+
+    fn since(&self, t: Mono) -> Duration {
+        self.now() - t
+    }
+}
+
+impl<C: Clock + ?Sized> ClockExt for C {}
+
+pub struct Timeout<F> {
+    future: Pin<Box<F>>,
+    deadline: BoxFuture<'static, ()>,
+}
+
+impl<F: Future> Future for Timeout<F> {
+    type Output = Result<F::Output, Elapsed>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        if let Poll::Ready(out) = self.future.as_mut().poll(cx) {
+            return Poll::Ready(Ok(out));
+        }
+        self.deadline.as_mut().poll(cx).map(|()| Err(Elapsed))
+    }
+}
+
+pub struct Interval<C: Clock + ?Sized> {
+    clock: Arc<C>,
+    next: Mono,
+    period: Duration,
+}
+
+impl<C: Clock + ?Sized> Interval<C> {
+    /// Waits for the next tick and returns its scheduled instant.
+    pub async fn tick(&mut self) -> Mono {
+        let deadline = self.next;
+        self.clock.sleep_until(deadline).await;
+        self.next = next_tick_skipping(deadline, self.clock.now(), self.period);
+        deadline
+    }
+}
+
+/// The first tick on the `deadline + k * period` grid that lies after `now`.
+fn next_tick_skipping(deadline: Mono, now: Mono, period: Duration) -> Mono {
+    let late_into_period = (now - deadline).as_nanos() % period.as_nanos();
+    let late_into_period = Duration::from_nanos(
+        u64::try_from(late_into_period).expect("a remainder of a Duration fits u64 nanos"),
+    );
+    now + (period - late_into_period)
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+type OriginInstant = tokio::time::Instant;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+type OriginInstant = web_time::Instant;
+
+/// One origin per process, so every real-time `Mono` is comparable with every
+/// other. Tokio's clock on native, so a paused tokio runtime pauses it too.
+fn origin() -> OriginInstant {
+    static ORIGIN: std::sync::OnceLock<OriginInstant> = std::sync::OnceLock::new();
+    *ORIGIN.get_or_init(OriginInstant::now)
+}
+
+fn real_now() -> Mono {
+    Mono(origin().elapsed())
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn real_sleep_until(deadline: Mono) -> BoxFuture<'static, ()> {
+    Box::pin(tokio::time::sleep_until(origin() + deadline.0))
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn real_sleep_until(_: Mono) -> BoxFuture<'static, ()> {
+    panic!("no timer on wasm32-unknown-unknown: a browser Clock implementation is not built yet")
+}
+
+/// The durations product code waits for. `Default` is production; an embedder
+/// overrides them by registering [`InjectedTimings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Timings {
+    /// An actor command running longer than this is reported as stuck.
+    pub actor_hang: Duration,
+    /// The first "still running" warning for a slow actor command, capped at
+    /// `actor_hang`.
+    pub actor_first_warning: Duration,
+    /// How often the Loro boot gate repeats its "still waiting" warning. Same
+    /// value as the MCP client's gate waiter: one gate-escape policy.
+    pub boot_gate_warn_every: Duration,
+    /// After this the Loro reconcile loop starts anyway, in disclosed
+    /// degraded mode.
+    pub boot_gate_watchdog: Duration,
+}
+
+impl Default for Timings {
+    fn default() -> Self {
+        Self {
+            actor_hang: Duration::from_secs(30),
+            actor_first_warning: Duration::from_secs(5),
+            boot_gate_warn_every: Duration::from_secs(60),
+            boot_gate_watchdog: Duration::from_secs(600),
+        }
+    }
+}
+
+/// DI key for [`Timings`]; an unregistered container uses
+/// `Timings::default()`, like [`InjectedClock`].
+#[derive(Debug, Clone)]
+pub struct InjectedTimings(pub Arc<Timings>);
+
 /// Production clock: reads the real system time.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_millis(&self) -> i64 {
-        // Preserves the exact pre-existing call used across block constructors.
         chrono::Utc::now().timestamp_millis()
+    }
+
+    fn now(&self) -> Mono {
+        real_now()
+    }
+
+    fn sleep_until(&self, deadline: Mono) -> BoxFuture<'static, ()> {
+        real_sleep_until(deadline)
+    }
+
+    fn sleep_blocking(&self, d: Duration) {
+        std::thread::sleep(d)
     }
 
     fn utc_offset_seconds_at(&self, millis: i64) -> i32 {
@@ -70,8 +273,8 @@ impl Clock for SystemClock {
     }
 }
 
-/// Deterministic clock for tests — instant AND zone. Cheap to clone; clones
-/// share the same instant.
+/// Deterministic wall clock for tests — instant AND zone. Cheap to clone;
+/// clones share the same instant. Its monotonic time and timers are real.
 ///
 /// The offset defaults to [`TestClock::DEFAULT_UTC_OFFSET_SECONDS`], a fixed
 /// zone that is deliberately NOT UTC: a date assertion written against a
@@ -111,6 +314,18 @@ impl TestClock {
 impl Clock for TestClock {
     fn now_millis(&self) -> i64 {
         self.millis.load(Ordering::SeqCst)
+    }
+
+    fn now(&self) -> Mono {
+        real_now()
+    }
+
+    fn sleep_until(&self, deadline: Mono) -> BoxFuture<'static, ()> {
+        real_sleep_until(deadline)
+    }
+
+    fn sleep_blocking(&self, d: Duration) {
+        std::thread::sleep(d)
     }
 
     fn utc_offset_seconds_at(&self, _: i64) -> i32 {

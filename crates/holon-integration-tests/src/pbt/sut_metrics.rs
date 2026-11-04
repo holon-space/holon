@@ -225,16 +225,14 @@ impl MetricsSut {
         };
         let perf_summary = format!(
             " apply={}ms check={}ms settle={}ms pre_inv16={}ms live_mirrors={}ms \
-             assert_quiet={}ms drain_cdc={}ms inv10_drain={}ms files_stable={}ms mark_proc={}ms×{}",
+             assert_quiet={}ms inv10_drain={}ms mark_proc={}ms×{}",
             metrics.apply_transition_total.as_millis(),
             metrics.check_invariants_total.as_millis(),
             metrics.settle_total.as_millis(),
             metrics.pre_inv16_settle_total.as_millis(),
             metrics.live_mirrors_total.as_millis(),
             metrics.assert_quiescent_total.as_millis(),
-            metrics.drain_cdc_total.as_millis(),
             metrics.inv10_watch_drain.as_millis(),
-            metrics.wait_files_stable.as_millis(),
             metrics.mark_processed_total.as_millis(),
             metrics.mark_processed_count,
         );

@@ -16,7 +16,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use holon_api::EntityUri;
 use holon_filesystem::FileSystem;
@@ -82,10 +81,7 @@ fn ingest_first_boot_keeps_one_journals_page_with_its_seed_children() {
             .build(rt.clone())
             .await
             .expect("boot");
-        env.wait_for_cdc_quiescent(Duration::from_millis(400), Duration::from_secs(10))
-            .await;
-        env.wait_for_org_files_stable(300, Duration::from_secs(10))
-            .await;
+        env.settle().await;
 
         let pages = ids_of(
             &env,
@@ -151,8 +147,7 @@ fn a_page_moved_to_another_file_gets_no_second_file_after_reboot() {
         .expect("write the moved page");
         for boot in 1..=2 {
             env.start_app(true).await.expect("start_app");
-            env.wait_for_org_files_stable(300, Duration::from_secs(10))
-                .await;
+            env.settle().await;
             assert!(
                 !env.org_fs.exists(&env.org_root().join("Journals.org")),
                 "boot {boot}: the seed wrote Journals.org although Diary.org already holds its \

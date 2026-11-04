@@ -74,11 +74,9 @@ fn local_override_wins_until_cleared_and_survives_reboot_reseed() {
             .expect("write vault.org");
 
         env.start_app(true).await.expect("boot-1 start_app");
-        assert!(
-            env.wait_for_block("tasks-perspective", Duration::from_secs(15))
-                .await,
-            "tasks-perspective should sync"
-        );
+        env.wait_for_block("tasks-perspective", Duration::from_secs(15))
+            .await
+            .unwrap_or_else(|hung| panic!("tasks-perspective should sync: {hung}"));
 
         let root_uri = holon_api::root_layout_block_uri();
 
@@ -123,11 +121,9 @@ fn local_override_wins_until_cleared_and_survives_reboot_reseed() {
 
         env.stop_app().await.expect("stop_app");
         env.start_app(true).await.expect("boot-2 start_app");
-        assert!(
-            env.wait_for_block("tasks-perspective", Duration::from_secs(15))
-                .await,
-            "tasks-perspective should re-sync on boot 2"
-        );
+        env.wait_for_block("tasks-perspective", Duration::from_secs(15))
+            .await
+            .unwrap_or_else(|hung| panic!("tasks-perspective should re-sync on boot 2: {hung}"));
 
         let survived = env
             .engine()

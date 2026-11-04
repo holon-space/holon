@@ -161,7 +161,7 @@ fn idless_headline_reingest_preserves_identity() {
 
         // First ingest mints a UUID and writes it back as an `:ID:` drawer.
         wait_for_disk(&env, &path, |c| c.contains(":ID:"), "first writeback (mint)").await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let before = ids_with_content(&env, HEADLINE).await;
         assert_eq!(
@@ -179,7 +179,7 @@ fn idless_headline_reingest_preserves_identity() {
         // The re-ingest writes `:ID:` back a second time — wait for that, then
         // let the controller settle.
         wait_for_disk(&env, &path, |c| c.contains(":ID:"), "second writeback (re-ingest)").await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let after = ids_with_content(&env, HEADLINE).await;
         assert_eq!(
@@ -221,7 +221,7 @@ fn two_identical_idless_siblings_survive_reingest() {
             "first writeback (mint)",
         )
         .await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let before = ids_with_content(&env, HEADLINE).await;
         assert_eq!(
@@ -237,7 +237,7 @@ fn two_identical_idless_siblings_survive_reingest() {
             .await
             .expect("stale re-write");
         wait_for_disk(&env, &path, |c| c.contains(":ID:"), "second writeback").await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let after = ids_with_content(&env, HEADLINE).await;
         assert_eq!(
@@ -285,7 +285,7 @@ fn shifted_identical_twins_preserve_identity() {
             "first writeback (mint)",
         )
         .await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let before = ids_with_content(&env, DUP).await;
         assert_eq!(
@@ -307,7 +307,7 @@ fn shifted_identical_twins_preserve_identity() {
             "second writeback",
         )
         .await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let after = ids_with_content(&env, DUP).await;
         assert_eq!(
@@ -356,7 +356,7 @@ fn swapped_identical_parents_keep_their_children() {
             "first writeback (mint)",
         )
         .await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let alpha_parent_before = parent_of_content(&env, "Alpha").await;
         let beta_parent_before = parent_of_content(&env, "Beta").await;
@@ -372,9 +372,9 @@ fn swapped_identical_parents_keep_their_children() {
         FileSystem::write(env.org_fs.as_ref(), &path, swapped.as_bytes())
             .await
             .expect("stale re-write (swap)");
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
         wait_for_disk(&env, &path, |c| c.contains(":ID:"), "second writeback").await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let alpha_parent_after = parent_of_content(&env, "Alpha").await;
         let beta_parent_after = parent_of_content(&env, "Beta").await;
@@ -416,7 +416,7 @@ fn genuinely_new_block_still_mints() {
             "first writeback (mint)",
         )
         .await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let keep_before = ids_with_content(&env, KEEP).await;
         assert_eq!(keep_before.len(), 1, "one headline ingests as one block");
@@ -434,7 +434,7 @@ fn genuinely_new_block_still_mints() {
             "second writeback",
         )
         .await;
-        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
+        env.settle().await;
 
         let keep_after = ids_with_content(&env, KEEP).await;
         assert_eq!(

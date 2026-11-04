@@ -20,6 +20,7 @@ mod perspective_slot_resolution;
 #[cfg(feature = "pbt")]
 mod recursive_query_renders_descendants;
 mod render_source_panels;
+mod router_settle_waits_for_delivery;
 mod sidebar_modifier_click_open_tab_probe;
 mod split_block_stale_display_regression;
 mod tour_spike;

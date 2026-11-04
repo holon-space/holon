@@ -85,10 +85,9 @@ async fn boot_edit_and_read_doc_id(
     }
     let env = builder.build(rt.clone()).await.expect("boot");
 
-    assert!(
-        env.wait_for_block("fe-child", SYNC_TIMEOUT).await,
-        "Frontends.org content block must ingest"
-    );
+    env.wait_for_block("fe-child", SYNC_TIMEOUT)
+        .await
+        .unwrap_or_else(|hung| panic!("Frontends.org content block must ingest: {hung}"));
 
     env.update_block_content("fe-child", "Some Heading Edited")
         .await

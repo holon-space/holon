@@ -1980,6 +1980,7 @@ for line in sys.stdin:
             home.join("supervisor.db"),
             holon::di::DatabaseRole::DurableStore,
             Arc::new(ConditionBus::new()),
+            Default::default(),
             |_| Ok(()),
             |injector| async move { injector.resolve::<TypeRegistry>() },
         )

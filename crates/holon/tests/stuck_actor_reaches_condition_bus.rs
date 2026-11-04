@@ -1,5 +1,5 @@
 //! Contract: in the real DI wiring, a SQL command that keeps the actor busy
-//! past `HOLON_ACTOR_HANG_MS` reaches the container's `ConditionBus` as
+//! past `Timings::actor_hang` reaches the container's `ConditionBus` as
 //! `DatabaseStuck`, and the disclosure clears when the command finishes.
 
 use std::mem::ManuallyDrop;
@@ -80,10 +80,10 @@ fn wait_until(within: Duration, what: &str, bus: &ConditionBus, done: impl Fn() 
 #[test]
 fn a_command_past_the_hang_bound_reaches_the_containers_condition_bus() {
     let (rows, fastest) = calibrate_slow_query();
-    let bound = fastest / 4;
-    // SAFETY: the calibration runtime is dropped, so no other thread reads the
-    // environment.
-    unsafe { std::env::set_var("HOLON_ACTOR_HANG_MS", bound.as_millis().to_string()) };
+    let timings = holon_api::Timings {
+        actor_hang: fastest / 4,
+        ..Default::default()
+    };
     let rt = ManuallyDrop::new(
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -94,7 +94,10 @@ fn a_command_past_the_hang_bound_reaches_the_containers_condition_bus() {
     let dir = tempfile::tempdir().expect("tempdir");
     let injector = Injector::root();
     let db = rt.block_on(async {
-        let (backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+        let db = TursoBackend::open_database(":memory:").expect("in-memory db");
+        let (cdc_tx, _) = tokio::sync::broadcast::channel(1024);
+        let (backend, handle) =
+            TursoBackend::new_with_timings(db, cdc_tx, &timings).expect("backend");
         register_core_services_with_backend(
             &injector,
             dir.path().join("unused.db"),

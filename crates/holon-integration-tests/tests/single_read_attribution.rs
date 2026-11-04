@@ -194,12 +194,7 @@ fn where_one_single_row_read_goes() {
             .len();
         eprintln!("[read-attr] boot: {d} files / {blocks} blocks");
         assert!(blocks > d, "the corpus never ingested: {blocks} blocks");
-        world
-            .wait_for_loro_quiescence(Duration::from_secs(120))
-            .await;
-        world
-            .wait_for_cdc_quiescent(Duration::from_millis(300), Duration::from_secs(120))
-            .await;
+        world.settle().await;
 
         let injector = world
             .injector()

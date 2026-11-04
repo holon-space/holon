@@ -1,0 +1,25 @@
+# Physical time is read only through the `Clock` port
+# (crates/holon-api/src/clock.rs). A direct read or timer cannot be driven by a
+# test clock; the baseline lists the sites not yet moved onto the port.
+
+[[smell]]
+id = "physical_time"
+case_sensitive = true
+files = "**/*.rs"
+skip_test_mods = true
+pattern = '''(?<![A-Za-z])(Monotonic)?Instant::now\s*\(|\bSystemTime::now\s*\(|\b(Utc|Local)::now\s*\(|\bthread::sleep\s*\(|\btokio::time::(sleep|sleep_until|timeout|timeout_at|interval|interval_at)\b|^\s*use\s+tokio::time::(sleep|sleep_until|timeout|timeout_at|interval|interval_at|Instant)\b|\.timer\(|gloo_timers::|\bDate::now\b|js_sys::Date::new_0|\bclock::now_millis\s*\(|\bnow_unix_millis\s*\('''
+exclude = [
+  "crates/holon-api/src/clock.rs",
+  "**/target/**", "**/tests/**", "**/benches/**", "**/examples/**",
+  "**/*_test.rs", "**/*_tests.rs", "**/tests.rs", "**/build.rs",
+  "crates/holon-integration-tests/**", "crates/holon-pbt-core/**", "crates/holon-oracles/**",
+  "crates/holon-*-testing/**", "crates/holon-mcp-mock/**", "crates/holon-macros-test/**",
+]
+message = """
+Physical time is read only through the Clock port (holon-api/src/clock.rs): \
+`clock.now()`, `clock.sleep(d).await`, `clock.timeout(d, f).await`, \
+`clock.interval(p)`, `clock.now_millis()`. A direct Instant::now / SystemTime::now / \
+tokio::time::sleep / thread::sleep cannot be driven by a test clock. Take an \
+`Arc<dyn Clock>` from the caller. Metrics that never decide behaviour may read \
+physical time with the reason. To suppress: // ALLOW(physical_time): <reason>
+"""

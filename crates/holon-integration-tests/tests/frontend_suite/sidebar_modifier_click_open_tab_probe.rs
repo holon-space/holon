@@ -224,13 +224,11 @@ fn many_open_history_rows_render_only_the_cursor_subtree() {
         env.create_block("block:probe-child-b", page_b.as_str(), "child of B")
             .await
             .expect("create child B");
-        env.wait_for_cdc_quiescent(Duration::from_millis(200), Duration::from_secs(5))
-            .await;
+        env.settle().await;
 
         open_tab(&env, &page_a).await;
         open_tab(&env, &page_b).await;
-        env.wait_for_cdc_quiescent(Duration::from_millis(200), Duration::from_secs(5))
-            .await;
+        env.settle().await;
 
         // Prod-side truth first. `open_tab` inserts WITHOUT closing, so the
         // boot-default focus row (`block:journals`) survives ahead of the two

@@ -13,6 +13,7 @@ use holon_filesystem::change_source::FileChange;
 use holon_filesystem::change_source::FileChangeSource;
 use holon_filesystem::writeback_net;
 use holon_loro::LoroSyncControllerHandle;
+use holon_loro::loro_share_backend::LoroShareBackend;
 use holon_net::exec::WhyNot;
 use holon_orgmode::OrgSyncIdleSignal;
 
@@ -87,6 +88,7 @@ impl std::fmt::Display for Owed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Progress {
     pub(crate) loro_settled: Option<bool>,
+    pub(crate) shares_idle: Option<bool>,
     pub(crate) cdc: Option<CdcProgress>,
     pub(crate) block_feed: Option<FeedProgress>,
     pub(crate) org: Option<OrgProgress>,
@@ -125,6 +127,13 @@ pub(crate) fn owed(progress: &Progress) -> Vec<Owed> {
             stage: "loro",
             target: "the authority's oplog frontiers".into(),
             value: "an older synced frontier".into(),
+        });
+    }
+    if progress.shares_idle == Some(false) {
+        owed.push(Owed {
+            stage: "share-projection",
+            target: "every share worker idle".into(),
+            value: "a share worker with work pending".into(),
         });
     }
     if let Some(cdc) = &progress.cdc {
@@ -273,6 +282,7 @@ fn writeback_owed(idle: &OrgSyncIdleSignal) -> Vec<String> {
 pub(crate) struct Signals<'a> {
     pub(crate) engine: Option<&'a Arc<BackendEngine>>,
     pub(crate) sync: Option<Arc<LoroSyncControllerHandle>>,
+    pub(crate) shares: Option<Arc<LoroShareBackend>>,
     pub(crate) org_idle: Option<Arc<OrgSyncIdleSignal>>,
     pub(crate) org_files: Option<OrgFiles<'a>>,
     pub(crate) block_feed: Option<Arc<holon_api::live_data::LiveData<holon_api::Block>>>,
@@ -288,6 +298,15 @@ impl Signals<'_> {
             ),
             None => None,
         };
+        // A placement change wakes a share's projection worker, which writes
+        // the share root's SQL parent after Loro already settled.
+        let shares_idle =
+            self.shares.as_ref().map(|shares| {
+                futures::FutureExt::now_or_never(shares.wait_for_workers_idle(
+                    holon_loro::loro_share_backend::SettleScope::LocalWrites,
+                ))
+                .is_some()
+            });
         let cdc = self.engine.map(|engine| {
             let emitted = engine.db_handle().cdc_emitted_watermark();
             let settled = engine.matview_manager().settled_up_to();
@@ -322,6 +341,7 @@ impl Signals<'_> {
         });
         Progress {
             loro_settled,
+            shares_idle,
             cdc,
             block_feed,
             org,
@@ -408,8 +428,9 @@ mod tests {
 
     use super::*;
 
-    const STAGES: [&str; 8] = [
+    const STAGES: [&str; 9] = [
         "loro",
+        "share-projection",
         "cdc-routed",
         "cdc-applied",
         "watch-release",
@@ -424,6 +445,7 @@ mod tests {
         (0u64..1_000, 0u64..3, 0u64..1_000, 0u64..1_000).prop_map(
             |(emitted, ahead, routed, changed)| Progress {
                 loro_settled: Some(true),
+                shares_idle: Some(true),
                 cdc: Some(CdcProgress {
                     emitted,
                     routed_through: emitted + ahead,
@@ -451,6 +473,7 @@ mod tests {
         let org = p.org.as_mut().expect("settled() wires org");
         match stage {
             "loro" => p.loro_settled = Some(false),
+            "share-projection" => p.shares_idle = Some(false),
             "cdc-routed" => {
                 cdc.emitted += by;
                 cdc.routed_through = cdc.emitted - by;
@@ -490,6 +513,7 @@ mod tests {
     fn a_stage_left_unwired_owes_nothing() {
         let unwired = Progress {
             loro_settled: None,
+            shares_idle: None,
             cdc: None,
             block_feed: None,
             org: None,
@@ -501,6 +525,7 @@ mod tests {
         Signals {
             engine: Some(engine),
             sync: None,
+            shares: None,
             org_idle: None,
             org_files: None,
             block_feed: None,
@@ -663,5 +688,85 @@ mod tests {
             cursor.sent()
         );
         assert!(message.contains(&expected), "{message}\nlacks: {expected}");
+    }
+
+    fn org_signals<'a>(
+        idle: &Arc<OrgSyncIdleSignal>,
+        emitted: &'a EmittedChanges,
+        scanned_through: u64,
+    ) -> Signals<'a> {
+        Signals {
+            engine: None,
+            sync: None,
+            shares: None,
+            org_idle: Some(idle.clone()),
+            org_files: Some(OrgFiles {
+                emitted,
+                scanned_through,
+            }),
+            block_feed: None,
+        }
+    }
+
+    /// With no sync loop running, a file change after the boot scan is never
+    /// ingested: the settle must name org-ingest instead of returning on a
+    /// quiet filesystem.
+    #[tokio::test]
+    async fn an_unprocessed_file_change_is_owed_to_org_ingest() {
+        let fs = InMemoryFileSystem::new();
+        holon_filesystem::FileSystem::create_dir_all(&fs, std::path::Path::new("/vault"))
+            .await
+            .expect("create /vault");
+        let emitted = EmittedChanges::watch(&fs);
+        let scanned_through = fs.last_change_seq();
+        let idle = OrgSyncIdleSignal::new();
+        converge_signals(
+            org_signals(&idle, &emitted, scanned_through),
+            Patience::Budget(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap_or_else(|gave_up| panic!("nothing was written, yet {gave_up}"));
+
+        holon_filesystem::FileSystem::write(&fs, std::path::Path::new("/vault/a.org"), b"* a\n")
+            .await
+            .expect("write a.org");
+        let gave_up = converge_signals(
+            org_signals(&idle, &emitted, scanned_through),
+            Patience::Budget(Duration::from_millis(100)),
+        )
+        .await
+        .expect_err("the change was never processed");
+        assert_eq!(
+            gave_up.owed.iter().map(|o| o.stage).collect::<Vec<_>>(),
+            vec!["org-ingest"],
+            "{gave_up}"
+        );
+    }
+
+    /// A write-back pass in flight holds the settle, though no file changes.
+    #[tokio::test]
+    async fn a_running_writeback_pass_is_owed_to_org_writeback() {
+        let fs = InMemoryFileSystem::new();
+        let emitted = EmittedChanges::watch(&fs);
+        let idle = OrgSyncIdleSignal::new();
+        let pass = idle.enter_pass();
+        let gave_up = converge_signals(
+            org_signals(&idle, &emitted, fs.last_change_seq()),
+            Patience::Budget(Duration::from_millis(100)),
+        )
+        .await
+        .expect_err("the pass is still running");
+        assert_eq!(
+            gave_up.owed.iter().map(|o| o.stage).collect::<Vec<_>>(),
+            vec!["org-writeback"],
+            "{gave_up}"
+        );
+        drop(pass);
+        converge_signals(
+            org_signals(&idle, &emitted, fs.last_change_seq()),
+            Patience::Budget(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap_or_else(|gave_up| panic!("the pass ended, yet {gave_up}"));
     }
 }

@@ -127,8 +127,7 @@ fn the_tab_strip_draws_an_open_tab_without_being_prodded() {
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft a page and navigate Main onto it");
-    runtime
-        .block_on(env.wait_for_cdc_quiescent(Duration::from_millis(500), Duration::from_secs(60)));
+    runtime.block_on(env.settle());
     settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
 
     // VACUITY GUARD, read from the table the strip is a view of. Without this a

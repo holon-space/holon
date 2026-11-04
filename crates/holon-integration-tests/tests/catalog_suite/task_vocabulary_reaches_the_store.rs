@@ -71,9 +71,7 @@ async fn wait_for_seed(env: &TestEnvironment) {
 }
 
 async fn settle(env: &TestEnvironment) {
-    env.wait_for_loro_quiescence(Duration::from_secs(15)).await;
-    env.wait_for_cdc_quiescent(Duration::from_millis(250), Duration::from_secs(15))
-        .await;
+    env.settle().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 }
 

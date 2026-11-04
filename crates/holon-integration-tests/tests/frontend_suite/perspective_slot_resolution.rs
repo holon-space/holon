@@ -75,14 +75,12 @@ fn root_slot_switches_via_set_field_and_override_drives_panel_variants() {
             .await
             .expect("build environment");
 
-        assert!(
-            env.wait_for_block("tasks-perspective", SYNC_TIMEOUT).await,
-            "tasks-perspective block should sync"
-        );
-        assert!(
-            env.wait_for_block("tasks-main-panel", SYNC_TIMEOUT).await,
-            "tasks-main-panel block should sync"
-        );
+        env.wait_for_block("tasks-perspective", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("tasks-perspective block should sync: {hung}"));
+        env.wait_for_block("tasks-main-panel", SYNC_TIMEOUT)
+            .await
+            .unwrap_or_else(|hung| panic!("tasks-main-panel block should sync: {hung}"));
 
         // 1. Default: root slot synthesizes the bundled layout from the root-layout
         //    block's own panels.

@@ -74,11 +74,7 @@ async fn write(t: &TestEnvironment, op: &str, params: &[(&str, &str)]) -> anyhow
 }
 
 async fn org_file_after_settle(t: &TestEnvironment) -> String {
-    t.wait_for_loro_quiescence(Duration::from_secs(15)).await;
-    t.wait_for_cdc_quiescent(Duration::from_millis(250), Duration::from_secs(15))
-        .await;
-    t.wait_for_org_files_stable(300, Duration::from_secs(15))
-        .await;
+    t.settle().await;
     t.org_fs
         .read_to_string(&t.org_file_path("notes.org"))
         .await

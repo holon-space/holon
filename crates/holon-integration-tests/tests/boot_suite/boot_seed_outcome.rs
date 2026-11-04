@@ -115,11 +115,11 @@ fn a_background_seed_is_reported_as_performed_once_it_succeeds() {
             "the seed ran, so it must not be reported as skipped: {:?}",
             report.skipped()
         );
-        assert!(
-            env.wait_for_block("block:root-layout", Duration::from_secs(10))
-                .await,
-            "the report says performed, so the layout must be in the store"
-        );
+        env.wait_for_block("block:root-layout", Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|hung| {
+                panic!("the report says performed, so the layout must be in the store: {hung}")
+            });
         assert_eq!(
             start_incomplete(&env),
             Vec::<String>::new(),

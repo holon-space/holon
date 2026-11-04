@@ -60,6 +60,7 @@ async fn engine_over(
         db_path,
         holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+        Default::default(),
         move |injector| {
             holon_loro_wiring::EventInfraModule
                 .configure(injector)

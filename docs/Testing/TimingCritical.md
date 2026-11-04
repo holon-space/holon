@@ -48,6 +48,36 @@ Three consequences worth stating:
   200 instead of 250, a real 120 s hang in the default layout seed, and the
   `inv-two-instance-convergence` divergence that a latency red was concealing.
 
+## Tests wait for the target of their write, not for a quiet period
+
+A wait that ends after a quiet window passes on a fast host and fails on a
+loaded one, so it is a bug-under-load by construction. A test waits for the
+state its write must reach instead:
+
+- After a write, `TestEnvironment::settle()` waits until every stage of
+  `converge_signals` (Loro, CDC routing and apply, watch registration and
+  release, the block feed, org ingest and org write-back) has reached the seq
+  that the write produced.
+- A test that proves an ABSENCE ("this write did NOT reach the disk") writes a
+  sentinel after it with `TestEnvironment::sentinel_writeback`, which waits
+  until the file holds the sentinel. Write-back runs in feed order, so every
+  earlier write has passed write-back by then.
+- Any other condition polls with `polling::wait_until` and a `Probe`. On its
+  deadline it fails with `WaitHung`, which names the target, the stage and the
+  last value it read.
+- A remaining `sleep` in a test names its reason: a poll interval inside a
+  target loop, or a product timer that the test drives on purpose.
+
+Product code reads physical time only through the `Clock` port
+(`crates/holon-api/src/clock.rs`): `now()`, `sleep`, `timeout` and `interval`
+on monotonic `Mono` time, and `now_millis()` for wall time. Product durations
+(the SQL actor's hang bound, the Loro boot-gate watchdog) come from `Timings`,
+which an embedder sets through `SessionConfig::timings`, never from
+environment variables. The archlint smell `physical_time` holds the line: a
+new direct `Instant::now`, `tokio::time::sleep` or `thread::sleep` in product
+code fails `just gate-arch`, and `archlint/baseline.txt` lists the sites not
+yet moved onto the port.
+
 ## Timing-critical tests
 
 `Runs` says WHAT runs a row inside the gate's one quiet-hold step
