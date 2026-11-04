@@ -859,6 +859,32 @@ expect_sut_order bulk-first known-red:bulk-add-sibling-order '\"block:bulk-1-0\"
 expect_sut_order bulk-second novel '\"block:c1\", \"block:bulk-1-0\"'
 expect_sut_order day-page-first novel '\"block:2026-10-01\", \"block:bulk-1-0\"'
 
+# `undo-create-sibling-order` anchors both whole orders under structural-page;
+# a changed tail or a block in another position is novel.
+expect_structural_sut_order() {
+    local label="$1" want="$2" sut="$3" log="$work/structural-sut-order-$1.log"
+    local a='\"block:96fd87f0-c7b5-441a-97ce-6b33bbcb418c\"' b='\"block:62b5b4d5-279b-4334-b97e-1bc97f421d84\"'
+    sut="${sut//A/$a}"; sut="${sut//B/$b}"
+    {
+        printf '%s\n' "$panic_header"
+        printf '%s\n' "reconciled composed sequence diverged from the oracle: [(\"inv-blocks-match-ref/org\", \"[inv-blocks-match-ref/org] sibling order diverges under parent block:structural-page.\\n  ref order: [\\\"block:parent\\\", $a, $b, \\\"block:c1\\\", \\\"block:c2\\\"]\\n  sut order: [$sut]\")]"
+        printf '%s\n' "error: recipe \`keystone-full\` failed with exit code 101"
+    } >"$log"
+    local out
+    out=$("$repo_root/scripts/keystone-known-reds.sh" "$log" 2>&1 || true)
+    if ! grep -q -- "^PRIMARY: \[$want\]" <<<"$out"; then
+        echo "[fixture] FAIL structural-sut-order/$label: want PRIMARY [$want]; got:"
+        printf '%s\n' "$out" | tail -5 | sed 's/^/          | /'
+        outcome_fail=1
+        return
+    fi
+    echo "[fixture] ok structural-sut-order/$label ($want)"
+}
+expect_structural_sut_order split-swap known-red:undo-create-sibling-order '\"block:parent\", B, A, \"block:c1\", \"block:c2\"'
+expect_structural_sut_order tail-extra novel '\"block:parent\", B, A, \"block:c1\", \"block:c2\", \"block:c3\"'
+expect_structural_sut_order tail-lost novel '\"block:parent\", A, B, \"block:c1\"'
+expect_structural_sut_order uuid-moved novel '\"block:parent\", B, \"block:c1\", A, \"block:c2\"'
+
 # The write-back state machine rows anchor on ids that only their sidecar
 # fixture uses, and sit above the broader rows that match the same payloads.
 # wb-d7's payload carries no fixture id, so it stays under syn-real-mint.
