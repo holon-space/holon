@@ -679,6 +679,9 @@ struct Delivery {
 struct DeliveryEntry {
     view_name: String,
     cursor: std::sync::Weak<DeliveryCursor>,
+    /// Closed once nobody reads the subscription, which then owes no apply
+    /// although the demux may still hold it.
+    stream: mpsc::WeakSender<BatchWithMetadata<RowChange>>,
     reports_applied: bool,
 }
 
@@ -822,7 +825,9 @@ impl MatviewManager {
     pub fn settled_up_to(&self) -> SettledUpTo {
         let mut delivery = self.delivery.lock().expect("delivery mutex");
         delivery.routed.retain(|r| r.strong_count() > 0);
-        delivery.cursors.retain(|e| e.cursor.strong_count() > 0);
+        delivery
+            .cursors
+            .retain(|e| e.cursor.strong_count() > 0 && Subscriptions::listening(&e.stream));
         let routed_through = delivery
             .routed
             .iter()
@@ -1511,6 +1516,7 @@ impl MatviewManager {
             .push(DeliveryEntry {
                 view_name: view_name.to_string(),
                 cursor: Arc::downgrade(&cursor),
+                stream: tx.downgrade(),
                 reports_applied,
             });
         let (ack_tx, ack_rx) = oneshot::channel();

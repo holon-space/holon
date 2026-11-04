@@ -514,11 +514,7 @@ mod tests {
         engine: &Arc<BackendEngine>,
         apply_delay: Option<Duration>,
     ) -> (Arc<DeliveryCursor>, Arc<AtomicU64>) {
-        engine
-            .db_handle()
-            .execute_ddl("CREATE TABLE settle_probe (id TEXT PRIMARY KEY, owner TEXT NOT NULL)")
-            .await
-            .expect("create the probe table");
+        create_probe_table(engine).await;
         let cursor = Arc::new(DeliveryCursor::default());
         let (_view, mut stream) = reporting_to(
             cursor.clone(),
@@ -542,6 +538,14 @@ mod tests {
             }
         });
         (cursor, applied)
+    }
+
+    async fn create_probe_table(engine: &Arc<BackendEngine>) {
+        engine
+            .db_handle()
+            .execute_ddl("CREATE TABLE settle_probe (id TEXT PRIMARY KEY, owner TEXT NOT NULL)")
+            .await
+            .expect("create the probe table");
     }
 
     async fn insert(engine: &Arc<BackendEngine>, id: &str, owner: &str) {
@@ -597,6 +601,43 @@ mod tests {
             cursor.sent(),
             cursor.applied()
         );
+    }
+
+    /// A watch whose consumer has gone owes no apply. Its enriching stream
+    /// still accepts the next batch and only closes behind it, so the
+    /// subscription stays registered with that batch routed and unapplied.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_watch_whose_consumer_left_does_not_hold_the_settle() {
+        let engine = holon::di::test_helpers::create_test_engine()
+            .await
+            .expect("test engine");
+        create_probe_table(&engine).await;
+        for i in 0..50 {
+            insert(&engine, &format!("before-{i}"), "mine").await;
+        }
+        let cursor = Arc::new(DeliveryCursor::default());
+        let (_view, raw) = reporting_to(
+            cursor.clone(),
+            engine
+                .matview_manager()
+                .ensure_and_subscribe("SELECT id, owner FROM settle_probe", None),
+        )
+        .await
+        .expect("watch the probe view");
+        drop(holon::api::ui_watcher::enrich_stream(
+            raw,
+            engine.profile_resolver().clone(),
+            Default::default(),
+        ));
+        drop(cursor);
+
+        insert(&engine, "after", "mine").await;
+        converge_signals(
+            engine_signals(&engine),
+            Patience::Budget(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap_or_else(|gave_up| panic!("settle gave up {gave_up}"));
     }
 
     /// A deadline that fires names the stage, its target and where it stands.
