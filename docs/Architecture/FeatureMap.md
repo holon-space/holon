@@ -418,6 +418,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `ref-diverge-content-ref-empty`
 - `ref-diverge-content-text-drift`
 - `ref-diverge-parent-reparent`
+- `refused-profile-fix-clears-refusal-load-timeout`
 - `shell-effect-stubborn-member-pid-race`
 - `shopping-mapping-cost-slo`
 - `slo-probe-arm-refusal-caught-panic`
