@@ -14,6 +14,7 @@ use holon_api::EntityUri;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::block::Block;
+use holon_block_roundtrip_testing::MarkedContent;
 use holon_block_roundtrip_testing::marked_content_strategy;
 use holon_org_format::RenderFidelity;
 use holon_org_format::expected_reparse;
@@ -494,23 +495,115 @@ proptest! {
     }
 }
 
+/// The chains above with a word of slack before a level's inner emphasis
+/// (`_a _b__`): org still nests them, but the inner span no longer covers the
+/// outer one.
+fn nested_emphasis_with_slack_strategy() -> impl Strategy<Value = String> {
+    (
+        prop::collection::vec(
+            (
+                prop_oneof![Just('*'), Just('/'), Just('_'), Just('+')],
+                prop::option::of("[a-z]{1,3} "),
+            ),
+            2..4,
+        ),
+        "[a-z][a-z0-9]{0,4}",
+    )
+        .prop_map(|(levels, core)| {
+            levels.iter().rev().fold(core, |inner, (delim, slack)| {
+                format!("{delim}{}{inner}{delim}", slack.as_deref().unwrap_or(""))
+            })
+        })
+}
+
+/// Slack makes byte identity unreachable for a same-kind chain: the store
+/// holds one span per kind, so the inner delimiters become content and are
+/// quoted on the way out. What stays binding is a storable parse and a cycle
+/// that settles.
+fn nested_emphasis_with_slack_parses_storably(text: &str) {
+    let (content, marks) = extract_inline_marks(text);
+    assert_store_representable(&marks, &format!("parsing {text:?}"));
+    assert_fixed_point(&content, &marks, 3);
+}
+
+#[test]
+fn nested_emphasis_with_slack_parses_to_a_storable_fixed_point() {
+    for text in ["_a _b__", "*a *b**", "_a /b _c_/_"] {
+        nested_emphasis_with_slack_parses_storably(text);
+    }
+    proptest::test_runner::TestRunner::new(ProptestConfig {
+        cases: 512,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })
+    .run(&nested_emphasis_with_slack_strategy(), |text| {
+        nested_emphasis_with_slack_parses_storably(&text);
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// An Underline mark APART from a markup literal shares no delimiter with it:
+/// the literal is quoted, the mark is emitted as is, and nothing else changes.
+#[test]
+fn an_underline_apart_from_a_markup_literal_keeps_its_bytes() {
+    let content = "aa the __init__ method";
+    let marks = [span(0, 2, InlineMark::Underline)];
+    let mut block = Block::new_text(
+        EntityUri::block("underline-apart"),
+        EntityUri::block("parent"),
+        content,
+    );
+    block.marks = Some(marks.to_vec());
+    let (emitted, fidelity) = render_block_content_checked(&block);
+
+    assert_eq!(emitted, "_aa_ the =__init__= method");
+    assert_eq!(fidelity, RenderFidelity::Exact);
+    assert_fixed_point(content, &marks, 3);
+}
+
+/// Store states a generator once found to break the cycle, run through the
+/// same property before the random cases.
+fn fixed_store_states() -> Vec<MarkedContent> {
+    let content = "aa [[https://example.com][the __init__ method]]";
+    vec![MarkedContent {
+        content: content.to_string(),
+        // The Underline closes inside the Verbatim, next to a link label whose
+        // `__init__` holds more underline delimiters.
+        marks: vec![
+            span(4, 46, InlineMark::Bold),
+            span(1, 47, InlineMark::Verbatim),
+            span(0, 3, InlineMark::Underline),
+        ],
+        expected_after_cycle: content.to_string(),
+    }]
+}
+
+fn store_state_reaches_a_fixed_point(state: &MarkedContent) {
+    assert_fixed_point_against(
+        &state.content,
+        &state.marks,
+        3,
+        Some(&state.expected_after_cycle),
+    );
+}
+
 // The class, not the instances. Any `(content, marks)` state ANY producer
 // can mint must be render-safe — see `MarkedContent` for why generating marks
 // by parsing org text cannot reach most of those states.
-proptest! {
-    #![proptest_config(ProptestConfig {
+#[test]
+fn any_generated_store_state_reaches_a_fixed_point() {
+    for state in fixed_store_states() {
+        store_state_reaches_a_fixed_point(&state);
+    }
+    proptest::test_runner::TestRunner::new(ProptestConfig {
         cases: 600,
         failure_persistence: None,
         ..ProptestConfig::default()
-    })]
-
-    #[test]
-    fn any_generated_store_state_reaches_a_fixed_point(state in marked_content_strategy()) {
-        assert_fixed_point_against(
-            &state.content,
-            &state.marks,
-            3,
-            Some(&state.expected_after_cycle),
-        );
-    }
+    })
+    .run(&marked_content_strategy(), |state| {
+        store_state_reaches_a_fixed_point(&state);
+        Ok(())
+    })
+    .unwrap();
 }

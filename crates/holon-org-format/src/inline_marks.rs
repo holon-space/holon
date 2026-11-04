@@ -149,7 +149,6 @@ fn extract_state(text: &str, classifier: &LinkTargetClassifier, src_base: usize)
         classifier: classifier.clone(),
         source: text.into(),
         src_base,
-        whole_text_len: text.len(),
         ..Default::default()
     };
     walk_node(&parse_inline(text), &mut state);
@@ -157,24 +156,21 @@ fn extract_state(text: &str, classifier: &LinkTargetClassifier, src_base: usize)
 }
 
 /// An emphasis node's contents, walked from the tree the outer walk already
-/// holds: same classifier and policy as `outer`, and which marks already
-/// cover the contents whole — see [`ExtractState::full_span_active`].
+/// holds: same classifier and policy as `outer`, and which marks enclose the
+/// contents — see [`ExtractState::enclosing`].
 fn extract_contents_within(
     emphasis: &SyntaxNode,
     outer: &ExtractState,
-    full_span_active: Vec<InlineMark>,
+    enclosing: Vec<InlineMark>,
 ) -> ExtractState {
     let children: Vec<_> = emphasis.children_with_tokens().collect();
     let contents = &children[1..children.len() - 1];
-    let delimiters = usize::from(children[0].text_range().len())
-        + usize::from(children[children.len() - 1].text_range().len());
     let mut state = ExtractState {
         classifier: outer.classifier.clone(),
         source: outer.source.clone(),
         keep_emphasis_raw: outer.keep_emphasis_raw,
         src_base: outer.src_base,
-        whole_text_len: usize::from(emphasis.text_range().len()) - delimiters,
-        full_span_active,
+        enclosing,
         nesting: outer.nesting + 1,
         ..Default::default()
     };
@@ -812,14 +808,11 @@ struct ExtractState {
     /// Absolute source byte offset of the string being walked (non-zero only
     /// in the emphasis arm's nested re-parse).
     src_base: usize,
-    /// Byte length of the string being walked, so a node can tell whether it
-    /// spans the whole of it.
-    whole_text_len: usize,
-    /// Marks an ancestor already holds over exactly this whole string. A node
-    /// re-minting one of them would put the same `(start, end, mark)` triple
-    /// in the set twice, which the Peritext store cannot hold (see
-    /// [`MarkSpan`]); such a node emits its delimiters as content instead.
-    full_span_active: Vec<InlineMark>,
+    /// Marks the enclosing emphasis nodes mint over the string being walked.
+    /// A node re-minting one of them would overlap a same-kind span, which the
+    /// Peritext store merges into one (see [`MarkSpan`]); such a node emits
+    /// its delimiters as content instead.
+    enclosing: Vec<InlineMark>,
     /// Source→content provenance, in source order — see [`OffsetRun`].
     runs: Vec<OffsetRun>,
     /// How many emphasis re-parses enclose the string being walked.
@@ -1114,25 +1107,22 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
                 MarkKindHint::Strike => InlineMark::Strike,
                 _ => unreachable!(),
             };
-            // orgize reads `**x**` as bold nested in bold, so stripping both
-            // layers would yield TWO MarkSpans with the same range and the same
-            // mark. The store keeps marks as a Peritext attribute set, where a
-            // mark is (range, key, value) — a duplicate has no representation
-            // there, so it comes back as one and write-back halves the
-            // authored delimiters. When an ancestor already carries this mark
-            // over exactly this span, keep the delimiters as literal content
-            // instead: one representable mark, and the bytes survive.
-            if spans_whole_text(&raw, state) && state.full_span_active.contains(&outer_mark) {
+            // orgize reads `**x**` as bold in bold and `_a _b__` as underline
+            // in underline, so stripping both layers would yield two overlapping
+            // MarkSpans of one mark. The store keeps marks as a Peritext
+            // attribute set and merges those into their union, so write-back
+            // loses the inner delimiters. When an ancestor already carries this
+            // mark, keep the delimiters as literal content instead: one
+            // representable mark, and the bytes survive.
+            if state.enclosing.contains(&outer_mark) {
                 emit_delimiters_as_content(&node, &raw, node_src, state);
                 return;
             }
             // Nested mark offsets are scalar offsets within the contents; the
             // runs are already in OUTER source coordinates.
-            let nested = extract_contents_within(
-                &node,
-                state,
-                active_for_inner(&raw, outer_mark.clone(), state),
-            );
+            let mut enclosing = state.enclosing.clone();
+            enclosing.push(outer_mark.clone());
+            let nested = extract_contents_within(&node, state, enclosing);
             // The text from recursion may differ from `inner` if it had nested
             // marks (delimiters were stripped). Use nested_text as the actual
             // emitted content.
@@ -1145,26 +1135,6 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             );
         }
     }
-}
-
-/// Whether this node's source text IS the whole string being walked — the
-/// only geometry under which an ancestor's mark covers exactly this span, and
-/// therefore the only one where re-emitting that mark would duplicate it.
-fn spans_whole_text(raw: &str, state: &ExtractState) -> bool {
-    raw.len() == state.whole_text_len
-}
-
-/// The marks an ancestor holds over exactly the inner text this node is about
-/// to recurse into: this node's own mark, plus the ancestors' own set when
-/// this node spans everything they cover.
-fn active_for_inner(raw: &str, outer_mark: InlineMark, state: &ExtractState) -> Vec<InlineMark> {
-    let mut active = if spans_whole_text(raw, state) {
-        state.full_span_active.clone()
-    } else {
-        Vec::new()
-    };
-    active.push(outer_mark);
-    active
 }
 
 /// Emit an emphasis node's own delimiters as literal content, minting no mark:
@@ -1184,8 +1154,7 @@ fn emit_delimiters_as_content(
         .expect("an emphasis node has delimiters")
         .len_utf8();
     let inner_src = stripped_byte_range(raw, 1, 1);
-    let active = state.full_span_active.clone();
-    let nested = extract_contents_within(node, state, active);
+    let nested = extract_contents_within(node, state, state.enclosing.clone());
 
     push_text(
         state,
