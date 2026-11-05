@@ -59,7 +59,8 @@ rc=0; combine_in_repo "${heads##* }" >/dev/null || rc=$?
 expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 
 # `just` and `cargo` stubs append each call, its HOLON_PBT_TIMING and the quiet
-# marker's content to $GATE_PROBE; `just latency-slo-gate` admits the host, `just timing-gate-build` prints $BUILD_OUT
+# marker's content to $GATE_PROBE; `just latency-slo-gate` prints $SETTLE_OUT (default: a contention line
+# and an admission), `just timing-gate-build` prints $BUILD_OUT
 # and `just $STUB_RED` exits 1; with STUB_RED_NEXTEST set, every nextest run
 # fails one org_suite test no known-red row lists. HOME is a scratch dir, so the hold's marker,
 # lock, log and slot walk are scratch files and no real build is lowered.
@@ -80,7 +81,7 @@ for tool in just cargo; do
 #!/usr/bin/env bash
 echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
-[ "${1:-}" != latency-slo-gate ] || printf "mean boot matview_ddl 1.0ms\nhost admitted\n"
+[ "${1:-}" != latency-slo-gate ] || printf '%b' "${SETTLE_OUT-mean boot matview_ddl 1.0ms\nhost admitted\n}"
 [ "$*" != "${STUB_RED:-}" ] || exit 1
 [ -z "${STUB_RED_NEXTEST:-}" ] || [ "${1:-} ${2:-}" != "nextest run" ] || { echo "        FAIL [   1.000s] holon-integration-tests::integration org_suite::stub_red"; exit 100; }
 EOF
@@ -200,6 +201,13 @@ expect "waits for the release and exits 0 (got $rc)" [ "$rc" = 0 ]
 expect "then runs its steps under its own hold" grep -qE "^timing-gate-steps \| quiet=[0-9]+\$" "$probe"
 expect "not under the other job's hold" [ -z "$(grep "^timing-gate-steps | quiet=$other\$" "$probe")" ]
 expect "releases the hold" [ ! -e "$marker" ]
+
+echo "== the timing-gate recipe on a settle probe without a contention line"
+for case in "host admitted\n|probe line absent — judging" "|the probe round printed neither an admission nor a contention value"; do
+  rc=0; in_stubs SETTLE_OUT="${case%%|*}" "$real_just" --justfile "$here/../justfile" --working-directory "$recipe" timing-gate >"$scratch/recipe-noprobe.out" 2>&1 || rc=$?
+  expect "settle output '${case%%|*}': exits 0 (got $rc)" [ "$rc" = 0 ]
+  expect "settle output '${case%%|*}': names the state '${case#*|}'" grep -q "${case#*|}" "$scratch/recipe-noprobe.out"
+done
 
 echo "== the timing gate on the integrated tip"
 : > "$probe"

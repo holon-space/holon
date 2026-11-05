@@ -1637,7 +1637,14 @@ timing-gate:
     while :; do
         round=$(( round + 1 ))
         just latency-slo-gate a_slowed_pipeline_fails_the_drain_test > "$P" 2>&1 || true
-        probe="$(grep -oE 'mean boot matview_ddl [0-9.]+ms[^.]*' "$P" | tail -1)"
+        # No contention line is a valid probe state (an admitted host prints
+        # none); it is named below. Any other grep failure stops the gate.
+        grc=0; lines="$(grep -oE 'mean boot matview_ddl [0-9.]+ms[^.]*' "$P")" || grc=$?
+        case $grc in
+            0) probe="$(tail -1 <<<"$lines")" ;;
+            1) probe= ;;
+            *) echo "timing-gate settle: grep on $P failed (exit $grc)"; exit "$grc" ;;
+        esac
         if grep -q 'host admitted' "$P"; then
             echo "timing-gate settle: round $round: ${probe:-probe line absent} — judging"
             break
