@@ -95,7 +95,7 @@ track() {
   for entry in ${TRACKS[$1]}; do
     n=${entry%%:*} name=${entry#*:}
     case $name in
-      featuremap) set -- /usr/bin/python3 scripts/featuremap.py check ;;
+      featuremap) set -- just cargo-free-checks ;;
       keystone-smoke | hand-authored | extra-nextest) set -- "$0" "--$name" ;;
       loro-suite | projector-lag-lock) set -- env HOLON_PBT_TIMING=measure just "$name" ;;
       *) set -- just "$name" ;;

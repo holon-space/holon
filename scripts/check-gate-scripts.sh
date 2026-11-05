@@ -31,7 +31,7 @@ make_repo() {
   jj git init --quiet
   printf 'base\n' > f
   printf '.claude/worktrees/\ntarget/\n' > .gitignore
-  mkdir scripts && : > scripts/featuremap.py
+  mkdir scripts
   printf '#!/bin/sh\n' > scripts/check-target-leftovers.sh && chmod +x scripts/check-target-leftovers.sh
   jj commit --quiet -m base
   jj bookmark create --quiet main -r @-
@@ -165,6 +165,11 @@ expect "names no other step red" [ "$(grep -c '^RED ' "$scratch/integrate-red.ou
 expect "runs every other step to a green row" [ "$(rows_of g2 | grep -v ' 0$')" = "7 gate-arch 1" ]
 expect "writes one gate-steps row per step" [ "$(rows_of g2 | cut -d' ' -f1 | tr '\n' ' ')" = "$sorted_steps" ]
 expect "names no candidate tip" [ -z "$(grep '^candidate tip' "$scratch/integrate-red.out")" ]
+
+echo "== the integrate run with a red cargo-free check"
+rc=0; in_stubs STUB_RED=cargo-free-checks "$integrate" g7 "1 2" "$tip" >"$scratch/integrate-cargo-free.out" 2>&1 || rc=$?
+expect "exits 1 (got $rc)" [ "$rc" = 1 ]
+expect "names the feature-map step red" grep -qx 'RED STEP \[9\] featuremap: exit 1, log target/gate-logs/g7-step-9.log' "$scratch/integrate-cargo-free.out"
 
 echo "== the integrate run with a red step under the hold"
 rc=0; in_stubs STUB_RED=windowed-gate "$integrate" g5 "1 2" "$tip" >"$scratch/integrate-held-red.out" 2>&1 || rc=$?

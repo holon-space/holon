@@ -1497,13 +1497,10 @@ check-web-arm:
     cargo check {{CANON}} --all-targets \
         2>&1 | tee target/gate-logs/check-web-arm.log
 
-# Architecture rules (archlint + the Rust-side structural tests). Its own
-# package, so `cargo nextest run --workspace` was the only thing that ran it and
-# no gate runs that — a red architecture test sat on main for 4 days
-# (BugFunnel 2026-08-12). Cheap (~35s): any per-lane or per-landing gate list,
-# even a hand-picked subset, should include THIS recipe — omitting it is how a
-# red architecture rule escapes a landing.
-gate-arch:
+# The gate's checks that read the tree and build nothing (about 30 s): gate-arch
+# and the landing gate's feature-map step run them. No cargo command belongs
+# here: scripts/test-cargo-free-checks.py fails on one.
+cargo-free-checks:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
@@ -1524,6 +1521,19 @@ gate-arch:
         2>&1 | tee target/gate-logs/gate-arch-adr-net-names.log
     { ./scripts/check-red-logs.py && ./scripts/check-red-logs.py --self-check; } \
         2>&1 | tee target/gate-logs/gate-arch-red-logs.log
+    /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
+
+# Architecture rules (archlint + the Rust-side structural tests). Its own
+# package, so `cargo nextest run --workspace` was the only thing that ran it and
+# no gate runs that — a red architecture test sat on main for 4 days
+# (BugFunnel 2026-08-12). Cheap (~35s): any per-lane or per-landing gate list,
+# even a hand-picked subset, should include THIS recipe — omitting it is how a
+# red architecture rule escapes a landing.
+gate-arch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    just cargo-free-checks
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
     # clippy.toml lists the tracing span guards; one held across `.await` leaves
     # its span current on the worker thread and panics an unrelated task. That
@@ -1767,8 +1777,8 @@ landing-gate:
     just gate-arch
     echo "== landing [8/17]: @c4 structure matches the committed baseline =="
     just arch-validate 2>&1 | tee target/gate-logs/landing-arch-validate.log
-    echo "== landing [9/17]: feature map matches the tree =="
-    /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
+    echo "== landing [9/17]: cargo-free checks, feature map included =="
+    just cargo-free-checks
     echo "== landing [10/17]: architecture lints (archlint) =="
     just analyze-arch 2>&1 | tee target/gate-logs/landing-analyze-arch.log
     echo "== landing [11/17]: loro consolidator suite =="
