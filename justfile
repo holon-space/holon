@@ -1762,8 +1762,9 @@ landing-gate:
     just analyze-arch 2>&1 | tee target/gate-logs/landing-analyze-arch.log
     echo "== landing [11/17]: loro consolidator suite =="
     just loro-suite
-    # Steps 12-14 MEASURE latency and judge nothing about it, so they may run at
-    # any load. The gate script places them outside the quiet hold.
+    # Steps 12-14 MEASURE latency and judge nothing about it. The gate script
+    # runs 12 and 13 at any load and 14 under the quiet hold, because the
+    # windowed paint waits go red on a loaded host.
     echo "== landing [12/17]: hand-authored regressions (latency measured) =="
     just hand-authored
     echo "== landing [13/17]: projector-lag lock =="

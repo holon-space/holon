@@ -61,18 +61,20 @@ expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 # `just` and `cargo` stubs append each call, its HOLON_PBT_TIMING and the quiet
 # marker's content to $GATE_PROBE; `just latency-slo-gate` prints $SETTLE_OUT (default: a contention line
 # and an admission), `just timing-gate-build` prints $BUILD_OUT
-# and `just $STUB_RED` exits 1; with STUB_RED_NEXTEST set, every nextest run
+# `just $STUB_RED` exits 1 and `just $STUB_SLEEP` sleeps 2 s; with STUB_RED_NEXTEST set, every nextest run
 # fails one org_suite test no known-red row lists. HOME is a scratch dir, so the hold's marker,
 # lock, log and slot walk are scratch files and no real build is lowered.
 home="$scratch/home" stubs="$scratch/stubs" probe="$scratch/probe.log"
 orch="$home/.claude/skills/orchestrator/scripts"
 mkdir -p "$orch" "$home/.cache/holon-build" "$stubs"
 ln -s "$HOME"/.claude/skills/orchestrator/scripts/* "$orch/"
-# A track runs in this test's slot; the quiet hold is the real one.
+# A track runs in this test's slot, or with GATE_HOLD_FIRST set in the real one; the quiet hold is
+# the real one.
 rm "$orch/with-build-slot.sh"
 cat > "$orch/with-build-slot.sh" <<EOF
 #!/usr/bin/env bash
 case "\$1" in --quiet-*) exec "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" "\$@" ;; esac
+[ -z "\${GATE_HOLD_FIRST:-}" ] || exec "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" "\$@"
 HOLON_BUILD_SLOT_HOLDER=\$\$ exec "\$@"
 EOF
 chmod +x "$orch/with-build-slot.sh"
@@ -81,8 +83,10 @@ for tool in just cargo; do
 #!/usr/bin/env bash
 echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
+[ "$*" != gate-compile ] || [ -z "${GATE_HOLD_FIRST:-}" ] || "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" --quiet-hold "$GATE_PID"
 [ "${1:-}" != latency-slo-gate ] || printf '%b' "${SETTLE_OUT-mean boot matview_ddl 1.0ms\nhost admitted\n}"
 [ "$*" != "${STUB_RED:-}" ] || exit 1
+[ "$*" != "${STUB_SLEEP:-}" ] || sleep 2
 [ -z "${STUB_RED_NEXTEST:-}" ] || [ "${1:-} ${2:-}" != "nextest run" ] || { echo "        FAIL [   1.000s] holon-integration-tests::integration org_suite::stub_red"; exit 100; }
 EOF
 done
@@ -98,7 +102,8 @@ for l in open(sys.argv[1]):
 steps="1 20 2 13 17 7 14 5 6 8 9 18 19 15 11 3 4 12 10 22"
 sorted_steps=$(tr ' ' '\n' <<<"$steps" | sort -n | tr '\n' ' ')
 # Without the caller's HOLON_PBT_TIMING, only the gate scripts can set it.
-in_stubs() { env -u HOLON_PBT_TIMING HOME="$home" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
+# The real wrapper asks rustup for rustc; under the scratch HOME rustup would install a toolchain.
+in_stubs() { env -u HOLON_PBT_TIMING HOME="$home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
 marker="$home/.cache/holon-build/quiet"
 # The probe lines of the steps that go red on a loaded host: the extra nextest
 # and the windowed gate.
@@ -166,6 +171,13 @@ rc=0; in_stubs STUB_RED=windowed-gate "$integrate" g5 "1 2" "$tip" >"$scratch/in
 expect "exits 1 (got $rc)" [ "$rc" = 1 ]
 expect "releases the hold" [ ! -e "$marker" ]
 
+echo "== the integrate run whose own hold is up before its tracks start"
+# gate-compile takes the hold for the gate's pid, so the tracks start under it in the real wrapper.
+rc=0; in_stubs GATE_HOLD_FIRST=1 "$integrate" g6 "1 2" "$tip" >"$scratch/integrate-own-hold.out" 2>&1 || rc=$?
+expect "exits 0 (got $rc)" [ "$rc" = 0 ]
+expect "lowers no track of its own" [ -z "$(grep 'this build runs in the background class' "$scratch/integrate-own-hold.out")" ]
+expect "releases the hold" [ ! -e "$marker" ]
+
 echo "== each track alone"
 : > "$probe"
 rc=0; tracks_alone || rc=$?
@@ -173,6 +185,12 @@ expect "every track exits 0 (got $rc)" [ "$rc" = 0 ]
 expect "the loaded-red steps run under the hold" held_by $$
 expect "no other step runs under it" held_by_none_other
 expect "the hold is released" [ ! -e "$marker" ]
+expect "warns of no expired hold" [ -z "$(grep 'quiet hold may have expired' "$scratch/tracks.out")" ]
+
+echo "== the quiet track whose step outlives the hold's age limit"
+rc=0; in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ GATE_QUIET_MAX_AGE_S=1 STUB_SLEEP=windowed-gate "$integrate" --track 1 >"$scratch/track-expired.out" 2>&1 || rc=$?
+expect "exits 0 (got $rc)" [ "$rc" = 0 ]
+expect "names the time after which reds may be load reds" grep -qE '^quiet hold may have expired; reds after [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z may be load reds$' "$scratch/track-expired.out"
 
 echo "== the quiet track while another job holds the hold"
 sleep 60 & other=$!

@@ -66,7 +66,8 @@ QUIET_TRACK=1
 read -ra STEPS <<<"${TRACKS[*]}"
 step_file() { echo "target/gate-logs/$GATE-step-$1.$2"; }
 SLOT=~/.claude/skills/orchestrator/scripts/with-build-slot.sh
-# The hold names the gate's own pid, so no track of this gate is lowered. Exit
+# The hold names the gate's own pid, and every track names it as its holder
+# (HOLON_BUILD_QUIET_HOLDER), so no track of this gate is lowered. Exit
 # 75 is a hold of another job (a timing gate or probe): wait for its release.
 quiet_hold() {
   local rc
@@ -76,7 +77,17 @@ quiet_hold() {
     sleep "${GATE_STEP_POLL_S:-5}"
   done
   [ "$rc" = 0 ] || { echo "QUIET HOLD NOT TAKEN: with-build-slot.sh --quiet-hold exit $rc"; exit "$rc"; }
-  trap '"$SLOT" --quiet-release "$GATE_PID"' EXIT
+  quiet_age_watch & watch=$!
+  trap '"$SLOT" --quiet-release "$GATE_PID"; ! kill -0 "$watch" 2>/dev/null || kill "$watch"' EXIT
+}
+# with-build-slot.sh treats a hold older than its age limit (3 h) as free, so
+# another job may then take it while this track still runs.
+quiet_age_watch() {
+  local s
+  trap 'kill "$s"; exit' TERM
+  sleep "${GATE_QUIET_MAX_AGE_S:-10800}" >/dev/null & s=$!
+  wait "$s"
+  echo "quiet hold may have expired; reds after $(date -u +%Y-%m-%dT%H:%M:%SZ) may be load reds"
 }
 track() {
   local entry n name rc
@@ -105,7 +116,7 @@ case "${1:-}" in
 esac
 
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
-export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$
+export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$ HOLON_BUILD_QUIET_HOLDER=$$
 tip=$3
 # The gpui build script then ignores git, so a git or jj call between the two
 # scripts cannot rebuild what gate-integrate.sh built.
