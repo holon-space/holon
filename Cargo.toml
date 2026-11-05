@@ -435,6 +435,9 @@ ed25519-dalek = { path = ".cargo/patches/ed25519-dalek" }
 # _CGContextSetFontSmoothingStyle). Gating it off keeps the symbol out of every
 # iOS binary; macOS/desktop are unaffected.
 core-graphics = { path = ".cargo/patches/core-graphics" }
+# futures-signals 0.3.34 plus upstream's elided-lifetime fix and a lost-wakeup fix: the
+# published `poll_change` drops a cross-thread `Mutable::set` that lands right after a delivery.
+futures-signals = { path = ".cargo/patches/futures-signals" }
 
 # Holon loro fork — implements `fork_at` / `SnapshotAt` on shallow-snapshot docs
 # (branch `fork-at-shallow`, based on loro-internal-v1.13.9). Needed because a

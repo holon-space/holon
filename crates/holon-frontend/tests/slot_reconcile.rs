@@ -21,6 +21,8 @@ use holon_frontend::StubBuilderServices;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveSlot;
 
+use crate::prop_wait::prop_reaches;
+
 fn row(content: &str) -> Arc<DataRow> {
     let mut r = DataRow::new();
     r.insert("id".to_string(), Value::String("block:1".to_string()));
@@ -57,26 +59,18 @@ fn slot_content(node: &ReactiveViewModel) -> Arc<ReactiveViewModel> {
         .get_cloned()
 }
 
-fn content_prop(node: &ReactiveViewModel) -> Option<String> {
-    match node.props.get_cloned().get("content") {
-        Some(Value::String(s)) => Some(s.clone()),
-        _ => None,
-    }
-}
-
-/// Let the runtime drain the subscription's wakeup.
-fn settle(services: &StubBuilderServices) {
-    let handle = services.runtime_handle().clone();
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            handle.block_on(async {
-                for _ in 0..50 {
-                    tokio::task::yield_now().await;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            })
-        });
-    });
+fn wait_for_content(
+    services: &StubBuilderServices,
+    node: &ReactiveViewModel,
+    expected: &str,
+    context: &str,
+) {
+    services.runtime_handle().block_on(prop_reaches(
+        node,
+        "content",
+        Value::String(expected.to_string()),
+        context,
+    ));
 }
 
 #[test]
@@ -110,24 +104,24 @@ fn s1_b_a_row_update_still_reaches_the_slot_root_after_a_rebuild() {
 
     let mounted = slot_wrapper(live_text(&services, &cell));
     cell.set(row("before-rebuild"));
-    settle(&services);
-    assert_eq!(
-        content_prop(&slot_content(&mounted)).as_deref(),
-        Some("before-rebuild"),
-        "S1 setup: the subscription must drive props before any rebuild"
+    wait_for_content(
+        &services,
+        &slot_content(&mounted),
+        "before-rebuild",
+        "S1 setup: the subscription must drive props before any rebuild",
     );
 
     let rebuilt = slot_wrapper(live_text(&services, &cell));
     let merged = mounted.with_update(&rebuilt);
 
     cell.set(row("after-rebuild"));
-    settle(&services);
-    assert_eq!(
-        content_prop(&slot_content(&merged)).as_deref(),
-        Some("after-rebuild"),
+    wait_for_content(
+        &services,
+        &slot_content(&merged),
+        "after-rebuild",
         "S1 VIOLATED: after a structural rebuild a row update no longer reaches \
          the slot root's props — the node went silently dead, still painting \
-         its pre-rebuild text"
+         its pre-rebuild text",
     );
 }
 

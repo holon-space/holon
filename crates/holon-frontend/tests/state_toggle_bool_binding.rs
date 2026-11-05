@@ -29,6 +29,8 @@ use holon_frontend::StubBuilderServices;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 
+use crate::prop_wait::prop_reaches;
+
 fn row(pairs: &[(&str, Value)]) -> Arc<DataRow> {
     let mut m: DataRow = HashMap::new();
     for (k, v) in pairs {
@@ -84,14 +86,14 @@ fn zero_reads_as_false_rather_than_as_absent() {
 async fn the_cdc_rederivation_keeps_the_bool() {
     let (vm, cell) = build(row(&[("enabled", Value::Integer(0))]));
     cell.set(row(&[("enabled", Value::Integer(1))]));
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-
-    assert_eq!(
-        current(&vm),
-        Some(Value::Boolean(true)),
+    prop_reaches(
+        &vm,
+        "current",
+        Value::Boolean(true),
         "the live subscription must re-derive through the same typed read as the build-time \
-         snapshot"
-    );
+         snapshot",
+    )
+    .await;
 }
 
 /// The toggle draws an `error` node whose message carries `shown`.
