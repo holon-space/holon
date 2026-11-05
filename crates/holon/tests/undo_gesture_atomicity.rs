@@ -332,7 +332,7 @@ fn readerless_prod_engine(store: Store) -> Arc<DispatchingOperationEngine> {
             Arc::new(StubProvider { store, race: None }) as Arc<dyn OperationProvider>,
         ]));
     Arc::new(
-        DispatchingOperationEngine::new(dispatcher)
+        DispatchingOperationEngine::new(dispatcher, Arc::new(holon_api::SystemClock))
             .with_history_store(Arc::new(holon::api::DegradedHistoryStore::new())),
     )
 }

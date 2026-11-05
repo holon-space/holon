@@ -252,6 +252,7 @@ fn vault() -> Vault {
             root,
             Arc::new(NoopOrdering),
             Arc::new(RealFileSystem),
+            std::sync::Arc::new(holon_api::SystemClock),
         )
     })
 }
@@ -266,6 +267,7 @@ fn logseq_vault() -> Vault {
             Arc::new(formats),
             Arc::new(NoopOrdering),
             Arc::new(RealFileSystem),
+            std::sync::Arc::new(holon_api::SystemClock),
         )
     })
 }

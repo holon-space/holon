@@ -270,6 +270,7 @@ async fn ingest_content(seeded: bool, content: &str) -> Ingested {
         root.clone(),
         Arc::new(ordering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let _ = controller
         .on_file_changed(&path)

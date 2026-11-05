@@ -275,6 +275,7 @@ fn build_controller(
         root,
         Arc::new(NoopOrdering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
 }
 
@@ -532,6 +533,7 @@ async fn rename_cleanup_never_deletes_outside_the_vault_root() {
         root.clone(),
         Arc::new(NoopOrdering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_alias_registrar(Arc::new(OutOfVaultAliasRegistrar {
         prior: victim.clone(),

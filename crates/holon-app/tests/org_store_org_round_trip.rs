@@ -963,6 +963,7 @@ async fn a_value_the_file_cannot_hold_raises_the_files_writeback_condition() {
         root.clone(),
         Arc::new(NoOrdering),
         Arc::new(holon_filesystem::RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_writeback_disclosure(Arc::new(
         holon_app::loro_seams::WritebackDegradedDisclosure { bus: bus.clone() },
@@ -1055,6 +1056,7 @@ async fn a_render_the_parser_would_refuse_leaves_the_page_readable() {
         root.clone(),
         Arc::new(NoOrdering),
         Arc::new(holon_filesystem::RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_writeback_disclosure(Arc::new(
         holon_app::loro_seams::WritebackDegradedDisclosure { bus: bus.clone() },

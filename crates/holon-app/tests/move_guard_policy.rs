@@ -63,6 +63,7 @@ async fn engine(
         holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         Default::default(),
+        std::sync::Arc::new(holon_api::SystemClock),
         move |injector| {
             EventInfraModule
                 .configure(injector)

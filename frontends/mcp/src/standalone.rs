@@ -51,6 +51,7 @@ impl Module for McpStandaloneModule {
             holon::di::DatabaseRole::for_crdt_enabled(self.holon_config.crdt_enabled()),
             self.conditions.clone(),
             Default::default(),
+            self.session_config.clock.clone(),
         )
         .map_err(|e| to_di_err("configure", &e))?;
         vault.register(injector);
@@ -102,7 +103,10 @@ mod tests {
         };
         let module = McpStandaloneModule::new(
             holon_config,
-            holon_frontend::SessionConfig::new(holon_api::UiInfo::permissive()),
+            holon_frontend::SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             dir.path().join("config"),
         );
         let injector = Injector::root();

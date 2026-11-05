@@ -179,6 +179,7 @@ async fn ingest_idonly_file(
         root.clone(),
         Arc::new(ordering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let _ = controller
         .on_file_changed(&path)
@@ -294,6 +295,7 @@ async fn idonly_root_page_heals_on_boot_store_health_sweep() {
         root.clone(),
         Arc::new(ordering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     controller
         .heal_title_less_doc_roots()

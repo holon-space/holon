@@ -69,6 +69,7 @@ async fn fresh_engine(db_path: std::path::PathBuf) -> Arc<holon::api::BackendEng
         holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         Default::default(),
+        std::sync::Arc::new(holon_api::SystemClock),
         |injector| {
             EventInfraModule.configure(injector).map_err(|e| {
                 anyhow::anyhow!("configure EventInfraModule for the disclosure-mirror test: {e}")

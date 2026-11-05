@@ -37,7 +37,10 @@ async fn a_panic_reaches_the_bus_the_tui_container_resolves() {
     let vault = SessionVault::acquire(Some(&vault_root)).expect("acquire the vault");
     let module = TuiModule::new(
         holon_config,
-        SessionConfig::new(holon_api::UiInfo::permissive()),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ),
         dir.path().join("config"),
         HashSet::new(),
         vault,

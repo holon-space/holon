@@ -46,16 +46,12 @@ async fn boot_with_clock(clock: Arc<dyn Clock>) -> Vec<holon_conditions::Conditi
     };
     let (session, _engine, bus) = holon_app::new_from_config_with_di(
         holon_config,
-        SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+        SessionConfig::new(holon_api::UiInfo::permissive(), clock).without_wait(),
         dir.path().to_path_buf(),
         HashSet::new(),
         Arc::new(ConditionBus::new()),
         move |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
-            let injected = holon_api::InjectedClock(clock.clone());
-            injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(move |_| {
-                injected.clone().into()
-            }));
             Ok(())
         },
         |injector| {

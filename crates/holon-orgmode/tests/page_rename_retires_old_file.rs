@@ -407,6 +407,7 @@ fn build_controller_with_ordering(
         root.to_path_buf(),
         ordering,
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     match registrar {
         Some(r) => controller.with_alias_registrar(r),
@@ -864,6 +865,7 @@ async fn a_spelling_namesake_never_takes_the_owners_file(
         root.clone(),
         Arc::new(RecordingOrdering::default()),
         fs.clone(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     write_back(&mut controller, &f.block(&Fixtures::page_id()))
         .await

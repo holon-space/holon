@@ -973,8 +973,8 @@ pub struct FileSyncController {
     /// Turso history store is wired. Never records during the initial cold-boot
     /// scan (see `in_initial_scan`), so a vault load does not flood history.
     history: Option<Arc<dyn holon_api::HistoryStore>>,
-    /// Clock for the ingest history event's `at_millis` (injected in tests; the
-    /// OS `SystemClock` in production).
+    /// Clock for the ingest history event's `at_millis`, the undone-deletion
+    /// sidecar and conflict-copy names.
     clock: Arc<dyn holon_api::Clock>,
 
     /// Strategy deciding, per minted id-less headline, remap-onto-twin
@@ -1239,6 +1239,7 @@ impl FileSyncController {
         formats: Arc<FormatRegistry>,
         ordering: Arc<dyn BlockOrdering>,
         fs: Arc<dyn FileSystem>,
+        clock: Arc<dyn holon_api::Clock>,
     ) -> Self {
         // Canonicalize root_dir so strip_prefix works with canonical file paths
         // (macOS: /var → /private/var symlink resolution).
@@ -1284,7 +1285,7 @@ impl FileSyncController {
             share_disclosure: None,
             share_disclosed: HashSet::new(),
             history: None,
-            clock: Arc::new(holon_api::SystemClock),
+            clock,
             scan_feed_ids: None,
             backlog_pending: HashSet::new(),
             backlog_feed_ids: Vec::new(),
@@ -1736,13 +1737,6 @@ impl FileSyncController {
     /// records one op_group through it. Absent in org-standalone wirings.
     pub fn with_history_store(mut self, history: Arc<dyn holon_api::HistoryStore>) -> Self {
         self.history = Some(history);
-        self
-    }
-
-    /// Override the clock used for ingest history timestamps (test
-    /// determinism).
-    pub fn with_clock(mut self, clock: Arc<dyn holon_api::Clock>) -> Self {
-        self.clock = clock;
         self
     }
 

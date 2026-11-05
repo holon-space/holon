@@ -849,6 +849,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 let ordering = resolver.resolve_async::<dyn BlockOrdering>().await;
                 let config = resolver.resolve::<OrgModeConfig>();
                 let fs = resolver.resolve::<dyn holon_filesystem::FileSystem>();
+                let clock = resolver.resolve::<holon_api::InjectedClock>().0.clone();
                 let change_source = resolver.resolve::<dyn holon_filesystem::FileChangeSource>();
                 let downstream = resolver
                     .optional_resolve_async::<dyn holon_core::DownstreamProjection>()
@@ -954,6 +955,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     formats,
                     ordering,
                     fs.clone(),
+                    clock,
                 );
                 if let Some(hook_cmd) = config.post_write_hook.clone() {
                     controller = controller.with_post_write_hook(hook_cmd);
@@ -1004,19 +1006,12 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
 
                 // R3b: wire the C2b history store so the org-ingest doc-page
                 // create records provenance (absent in org-standalone/no-Turso
-                // wirings). Plus the injected clock, when a test provides one, so
-                // the ingest history `at_millis` is deterministic under replay.
+                // wirings).
                 if let Some(history) = resolver
                     .optional_resolve_async::<dyn holon_api::HistoryStore>()
                     .await
                 {
                     controller = controller.with_history_store(history);
-                }
-                if let Some(injected) = resolver
-                    .optional_resolve_async::<holon_api::InjectedClock>()
-                    .await
-                {
-                    controller = controller.with_clock(injected.0.clone());
                 }
 
                 let (rerender_tx, rerender_rx) =

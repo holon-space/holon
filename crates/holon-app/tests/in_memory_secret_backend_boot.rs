@@ -51,7 +51,11 @@ async fn boot(dir: &std::path::Path) -> (Arc<holon_frontend::FrontendSession>, A
     };
     let (session, _engine, bus) = holon_app::new_from_config_with_di(
         holon_config,
-        SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),
@@ -238,7 +242,11 @@ fn a_seed_file_that_names_one_account_twice_refuses_to_boot() {
     let booted = runtime().block_on(async {
         holon_app::new_from_config_with_di(
             holon_config,
-            SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+            SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            )
+            .without_wait(),
             dir.path().to_path_buf(),
             HashSet::new(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
@@ -293,7 +301,11 @@ fn a_seed_without_the_memory_backend_refuses_to_boot() {
     let booted = runtime().block_on(async {
         holon_app::new_from_config_with_di(
             holon_config,
-            SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+            SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            )
+            .without_wait(),
             dir.path().to_path_buf(),
             HashSet::new(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
@@ -339,7 +351,11 @@ fn a_real_config_dir_refuses_to_boot_in_memory() {
     let booted = runtime().block_on(async {
         holon_app::new_from_config_with_di(
             holon_config,
-            SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+            SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            )
+            .without_wait(),
             std::path::PathBuf::from("/Users/someone/.config/holon"),
             HashSet::new(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),

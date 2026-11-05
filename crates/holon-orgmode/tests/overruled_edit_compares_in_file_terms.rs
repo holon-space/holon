@@ -270,6 +270,7 @@ async fn a_store_only_field_is_no_overruled_edit() {
         root,
         Arc::new(MovedBetaTree { store }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_writeback_disclosure(overruled.clone());
     let outcome = controller.on_file_changed(&path).await;

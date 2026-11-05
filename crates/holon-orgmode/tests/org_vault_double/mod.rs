@@ -467,6 +467,7 @@ fn parts_at(
         root,
         Arc::new(ordering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_writeback_disclosure(disclosures.clone())
     .with_writeback_net(net.clone());

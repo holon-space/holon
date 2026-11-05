@@ -1981,6 +1981,7 @@ for line in sys.stdin:
             holon::di::DatabaseRole::DurableStore,
             Arc::new(ConditionBus::new()),
             Default::default(),
+            std::sync::Arc::new(holon_api::SystemClock),
             |_| Ok(()),
             |injector| async move { injector.resolve::<TypeRegistry>() },
         )

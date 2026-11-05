@@ -122,6 +122,7 @@ async fn a_late_block_change_of_a_deleted_page_does_not_recreate_its_file() {
         root.clone(),
         Arc::new(NoopOrdering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
 
     controller

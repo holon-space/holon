@@ -82,6 +82,7 @@ impl Module for TuiModule {
             holon::di::DatabaseRole::for_crdt_enabled(self.holon_config.crdt_enabled()),
             self.conditions.clone(),
             Default::default(),
+            self.session_config.clock.clone(),
         )
         .map_err(|e| to_di_err("configure", &e))?;
         vault.register(injector);

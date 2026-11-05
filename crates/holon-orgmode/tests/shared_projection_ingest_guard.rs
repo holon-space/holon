@@ -322,6 +322,7 @@ fn mount_vault(store: FakeStore, registry: Option<Arc<StubMountRegistry>>) -> Mo
         root,
         Arc::new(store.clone()),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     if let Some(reg) = registry {
         controller = controller.with_mount_registry(reg);

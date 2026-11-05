@@ -273,15 +273,17 @@ pub struct SessionConfig {
     /// histories would silently fail to converge.
     pub loro_peer_id: Option<u64>,
     pub timings: std::sync::Arc<holon_api::Timings>,
+    pub clock: std::sync::Arc<dyn holon_api::Clock>,
 }
 
 impl SessionConfig {
-    pub fn new(ui_info: holon_api::UiInfo) -> Self {
+    pub fn new(ui_info: holon_api::UiInfo, clock: std::sync::Arc<dyn holon_api::Clock>) -> Self {
         Self {
             ui_info,
             wait_for_ready: true,
             loro_peer_id: None,
             timings: Default::default(),
+            clock,
         }
     }
 

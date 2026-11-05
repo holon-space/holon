@@ -91,6 +91,7 @@ where
         crate::di::DatabaseRole::DurableStore,
         conditions.clone(),
         Default::default(),
+        std::sync::Arc::new(holon_api::SystemClock),
         setup_fn,
     )
     .await?;
@@ -117,6 +118,7 @@ where
         crate::di::DatabaseRole::DurableStore,
         conditions.clone(),
         Default::default(),
+        std::sync::Arc::new(holon_api::SystemClock),
         setup_fn,
         extra_resolve,
     )

@@ -55,7 +55,10 @@ async fn delete_right_after_ingest() -> Result<(), String> {
     };
     let (_session, engine, ()) = holon_app::new_from_config_with_di(
         holon_config,
-        SessionConfig::new(holon_api::UiInfo::permissive()),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ),
         dir.path().to_path_buf(),
         HashSet::new(),
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),

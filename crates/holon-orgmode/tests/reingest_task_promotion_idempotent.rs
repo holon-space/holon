@@ -247,6 +247,7 @@ async fn ingest(store: &FakeStore, root: &std::path::Path, source: &str) {
         root.to_path_buf(),
         Arc::new(store.clone()),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let _ = controller
         .on_file_changed(&path)

@@ -220,6 +220,7 @@ async fn a_backend_without_a_hash_record_discloses_the_written_file_as_unrecorde
             store: store.clone(),
         }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_writeback_disclosure(disclosures.clone());
 

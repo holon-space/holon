@@ -288,9 +288,8 @@ async fn create_initialized_engine(
     // the injected wall clock and re-fire temporal-guard matviews on
     // day-rollover. Every embedder resolves through this shared path, so
     // spawning it here covers GPUI, iOS, dioxus-web worker, and headless tests.
-    // The production wiring uses the real `SystemClock`; the keystone
-    // `AdvanceDay` transition injects a fake clock (via `InjectedClock`,
-    // resolved in the factory below) instead (§6).
+    // The clock is the root's required `InjectedClock`: the real `SystemClock`
+    // in production, a `TestClock` the keystone `AdvanceDay` advances (§6).
     if let Err(e) = start_clock(&mut engine, &db_handle, clock, &shutdown).await {
         tracing::error!("[DI] the clock did not start: {e:#}");
         conditions.emit(holon_conditions::Condition {
@@ -765,15 +764,13 @@ pub fn register_core_services_with_backend(
                 let type_registry = inj.resolve::<TypeRegistry>();
                 let graph_schema_registry = build_graph_schema_registry(&type_registry);
 
-                // Clock DI seam (ADR 0024 §6): the `ClockScheduler` ticks on the
-                // injected wall clock. Production registers nothing → real
-                // `SystemClock`; a test wiring registers `InjectedClock` holding a
-                // controllable `TestClock` so `AdvanceDay` advances time through the
-                // scheduler's own reconcile path, never a raw `clock`-relation write.
-                let clock: Arc<dyn holon_api::Clock> = inj
-                    .try_resolve::<holon_api::InjectedClock>()
-                    .map(|c| c.0.clone())
-                    .unwrap_or_else(|_| Arc::new(holon_api::SystemClock));
+                let clock = holon_core::resolve_bound_async::<holon_api::InjectedClock>(
+                    &inj,
+                    "[BackendEngine] clock",
+                )
+                .await
+                .0
+                .clone();
 
                 // BackendEngine::new wires TursoHistoryStore (C2b) over the raw
                 // db handle; `block_history` must exist before any engine op

@@ -206,6 +206,7 @@ fn build_harness(authored: EntityRef) -> Harness {
             reader: reader.clone(),
         }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let path = holon_core::CanonicalPath::new(&root)
         .into_path_buf()

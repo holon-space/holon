@@ -7395,6 +7395,7 @@ pub(crate) mod engine_harness {
             holon::di::DatabaseRole::DurableStore,
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             Default::default(),
+            std::sync::Arc::new(holon_api::SystemClock),
             |injector| {
                 holon_loro_wiring::EventInfraModule
                     .configure(injector)
@@ -7540,6 +7541,7 @@ pub(crate) mod engine_harness {
             holon::di::DatabaseRole::DurableStore,
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             Default::default(),
+            std::sync::Arc::new(holon_api::SystemClock),
             move |injector| {
                 injector.provide::<holon_loro_wiring::LoroConfig>(Provider::root(move |_| {
                     fluxdi::Shared::new(
@@ -10018,6 +10020,7 @@ mod shape_sim_cell_branch_tests {
             holon::di::DatabaseRole::DurableStore,
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             Default::default(),
+            std::sync::Arc::new(holon_api::SystemClock),
             |injector| {
                 holon_loro_wiring::EventInfraModule
                     .configure(injector)

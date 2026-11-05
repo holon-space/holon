@@ -56,7 +56,10 @@ async fn boot(dir: &Path) -> Booted {
     };
     let (session, engine, bus) = holon_app::new_from_config_with_di(
         holon_config,
-        SessionConfig::new(holon_api::UiInfo::permissive()),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ),
         dir.to_path_buf(),
         HashSet::new(),
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),

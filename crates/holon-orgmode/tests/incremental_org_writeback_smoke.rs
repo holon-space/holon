@@ -275,6 +275,7 @@ fn build_harness_from(doc: Block, blocks: Vec<Block>) -> Harness {
             reader: reader.clone(),
         }),
         fs,
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let path = holon_core::CanonicalPath::new(&root)
         .into_path_buf()
@@ -823,6 +824,7 @@ fn build_harness_with_child_page(n: usize) -> (Harness, EntityUri) {
             reader: reader.clone(),
         }),
         fs,
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let path = holon_core::CanonicalPath::new(&root)
         .into_path_buf()
@@ -967,6 +969,7 @@ fn build_harness_with_failing_child_name_chain(n: usize) -> Harness {
             reader: reader.clone(),
         }),
         fs,
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let path = holon_core::CanonicalPath::new(&root)
         .into_path_buf()
@@ -1171,6 +1174,7 @@ async fn childless_runtime_page_materializes_its_identity_file() {
         root.clone(),
         Arc::new(NoChildrenOrdering),
         fs,
+        std::sync::Arc::new(holon_api::SystemClock),
     );
 
     // The reactive per-block writeback fires with the page as the upserted block.
@@ -1284,6 +1288,7 @@ fn build_seed_harness() -> Harness {
             reader: reader.clone(),
         }),
         fs,
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let path = holon_core::CanonicalPath::new(&root)
         .into_path_buf()

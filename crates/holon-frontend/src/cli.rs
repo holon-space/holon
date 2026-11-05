@@ -35,7 +35,7 @@ pub fn build_session(
         available_widgets,
         screen_size: None,
     };
-    let session_config = SessionConfig::new(ui_info);
+    let session_config = SessionConfig::new(ui_info, std::sync::Arc::new(holon_api::SystemClock));
 
     eprintln!(
         "Config dir: {}, db: {}, orgmode: {:?}, loro: {}",

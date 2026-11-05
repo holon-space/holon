@@ -232,6 +232,7 @@ fn build_controller(
         root,
         Arc::new(NoopOrdering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_alias_registrar(registrar)
 }

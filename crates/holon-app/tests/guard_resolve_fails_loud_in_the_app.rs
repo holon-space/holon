@@ -78,7 +78,11 @@ async fn app_boot_failure_message(
     std::panic::set_hook(Box::new(|_| {}));
     let outcome = AssertUnwindSafe(holon_app::new_from_config_with_di(
         holon_config,
-        SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
         Arc::new(holon_conditions::ConditionBus::new()),

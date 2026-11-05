@@ -314,6 +314,7 @@ impl Vault {
             root,
             Arc::new(store.clone()),
             Arc::new(RealFileSystem),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         let mut vault = Self {
             _tmp: tmp,

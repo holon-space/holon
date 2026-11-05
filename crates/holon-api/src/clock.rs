@@ -54,11 +54,11 @@ pub fn host_utc_offset_seconds(millis: i64) -> i32 {
         .local_minus_utc()
 }
 
-/// DI seam for the wall-clock authority the `ClockScheduler` ticks on.
-/// Production boot registers nothing and the engine factory falls back to
-/// [`SystemClock`]; a test wiring registers this newtype holding a controllable
-/// [`TestClock`] so the keystone `AdvanceDay` transition advances time through
-/// the real scheduler path (never a raw `clock`-relation write). A wrapper
+/// DI seam for the wall-clock authority the `ClockScheduler` ticks on. Every DI
+/// root must register it: production with [`SystemClock`], a test wiring with a
+/// controllable [`TestClock`] so the keystone `AdvanceDay` transition advances
+/// time through the real scheduler path (never a raw `clock`-relation write).
+/// Resolving it from a root without one panics, naming this type. A wrapper
 /// newtype (not a bare `Arc<dyn Clock>`) so fluxdi keys on one stable type both
 /// sides name.
 #[derive(Clone)]
@@ -243,7 +243,7 @@ impl Default for Timings {
 }
 
 /// DI key for [`Timings`]; an unregistered container uses
-/// `Timings::default()`, like [`InjectedClock`].
+/// `Timings::default()`.
 #[derive(Debug, Clone)]
 pub struct InjectedTimings(pub Arc<Timings>);
 

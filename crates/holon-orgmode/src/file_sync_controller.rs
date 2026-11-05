@@ -32,6 +32,7 @@ pub fn new_org_sync_controller(
     root_dir: PathBuf,
     ordering: Arc<dyn BlockOrdering>,
     fs: Arc<dyn FileSystem>,
+    clock: Arc<dyn holon_api::Clock>,
 ) -> FileSyncController {
     FileSyncController::with_formats(
         block_reader,
@@ -40,5 +41,6 @@ pub fn new_org_sync_controller(
         org_only_format_registry(),
         ordering,
         fs,
+        clock,
     )
 }

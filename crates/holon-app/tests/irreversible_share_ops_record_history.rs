@@ -39,7 +39,10 @@ async fn boot(dir: &std::path::Path) -> (Arc<BackendEngine>, Arc<FrontendSession
     let credentials = Arc::new(ShareCredentials::in_memory(&dir.to_string_lossy()));
     let (session, engine, ()) = holon_app::new_from_config_with_di(
         config,
-        SessionConfig::new(holon_api::UiInfo::permissive()),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ),
         dir.to_path_buf(),
         HashSet::new(),
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),

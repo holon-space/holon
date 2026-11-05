@@ -215,6 +215,7 @@ async fn a_file_edit_does_not_bring_back_text_the_app_deleted() {
             store: store.clone(),
         }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_text_merge(Arc::new(TransientLoroTextMerge::default()));
     let first = controller
@@ -313,6 +314,7 @@ async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
             store: store.clone(),
         }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_text_merge(Arc::new(TransientLoroTextMerge::default()))
     .with_writeback_disclosure(Arc::new(
@@ -367,6 +369,7 @@ async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
             store: store.clone(),
         }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_text_merge(Arc::new(TransientLoroTextMerge::default()));
     let ingested = restarted
@@ -478,6 +481,7 @@ async fn an_unwritable_conflict_copy_blocks_the_overruling_write_back_and_is_dis
             store: store.clone(),
         }),
         Arc::new(ConflictCopiesUnwritable),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_text_merge(Arc::new(TransientLoroTextMerge::default()))
     .with_writeback_disclosure(Arc::new(
@@ -615,6 +619,7 @@ async fn edited_too_far_apart(
             store: store.clone(),
         }),
         fs,
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_text_merge(Arc::new(TransientLoroTextMerge::default()))
     .with_writeback_disclosure(Arc::new(

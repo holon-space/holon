@@ -190,6 +190,7 @@ fn controller(store: &Store, root: &std::path::Path) -> FileSyncController {
         root.to_path_buf(),
         Arc::new(NoopOrdering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
 }
 

@@ -53,7 +53,11 @@ async fn boot_and_report(dir: &std::path::Path) -> Report {
     };
     let (session, _engine, ()) = holon_app::new_from_config_with_di(
         holon_config,
-        SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),

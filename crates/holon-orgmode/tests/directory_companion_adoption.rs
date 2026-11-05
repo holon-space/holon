@@ -207,6 +207,7 @@ async fn ingest_in_order(dm: StoringDocManager, root: &std::path::Path, order: &
         root.to_path_buf(),
         Arc::new(NoopOrdering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     for rel in order {
         let path = root.join(rel);

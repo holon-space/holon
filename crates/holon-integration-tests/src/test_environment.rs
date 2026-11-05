@@ -483,7 +483,11 @@ impl TestEnvironmentBuilder {
             ..Default::default()
         };
         let config_dir = temp_dir.path().to_path_buf();
-        let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive());
+        let clock: Arc<dyn holon_api::Clock> = match &self.clock {
+            Some(clock) => clock.clone(),
+            None => Arc::new(holon_api::SystemClock),
+        };
+        let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive(), clock);
         if !self.wait_for_file_watcher {
             session_config = session_config.without_wait();
         }
@@ -494,8 +498,6 @@ impl TestEnvironmentBuilder {
         };
         let org_fs_for_di = org_fs.clone();
         let secret_namespace = config_dir.clone();
-        let clock_for_di = self.clock.clone();
-
         let (session, backend_engine, (doc_store, reactive_engine, idle_signal, injector)) =
             holon_app::new_from_config_with_di(
                 holon_config,
@@ -511,12 +513,6 @@ impl TestEnvironmentBuilder {
                         &secret_namespace,
                     );
                     holon_mcp::di::register_debug_services(injector);
-                    if let Some(clock) = clock_for_di.clone() {
-                        let injected = holon_api::InjectedClock(clock);
-                        injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
-                            move |_| injected.clone().into(),
-                        ));
-                    }
                     Ok(())
                 },
                 move |injector| {
@@ -784,7 +780,11 @@ pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path)
     };
     let result = holon_app::new_from_config_with_di(
         second,
-        SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .without_wait(),
         temp_path.to_path_buf(),
         std::collections::HashSet::new(),
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),
@@ -869,7 +869,11 @@ pub(crate) async fn run_epoch_flip_rejection_check(
         crdt: flipped_crdt_preferences(currently_loro_enabled),
         ..Default::default()
     };
-    let session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
+    let session_config = SessionConfig::new(
+        holon_api::UiInfo::permissive(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
+    .without_wait();
 
     eprintln!(
         "[EpochFlipRejected] attempting flipped boot (live consolidator \
@@ -1165,7 +1169,10 @@ impl TestEnvironment {
             ..Default::default()
         };
         let config_dir = self.temp_dir.path().to_path_buf();
-        let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive());
+        let mut session_config = SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         if !wait_for_ready {
             session_config = session_config.without_wait();
         }
@@ -1341,6 +1348,7 @@ impl TestEnvironment {
             storage_dir,
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             Default::default(),
+            std::sync::Arc::new(holon_api::SystemClock),
             {
                 let backend = backend.clone();
                 let shared_store = shared_store.clone();

@@ -40,7 +40,11 @@ fn booting_the_gpui_module_gives_the_mcp_tools_the_vault_root() {
                 },
                 ..Default::default()
             },
-            SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+            SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            )
+            .without_wait(),
             dir.path().to_path_buf(),
             HashSet::new(),
         ));

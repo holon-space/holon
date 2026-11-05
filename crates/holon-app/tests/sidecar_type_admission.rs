@@ -120,7 +120,11 @@ fn a_sidecar_entity_its_home_cannot_carry_refuses_the_integration_and_builds_not
         };
         let (session, engine, bus) = holon_app::new_from_config_with_di(
             holon_config,
-            SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+            SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            )
+            .without_wait(),
             dir.path().to_path_buf(),
             HashSet::new(),
             Arc::new(ConditionBus::new()),
@@ -232,7 +236,11 @@ fn refusals_of(sidecars: &[(&str, &[(&str, &str)])]) -> Vec<(String, String)> {
         };
         let (session, engine, bus) = holon_app::new_from_config_with_di(
             holon_config,
-            SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+            SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            )
+            .without_wait(),
             dir.path().to_path_buf(),
             HashSet::new(),
             Arc::new(ConditionBus::new()),

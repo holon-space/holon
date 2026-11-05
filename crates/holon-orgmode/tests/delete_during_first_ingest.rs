@@ -284,6 +284,7 @@ async fn a_file_deleted_during_its_first_ingest_is_cascaded_and_stays_deleted() 
         root,
         Arc::new(ordering),
         fs.clone(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
 
     let _ = controller

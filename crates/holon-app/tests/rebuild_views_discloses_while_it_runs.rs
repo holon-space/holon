@@ -31,7 +31,10 @@ async fn rebuild_views_is_disclosed_while_it_runs_and_not_after() {
     };
     let (_session, engine, injector) = holon_app::new_from_config_with_di(
         config,
-        SessionConfig::new(holon_api::UiInfo::permissive()),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ),
         dir.path().to_path_buf(),
         HashSet::new(),
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),

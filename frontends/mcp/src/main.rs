@@ -419,7 +419,10 @@ async fn run() -> Result<()> {
     let transport_mode = config.transport_mode.clone();
     let holon_config = holon_config_for(config);
     let config_dir = holon_frontend::config::resolve_config_dir(None);
-    let session_config = holon_frontend::SessionConfig::new(holon_api::UiInfo::permissive());
+    let session_config = holon_frontend::SessionConfig::new(
+        holon_api::UiInfo::permissive(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
 
     // A stop during boot waits for the boot to finish and then takes the one
     // shutdown path, so the vault is left as a clean quit leaves it.

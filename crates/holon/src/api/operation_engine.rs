@@ -46,7 +46,6 @@ use holon_api::admission::Footprint;
 use holon_api::admission::OpRequest;
 use holon_api::admission::Ticket;
 use holon_api::clock::Clock;
-use holon_api::clock::SystemClock;
 use holon_api::effect_id::FiringKey;
 use holon_api::effect_id::deterministic_proposal_id;
 use holon_api::entity_uri::EntityUri;
@@ -147,9 +146,8 @@ pub struct EngineState {
     /// Snapshot persistence. `None` for an in-memory-only stack.
     store: Option<Arc<dyn UndoStore>>,
     seq: AtomicI64,
-    /// Wall-clock authority for provenance stamps (ADR 0024 P8 / C2a). Defaults
-    /// to [`SystemClock`]; a test wiring overrides it via [`Self::with_clock`]
-    /// so stamp timestamps are deterministic. Never a raw `SystemTime::now`.
+    /// Wall-clock authority for provenance stamps (ADR 0024 P8 / C2a). Never a
+    /// raw `SystemTime::now`.
     clock: Arc<dyn Clock>,
     /// Optional op/effect history relation (C2b). When wired, every successful
     /// op appends its field deltas to the stream. `None` on a wiring without a
@@ -674,14 +672,14 @@ impl DispatchingOperationEngine {
     /// Build an in-memory engine over the given dispatcher (no persistence, no
     /// staleness reader). Used by Loro-only sessions whose reversible ops carry
     /// no field-level preconditions.
-    pub fn new(dispatcher: Arc<OperationDispatcher>) -> Self {
+    pub fn new(dispatcher: Arc<OperationDispatcher>, clock: Arc<dyn Clock>) -> Self {
         Self::from_state(EngineState {
             dispatcher,
             undo_stack: Arc::new(RwLock::new(UndoStack::default())),
             reader: None,
             store: None,
             seq: AtomicI64::new(0),
-            clock: Arc::new(SystemClock),
+            clock,
             text_undo: std::sync::OnceLock::new(),
             discarded_at_boot: 0,
             history: None,
@@ -728,13 +726,6 @@ impl DispatchingOperationEngine {
         params: &StorageEntity,
     ) -> Result<Footprint> {
         self.footprint(entity_name, op_name, |key| params.get(key))
-    }
-
-    /// Replace the provenance-stamp clock that [`Self::new`] defaults to
-    /// [`SystemClock`].
-    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
-        self.state_mut().clock = clock;
-        self
     }
 
     /// Wire the text half of the undo stack (D115.A). Without it, a session

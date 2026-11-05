@@ -644,6 +644,7 @@ mod read_only_home {
             root,
             Arc::new(Ordering_(blocks.clone())),
             mount.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         controller
             .seed_holder_from_authority(&page.id)

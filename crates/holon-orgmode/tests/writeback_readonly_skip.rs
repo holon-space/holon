@@ -322,6 +322,7 @@ async fn readonly_writeback_logs_once_then_skips_no_per_cdc_retry() {
             reader: reader.clone(),
         }),
         fs.clone(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
 
     const EVENTS: usize = 4;
@@ -382,6 +383,7 @@ async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
             reader: reader.clone(),
         }),
         fs.clone(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
 
     // (1) Storm on a read-only path: the mark is set with exactly one attempt.

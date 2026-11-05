@@ -69,7 +69,7 @@ pub async fn build_fresh_sut(
         available_widgets: crate::render_supported_widgets(),
         screen_size: None,
     };
-    let session_config = SessionConfig::new(ui_info);
+    let session_config = SessionConfig::new(ui_info, std::sync::Arc::new(holon_api::SystemClock));
 
     // Capture the DI injector so the fresh session's convergence / mirror
     // handles can be resolved after build (the windowless path bypasses

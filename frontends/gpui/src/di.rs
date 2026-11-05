@@ -66,6 +66,7 @@ impl GpuiModule {
             role: holon::di::DatabaseRole::for_crdt_enabled(self.holon_config.crdt_enabled()),
             conditions: self.conditions.clone(),
             timings: self.session_config.timings.clone(),
+            clock: self.session_config.clock.clone(),
         }
     }
 
@@ -205,7 +206,10 @@ mod mcp_toggle_tests {
         let config_dir = tempfile::tempdir().expect("temp config dir");
         let module = GpuiModule::new(
             holon_config,
-            SessionConfig::new(holon_api::UiInfo::permissive()),
+            SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             config_dir.path().to_path_buf(),
             HashSet::new(),
         );
@@ -276,7 +280,10 @@ mod write_tier_wiring_tests {
         holon_config.mcp.enabled = Some(false);
         let module = GpuiModule::new(
             holon_config,
-            SessionConfig::new(holon_api::UiInfo::permissive()),
+            SessionConfig::new(
+                holon_api::UiInfo::permissive(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             config_dir.path().to_path_buf(),
             HashSet::new(),
         );

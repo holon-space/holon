@@ -323,6 +323,7 @@ fn build_controller(
         root,
         Arc::new(NoopOrdering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
 }
 
@@ -607,6 +608,7 @@ async fn companion_deinline_of_child_page_content_is_not_vetoed_prod_page_only_s
         root.clone(),
         Arc::new(NoopOrdering),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
 
     // The de-inline is legitimate — the child subtree is preserved in the

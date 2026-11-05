@@ -93,6 +93,7 @@ impl BlockQueryFrontendComponent {
             ":memory:".into(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             Default::default(),
+            std::sync::Arc::new(holon_api::SystemClock),
             {
                 let backend = backend.clone();
                 move |inj| {

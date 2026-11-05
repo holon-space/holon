@@ -211,6 +211,7 @@ mod tests {
             role: holon::di::DatabaseRole::DurableStore,
             conditions: std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             timings: Default::default(),
+            clock: std::sync::Arc::new(holon_api::SystemClock),
         }
         .configure(&injector)
         .expect_err("opening a directory as the Turso DB must fail, not succeed");
@@ -236,6 +237,7 @@ mod tests {
             role: holon::di::DatabaseRole::DurableStore,
             conditions: std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             timings: Default::default(),
+            clock: std::sync::Arc::new(holon_api::SystemClock),
         }
         .configure(&Injector::root())
         .expect_err("a read-only database file must fail the open");

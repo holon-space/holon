@@ -67,6 +67,7 @@ async fn fresh_engine(
         holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         Default::default(),
+        std::sync::Arc::new(holon_api::SystemClock),
         |injector| {
             EventInfraModule.configure(injector).map_err(|e| {
                 anyhow::anyhow!("configure EventInfraModule for integrations-seed test: {e}")

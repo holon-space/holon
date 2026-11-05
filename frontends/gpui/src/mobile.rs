@@ -156,7 +156,8 @@ fn open_holon_window(
             true,
         )
         .unwrap_or_else(|e| panic!("Cannot boot: {e:#}"));
-        let session_config = SessionConfig::new(ui_info);
+        let session_config =
+            SessionConfig::new(ui_info, std::sync::Arc::new(holon_api::SystemClock));
 
         // Bootstrap through `GpuiModule` (same path as desktop `main.rs`)
         // instead of `holon_app::new_from_config`. This starts the embedded

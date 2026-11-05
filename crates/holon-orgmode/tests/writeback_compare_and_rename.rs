@@ -517,6 +517,7 @@ impl Harness {
             root,
             Arc::new(world.clone()),
             fs.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
         )
         .with_writeback_disclosure(disclosed.clone())
         .with_writeback_net(refused.clone());

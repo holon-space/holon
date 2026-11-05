@@ -523,6 +523,7 @@ impl Vault {
                 reader: self.reader.clone(),
             }),
             Arc::new(RealFileSystem),
+            std::sync::Arc::new(holon_api::SystemClock),
         )
         .with_downstream_projection(Arc::new(DirectProjection))
         .with_read_only_documents(read_only.clone());
@@ -573,6 +574,7 @@ fn vault_with_projection(
             reader: reader.clone(),
         }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_downstream_projection(projection)
     .with_read_only_documents(Arc::new(holon_core::ReadOnlyDocuments::new()));
@@ -1192,6 +1194,7 @@ async fn a_refusal_names_its_format_and_is_retracted_when_the_file_ingests() {
             reader: reader.clone(),
         }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_downstream_projection(Arc::new(DirectProjection))
     .with_writeback_disclosure(log.clone());
@@ -1234,6 +1237,7 @@ async fn a_refusal_names_its_format_and_is_retracted_when_the_file_ingests() {
             reader: reader.clone(),
         }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_downstream_projection(Arc::new(DirectProjection))
     .with_writeback_disclosure(log.clone());
@@ -1284,6 +1288,7 @@ async fn a_refusal_is_keyed_by_the_file_not_by_its_format() {
             reader: reader.clone(),
         }),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_downstream_projection(Arc::new(DirectProjection))
     .with_writeback_disclosure(log.clone());

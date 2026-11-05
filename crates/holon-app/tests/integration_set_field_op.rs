@@ -70,6 +70,7 @@ async fn engine_over_with_browser(
         holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         Default::default(),
+        std::sync::Arc::new(holon_api::SystemClock),
         move |injector| {
             holon_app::mcp_integrations::McpIntegrationsModule::from_dir(&state_dir, &state_dir)
                 .with_browser(browser.clone())

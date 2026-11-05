@@ -61,7 +61,10 @@ fn shipped_module(dir: &std::path::Path, crdt_enabled: Option<bool>) -> GpuiModu
             },
             ..Default::default()
         },
-        SessionConfig::new(holon_api::UiInfo::permissive()),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ),
         dir.to_path_buf(),
         HashSet::new(),
     )

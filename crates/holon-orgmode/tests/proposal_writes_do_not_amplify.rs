@@ -336,6 +336,7 @@ async fn build_harness() -> Harness {
             reader: reader.clone(),
         }),
         fs.clone(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
 
     for (rel, _) in TRACKED {

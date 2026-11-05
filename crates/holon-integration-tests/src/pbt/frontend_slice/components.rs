@@ -986,7 +986,12 @@ impl HeadlessFrontendComponent {
         // previous run's panic disclosed on it and this process's panics
         // routed to it.
         let conditions = holon_frontend::panic_record::install(&config_dir);
-        let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
+        let clock: Arc<dyn holon_api::Clock> = match &params.clock {
+            Some(clock) => clock.clone(),
+            None => Arc::new(holon_api::SystemClock),
+        };
+        let mut session_config =
+            SessionConfig::new(holon_api::UiInfo::permissive(), clock).without_wait();
         session_config.loro_peer_id = params.peer_id;
         session_config.timings = params.timings.clone();
         let org_fs_for_di = org_fs.clone();
@@ -996,12 +1001,6 @@ impl HeadlessFrontendComponent {
         let injector_slot: Arc<std::sync::OnceLock<fluxdi::Injector>> =
             Arc::new(std::sync::OnceLock::new());
         let injector_slot_c = injector_slot.clone();
-        // Clock DI seam (ADR 0024 §6): when the caller injects a controllable
-        // clock, register it as `InjectedClock` BEFORE the engine resolves, so the
-        // `ClockScheduler` (spawned in `create_initialized_engine`) ticks on it
-        // instead of the OS `SystemClock`. `None` → the factory falls back to
-        // `SystemClock`, unchanged.
-        let clock_for_di = params.clock.clone();
         let sidecar_for_di = params.sidecar_yaml.clone();
 
         let (session, engine, reactive) = holon_app::new_from_config_with_di(
@@ -1028,13 +1027,6 @@ impl HeadlessFrontendComponent {
                         ) as Arc<dyn holon_filesystem::ImageDataProvider>
                     }),
                 );
-                if let Some(test_clock) = clock_for_di.clone() {
-                    let injected =
-                        holon_api::InjectedClock(test_clock as Arc<dyn holon_api::Clock>);
-                    injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
-                        move |_| injected.clone().into(),
-                    ));
-                }
                 // Install the sidecar's entities on the SAME registry the link
                 // classifier reads, BEFORE the org scan — a link ingested while
                 // its entity is unregistered would be a permanent

@@ -343,6 +343,7 @@ fn build_with_fs(
         std::path::PathBuf::from(ROOT),
         Arc::new(NoopOrdering),
         fs,
+        std::sync::Arc::new(holon_api::SystemClock),
     )
 }
 

@@ -190,10 +190,15 @@ pub fn open_and_register_core(
     role: DatabaseRole,
     conditions: Arc<holon_conditions::ConditionBus>,
     timings: Arc<holon_api::Timings>,
+    clock: Arc<dyn holon_api::Clock>,
 ) -> Result<()> {
     let injected_timings = holon_api::InjectedTimings(timings.clone());
     injector.provide::<holon_api::InjectedTimings>(fluxdi::Provider::root(move |_| {
         fluxdi::Shared::new(injected_timings.clone())
+    }));
+    let injected_clock = holon_api::InjectedClock(clock);
+    injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(move |_| {
+        fluxdi::Shared::new(injected_clock.clone())
     }));
     // Registered before the storage substrate so no wiring can spawn
     // session-scoped work without a shutdown to register it against.
@@ -283,6 +288,7 @@ pub struct CoreInfraModule {
     /// The frontend core's bus, created before any storage opens.
     pub conditions: Arc<holon_conditions::ConditionBus>,
     pub timings: Arc<holon_api::Timings>,
+    pub clock: Arc<dyn holon_api::Clock>,
 }
 
 impl Module for CoreInfraModule {
@@ -294,6 +300,7 @@ impl Module for CoreInfraModule {
             self.role,
             self.conditions.clone(),
             self.timings.clone(),
+            self.clock.clone(),
         )
         .map_err(|e| {
             fluxdi::Error::module_lifecycle_failed(
@@ -314,6 +321,7 @@ async fn build_di_container<F>(
     role: DatabaseRole,
     conditions: Arc<holon_conditions::ConditionBus>,
     timings: Arc<holon_api::Timings>,
+    clock: Arc<dyn holon_api::Clock>,
     setup_fn: F,
 ) -> Result<Arc<Injector>>
 where
@@ -328,6 +336,7 @@ where
         role,
         conditions,
         timings,
+        clock,
     )?;
 
     setup_fn(&injector)?;
@@ -350,6 +359,7 @@ pub async fn build_no_turso_container<F>(
     db_path: PathBuf,
     conditions: Arc<holon_conditions::ConditionBus>,
     timings: Arc<holon_api::Timings>,
+    clock: Arc<dyn holon_api::Clock>,
     setup_fn: F,
 ) -> Result<Arc<Injector>>
 where
@@ -363,6 +373,7 @@ where
         DatabaseRole::Projection,
         conditions,
         timings,
+        clock,
     )?;
     setup_fn(&injector)?;
     super::guard_bindings::complete_guard_composition(&injector);
@@ -379,6 +390,7 @@ pub async fn create_backend_engine<F>(
     role: DatabaseRole,
     conditions: Arc<holon_conditions::ConditionBus>,
     timings: Arc<holon_api::Timings>,
+    clock: Arc<dyn holon_api::Clock>,
     setup_fn: F,
 ) -> Result<Arc<BackendEngine>>
 where
@@ -389,6 +401,7 @@ where
         role,
         conditions,
         timings,
+        clock,
         setup_fn,
         |_| async {},
     )
@@ -406,7 +419,7 @@ where
 /// they don't share dependencies (e.g. CacheEventSubscriber wiring is
 /// independent of engine creation).
 #[tracing::instrument(
-    skip(conditions, timings, setup_fn, extra_resolve),
+    skip(conditions, timings, clock, setup_fn, extra_resolve),
     name = "di.create_backend_engine"
 )]
 pub async fn create_backend_engine_with_extras<F, G, Fut, T>(
@@ -414,6 +427,7 @@ pub async fn create_backend_engine_with_extras<F, G, Fut, T>(
     role: DatabaseRole,
     conditions: Arc<holon_conditions::ConditionBus>,
     timings: Arc<holon_api::Timings>,
+    clock: Arc<dyn holon_api::Clock>,
     setup_fn: F,
     extra_resolve: G,
 ) -> Result<(Arc<BackendEngine>, T)>
@@ -423,7 +437,7 @@ where
     Fut: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let injector = build_di_container(db_path, role, conditions, timings, setup_fn).await?;
+    let injector = build_di_container(db_path, role, conditions, timings, clock, setup_fn).await?;
 
     // Resolve BackendEngine FIRST, then extras. Resolving in parallel causes
     // a fluxdi TOCTOU race: both tasks call resolve_async::<BackendEngine>,
@@ -473,6 +487,7 @@ mod no_turso_tests {
             ":memory:".into(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             Default::default(),
+            std::sync::Arc::new(holon_api::SystemClock),
             move |inj| {
                 inj.provide::<dyn BlockQuerySource>(Provider::root(move |_| {
                     let blocks = blocks.clone();

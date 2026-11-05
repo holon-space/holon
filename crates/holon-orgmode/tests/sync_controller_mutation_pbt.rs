@@ -875,6 +875,7 @@ impl TestFixture {
             root_dir.clone(),
             ordering,
             Arc::new(holon_filesystem::RealFileSystem),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
 
         let doc_id = EntityUri::block_random();
@@ -2192,6 +2193,7 @@ mod ordering_replay_tests {
             root_dir.clone(),
             ordering.clone(),
             Arc::new(holon_filesystem::RealFileSystem),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
 
         let doc_name = "order-test".to_string();
@@ -2537,6 +2539,7 @@ mod fast_path_loro_presence_tests {
             root_dir.to_path_buf(),
             ordering.clone(),
             Arc::new(holon_filesystem::RealFileSystem),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
 
         let stable_block_uuid = uuid::Uuid::new_v4().to_string();
@@ -2580,6 +2583,7 @@ mod fast_path_loro_presence_tests {
             root_dir.to_path_buf(),
             ordering.clone(),
             Arc::new(holon_filesystem::RealFileSystem),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
 
         controller.initialize().await.expect("initialize boot 2");
@@ -2812,6 +2816,7 @@ mod initial_scan_batched_barrier_tests {
             root.to_path_buf(),
             ordering,
             Arc::new(holon_filesystem::RealFileSystem),
+            std::sync::Arc::new(holon_api::SystemClock),
         )
     }
 

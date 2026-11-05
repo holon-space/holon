@@ -902,6 +902,7 @@ async fn compose_sut_seeded_impl(
                 block_ops,
                 global_doc.clone(),
                 Arc::new(holon_conditions::ConditionBus::new()),
+                Arc::new(holon_api::SystemClock),
             );
             loro_caps.insert(Arc::new(crate::pbt::op_write_cap::EdgeFieldWriter::new(
                 engine.clone(),

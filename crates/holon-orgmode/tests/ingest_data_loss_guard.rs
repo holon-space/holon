@@ -404,6 +404,7 @@ async fn ingest_file(
         root,
         Arc::new(store.clone()),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let result = controller.on_file_changed(&path).await.map(|_| ());
     let on_disk = std::fs::read_to_string(&path).unwrap();
@@ -776,6 +777,7 @@ fn controller_over(
         root.to_path_buf(),
         Arc::new(store.clone()),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
 }
 
@@ -1065,6 +1067,7 @@ async fn a_vault_that_cannot_store_a_merge_base_still_ingests_and_discloses_the_
         root.clone(),
         Arc::new(store.clone()),
         Arc::new(RealFileSystem),
+        std::sync::Arc::new(holon_api::SystemClock),
     )
     .with_writeback_disclosure(disclosed.clone());
 

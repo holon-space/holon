@@ -372,8 +372,7 @@ impl BackendEngine {
         let history = Arc::new(crate::api::history_store::TursoHistoryStore::new(
             db_handle.clone(),
         ));
-        let op_engine = DispatchingOperationEngine::new(dispatcher.clone())
-            .with_clock(clock.clone())
+        let op_engine = DispatchingOperationEngine::new(dispatcher.clone(), clock.clone())
             .with_history_store(history)
             .with_write_authority(block_write_authority.clone());
         Ok(Self {

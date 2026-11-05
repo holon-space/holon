@@ -52,7 +52,10 @@ async fn boot_with_crdt(dir: &std::path::Path, db_file: &str, crdt_enabled: bool
     config.crdt.enabled = Some(crdt_enabled);
     let (session, engine, injector) = holon_app::new_from_config_with_di(
         config,
-        SessionConfig::new(holon_api::UiInfo::permissive()),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ),
         dir.to_path_buf(),
         HashSet::new(),
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),

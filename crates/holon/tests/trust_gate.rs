@@ -226,7 +226,7 @@ fn fixture(policy_yaml: &str) -> Fixture {
     let policy = TrustPolicy::parse_yaml(policy_yaml).expect("test policy parses");
     // `new` + reader-less would skip the idempotence read seam; wire the
     // reader through the same store the provider writes.
-    let engine = DispatchingOperationEngine::new(dispatcher)
+    let engine = DispatchingOperationEngine::new(dispatcher, Arc::new(holon_api::SystemClock))
         .with_trust_policy(Arc::new(policy))
         .with_state_reader(Arc::new(StoreReader {
             store: store.clone(),

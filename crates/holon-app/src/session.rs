@@ -73,11 +73,13 @@ where
     let vault_root = holon_config.vault.root.clone();
     let home_conditions = Arc::clone(&conditions);
     let timings = session_config.timings.clone();
+    let clock = session_config.clock.clone();
     let (engine, (session, extra, types)) = holon::di::create_backend_engine_with_extras(
         db_path,
         holon::di::DatabaseRole::for_crdt_enabled(holon_config.crdt_enabled()),
         conditions,
         timings,
+        clock,
         move |injector| {
             #[cfg(not(target_arch = "wasm32"))]
             vault.register(injector);

@@ -47,7 +47,11 @@ async fn boot(dir: &Path) -> (Vec<Condition>, Vec<String>) {
     let bus = Arc::new(ConditionBus::new());
     let (session, engine, ()) = holon_app::new_from_config_with_di(
         config,
-        SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+        SessionConfig::new(
+            holon_api::UiInfo::permissive(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
         bus.clone(),

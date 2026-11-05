@@ -154,7 +154,8 @@ pub fn register_loro_operation_engine(
         }
     };
     let bus = injector.resolve::<Arc<holon_conditions::ConditionBus>>();
-    let engine = loro_operation_engine(block_ops, collab, (*bus).clone());
+    let clock = injector.resolve::<holon_api::InjectedClock>().0.clone();
+    let engine = loro_operation_engine(block_ops, collab, (*bus).clone(), clock);
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
 }
 
@@ -164,6 +165,7 @@ pub fn loro_operation_engine(
     block_ops: LoroBlockOperations,
     collab: Arc<holon_loro::LoroDocument>,
     bus: Arc<holon_conditions::ConditionBus>,
+    clock: Arc<dyn holon_api::Clock>,
 ) -> Arc<dyn OperationEngine> {
     let block_ops = Arc::new(block_ops);
     // Navigation ops (focus / back / forward / home) have no Turso substrate in
@@ -224,7 +226,7 @@ pub fn loro_operation_engine(
     // DISCLOSED degraded store (warns at construction; reads fail loud) rather
     // than silently omitting history.
     Arc::new(
-        DispatchingOperationEngine::new(Arc::new(dispatcher))
+        DispatchingOperationEngine::new(Arc::new(dispatcher), clock)
             .with_history_store(Arc::new(holon::api::DegradedHistoryStore::new()))
             .with_write_authority(block_ops as Arc<dyn holon_core::WriteAuthorityReads>),
     )
@@ -355,6 +357,7 @@ mod tests {
             ":memory:".into(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             Default::default(),
+            std::sync::Arc::new(holon_api::SystemClock),
             move |inj| {
                 register_loro_block_query_source(inj, backend);
                 Ok(())
@@ -386,6 +389,7 @@ mod tests {
             ":memory:".into(),
             std::sync::Arc::new(holon_conditions::ConditionBus::new()),
             Default::default(),
+            std::sync::Arc::new(holon_api::SystemClock),
             |_| Ok(()),
         )
         .await
@@ -589,6 +593,7 @@ mod tests {
             LoroBlockOperations::new(store.clone()),
             collab,
             Arc::new(holon_conditions::ConditionBus::new()),
+            Arc::new(holon_api::SystemClock),
         );
         let run = |op: &'static str, params: Vec<(&'static str, String)>| {
             let engine = engine.clone();
@@ -748,5 +753,70 @@ mod tests {
             (Some("CANCELLED".into()), Some("active".into())),
             "the ring edit re-derives the category"
         );
+    }
+
+    fn no_turso_root(clock: Option<Arc<dyn holon_api::Clock>>) -> (Injector, tempfile::TempDir) {
+        let injector = Injector::root();
+        let bus = Arc::new(holon_conditions::ConditionBus::new());
+        injector.provide::<Arc<holon_conditions::ConditionBus>>(Provider::root(move |_| {
+            Shared::new(bus.clone())
+        }));
+        if let Some(clock) = clock {
+            let injected = holon_api::InjectedClock(clock);
+            injector.provide::<holon_api::InjectedClock>(Provider::root(move |_| {
+                Shared::new(injected.clone())
+            }));
+        }
+        (injector, tempfile::tempdir().unwrap())
+    }
+
+    async fn register_engine(
+        injector: &Injector,
+        dir: &std::path::Path,
+    ) -> Arc<RwLock<LoroDocumentStore>> {
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(dir.to_path_buf())));
+        let collab = store.read().await.get_doc(DocScope::Global).await.unwrap();
+        register_loro_operation_engine(injector, store.clone(), collab);
+        store
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(16))]
+
+        /// The no-Turso engine stamps a create with the root's injected clock,
+        /// whatever instant that clock holds.
+        #[test]
+        fn no_turso_engine_stamps_with_the_injected_clock(at in 0i64..4_102_444_800_000) {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let stamped = rt.block_on(async {
+                let clock: Arc<dyn holon_api::Clock> = Arc::new(holon_api::TestClock::new(at));
+                let (injector, dir) = no_turso_root(Some(clock));
+                let store = register_engine(&injector, dir.path()).await;
+                let engine = injector.resolve::<dyn OperationEngine>();
+                try_op(
+                    &engine,
+                    "create",
+                    &[("id", "block:stamped"), ("parent_id", &EntityUri::no_parent().to_string()), ("content", "x")],
+                )
+                .await
+                .unwrap();
+                let ops = LoroBlockOperations::new(store);
+                use holon_core::WriteAuthorityReads;
+                // ALLOW(entity_uri_from_raw): test-fixture literal
+                let block = ops.block(&EntityUri::from_raw("block:stamped")).await.unwrap().unwrap();
+                holon_api::ProvenanceStamp::from_value(&block.properties[holon_api::PROVENANCE_PROPERTY])
+                    .unwrap()
+                    .at_millis
+            });
+            proptest::prop_assert_eq!(stamped, at);
+        }
+    }
+
+    /// The absence of a clock is one state, so one example covers it.
+    #[tokio::test]
+    #[should_panic(expected = "holon_api::clock::InjectedClock")]
+    async fn no_turso_engine_without_a_clock_names_the_missing_key() {
+        let (injector, dir) = no_turso_root(None);
+        register_engine(&injector, dir.path()).await;
     }
 }

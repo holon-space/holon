@@ -363,20 +363,15 @@ mod backend {
                 create_backend_engine_with_extras(
                     path,
                     holon::di::DatabaseRole::DurableStore,
-                    std::sync::Arc::new(holon_conditions::ConditionBus::new()), Default::default(),
+                    std::sync::Arc::new(holon_conditions::ConditionBus::new()),
+                    Default::default(),
+                    Arc::new(BrowserClock {
+                        utc_offset_seconds: *UTC_OFFSET_SECONDS
+                            .get()
+                            .expect("engine_init installs the utc offset before any engine build"),
+                    }),
                     |injector| {
                         use fluxdi::Module as _;
-
-                        let clock = BrowserClock {
-                            utc_offset_seconds: *UTC_OFFSET_SECONDS.get().expect(
-                                "engine_init installs the utc offset before any engine build",
-                            ),
-                        };
-                        let injected =
-                            holon_api::InjectedClock(Arc::new(clock) as Arc<dyn holon_api::Clock>);
-                        injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
-                            move |_| injected.clone().into(),
-                        ));
 
                         holon_loro_wiring::EventInfraModule
                             .configure(injector)
@@ -2028,7 +2023,9 @@ pub fn open_db(path: String) -> napi::Result<()> {
     let db = holon::storage::turso::TursoBackend::open_database(&path)
         .map_err(|e| nerr("open_database", e))?;
 
-    let conn = db.connect(turso_core::ConnectOpts::new()).map_err(|e| nerr("connect", e))?;
+    let conn = db
+        .connect(turso_core::ConnectOpts::new())
+        .map_err(|e| nerr("connect", e))?;
 
     *db_slot().lock() = Some(DbState { _db: db, conn, io });
     Ok(())

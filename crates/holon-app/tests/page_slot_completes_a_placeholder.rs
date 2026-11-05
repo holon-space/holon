@@ -30,6 +30,7 @@ async fn boot(
         holon::di::DatabaseRole::DurableStore,
         std::sync::Arc::new(holon_conditions::ConditionBus::new()),
         Default::default(),
+        std::sync::Arc::new(holon_api::SystemClock),
         |injector| {
             EventInfraModule
                 .configure(injector)
