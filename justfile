@@ -1585,7 +1585,8 @@ windowed-gate:
     mkdir -p target/gate-logs/windowed
     # No `frontends/gpui/tests/*` test asserts a duration; the composed loop
     # inherits `inv-settle-budget` only, so this gate measures rather than
-    # judges and needs no quiet host.
+    # judges. Its paint waits still go red on a heavily loaded host, so
+    # scripts/gate-integrate.sh runs it under the quiet hold.
     export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}
     L=target/gate-logs/windowed-gate.log
     echo "HOLON_PBT_TIMING=$HOLON_PBT_TIMING" | tee "$L"
@@ -1618,7 +1619,9 @@ timing-gate:
     # empty hold and lowering this tree. Taking it here makes every caller
     # clean: the land gate, a lane and a bare `just timing-gate`.
     SLOT=~/.claude/skills/orchestrator/scripts/with-build-slot.sh
-    bash "$SLOT" --quiet-hold $$
+    # Exit 75 is a hold of another job (an integrate run): wait for its release.
+    until rc=0; bash "$SLOT" --quiet-hold $$ || rc=$?; [ "$rc" != 75 ]; do sleep "${GATE_STEP_POLL_S:-5}"; done
+    [ "$rc" = 0 ] || { echo "QUIET HOLD NOT TAKEN: with-build-slot.sh --quiet-hold exit $rc"; exit "$rc"; }
     export HOLON_BUILD_QUIET_HOLDER=$$
     trap "bash $SLOT --quiet-release $$" EXIT
     # Explicit, never inherited: this is the ONE step that judges.

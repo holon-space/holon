@@ -9,6 +9,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 combine="$here/gate-combine.sh"
 integrate="$here/gate-integrate.sh"
 timing="$here/gate-timing.sh"
+real_just=$(command -v just)
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 fails=0
@@ -58,7 +59,7 @@ rc=0; combine_in_repo "${heads##* }" >/dev/null || rc=$?
 expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 
 # `just` and `cargo` stubs append each call, its HOLON_PBT_TIMING and the quiet
-# marker's content to $GATE_PROBE; `just timing-gate-build` prints $BUILD_OUT
+# marker's content to $GATE_PROBE; `just latency-slo-gate` admits the host, `just timing-gate-build` prints $BUILD_OUT
 # and `just $STUB_RED` exits 1; with STUB_RED_NEXTEST set, every nextest run
 # fails one org_suite test no known-red row lists. HOME is a scratch dir, so the hold's marker,
 # lock, log and slot walk are scratch files and no real build is lowered.
@@ -79,6 +80,7 @@ for tool in just cargo; do
 #!/usr/bin/env bash
 echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
+[ "${1:-}" != latency-slo-gate ] || printf "mean boot matview_ddl 1.0ms\nhost admitted\n"
 [ "$*" != "${STUB_RED:-}" ] || exit 1
 [ -z "${STUB_RED_NEXTEST:-}" ] || [ "${1:-} ${2:-}" != "nextest run" ] || { echo "        FAIL [   1.000s] holon-integration-tests::integration org_suite::stub_red"; exit 100; }
 EOF
@@ -180,6 +182,24 @@ rc=0; in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ "$integrate" --track 1 >"$sc
 kill "$other"; wait
 expect "waits for the release and exits 0 (got $rc)" [ "$rc" = 0 ]
 expect "then runs its steps under its own hold" held_by $$
+
+echo "== the timing-gate recipe while another job holds the hold"
+# The real recipe from this justfile runs; only its steps script is a stub.
+recipe="$scratch/recipe"
+mkdir -p "$recipe/scripts"
+cat > "$recipe/scripts/timing-gate-steps.sh" <<'EOF'
+echo "timing-gate-steps | quiet=$(cat "$HOME/.cache/holon-build/quiet")" >> "$GATE_PROBE"
+EOF
+sleep 60 & other=$!
+HOME="$home" "$orch/with-build-slot.sh" --quiet-hold "$other" 2>/dev/null
+(sleep 1; HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$other" 2>/dev/null) &
+: > "$probe"
+rc=0; in_stubs "$real_just" --justfile "$here/../justfile" --working-directory "$recipe" timing-gate >"$scratch/recipe-wait.out" 2>&1 || rc=$?
+kill "$other"; wait
+expect "waits for the release and exits 0 (got $rc)" [ "$rc" = 0 ]
+expect "then runs its steps under its own hold" grep -qE "^timing-gate-steps \| quiet=[0-9]+\$" "$probe"
+expect "not under the other job's hold" [ -z "$(grep "^timing-gate-steps | quiet=$other\$" "$probe")" ]
+expect "releases the hold" [ ! -e "$marker" ]
 
 echo "== the timing gate on the integrated tip"
 : > "$probe"
