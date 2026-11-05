@@ -41,3 +41,11 @@ Open. Replay `PROPTEST_RNG_SEED=17253210760330187199` on the composed keystone
 and root-cause the first panic (harness.rs:2231): first decide which
 disclosure kind is right for an edited copy after the cut-paste, then why
 `block:kd-1` is declared in two files.
+
+Seed 6752774316641571383 reaches the same verdict for `block:archive-80`
+(Archive.org, forward-edge-page.org): `PasteBlockCopy`, `EditBlockCopy`, a
+`ToggleState` of the owner's block to the empty task state ("its task state
+\"\" is not written"), then `FinishCutPaste`, after which the copy is adopted.
+The model counts the empty task state as a change against the pasted keyword
+(conflict); the store's `merge_adopted` does not (adoption). Known-red row
+`edited-copy-cut-paste-raises-unedited-two-files`.
