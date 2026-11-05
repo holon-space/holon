@@ -34,5 +34,7 @@ whichever side turns out wrong. ORACLE if the oracle's text model of a typed
 link is wrong; a product defect otherwise.
 
 ## Remedy
-Open. Needs a probe at the TypeChars apply on a decision block (oracle text vs
-the `set_field` content) and a known-red row decision.
+Open, owned by https://github.com/holon-space/holon-work/issues/974: a probe at
+the TypeChars apply on a decision block (oracle text vs the `set_field`
+content), then the fix. Known-red row
+`typed-link-in-pasted-decision-block-file-disagrees`.
