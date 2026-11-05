@@ -235,11 +235,15 @@ async fn every_block_operation_undoes_and_redoes_at_the_top_level() {
         "every BlockOperations op needs a top-level case here"
     );
 
+    let mut runs = tokio::task::JoinSet::new();
+    for (op, pairs, expected) in cases {
+        runs.spawn(async move { (op, expected, observe(op, &pairs).await) });
+    }
     let mut wrong = Vec::new();
-    for (op, pairs, expected) in &cases {
-        let observed = observe(op, pairs).await;
+    while let Some(joined) = runs.join_next().await {
+        let (op, expected, observed) = joined.expect("case task panicked");
         let as_expected = match (&observed, expected) {
-            (Ok(got), want) => got == want,
+            (Ok(got), want) => got == &want,
             (Err(e), Expect::Refused(said)) => {
                 e.contains(said) && !e.contains("operation boundary")
             }
@@ -249,5 +253,6 @@ async fn every_block_operation_undoes_and_redoes_at_the_top_level() {
             wrong.push(format!("{op}: expected {expected:?}, got {observed:?}"));
         }
     }
+    wrong.sort();
     assert!(wrong.is_empty(), "at the top level:\n{}", wrong.join("\n"));
 }
