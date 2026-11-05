@@ -16,7 +16,7 @@ echo "STARTED: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 eval "set -- $args"
 case $step in
   clippy) cargo clippy "$@" --all-targets -- -D warnings 2>&1 ;;
-  nextest) HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure} cargo nextest run --no-fail-fast "$@" 2>&1 ;;
+  nextest) HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure} "$(dirname "$0")/../lane-nextest.py" run "$@" 2>&1 ;;
   *) "$@" 2>&1 ;;
 esac
 code=$?

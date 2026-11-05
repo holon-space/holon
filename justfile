@@ -266,6 +266,17 @@ capability-sweep:
 known-reds-fixture *FLAGS:
     scripts/keystone-known-reds-fixture.sh {{FLAGS}}
 
+# A lane's nextest run (the printed `nextest:` args): stops at the first red that
+# scripts/keystone-known-reds.sh does not list, and writes the red list.
+[positional-arguments]
+lane-nextest *ARGS:
+    scripts/lane-nextest.py run "$@"
+
+# Reruns only the tests on that red list, with the same args.
+[positional-arguments]
+lane-nextest-reds *ARGS:
+    scripts/lane-nextest.py rerun "$@"
+
 # Replay hand-authored keystone regressions (concrete transition sequences from
 # docs/Testing/HandAuthoredRegressions.md) through the keystone harness. Same
 # --features pbt gate as the keystone; fail-loud on any red or parse error.
