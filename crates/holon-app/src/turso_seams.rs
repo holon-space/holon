@@ -1079,6 +1079,7 @@ impl Module for OrgModeModule {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    resolver.resolve::<holon_api::InjectedClock>().0.clone(),
                 ));
 
                 // ============================================================
@@ -1263,6 +1264,7 @@ impl Module for OrgModeModule {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    resolver.resolve::<holon_api::InjectedClock>().0.clone(),
                 );
                 let sql = Arc::new(
                     match resolver

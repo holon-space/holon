@@ -131,6 +131,7 @@ async fn through_the_store(
         "block".to_string(),
         "block".to_string(),
         holon_turso::schema_modules::BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     let entity: EntityName = "block".to_string().into();
 

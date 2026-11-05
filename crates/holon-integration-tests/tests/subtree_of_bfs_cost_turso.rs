@@ -200,6 +200,7 @@ async fn measure(subtree: usize) -> Result<()> {
         "block".to_string(),
         "block".to_string(),
         BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     let real_ordering: Arc<dyn BlockOrdering> =
         Arc::new(SqlBlockOperations::new(sql_ops, cache.clone()));

@@ -5084,6 +5084,7 @@ mod instantiate_template_tests {
                     BLOCK_WRITE_TABLE.to_string(),
                     "block".to_string(),
                     "block".to_string(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ))
             })
         })
@@ -5105,6 +5106,7 @@ mod instantiate_template_tests {
                     "block".to_string(),
                     "block".to_string(),
                     holon_turso::schema_modules::BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ))
             })
         })

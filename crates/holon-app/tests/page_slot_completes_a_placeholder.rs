@@ -48,6 +48,7 @@ async fn boot(
                         holon_turso::schema_module::SchemaModule::edge_fields(
                             &holon_turso::schema_modules::BlockSchemaModule,
                         ),
+                        std::sync::Arc::new(holon_api::SystemClock),
                     )) as Arc<dyn holon_core::OperationProvider>
                 },
             ));

@@ -86,6 +86,12 @@ impl RemoteListSut {
             Arc::new(FakeAppSurface::new(app.clone())),
             compiled.clone(),
             holon_app::remote_list::device_id(),
+            component
+                .injector()
+                .resolve_async::<holon_api::InjectedClock>()
+                .await
+                .0
+                .clone(),
         );
         component
             .engine()

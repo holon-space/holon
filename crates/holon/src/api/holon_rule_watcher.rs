@@ -719,6 +719,7 @@ emit:
                         source_col: "block_id".to_string(),
                         target_col: "tag".to_string(),
                     }],
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ))
             })
         })

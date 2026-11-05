@@ -122,6 +122,7 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
                             holon::storage::BLOCK_WRITE_TABLE.to_string(),
                             "block".to_string(),
                             "block".to_string(),
+                            std::sync::Arc::new(holon_api::SystemClock),
                         )) as Arc<dyn holon_core::OperationProvider>
                     }),
                 );

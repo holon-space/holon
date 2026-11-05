@@ -93,7 +93,10 @@ fn share_backend(dir: &TempDir, handle: DbHandle) -> Arc<LoroShareBackend> {
         Arc::new(holon_loro::share_credentials::ShareCredentials::in_memory(
             &dir.path().to_string_lossy(),
         )),
-        Some(holon_loro_wiring::block_sql_write_provider(handle)),
+        Some(holon_loro_wiring::block_sql_write_provider(
+            handle,
+            std::sync::Arc::new(holon_api::SystemClock),
+        )),
         None,
         None,
     )

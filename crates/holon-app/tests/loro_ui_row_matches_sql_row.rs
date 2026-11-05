@@ -179,6 +179,7 @@ async fn sql_provider() -> (SqlOperationProvider, holon::storage::turso::DbHandl
         "block".to_string(),
         "block".to_string(),
         BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     (provider, handle)
 }

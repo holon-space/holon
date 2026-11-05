@@ -132,6 +132,7 @@ async fn through_the_store(doc: &Block, blocks: &[Block], leg: WriteLeg) -> Vec<
         "block".to_string(),
         "block".to_string(),
         BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     let entity: EntityName = "block".to_string().into();
 
@@ -622,6 +623,7 @@ async fn ingest_in_sequence(sources: &[&str], headline: &str) -> Ingested {
         "block".to_string(),
         "block".to_string(),
         BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     let entity: EntityName = "block".to_string().into();
     let adapter = holon_orgmode::OrgFormatAdapter::new();

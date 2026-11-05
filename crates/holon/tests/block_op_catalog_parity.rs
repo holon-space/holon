@@ -81,6 +81,7 @@ async fn both_block_providers_source_catalog_descriptors_identically() {
         ENTITY.to_string(),
         SHORT.to_string(),
         block_edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
 
     // Loro authority.
@@ -155,6 +156,7 @@ async fn each_block_authority_declares_every_op_it_executes_with_its_references(
                 ENTITY.to_string(),
                 SHORT.to_string(),
                 block_edge_fields(),
+                std::sync::Arc::new(holon_api::SystemClock),
             )),
         ),
         (

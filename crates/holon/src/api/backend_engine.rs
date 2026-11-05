@@ -2144,6 +2144,7 @@ mod tests {
                     crate::storage::BLOCK_WRITE_TABLE.to_string(),
                     "block".to_string(),
                     "block".to_string(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ))
             })
         })
@@ -2604,6 +2605,7 @@ mod tests {
                     "test_item".to_string(),
                     "test-item".to_string(),
                     "test-item".to_string(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ))
             })
         })
@@ -2724,6 +2726,7 @@ mod tests {
                     "block".to_string(),
                     "block".to_string(),
                     "block".to_string(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ))
             })
         })

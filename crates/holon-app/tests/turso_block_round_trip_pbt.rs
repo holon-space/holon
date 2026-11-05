@@ -99,6 +99,7 @@ proptest! {
                 "block".to_string(),
                 "block".to_string(),
                 descriptors,
+                std::sync::Arc::new(holon_api::SystemClock),
             ));
             let entity: EntityName = "block".to_string().into();
 
@@ -192,6 +193,7 @@ proptest! {
                 "block".to_string(),
                 "block".to_string(),
                 descriptors,
+                std::sync::Arc::new(holon_api::SystemClock),
             ));
             let entity: EntityName = "block".to_string().into();
 
@@ -283,6 +285,7 @@ fn blocked_by_requires_edge_round_trips_through_store() {
             "block".to_string(),
             "block".to_string(),
             descriptors,
+            std::sync::Arc::new(holon_api::SystemClock),
         ));
         let entity: EntityName = "block".to_string().into();
 

@@ -4049,6 +4049,7 @@ async fn instantiate_template_deterministic_gate() {
                 BLOCK_WRITE_TABLE.to_string(),
                 "block".to_string(),
                 "block".to_string(),
+                std::sync::Arc::new(holon_api::SystemClock),
             ))
         })
     })

@@ -45,6 +45,7 @@ pub async fn new_sql_engine() -> Arc<BackendEngine> {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 )) as Arc<dyn OperationProvider>
             },
         ));
@@ -77,6 +78,7 @@ pub async fn new_sql_engine_with_structural_ops() -> Arc<BackendEngine> {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 )) as Arc<dyn OperationProvider>
             },
         ));
@@ -91,6 +93,7 @@ pub async fn new_sql_engine_with_structural_ops() -> Arc<BackendEngine> {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ));
                 // Point the cache at `block_raw` (not the `block` matview) so writes
                 // are immediately visible to the structural ops' ordering reads.

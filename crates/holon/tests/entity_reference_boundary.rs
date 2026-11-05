@@ -42,6 +42,7 @@ async fn engine_with_one_row() -> Arc<BackendEngine> {
                     TABLE.to_string(),
                     ENTITY.to_string(),
                     ENTITY.to_string(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 )) as Arc<dyn holon_core::OperationProvider>
             })
         },
@@ -89,6 +90,7 @@ async fn block_engine_with_a_second_indent_authority() -> Arc<BackendEngine> {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 )) as Arc<dyn holon_core::OperationProvider>
             })
             .with_operation_provider_factory(|backend| {
@@ -100,6 +102,7 @@ async fn block_engine_with_a_second_indent_authority() -> Arc<BackendEngine> {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ));
                 let mut block_raw_type_def = holon_api::block::Block::type_definition();
                 block_raw_type_def.name = holon::storage::BLOCK_WRITE_TABLE.to_string();

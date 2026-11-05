@@ -59,6 +59,7 @@ async fn ingest_sink() -> (Arc<BackendEngine>, Arc<SqlBlockOperations>) {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 )) as Arc<dyn OperationProvider>
             })
             .with_operation_provider_factory(move |backend| {
@@ -70,6 +71,7 @@ async fn ingest_sink() -> (Arc<BackendEngine>, Arc<SqlBlockOperations>) {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ));
                 let mut block_raw_type_def = Block::type_definition();
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();

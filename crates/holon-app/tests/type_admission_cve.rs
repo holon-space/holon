@@ -66,6 +66,7 @@ async fn boot_fresh_db(
                         holon::storage::BLOCK_WRITE_TABLE.to_string(),
                         "block".to_string(),
                         "block".to_string(),
+                        std::sync::Arc::new(holon_api::SystemClock),
                     )) as Arc<dyn holon_core::OperationProvider>
                 },
             ));
@@ -144,7 +145,10 @@ fn a_boolean_computed_persisted_field_is_refused_against_a_string_only_home() {
         let err = holon_app::type_admission::declare_type_admitted(
             &profiles,
             &boolean_computed_type("gen_refused", "org"),
-            &holon::core::type_declaration::SqlTypeWriteAuthority(engine.db_handle().clone()),
+            &holon::core::type_declaration::SqlTypeWriteAuthority(
+                engine.db_handle().clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             engine.db_handle(),
             &types,
             &engine.get_dispatcher(),
@@ -184,7 +188,10 @@ fn the_same_field_is_admitted_against_a_full_algebra_home() {
         holon_app::type_admission::declare_type_admitted(
             &profiles,
             &boolean_computed_type("gen_admitted", "holon-native"),
-            &holon::core::type_declaration::SqlTypeWriteAuthority(engine.db_handle().clone()),
+            &holon::core::type_declaration::SqlTypeWriteAuthority(
+                engine.db_handle().clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             engine.db_handle(),
             &types,
             &engine.get_dispatcher(),
@@ -295,7 +302,10 @@ fn an_unknown_home_is_refused_through_the_seat_even_with_no_computed_fields() {
         let err = holon_app::type_admission::declare_type_admitted(
             &profiles,
             &plain,
-            &holon::core::type_declaration::SqlTypeWriteAuthority(engine.db_handle().clone()),
+            &holon::core::type_declaration::SqlTypeWriteAuthority(
+                engine.db_handle().clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             engine.db_handle(),
             &types,
             &engine.get_dispatcher(),

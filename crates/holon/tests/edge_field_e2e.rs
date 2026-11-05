@@ -132,6 +132,7 @@ fn make_provider(handle: holon::storage::turso::DbHandle) -> SqlOperationProvide
         ENTITY.to_string(),
         ENTITY.to_string(),
         vec![descriptor()],
+        std::sync::Arc::new(holon_api::SystemClock),
     )
 }
 
@@ -426,6 +427,7 @@ async fn block_schema_module_creates_junction_tables_and_wires_edge_fields() {
         "block".to_string(),
         "block".to_string(),
         descriptors,
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     let entity_name: EntityName = "block".to_string().into();
 

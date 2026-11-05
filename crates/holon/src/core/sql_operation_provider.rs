@@ -318,7 +318,7 @@ pub struct SqlOperationProvider {
     /// Edge-typed fields (multi-valued, projected to a junction table).
     /// Indexed by field name for O(1) partition-time lookup.
     edge_fields: HashMap<String, EdgeFieldDescriptor>,
-    /// Wall-clock authority for write-time timestamps. Defaults to SystemClock.
+    /// Wall-clock authority for write-time timestamps.
     clock: std::sync::Arc<dyn holon_api::Clock>,
     /// Tells which blocks are shared pages. `None` on a wiring that holds no
     /// shares.
@@ -331,6 +331,7 @@ impl SqlOperationProvider {
         table_name: String,
         entity_name: String,
         entity_short_name: String,
+        clock: std::sync::Arc<dyn holon_api::Clock>,
     ) -> Self {
         Self::with_edge_fields(
             db_handle,
@@ -338,6 +339,7 @@ impl SqlOperationProvider {
             entity_name,
             entity_short_name,
             Vec::new(),
+            clock,
         )
     }
 
@@ -350,6 +352,7 @@ impl SqlOperationProvider {
         entity_name: String,
         entity_short_name: String,
         edge_fields: Vec<EdgeFieldDescriptor>,
+        clock: std::sync::Arc<dyn holon_api::Clock>,
     ) -> Self {
         let write_schema = block_write_schema(&entity_name);
         Self::with_write_schema(
@@ -359,6 +362,7 @@ impl SqlOperationProvider {
             entity_short_name,
             edge_fields,
             write_schema,
+            clock,
         )
     }
 
@@ -369,7 +373,11 @@ impl SqlOperationProvider {
     /// same code path, parameterized by the type instead of defaulting to
     /// block. Registering it is what makes a declared type writable; see
     /// [`crate::core::type_declaration::declare_type`].
-    pub fn for_type(db_handle: DbHandle, type_def: &TypeDefinition) -> Result<Self> {
+    pub fn for_type(
+        db_handle: DbHandle,
+        type_def: &TypeDefinition,
+        clock: std::sync::Arc<dyn holon_api::Clock>,
+    ) -> Result<Self> {
         // Routed by the CANONICAL entity name. `EntityName` folds `_` to `-`
         // so the name is a valid URI scheme; a provider that kept the raw
         // `gen_1` would advertise `gen-1` in its descriptors and match nothing
@@ -383,6 +391,7 @@ impl SqlOperationProvider {
             entity_name.as_str().to_string(),
             Vec::new(),
             WriteSchema::from_type_def(type_def)?,
+            clock,
         ))
     }
 
@@ -393,6 +402,7 @@ impl SqlOperationProvider {
         entity_short_name: String,
         edge_fields: Vec<EdgeFieldDescriptor>,
         write_schema: WriteSchema,
+        clock: std::sync::Arc<dyn holon_api::Clock>,
     ) -> Self {
         let edge_fields = edge_fields
             .into_iter()
@@ -406,7 +416,7 @@ impl SqlOperationProvider {
             entity_short_name,
             write_schema,
             edge_fields,
-            clock: std::sync::Arc::new(holon_api::SystemClock),
+            clock,
             shared_pages: None,
         }
     }
@@ -444,12 +454,6 @@ impl SqlOperationProvider {
     fn require_write_route(&self, field: &str) -> Result<()> {
         self.write_schema
             .require_write_route(&self.entity_name, &self.table_name, field)
-    }
-
-    /// Override the clock (tests). Defaults to SystemClock.
-    pub fn with_clock(mut self, clock: std::sync::Arc<dyn holon_api::Clock>) -> Self {
-        self.clock = clock;
-        self
     }
 
     fn value_to_sql(value: &Value) -> std::result::Result<String, holon_api::NotJson> {
@@ -5022,8 +5026,8 @@ mod clock_tests {
             "block_raw".to_string(),
             "block".to_string(),
             "block".to_string(),
-        )
-        .with_clock(Arc::new(TestClock::new(123456)));
+            Arc::new(TestClock::new(123456)),
+        );
 
         let mut params = StorageEntity::new();
         params.insert("id".into(), Value::String("b1".to_string()));
@@ -5077,6 +5081,7 @@ mod create_id_tests {
             "block_raw".to_string(),
             "block".to_string(),
             "block".to_string(),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
 
         let mut params = StorageEntity::new();
@@ -5157,6 +5162,7 @@ mod delete_inverse_classification_tests {
             "block_raw".to_string(),
             "block".to_string(),
             "block".to_string(),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         // Leak the backend for the test's lifetime so the actor stays alive.
         std::mem::forget(_backend);
@@ -5444,6 +5450,7 @@ mod link_resolution_rewrite_tests {
             "block_raw".to_string(),
             "block".to_string(),
             "block".to_string(),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         std::mem::forget(_backend);
         (db_handle, provider)
@@ -5652,6 +5659,7 @@ mod two_phase_fk_tests {
             "block".to_string(),
             "block".to_string(),
             vec![requires_descriptor],
+            std::sync::Arc::new(holon_api::SystemClock),
         );
 
         // Adversarial op order: dependent A (requires B) emitted BEFORE B.
@@ -5729,6 +5737,7 @@ mod tag_op_tests {
             "block".to_string(),
             "block".to_string(),
             vec![tags_edge()],
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         std::mem::forget(_backend);
         (db, provider)
@@ -6001,8 +6010,12 @@ mod soft_delete_route_tests {
         )
         .await
         .expect("seed row");
-        let provider =
-            SqlOperationProvider::for_type(db.clone(), &soft_delete_type()).expect("provider");
+        let provider = SqlOperationProvider::for_type(
+            db.clone(),
+            &soft_delete_type(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .expect("provider");
         std::mem::forget(_backend);
         (db, provider)
     }
@@ -6142,6 +6155,7 @@ mod ancestry_tests {
             "block_raw".to_string(),
             "block".to_string(),
             "block".to_string(),
+            std::sync::Arc::new(holon_api::SystemClock),
         )
     }
 
@@ -6237,8 +6251,12 @@ mod field_format_write_tests {
         )
         .await
         .expect("gen_counted_raw");
-        let provider =
-            SqlOperationProvider::for_type(db.clone(), &counted_type()).expect("the counted type");
+        let provider = SqlOperationProvider::for_type(
+            db.clone(),
+            &counted_type(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .expect("the counted type");
         std::mem::forget(backend);
         (db, provider)
     }

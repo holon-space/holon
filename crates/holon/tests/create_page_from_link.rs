@@ -45,6 +45,7 @@ async fn block_engine() -> Arc<BackendEngine> {
                     ENTITY.to_string(),
                     ENTITY.to_string(),
                     BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 )) as Arc<dyn OperationProvider>
             })
             .with_operation_provider_factory(|backend| {
@@ -56,6 +57,7 @@ async fn block_engine() -> Arc<BackendEngine> {
                     ENTITY.to_string(),
                     ENTITY.to_string(),
                     BlockSchemaModule.edge_fields(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ));
                 let mut block_raw_type_def = Block::type_definition();
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();

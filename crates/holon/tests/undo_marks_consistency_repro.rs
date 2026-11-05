@@ -75,6 +75,7 @@ fn dispatcher(handle: DbHandle) -> OperationDispatcher {
         ENTITY.to_string(),
         ENTITY.to_string(),
         vec![tags_descriptor()],
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     OperationDispatcher::new(vec![provider as Arc<dyn OperationProvider>])
 }

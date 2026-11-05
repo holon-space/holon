@@ -144,6 +144,7 @@ impl Module for EventInfraModule {
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
+                    resolver.resolve::<holon_api::InjectedClock>().0.clone(),
                 ));
 
                 // Resolve the `BlockCellRegistry`. In Full mode (LoroModule
@@ -220,6 +221,7 @@ impl Module for EventInfraModule {
                 "block".to_string(),
                 "block".to_string(),
                 BlockSchemaModule.edge_fields(),
+                resolver.resolve::<holon_api::InjectedClock>().0.clone(),
             ));
 
             let cell_registry: Arc<dyn EntityCellRegistry> =

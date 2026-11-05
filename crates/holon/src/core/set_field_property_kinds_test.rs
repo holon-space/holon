@@ -40,6 +40,7 @@ async fn provider_with_block() -> (
         "block_raw".to_string(),
         "block".to_string(),
         "block".to_string(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let id = "block:kinds-block".to_string();
     let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();

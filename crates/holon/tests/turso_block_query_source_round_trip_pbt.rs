@@ -86,6 +86,7 @@ async fn write_blocks(
         "block".to_string(),
         "block".to_string(),
         BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let entity: EntityName = "block".to_string().into();
     // Seed the document root the generated roots hang under (their `parent_id`
@@ -164,6 +165,7 @@ async fn purge_document(engine: &BackendEngine, doc_id: &EntityUri) -> Result<()
         "block".to_string(),
         "block".to_string(),
         BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let mut params = StorageEntity::new();
     params.insert("id".into(), Value::String(doc_id.as_str().to_string()));

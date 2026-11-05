@@ -53,6 +53,7 @@ use crate::focus_roots_feed::FocusRootsFeed;
 /// descriptor for into the `properties` JSON column instead, silently.
 pub fn block_sql_write_provider(
     db_handle: holon::storage::DbHandle,
+    clock: Arc<dyn holon_api::Clock>,
 ) -> Arc<dyn OriginTaggedWrites> {
     Arc::new(SqlOperationProvider::with_edge_fields(
         db_handle,
@@ -60,6 +61,7 @@ pub fn block_sql_write_provider(
         "block".to_string(),
         "block".to_string(),
         BlockSchemaModule.edge_fields(),
+        clock,
     ))
 }
 
@@ -168,7 +170,10 @@ impl Module for LoroModule {
                     holon_loro::loro_entity_operations::LoroTypeWriteAuthority::new(
                         collab,
                         Some(Arc::new(
-                            holon::core::type_declaration::SqlTypeWriteAuthority(db),
+                            holon::core::type_declaration::SqlTypeWriteAuthority(
+                                db,
+                                resolver.resolve::<holon_api::InjectedClock>().0.clone(),
+                            ),
                         )),
                     ),
                 ) as Arc<dyn holon_core::TypeWriteAuthority>
@@ -268,7 +273,10 @@ impl Module for LoroModule {
                 let doc_store = resolver.resolve::<LoroDocumentStore>();
                 let db_handle_provider = resolver.resolve::<dyn holon::di::DbHandleProvider>();
                 let db_handle = db_handle_provider.handle();
-                let command_bus = block_sql_write_provider(db_handle.clone());
+                let command_bus = block_sql_write_provider(
+                    db_handle.clone(),
+                    resolver.resolve::<holon_api::InjectedClock>().0.clone(),
+                );
                 let sink_reader: Arc<dyn holon_loro::SinkReader> =
                     Arc::new(holon::storage::TursoSinkReader::new(db_handle.clone()));
                 let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
@@ -281,6 +289,7 @@ impl Module for LoroModule {
                     resolver
                         .resolve_async::<holon_profiles::TypeRegistry>()
                         .await,
+                    resolver.resolve::<holon_api::InjectedClock>().0.clone(),
                 ));
                 let projection = holon_loro::loro_sync_controller::LoroProjection::from_storage(
                     doc_store_arc,
@@ -627,7 +636,10 @@ fn register_subtree_share(injector: &Injector) {
         // the SQL `block` table works. Same factory as the global
         // projection's — a separate instance over the same `DbHandle`.
         let db_handle_provider = resolver.resolve::<dyn holon::di::DbHandleProvider>();
-        let sql_ops = block_sql_write_provider(db_handle_provider.handle());
+        let sql_ops = block_sql_write_provider(
+            db_handle_provider.handle(),
+            resolver.resolve::<holon_api::InjectedClock>().0.clone(),
+        );
 
         // The global Loro→SQL projection (same instance `LoroSyncController`
         // drives). `share_subtree` flushes it after pruning so the global

@@ -269,6 +269,7 @@ mod tests {
             "block".to_string(),
             "block".to_string(),
             BlockSchemaModule.edge_fields(),
+            std::sync::Arc::new(holon_api::SystemClock),
         ));
         let mut block_raw_type_def = Block::type_definition();
         block_raw_type_def.name = "block_raw".to_string();

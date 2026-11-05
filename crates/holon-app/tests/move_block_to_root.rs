@@ -85,6 +85,7 @@ async fn wiring(
         "block".to_string(),
         "block".to_string(),
         BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     let cache: Arc<QueryableCache<Block>> = Arc::new(
         QueryableCache::<Block>::new(handle.clone(), Block::type_definition())

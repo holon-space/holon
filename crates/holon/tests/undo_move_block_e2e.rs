@@ -38,6 +38,7 @@ async fn block_engine() -> Arc<BackendEngine> {
                     BLOCK_WRITE_TABLE.to_string(),
                     "block".to_string(),
                     "block".to_string(),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 )) as Arc<dyn OperationProvider>
             })
             .with_operation_provider_factory(|backend| {
@@ -50,6 +51,7 @@ async fn block_engine() -> Arc<BackendEngine> {
                     "block".to_string(),
                     "block".to_string(),
                     descriptors,
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ));
                 // Point the cache at `block_raw` so provider-internal reads
                 // (`get_by_id`, sibling scans) see the rows the provider writes —

@@ -29,6 +29,7 @@ async fn the_previous_sibling_is_the_one_before_in_sort_key_then_id_order() {
                 "block".to_string(),
                 "block".to_string(),
                 BlockSchemaModule.edge_fields(),
+                std::sync::Arc::new(holon_api::SystemClock),
             )) as Arc<dyn OperationProvider>
         })
     })

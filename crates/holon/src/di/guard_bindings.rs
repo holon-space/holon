@@ -95,6 +95,7 @@ pub fn sql_type_write_authority() -> Provider<dyn holon_core::TypeWriteAuthority
             .await;
         Arc::new(crate::core::type_declaration::SqlTypeWriteAuthority(
             db.handle(),
+            resolver.resolve::<holon_api::InjectedClock>().0.clone(),
         )) as Arc<dyn holon_core::TypeWriteAuthority>
     })
 }

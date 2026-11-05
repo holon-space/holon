@@ -80,6 +80,7 @@ fn sql_provider(handle: DbHandle) -> Arc<SqlOperationProvider> {
         ENTITY.to_string(),
         ENTITY.to_string(),
         vec![tags_descriptor()],
+        std::sync::Arc::new(holon_api::SystemClock),
     ))
 }
 

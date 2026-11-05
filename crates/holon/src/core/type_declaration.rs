@@ -205,7 +205,7 @@ fn require_declarable(type_def: &TypeDefinition) -> Result<()> {
 
 /// The SQL tables as the write authority of every free-standing type, for a
 /// container with no Loro store.
-pub struct SqlTypeWriteAuthority(pub DbHandle);
+pub struct SqlTypeWriteAuthority(pub DbHandle, pub std::sync::Arc<dyn holon_api::Clock>);
 
 #[async_trait::async_trait]
 impl TypeWriteAuthority for SqlTypeWriteAuthority {
@@ -213,6 +213,7 @@ impl TypeWriteAuthority for SqlTypeWriteAuthority {
         Ok(Arc::new(SqlOperationProvider::for_type(
             self.0.clone(),
             type_def,
+            self.1.clone(),
         )?))
     }
 
@@ -483,7 +484,10 @@ mod tests {
         ] {
             let err = declare_type(
                 type_def,
-                &SqlTypeWriteAuthority(db_handle.clone()),
+                &SqlTypeWriteAuthority(
+                    db_handle.clone(),
+                    std::sync::Arc::new(holon_api::SystemClock),
+                ),
                 &db_handle,
                 &registry,
                 &dispatcher,
@@ -535,7 +539,10 @@ mod tests {
 
         let err = declare_type(
             &type_def,
-            &SqlTypeWriteAuthority(db_handle.clone()),
+            &SqlTypeWriteAuthority(
+                db_handle.clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             &db_handle,
             &registry,
             &dispatcher,
@@ -576,7 +583,10 @@ mod tests {
 
         let artifacts = declare_type(
             &type_def,
-            &SqlTypeWriteAuthority(db_handle.clone()),
+            &SqlTypeWriteAuthority(
+                db_handle.clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             &db_handle,
             &registry,
             &dispatcher,
@@ -589,7 +599,10 @@ mod tests {
         // Re-declaring is refused by the write-authority check.
         let err = declare_type(
             &type_def,
-            &SqlTypeWriteAuthority(db_handle.clone()),
+            &SqlTypeWriteAuthority(
+                db_handle.clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             &db_handle,
             &registry,
             &dispatcher,
@@ -623,7 +636,10 @@ mod tests {
 
         let after_teardown = declare_type(
             &type_def,
-            &SqlTypeWriteAuthority(db_handle.clone()),
+            &SqlTypeWriteAuthority(
+                db_handle.clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             &db_handle,
             &registry,
             &dispatcher,

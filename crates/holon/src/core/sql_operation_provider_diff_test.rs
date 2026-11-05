@@ -54,6 +54,7 @@ async fn make_provider_with_block(
         BLOCK_TABLE.to_string(),
         "block".to_string(),
         "block".to_string(),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     (backend, db_handle, provider, id)
 }

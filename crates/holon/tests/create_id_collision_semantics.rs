@@ -69,6 +69,7 @@ async fn setup() -> (DbHandle, Arc<SqlOperationProvider>) {
         ENTITY.to_string(),
         ENTITY.to_string(),
         vec![tags_descriptor()],
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     (handle, provider)
 }
@@ -235,6 +236,7 @@ async fn adopting_a_null_titled_holder_is_disclosed() {
         "nullable_block".to_string(),
         ENTITY.to_string(),
         ENTITY.to_string(),
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     handle
         .execute(

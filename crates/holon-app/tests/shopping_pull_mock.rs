@@ -377,7 +377,12 @@ fn connection() -> Arc<CompiledListSync> {
 }
 
 fn peer_for(base_url: &str) -> RestListPeer {
-    RestListPeer::new(surface_for(base_url), connection(), DEVICE_ID)
+    RestListPeer::new(
+        surface_for(base_url),
+        connection(),
+        DEVICE_ID,
+        Arc::new(holon_api::SystemClock),
+    )
 }
 
 /// A version envelope with no items, for a leg that needs a batch to send
@@ -1193,7 +1198,12 @@ fn peer_from(sidecar: &str, base_url: &str) -> RestListPeer {
     let declared = holon_kitchen::shopping_item_type().expect("the declared type");
     let compiled =
         CompiledListSync::compile("shopping", spec, &declared).expect("the connection compiles");
-    RestListPeer::new(surface, compiled, DEVICE_ID)
+    RestListPeer::new(
+        surface,
+        compiled,
+        DEVICE_ID,
+        Arc::new(holon_api::SystemClock),
+    )
 }
 
 #[tokio::test]

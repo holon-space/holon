@@ -1537,6 +1537,7 @@ mod tests {
             "block".to_string(),
             "block".to_string(),
             descriptors,
+            std::sync::Arc::new(holon_api::SystemClock),
         ));
         // Point the cache at `block_raw` (not the `block` matview) so that
         // test INSERTs into block_raw are immediately visible via get_by_id.

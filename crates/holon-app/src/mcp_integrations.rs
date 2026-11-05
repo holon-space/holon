@@ -600,6 +600,7 @@ pub struct IntegrationSupervisor {
     token_store: Arc<dyn SyncTokenStore>,
     type_registry: Arc<TypeRegistry>,
     type_write_authority: Arc<dyn holon_core::TypeWriteAuthority>,
+    clock: Arc<dyn holon_api::Clock>,
     sync_gate: SyncGate,
     keychain: Arc<dyn holon_secrets::KeychainStore>,
     /// Its `preferences` are the last place a `${VAR}` is looked up.
@@ -945,7 +946,10 @@ impl IntegrationSupervisor {
             };
             let authority = holon::core::type_declaration::derived_write_authority(
                 &type_def,
-                &holon::core::type_declaration::SqlTypeWriteAuthority(self.db.clone()),
+                &holon::core::type_declaration::SqlTypeWriteAuthority(
+                    self.db.clone(),
+                    self.clock.clone(),
+                ),
                 |entity| {
                     dispatcher.has_provider(entity)
                         || connector_serves.contains(&EntityName::new(entity))
@@ -1067,6 +1071,7 @@ impl IntegrationSupervisor {
             integration,
             self.type_write_authority.clone(),
             &self.type_registry,
+            self.clock.clone(),
         )
         .map_err(|why| anyhow::anyhow!("its `holon.list_sync` cannot be served: {why}"))?;
         dispatcher
@@ -1346,6 +1351,7 @@ impl Module for McpIntegrationsModule {
                     type_write_authority: resolver
                         .resolve_async::<dyn holon_core::TypeWriteAuthority>()
                         .await,
+                    clock: resolver.resolve::<holon_api::InjectedClock>().0.clone(),
                     sync_gate: (*resolver.resolve::<SyncGate>()).clone(),
                     // The session's ONE secret store: a session on the in-memory
                     // backend must not have this reader talking to the login
@@ -2016,7 +2022,9 @@ for line in sys.stdin:
             db: db.clone(),
             type_write_authority: Arc::new(holon::core::type_declaration::SqlTypeWriteAuthority(
                 db.clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
             )),
+            clock: std::sync::Arc::new(holon_api::SystemClock),
             attribution: IntegrationAttribution::new(),
             bus: Arc::new(ConditionBus::new()),
             shutdown: Arc::new(SessionShutdown::new()),

@@ -53,6 +53,7 @@ async fn gate_cost_on_a_plain_block_over_the_sql_authority() {
                 "block".to_string(),
                 "block".to_string(),
                 BlockSchemaModule.edge_fields(),
+                std::sync::Arc::new(holon_api::SystemClock),
             )) as Arc<dyn OperationProvider>
         })
     })

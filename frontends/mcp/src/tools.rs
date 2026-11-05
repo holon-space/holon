@@ -7410,6 +7410,7 @@ pub(crate) mod engine_harness {
                             holon::storage::BLOCK_WRITE_TABLE.to_string(),
                             "block".to_string(),
                             "block".to_string(),
+                            std::sync::Arc::new(holon_api::SystemClock),
                         )) as Arc<dyn holon_core::OperationProvider>
                     },
                 ));
@@ -10036,6 +10037,7 @@ mod shape_sim_cell_branch_tests {
                             "block".to_string(),
                             "block".to_string(),
                             BlockSchemaModule.edge_fields(),
+                            std::sync::Arc::new(holon_api::SystemClock),
                         ))
                             as std::sync::Arc<dyn holon_core::OperationProvider>
                     }),

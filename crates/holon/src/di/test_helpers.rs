@@ -147,7 +147,7 @@ pub type SyncableProviderFactory =
 ///
 /// let module = TestProviderModule::new()
 ///     .with_operation_provider_factory(|backend| {
-///         Arc::new(SqlOperationProvider::new(backend, "block".into(), "block".into(), "block".into()))
+///         Arc::new(SqlOperationProvider::new(backend, "block".into(), "block".into(), "block".into(), Arc::new(SystemClock)))
 ///     });
 ///
 /// services.add_module_mut(module);

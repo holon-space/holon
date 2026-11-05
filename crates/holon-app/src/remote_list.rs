@@ -51,6 +51,7 @@ pub struct RestListPeer {
     surface: Arc<dyn McpCallSurface>,
     compiled: Arc<CompiledListSync>,
     device_id: String,
+    clock: Arc<dyn holon_api::Clock>,
     /// The newest version this peer observed, echoed on the next read. Zero
     /// until the first pull.
     last_version: AtomicI64,
@@ -61,11 +62,13 @@ impl RestListPeer {
         surface: Arc<dyn McpCallSurface>,
         compiled: Arc<CompiledListSync>,
         device_id: impl Into<String>,
+        clock: Arc<dyn holon_api::Clock>,
     ) -> Self {
         Self {
             surface,
             compiled,
             device_id: device_id.into(),
+            clock,
             last_version: AtomicI64::new(0),
         }
     }
@@ -111,8 +114,13 @@ impl RemoteListPeer for RestListPeer {
         // The fetch time is stamped where the body is known to have mapped: it
         // becomes the watermark, and a watermark from a failed fetch would
         // license a later absence-as-deletion.
-        let snapshot =
-            ListSnapshot::from_rows(&self.compiled, &rows, chrono::Utc::now().to_rfc3339())?;
+        let millis = self.clock.now_millis();
+        let fetched_at = chrono::DateTime::from_timestamp_millis(millis)
+            .ok_or_else(|| {
+                anyhow::anyhow!("the clock returned {millis}ms, which is not a valid instant")
+            })?
+            .to_rfc3339();
+        let snapshot = ListSnapshot::from_rows(&self.compiled, &rows, fetched_at)?;
         self.observe(snapshot.version());
         Ok(snapshot)
     }
@@ -228,6 +236,7 @@ pub fn configured_list(
     integration: &McpIntegration,
     authority: Arc<dyn TypeWriteAuthority>,
     types: &TypeRegistry,
+    clock: Arc<dyn holon_api::Clock>,
 ) -> std::result::Result<ConfiguredList, String> {
     let entity = spec.entity.clone();
     let declared = types.get(&entity).ok_or_else(|| {
@@ -246,6 +255,7 @@ pub fn configured_list(
             integration.sync_engine.call_surface(),
             compiled.clone(),
             device_id(),
+            clock,
         )),
         rows: Arc::new(AuthorityRows::new(authority, declared)),
         device_id: device_id().to_string(),

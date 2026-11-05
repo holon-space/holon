@@ -24,11 +24,20 @@ use holon_turso::turso_adapter::TursoAdapter;
 pub struct SqlTypedEntitySink {
     db: DbHandle,
     registry: Shared<TypeRegistry>,
+    clock: std::sync::Arc<dyn holon_api::Clock>,
 }
 
 impl SqlTypedEntitySink {
-    pub fn new(db: DbHandle, registry: Shared<TypeRegistry>) -> Self {
-        Self { db, registry }
+    pub fn new(
+        db: DbHandle,
+        registry: Shared<TypeRegistry>,
+        clock: std::sync::Arc<dyn holon_api::Clock>,
+    ) -> Self {
+        Self {
+            db,
+            registry,
+            clock,
+        }
     }
 }
 
@@ -45,8 +54,9 @@ impl TypedEntitySink for SqlTypedEntitySink {
             .into_iter()
             .find(|t| &EntityName::new(t.name.as_str()) == entity)
             .with_context(|| format!("no type is declared for the typed entity '{entity}'"))?;
-        let provider = SqlOperationProvider::for_type(self.db.clone(), &type_def)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let provider =
+            SqlOperationProvider::for_type(self.db.clone(), &type_def, self.clock.clone())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         let exists_sql = format!(
             "SELECT id FROM {} WHERE id = $id",
             TursoAdapter::raw_table_name(&type_def)

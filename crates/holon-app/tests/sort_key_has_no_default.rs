@@ -68,6 +68,7 @@ async fn sqlonly_block_crud() -> (
         "block".to_string(),
         "block".to_string(),
         BlockSchemaModule.edge_fields(),
+        std::sync::Arc::new(holon_api::SystemClock),
     ));
     let mut block_raw_type_def = Block::type_definition();
     block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();

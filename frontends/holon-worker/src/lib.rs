@@ -399,6 +399,7 @@ mod backend {
                                     holon::storage::BLOCK_WRITE_TABLE.to_string(),
                                     "block".to_string(),
                                     "block".to_string(),
+                                    resolver.resolve::<holon_api::InjectedClock>().0.clone(),
                                 );
                                 std::sync::Arc::new(provider)
                                     as std::sync::Arc<dyn holon_core::OperationProvider>
