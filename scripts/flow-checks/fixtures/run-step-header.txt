@@ -1,0 +1,7 @@
+echo: echo hello
+BASE: 4f9afab597faeb1d0e31b3c382074c8aabb35002
+TREE: 0328b6bdcdc4b68848c5a746956ad412b525cfe7
+STARTED: 2026-11-05T09:00:00Z
+hello
+
+exit: 0

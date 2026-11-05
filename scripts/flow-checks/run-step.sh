@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run one step line that scripts/select-tests.py printed and write its log to stdout:
 #   BASE=<lane base commit> scripts/flow-checks/run-step.sh '<step>: <args>' | tee target/<lane>/<step>.log
-# Line 1 is the step line verbatim, then the BASE:/TREE: header and the step's output; the last line is
+# Line 1 is the step line verbatim, then the BASE:/TREE:/STARTED: header and the step's output; the last line is
 # `exit: <code>`, and the script exits with that code. scripts/flow-checks/tests-cover-diff.py reads this shape.
 set -uo pipefail
 line=$1
@@ -11,6 +11,7 @@ args=${line#*: }
 echo "$line"
 echo "BASE: $BASE"
 echo "TREE: $(jj log -r @ --no-graph -T commit_id)"
+echo "STARTED: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # The args hold shell quoting (`-E '<filterset>'`).
 eval "set -- $args"
 case $step in
