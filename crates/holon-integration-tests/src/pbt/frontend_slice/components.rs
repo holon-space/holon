@@ -2200,34 +2200,11 @@ impl HeadlessFrontendComponent {
         parse_block_rows(&rows)
     }
 
-    /// Poll the `block_raw` id-set until it is stable across two consecutive
-    /// reads (the same convergence `simulate_restart` uses), so a watcher
-    /// re-ingest driven by an external file move has fully projected before the
-    /// invariants run. Fail loud on a 5s budget -- a never-stabilizing set
-    /// means the ingest cascade regressed.
+    /// Settle so a watcher re-ingest driven by an external file move has
+    /// fully projected before the invariants run. Fail loud on a 5s budget --
+    /// a never-settling ingest means the cascade regressed.
     async fn settle_block_id_set(&self, label: &str) {
-        let ids = || async {
-            self.all_blocks()
-                .await
-                .into_iter()
-                .map(|b| b.id)
-                .collect::<std::collections::BTreeSet<_>>()
-        };
-        let timeout = Duration::from_secs(5);
-        let start = std::time::Instant::now();
-        let mut prev = ids().await;
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let now = ids().await;
-            if now == prev {
-                break;
-            }
-            prev = now;
-            assert!(
-                start.elapsed() < timeout,
-                "[{label}] block_raw id-set never stabilized after 5s"
-            );
-        }
+        self.converge(Duration::from_secs(5), label).await;
     }
 
     /// Run a read-only SQL statement against the headless engine and return the
@@ -2317,42 +2294,21 @@ impl HeadlessFrontendComponent {
     /// Settle the navigation matviews (`current_focus` / `focus_roots`) to a
     /// fixed point after a `navigation.focus` write, so the focus
     /// invariants read a converged projection. A query watch / op clears
-    /// `is_loading` before its CDC pump delivers, so poll the row counts to
-    /// a stable fixed point (mirrors the `watch_rows` settle loop).
-    /// Reaching the fixed point is what makes the `focus_roots` teeth
+    /// `is_loading` before its CDC pump delivers, so wait for the CDC fixed
+    /// point. Reaching it is what makes the `focus_roots` teeth
     /// produce a real `Fail` (not a CDC-lag `Skipped`, V4).
     /// Returns the settled `focus_roots` rows. Callers that need to assert on
     /// the settled state read them from here rather than issuing their own
-    /// SELECT: these two statements are already the bulk of the pinned
-    /// `PinBlock` read budget (`PIN_BLOCK_CLICK_RESOLVE_READS`), which gates
-    /// RAW reads, so a re-query would spend budget re-reading what this loop
-    /// just read.
+    /// SELECT, so the read stays inside the pinned `PinBlock` read budget
+    /// (`PIN_BLOCK_CLICK_RESOLVE_READS`), which gates RAW reads.
     async fn settle_focus_matviews(&self) -> Vec<holon_api::StorageEntity> {
-        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
-        let mut last = (usize::MAX, usize::MAX);
-        let mut stable = 0u32;
-        loop {
-            let cf = self
-                .sql_query("SELECT region, block_id FROM current_focus")
-                .await
-                .len();
-            let fr = self
-                .sql_query("SELECT region, root_id FROM focus_roots")
-                .await;
-            if (cf, fr.len()) == last {
-                stable += 1;
-                if stable >= 3 {
-                    return fr;
-                }
-            } else {
-                stable = 0;
-            }
-            last = (cf, fr.len());
-            if tokio::time::Instant::now() >= deadline {
-                return fr;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        self.converge(
+            soak_deadline(Duration::from_secs(3)),
+            "settle_focus_matviews",
+        )
+        .await;
+        self.sql_query("SELECT region, root_id FROM focus_roots")
+            .await
     }
 
     /// Wait until the LeftSidebar has bound a clickable `navigation.focus`
@@ -2636,12 +2592,11 @@ impl HeadlessFrontendComponent {
         }
     }
 
-    /// Settle `block_id`'s `block_raw.content` after a keystroke edit: the
-    /// per-keystroke pipeline syncs the editor's Loro text cell to `block_raw`
-    /// through CDC, after the keystroke returns.
-    async fn settle_block_content(&self, block_id: &EntityUri) {
-        self.settle_projections(&format!("settle_block_content {block_id}"))
-            .await;
+    /// Settle `block_raw.content` after a keystroke edit: the per-keystroke
+    /// pipeline syncs the editor's Loro text cell to `block_raw` through CDC,
+    /// after the keystroke returns.
+    async fn settle_block_content(&self) {
+        self.settle_projections("settle_block_content").await;
     }
 
     /// Dispatch a `navigation` provider op through the windowless
@@ -3614,9 +3569,7 @@ impl HeadlessFrontendComponent {
                 });
             crate::pbt::composed::schedule_point::schedule_point().await;
         }
-        if let Some(block) = self.reactive().focused_block() {
-            self.settle_block_content(&block).await;
-        }
+        self.settle_block_content().await;
     }
 
     /// `DeleteBackward` driven through an explicit `driver` (§8.12 C-3
@@ -3631,9 +3584,7 @@ impl HeadlessFrontendComponent {
                 });
             crate::pbt::composed::schedule_point::schedule_point().await;
         }
-        if let Some(block) = self.reactive().focused_block() {
-            self.settle_block_content(&block).await;
-        }
+        self.settle_block_content().await;
     }
 
     /// `MoveCursor` driven through an explicit `driver` (§8.12 C-3 mechanism
@@ -4821,25 +4772,50 @@ impl HeadlessFrontendComponent {
             crate::pbt::invariants::bodies::settle_budget::wedge_deadline(),
         )
         .await;
-        crate::pbt::convergence::converge_signals(
-            crate::pbt::convergence::Signals {
-                engine: Some(&engine),
-                sync: self.loro_sync_handle(),
-                shares: None,
-                org_idle: self.org_idle_signal(),
-                org_files: Some(self.org_files()),
-                block_feed: self.block_feed(),
-            },
+        self.converge_until(
             crate::pbt::convergence::Patience::Budget(
                 crate::pbt::invariants::bodies::settle_budget::wedge_deadline(),
             ),
+            seam,
         )
-        .await
-        .unwrap_or_else(|gave_up| panic!("[{seam}] the projections did not settle {gave_up}"));
+        .await;
+    }
+
+    /// Wait for the composed settle's fixed point: every CDC batch up to the
+    /// emitted watermark applied, Loro synced, org ingest and write-back caught
+    /// up with every file change already broadcast. Anchored on writes that
+    /// already happened, so it returns as soon as they landed instead of after
+    /// a quiet period.
+    async fn converge(&self, budget: Duration, site: &str) {
+        self.converge_until(
+            crate::pbt::convergence::Patience::Budget(
+                budget.max(crate::pbt::composed::wide_e2e::CONVERGE_BUDGET),
+            ),
+            site,
+        )
+        .await;
+    }
+
+    async fn converge_until(&self, patience: crate::pbt::convergence::Patience, site: &str) {
+        let engine = self.engine();
+        let signals = crate::pbt::convergence::Signals {
+            engine: Some(&engine),
+            sync: self.loro_sync_handle(),
+            shares: None,
+            org_idle: self.org_idle_signal(),
+            org_files: Some(self.org_files()),
+            block_feed: self.block_feed(),
+        };
+        if let Err(gave_up) = crate::pbt::convergence::converge_signals(signals, patience).await {
+            panic!("[{site}] projections did not reach a fixed point {gave_up}");
+        }
     }
 
     /// Settle barrier for a seam org write whose expected new ids are KNOWN:
     /// wait until every `expected` id reaches `block_raw`, then settle.
+    ///
+    /// The expected ids make the post-state an explicit precondition: a write
+    /// that never ingests fails here, named, instead of in a later invariant.
     async fn settle_until_ids_present(
         &self,
         expected: &[EntityUri],
@@ -5455,6 +5431,29 @@ impl HeadlessFrontendComponent {
 
     /// Wait until the file-sync controller has processed every change up to
     /// the latest one, `path`'s.
+    async fn await_block_content(&self, id: &EntityUri, text: &str, seam: &str) {
+        let timeout = soak_deadline(Duration::from_secs(5));
+        let start = std::time::Instant::now();
+        loop {
+            let content = self
+                .all_blocks()
+                .await
+                .into_iter()
+                .find(|b| &b.id == id)
+                .map(|b| b.content);
+            if content.as_deref() == Some(text) {
+                break;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "[{seam}] {id} never took the edited text {text:?} after {timeout:?}; \
+                 block_raw holds {content:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        self.converge(timeout, seam).await;
+    }
+
     async fn await_ingest(&self, path: &Path, seam: &str) {
         let seq = self.org_fs().last_change_seq();
         let idle = self
@@ -5549,10 +5548,14 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
             text,
         } = edit
         {
-            let edited = headline_retitled(&disk, &self.resolve_id(block), disk_text, text);
+            let id = self.resolve_id(block);
+            let edited = headline_retitled(&disk, &id, disk_text, text);
             self.write_org_file_and_await_ingest(&path, &edited, SEAM)
                 .await;
             self.settle_projections("external_file_edit").await;
+            // The file converges without its watcher event, but after the
+            // projections already look settled.
+            self.await_block_content(&id, text, SEAM).await;
             return;
         }
         if let ExternalFileEdit::Empty { whitespace } = edit {
@@ -6039,7 +6042,8 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
                 "[SutAppLifecycle::create_document] timeout waiting for the doc block (title \
                  {stem:?}) to land in block_raw after writing {file_name}"
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.converge(timeout, "SutAppLifecycle::create_document")
+                .await;
         };
         // Track the new doc so a later `BulkExternalAdd` / External `ApplyMutation`
         // targeting it resolves a file path. `doc_id` is the minted doc-page
@@ -6095,7 +6099,8 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
                  blocks when an org file is deleted outside Holon (regression of \
                  FileSyncController::on_file_deleted's cascade)"
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.converge(timeout, "SutAppLifecycle::delete_document")
+                .await;
         }
 
         assert!(
@@ -6275,6 +6280,16 @@ impl holon_pbt_core::capabilities::SutFixtureFs for HeadlessFrontendComponent {
             .unwrap_or(filename)
             .to_string();
         let timeout = Duration::from_secs(5);
+        // The ingest of one file grows with its size and marks the file's change
+        // processed only once the whole file landed.
+        self.converge_until(
+            crate::pbt::convergence::Patience::WhileProgressing {
+                stall: crate::pbt::composed::wide_e2e::BULK_SETTLE_STALL,
+                ceiling: crate::pbt::composed::wide_e2e::BULK_SETTLE_CEILING,
+            },
+            "SutFixtureFs::write_org_file",
+        )
+        .await;
         let start = std::time::Instant::now();
         let doc_id = loop {
             if let Some(b) = self

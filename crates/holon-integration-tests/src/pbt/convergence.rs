@@ -796,6 +796,40 @@ mod tests {
         .unwrap_or_else(|gave_up| panic!("a later poll pass completed, yet {gave_up}"));
     }
 
+    /// A patient settle still gives up once the ingest stops moving: it fails
+    /// at the stall bound, long before its ceiling.
+    #[tokio::test]
+    async fn a_stalled_ingest_fails_at_the_stall_bound() {
+        let fs = InMemoryFileSystem::new();
+        holon_filesystem::FileSystem::create_dir_all(&fs, std::path::Path::new("/vault"))
+            .await
+            .expect("create /vault");
+        let emitted = EmittedChanges::watch(&fs);
+        let scanned_through = fs.last_change_seq();
+        let idle = OrgSyncIdleSignal::new();
+        holon_filesystem::FileSystem::write(&fs, std::path::Path::new("/vault/a.org"), b"* a\n")
+            .await
+            .expect("write a.org");
+        let (stall, ceiling) = (Duration::from_millis(200), Duration::from_secs(60));
+        let started = std::time::Instant::now();
+        let gave_up = converge_signals(
+            org_signals(&idle, &emitted, scanned_through),
+            Patience::WhileProgressing { stall, ceiling },
+        )
+        .await
+        .expect_err("the change is never processed");
+        assert!(
+            matches!(gave_up.why, GaveUpWhy::Stalled { .. }) && started.elapsed() < ceiling / 10,
+            "gave up after {:?}: {gave_up}",
+            started.elapsed()
+        );
+        assert_eq!(
+            gave_up.owed.iter().map(|o| o.stage).collect::<Vec<_>>(),
+            vec!["org-ingest"],
+            "{gave_up}"
+        );
+    }
+
     /// A write-back pass in flight holds the settle, though no file changes.
     #[tokio::test]
     async fn a_running_writeback_pass_is_owed_to_org_writeback() {

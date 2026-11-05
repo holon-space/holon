@@ -233,12 +233,6 @@ impl crate::pbt::composed::harness::ComposedSut<WideE2E> {
     }
 }
 
-/// Wait until every intent the frontend dispatched has landed or failed, as
-/// production's state is once its fire-and-forget ops complete. A run the
-/// dispatch hold parked stays in flight on purpose and is not waited for, nor
-/// are the ops admitted behind it or the chains that hold them: once every
-/// released claim is parked, the waiting ones cannot move until the hold lets
-/// go.
 async fn drain_dispatches(handle: &WideHandle, budget: Duration) {
     let Some(reactive) = handle.reactive() else {
         return;
