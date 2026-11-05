@@ -70,13 +70,17 @@ trap 'rm -rf "$work"' EXIT
 bless=0
 [ "${1-}" = "--bless" ] && bless=1
 
+registry="$repo_root/docs/Testing/KeystoneKnownReds.md"
+registry_rows="$work/registry-rows.txt"
+awk -F'|' '/^\| *`/ { gsub(/^ *`|` *$/, "", $2); print $2 }' "$registry" >"$registry_rows"
+
 # Rows the LIVE registry still carries as `known-red`. Expectations for any
 # other key are dropped at check time — a fixed family is absence, not drift.
 live="$work/live-keys.txt"
 awk -F'|' '/^\| *`/ {
     gsub(/^ *`|` *$/, "", $2); gsub(/^ *| *$/, "", $3)
     if ($3 == "known-red") print $2
-}' "$repo_root/docs/Testing/KeystoneKnownReds.md" >"$live"
+}' "$registry" >"$live"
 
 # Replay one corpus and pin its per-key hit counts.
 #
@@ -163,9 +167,33 @@ fi
 # keystone log is thousands of lines of invariant chatter, and it was exactly
 # that chatter the classifier had to stop reading as a failure.
 outcome_fail=0
+# A case whose expected verdict names a row the registry no longer has can never
+# pass; stop on it so the stale case is named instead of reported as drift.
+row_name='[a-z0-9]+(-[a-z0-9]+)+'
+require_rows() {
+    local label="$1" rows="$2" row
+    for row in $rows; do
+        if ! grep -qx -- "$row" "$registry_rows"; then
+            echo "[fixture] fixture case $label names a removed row $row" >&2
+            exit 2
+        fi
+    done
+}
+# Every wording in which a want text names a row.
+require_row() {
+    require_rows "$1" "$(grep -oE "(known-red:|known-red \\\\\[|names |matches |known_red |cross-family match: )$row_name" <<<"$2" |
+        sed -E 's/.*[ :[]//')"
+}
 expect_outcome() {
-    local label="$1" want_code="$2" want_line="$3"
+    local label="$1" want_code="$2" want_line="$3" log
     shift 3
+    require_row "$label" "$want_line"
+    # The fixture's own replay logs declare a row per case.
+    for log in "$@"; do
+        case "$log" in
+        "$work"/*) require_rows "$label" "$(grep -ohE "known red: $row_name," "$log" | sed -E 's/known red: (.*),/\1/')" ;;
+        esac
+    done
     local out code=0
     out=$("$repo_root/scripts/keystone-known-reds.sh" "$@" 2>&1) || code=$?
     if [ "$code" -ne "$want_code" ] || ! grep -q -- "$want_line" <<<"$out"; then
@@ -477,16 +505,8 @@ test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
 EOF
 expect_outcome violation/page-without-own-file 0 '^PRIMARY: \[known-red:page-without-own-file\]' "$work/violation-page-without-own-file.log"
-# An empty created file whose `#+ID:` header never reaches disk fires both
-# file invariants; the one-byte echo-loop shape beside a fileless page must not
-# be absorbed by that row.
-cat >"$work/violation-empty-created-file-header-never-written.log" <<'EOF'
-thread 'joining_a_received_page_away_is_refused_and_leaves_it_placed' (143066426) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13:
-reconciled composed sequence diverged from the oracle: [("inv-org-render-fixed-point", "[inv-org-render-fixed-point] render != disk PERSISTED for 5s — not a transient projection lag but a real echo-loop / oscillation: the next re_render_all_tracked would keep rewriting the file.\n--- disk (0 bytes) [/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpheOSSG/doc_0.org] ---\n\n--- rendered from SQL (43 bytes) ---\n#+ID: 317c2395-de93-fe93-d5fa-5db9c57da4db\n"), ("inv-every-page-has-its-own-file", "[inv-every-page-has-its-own-file] 1 page(s) not homed to exactly one own file: [\"page `317c2395-de93-fe93-d5fa-5db9c57da4db` owns NO file (fileless — content lives only in the store; writeback must MATERIALIZE it into `…/317c2395-de93-fe93-d5fa-5db9c57da4db.org`)\"]")]
-test joining_a_received_page_away_is_refused_and_leaves_it_placed ... FAILED
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out; finished in 33.21s
-EOF
-expect_outcome violation/empty-created-file-header-never-written 0 '^PRIMARY: \[known-red:empty-created-file-header-never-written' "$work/violation-empty-created-file-header-never-written.log"
+# The one-byte echo-loop shape beside a fileless page must not be absorbed by
+# the fileless-page row.
 cat >"$work/violation-one-byte-echo-loop-beside-fileless-page.log" <<'EOF'
 thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1607:13:
 reconciled composed sequence diverged from the oracle: [("inv-org-render-fixed-point", "[inv-org-render-fixed-point] render != disk PERSISTED for 5s — not a transient projection lag but a real echo-loop / oscillation: the next re_render_all_tracked would keep rewriting the file.\n--- disk (277 bytes) [/private/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpfaBZ5X/forward-edge-page.org] ---\n#+ID: forward-edge-page\n* fe-parent\n:PROPERTIES:\n:ID: fe-parent\n:END:\n* fe-blocked\n:PROPERTIES:\n:ID: fe-blocked\n:REQUIRES: fe-target\n:END:\n** rlJWtK\n:PROPERTIES:\n:ID: block-4\n:column-priority: L\n:END:\nfoVL623I188Qt\ndTL dC Nh8GfJ M\n* fe-target\n:PROPERTIES:\n:ID: fe-target\n:END:\n\n--- rendered from SQL (278 bytes) ---\n#+ID: forward-edge-page\n* fe-parent\n:PROPERTIES:\n:ID: fe-parent\n:END:\n* fe-blocked\n:PROPERTIES:\n:ID: fe-blocked\n:REQUIRES: fe-target\n:END:\n** rlJWtK\n:PROPERTIES:\n:ID: block-4\n:column-priority: L\n:END:\nfoVL623I188Qt\ndTL dC Nh8GfJ M\n\n* fe-target\n:PROPERTIES:\n:ID: fe-target\n:END:\n"), ("inv-every-page-has-its-own-file", "[inv-every-page-has-its-own-file] 1 page(s) not homed to exactly one own file: [\"page `61133fe7-d4d5-ab1c-24e4-110da5f42293` owns NO file (fileless — content lives only in the store; writeback must MATERIALIZE it into `…/61133fe7-d4d5-ab1c-24e4-110da5f42293.org`)\"]")]
@@ -669,6 +689,26 @@ error: test run failed
 EOF
 expect_outcome known-panic-on-main 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
     "$work/known-panic-on-main.log"
+# An iroh transport failure inside a fork-mode proptest child is known by its
+# transport phrase, not by the test name.
+cat >"$work/iroh-accept-drain-recv-stream.log" <<'EOF'
+        FAIL [  81.338s] (1/1) holon::main sync_suite::sync_pbt::tests::test_multi_peer_sync_iroh
+  stdout ───
+    Applying transition 6/11: SyncAll
+
+    thread 'sync_suite::sync_pbt::tests::test_multi_peer_sync_iroh' (1310338438) panicked at crates/holon-loro/src/multi_peer.rs:644:30:
+    called `Result::unwrap()` on an `Err` value: [accept] drain recv stream
+
+    Caused by:
+        drain read failed: connection lost
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+────────────
+     Summary [  81.344s] 1 test run: 0 passed, 1 failed, 431 skipped
+        FAIL [  81.338s] (1/1) holon::main sync_suite::sync_pbt::tests::test_multi_peer_sync_iroh
+error: test run failed
+EOF
+expect_outcome violation/iroh-accept-drain-recv-stream 0 '^PRIMARY: \[known-red:iroh-accept-drain-recv-stream\]' \
+    "$work/iroh-accept-drain-recv-stream.log"
 # The same test name in two binaries, one passing: one failure, one signature.
 cat >"$work/same-name-two-binaries.log" <<'EOF'
         PASS [   0.010s] (1/2) holon-app::suite shared_name
@@ -840,6 +880,7 @@ expect_outcome timeout-row 0 '^PRIMARY: \[known-red:turso-block-query-source-rou
 panic_header="thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1390:13:"
 expect_sut_order() {
     local label="$1" want="$2" sut="$3" log="$work/sut-order-$1.log"
+    require_row "$label" "$want"
     {
         printf '%s\n' "$panic_header"
         printf '%s\n' "reconciled composed sequence diverged from the oracle: [(\"inv-blocks-match-ref/org\", \"[inv-blocks-match-ref/org] sibling order diverges under parent block:journals.\\n  ref order: [\\\"block:c1\\\", \\\"block:bulk-1-0\\\"]\\n  sut order: [$sut]\")]"
@@ -863,6 +904,7 @@ expect_sut_order day-page-first novel '\"block:2026-10-01\", \"block:bulk-1-0\"'
 # a changed tail or a block in another position is novel.
 expect_structural_sut_order() {
     local label="$1" want="$2" sut="$3" log="$work/structural-sut-order-$1.log"
+    require_row "$label" "$want"
     local a='\"block:96fd87f0-c7b5-441a-97ce-6b33bbcb418c\"' b='\"block:62b5b4d5-279b-4334-b97e-1bc97f421d84\"'
     sut="${sut//A/$a}"; sut="${sut//B/$b}"
     {
