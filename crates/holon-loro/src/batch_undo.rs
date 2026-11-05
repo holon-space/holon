@@ -348,7 +348,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = LoroDocumentStore::new(dir.path().to_path_buf());
         let doc = store.get_doc(DocScope::Global).await.unwrap();
-        let backend = LoroBackend::from_document(doc.clone());
+        let backend =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         create(&backend, EntityUri::no_parent(), "root").await;
         create(&backend, EntityUri::block("root"), "p1").await;
         create(&backend, EntityUri::block("root"), "p2").await;

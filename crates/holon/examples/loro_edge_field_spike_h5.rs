@@ -76,9 +76,12 @@ async fn main() -> Result<()> {
 async fn round_trip_through_loro() -> Result<bool> {
     println!("--- Test 1: Value::Array survives Loro round-trip ---");
 
-    let backend = LoroBackend::create_new("h5-edge-spike".to_string())
-        .await
-        .map_err(|e| anyhow::anyhow!("create_new: {:?}", e))?;
+    let backend = LoroBackend::create_new(
+        "h5-edge-spike".to_string(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("create_new: {:?}", e))?;
 
     let block = backend
         .create_block(

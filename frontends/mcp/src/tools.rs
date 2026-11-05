@@ -6577,7 +6577,10 @@ impl HolonMcpServer {
                         )
                     })?
                 };
-                Ok(Some(LoroBackend::from_document(doc)))
+                Ok(Some(LoroBackend::from_document(
+                    doc,
+                    self.engine().clock().clone(),
+                )))
             }
         }
     }
@@ -6645,7 +6648,7 @@ impl HolonMcpServer {
             )
         })?;
 
-        let backend = LoroBackend::from_document(loro_doc);
+        let backend = LoroBackend::from_document(loro_doc, self.engine().clock().clone());
         backend.get_all_blocks(Traversal::ALL).await.map_err(|e| {
             rmcp::ErrorData::internal_error(format!("Failed to read blocks from Loro: {}", e), None)
         })
@@ -9061,6 +9064,7 @@ mod peer_interference {
                     global,
                     layout,
                     Arc::new(holon_core::NoReadOnlyDocuments),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 );
                 let registry: &dyn EntityCellRegistry = &registry;
                 registry
@@ -9075,7 +9079,7 @@ mod peer_interference {
 
             let doc = self.doc_store.get_doc(DocScope::Global).await?;
             tokio::spawn(async move {
-                LoroBackend::from_document(doc)
+                LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock))
                     .create_block_with_properties(
                         EntityUri::block("root"),
                         BlockContent::text("uiedit"),
@@ -9217,7 +9221,8 @@ mod peer_interference {
                     .to_string()
             };
             let doc = self.doc_store.get_doc(DocScope::Global).await?;
-            let backend = LoroBackend::from_document(doc);
+            let backend =
+                LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock));
             let (id, parent) = (param("id"), param("parent_id"));
             let first_other = backend
                 .list_children(&parent)
@@ -9297,7 +9302,7 @@ mod peer_interference {
                 Some(super::engine_harness::THEIR_PEER),
             )?);
             theirs.apply_update_with_origin(WriteOrigin::SyncImport, &ours.export_snapshot()?)?;
-            LoroBackend::from_document(theirs.clone())
+            LoroBackend::from_document(theirs.clone(), std::sync::Arc::new(holon_api::SystemClock))
                 .create_block_with_properties(
                     EntityUri::block("root"),
                     BlockContent::text("theirs"),
@@ -9357,7 +9362,10 @@ mod dense_patch_rollback_tests {
     }
 
     async fn backend_of(store: &LoroDocumentStore) -> LoroBackend {
-        LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"))
+        LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("global doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
     }
 
     /// The block ids the write authority itself holds, which is where a
@@ -9842,8 +9850,10 @@ mod dense_patch_shape_gate_tests {
     async fn a_batch_legal_only_as_a_whole_lands() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
-        let backend =
-            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("doc"));
+        let backend = LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         two_decisions(&backend).await;
         projection.flush().await.expect("project the seed");
         let server = server(engine.clone());
@@ -9873,8 +9883,10 @@ mod dense_patch_shape_gate_tests {
     async fn a_batch_that_ends_in_a_broken_decision_is_refused_and_writes_nothing() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
-        let backend =
-            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("doc"));
+        let backend = LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         two_decisions(&backend).await;
         projection.flush().await.expect("project the seed");
         let server = server(engine.clone());
@@ -9906,8 +9918,10 @@ mod dense_patch_shape_gate_tests {
     async fn a_legal_decision_is_created_by_one_dense_patch() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
-        let backend =
-            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("doc"));
+        let backend = LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         // A projection renders under its roots' parent; the sentinel cannot be one.
         put(&backend, "page", EntityUri::no_parent(), "page", &[], &[]).await;
         put(&backend, "root", EntityUri::block("page"), "root", &[], &[]).await;
@@ -10207,8 +10221,10 @@ mod shape_sim_cell_branch_tests {
     async fn the_simulator_predicts_the_loro_cell_branch() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
-        let backend =
-            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("doc"));
+        let backend = LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         seed_loro(&backend).await;
         projection.flush().await.expect("project the seed");
         split_join_delete(&engine, Some(projection.as_ref())).await;
@@ -10251,8 +10267,10 @@ mod dense_patch_readback_tests {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, projection) =
             super::engine_harness::fresh_loro_engine_dropping_move_anchors(dir.path()).await;
-        let backend =
-            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        let backend = LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("global doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         backend
             .create_block_with_properties(
                 EntityUri::no_parent(),
@@ -10333,8 +10351,10 @@ mod dense_patch_readback_tests {
     async fn a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, projection) = fresh_loro_engine_rewriting_content(dir.path()).await;
-        let backend =
-            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        let backend = LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("global doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         for (parent, content, id) in [
             (EntityUri::no_parent(), "root", "root"),
             (EntityUri::block("root"), "Head", "kid"),
@@ -10443,8 +10463,10 @@ mod dense_patch_row_rollback_tests {
     async fn a_content_write_that_fails_after_the_state_write_rolls_the_row_back() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store) = fresh_loro_engine_failing_content(dir.path()).await;
-        let backend =
-            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        let backend = LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("global doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         for (parent, content, id) in [
             (EntityUri::no_parent(), "root", "root"),
             (EntityUri::block("root"), "Head", "kid"),
@@ -10762,8 +10784,10 @@ mod dense_patch_file_check_tests {
     async fn a_check_that_cannot_finish_rolls_the_writes_back() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
-        let backend =
-            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        let backend = LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("global doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         backend
             .create_block_with_properties(
                 EntityUri::no_parent(),
@@ -10962,8 +10986,10 @@ mod task_category_authority_tests {
         )
         .await;
 
-        let backend =
-            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        let backend = LoroBackend::from_document(
+            store.get_doc(DocScope::Global).await.expect("global doc"),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         let x = backend
             .get_block("block:x")
             .await

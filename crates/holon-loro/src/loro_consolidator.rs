@@ -89,9 +89,10 @@ mod tests {
     async fn is_ancestor_orders_heads_along_the_history() {
         let doc = Arc::new(LoroDoc::new());
         doc.set_peer_id(1).unwrap();
-        let consolidator = LoroConsolidator::new(Arc::new(LoroBackend::from_document(Arc::new(
-            LoroDocument::from_existing(doc.clone(), "test"),
-        ))));
+        let consolidator = LoroConsolidator::new(Arc::new(LoroBackend::from_document(
+            Arc::new(LoroDocument::from_existing(doc.clone(), "test")),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )));
         create_block_with_id(&doc, None, "a", "a");
         let earlier = consolidator.head().await.unwrap();
         create_block_with_id(&doc, None, "b", "b");

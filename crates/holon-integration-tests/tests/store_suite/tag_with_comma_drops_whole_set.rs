@@ -87,7 +87,7 @@ async fn edge_backend(env: &TestEnvironment) -> LoroBackend {
         .get_doc(DocScope::Global)
         .await
         .expect("global Loro doc");
-    LoroBackend::from_document(global_doc)
+    LoroBackend::from_document(global_doc, std::sync::Arc::new(holon_api::SystemClock))
 }
 
 /// The tags `block_tags` holds for `blk-a`, sorted.

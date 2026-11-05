@@ -27,14 +27,19 @@ use crate::loro_backend::LoroBackend;
 pub struct LoroBlocksDataSource {
     doc_store: Arc<RwLock<LoroDocumentStore>>,
     change_tx: tokio::sync::broadcast::Sender<Vec<Change<Block>>>,
+    clock: Arc<dyn holon_api::Clock>,
 }
 
 impl LoroBlocksDataSource {
-    pub fn new(doc_store: Arc<RwLock<LoroDocumentStore>>) -> Self {
+    pub fn new(
+        doc_store: Arc<RwLock<LoroDocumentStore>>,
+        clock: Arc<dyn holon_api::Clock>,
+    ) -> Self {
         let (change_tx, _) = tokio::sync::broadcast::channel(100);
         Self {
             doc_store,
             change_tx,
+            clock,
         }
     }
 
@@ -56,7 +61,7 @@ impl LoroBlocksDataSource {
         let mut current_state: HashMap<String, Block> = HashMap::new();
 
         for (_path, collab_doc) in store.iter().await {
-            let backend = LoroBackend::from_document(collab_doc);
+            let backend = LoroBackend::from_document(collab_doc, self.clock.clone());
 
             if let Ok(blocks) = backend.get_all_blocks(Traversal::ALL_BUT_ROOT).await {
                 for block in blocks {
@@ -135,7 +140,7 @@ impl DataSource<Block> for LoroBlocksDataSource {
         let mut all = Vec::new();
 
         for (_path, collab_doc) in store.iter().await {
-            let backend = LoroBackend::from_document(collab_doc);
+            let backend = LoroBackend::from_document(collab_doc, self.clock.clone());
 
             if let Ok(blocks) = backend.get_all_blocks(Traversal::ALL_BUT_ROOT).await {
                 all.extend(blocks);
@@ -149,7 +154,7 @@ impl DataSource<Block> for LoroBlocksDataSource {
         let store = self.doc_store.read().await;
 
         for (_path, collab_doc) in store.iter().await {
-            let backend = LoroBackend::from_document(collab_doc);
+            let backend = LoroBackend::from_document(collab_doc, self.clock.clone());
 
             if let Ok(block) = backend.get_block(id).await {
                 return Ok(Some(block));

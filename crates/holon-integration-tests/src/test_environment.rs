@@ -1341,7 +1341,10 @@ impl TestEnvironment {
             .get_doc(DocScope::Global)
             .await
             .map_err(|e| anyhow::anyhow!("get_doc(Global): {e}"))?;
-        let backend = Arc::new(LoroBackend::from_document(doc.clone()));
+        let backend = Arc::new(LoroBackend::from_document(
+            doc.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ));
         let shared_store = Arc::new(RwLock::new(doc_store));
 
         let injector = build_no_turso_container(

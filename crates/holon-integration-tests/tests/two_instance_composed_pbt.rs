@@ -2091,18 +2091,20 @@ async fn seed_the_receivers_pre_pair_notes(
             edges: holon_api::BlockEdges::default(),
         }
     };
-    holon_loro::loro_backend::LoroBackend::from_document(doc)
-        .create_blocks_with_properties(vec![
-            note(
-                holon_api::EntityUri::parse(RECEIVER_RECIPE_STEP)
-                    .expect("a literal recipe-step uri"),
-                SOLO_RECIPE_NOTE,
-                "use duck eggs next time",
-            ),
-            note(ordinary_parent.clone(), SOLO_ORDINARY_NOTE, "bought milk"),
-        ])
-        .await
-        .expect("seeding the receiver's pre-pair notes");
+    holon_loro::loro_backend::LoroBackend::from_document(
+        doc,
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
+    .create_blocks_with_properties(vec![
+        note(
+            holon_api::EntityUri::parse(RECEIVER_RECIPE_STEP).expect("a literal recipe-step uri"),
+            SOLO_RECIPE_NOTE,
+            "use duck eggs next time",
+        ),
+        note(ordinary_parent.clone(), SOLO_ORDINARY_NOTE, "bought milk"),
+    ])
+    .await
+    .expect("seeding the receiver's pre-pair notes");
 }
 
 /// The block `id` as the receiver holds it after the pair, with the parent the

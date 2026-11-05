@@ -89,7 +89,8 @@ async fn both_block_providers_source_catalog_descriptors_identically() {
     let store = Arc::new(RwLock::new(LoroDocumentStore::new(
         dir.path().to_path_buf(),
     )));
-    let loro_provider = LoroBlockOperations::new(store);
+    let loro_provider =
+        LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock));
 
     let sql_ops = sql_provider.operations();
     let loro_ops = loro_provider.operations();
@@ -161,7 +162,10 @@ async fn each_block_authority_declares_every_op_it_executes_with_its_references(
         ),
         (
             "LoroBlockOperations",
-            Arc::new(LoroBlockOperations::new(store)),
+            Arc::new(LoroBlockOperations::new(
+                store,
+                std::sync::Arc::new(holon_api::SystemClock),
+            )),
         ),
     ];
     let declared: Vec<Vec<OperationDescriptor>> = authorities

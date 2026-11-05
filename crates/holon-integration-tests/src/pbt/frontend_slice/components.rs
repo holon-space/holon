@@ -1874,10 +1874,18 @@ impl HeadlessFrontendComponent {
         );
     }
 
+    /// The injected clock every write of this session stamps.
+    pub(crate) fn clock(&self) -> &Arc<holon_api::TestClock> {
+        self.boot_params
+            .clock
+            .as_ref()
+            .expect("the session booted without an injected TestClock")
+    }
+
     /// Resolve an oracle-space id to its SUT-space id (identity if the resolver
     /// is unset or the id is unmapped) — the component-side analog of
     /// [`OpDispatchWriter::resolve`].
-    fn resolve_id(&self, id: &EntityUri) -> EntityUri {
+    pub(crate) fn resolve_id(&self, id: &EntityUri) -> EntityUri {
         match self.resolver.get() {
             Some(r) => r
                 .lock()

@@ -93,7 +93,7 @@ async fn snapshot_holds(vault: &Path, bare_id: &str) -> bool {
     let path = vault.join(".loro").join(holon_loro::GLOBAL_SNAPSHOT_NAME);
     let doc = LoroDocument::load_from_file(&path, "probe".to_string())
         .unwrap_or_else(|e| panic!("the snapshot at {} does not load: {e:#}", path.display()));
-    LoroBackend::from_document(Arc::new(doc))
+    LoroBackend::from_document(Arc::new(doc), std::sync::Arc::new(holon_api::SystemClock))
         .resolve_to_tree_id(&format!("block:{bare_id}"))
         .await
         .is_some()

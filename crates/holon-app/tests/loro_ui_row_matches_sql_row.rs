@@ -196,8 +196,14 @@ async fn loro_ui_row_matches_the_sql_block_row() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = LoroDocumentStore::new(tmp.path().to_path_buf());
     let doc = store.get_doc(DocScope::Global).await.expect("global doc");
-    let backend = Arc::new(LoroBackend::from_document(doc));
-    let ops = LoroBlockOperations::new(Arc::new(RwLock::new(store)));
+    let backend = Arc::new(LoroBackend::from_document(
+        doc,
+        std::sync::Arc::new(holon_api::SystemClock),
+    ));
+    let ops = LoroBlockOperations::new(
+        Arc::new(RwLock::new(store)),
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
     let entity: EntityName = "block".to_string().into();
 
     let fixture = fixture();

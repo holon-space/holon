@@ -79,7 +79,10 @@ mod stateful_tests {
             let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
 
             let backend = runtime
-                .block_on(MemoryBackend::create_new("reference".to_string()))
+                .block_on(MemoryBackend::create_new(
+                    "reference".to_string(),
+                    std::sync::Arc::new(holon_api::SystemClock),
+                ))
                 .unwrap();
 
             let initial_version = runtime.block_on(backend.get_current_version()).unwrap();
@@ -374,7 +377,10 @@ mod stateful_tests {
         ) -> Self::SystemUnderTest {
             let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
             let backend = runtime
-                .block_on(LoroBackend::create_new("test-pbt".to_string()))
+                .block_on(LoroBackend::create_new(
+                    "test-pbt".to_string(),
+                    std::sync::Arc::new(holon_api::SystemClock),
+                ))
                 .unwrap();
 
             let initial_version = runtime.block_on(backend.get_current_version()).unwrap();
@@ -826,9 +832,12 @@ mod custom_properties_round_trip {
     use holon_loro::snapshot_blocks_from_doc;
 
     async fn backend() -> LoroBackend {
-        LoroBackend::create_new("test-properties-roundtrip".to_string())
-            .await
-            .unwrap()
+        LoroBackend::create_new(
+            "test-properties-roundtrip".to_string(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .await
+        .unwrap()
     }
 
     fn props(pairs: &[(&str, &str)]) -> HashMap<String, Value> {
@@ -1063,7 +1072,12 @@ mod custom_properties_round_trip {
         };
 
         // Fresh backend that imports the snapshot.
-        let b = LoroBackend::create_new("peer-b".to_string()).await.unwrap();
+        let b = LoroBackend::create_new(
+            "peer-b".to_string(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .await
+        .unwrap();
         {
             let collab = b.collab_for_test();
             let doc_arc = collab.doc();

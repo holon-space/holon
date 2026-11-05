@@ -863,7 +863,11 @@ async fn compose_sut_seeded_impl(
         // The slice's Loro cap reads the DEVICE's whole store, not the
         // replicated half: layout blocks are as real to a block invariant as
         // any other, and a cap blind to them would report them missing.
-        let backend = LoroBackend::from_document(global_doc.clone()).with_layout_doc(layout_doc);
+        let backend = LoroBackend::from_document(
+            global_doc.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_layout_doc(layout_doc);
         // ...and every shared subtree the device has loaded, which the
         // authority follows through its mount.
         let backend = Arc::new(match frontend_shared_trees.clone() {
@@ -896,8 +900,10 @@ async fn compose_sut_seeded_impl(
         // Pure Loro: the tag operation dispatches through the Loro-only
         // operation engine a no-Turso session runs, over the canonical doc.
         if !has_turso {
-            let block_ops =
-                holon_loro::loro_block_operations::LoroBlockOperations::new(doc_store.clone());
+            let block_ops = holon_loro::loro_block_operations::LoroBlockOperations::new(
+                doc_store.clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            );
             let engine = holon_loro_wiring::loro_block_query_source::loro_operation_engine(
                 block_ops,
                 global_doc.clone(),

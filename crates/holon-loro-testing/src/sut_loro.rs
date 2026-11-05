@@ -171,7 +171,8 @@ impl LoroSut {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get global doc: {}", e))?;
 
-        let backend = LoroBackend::from_document(collab_doc);
+        let backend =
+            LoroBackend::from_document(collab_doc, std::sync::Arc::new(holon_api::SystemClock));
         backend
             .get_all_blocks(holon::api::types::Traversal::ALL)
             .await

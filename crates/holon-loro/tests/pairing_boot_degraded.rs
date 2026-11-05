@@ -59,7 +59,10 @@ fn new_block(parent: EntityUri, id: &str, content: &str) -> NewBlockWithProperti
 }
 
 async fn write_into(store: &LoroDocumentStore, blocks: Vec<NewBlockWithProperties>) -> Result<()> {
-    let backend = LoroBackend::from_document(store.get_doc(DocScope::Global).await?);
+    let backend = LoroBackend::from_document(
+        store.get_doc(DocScope::Global).await?,
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
     backend
         .create_blocks_with_properties(blocks)
         .await
@@ -94,7 +97,7 @@ impl BlockOrdering for LiveOrdering {
             .get_doc(DocScope::Global)
             .await
             .expect("the live global doc");
-        LoroBackend::from_document(doc)
+        LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock))
             .create_blocks_with_properties(blocks)
             .await
             .expect("re-importing into the live global doc");

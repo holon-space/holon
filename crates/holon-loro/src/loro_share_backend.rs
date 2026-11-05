@@ -4235,8 +4235,11 @@ mod tests {
         // Build the wired write backend exactly as DI does: global doc +
         // the share manager as the SharedTreeStore.
         let manager = backend_a.manager.clone();
-        let write_backend = LoroBackend::from_document(a_global.clone())
-            .with_shared_trees(manager as Arc<dyn SharedTreeStore>);
+        let write_backend = LoroBackend::from_document(
+            a_global.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(manager as Arc<dyn SharedTreeStore>);
 
         // Route a write to a block that lives only in the shared subtree.
         write_backend
@@ -4326,8 +4329,9 @@ mod tests {
 
         let a_global = backend_a.global_doc().await.unwrap();
         let manager = backend_a.manager.clone();
-        let write_backend = LoroBackend::from_document(a_global)
-            .with_shared_trees(manager as Arc<dyn SharedTreeStore>);
+        let write_backend =
+            LoroBackend::from_document(a_global, std::sync::Arc::new(holon_api::SystemClock))
+                .with_shared_trees(manager as Arc<dyn SharedTreeStore>);
 
         (
             backend_a,
@@ -4345,7 +4349,7 @@ mod tests {
         use crate::loro_backend::LoroBackend;
         use crate::shared_tree::SharedTreeStore;
         let b_global = backend_b.global_doc().await.unwrap();
-        LoroBackend::from_document(b_global)
+        LoroBackend::from_document(b_global, std::sync::Arc::new(holon_api::SystemClock))
             .with_shared_trees(backend_b.manager.clone() as Arc<dyn SharedTreeStore>)
     }
 
@@ -6896,8 +6900,11 @@ mod tests {
         );
 
         let b_global = backend_b.global_doc().await.unwrap();
-        let authority = LoroBackend::from_document(b_global.clone())
-            .with_shared_trees(backend_b.manager.clone() as Arc<dyn SharedTreeStore>);
+        let authority = LoroBackend::from_document(
+            b_global.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(backend_b.manager.clone() as Arc<dyn SharedTreeStore>);
         assert_eq!(
             authority
                 .get_block("block:shared-page")
@@ -7562,8 +7569,11 @@ mod tests {
     /// The Loro authority of `backend`, following its mounts into its shares.
     async fn authority_of(backend: &Arc<LoroShareBackend>) -> crate::loro_backend::LoroBackend {
         use crate::shared_tree::SharedTreeStore;
-        crate::loro_backend::LoroBackend::from_document(backend.global_doc().await.unwrap())
-            .with_shared_trees(backend.manager.clone() as Arc<dyn SharedTreeStore>)
+        crate::loro_backend::LoroBackend::from_document(
+            backend.global_doc().await.unwrap(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(backend.manager.clone() as Arc<dyn SharedTreeStore>)
     }
 
     /// The cell registry of `backend`, the route production structural
@@ -7577,6 +7587,7 @@ mod tests {
             store.get_doc(DocScope::Global).await.unwrap(),
             store.get_doc(DocScope::Layout).await.unwrap(),
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         )
         .with_shared_trees(backend.manager.clone() as Arc<dyn SharedTreeStore>)
     }
@@ -7833,8 +7844,12 @@ mod tests {
         use holon_core::traits::CrudOperations;
 
         let fixture = PageShareFixture::accepted().await;
-        let ops = crate::LoroBlockOperations::new(fixture.b.store.clone()).with_shared_trees(
-            fixture.b.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        let ops = crate::LoroBlockOperations::new(
+            fixture.b.store.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(
+            fixture.b.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>
         );
         let batch = ops.open().await.unwrap();
         batch
@@ -7903,8 +7918,12 @@ mod tests {
         edit_shared_root(&fixture.a, &stid, "before-revocation-").await;
         assert!(fixture.b.sync_with_peers(&stid).await.unwrap() > 0);
 
-        let ops = crate::LoroBlockOperations::new(fixture.a.store.clone()).with_shared_trees(
-            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        let ops = crate::LoroBlockOperations::new(
+            fixture.a.store.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(
+            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>
         );
         ops.delete("block:p-child").await.unwrap();
         let page = EntityUri::block("shared-page");
@@ -7935,8 +7954,12 @@ mod tests {
         use holon_core::traits::CrudOperations;
 
         let fixture = PageShareFixture::accepted().await;
-        let ops = crate::LoroBlockOperations::new(fixture.a.store.clone()).with_shared_trees(
-            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        let ops = crate::LoroBlockOperations::new(
+            fixture.a.store.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(
+            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>
         );
         ops.delete("block:p-child").await.unwrap();
         let deleted = ops.delete("block:shared-page").await.unwrap();
@@ -7971,8 +7994,12 @@ mod tests {
         use holon_core::traits::CrudOperations;
 
         let fixture = PageShareFixture::accepted().await;
-        let ops = crate::LoroBlockOperations::new(fixture.a.store.clone()).with_shared_trees(
-            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        let ops = crate::LoroBlockOperations::new(
+            fixture.a.store.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(
+            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>
         );
         let refused = ops
             .delete("block:shared-page")
@@ -8066,8 +8093,12 @@ mod tests {
         use holon_core::traits::CrudOperations;
 
         let fixture = PageShareFixture::accepted().await;
-        let ops = crate::LoroBlockOperations::new(fixture.a.store.clone()).with_shared_trees(
-            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        let ops = crate::LoroBlockOperations::new(
+            fixture.a.store.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(
+            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>
         );
         ops.delete("block:p-child").await.unwrap();
         let racing: Arc<dyn shared_tree::ShareExit> = Arc::new(ChildBornBeforeExit {
@@ -8645,8 +8676,11 @@ mod tests {
         b: &LoroShareBackend,
         global: Arc<crate::loro_document::LoroDocument>,
     ) -> crate::loro_backend::LoroBackend {
-        crate::loro_backend::LoroBackend::from_document(global)
-            .with_shared_trees(b.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>)
+        crate::loro_backend::LoroBackend::from_document(
+            global,
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(b.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>)
     }
 
     fn page_id(answer: holon_core::OwningPage) -> String {
@@ -8719,8 +8753,10 @@ mod tests {
         seed_block(&b, "gamma", Some("host"), "Gamma").await;
         let (m1, st1) = share_ok(&b, "block:gamma").await;
 
-        let unloaded =
-            crate::loro_backend::LoroBackend::from_document(b.global_doc().await.unwrap());
+        let unloaded = crate::loro_backend::LoroBackend::from_document(
+            b.global_doc().await.unwrap(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         assert_eq!(
             unloaded.owning_page(&m1).unwrap(),
             OwningPage::Broken(ChainBreak::SharedSubtreeNotMaterialized {

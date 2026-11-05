@@ -18,7 +18,8 @@ const BUCKET: usize = 1000;
 #[test]
 fn a_create_costs_the_same_in_a_large_tree_as_in_a_small_one() {
     let doc = Arc::new(LoroDocument::new("stable-id-create-cost".into()).unwrap());
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     let root = doc
         .with_write(WriteOrigin::BlockOps, |d| {
             let root = d.get_tree(TREE_NAME).create(None)?;

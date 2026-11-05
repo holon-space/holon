@@ -66,7 +66,8 @@ async fn create(backend: &LoroBackend, parent: EntityUri, id: &str) {
 #[tokio::test]
 async fn revert_to_undoes_the_creates_a_failed_batch_left_behind() {
     let doc = Arc::new(LoroDocument::new("revert-probe".to_string()).unwrap());
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend, EntityUri::no_parent(), "root").await;
 
     // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
@@ -103,7 +104,8 @@ async fn revert_to_undoes_the_creates_a_failed_batch_left_behind() {
 #[tokio::test]
 async fn a_later_write_does_not_resurrect_the_reverted_batch() {
     let doc = Arc::new(LoroDocument::new("revert-leak".to_string()).unwrap());
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend, EntityUri::no_parent(), "root").await;
 
     // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
@@ -138,11 +140,13 @@ async fn a_later_write_does_not_resurrect_the_reverted_batch() {
 #[tokio::test]
 async fn a_remote_op_inside_the_batch_window_is_reverted_too() {
     let doc_a = Arc::new(LoroDocument::new("revert-remote-a".to_string()).unwrap());
-    let backend_a = LoroBackend::from_document(doc_a.clone());
+    let backend_a =
+        LoroBackend::from_document(doc_a.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend_a, EntityUri::no_parent(), "root").await;
 
     let doc_b = Arc::new(LoroDocument::new("revert-remote-b".to_string()).unwrap());
-    let backend_b = LoroBackend::from_document(doc_b.clone());
+    let backend_b =
+        LoroBackend::from_document(doc_b.clone(), std::sync::Arc::new(holon_api::SystemClock));
     // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
     // are not exposed through the doc-boundary API, and single-threaded probe
     // reads cannot observe another writer.
@@ -210,7 +214,8 @@ async fn a_remote_op_inside_the_batch_window_is_reverted_too() {
 #[tokio::test]
 async fn revert_across_a_shallow_snapshot_boundary_fails() {
     let doc = Arc::new(LoroDocument::new("revert-shallow".to_string()).unwrap());
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend, EntityUri::no_parent(), "root").await;
     // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
     // are not exposed through the doc-boundary API, and single-threaded probe
@@ -256,7 +261,8 @@ fn foreign_peer_advanced(doc: &LoroDoc, before: &loro::VersionVector, ours: loro
 async fn the_guard_admits_a_local_only_window_and_refuses_a_peer_touched_one() {
     let doc_a = Arc::new(LoroDocument::new("guard-a".to_string()).unwrap());
     let ours = doc_a.peer_id();
-    let backend_a = LoroBackend::from_document(doc_a.clone());
+    let backend_a =
+        LoroBackend::from_document(doc_a.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend_a, EntityUri::no_parent(), "root").await;
 
     // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
@@ -276,7 +282,8 @@ async fn the_guard_admits_a_local_only_window_and_refuses_a_peer_touched_one() {
 
     // (b) same window, plus a peer's op → refused.
     let doc_b = Arc::new(LoroDocument::new("guard-b".to_string()).unwrap());
-    let backend_b = LoroBackend::from_document(doc_b.clone());
+    let backend_b =
+        LoroBackend::from_document(doc_b.clone(), std::sync::Arc::new(holon_api::SystemClock));
     // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
     // are not exposed through the doc-boundary API, and single-threaded probe
     // reads cannot observe another writer.

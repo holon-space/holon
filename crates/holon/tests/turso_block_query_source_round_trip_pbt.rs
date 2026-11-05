@@ -244,9 +244,12 @@ async fn seed_loro_backend(
     doc_id: &EntityUri,
     blocks: &[Block],
 ) -> Result<Arc<LoroBackend>, TestCaseError> {
-    let backend = LoroBackend::create_new("bqs-equivalence".to_string())
-        .await
-        .map_err(|e| TestCaseError::fail(format!("loro create_new: {e}")))?;
+    let backend = LoroBackend::create_new(
+        "bqs-equivalence".to_string(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
+    .await
+    .map_err(|e| TestCaseError::fail(format!("loro create_new: {e}")))?;
     backend
         .create_block_with_properties(
             EntityUri::no_parent(),

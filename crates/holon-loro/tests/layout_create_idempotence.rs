@@ -85,6 +85,7 @@ async fn re_seeding_an_already_migrated_layout_mints_no_second_live_node() -> Re
         store.get_doc(DocScope::Global).await?,
         store.get_doc(DocScope::Layout).await?,
         std::sync::Arc::new(holon_core::NoReadOnlyDocuments),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
 
     seed_layout(&registry).await?;

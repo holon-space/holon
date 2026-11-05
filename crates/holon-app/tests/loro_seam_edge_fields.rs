@@ -22,7 +22,10 @@ use holon_loro::loro_document::LoroDocument;
 #[tokio::test]
 async fn update_in_tree_routes_every_edge_field_to_its_junction() {
     let doc = LoroDocument::new("seam-test".to_string()).expect("loro doc");
-    let backend = Arc::new(LoroBackend::from_document(Arc::new(doc)));
+    let backend = Arc::new(LoroBackend::from_document(
+        Arc::new(doc),
+        std::sync::Arc::new(holon_api::SystemClock),
+    ));
     let root = backend.create_placeholder_root("root").await.expect("root");
     let seam = LoroBlockOrdering::new(backend.clone());
 

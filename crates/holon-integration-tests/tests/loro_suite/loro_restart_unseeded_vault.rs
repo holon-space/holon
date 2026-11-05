@@ -170,7 +170,8 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         .get_doc(DocScope::Global)
         .await
         .expect("global Loro doc");
-    let backend = LoroBackend::from_document(global_doc);
+    let backend =
+        LoroBackend::from_document(global_doc, std::sync::Arc::new(holon_api::SystemClock));
     let seed_deadline = std::time::Instant::now() + Duration::from_secs(10);
     while backend.resolve_to_tree_id(&target_id).await.is_none() {
         assert!(

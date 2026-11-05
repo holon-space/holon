@@ -24,7 +24,8 @@ fn recorded_origins(doc: &LoroDocument) -> (Arc<Mutex<Vec<String>>>, loro::Subsc
 #[test]
 fn projected_blocks_inside_a_write_batch_is_refused_and_the_batch_stays_one_commit() -> Result<()> {
     let doc = Arc::new(LoroDocument::new("projected_blocks_in_batch".to_string())?);
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     let (origins, _sub) = recorded_origins(&doc);
 
     let inner = doc.with_write(WriteOrigin::Probe("batch"), |d| {
@@ -47,7 +48,8 @@ fn projected_blocks_inside_a_write_batch_is_refused_and_the_batch_stays_one_comm
 #[test]
 fn projected_blocks_refuses_ops_left_pending_outside_the_write_guard() -> Result<()> {
     let doc = Arc::new(LoroDocument::new("projected_blocks_pending".to_string())?);
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     let (origins, _sub) = recorded_origins(&doc);
 
     // ALLOW(loro_doc_escape): the unguarded write this test plants on purpose.

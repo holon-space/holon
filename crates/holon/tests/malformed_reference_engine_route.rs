@@ -183,9 +183,12 @@ async fn a_malformed_edge_target_is_refused_by_name_under_both_authorities() {
     let named = |e: &str| e.contains("edge field 'requires'") && e.contains("\"a b\"");
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let loro = holon_loro::LoroBlockOperations::new(Arc::new(tokio::sync::RwLock::new(
-        holon_loro::LoroDocumentStore::new(dir.path().to_path_buf()),
-    )));
+    let loro = holon_loro::LoroBlockOperations::new(
+        Arc::new(tokio::sync::RwLock::new(
+            holon_loro::LoroDocumentStore::new(dir.path().to_path_buf()),
+        )),
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
     loro.create(params(&[
         ("id", text("block:a")),
         ("content", text("a")),

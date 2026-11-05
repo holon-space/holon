@@ -2813,7 +2813,7 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
         widget_only,
         block_type,
         created_at,
-        updated_at: _,
+        updated_at,
     } = block;
     let mut params = holon_api::StorageEntity::new();
     params.insert("id".into(), Value::String(id.to_string()));
@@ -2827,7 +2827,7 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
     let now = holon_api::clock::now_millis();
     let created = if *created_at > 0 { *created_at } else { now };
     params.insert("created_at".into(), Value::Integer(created));
-    params.insert("updated_at".into(), Value::Integer(now));
+    params.insert("updated_at".into(), Value::Integer(*updated_at));
     // Projection-totality guard (R-1): every owned Loro block MUST have a
     // non-empty fractional_index. An empty sort_key means the projection
     // failed to carry the Loro authority's order — the "sort_key stays A0"
@@ -2892,7 +2892,8 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
 }
 
 /// Build a params map containing only fields that differ between `old` and
-/// `new`, plus the `id` (always needed for the WHERE clause) and `updated_at`.
+/// `new`, plus the `id` (always needed for the WHERE clause) and the block's
+/// own `updated_at`.
 /// This prevents Loro outbound reconcile from overwriting SQL fields that a
 /// concurrent direct write has already advanced.
 fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::StorageEntity {
@@ -2902,8 +2903,7 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
     let mut params = HashMap::new();
     params.insert("id".into(), Value::String(new.id.to_string()));
 
-    let now = holon_api::clock::now_millis();
-    params.insert("updated_at".into(), Value::Integer(now));
+    params.insert("updated_at".into(), Value::Integer(new.updated_at));
 
     if old.parent_id != new.parent_id {
         params.insert("parent_id".into(), Value::String(new.parent_id.to_string()));

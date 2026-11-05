@@ -102,7 +102,10 @@ pub async fn register_loro_read_stack(
         .get_doc(DocScope::Global)
         .await
         .expect("register_loro_read_stack: get_doc(Global) failed");
-    let backend = Arc::new(LoroBackend::from_document(doc));
+    let backend = Arc::new(LoroBackend::from_document(
+        doc,
+        injector.resolve::<holon_api::InjectedClock>().0.clone(),
+    ));
 
     // A `LoroDocumentStore` clone shares the global-doc `Arc`, so the registered
     // store, the read backend, and the write store below all observe one doc.
@@ -132,7 +135,8 @@ pub fn register_loro_operation_engine(
     doc_store: Arc<RwLock<LoroDocumentStore>>,
     collab: Arc<holon_loro::LoroDocument>,
 ) {
-    let block_ops = LoroBlockOperations::new(doc_store);
+    let clock = injector.resolve::<holon_api::InjectedClock>().0.clone();
+    let block_ops = LoroBlockOperations::new(doc_store, clock.clone());
     // Thread the shared-tree registry into the write path if the container
     // registered one. No-Turso sessions do not run `register_subtree_share`, so
     // this is normally `None` (no subtree is ever shared here) — but resolving it
@@ -154,7 +158,6 @@ pub fn register_loro_operation_engine(
         }
     };
     let bus = injector.resolve::<Arc<holon_conditions::ConditionBus>>();
-    let clock = injector.resolve::<holon_api::InjectedClock>().0.clone();
     let engine = loro_operation_engine(block_ops, collab, (*bus).clone(), clock);
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
 }
@@ -245,9 +248,12 @@ mod tests {
     use super::*;
 
     async fn seed_backend() -> (Arc<LoroBackend>, EntityUri, Vec<EntityUri>, EntityUri) {
-        let backend = LoroBackend::create_new("loro-query-source-test".to_string())
-            .await
-            .unwrap();
+        let backend = LoroBackend::create_new(
+            "loro-query-source-test".to_string(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .await
+        .unwrap();
 
         // root
         //   first
@@ -399,7 +405,7 @@ mod tests {
 
         // Seed the SAME global doc the resolved source will read.
         let doc = store.read().await.get_doc(DocScope::Global).await.unwrap();
-        let backend = LoroBackend::from_document(doc);
+        let backend = LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock));
         let root = backend
             .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)
             .await
@@ -436,7 +442,8 @@ mod tests {
             let doc_store = LoroDocumentStore::new(dir.clone());
             // `backend` and `ops` share this store's global doc (clone shares the Arc).
             let doc = doc_store.get_doc(DocScope::Global).await.unwrap();
-            let backend = LoroBackend::from_document(doc);
+            let backend =
+                LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock));
             let root = backend
                 .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)
                 .await
@@ -446,7 +453,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            let ops = LoroBlockOperations::new(Arc::new(RwLock::new(doc_store.clone())));
+            let ops = LoroBlockOperations::new(
+                Arc::new(RwLock::new(doc_store.clone())),
+                std::sync::Arc::new(holon_api::SystemClock),
+            );
             ops.set_field(
                 child.id.as_str(),
                 "content",
@@ -461,7 +471,8 @@ mod tests {
         // Reopen a brand-new store over the same dir.
         let store2 = LoroDocumentStore::new(dir);
         let doc2 = store2.get_doc(DocScope::Global).await.unwrap();
-        let backend2 = LoroBackend::from_document(doc2);
+        let backend2 =
+            LoroBackend::from_document(doc2, std::sync::Arc::new(holon_api::SystemClock));
         let reloaded = backend2.get_block(&child_id).await.unwrap();
         assert_eq!(
             reloaded.content, "persisted",
@@ -480,9 +491,12 @@ mod tests {
             .unwrap();
         let (backend, sides) = reader_rt.block_on(async {
             let backend = Arc::new(
-                LoroBackend::create_new("loro-query-source-interleave".to_string())
-                    .await
-                    .unwrap(),
+                LoroBackend::create_new(
+                    "loro-query-source-interleave".to_string(),
+                    std::sync::Arc::new(holon_api::SystemClock),
+                )
+                .await
+                .unwrap(),
             );
             let root = backend
                 .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)
@@ -590,7 +604,7 @@ mod tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(tmp.keep())));
         let collab = store.read().await.get_doc(DocScope::Global).await.unwrap();
         let engine = loro_operation_engine(
-            LoroBlockOperations::new(store.clone()),
+            LoroBlockOperations::new(store.clone(), std::sync::Arc::new(holon_api::SystemClock)),
             collab,
             Arc::new(holon_conditions::ConditionBus::new()),
             Arc::new(holon_api::SystemClock),
@@ -641,7 +655,10 @@ mod tests {
             )
             .await;
         }
-        (engine, LoroBlockOperations::new(store))
+        (
+            engine,
+            LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock)),
+        )
     }
 
     async fn task_pair(ops: &LoroBlockOperations, id: &str) -> (Option<String>, Option<String>) {
@@ -800,7 +817,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let ops = LoroBlockOperations::new(store);
+                let ops = LoroBlockOperations::new(store, Arc::new(holon_api::TestClock::new(at)));
                 use holon_core::WriteAuthorityReads;
                 // ALLOW(entity_uri_from_raw): test-fixture literal
                 let block = ops.block(&EntityUri::from_raw("block:stamped")).await.unwrap().unwrap();

@@ -621,9 +621,12 @@ async fn both_stores_refuse_the_same_non_finite_float_write() {
 
     let (_backend, _db, sql, _) = make_provider_with_block("x", None, 1000).await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let loro = holon_loro::LoroBlockOperations::new(std::sync::Arc::new(tokio::sync::RwLock::new(
-        holon_loro::LoroDocumentStore::new(dir.path().to_path_buf()),
-    )));
+    let loro = holon_loro::LoroBlockOperations::new(
+        std::sync::Arc::new(tokio::sync::RwLock::new(
+            holon_loro::LoroDocumentStore::new(dir.path().to_path_buf()),
+        )),
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
 
     for (i, (param, value, path, shown)) in cases.into_iter().enumerate() {
         let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();

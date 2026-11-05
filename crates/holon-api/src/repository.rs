@@ -251,12 +251,18 @@ pub trait CoreOperations: Send + Sync {
 #[async_trait]
 pub trait Lifecycle: Send + Sync {
     /// Create a new document.
-    async fn create_new(doc_id: String) -> Result<Self, ApiError>
+    async fn create_new(
+        doc_id: String,
+        clock: std::sync::Arc<dyn crate::Clock>,
+    ) -> Result<Self, ApiError>
     where
         Self: Sized;
 
     /// Open an existing document.
-    async fn open_existing(doc_id: String) -> Result<Self, ApiError>
+    async fn open_existing(
+        doc_id: String,
+        clock: std::sync::Arc<dyn crate::Clock>,
+    ) -> Result<Self, ApiError>
     where
         Self: Sized;
 

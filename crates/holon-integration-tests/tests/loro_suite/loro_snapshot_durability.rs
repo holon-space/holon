@@ -87,7 +87,7 @@ fn sidecar_path(snapshot: &std::path::Path) -> std::path::PathBuf {
 async fn snapshot_holds(path: &std::path::Path, id: &str) -> bool {
     let doc = LoroDocument::load_from_file(path, "probe".to_string())
         .unwrap_or_else(|e| panic!("the snapshot at {} does not load: {e:#}", path.display()));
-    LoroBackend::from_document(Arc::new(doc))
+    LoroBackend::from_document(Arc::new(doc), std::sync::Arc::new(holon_api::SystemClock))
         .resolve_to_tree_id(id)
         .await
         .is_some()
@@ -102,7 +102,7 @@ async fn live_tree_holds(env: &TestEnvironment, id: &str) -> bool {
         .get_doc(DocScope::Global)
         .await
         .expect("global Loro doc");
-    LoroBackend::from_document(doc)
+    LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock))
         .resolve_to_tree_id(id)
         .await
         .is_some()

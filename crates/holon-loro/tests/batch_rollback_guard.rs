@@ -32,11 +32,17 @@ fn store_at(dir: &std::path::Path, peer: u64) -> LoroDocumentStore {
 }
 
 fn ops_over(store: &LoroDocumentStore) -> LoroBlockOperations {
-    LoroBlockOperations::new(Arc::new(RwLock::new(store.clone())))
+    LoroBlockOperations::new(
+        Arc::new(RwLock::new(store.clone())),
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
 }
 
 async fn backend_for(store: &LoroDocumentStore, scope: DocScope) -> LoroBackend {
-    LoroBackend::from_document(store.get_doc(scope).await.expect("document"))
+    LoroBackend::from_document(
+        store.get_doc(scope).await.expect("document"),
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
 }
 
 async fn create(backend: &LoroBackend, parent: EntityUri, id: &str) {
@@ -80,8 +86,12 @@ async fn type_into(store: &LoroDocumentStore, id: &str, text: &str) {
     let layout = store.get_doc(DocScope::Layout).await.unwrap();
     let (uri, text) = (EntityUri::block(id), text.to_string());
     std::thread::spawn(move || {
-        let registry =
-            BlockCellRegistry::with_loro(global, layout, Arc::new(holon_core::NoReadOnlyDocuments));
+        let registry = BlockCellRegistry::with_loro(
+            global,
+            layout,
+            Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         let registry: &dyn EntityCellRegistry = &registry;
         registry
             .editable_field::<String>(&uri, "content")
@@ -152,7 +162,8 @@ async fn a_peers_write_inside_the_window_survives_and_the_peer_converges() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_at(dir.path(), OUR_PEER);
     let doc = store.get_doc(DocScope::Global).await.unwrap();
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     let ops = ops_over(&store);
 
     create(&backend, EntityUri::no_parent(), "root").await;
@@ -165,7 +176,10 @@ async fn a_peers_write_inside_the_window_survives_and_the_peer_converges() {
             .unwrap();
     };
     sync(&doc, &peer_doc);
-    let peer_backend = LoroBackend::from_document(peer_doc.clone());
+    let peer_backend = LoroBackend::from_document(
+        peer_doc.clone(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
 
     let batch = ops.open().await.unwrap();
     let id = batch.id();
@@ -271,7 +285,8 @@ async fn a_checkout_inside_the_window_refuses_the_rollback() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_at(dir.path(), OUR_PEER);
     let doc = store.get_doc(DocScope::Global).await.unwrap();
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     let ops = ops_over(&store);
     create(&backend, EntityUri::no_parent(), "root").await;
 
@@ -305,7 +320,8 @@ async fn a_checkout_before_the_batch_writes_refuses_the_rollback() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_at(dir.path(), OUR_PEER);
     let doc = store.get_doc(DocScope::Global).await.unwrap();
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     let ops = ops_over(&store);
     create(&backend, EntityUri::no_parent(), "root").await;
     let before = doc.with_read(|d| Ok(d.oplog_frontiers())).unwrap();

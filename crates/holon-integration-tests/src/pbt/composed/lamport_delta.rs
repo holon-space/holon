@@ -11,8 +11,12 @@
 
 use std::sync::Once;
 
+use holon_api::Clock;
 use holon_api::EdgeFieldUpdate;
+use holon_pbt_core::capabilities::SutLoroLog;
+use holon_pbt_core::composition::CapMap;
 
+use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::E2ETransition;
 use crate::pbt::transitions::SetEdgeField;
@@ -28,6 +32,9 @@ enum Delta {
     /// The create's fixed ops plus one map set per written column. Every
     /// drawn id is fresh, so no tombstoned key is cleared first.
     TypedCreate,
+    /// One tree move, plus one `updated_at` map set when the clock reads other
+    /// than the block's stored stamp: Loro skips a same-value map insert.
+    Indent,
 }
 
 /// Atom counts measured on the keystone (`just atom-counts`). `Outdent` has
@@ -38,7 +45,7 @@ const PREDICTORS: &[(&str, Delta)] = &[
     ("CreateTypedEntity", Delta::TypedCreate),
     ("SetTypedEntityField", Delta::TypedFieldWrite),
     ("DeleteTypedEntity", Delta::Constant(1)),
-    ("Indent", Delta::Constant(2)),
+    ("Indent", Delta::Indent),
     ("SetEdgeField", Delta::EdgeFieldWrite),
     ("Search", Delta::Constant(0)),
     ("JumpToSearchHit", Delta::Constant(0)),
@@ -57,9 +64,54 @@ const PREDICTORS: &[(&str, Delta)] = &[
 /// Measured with one-, two- and four-column types.
 const TYPED_CREATE_FIXED_OPS: u32 = 3;
 
+/// The target block's `updated_at` as the SUT stores it and the SUT clock's
+/// reading, both taken before the SUT applies the transition.
+#[derive(Clone, Copy, Debug)]
+pub struct StampProbe {
+    pub stored: i64,
+    pub now: i64,
+}
+
+/// Reads what [`predict`] needs from the SUT before the apply: a [`StampProbe`]
+/// for an `Indent`, nothing for any other kind.
+pub async fn probe(
+    t: &E2ETransition,
+    frontend: Option<&HeadlessFrontendComponent>,
+    caps: &CapMap,
+) -> Option<StampProbe> {
+    let E2ETransition::Indent(t) = t else {
+        return None;
+    };
+    let log = caps.get::<dyn SutLoroLog>()?;
+    let frontend = frontend.expect(
+        "[lamport-delta] 'Indent' on a draw with a Loro log but no frontend: no SUT clock to read",
+    );
+    let id = frontend.resolve_id(&t.block_id);
+    let blocks = log
+        .loro_block_snapshot()
+        .await
+        .expect("[lamport-delta] the SUT exposes a Loro log but no Loro block snapshot");
+    let stored = blocks
+        .iter()
+        .find(|b| b.id == id)
+        .unwrap_or_else(|| {
+            panic!(
+                "[lamport-delta] 'Indent' target {id} (oracle {}) is not in the SUT Loro tree \
+                 before the apply",
+                t.block_id
+            )
+        })
+        .updated_at;
+    Some(StampProbe {
+        stored,
+        now: frontend.clock().now_millis(),
+    })
+}
+
 /// The SUT primary's exact Lamport advance for `t`, read off the ref state
-/// after `t`; `None` for a kind without a predictor.
-pub fn predict(t: &E2ETransition, post: &ReferenceState) -> Option<u32> {
+/// after `t` and the pre-apply [`StampProbe`]; `None` for a kind without a
+/// predictor.
+pub fn predict(t: &E2ETransition, post: &ReferenceState, stamp: Option<StampProbe>) -> Option<u32> {
     static UNCHECKED: Once = Once::new();
     UNCHECKED.call_once(|| {
         eprintln!(
@@ -88,7 +140,15 @@ pub fn predict(t: &E2ETransition, post: &ReferenceState) -> Option<u32> {
             };
             typed_field_write(t, post)
         }
+        // No probe means the draw has no Loro log, so there is no height to check.
+        Delta::Indent => indent(stamp?),
     })
+}
+
+/// One tree move, plus the `updated_at` map set unless the clock reads the
+/// block's stored stamp.
+fn indent(stamp: StampProbe) -> u32 {
+    1 + u32::from(stamp.stored != stamp.now)
 }
 
 fn edge_field_write(t: &SetEdgeField, post: &ReferenceState) -> u32 {
@@ -192,6 +252,7 @@ mod tests {
                         Delta::EdgeFieldWrite => Delta::EdgeFieldWrite,
                         Delta::TypedFieldWrite => Delta::TypedFieldWrite,
                         Delta::TypedCreate => Delta::TypedCreate,
+                        Delta::Indent => Delta::Indent,
                     },
                 )
             })
@@ -200,6 +261,12 @@ mod tests {
         let fewer = unchecked_kinds(E2ETransition::VARIANT_NAMES, &more);
         assert!(!fewer.contains(&"SplitBlock"));
         assert_eq!(fewer.len() + 1, unchecked.len());
+    }
+
+    #[test]
+    fn indent_writes_the_stamp_only_when_the_clock_moved() {
+        assert_eq!(indent(StampProbe { stored: 5, now: 5 }), 1);
+        assert_eq!(indent(StampProbe { stored: 5, now: 6 }), 2);
     }
 
     #[test]

@@ -24,7 +24,10 @@ use crate::loro_document_store::LoroDocumentStore;
 /// Idempotent: the second boot finds the subtree only in the layout doc and
 /// moves nothing. An id live in BOTH docs is an ambiguity — the two writes
 /// would have diverged independently — so it errors rather than picking one.
-pub async fn migrate_layout_out_of_global(store: &LoroDocumentStore) -> Result<usize> {
+pub async fn migrate_layout_out_of_global(
+    store: &LoroDocumentStore,
+    clock: std::sync::Arc<dyn holon_api::Clock>,
+) -> Result<usize> {
     let global = store.get_doc(DocScope::Global).await?;
     let layout = store.get_doc(DocScope::Layout).await?;
 
@@ -51,7 +54,7 @@ pub async fn migrate_layout_out_of_global(store: &LoroDocumentStore) -> Result<u
         ));
     }
 
-    let layout_backend = LoroBackend::from_document(layout);
+    let layout_backend = LoroBackend::from_document(layout, clock.clone());
     let requests: Vec<NewBlockWithProperties> = subtree
         .iter()
         .map(|b| NewBlockWithProperties {
@@ -67,7 +70,7 @@ pub async fn migrate_layout_out_of_global(store: &LoroDocumentStore) -> Result<u
         .await
         .map_err(|e| anyhow!("layout migration: writing the subtree into the layout doc: {e:?}"))?;
 
-    let global_backend = LoroBackend::from_document(global);
+    let global_backend = LoroBackend::from_document(global, clock);
     // Leaves first: deleting a parent first would take its children with it,
     // and the per-id delete is what keeps this loop's count honest.
     for block in subtree.iter().rev() {

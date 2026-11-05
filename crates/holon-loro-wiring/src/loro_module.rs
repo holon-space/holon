@@ -124,9 +124,10 @@ impl Module for LoroModule {
         // Register LoroBlocksDataSource
         injector.provide::<LoroBlocksDataSource>(Provider::root(|resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
-            Shared::new(LoroBlocksDataSource::new(Arc::new(RwLock::new(
-                (*doc_store).clone(),
-            ))))
+            Shared::new(LoroBlocksDataSource::new(
+                Arc::new(RwLock::new((*doc_store).clone())),
+                resolver.resolve::<holon_api::InjectedClock>().0.clone(),
+            ))
         }));
 
         // Register LoroBlockOperations. When the subtree-share machinery is
@@ -139,8 +140,11 @@ impl Module for LoroModule {
         injector.provide::<LoroBlockOperations>(Provider::root(|resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
             let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
-            let ops = LoroBlockOperations::new(Arc::new(RwLock::new((*doc_store).clone())))
-                .with_condition_bus((*bus).clone());
+            let ops = LoroBlockOperations::new(
+                Arc::new(RwLock::new((*doc_store).clone())),
+                resolver.resolve::<holon_api::InjectedClock>().0.clone(),
+            )
+            .with_condition_bus((*bus).clone());
             #[cfg(all(
                 feature = "iroh-sync",
                 not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -206,7 +210,10 @@ impl Module for LoroModule {
                     .resolve_async::<dyn holon_core::WriteTierAuthority>()
                     .await;
                 let mut registry = holon_loro::block_cell_registry::BlockCellRegistry::with_loro(
-                    collab, layout, write_tier,
+                    collab,
+                    layout,
+                    write_tier,
+                    resolver.resolve::<holon_api::InjectedClock>().0.clone(),
                 )
                 .with_text_undo_arming((*doc_store).clone(), tokio::runtime::Handle::current());
                 #[cfg(all(
@@ -390,9 +397,12 @@ impl Module for LoroModule {
             // final placement.
             {
                 let store = doc_store_arc.read().await;
-                let moved = holon_loro::layout_migration::migrate_layout_out_of_global(&store)
-                    .await
-                    .expect("[LoroModule] layout migration");
+                let moved = holon_loro::layout_migration::migrate_layout_out_of_global(
+                    &store,
+                    resolver.resolve::<holon_api::InjectedClock>().0.clone(),
+                )
+                .await
+                .expect("[LoroModule] layout migration");
                 if moved > 0 {
                     info!(
                         "[LoroModule] moved {moved} layout block(s) out of the replicated global \

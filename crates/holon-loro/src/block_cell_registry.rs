@@ -92,6 +92,7 @@ impl BlockCellRegistry {
         loro_doc: Arc<LoroDocument>,
         layout: Arc<LoroDocument>,
         write_tier: Arc<dyn WriteTierAuthority>,
+        clock: Arc<dyn holon_api::Clock>,
     ) -> Self {
         // ALLOW(loro_doc_escape): the cell backings' retained container handles
         // read single containers of already-born blocks; the scoped-capability
@@ -99,7 +100,7 @@ impl BlockCellRegistry {
         let doc = loro_doc.doc();
         // ALLOW(loro_doc_escape): same scoped-capability ruling, layout doc.
         let layout_doc = layout.doc();
-        let backend = Arc::new(LoroBackend::from_document(loro_doc).with_layout_doc(layout));
+        let backend = Arc::new(LoroBackend::from_document(loro_doc, clock).with_layout_doc(layout));
         Self {
             cache: CellCache::new(),
             doc,
@@ -194,9 +195,13 @@ impl BlockCellRegistry {
     /// `LoroDoc` directly via the `loro` crate without going through
     /// `LoroDocumentStore`. Production callers should prefer
     /// [`Self::with_loro`].
-    pub fn with_loro_doc(doc: Arc<LoroDoc>, write_tier: Arc<dyn WriteTierAuthority>) -> Self {
+    pub fn with_loro_doc(
+        doc: Arc<LoroDoc>,
+        write_tier: Arc<dyn WriteTierAuthority>,
+        clock: Arc<dyn holon_api::Clock>,
+    ) -> Self {
         let loro_doc = LoroDocument::from_existing(doc.clone(), "test");
-        let backend = Arc::new(LoroBackend::from_document(Arc::new(loro_doc)));
+        let backend = Arc::new(LoroBackend::from_document(Arc::new(loro_doc), clock));
         Self {
             cache: CellCache::new(),
             doc,
@@ -1112,6 +1117,7 @@ mod tests {
         let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(
             doc,
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         ));
         let uri = EntityUri::block("abc");
         let cell: Cell<String> = registry.as_ref().live_field::<String>(&uri, "content")?;
@@ -1125,6 +1131,7 @@ mod tests {
         let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(
             doc,
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         ));
         let uri = EntityUri::block("abc");
         let cell: Cell<bool> = registry.as_ref().live_field::<bool>(&uri, "widget_only")?;
@@ -1135,8 +1142,11 @@ mod tests {
     #[tokio::test]
     async fn write_field_widget_only_round_trips_through_cell() -> Result<()> {
         let doc = make_loro_doc_with_block("abc");
-        let registry =
-            BlockCellRegistry::with_loro_doc(doc, Arc::new(holon_core::NoReadOnlyDocuments));
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc,
+            Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         let uri = EntityUri::block("abc");
         let routed = registry
             .write_field(&uri, "widget_only", Value::Boolean(true))
@@ -1154,6 +1164,7 @@ mod tests {
         let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(
             doc,
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         ));
         let uri = EntityUri::block("abc");
         let res = registry.as_ref().live_field::<f64>(&uri, "widget_only");
@@ -1180,6 +1191,7 @@ mod tests {
         let registry = BlockCellRegistry::with_loro_doc(
             doc.clone(),
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         let rt = tokio::runtime::Runtime::new()?;
         let no_parent = EntityUri::no_parent();
@@ -1233,6 +1245,7 @@ mod tests {
         let registry = BlockCellRegistry::with_loro_doc(
             doc.clone(),
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         let unheld = EntityUri::block("unheld");
         let frontier = doc.oplog_frontiers();
@@ -1304,6 +1317,7 @@ mod tests {
         let registry = BlockCellRegistry::with_loro_doc(
             doc.clone(),
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         let frontier = doc.oplog_frontiers();
         for field in ["requires", "advice_suppressed", "contributes_to"] {
@@ -1359,7 +1373,11 @@ mod tests {
     #[tokio::test]
     async fn create_entity_sync_under_a_read_only_parent_is_refused_typed() {
         let doc = make_loro_doc_with_block("recipe");
-        let registry = BlockCellRegistry::with_loro_doc(doc.clone(), Arc::new(RecipeTier));
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc.clone(),
+            Arc::new(RecipeTier),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         let err = registry
             .create_entity_sync(
                 &EntityUri::block("recipe"),
@@ -1387,7 +1405,11 @@ mod tests {
     #[tokio::test]
     async fn create_entity_under_a_read_only_parent_is_refused_typed() {
         let doc = make_loro_doc_with_block("recipe");
-        let registry = BlockCellRegistry::with_loro_doc(doc.clone(), Arc::new(RecipeTier));
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc.clone(),
+            Arc::new(RecipeTier),
+            std::sync::Arc::new(holon_api::SystemClock),
+        );
         let err = registry
             .create_entity(
                 &EntityUri::block("recipe"),
@@ -1419,6 +1441,7 @@ mod tests {
         let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(
             doc,
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         ));
         let uri = EntityUri::block("missing");
         let res = registry.as_ref().live_field::<String>(&uri, "content");
@@ -1444,6 +1467,7 @@ mod tests {
         let registry = BlockCellRegistry::with_loro_doc(
             doc.clone(),
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         let parent = EntityUri::block("parent");
         let child = EntityUri::block("journals");
@@ -1531,6 +1555,7 @@ mod tests {
         let registry = BlockCellRegistry::with_loro_doc(
             doc.clone(),
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         let root = EntityUri::block("root");
         let parent = EntityUri::block("headline");
@@ -1604,6 +1629,7 @@ mod tests {
         let registry = BlockCellRegistry::with_loro_doc(
             doc.clone(),
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         let parent = EntityUri::block("parent");
         let child = EntityUri::block("root-layout");
@@ -1664,6 +1690,7 @@ mod tests {
         let registry: Arc<dyn EntityCellRegistry> = Arc::new(BlockCellRegistry::with_loro_doc(
             doc,
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         ));
         let uri = EntityUri::block("zzz");
         let _cell = registry.as_ref().live_field::<String>(&uri, "content")?;
@@ -1682,6 +1709,7 @@ mod tests {
         let never_registry = BlockCellRegistry::with_loro_doc(
             make_loro_doc_with_block("seeded"),
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         assert_eq!(
             never_registry
@@ -1702,6 +1730,7 @@ mod tests {
         let registry = BlockCellRegistry::with_loro_doc(
             doc.clone(),
             Arc::new(holon_core::NoReadOnlyDocuments),
+            std::sync::Arc::new(holon_api::SystemClock),
         );
         let tree_id = registry
             .backend

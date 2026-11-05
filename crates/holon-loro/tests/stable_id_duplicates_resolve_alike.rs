@@ -34,7 +34,8 @@ fn new_doc(peer: u64) -> Arc<LoroDocument> {
 }
 
 fn create_root(rt: &tokio::runtime::Runtime, doc: &Arc<LoroDocument>, text: &str) -> TreeID {
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     rt.block_on(backend.create_block(
         EntityUri::no_parent(),
         BlockContent::text(text),
@@ -106,7 +107,9 @@ fn parent(doc: &LoroDocument, node: TreeID) -> Option<loro::TreeParentId> {
 fn layout_case(small_first: bool) {
     let rt = rt();
     let (layout, large, small) = duplicated(&rt, small_first);
-    let backend = LoroBackend::from_document(new_doc(1)).with_layout_doc(layout.clone());
+    let backend =
+        LoroBackend::from_document(new_doc(1), std::sync::Arc::new(holon_api::SystemClock))
+            .with_layout_doc(layout.clone());
 
     rt.block_on(backend.create_block(
         EntityUri::block(ID),
@@ -150,7 +153,8 @@ fn layout_writes_address_the_smallest_carrier_listed_last() {
 fn snapshot_case(small_first: bool) {
     let rt = rt();
     let (doc, _, small) = duplicated(&rt, small_first);
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     rt.block_on(backend.update_block(&format!("block:{ID}"), BlockContent::text("edited")))
         .unwrap();
     assert_eq!(content(&doc, small), "edited");
@@ -180,7 +184,9 @@ fn shared_case(small_first: bool) {
     let (shared, large, small) = duplicated(&rt, small_first);
     let mut store = InMemorySharedTreeStore::new();
     store.insert_arc("share-1".into(), shared.doc());
-    let backend = LoroBackend::from_document(new_doc(1)).with_shared_trees(Arc::new(store));
+    let backend =
+        LoroBackend::from_document(new_doc(1), std::sync::Arc::new(holon_api::SystemClock))
+            .with_shared_trees(Arc::new(store));
 
     rt.block_on(backend.update_block(&format!("block:{ID}"), BlockContent::text("edited")))
         .unwrap();
@@ -207,6 +213,7 @@ fn cell_case(small_first: bool) {
     let registry = BlockCellRegistry::with_loro_doc(
         doc.doc(),
         std::sync::Arc::new(holon_core::NoReadOnlyDocuments),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let written = rt
         .block_on(registry.write_field(

@@ -812,7 +812,11 @@ impl TwoInstanceHandle {
         let shared = frontend
             .shared_tree_store()
             .expect("the receiver wires the share machinery");
-        holon_loro::loro_backend::LoroBackend::from_document(global).with_shared_trees(shared)
+        holon_loro::loro_backend::LoroBackend::from_document(
+            global,
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .with_shared_trees(shared)
     }
 
     /// The stable id of the receiver's mount that places `page`.

@@ -75,7 +75,10 @@ async fn create(
 async fn gate_cost_on_a_plain_block_over_the_loro_authority() {
     let dir = tempfile::tempdir().unwrap();
     let store = LoroDocumentStore::new(dir.path().to_path_buf()).with_peer_id(Some(7));
-    let backend = LoroBackend::from_document(store.get_doc(DocScope::Global).await.unwrap());
+    let backend = LoroBackend::from_document(
+        store.get_doc(DocScope::Global).await.unwrap(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
     create(&backend, EntityUri::no_parent(), "page", &[], &[]).await;
     for i in 0..SIBLINGS {
         create(
@@ -87,9 +90,10 @@ async fn gate_cost_on_a_plain_block_over_the_loro_authority() {
         )
         .await;
     }
-    let authority: Arc<dyn WriteAuthorityReads> = Arc::new(LoroBlockOperations::new(Arc::new(
-        RwLock::new(store.clone()),
-    )));
+    let authority: Arc<dyn WriteAuthorityReads> = Arc::new(LoroBlockOperations::new(
+        Arc::new(RwLock::new(store.clone())),
+        std::sync::Arc::new(holon_api::SystemClock),
+    ));
     assert!(
         authority
             .tagged_neighbourhood(&["decision"], &[], None)

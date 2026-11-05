@@ -642,9 +642,12 @@ mod tests {
     /// engine.
     #[tokio::test]
     async fn loro_watch_ui_emits_source_render_then_children_data() {
-        let backend = LoroBackend::create_new("loro-watch-ui-test".to_string())
-            .await
-            .unwrap();
+        let backend = LoroBackend::create_new(
+            "loro-watch-ui-test".to_string(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .await
+        .unwrap();
         let root = backend
             .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)
             .await
@@ -766,9 +769,12 @@ mod tests {
         use std::time::Instant;
 
         let backend = Arc::new(
-            LoroBackend::create_new("loro-watch-churn-test".to_string())
-                .await
-                .unwrap(),
+            LoroBackend::create_new(
+                "loro-watch-churn-test".to_string(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            )
+            .await
+            .unwrap(),
         );
         let root = backend
             .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)

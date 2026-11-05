@@ -78,7 +78,7 @@ async fn write_into(store: &LoroDocumentStore, blocks: Vec<NewBlockWithPropertie
         .get_doc(DocScope::Global)
         .await
         .expect("the global doc");
-    LoroBackend::from_document(doc)
+    LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock))
         .create_blocks_with_properties(blocks)
         .await
         .expect("writing blocks into the global doc");

@@ -373,8 +373,11 @@ mod tests {
             /// The production write provider, wired exactly as DI wires it:
             /// this peer's doc store plus its shared-tree registry.
             fn ops(&self) -> LoroBlockOperations {
-                LoroBlockOperations::new(self.store.clone())
-                    .with_shared_trees(self.be.manager_for_test() as Arc<dyn SharedTreeStore>)
+                LoroBlockOperations::new(
+                    self.store.clone(),
+                    std::sync::Arc::new(holon_api::SystemClock),
+                )
+                .with_shared_trees(self.be.manager_for_test() as Arc<dyn SharedTreeStore>)
             }
 
             /// The wired write backend `LoroBlockOperations` delegates to.
@@ -384,8 +387,11 @@ mod tests {
             /// question this PBT asks lives in the backend either way.
             async fn backend(&self) -> holon_loro::loro_backend::LoroBackend {
                 let global = self.be.test_global_doc().await;
-                holon_loro::loro_backend::LoroBackend::from_document(global)
-                    .with_shared_trees(self.be.manager_for_test() as Arc<dyn SharedTreeStore>)
+                holon_loro::loro_backend::LoroBackend::from_document(
+                    global,
+                    std::sync::Arc::new(holon_api::SystemClock),
+                )
+                .with_shared_trees(self.be.manager_for_test() as Arc<dyn SharedTreeStore>)
             }
         }
 

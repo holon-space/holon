@@ -274,9 +274,12 @@ fn owning_page_cost_on_a_deep_vault() {
             .await
             .expect("the global doc");
         let node_of = |id: &str| {
-            holon_loro::LoroBackend::from_document(global.clone())
-                .find_tree_id_by_stable_id_sync(id)
-                .unwrap_or_else(|| panic!("{id} has no tree node"))
+            holon_loro::LoroBackend::from_document(
+                global.clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            )
+            .find_tree_id_by_stable_id_sync(id)
+            .unwrap_or_else(|| panic!("{id} has no tree node"))
         };
         let write = |f: &dyn Fn(&holon_loro::WriteTxn) -> anyhow::Result<()>| {
             global

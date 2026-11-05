@@ -35,7 +35,10 @@ async fn write_into(
     scope: DocScope,
     blocks: Vec<NewBlockWithProperties>,
 ) -> Result<()> {
-    let backend = LoroBackend::from_document(store.get_doc(scope).await?);
+    let backend = LoroBackend::from_document(
+        store.get_doc(scope).await?,
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
     backend
         .create_blocks_with_properties(blocks)
         .await
@@ -79,7 +82,8 @@ async fn a_legacy_vault_moves_its_layout_closure_once_and_then_moves_nothing() -
     let dir = tempfile::tempdir()?;
     let store = legacy_store(&dir).await?;
 
-    let moved = migrate_layout_out_of_global(&store).await?;
+    let moved =
+        migrate_layout_out_of_global(&store, std::sync::Arc::new(holon_api::SystemClock)).await?;
     assert_eq!(moved, 3, "the `block:__default__` closure is three blocks");
     assert_eq!(
         ids_in(&store, DocScope::Layout).await,
@@ -95,7 +99,8 @@ async fn a_legacy_vault_moves_its_layout_closure_once_and_then_moves_nothing() -
         "only the layout closure moves — replicated content stays"
     );
 
-    let again = migrate_layout_out_of_global(&store).await?;
+    let again =
+        migrate_layout_out_of_global(&store, std::sync::Arc::new(holon_api::SystemClock)).await?;
     assert_eq!(
         again, 0,
         "the second boot finds nothing left in the global doc"
@@ -116,7 +121,7 @@ async fn a_half_migrated_vault_refuses_to_migrate_and_names_the_straddling_ids()
     )
     .await?;
 
-    let err = migrate_layout_out_of_global(&store)
+    let err = migrate_layout_out_of_global(&store, std::sync::Arc::new(holon_api::SystemClock))
         .await
         .expect_err("an id live in BOTH docs has no rule-decidable resolution");
     let msg = format!("{err:#}");
@@ -145,13 +150,17 @@ async fn a_vault_with_no_layout_migrates_nothing_and_seeds_into_the_layout_doc()
     )
     .await?;
 
-    assert_eq!(migrate_layout_out_of_global(&store).await?, 0);
+    assert_eq!(
+        migrate_layout_out_of_global(&store, std::sync::Arc::new(holon_api::SystemClock)).await?,
+        0
+    );
     assert!(ids_in(&store, DocScope::Layout).await.is_empty());
 
     let registry = BlockCellRegistry::with_loro(
         store.get_doc(DocScope::Global).await?,
         store.get_doc(DocScope::Layout).await?,
         std::sync::Arc::new(holon_core::NoReadOnlyDocuments),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     registry
         .create_entity(

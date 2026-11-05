@@ -20,7 +20,10 @@ use holon_loro::loro_document::LoroDocument;
 
 async fn backend_with_block(id: &str) -> Arc<LoroBackend> {
     let doc = LoroDocument::new("marks-precondition".to_string()).expect("loro doc");
-    let backend = Arc::new(LoroBackend::from_document(Arc::new(doc)));
+    let backend = Arc::new(LoroBackend::from_document(
+        Arc::new(doc),
+        std::sync::Arc::new(holon_api::SystemClock),
+    ));
     let root = backend.create_placeholder_root("root").await.expect("root");
     backend
         .create_block(

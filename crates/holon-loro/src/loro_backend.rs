@@ -2415,7 +2415,10 @@ impl LoroBackend {
         }
     }
 
-    pub fn from_document(collab_doc: Arc<LoroDocument>) -> Self {
+    pub fn from_document(
+        collab_doc: Arc<LoroDocument>,
+        clock: std::sync::Arc<dyn holon_api::Clock>,
+    ) -> Self {
         Self {
             collab_doc,
             layout_doc: None,
@@ -2424,7 +2427,7 @@ impl LoroBackend {
             shared_trees: None,
             mount_cache: MountCache::default(),
             condition_bus: None,
-            clock: std::sync::Arc::new(holon_api::SystemClock),
+            clock,
         }
     }
 
@@ -2434,11 +2437,6 @@ impl LoroBackend {
     /// [`Self::resolve_write_target_for_parent`]).
     pub fn with_layout_doc(mut self, layout_doc: Arc<LoroDocument>) -> Self {
         self.layout_doc = Some(layout_doc);
-        self
-    }
-
-    pub fn with_clock(mut self, clock: std::sync::Arc<dyn holon_api::Clock>) -> Self {
-        self.clock = clock;
         self
     }
 
@@ -4925,7 +4923,10 @@ impl LoroBackend {
 
 #[async_trait]
 impl Lifecycle for LoroBackend {
-    async fn create_new(doc_id: String) -> Result<Self, ApiError>
+    async fn create_new(
+        doc_id: String,
+        clock: std::sync::Arc<dyn holon_api::Clock>,
+    ) -> Result<Self, ApiError>
     where
         Self: Sized,
     {
@@ -4942,15 +4943,18 @@ impl Lifecycle for LoroBackend {
             shared_trees: None,
             mount_cache: MountCache::default(),
             condition_bus: None,
-            clock: std::sync::Arc::new(holon_api::SystemClock),
+            clock,
         })
     }
 
-    async fn open_existing(doc_id: String) -> Result<Self, ApiError>
+    async fn open_existing(
+        doc_id: String,
+        clock: std::sync::Arc<dyn holon_api::Clock>,
+    ) -> Result<Self, ApiError>
     where
         Self: Sized,
     {
-        Self::create_new(doc_id).await
+        Self::create_new(doc_id, clock).await
     }
 
     async fn dispose(&self) -> Result<(), ApiError> {
@@ -5902,7 +5906,10 @@ mod diff_checkout_race_tests {
 
     async fn make_backend() -> (Arc<LoroDocument>, Arc<LoroBackend>) {
         let doc = Arc::new(LoroDocument::new("diff-race".to_string()).unwrap());
-        let backend = Arc::new(LoroBackend::from_document(doc.clone()));
+        let backend = Arc::new(LoroBackend::from_document(
+            doc.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ));
         (doc, backend)
     }
 
@@ -5978,7 +5985,8 @@ mod diff_checkout_race_tests {
         ]);
 
         let doc = Arc::new(LoroDocument::new("restart".to_string()).unwrap());
-        let backend = LoroBackend::from_document(doc.clone());
+        let backend =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         backend
             .create_block_with_properties(
                 EntityUri::no_parent(),
@@ -5994,10 +6002,11 @@ mod diff_checkout_race_tests {
         let reopened = Arc::new(
             LoroDocument::load_from_file(&path, "restart".to_string()).expect("snapshot reloads"),
         );
-        let block = LoroBackend::from_document(reopened)
-            .get_block("block:restart-host")
-            .await
-            .expect("the reloaded block must read");
+        let block =
+            LoroBackend::from_document(reopened, std::sync::Arc::new(holon_api::SystemClock))
+                .get_block("block:restart-host")
+                .await
+                .expect("the reloaded block must read");
 
         assert_eq!(
             block.properties.get("when"),
@@ -6109,8 +6118,10 @@ mod diff_checkout_race_tests {
     #[tokio::test]
     async fn remote_delete_tombstoned_parent_never_served_as_parent() {
         let doc = Arc::new(LoroDocument::new("remote-del".to_string()).unwrap());
-        let backend_a = LoroBackend::from_document(doc.clone());
-        let backend_b = LoroBackend::from_document(doc.clone());
+        let backend_a =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
+        let backend_b =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
 
         backend_a
             .create_block_with_properties(
@@ -6958,7 +6969,8 @@ mod half_born_node_tests {
     #[tokio::test]
     async fn list_children_withholds_a_child_whose_stable_id_has_not_landed() {
         let doc = Arc::new(LoroDocument::new("half-born".to_string()).unwrap());
-        let backend = LoroBackend::from_document(doc.clone());
+        let backend =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         create(&backend, EntityUri::no_parent(), "parent").await;
         create(&backend, EntityUri::block("parent"), "settled").await;
 
@@ -6984,7 +6996,8 @@ mod half_born_node_tests {
     #[tokio::test]
     async fn move_block_survives_a_half_born_node_elsewhere_in_the_tree() {
         let doc = Arc::new(LoroDocument::new("half-born-move".to_string()).unwrap());
-        let backend = LoroBackend::from_document(doc.clone());
+        let backend =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         create(&backend, EntityUri::no_parent(), "parent").await;
         create(&backend, EntityUri::block("parent"), "mover").await;
         create(&backend, EntityUri::no_parent(), "target").await;
@@ -7016,7 +7029,8 @@ mod half_born_node_tests {
     #[tokio::test]
     async fn tree_view_withholds_the_subtree_under_a_half_born_node() {
         let doc = Arc::new(LoroDocument::new("half-born-subtree".to_string()).unwrap());
-        let backend = LoroBackend::from_document(doc.clone());
+        let backend =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         create(&backend, EntityUri::no_parent(), "parent").await;
         create(&backend, EntityUri::block("parent"), "settled").await;
 
@@ -7092,7 +7106,8 @@ mod half_born_node_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.loro");
         let doc = Arc::new(LoroDocument::new("half-born-export".to_string()).unwrap());
-        let backend = LoroBackend::from_document(doc.clone());
+        let backend =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         create(&backend, EntityUri::no_parent(), "parent").await;
 
         set_birth_widening_ms(WIDENED_BIRTH_MS);
@@ -7156,7 +7171,8 @@ mod half_born_node_tests {
     #[serial_test::serial]
     async fn the_birth_window_is_open_to_a_raw_reader_and_closed_to_a_guarded_one() {
         let doc = Arc::new(LoroDocument::new("half-born-hammer".to_string()).unwrap());
-        let backend = LoroBackend::from_document(doc.clone());
+        let backend =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         create(&backend, EntityUri::no_parent(), "parent").await;
 
         let midpoint = Duration::from_millis(WIDENED_BIRTH_MS / 2);
@@ -7236,7 +7252,7 @@ mod stable_id_lookup_tests {
     #[tokio::test]
     async fn a_renamed_stable_id_no_longer_resolves_to_its_node() {
         let doc = Arc::new(LoroDocument::new("rename".to_string()).unwrap());
-        let backend = LoroBackend::from_document(doc);
+        let backend = LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock));
         let node = create(&backend, "before").await;
 
         backend
@@ -7255,8 +7271,10 @@ mod stable_id_lookup_tests {
     #[tokio::test]
     async fn a_node_deleted_behind_the_backend_resolves_to_its_recreation() {
         let doc = Arc::new(LoroDocument::new("shared".to_string()).unwrap());
-        let writer = LoroBackend::from_document(doc.clone());
-        let reader = LoroBackend::from_document(doc.clone());
+        let writer =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
+        let reader =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         let first = create(&writer, "reborn").await;
         assert_eq!(reader.resolve_to_tree_id("block:reborn").await, Some(first));
 
@@ -7279,7 +7297,8 @@ mod stable_id_lookup_tests {
     #[tokio::test]
     async fn a_stable_id_rewritten_behind_the_backend_resolves_to_its_new_id() {
         let doc = Arc::new(LoroDocument::new("rewrite".to_string()).unwrap());
-        let backend = LoroBackend::from_document(doc.clone());
+        let backend =
+            LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         let node = create(&backend, "cached").await;
 
         doc.with_write(WriteOrigin::BlockOps, |d| {

@@ -230,7 +230,10 @@ mod tests {
         meta.insert(STABLE_ID, block_id.to_string()).unwrap();
         doc.commit();
         let loro_doc = crate::loro_document::LoroDocument::from_existing(doc.clone(), "test");
-        let backend = Arc::new(LoroBackend::from_document(Arc::new(loro_doc)));
+        let backend = Arc::new(LoroBackend::from_document(
+            Arc::new(loro_doc),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ));
         (doc, backend)
     }
 

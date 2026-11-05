@@ -248,7 +248,10 @@ impl Sut {
                 .enable_all()
                 .build()
                 .unwrap(),
-            backend: LoroBackend::from_document(doc.clone()),
+            backend: LoroBackend::from_document(
+                doc.clone(),
+                std::sync::Arc::new(holon_api::SystemClock),
+            ),
             doc,
             half_born: Vec::new(),
             history: Vec::new(),
@@ -493,7 +496,10 @@ impl Sut {
                 );
                 doc.apply_update(&self.doc.export_snapshot().unwrap())
                     .unwrap();
-                self.backend = LoroBackend::from_document(doc.clone());
+                self.backend = LoroBackend::from_document(
+                    doc.clone(),
+                    std::sync::Arc::new(holon_api::SystemClock),
+                );
                 self.doc = doc;
             }
             Transition::Revert { to } => {

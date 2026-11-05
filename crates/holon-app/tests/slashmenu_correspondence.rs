@@ -210,7 +210,10 @@ async fn block_engine_loro_authority() -> Arc<BackendEngine> {
                 // the store must not vanish mid-test).
                 std::mem::forget(dir);
                 let store = Arc::new(TokioRwLock::new(LoroDocumentStore::new(path)));
-                Arc::new(LoroBlockOperations::new(store)) as Arc<dyn OperationProvider>
+                Arc::new(LoroBlockOperations::new(
+                    store,
+                    std::sync::Arc::new(holon_api::SystemClock),
+                )) as Arc<dyn OperationProvider>
             })
     })
     .await

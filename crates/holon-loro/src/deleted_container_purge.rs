@@ -127,7 +127,10 @@ mod tests {
 
     async fn backend_with_secret_block() -> (Arc<LoroDocument>, Arc<LoroBackend>) {
         let doc = Arc::new(LoroDocument::new("purge-rung".to_string()).unwrap());
-        let backend = Arc::new(LoroBackend::from_document(doc.clone()));
+        let backend = Arc::new(LoroBackend::from_document(
+            doc.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ));
         backend
             .create_block_with_properties(
                 EntityUri::no_parent(),
@@ -233,7 +236,10 @@ mod tests {
         let (doc_a, backend_a) = backend_with_secret_block().await;
 
         let doc_b = Arc::new(LoroDocument::new("purge-rung-b".to_string()).unwrap());
-        let backend_b = Arc::new(LoroBackend::from_document(doc_b.clone()));
+        let backend_b = Arc::new(LoroBackend::from_document(
+            doc_b.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ));
         sync(&doc_a, &doc_b);
 
         // Name the block's root containers while it is alive — after the delete
@@ -327,7 +333,10 @@ mod tests {
     async fn a_merged_dag_still_compacts_the_deleted_blocks_history() {
         let (doc_a, backend_a) = backend_with_secret_block().await;
         let doc_b = Arc::new(LoroDocument::new("purge-rung-merged".to_string()).unwrap());
-        let backend_b = Arc::new(LoroBackend::from_document(doc_b.clone()));
+        let backend_b = Arc::new(LoroBackend::from_document(
+            doc_b.clone(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        ));
         sync(&doc_a, &doc_b);
 
         // Deliberately UNRELATED to the secret block.

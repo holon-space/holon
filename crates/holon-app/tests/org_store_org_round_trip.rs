@@ -456,7 +456,7 @@ async fn inline_marks_around_a_link_survive_the_loro_text_seam() {
     .expect("the fixture must parse");
 
     let doc = Arc::new(LoroDocument::new("marks".to_string()).expect("loro doc"));
-    let backend = LoroBackend::from_document(doc);
+    let backend = LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock));
     for block in std::iter::once(&parsed.document).chain(parsed.blocks.iter()) {
         backend
             .create_block_with_properties(

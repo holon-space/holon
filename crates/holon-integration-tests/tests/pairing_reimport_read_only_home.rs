@@ -86,7 +86,7 @@ async fn seed_archive(archive: &std::path::Path) {
         .get_doc(holon_loro::DocScope::Global)
         .await
         .expect("the archived global doc");
-    LoroBackend::from_document(doc)
+    LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock))
         .create_blocks_with_properties(vec![
             new_block(
                 EntityUri::no_parent(),

@@ -54,9 +54,12 @@ async fn seed_block(
 }
 
 async fn new_loro() -> LoroBackend {
-    LoroBackend::create_new("sql-loro-slice".to_string())
-        .await
-        .expect("create_new LoroBackend")
+    LoroBackend::create_new(
+        "sql-loro-slice".to_string(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
+    .await
+    .expect("create_new LoroBackend")
 }
 
 /// Positive: two real stores seeded with the same blocks ⇒

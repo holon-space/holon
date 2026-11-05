@@ -140,7 +140,8 @@ async fn a_multi_block_import_is_never_observed_half_applied() {
     const BLOCKS_PER_CYCLE: usize = 8;
 
     let doc_a = Arc::new(LoroDocument::new("import-probe-a".to_string()).unwrap());
-    let backend_a = LoroBackend::from_document(doc_a.clone());
+    let backend_a =
+        LoroBackend::from_document(doc_a.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend_a, EntityUri::no_parent(), "root").await;
 
     let doc_b = Arc::new(LoroDocument::new("import-probe-b".to_string()).unwrap());
@@ -211,7 +212,8 @@ async fn an_import_carrying_create_and_move_is_never_observed_half_applied() {
     const CYCLES: usize = 120;
 
     let doc_a = Arc::new(LoroDocument::new("import-probe-mv-a".to_string()).unwrap());
-    let backend_a = LoroBackend::from_document(doc_a.clone());
+    let backend_a =
+        LoroBackend::from_document(doc_a.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend_a, EntityUri::no_parent(), "root").await;
     create(&backend_a, EntityUri::no_parent(), "other").await;
     create(&backend_a, EntityUri::block("root"), "mover").await;
@@ -281,7 +283,8 @@ async fn a_single_large_import_is_never_observed_half_applied() {
     const BLOCKS: usize = 2000;
 
     let doc_a = Arc::new(LoroDocument::new("import-probe-big-a".to_string()).unwrap());
-    let backend_a = LoroBackend::from_document(doc_a.clone());
+    let backend_a =
+        LoroBackend::from_document(doc_a.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend_a, EntityUri::no_parent(), "root").await;
 
     let doc_b = Arc::new(LoroDocument::new("import-probe-big-b".to_string()).unwrap());
@@ -345,7 +348,8 @@ async fn a_single_large_import_is_never_observed_half_applied() {
 #[tokio::test]
 async fn the_scan_detects_a_half_born_node_when_one_exists() {
     let doc = Arc::new(LoroDocument::new("import-probe-teeth".to_string()).unwrap());
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend, EntityUri::no_parent(), "root").await;
     let root_tid = backend.resolve_to_tree_id("block:root").await.unwrap();
 

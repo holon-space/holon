@@ -395,8 +395,14 @@ pub trait ComposedSlice: 'static {
     }
 
     /// The exact Lamport advance `t` leaves on the SUT primary doc, read off
-    /// the ref state after `t`; `None` leaves the kind unchecked.
-    fn lamport_delta(_: &Self::Transition, _: &ReferenceState) -> Option<u32> {
+    /// the ref state after `t` and the SUT before its apply; `None` leaves the
+    /// kind unchecked.
+    async fn lamport_delta(
+        _: &Self::Transition,
+        _: &ReferenceState,
+        _: &Self::Handle,
+        _: &CapMap,
+    ) -> Option<u32> {
         None
     }
 
@@ -979,6 +985,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
                 // progressing transitions stay well inside this and are reported
                 // with their real measured duration by the invariant below.
                 let height_before = sut_lamport_height(caps).await;
+                let predicted = S::lamport_delta(&transition, ref_state, handle, caps).await;
                 let progressed = tokio::time::timeout(wedge, async {
                     match plan {
                         // UNMASKED — the same two statements, in the same order,
@@ -1050,12 +1057,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
                         .map(|(b, a)| a.saturating_sub(b));
                     holon_loro_testing::atom_counts::note_tick(&kind, delta);
                 }
-                super::lamport_delta::assert_delta(
-                    &kind,
-                    S::lamport_delta(&transition, ref_state),
-                    height_before,
-                    height_after,
-                );
+                super::lamport_delta::assert_delta(&kind, predicted, height_before, height_after);
                 assert_sut_peers(caps, ref_state, primary_peer_ids, &kind).await;
                 let after = sut_ids(caps).await;
                 (before, after, action_us)

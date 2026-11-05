@@ -65,7 +65,7 @@ async fn seed_document(dir: &std::path::Path, blocks: Vec<NewBlockWithProperties
         .get_doc(DocScope::Global)
         .await
         .expect("the global doc");
-    LoroBackend::from_document(doc)
+    LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock))
         .create_blocks_with_properties(blocks)
         .await
         .expect("seeding a global doc");

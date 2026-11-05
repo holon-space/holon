@@ -62,7 +62,8 @@ async fn authority(env: &TestEnvironment) -> LoroBackend {
     let store = store.read().await;
     let global = store.get_doc(DocScope::Global).await.expect("global doc");
     let layout = store.get_doc(DocScope::Layout).await.expect("layout doc");
-    LoroBackend::from_document(global).with_layout_doc(layout)
+    LoroBackend::from_document(global, std::sync::Arc::new(holon_api::SystemClock))
+        .with_layout_doc(layout)
 }
 
 #[test]

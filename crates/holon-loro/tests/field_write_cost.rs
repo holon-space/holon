@@ -54,6 +54,7 @@ async fn measure(n: usize) -> Measured {
         doc.clone(),
         layout,
         Arc::new(holon_core::NoReadOnlyDocuments),
+        std::sync::Arc::new(holon_api::SystemClock),
     );
     let write = |k: usize| {
         let uri = EntityUri::block(&format!("b{}", (k * 7919) % n));

@@ -35,7 +35,7 @@ async fn ops_with_anchor() -> (LoroBlockOperations, tempfile::TempDir, String) {
     let store = Arc::new(RwLock::new(LoroDocumentStore::new(
         dir.path().to_path_buf(),
     )));
-    let ops = LoroBlockOperations::new(store);
+    let ops = LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock));
 
     let mut fields: StorageEntity = HashMap::new();
     fields.insert("id".into(), Value::String("block:anchor".into()));

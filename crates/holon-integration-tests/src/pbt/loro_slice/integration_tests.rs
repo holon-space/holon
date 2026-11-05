@@ -16,7 +16,7 @@ use crate::pbt::composed::subsystem_seed::seed_ref;
 use crate::pbt::loro_slice::builders::loro_wide;
 
 async fn new_loro(doc: &str) -> LoroBackend {
-    LoroBackend::create_new(doc.to_string())
+    LoroBackend::create_new(doc.to_string(), std::sync::Arc::new(holon_api::SystemClock))
         .await
         .expect("create_new LoroBackend")
 }

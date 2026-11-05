@@ -508,6 +508,10 @@ impl BackendEngine {
         &self.search
     }
 
+    pub fn clock(&self) -> &Arc<dyn holon_api::Clock> {
+        &self.clock
+    }
+
     /// The block write authority's rollback capability, when this session's
     /// authority has one (the CRDT store). `None` under the SQL authority.
     pub fn batch_rollback(&self) -> Option<&dyn holon_core::batch_rollback::BatchRollback> {

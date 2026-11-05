@@ -61,7 +61,7 @@ proptest! {
         changes in proptest::collection::vec(change(), 1..20),
     ) {
         let doc = Arc::new(LoroDocument::new("stable-id-cost".into()).unwrap());
-        let backend = LoroBackend::from_document(doc.clone());
+        let backend = LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
         let (roots, mut nodes) = seed(&doc, leaves);
 
         prop_assert!(backend.find_tree_id_by_stable_id_sync("n0").is_some());
@@ -114,7 +114,8 @@ fn a_batch_resolves_the_parents_it_created_without_a_scan() {
     use holon_api::repository::NewBlock;
 
     let doc = Arc::new(LoroDocument::new("stable-id-cost-batch".into()).unwrap());
-    let backend = LoroBackend::from_document(doc.clone());
+    let backend =
+        LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     seed(&doc, 200);
     let mut parent = EntityUri::block("p0");
     let blocks: Vec<NewBlock> = (0..50)

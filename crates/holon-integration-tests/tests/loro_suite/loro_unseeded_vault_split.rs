@@ -175,7 +175,10 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         .get_doc(DocScope::Global)
         .await
         .expect("global Loro doc");
-    let backend = LoroBackend::from_document(global_doc.clone());
+    let backend = LoroBackend::from_document(
+        global_doc.clone(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    );
     assert!(
         backend.resolve_to_tree_id(stranded_id).await.is_none(),
         "precondition violated: stranded block unexpectedly has a Loro node"

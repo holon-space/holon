@@ -29,9 +29,12 @@ use crate::pbt::memory_slice::components::MemoryBackendComponent;
 /// `MemoryBackend` tree — no Turso, no `min_sut`, no E2ESut.
 #[tokio::test]
 async fn memory_slice_runs_structural_block_invariants_without_turso() {
-    let backend = MemoryBackend::create_new("mem-slice".to_string())
-        .await
-        .expect("create_new memory backend");
+    let backend = MemoryBackend::create_new(
+        "mem-slice".to_string(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
+    .await
+    .expect("create_new memory backend");
     // A small valid tree: text child + source child under a virtual root, so
     // the invariants traverse real data rather than an empty store.
     let root = EntityUri::no_parent();
@@ -167,9 +170,12 @@ async fn memory_slice_editor_invariants_deselected_without_editor() {
 #[tokio::test]
 async fn memory_slice_editor_text_and_caret_match_when_wired() {
     let block = uri("local://e");
-    let backend = MemoryBackend::create_new("editor-slice".to_string())
-        .await
-        .expect("create_new memory backend");
+    let backend = MemoryBackend::create_new(
+        "editor-slice".to_string(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
+    .await
+    .expect("create_new memory backend");
     let (sut, editor) = memory_wide_with_editor(backend);
 
     // SUT editor: open at end-of-text, then type (incl. a multi-byte char).
@@ -250,7 +256,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let block = uri("local://eop");
         let (sut, editor) = rt.block_on(async {
-            let backend = MemoryBackend::create_new("editor-op-shell".to_string())
+            let backend = MemoryBackend::create_new("editor-op-shell".to_string(), std::sync::Arc::new(holon_api::SystemClock))
                 .await
                 .expect("create_new");
             memory_wide_with_editor(backend)
@@ -314,9 +320,12 @@ async fn commit_editor(editor: &InMemEditorComponent, backend: &MemoryBackend) {
 /// (re-reading the store) agrees with the reference's expected content.
 #[tokio::test]
 async fn memory_slice_editor_commit_flows_to_backend() {
-    let backend = MemoryBackend::create_new("editor-commit".to_string())
-        .await
-        .expect("create_new");
+    let backend = MemoryBackend::create_new(
+        "editor-commit".to_string(),
+        std::sync::Arc::new(holon_api::SystemClock),
+    )
+    .await
+    .expect("create_new");
     let blk = backend
         .create_block(EntityUri::no_parent(), BlockContent::text("initial"), None)
         .await
@@ -375,7 +384,7 @@ proptest! {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let (caps, blk_id) = rt.block_on(async {
             let backend = Arc::new(
-                MemoryBackend::create_new("editor-commit-rt".to_string())
+                MemoryBackend::create_new("editor-commit-rt".to_string(), std::sync::Arc::new(holon_api::SystemClock))
                     .await
                     .expect("create_new"),
             );

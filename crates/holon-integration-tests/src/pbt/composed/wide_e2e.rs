@@ -2540,8 +2540,15 @@ impl ComposedSlice for WideE2E {
         t.variant_name().to_string()
     }
 
-    fn lamport_delta(t: &E2ETransition, post: &ReferenceState) -> Option<u32> {
-        crate::pbt::composed::lamport_delta::predict(t, post)
+    async fn lamport_delta(
+        t: &E2ETransition,
+        post: &ReferenceState,
+        handle: &WideHandle,
+        caps: &CapMap,
+    ) -> Option<u32> {
+        use crate::pbt::composed::lamport_delta;
+        let stamp = lamport_delta::probe(t, handle.frontend().map(|f| f.as_ref()), caps).await;
+        lamport_delta::predict(t, post, stamp)
     }
 
     /// Arm this session's engine for the fire-and-forget dispatch door, apply,

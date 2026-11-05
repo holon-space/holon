@@ -63,7 +63,10 @@ impl Default for ReferenceState {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let backend = tokio::task::block_in_place(|| {
-                    handle.block_on(MemoryBackend::create_new("reference".to_string()))
+                    handle.block_on(MemoryBackend::create_new(
+                        "reference".to_string(),
+                        std::sync::Arc::new(holon_api::SystemClock),
+                    ))
                 })
                 .unwrap();
 
@@ -78,7 +81,10 @@ impl Default for ReferenceState {
                 let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap());
                 let handle = runtime.handle().clone();
                 let backend = runtime
-                    .block_on(MemoryBackend::create_new("reference".to_string()))
+                    .block_on(MemoryBackend::create_new(
+                        "reference".to_string(),
+                        std::sync::Arc::new(holon_api::SystemClock),
+                    ))
                     .unwrap();
 
                 Self {

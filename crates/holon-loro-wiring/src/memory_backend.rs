@@ -47,7 +47,7 @@ use tokio_stream::wrappers::ReceiverStream;
 /// use holon::api::{MemoryBackend, CoreOperations, Lifecycle};
 ///
 /// async fn example() -> anyhow::Result<()> {
-///     let backend = MemoryBackend::create_new("test-doc".to_string()).await?;
+///     let backend = MemoryBackend::create_new("test-doc".to_string(), std::sync::Arc::new(holon_api::SystemClock)).await?;
 ///
 ///     let block = backend.create_block(None, "Hello".to_string(), None).await?;
 ///     let retrieved = backend.get_block(&block.id).await?;
@@ -158,11 +158,6 @@ impl MemoryBackend {
         id
     }
 
-    pub fn with_clock(mut self, clock: std::sync::Arc<dyn holon_api::Clock>) -> Self {
-        self.clock = clock;
-        self
-    }
-
     /// Get current Unix timestamp in milliseconds.
     fn now_millis(&self) -> i64 {
         self.clock.now_millis()
@@ -197,15 +192,21 @@ impl MemoryBackend {
 
 #[async_trait]
 impl Lifecycle for MemoryBackend {
-    async fn create_new(doc_id: String) -> Result<Self, ApiError> {
+    async fn create_new(
+        doc_id: String,
+        clock: std::sync::Arc<dyn holon_api::Clock>,
+    ) -> Result<Self, ApiError> {
         Ok(Self {
             doc_id,
             state: Arc::new(RwLock::new(MemoryState::default())),
-            clock: std::sync::Arc::new(holon_api::SystemClock),
+            clock,
         })
     }
 
-    async fn open_existing(_: String) -> Result<Self, ApiError> {
+    async fn open_existing(
+        _: String,
+        _: std::sync::Arc<dyn holon_api::Clock>,
+    ) -> Result<Self, ApiError> {
         Err(ApiError::InvalidOperation {
             message: "MemoryBackend does not support persistence".to_string(),
         })

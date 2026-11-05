@@ -1699,6 +1699,7 @@ mod tests {
                 holon_loro::block_cell_registry::BlockCellRegistry::with_loro_doc(
                     Arc::new(loro::LoroDoc::new()),
                     Arc::new(holon_core::NoReadOnlyDocuments),
+                    std::sync::Arc::new(holon_api::SystemClock),
                 ),
             ))
             .with_capabilities(holon_api::capability::SessionCapabilities::detect_and_pin(

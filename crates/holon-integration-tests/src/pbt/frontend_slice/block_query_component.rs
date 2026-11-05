@@ -64,9 +64,12 @@ impl BlockQueryFrontendComponent {
     /// for the parent — VERIFIED by the minimal positive test (else the
     /// degraded twin would Skip forever with no teeth).
     pub async fn new() -> Self {
-        let backend = LoroBackend::create_new("block-query-degraded".to_string())
-            .await
-            .expect("create LoroBackend for degraded frontend");
+        let backend = LoroBackend::create_new(
+            "block-query-degraded".to_string(),
+            std::sync::Arc::new(holon_api::SystemClock),
+        )
+        .await
+        .expect("create LoroBackend for degraded frontend");
         let page = backend
             .create_block(
                 EntityUri::no_parent(),

@@ -13,7 +13,10 @@ use holon_loro::loro_document::LoroDocument;
 
 async fn manager() -> (LoroDocumentManager, EntityUri) {
     let doc = LoroDocument::new("page-position".to_string()).expect("loro doc");
-    let backend = Arc::new(LoroBackend::from_document(Arc::new(doc)));
+    let backend = Arc::new(LoroBackend::from_document(
+        Arc::new(doc),
+        std::sync::Arc::new(holon_api::SystemClock),
+    ));
     let root = backend.create_placeholder_root("root").await.expect("root");
     (
         LoroDocumentManager::new(backend),

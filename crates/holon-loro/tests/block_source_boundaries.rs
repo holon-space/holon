@@ -19,6 +19,7 @@ async fn registry(store: &LoroDocumentStore) -> Result<BlockCellRegistry> {
         store.get_doc(DocScope::Global).await?,
         store.get_doc(DocScope::Layout).await?,
         std::sync::Arc::new(holon_core::NoReadOnlyDocuments),
+        std::sync::Arc::new(holon_api::SystemClock),
     ))
 }
 

@@ -73,15 +73,20 @@ pub struct LoroBlockOperations {
     /// scan the whole tree for its mount.
     mount_cache: crate::loro_backend::MountCache,
     condition_bus: Option<Arc<holon_conditions::ConditionBus>>,
+    clock: Arc<dyn holon_api::Clock>,
 }
 
 impl LoroBlockOperations {
-    pub fn new(doc_store: Arc<RwLock<LoroDocumentStore>>) -> Self {
+    pub fn new(
+        doc_store: Arc<RwLock<LoroDocumentStore>>,
+        clock: Arc<dyn holon_api::Clock>,
+    ) -> Self {
         Self {
             doc_store,
             shared_trees: None,
             mount_cache: Default::default(),
             condition_bus: None,
+            clock,
         }
     }
 
@@ -116,7 +121,7 @@ impl LoroBlockOperations {
             .get_doc(DocScope::Layout)
             .await
             .map_err(|e| format!("Failed to get layout doc: {}", e))?;
-        let mut backend = LoroBackend::from_document(collab_doc)
+        let mut backend = LoroBackend::from_document(collab_doc, self.clock.clone())
             .with_layout_doc(layout_doc)
             .with_mount_cache(self.mount_cache.clone());
         if let Some(bus) = &self.condition_bus {
@@ -1951,7 +1956,7 @@ mod advice_dismiss_tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
         )));
-        let ops = LoroBlockOperations::new(store);
+        let ops = LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock));
         let backend = ops.get_backend("").await.expect("backend");
         let root = backend.create_placeholder_root("root").await.expect("root");
         let root_uri = EntityUri::parse_owned(root).expect("root uri");
@@ -2078,7 +2083,7 @@ mod advice_dismiss_tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
         )));
-        let ops = LoroBlockOperations::new(store);
+        let ops = LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock));
         let backend = ops.get_backend("").await.expect("backend");
         let root = backend.create_placeholder_root("root").await.expect("root");
 
@@ -3240,7 +3245,10 @@ mod intent_boundary_tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
         )));
-        (LoroBlockOperations::new(store), dir)
+        (
+            LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock)),
+            dir,
+        )
     }
 
     /// C2 provenance (`inv-history-records-all-creates`): a genuine Loro-backed
@@ -3332,7 +3340,7 @@ mod tag_op_tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
         )));
-        let ops = LoroBlockOperations::new(store);
+        let ops = LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock));
         let backend = ops.get_backend("").await.expect("backend");
         backend.create_placeholder_root("root").await.expect("root");
         (ops, dir, backend)
@@ -3568,7 +3576,7 @@ mod unheld_write_tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
         )));
-        let ops = LoroBlockOperations::new(store);
+        let ops = LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock));
         ops.get_backend("").await.expect("backend");
 
         let err = not_held::<()>(parse_block_id("absent-bare").expect("a bare id parses"))
@@ -3609,7 +3617,7 @@ mod unheld_write_tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
         )));
-        let ops = LoroBlockOperations::new(store);
+        let ops = LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock));
         ops.get_backend("").await.expect("backend");
         let held: StorageEntity = HashMap::from([
             ("id".into(), Value::String("block:held".into())),
@@ -3714,7 +3722,7 @@ mod unheld_write_tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
         )));
-        let ops = LoroBlockOperations::new(store);
+        let ops = LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock));
         ops.get_backend("").await.expect("backend");
         let held: StorageEntity = HashMap::from([
             ("id".into(), Value::String("block:held".into())),
@@ -3767,7 +3775,7 @@ mod unheld_write_tests {
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(
             dir.path().to_path_buf(),
         )));
-        let ops = LoroBlockOperations::new(store);
+        let ops = LoroBlockOperations::new(store, std::sync::Arc::new(holon_api::SystemClock));
         ops.get_backend("").await.expect("backend");
         for id in ["a b", ""] {
             for op in [

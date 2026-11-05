@@ -89,7 +89,10 @@ impl HolonNative {
             profile: CapabilityProfile::from_path(&path)
                 .context("the holon-native profile must load")?,
             ctx: E2ETestContext::from_engine(block_engine().await?),
-            loro: Arc::new(LoroBackend::from_document(doc)),
+            loro: Arc::new(LoroBackend::from_document(
+                doc,
+                std::sync::Arc::new(holon_api::SystemClock),
+            )),
         };
         // CONTROL, and it is load-bearing: without it a broken WRITE PATH
         // reaches the report as `Readback::Refused` and reads exactly like a
