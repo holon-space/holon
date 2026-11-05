@@ -363,7 +363,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `crash-restore-window-not-disclosed`
 - `create-sql-read-repeat-budget`
 - `cut-paste-duplicate-block-id`
-- `decision-edit-sends-unresolved-split-id`
 - `deletebackward-sql-reads-budget`
 - `deleted-file-recreated-by-stale-page-mirror`
 - `deleted-page-rewritten-from-stale-page-mirror-pin`

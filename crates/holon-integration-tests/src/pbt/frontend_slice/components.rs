@@ -1897,6 +1897,33 @@ impl HeadlessFrontendComponent {
         }
     }
 
+    /// A planned shape op names blocks in oracle space; the SUT knows a split
+    /// block only by the id it minted.
+    fn resolve_op_ids(&self, mut op: holon_api::Operation) -> holon_api::Operation {
+        for key in ["id", "parent_id", "after_block_id"] {
+            if let Some(holon_api::Value::String(raw)) = op.params.get(key) {
+                let id = EntityUri::parse(raw)
+                    .unwrap_or_else(|e| panic!("planned {} param {key}={raw}: {e:#}", op.op_name));
+                let resolved = match self.resolver.get() {
+                    Some(r) => holon_pbt_core::types::resolve_sut_id(r, &id),
+                    None => {
+                        assert!(
+                            !crate::pbt::is_synthetic_ref_id(&id),
+                            "planned {} names oracle-only id {id}, but no IdResolver is wired",
+                            op.op_name
+                        );
+                        id
+                    }
+                };
+                op.params.insert(
+                    key.to_string(),
+                    holon_api::Value::String(resolved.to_string()),
+                );
+            }
+        }
+        op
+    }
+
     /// Register a watched query through the **production** reactive watch
     /// surface ([`ReactiveEngine::watch_query_live`] →
     /// `ensure_query_watching` → the real `registry`/`watchers` + CDC pump
@@ -9363,6 +9390,7 @@ impl holon_pbt_core::capabilities::SutShapeEdit for HeadlessFrontendComponent {
         origin: holon_api::OpOrigin,
     ) -> Result<(), String> {
         let compared_before = holon_core::shape_gate::ShapeAudit::global().log().compared;
+        let ops = ops.into_iter().map(|op| self.resolve_op_ids(op)).collect();
         let outcome = self
             .engine()
             .execute_plan(ops, origin)
@@ -9386,6 +9414,7 @@ impl holon_pbt_core::capabilities::SutShapeEdit for HeadlessFrontendComponent {
     ) {
         let engine = self.engine();
         let spawn = |(op, origin): (holon_api::Operation, holon_api::OpOrigin)| {
+            let op = self.resolve_op_ids(op);
             let params: holon_api::StorageEntity = op
                 .params
                 .into_iter()
