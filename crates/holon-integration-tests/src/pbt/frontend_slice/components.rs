@@ -645,8 +645,8 @@ impl HeadlessFrontendComponent {
     /// Fork B echo-test helper — re-trigger the production `FileSyncController`
     /// watcher over an absolute on-disk path (tracked or freshly materialized),
     /// by the same touch-then-restore dance `simulate_restart` uses for
-    /// tracked files: append a space, settle, restore, then wait for the
-    /// `block_raw` id-set to stabilize. Used to prove that re-ingesting a
+    /// tracked files: append a space, await the ingest, restore, then settle
+    /// the projections. Used to prove that re-ingesting a
     /// B2-materialized page file is idempotent (the echo's hash equals the
     /// file's write-back `Base` — no re-mint, no re-write).
     pub async fn pump_watcher_over_disk_path(&self, path: &Path) {
@@ -669,7 +669,7 @@ impl HeadlessFrontendComponent {
             .unwrap_or_else(|e| {
                 panic!("[pump_watcher_over_disk_path] restore {path:?} failed: {e:#}")
             });
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("pump_watcher_over_disk_path").await;
     }
 
     /// Fork B echo-test helper — the current `block_raw` id-set. Set equality
@@ -1485,7 +1485,6 @@ impl HeadlessFrontendComponent {
              (HOLON_PBT_LATENCY_WEDGE_MS) — a reboot that never settles cannot be judged, and its \
              re-seed teeth below would read a half-projected store"
         );
-        self.settle_block_ids_stable(wedge).await;
 
         // A reboot must RE-OPEN the store, never re-seed it. If the second boot
         // re-ingested the seed tree or re-minted pages, the block set would grow
@@ -2637,42 +2636,12 @@ impl HeadlessFrontendComponent {
         }
     }
 
-    /// Settle `block_id`'s `block_raw.content` to a fixed point after a
-    /// keystroke edit. A char insert mutates the editor's `MutableText`
-    /// (Loro) cell; the per-keystroke pipeline then syncs that through to
-    /// the `block_raw` projection where `inv-blocks-match-ref/block_raw`
-    /// reads. That sync is CDC-driven and can lag the synchronous keystroke
-    /// return, so poll the projected content to a stable value (3 equal
-    /// reads) — the content analogue of `settle_focus_matviews`. This is
-    /// what gives committed-content parity with the reference's eager
-    /// `commit_active_editor_if_changed`.
+    /// Settle `block_id`'s `block_raw.content` after a keystroke edit: the
+    /// per-keystroke pipeline syncs the editor's Loro text cell to `block_raw`
+    /// through CDC, after the keystroke returns.
     async fn settle_block_content(&self, block_id: &EntityUri) {
-        let escaped = block_id.as_str().replace('\'', "''");
-        let sql = format!("SELECT content FROM block_raw WHERE id = '{escaped}'");
-        let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
-        let mut last: Option<String> = None;
-        let mut stable = 0u32;
-        loop {
-            let now = self
-                .sql_query(&sql)
-                .await
-                .into_iter()
-                .next()
-                .and_then(|r| Self::cell(&r, "content"));
-            if now == last {
-                stable += 1;
-                if stable >= 3 {
-                    break;
-                }
-            } else {
-                stable = 0;
-            }
-            last = now;
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        self.settle_projections(&format!("settle_block_content {block_id}"))
+            .await;
     }
 
     /// Dispatch a `navigation` provider op through the windowless
@@ -4543,7 +4512,7 @@ impl SutClockAdvance for HeadlessFrontendComponent {
             .expect("reconcile_clock after advancing the injected clock");
         // The journal auto-create action fires REACTIVELY off the clock-relation
         // CDC (action_watcher → `block.create`), so the new day-block lands AFTER
-        // `reconcile_clock` returns. Await the block-id set stabilizing here, so
+        // `reconcile_clock` returns. Settle the projections here, so
         // (a) the block exists before this tick's invariants read it, and (b) the
         // per-tick `converge_projections` that follows (which waits on the
         // org-writeback idle signal) actually MATERIALIZES the new journal's
@@ -4551,7 +4520,7 @@ impl SutClockAdvance for HeadlessFrontendComponent {
         // races the writeback and `inv-every-page-has-its-own-file` reads a
         // still-fileless page. A same-day re-tick (`days == 0`) is a no-op create,
         // so this returns immediately.
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("advance_clock_days").await;
         holon_api::CalendarDate::from_clock(clock.as_ref()).ymd()
     }
 }
@@ -4840,39 +4809,30 @@ impl HeadlessFrontendComponent {
 }
 
 impl HeadlessFrontendComponent {
-    /// Settle barrier shared by the seam-mutate methods: poll `block_raw` until
-    /// its id-set is stable across two consecutive reads (the live
-    /// `FileSyncController` finished re-ingesting the org write). Same
-    /// shape as `simulate_restart`'s settle.
-    async fn settle_block_ids_stable(&self, timeout: Duration) {
-        let start = std::time::Instant::now();
-        let mut prev: BTreeSet<EntityUri> =
-            self.all_blocks().await.into_iter().map(|b| b.id).collect();
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let now: BTreeSet<EntityUri> =
-                self.all_blocks().await.into_iter().map(|b| b.id).collect();
-            if now == prev {
-                break;
-            }
-            prev = now;
-            assert!(
-                start.elapsed() < timeout,
-                "[settle_block_ids_stable] block_raw id-set never stabilized after org write"
-            );
-        }
+    /// Waits until every projection reached the target of the writes made so
+    /// far, the org ingest of a seam's file writes included; panics naming the
+    /// stage short of its target when one hangs.
+    async fn settle_projections(&self, seam: &str) {
+        let engine = self.engine();
+        crate::pbt::convergence::converge_signals(
+            crate::pbt::convergence::Signals {
+                engine: Some(&engine),
+                sync: self.loro_sync_handle(),
+                shares: None,
+                org_idle: self.org_idle_signal(),
+                org_files: Some(self.org_files()),
+                block_feed: self.block_feed(),
+            },
+            crate::pbt::convergence::Patience::Budget(
+                crate::pbt::invariants::bodies::settle_budget::wedge_deadline(),
+            ),
+        )
+        .await
+        .unwrap_or_else(|gave_up| panic!("[{seam}] the projections did not settle {gave_up}"));
     }
 
     /// Settle barrier for a seam org write whose expected new ids are KNOWN:
-    /// wait until every `expected` id reaches `block_raw`, then until the
-    /// id-set stops changing.
-    ///
-    /// [`Self::settle_block_ids_stable`] cannot anchor such a write on its own:
-    /// two equal samples 100ms apart are the PRE-write state whenever the
-    /// watcher has not fired yet, so it reports "settled" on an ingest that has
-    /// not started and hands the harness a torn post-state (the write's blocks
-    /// arrive after the invariants and the per-tick reconcile have already
-    /// run).
+    /// wait until every `expected` id reaches `block_raw`, then settle.
     async fn settle_until_ids_present(
         &self,
         expected: &[EntityUri],
@@ -4901,7 +4861,7 @@ impl HeadlessFrontendComponent {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        self.settle_block_ids_stable(timeout).await;
+        self.settle_projections(seam).await;
     }
 
     /// Preserve the SUT's real sibling order across a seam org rewrite.
@@ -5056,7 +5016,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
                     panic!("[apply_mutation/External] write {file_path:?} failed: {e:#}")
                 });
         }
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("apply_mutation").await;
     }
 
     async fn bulk_external_add(&self, doc_uri: &EntityUri, blocks: &[Block]) {
@@ -5125,7 +5085,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             .unwrap_or_else(|e| {
                 panic!("[stale_external_rewrite] write {file_path:?} failed: {e:#}")
             });
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("stale_external_rewrite").await;
     }
 
     async fn move_block_between_files(
@@ -5152,7 +5112,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
                     .await;
             }
         }
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("move_block_between_files").await;
         if order == CutPasteSaveOrder::TargetFirst {
             let bare = self.resolve_id(block_id).id().to_string();
             let back = holon_orgmode::subtree::cut_subtree(
@@ -5210,7 +5170,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             .insert((target_path.clone(), bare), section);
         self.write_org_file_and_await_ingest(&target_path, &pasted, SEAM)
             .await;
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("paste_block_copy").await;
     }
 
     async fn finish_cut_paste(
@@ -5238,7 +5198,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         }
         self.write_org_file_and_await_ingest(&path, &without, SEAM)
             .await;
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("finish_cut_paste").await;
         if finish == CutPasteFinish::SourceSaved {
             let back = holon_orgmode::subtree::cut_subtree(
                 &self.read_vault_file(&path, SEAM).await,
@@ -5293,7 +5253,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             );
         self.write_org_file_and_await_ingest(&path, &edited, SEAM)
             .await;
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("edit_block_copy").await;
     }
 
     async fn delete_line_from_file(&self, block_id: &EntityUri, root: &EntityUri, doc: &EntityUri) {
@@ -5315,7 +5275,7 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         }
         self.write_org_file_and_await_ingest(&path, &without, SEAM)
             .await;
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("delete_line_from_file").await;
     }
 
     async fn save_vault_file(&self, name: &str, content: &str) {
@@ -5585,7 +5545,7 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
             let edited = headline_retitled(&disk, &self.resolve_id(block), disk_text, text);
             self.write_org_file_and_await_ingest(&path, &edited, SEAM)
                 .await;
-            self.settle_block_ids_stable(Duration::from_secs(5)).await;
+            self.settle_projections("external_file_edit").await;
             return;
         }
         if let ExternalFileEdit::Empty { whitespace } = edit {
@@ -5605,7 +5565,7 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
             edited.push_str(&format!("* {title}\n"));
             self.write_org_file_and_await_ingest(&path, &edited, SEAM)
                 .await;
-            self.settle_block_ids_stable(Duration::from_secs(5)).await;
+            self.settle_projections("external_file_edit").await;
             return;
         }
         let mut lines: Vec<&str> = disk.lines().collect();
@@ -5657,7 +5617,7 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
         }
         self.write_org_file_and_await_ingest(&path, &edited, SEAM)
             .await;
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("external_file_edit").await;
     }
 }
 
@@ -5875,7 +5835,7 @@ impl SutBlockCreate for HeadlessFrontendComponent {
                     .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}"));
             }
         }
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("apply_create_under_focus").await;
     }
 }
 
@@ -5969,16 +5929,10 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 
     async fn simulate_restart(&self) {
         use holon_filesystem::FileSystem;
-        // Faithful to `E2ESut`/`TestEnvironment::simulate_restart` (which is itself a
-        // file-touch, NOT a true reboot): re-trigger the production
-        // `FileSyncController` watcher by touch-writing each tracked org file
-        // (append a space, settle, restore), forcing a re-parse. Blocks are
-        // PRESERVED — the `:ID:` drawers persisted on disk make the re-parse
-        // id-stable — so `SimulateRestart::apply_to_ref` is a no-op and
-        // this only re-exercises the ingest path. The post-action block-convergence
-        // settle (E2ESut's `wait_for_blocks_synced`, relocated to the seam)
-        // lives HERE in the cap since the composed harness has no seam: poll
-        // `block_raw` to a stable id-set.
+        // A file touch, not a true reboot: touch-writing each tracked org file
+        // makes the `FileSyncController` re-parse it. The `:ID:` drawers on
+        // disk keep the re-parse id-stable, so `SimulateRestart::apply_to_ref`
+        // is a no-op.
         for path in self.org_paths() {
             let content = FileSystem::read_to_string(self.org_fs().as_ref(), path)
                 .await
@@ -5990,36 +5944,12 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
             )
             .await
             .unwrap_or_else(|e| panic!("[simulate_restart] touch {path:?} failed: {e:#}"));
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.await_ingest(path, "simulate_restart").await;
             FileSystem::write(self.org_fs().as_ref(), path, content.as_bytes())
                 .await
                 .unwrap_or_else(|e| panic!("[simulate_restart] restore {path:?} failed: {e:#}"));
         }
-
-        // Settle: poll until the block_raw id-set is stable across two consecutive
-        // reads.
-        let ids = || async {
-            self.all_blocks()
-                .await
-                .into_iter()
-                .map(|b| b.id)
-                .collect::<std::collections::BTreeSet<_>>()
-        };
-        let timeout = Duration::from_secs(5);
-        let start = std::time::Instant::now();
-        let mut prev = ids().await;
-        loop {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let now = ids().await;
-            if now == prev {
-                break;
-            }
-            prev = now;
-            assert!(
-                start.elapsed() < timeout,
-                "[simulate_restart] block_raw id-set never stabilized after restart"
-            );
-        }
+        self.settle_projections("simulate_restart").await;
     }
 
     async fn create_document(&self, file_name: &str) {
@@ -6355,7 +6285,7 @@ impl holon_pbt_core::capabilities::SutFixtureFs for HeadlessFrontendComponent {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
-        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        self.settle_projections("write_org_file").await;
 
         // Track the doc for later file-seam lookups (BulkExternalAdd / External
         // ApplyMutation) — idempotent for a same-file rewrite.
@@ -7406,7 +7336,6 @@ mod tests {
             .await;
 
         // Let the reactive writeback route + persist the child.
-        comp.settle_block_ids_stable(Duration::from_secs(5)).await;
         comp.settle().await;
 
         // DISK TRUTH: the child must be in the date page's OWN file, and the

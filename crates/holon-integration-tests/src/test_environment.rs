@@ -312,8 +312,6 @@ pub struct TestEnvironmentBuilder {
     org_files: Vec<(String, String)>,
     /// Whether to wait for file watcher to be ready before returning
     wait_for_file_watcher: bool,
-    /// Additional delay after file watcher ready (ms)
-    settle_delay_ms: u64,
     /// Enable a fake external MCP provider (for testing DDL race conditions)
     enable_fake_mcp: bool,
     /// Enable Loro CRDT layer (default: true)
@@ -335,7 +333,6 @@ impl TestEnvironmentBuilder {
         Self {
             org_files: Vec::new(),
             wait_for_file_watcher: true,
-            settle_delay_ms: 100,
             enable_fake_mcp: false,
             enable_loro: true,
             clock: None,
@@ -394,14 +391,6 @@ impl TestEnvironmentBuilder {
     /// while preload_views is still running DDL.
     pub fn wait_for_file_watcher(mut self, wait: bool) -> Self {
         self.wait_for_file_watcher = wait;
-        self
-    }
-
-    /// Set the delay after file watcher is ready (in milliseconds)
-    ///
-    /// Only applies if `wait_for_file_watcher` is true.
-    pub fn settle_delay_ms(mut self, ms: u64) -> Self {
-        self.settle_delay_ms = ms;
         self
     }
 
@@ -472,8 +461,6 @@ impl TestEnvironmentBuilder {
 
         let enable_loro = self.enable_loro;
 
-        let settle_delay_ms = self.settle_delay_ms;
-
         let holon_config = HolonConfig {
             db_path: Some(temp_dir.path().join("test.db")),
             vault: holon_frontend::config::VaultConfig {
@@ -540,13 +527,23 @@ impl TestEnvironmentBuilder {
         } else {
             None
         };
-        if self.wait_for_file_watcher {
+        let wait_for_file_watcher = self.wait_for_file_watcher;
+        if wait_for_file_watcher {
             wait_for_vault_backlog(&injector).await?;
         }
 
-        // Tests need deterministic state — wait for CDC event propagation
-        if settle_delay_ms > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(settle_delay_ms)).await;
+        if wait_for_file_watcher {
+            converge_session(
+                Some(&backend_engine),
+                sync_handle.clone(),
+                Some(&injector),
+                idle_signal.clone(),
+                &org_emitted,
+                org_scanned_through,
+                SETTLE_HANG_DEADLINE,
+            )
+            .await
+            .map_err(|gave_up| anyhow::anyhow!("the booted session did not settle {gave_up}"))?;
         }
 
         let ctx = E2ETestContext::from_engine(backend_engine);
@@ -591,6 +588,43 @@ impl TestEnvironmentBuilder {
             loro_org_idle: OnceCell::new(),
         })
     }
+}
+
+/// Converges every stage a session wires, from its parts, so a session can
+/// settle before its `TestEnvironment` exists.
+async fn converge_session(
+    engine: Option<&Arc<BackendEngine>>,
+    sync: Option<Arc<holon_loro::LoroSyncControllerHandle>>,
+    injector: Option<&fluxdi::Injector>,
+    org_idle: Option<Arc<holon_orgmode::OrgSyncIdleSignal>>,
+    org_emitted: &crate::pbt::convergence::EmittedChanges,
+    scanned_through: u64,
+    deadline: std::time::Duration,
+) -> std::result::Result<(), crate::pbt::convergence::GaveUp> {
+    let org_files = org_idle
+        .as_ref()
+        .map(|_| crate::pbt::convergence::OrgFiles {
+            emitted: org_emitted,
+            scanned_through,
+        });
+    let block_feed = injector.and_then(|injector| {
+        injector
+            .try_resolve::<holon_api::live_data::BlockFeed>()
+            .ok() // ALLOW(ok): optional DI service — absent without a block matview
+            .map(|feed| feed.0.clone())
+    });
+    crate::pbt::convergence::converge_signals(
+        crate::pbt::convergence::Signals {
+            engine,
+            sync,
+            shares: injector.and_then(built_share_backend),
+            org_idle,
+            org_files,
+            block_feed,
+        },
+        crate::pbt::convergence::Patience::Budget(deadline),
+    )
+    .await
 }
 
 /// A session is ready once the writable files are in (D108.a); a test that
@@ -1705,34 +1739,19 @@ impl TestEnvironment {
         &self,
         deadline: std::time::Duration,
     ) -> std::result::Result<(), crate::pbt::convergence::GaveUp> {
-        let engine = self.ctx.get().map(|ctx| ctx.engine());
         let org_idle = self
             .org_sync_idle
             .get()
             .or(self.loro_org_idle.get())
             .cloned();
-        let org_files = org_idle
-            .as_ref()
-            .map(|_| crate::pbt::convergence::OrgFiles {
-                emitted: &self.org_emitted,
-                scanned_through: self.org_scanned_through.get(),
-            });
-        let block_feed = self.injector.get().and_then(|injector| {
-            injector
-                .try_resolve::<holon_api::live_data::BlockFeed>()
-                .ok() // ALLOW(ok): optional DI service — absent without a block matview
-                .map(|feed| feed.0.clone())
-        });
-        crate::pbt::convergence::converge_signals(
-            crate::pbt::convergence::Signals {
-                engine,
-                sync: self.loro_sync_handle.get().cloned(),
-                shares: self.injector.get().and_then(built_share_backend),
-                org_idle,
-                org_files,
-                block_feed,
-            },
-            crate::pbt::convergence::Patience::Budget(deadline),
+        converge_session(
+            self.ctx.get().map(|ctx| ctx.engine()),
+            self.loro_sync_handle.get().cloned(),
+            self.injector.get(),
+            org_idle,
+            &self.org_emitted,
+            self.org_scanned_through.get(),
+            deadline,
         )
         .await
     }
@@ -2871,7 +2890,7 @@ impl TestEnvironment {
                     file_path.display()
                 )
             })?;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.settle().await;
             // Restore original content
             holon_filesystem::FileSystem::write(
                 self.org_fs.as_ref(),
