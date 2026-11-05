@@ -92,10 +92,22 @@ for l in open(sys.argv[1]):
     r = json.loads(l)
     if r["gate"] == sys.argv[2]: print(r["step"], r["name"], r["exit"])' "$home/.cache/holon-build/gate-steps.jsonl" "$1" | sort -n
 }
-steps="1 20 2 13 17 7 14 5 6 8 9 18 19 3 4 12 11 15 10 22"
+steps="1 20 2 13 17 7 14 5 6 8 9 18 19 15 11 3 4 12 10 22"
 sorted_steps=$(tr ' ' '\n' <<<"$steps" | sort -n | tr '\n' ' ')
 # Without the caller's HOLON_PBT_TIMING, only the gate scripts can set it.
 in_stubs() { env -u HOLON_PBT_TIMING HOME="$home" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
+marker="$home/.cache/holon-build/quiet"
+# The probe lines of the steps that go red on a loaded host: the extra nextest
+# and the windowed gate.
+loaded_red='^(cargo nextest run --profile load-tolerant|just windowed-gate) '
+# Whether every such line saw the hold of pid $1 and there is at least one.
+held_by() { grep -qE "$loaded_red" "$probe" && ! grep -E "$loaded_red" "$probe" | grep -qv " | quiet=$1\$"; }
+held_by_none_other() { ! grep -vE "$loaded_red" "$probe" | grep -qv ' | quiet=$'; }
+# Runs every track alone, in order, as gate g4 whose pid is this shell's.
+tracks_alone() {
+  local t
+  for t in 0 1 2; do in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ "$integrate" --track $t >>"$scratch/tracks.out" 2>&1 || return; done
+}
 
 echo "== the integrate run"
 rc=0; in_stubs "$integrate" g1 "1 2" "$tip" >"$scratch/integrate.out" 2>&1 || rc=$?
@@ -106,7 +118,9 @@ order=$(sed -n 's/^== landing \[\([0-9]*\)\].*/\1/p' "$scratch/integrate.out" | 
 expect "logs the non-timing steps in order (got $order)" [ "$order" = "$steps " ]
 expect "writes one gate-steps row per step" [ "$(rows_of g1 | cut -d' ' -f1 | tr '\n' ' ')" = "$sorted_steps" ]
 expect "never calls timing-gate" [ "$(grep -c '^just timing-gate |' "$probe")" = 0 ]
-expect "never takes the quiet hold" [ -z "$(grep -v ' | quiet=$' "$probe")" ]
+gate_pid=$(sed -n 's/^gate-integrate.sh: g1 (pid \([0-9]*\)).*/\1/p' "$scratch/integrate.out")
+expect "runs the loaded-red steps under the gate's own hold" held_by "$gate_pid"
+expect "releases the hold at its end" [ ! -e "$marker" ]
 # The integrate run judges no duration, so every cargo call that runs tests
 # measures; fmt runs none.
 expect "runs cargo test arms" grep -qE '^cargo (test|nextest) ' "$probe"
@@ -143,6 +157,29 @@ expect "names no other step red" [ "$(grep -c '^RED ' "$scratch/integrate-red.ou
 expect "runs every other step to a green row" [ "$(rows_of g2 | grep -v ' 0$')" = "7 gate-arch 1" ]
 expect "writes one gate-steps row per step" [ "$(rows_of g2 | cut -d' ' -f1 | tr '\n' ' ')" = "$sorted_steps" ]
 expect "names no candidate tip" [ -z "$(grep '^candidate tip' "$scratch/integrate-red.out")" ]
+
+echo "== the integrate run with a red step under the hold"
+rc=0; in_stubs STUB_RED=windowed-gate "$integrate" g5 "1 2" "$tip" >"$scratch/integrate-held-red.out" 2>&1 || rc=$?
+expect "exits 1 (got $rc)" [ "$rc" = 1 ]
+expect "releases the hold" [ ! -e "$marker" ]
+
+echo "== each track alone"
+: > "$probe"
+rc=0; tracks_alone || rc=$?
+expect "every track exits 0 (got $rc)" [ "$rc" = 0 ]
+expect "the loaded-red steps run under the hold" held_by $$
+expect "no other step runs under it" held_by_none_other
+expect "the hold is released" [ ! -e "$marker" ]
+
+echo "== the quiet track while another job holds the hold"
+sleep 60 & other=$!
+HOME="$home" "$orch/with-build-slot.sh" --quiet-hold "$other" 2>/dev/null
+(sleep 1; HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$other" 2>/dev/null) &
+: > "$probe"
+rc=0; in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ "$integrate" --track 1 >"$scratch/track-wait.out" 2>&1 || rc=$?
+kill "$other"; wait
+expect "waits for the release and exits 0 (got $rc)" [ "$rc" = 0 ]
+expect "then runs its steps under its own hold" held_by $$
 
 echo "== the timing gate on the integrated tip"
 : > "$probe"

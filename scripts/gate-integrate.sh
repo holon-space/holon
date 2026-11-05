@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The first half of the landing gate: every gate step that judges no duration,
-# at any load, in the integration checkout that gate-combine.sh prepared (the
+# in the integration checkout that gate-combine.sh prepared (the
 # current directory). It also builds every binary `just timing-gate` runs, so
 # scripts/gate-timing.sh compiles nothing.
 #
@@ -9,8 +9,10 @@
 #   GATE_DISK_FLOOR_GIB  free disk the gate needs (default 130).
 #
 # After gate-compile the steps run at once in TRACKS, one build slot per track:
-# no step reads another step's output, and every one tolerates load. Each step
-# writes its own log and gate-steps.jsonl row; the logs follow in TRACKS order.
+# no step reads another step's output. The steps of QUIET_TRACK go red on a
+# loaded host, so that track runs under the machine-wide quiet hold; the other
+# tracks run at any load. Each step writes its own log and gate-steps.jsonl
+# row; the logs follow in TRACKS order.
 #
 # Last stdout line on green: `candidate tip: <tip>`, the argument for
 # scripts/gate-timing.sh.
@@ -57,13 +59,28 @@ PBT_FEATURES="holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-
 # gate's own slot. A step is <n>:<name>, its number in gate-steps.jsonl.
 TRACKS=(
   "13:hand-authored 17:timing-gate-build 7:gate-arch 14:projector-lag-lock 5:check-dioxus-web-wasm 6:check-worker-wasm 8:arch-validate 9:featuremap 18:guests-verify"
-  "19:extra-nextest 3:check-release-shape 4:check-frontend-wasm 12:loro-suite"
-  "11:keystone-smoke 15:windowed-gate 10:analyze-arch 22:keystone-tour"
+  "19:extra-nextest 15:windowed-gate"
+  "11:keystone-smoke 3:check-release-shape 4:check-frontend-wasm 12:loro-suite 10:analyze-arch 22:keystone-tour"
 )
+QUIET_TRACK=1
 read -ra STEPS <<<"${TRACKS[*]}"
 step_file() { echo "target/gate-logs/$GATE-step-$1.$2"; }
+SLOT=~/.claude/skills/orchestrator/scripts/with-build-slot.sh
+# The hold names the gate's own pid, so no track of this gate is lowered. Exit
+# 75 is a hold of another job (a timing gate or probe): wait for its release.
+quiet_hold() {
+  local rc
+  while :; do
+    rc=0; "$SLOT" --quiet-hold "$GATE_PID" || rc=$?
+    [ "$rc" = 75 ] || break
+    sleep "${GATE_STEP_POLL_S:-5}"
+  done
+  [ "$rc" = 0 ] || { echo "QUIET HOLD NOT TAKEN: with-build-slot.sh --quiet-hold exit $rc"; exit "$rc"; }
+  trap '"$SLOT" --quiet-release "$GATE_PID"' EXIT
+}
 track() {
   local entry n name rc
+  [ "$1" != "$QUIET_TRACK" ] || quiet_hold
   for entry in ${TRACKS[$1]}; do
     n=${entry%%:*} name=${entry#*:}
     case $name in
@@ -88,7 +105,7 @@ case "${1:-}" in
 esac
 
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
-export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1
+export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$
 tip=$3
 # The gpui build script then ignores git, so a git or jj call between the two
 # scripts cannot rebuild what gate-integrate.sh built.
