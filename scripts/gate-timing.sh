@@ -5,12 +5,15 @@
 #
 # Usage, inside a build slot (`flow job run ... -- scripts/gate-timing.sh ...`):
 #   scripts/gate-timing.sh <gate-id> "<cards>" <tip>
+#   scripts/gate-timing.sh --steps   prints the step names, for the selection
 #
 # Exit: 9 = the checkout is not <tip>, checked before any cargo command;
 # 10 = the timing binaries were not built yet, so the hold would time a compile;
 # otherwise `just timing-gate`'s exit (3 = no verdict on a busy host).
 set -euo pipefail
 
+STEPS="timing-gate-build timing-gate"
+if [ "${1:-}" = --steps ]; then echo $STEPS; exit; fi
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
 export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1
 tip=$3
@@ -25,11 +28,19 @@ mkdir -p target/gate-logs
 echo "gate-timing.sh: $GATE (pid $$), tip $tip, cards: $GATE_CARDS"
 # shellcheck source=/dev/null
 source ~/.claude/skills/orchestrator/scripts/gate-step.sh
+# shellcheck disable=SC2086
+gate_steps $STEPS
+GATE_STEP_TMP=$(mktemp -d)
+trap 'rm -rf "$GATE_STEP_TMP"' EXIT
+# A step sees neither the record file of gate-step.sh's runner nor its temp folder.
+gate_step() {
+  step "$1" "$2" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED TMPDIR="$GATE_STEP_TMP" "${@:3}"
+}
 
 build_log=target/gate-logs/$GATE-timing-build.log
-step 17 timing-gate-build just timing-gate-build 2>&1 | tee "$build_log"
+gate_step 17 timing-gate-build just timing-gate-build 2>&1 | tee "$build_log"
 ! grep -q '^ *Compiling ' "$build_log" || { echo "GATE COMPILED: the timing binaries of $tip were not built by gate-integrate.sh (see $build_log)"; exit 10; }
 rc=0
-step 16 timing-gate just timing-gate || rc=$?
+gate_step 16 timing-gate just timing-gate || rc=$?
 /usr/bin/python3 "$(dirname "$0")/target-gc.py" target --apply --incremental-below "${GATE_DISK_FLOOR_GIB:-130}" || echo "TARGET-GC NOT RUN (exit $?), see above"
 exit $rc

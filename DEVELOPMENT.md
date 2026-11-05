@@ -723,17 +723,39 @@ Notes:
 - Timings assume a **warm build cache**; the first run after a rebase that
   touches many crates pays the compile cost once.
 
-### Which landing steps a batch may skip
+### Which landing steps a batch runs
 
-`scripts/gate-skip.py --base <rev> --tip <rev>` reads the batch diff and prints
-`full` or `skip: 3 4 5 6 11 12 13 14 15 16 18` (the landing gate's release-shape
-and wasm checks and its test-running steps). It skips only when every changed
-path is a doc or a file only non-skipped steps read (any path under a crate's
-`tests/` forces full), and no path is a trigger (manifests, toolchain, justfile,
-nextest config, files the skipped steps or their tests read); a rename or copy
-counts its source and its destination. It prints each
-blocking path and its reason on stderr. Its self-check is
-`python3 scripts/test-gate-skip.py`.
+The landing gate runs only the steps a batch can reach. flow lists the
+batch's changed paths (its `changed` command) and runs
+`scripts/select-tests.py --gate integrate` (or `--gate timing`) on them; the
+gate starts as `gate-step.sh run scripts/gate-integrate.sh ...`, and a step
+the selection does not name writes a `"skipped": true` row and returns 0.
+Each gate script declares its step names with `gate_steps` and prints them
+with `--steps`.
+
+The scoped rule, per changed path:
+
+- the tree checks (fmt, deny, the arch checks, guests-verify) run for every
+  batch;
+- a path inside a workspace crate reaches that crate and every crate that
+  depends on it; each step runs when it builds or tests a reached crate, and
+  extra-nextest runs only those crates' tests (`package(...)` filter set);
+  a path under a crate's `tests/` reaches only that crate;
+- a file outside the crates runs the steps whose sources (recipe, script,
+  path table of `scripts/timing-split.py`) name it, and the steps of every
+  crate that names it in a string literal;
+- the timing steps run when a reached crate is in their dependency closure,
+  or when their sources name the path.
+
+The full-run rules: the selection is the one line `* <path>`, which runs every
+step, when a path is a root build file (`Cargo.toml`, `Cargo.lock`,
+`rust-toolchain*`, `justfile`, `proptest.toml`), any crate manifest, a path
+under `.cargo/`, `.config/` or `workspace-hack/`, a gate script or
+`select-tests.py`, or a path under no crate and no known root. A release or
+the daily run on main sets `GATE_FULL=1`, which runs every step whatever the
+selection says.
+
+The selection's self-check is `scripts/select-tests.py --self-check`.
 
 ## iOS live-MCP E2E gate (`general_e2e_composed_pbt_live_mcp`)
 

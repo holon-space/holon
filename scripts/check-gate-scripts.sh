@@ -58,8 +58,8 @@ echo "== a head rewritten locally since its push"
 rc=0; combine_in_repo "${heads##* }" >/dev/null || rc=$?
 expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 
-# `just` and `cargo` stubs append each call, its HOLON_PBT_TIMING and the quiet
-# marker's content to $GATE_PROBE; `just latency-slo-gate` prints $SETTLE_OUT (default: a contention line
+# `just` and `cargo` stubs append each call, its HOLON_PBT_TIMING, the record file of gate-step.sh's runner
+# and the quiet marker's content to $GATE_PROBE; `just latency-slo-gate` prints $SETTLE_OUT (default: a contention line
 # and an admission), `just timing-gate-build` prints $BUILD_OUT
 # `just $STUB_RED` exits 1 and `just $STUB_SLEEP` sleeps 2 s; with STUB_RED_NEXTEST set, every nextest run
 # fails one org_suite test no known-red row lists. HOME is a scratch dir, so the hold's marker,
@@ -81,7 +81,7 @@ chmod +x "$orch/with-build-slot.sh"
 for tool in just cargo; do
   cat > "$stubs/$tool" <<'EOF'
 #!/usr/bin/env bash
-echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
+echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | record=${GATE_RECORD-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
 [ "$*" != gate-compile ] || [ -z "${GATE_HOLD_FIRST:-}" ] || "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" --quiet-hold "$GATE_PID"
 [ "${1:-}" != latency-slo-gate ] || printf '%b' "${SETTLE_OUT-mean boot matview_ddl 1.0ms\nhost admitted\n}"
@@ -97,7 +97,7 @@ rows_of() {
   /usr/bin/python3 -c 'import json, sys
 for l in open(sys.argv[1]):
     r = json.loads(l)
-    if r["gate"] == sys.argv[2]: print(r["step"], r["name"], r["exit"])' "$home/.cache/holon-build/gate-steps.jsonl" "$1" | sort -n
+    if r["gate"] == sys.argv[2]: print(r["step"], r["name"], r.get("exit", "skipped"))' "$home/.cache/holon-build/gate-steps.jsonl" "$1" | sort -n
 }
 steps="1 20 2 13 17 7 14 5 6 8 9 18 19 15 11 3 4 12 10 22"
 sorted_steps=$(tr ' ' '\n' <<<"$steps" | sort -n | tr '\n' ' ')
@@ -206,6 +206,26 @@ rc=0; in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ "$integrate" --track 1 >"$sc
 kill "$other"; wait
 expect "waits for the release and exits 0 (got $rc)" [ "$rc" = 0 ]
 expect "then runs its steps under its own hold" held_by $$
+
+echo "== the integrate run of a batch that selects two steps"
+selected="$scratch/selected"
+printf 'fmt tree-check\nkeystone-tour crate-reached\n' > "$selected"
+: > "$probe"
+rc=0; in_stubs GATE_SELECT=1 GATE_SELECTED="$selected" "$orch/gate-step.sh" run "$integrate" g7 "1 2" "$tip" >"$scratch/integrate-selected.out" 2>&1 || rc=$?
+expect "exits 0 (got $rc)" [ "$rc" = 0 ]
+[ "$rc" = 0 ] || tail -n 20 "$scratch/integrate-selected.out"
+# The script itself evaluates a justfile variable; every other call is a step's.
+step_calls=$(grep -v '^just --evaluate ' "$probe")
+expect "runs only the selected steps (got: $(cut -d'|' -f1 <<<"$step_calls" | tr '\n' ','))" \
+  [ "$(cut -d'|' -f1 <<<"$step_calls" | tr '\n' ',')" = "cargo fmt --all -- --check ,just keystone-tour ," ]
+expect "no step sees the runner's record file" [ -z "$(grep -v ' | record=unset | ' <<<"$step_calls")" ]
+expect "writes a skipped row for every other step" [ "$(rows_of g7 | grep -c ' skipped$')" = $(($(wc -w <<<"$steps") - 2)) ]
+
+echo "== the timing gate of a batch that selects no timing step"
+: > "$selected"; : > "$probe"
+rc=0; in_stubs GATE_SELECT=1 GATE_SELECTED="$selected" "$orch/gate-step.sh" run "$timing" g7 "1 2" "$tip" >"$scratch/timing-selected.out" 2>&1 || rc=$?
+expect "exits 0 (got $rc)" [ "$rc" = 0 ]
+expect "calls no just or cargo" [ ! -s "$probe" ]
 
 echo "== the timing-gate recipe while another job holds the hold"
 # The real recipe from this justfile runs; only its steps script is a stub.

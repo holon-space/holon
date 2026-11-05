@@ -7,9 +7,13 @@ arms a latency oracle on every transition. So it runs as two scripts on one
 tip: `scripts/gate-integrate.sh` runs every other step and builds the timing
 binaries, then `scripts/gate-timing.sh` runs `just timing-gate` under the hold
 and compiles nothing. The integrate run holds the machine quiet as well, but
-only for the wide nextest sweep and the windowed gate: they judge no duration,
-yet their caps and paint waits go red on a heavily loaded host. This file is the source of truth for
-the split: which tests really do judge a duration, and what cap the others get.
+only for the wide nextest sweep and the windowed gate, and only when the
+batch's selection names one of them: they judge no duration, yet their caps
+and paint waits go red on a heavily loaded host. Both scripts run only the
+steps a batch can reach; the timing steps run when a changed crate is in
+their dependency closure (DEVELOPMENT.md, "Which landing steps a batch
+runs"). This file is the source of truth for the split: which tests really
+do judge a duration, and what cap the others get.
 
 `scripts/timing-split.py` reads the two tables below and generates the
 `.config/nextest.toml` blocks from them. Nothing in that file is hand-edited;

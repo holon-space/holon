@@ -8,11 +8,14 @@
 #   scripts/gate-integrate.sh <gate-id> "<cards>" <tip>
 #   GATE_DISK_FLOOR_GIB  free disk the gate needs (default 130).
 #
+#   scripts/gate-integrate.sh --steps   prints the step names, for the selection
+#
 # After gate-compile the steps run at once in TRACKS, one build slot per track:
 # no step reads another step's output. The steps of QUIET_TRACK go red on a
-# loaded host, so that track runs under the machine-wide quiet hold; the other
-# tracks run at any load. Each step writes its own log and gate-steps.jsonl
-# row; the logs follow in TRACKS order.
+# loaded host, so that track runs under the machine-wide quiet hold when one of
+# them is selected; the other tracks run at any load. A track with no selected
+# step runs in the gate's own slot. Each step writes its own log and
+# gate-steps.jsonl row; the logs follow in TRACKS order.
 #
 # Last stdout line on green: `candidate tip: <tip>`, the argument for
 # scripts/gate-timing.sh.
@@ -23,37 +26,7 @@
 # nextest alone exits 12 or 13.
 set -euo pipefail
 
-# Steps that are pipelines run as `"$0" --<name>`: `step` runs one command.
-keystone_smoke() {
-  local log=target/gate-logs/$GATE-smoke.log classified=target/gate-logs/$GATE-smoke-classify.txt
-  HOLON_PBT_TIMING=measure just keystone-smoke 2>&1 | tee "$log" && return
-  bash scripts/keystone-known-reds.sh "$log" | tee "$classified"
-  grep -q 'PASS-WITH-NOTE' "$classified" || { echo "KEYSTONE SMOKE NOVEL RED"; exit 11; }
-  echo "keystone smoke: pass-with-note (known reds only)"
-}
-# The replay runs every case; the classifier judges each red case against the
-# row the case names.
-hand_authored() {
-  local log=target/gate-logs/$GATE-hand.log classified=target/gate-logs/$GATE-hand-classify.txt
-  just hand-authored 2>&1 | tee "$log" && return
-  bash scripts/keystone-known-reds.sh "$log" | tee "$classified" || true
-  grep -q 'PASS-WITH-NOTE' "$classified" || { echo "HAND-AUTHORED NOVEL RED"; exit 11; }
-  echo "hand-authored: pass-with-note (known reds only)"
-}
-extra_nextest() {
-  local log=target/gate-logs/$GATE-extra.log classified=target/gate-logs/$GATE-extra-classify.txt
-  local rc=0
-  mark=$(mktemp); trap 'rm -f "$mark"' EXIT
-  if ! HOLON_PBT_TIMING=measure cargo nextest run --profile load-tolerant --no-fail-fast \
-      --workspace --features "$PBT_FEATURES" 2>&1 | tee "$log"; then
-    bash scripts/keystone-known-reds.sh "$log" | tee "$classified" || true
-    grep -q 'PASS-WITH-NOTE' "$classified" || rc=12
-    [ $rc -ne 0 ] || echo "extra nextest: pass-with-note (known reds only)"
-  fi
-  ./scripts/check-target-leftovers.sh "$mark" 2>&1 | tee "target/gate-logs/$GATE-leftovers.log" || { echo "TARGET LEFTOVERS"; rc=13; }
-  return $rc
-}
-PBT_FEATURES="holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt"
+export PBT_FEATURES="holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt"
 
 # Balanced by step time; the first track runs in the
 # gate's own slot. A step is <n>:<name>, its number in gate-steps.jsonl.
@@ -64,6 +37,8 @@ TRACKS=(
 )
 QUIET_TRACK=1
 read -ra STEPS <<<"${TRACKS[*]}"
+step_names() { echo fmt deny gate-compile "${STEPS[@]#*:}"; }
+if [ "${1:-}" = --steps ]; then step_names; exit; fi
 step_file() { echo "target/gate-logs/$GATE-step-$1.$2"; }
 SLOT=~/.claude/skills/orchestrator/scripts/with-build-slot.sh
 # The hold names the gate's own pid, and every track names it as its holder
@@ -78,7 +53,7 @@ quiet_hold() {
   done
   [ "$rc" = 0 ] || { echo "QUIET HOLD NOT TAKEN: with-build-slot.sh --quiet-hold exit $rc"; exit "$rc"; }
   quiet_age_watch & watch=$!
-  trap '"$SLOT" --quiet-release "$GATE_PID"; ! kill -0 "$watch" 2>/dev/null || kill "$watch"' EXIT
+  trap '"$SLOT" --quiet-release "$GATE_PID"; ! kill -0 "$watch" 2>/dev/null || kill "$watch"; [ -z "${TRACK_TMP:-}" ] || rm -rf "$TRACK_TMP"' EXIT
 }
 # with-build-slot.sh treats a hold older than its age limit (3 h) as free, so
 # another job may then take it while this track still runs.
@@ -89,18 +64,33 @@ quiet_age_watch() {
   wait "$s"
   echo "quiet hold may have expired; reds after $(date -u +%Y-%m-%dT%H:%M:%SZ) may be load reds"
 }
+# Whether the batch's selection runs step $1 (every step runs without one).
+selected() {
+  [ "${GATE_SELECT:-}" = 1 ] && [ "${GATE_FULL:-}" != 1 ] || return 0
+  awk -v s="$1" '$1 == s || $1 == "*" { f = 1 } END { exit !f }' "$GATE_SELECTED"
+}
+track_selected() {
+  local entry
+  for entry in ${TRACKS[$1]}; do selected "${entry#*:}" && return; done
+  return 1
+}
+# A step sees neither the record file of gate-step.sh's runner nor its temp folder.
+gate_step() {
+  step "$1" "$2" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED TMPDIR="$GATE_STEP_TMP" "${@:3}"
+}
 track() {
   local entry n name rc
-  [ "$1" != "$QUIET_TRACK" ] || quiet_hold
+  [ -n "${GATE_STEP_TMP:-}" ] || { GATE_STEP_TMP=$(mktemp -d); TRACK_TMP=$GATE_STEP_TMP; trap 'rm -rf "$TRACK_TMP"' EXIT; }
+  [ "$1" != "$QUIET_TRACK" ] || ! track_selected "$1" || quiet_hold
   for entry in ${TRACKS[$1]}; do
     n=${entry%%:*} name=${entry#*:}
     case $name in
       featuremap) set -- just cargo-free-checks ;;
-      keystone-smoke | hand-authored | extra-nextest) set -- "$0" "--$name" ;;
+      keystone-smoke | hand-authored | extra-nextest) set -- bash "$(dirname "$0")/gate-integrate-steps.sh" "$name" ;;
       loro-suite | projector-lag-lock) set -- env HOLON_PBT_TIMING=measure just "$name" ;;
       *) set -- just "$name" ;;
     esac
-    rc=0; step "$n" "$name" "$@" >"$(step_file "$n" log)" 2>&1 || rc=$?
+    rc=0; gate_step "$n" "$name" "$@" >"$(step_file "$n" log)" 2>&1 || rc=$?
     echo "$rc" >"$(step_file "$n" rc)"
     echo "step [$n] $name: exit $rc"
   done
@@ -108,12 +98,9 @@ track() {
 
 # shellcheck source=/dev/null
 source ~/.claude/skills/orchestrator/scripts/gate-step.sh
-case "${1:-}" in
-  --keystone-smoke) keystone_smoke; exit ;;
-  --hand-authored) hand_authored; exit ;;
-  --extra-nextest) extra_nextest; exit ;;
-  --track) track "$2"; exit ;;
-esac
+# shellcheck disable=SC2046
+gate_steps $(step_names)
+[ "${1:-}" != --track ] || { track "$2"; exit; }
 
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
 export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$ HOLON_BUILD_QUIET_HOLDER=$$
@@ -136,13 +123,16 @@ mkdir -p target/gate-logs
 echo "gate-integrate.sh: $GATE (pid $$), tip $tip, cards: $GATE_CARDS"
 
 /usr/bin/python3 "$(dirname "$0")/target-gc.py" target --mark
-step 1 fmt cargo fmt --all -- --check
-step 20 deny just deny
-step 2 gate-compile just gate-compile
+GATE_STEP_TMP=$(mktemp -d); export GATE_STEP_TMP
+trap 'rm -rf "$GATE_STEP_TMP"' EXIT
+gate_step 1 fmt cargo fmt --all -- --check
+gate_step 20 deny just deny
+gate_step 2 gate-compile just gate-compile
 rm -f target/gate-logs/"$GATE"-step-*
 pids=()
 "$0" --track 0 & pids+=($!)
 for t in $(seq 1 $((${#TRACKS[@]} - 1))); do
+  track_selected "$t" || { "$0" --track "$t" & pids+=($!); continue; }
   # A track of its own takes a slot of its own and writes its own job record.
   env -u HOLON_BUILD_SLOT_HOLDER -u FLOW_JOB_STATUS -u FLOW_JOB_LOG FLOW_JOB_ID="${FLOW_JOB_ID:-$GATE}.track$t" \
     ~/.claude/skills/orchestrator/scripts/with-build-slot.sh "$0" --track "$t" & pids+=($!)

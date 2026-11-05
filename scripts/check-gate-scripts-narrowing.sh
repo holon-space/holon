@@ -7,7 +7,7 @@ fails=0
 for plant in "--exclude=holon-integration-tests" "--filterset='not test(/^org_suite::/)'" "-E'not test(/^org_suite::/)'" "--lib" "views_law"; do
   copy=$(mktemp -d)
   cp -R "$here" "$copy/scripts" && cp "$here/../justfile" "$copy/justfile"
-  /usr/bin/python3 - "$copy/scripts/gate-integrate.sh" "$plant" <<'PY'
+  /usr/bin/python3 - "$copy/scripts/gate-integrate-steps.sh" "$plant" <<'PY'
 import sys; p, plant = sys.argv[1:]; s = open(p).read()
 old = '--workspace --features "$PBT_FEATURES" 2>&1'
 assert s.count(old) == 1
