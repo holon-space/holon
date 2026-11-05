@@ -88,8 +88,8 @@ use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
 // boot_and_seed_wide/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
 use crate::pbt::composed::wide_e2e::{
     SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, converge_handle, folder_journal_page,
-    frontend_wired, page_root, seed_folder_companion, seed_folder_companion_subdir, structural_ref,
-    subdir_journal_page, wide_e2e_ref, wide_ref,
+    frontend_wired, page_root, seed_folder_companion, seed_folder_companion_subdir, settle_within,
+    structural_ref, subdir_journal_page, wide_e2e_ref, wide_ref,
 };
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::is_synthetic_ref_id;
@@ -2355,7 +2355,7 @@ entities:
             block_id: EntityUri::parse("block:journals").expect("journals id"),
         };
         TransitionImpl::apply_to_sut(&nav, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2397,7 +2397,7 @@ entities:
         };
         toggle.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&toggle, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2464,7 +2464,7 @@ entities:
             new_state: CycleTarget::Todo,
         };
         TransitionImpl::apply_to_sut(&toggle, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2529,7 +2529,7 @@ entities:
         let watch = all_blocks_watch("query-allblocks");
         watch.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&watch, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2573,7 +2573,7 @@ entities:
             position: 1,
         };
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -2694,7 +2694,7 @@ entities:
         };
         split.apply_to_ref(&mut oracle); // mints synthetic block::split-N, focuses + opens it
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await; // focus-handoff focuses real new
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
         let after = sut_ids(&caps).await;
 
         // Reconcile the one synthetic split id ↔ the one real minted id.
@@ -2719,7 +2719,7 @@ entities:
         };
         typ.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&typ, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&map);
         drop_ref_off_thread(oracle);
@@ -3374,7 +3374,7 @@ entities:
         };
         cd.apply_to_ref(&mut oracle); // mints synthetic block:ref-doc-N page
         TransitionImpl::apply_to_sut(&cd, &oracle, &mut caps).await; // writes file → watcher mints page
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
         let after = sut_ids(&caps).await;
 
         // Reconcile the one synthetic doc-uri ↔ the one real minted page id (the
@@ -3430,7 +3430,7 @@ entities:
             file_name: "sr1-spurious.org".to_string(),
         };
         TransitionImpl::apply_to_sut(&cd, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -3466,7 +3466,7 @@ entities:
         };
         pin.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&pin, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -3500,7 +3500,7 @@ entities:
             block_id: fixed_ids().c1,
         };
         TransitionImpl::apply_to_sut(&pin, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
         drop_ref_off_thread(oracle);
@@ -3540,7 +3540,7 @@ entities:
         ] {
             t.apply_to_ref(&mut oracle);
             TransitionImpl::apply_to_sut(&t, &oracle, &mut caps).await;
-            converge_handle(&handle, SETTLE).await;
+            settle_within(&handle, SETTLE).await;
         }
 
         let mut resolved = oracle.with_resolved_doc_uris(&BTreeMap::new());
@@ -3572,7 +3572,7 @@ entities:
         });
         indent.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&indent, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
 
         let before = sut_ids(&caps).await;
         let split = E2ETransition::SplitBlock(SplitBlock {
@@ -3581,7 +3581,7 @@ entities:
         });
         split.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&split, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
         let after = sut_ids(&caps).await;
 
         // Reconcile the one synthetic split id ↔ the one real minted id.
@@ -3628,7 +3628,7 @@ entities:
         let restart = SimulateRestart;
         restart.apply_to_ref(&mut oracle); // no-op (blocks preserved)
         TransitionImpl::apply_to_sut(&restart, &oracle, &mut caps).await;
-        converge_handle(&handle, SETTLE).await;
+        settle_within(&handle, SETTLE).await;
         let after = sut_ids(&caps).await;
         assert_eq!(
             before, after,

@@ -197,7 +197,7 @@ pub async fn converge_handle(handle: &WideHandle, budget: Duration) {
 
 /// The post-apply settle: dispatches drained, then the 3 projections
 /// converged, each within `budget` (floored at [`CONVERGE_BUDGET`]).
-async fn settle_within(handle: &WideHandle, budget: Duration) {
+pub async fn settle_within(handle: &WideHandle, budget: Duration) {
     drain_dispatches(handle, budget).await;
     converge_projections(handle, budget).await;
 }

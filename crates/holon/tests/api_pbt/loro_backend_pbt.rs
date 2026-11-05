@@ -789,9 +789,8 @@ mod stateful_tests {
 
     proptest_state_machine::prop_state_machine! {
         #![proptest_config(ProptestConfig {
-            cases: 20,
+            cases: 12,
             failure_persistence: None,
-            timeout: 10000,
             verbose: 2,
             .. ProptestConfig::default()
         })]

@@ -388,6 +388,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `integration-toggle-load`
 - `invite-refusal-unmapped-focus-root`
 - `iroh-accept-drain-recv-stream`
+- `iroh-accept-peer-never-closed`
+- `iroh-init-drain-recv-stream`
 - `iroh-nat-traversal-address-set`
 - `iroh-pairing-refusal-reads-as-io-failure`
 - `iroh-proptest-fork-child-wrapper`
@@ -425,6 +427,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `refused-profile-fix-clears-refusal-load-timeout`
 - `shell-effect-stubborn-member-pid-race`
 - `shopping-mapping-cost-slo`
+- `shrinker-capmap-trigger-passed`
 - `slo-probe-arm-refusal-caught-panic`
 - `slot-reconcile-props-before-rebuild-under-load`
 - `slot-withdrawn-last-claim-no-retraction`
@@ -437,7 +440,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `toggle-state-sql-read-repeat-budget`
 - `tour-spike-advance-cursor-not-visible`
 - `tour-spike-create-op-not-observable-load`
-- `tui-boot-refusals-second-instance-load-timeout`
 - `tui-inline-row-mount-unsettled-frame`
 - `tui-refused-write-back-missing-from-log`
 - `tui-stderr-write-missing-from-log-load`

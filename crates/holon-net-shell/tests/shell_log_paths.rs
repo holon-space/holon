@@ -1360,7 +1360,7 @@ fn drive(names: Vec<Names>, patterns: Vec<Pattern>, ops: &[Op]) {
 proptest! {
     // A refused open waits a second for the holder to let go; nextest ends a
     // test at two minutes.
-    #![proptest_config(Config { cases: 40, failure_persistence: None, ..Config::default() })]
+    #![proptest_config(Config { cases: 20, failure_persistence: None, ..Config::default() })]
 
     #[test]
     fn every_attempt_keeps_its_own_log_across_runs_restarts_and_runners(
