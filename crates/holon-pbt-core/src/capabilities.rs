@@ -1717,13 +1717,14 @@ pub trait SutOrderKeys {
 /// property-projection surface.
 #[holon_macros::capmap_adapter]
 pub trait SutLoroTaskState {
-    /// Task state string for `block_id` as projected from the Loro block's
-    /// `properties["task_state"]` scalar — the same value the SQL sibling
-    /// [`SutSqlProjection::block_task_state`] reads via
+    /// Every Loro block's task state, keyed by block id, as projected from the
+    /// block's `properties["task_state"]` scalar — the same value the SQL
+    /// sibling [`SutSqlProjection::block_task_state`] reads via
     /// `json_extract(properties,'$.task_state')`, so the two are directly
-    /// comparable by `inv-task-state-storage-coherence`. `None` when Loro
-    /// isn't enabled, the block is absent, or it carries no `task_state`.
-    async fn loro_task_state_of(&self, block_id: &str) -> Option<String>;
+    /// comparable by `inv-task-state-storage-coherence`. A block absent from
+    /// the map, or mapped to `None`, carries no `task_state`. One call reads
+    /// the tree once, so a pass over all blocks stays linear.
+    async fn loro_task_states(&self) -> BTreeMap<String, Option<String>>;
 }
 
 /// The on-disk `.loro` snapshot measured against what the SQL projection

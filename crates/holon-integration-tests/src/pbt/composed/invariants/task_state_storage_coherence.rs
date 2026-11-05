@@ -1,7 +1,7 @@
 //! `inv-task-state-storage-coherence` — cross-checks each block's `task_state`
 //! between the **SQL projection** (`SutSqlProjection::block_task_state`, a
 //! `json_extract(properties,'$.task_state')` read) and the **Loro projection**
-//! (`SutLoroTaskState::loro_task_state_of`, the same `properties["task_state"]`
+//! (`SutLoroTaskState::loro_task_states`, the same `properties["task_state"]`
 //! scalar off the live CRDT tree). Since F4 both SUT reads are cross-checked
 //! against the reference `task_state` (`RefTaskState`, declared in `Needs`), so
 //! a divergence in EITHER store is attributed against the known-good truth —
@@ -133,7 +133,7 @@ mod tests {
 /// over the composed `full_headless` CapMap must move BOTH the SQL
 /// `block_raw.properties` projection AND the Loro tag projection `None` →
 /// `TODO` in lockstep — exactly the coherence the invariant guards. It is the
-/// only test that asserts the **Loro** side (`loro_task_state_of`) moves with
+/// only test that asserts the **Loro** side (`loro_task_states`) moves with
 /// the SQL side directly; the frontend-slice toggle teeth only proves
 /// `inv-blocks-match-ref/block_raw` catches a SUT-only divergence.
 ///
@@ -193,7 +193,7 @@ mod real_sut_teeth {
                 "precondition: seeded c1 has no SQL task_state"
             );
             assert_eq!(
-                caps.loro_task_state_of(c1.as_str()).await,
+                caps.loro_task_states().await.remove(c1.as_str()).flatten(),
                 None,
                 "precondition: seeded c1 has no Loro task_state"
             );
@@ -217,7 +217,7 @@ mod real_sut_teeth {
             tokio::time::sleep(SETTLE).await;
 
             let sql = caps.block_task_state(&c1).await;
-            let loro = caps.loro_task_state_of(c1.as_str()).await;
+            let loro = caps.loro_task_states().await.remove(c1.as_str()).flatten();
             assert_eq!(
                 sql.as_deref(),
                 Some("TODO"),

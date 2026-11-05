@@ -195,8 +195,8 @@ impl SutSqlProjection for ToySut {
 
 #[async_trait::async_trait(?Send)]
 impl SutLoroTaskState for ToySut {
-    async fn loro_task_state_of(&self, _: &str) -> Option<String> {
-        None
+    async fn loro_task_states(&self) -> BTreeMap<String, Option<String>> {
+        BTreeMap::new()
     }
 }
 

@@ -148,19 +148,25 @@ impl SutLoroLog for LoroBackendComponent {
 
 #[async_trait::async_trait(?Send)]
 impl SutLoroTaskState for LoroBackendComponent {
-    /// Project a block's `task_state` from the live Loro tree — the
+    /// Project every block's `task_state` from the live Loro tree — the
     /// `properties["task_state"]` scalar, exactly the value the SQL sibling
     /// [`holon_pbt_core::capabilities::SutSqlProjection::block_task_state`]
-    /// reads via `json_extract`. `None` when the block is absent or carries no
-    /// `task_state`, so `inv-task-state-storage-coherence` compares like for
-    /// like across the two independent storage realizations.
-    async fn loro_task_state_of(&self, block_id: &str) -> Option<String> {
-        let blocks = self.all_blocks().await;
-        let block = blocks.iter().find(|b| b.id.as_str() == block_id)?;
-        block
-            .properties
-            .get("task_state")
-            .and_then(|v| v.as_string_owned())
+    /// reads via `json_extract`, so `inv-task-state-storage-coherence`
+    /// compares like for like across the two independent storage
+    /// realizations. A duplicated id keeps its first block.
+    async fn loro_task_states(&self) -> std::collections::BTreeMap<String, Option<String>> {
+        let mut states = std::collections::BTreeMap::new();
+        for block in self.all_blocks().await {
+            states
+                .entry(block.id.as_str().to_string())
+                .or_insert_with(|| {
+                    block
+                        .properties
+                        .get("task_state")
+                        .and_then(|v| v.as_string_owned())
+                });
+        }
+        states
     }
 }
 

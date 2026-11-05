@@ -20,7 +20,7 @@
 //!
 //! ## Deferral note
 //!
-//! The Loro side (`SutLoroTaskState::loro_task_state_of`) is `unimplemented!`
+//! The Loro side (`SutLoroTaskState::loro_task_states`) is `unimplemented!`
 //! on `E2ESut`: projecting task_state from Loro tags requires exposing the
 //! LoroSyncController's tag map through `TestContext`, which is not yet wired.
 //! The invariant body is defined so it compiles and the ID is reserved; at
@@ -64,11 +64,12 @@ where
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         let all_ids = sut.all_block_ids().await;
+        let loro_states = sut.loro_task_states().await;
         let mut mismatches: Vec<String> = Vec::new();
 
         for id in &all_ids {
             let sql_state = sut.block_task_state(id).await;
-            let loro_state = sut.loro_task_state_of(id.as_str()).await;
+            let loro_state = loro_states.get(id.as_str()).cloned().flatten();
             // Anchor on the reference (correspondence): both SUT stores must
             // match the ref's task_state. Coherence between the two stores is
             // then implied — the SUT↔SUT comparison was a shadow of this.

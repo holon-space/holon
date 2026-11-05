@@ -331,11 +331,11 @@ pub struct FixtureLoroTaskState {
 
 #[async_trait::async_trait(?Send)]
 impl SutLoroTaskState for FixtureLoroTaskState {
-    async fn loro_task_state_of(&self, block_id: &str) -> Option<String> {
+    async fn loro_task_states(&self) -> std::collections::BTreeMap<String, Option<String>> {
         self.task_state
             .iter()
-            .find(|(id, _)| id.as_str() == block_id)
-            .map(|(_, state)| state.clone())
+            .map(|(id, state)| (id.as_str().to_string(), Some(state.clone())))
+            .collect()
     }
 }
 

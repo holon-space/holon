@@ -385,7 +385,7 @@ consumed only by the PBT stack today.
   capability to a shared helper ripples through every caller's bounds.
   Mitigated by umbrella traits (`SutTransitionTarget`, `SutHandle`) at the
   dispatch boundary only.
-- **Partial implementations exist.** `SutLoroTaskState::loro_task_state_of` is
+- **Partial implementations exist.** `SutLoroTaskState::loro_task_states` is
   declared but `unimplemented!()` on `E2ESut` pending the LoroSyncController
   tag-projection plumbing (capabilities.rs:676-683) — the trait surface runs
   ahead of providers by design, but each such gap is a latent
