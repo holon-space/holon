@@ -533,11 +533,15 @@ impl TestEnvironmentBuilder {
         }
 
         if wait_for_file_watcher {
+            // A controller that died at start never ingests what it owes.
+            let org_idle = idle_signal
+                .clone()
+                .filter(|_| !start_degradation_disclosed(&injector));
             converge_session(
                 Some(&backend_engine),
                 sync_handle.clone(),
                 Some(&injector),
-                idle_signal.clone(),
+                org_idle,
                 &org_emitted,
                 org_scanned_through,
                 SETTLE_HANG_DEADLINE,

@@ -37,17 +37,14 @@
 //!
 //! Independently of that open question,
 //! `wiped_junction_is_repaired_on_next_boot` shows a junction emptied between
-//! boots coming back on the next boot. The mechanism is measured, not guessed,
-//! by sampling the TAGGED ROOT rather than an untagged child (the untagged
-//! child is untouched either way and has no discriminating power): the root IS
-//! rewritten. The wipe makes the doc-root invisible to the page lookup, that
-//! lookup misses, and the ingest path re-creates the page with
-//! `set_page(true)`.
+//! boots coming back on the next boot. In the Loro wiring the repair is the
+//! projection's cold-boot reconcile: it diffs the SQL sink against the Loro
+//! tree, the root's missing `Page` row is a difference, and an update writes
+//! it back. Measured: dropping the reconcile's updates leaves the row missing;
+//! dropping the `set_page(true)` of the ingest's page re-creation does not.
 //!
 //! So the self-heal is re-derivation triggered by MISSING DERIVED STATE rather
-//! than by the file changing. It is NOT the Loro boot projection —
-//! that explanation was refuted by measurement (the repair also happens with
-//! Loro disabled).
+//! than by the file changing.
 //!
 //! CONSEQUENCE: these cases cannot go red for the LIVE symptom (a real vault
 //! stuck at zero rows), because in this configuration the system self-repairs.
@@ -393,8 +390,11 @@ fn wiped_junction_is_repaired_on_next_boot() {
             "[wipe-repair] boot-1 file hashes = {:?}",
             file_hashes(&env).await
         );
-        let stamp1 = updated_at(&env, "block:blk-a").await;
-        let root_stamp1 = updated_at(&env, "block:page-alpha").await;
+        let root_page = ("block:page-alpha".to_string(), "Page".to_string());
+        assert!(
+            boot1.contains(&root_page),
+            "premise: boot-1 tags the root {root_page:?}. block_tags = {boot1:?}"
+        );
 
         // Exactly what a pre-repair boot's `DROP TABLE block_tags` left behind:
         // an empty junction over an intact `block_raw` and an intact Loro tree.
@@ -415,42 +415,14 @@ fn wiped_junction_is_repaired_on_next_boot() {
         let boot2 = tag_pairs(&env).await;
         eprintln!("[wipe-repair] boot-2 block_tags = {boot2:?}");
 
-        // WHAT ACTUALLY REPAIRS THIS — measured, and NOT what an earlier
-        // revision of this test claimed.
-        //
-        // Sampling the UNTAGGED child says nothing: it is untouched either way
-        // (an unwiped reboot leaves both untouched, which is why
-        // `reboot_harness_takes_the_cold_boot_fast_path_skip` has to corrupt
-        // content instead of comparing stamps). The TAGGED ROOT is the
-        // discriminator, and it IS rewritten here. The wipe makes the doc-root
-        // invisible to the page lookup (`block_raw JOIN block_tags WHERE
-        // tag='Page'`); that lookup misses, and the ingest path re-creates the
-        // page with `set_page(true)`, restoring the tag.
-        //
-        // So the repair is re-derivation triggered by MISSING DERIVED STATE, not
-        // by the file changing — which is exactly why it survives the fast-path
-        // skip. Its BOUNDARY is the open question behind the live symptom: a
-        // page whose re-creation cannot complete (quarantined file, identity
-        // collision) never heals, and Martin's vault contains such files.
-        let child_after = updated_at(&env, "block:blk-a").await;
-        let root_after = updated_at(&env, "block:page-alpha").await;
-        eprintln!(
-            "[wipe-repair] child blk-a {} | root page-alpha {}",
-            if child_after == stamp1 {
-                "untouched"
-            } else {
-                "rewritten"
-            },
-            if root_after == root_stamp1 {
-                "untouched"
-            } else {
-                "REWRITTEN"
-            }
-        );
-        assert_ne!(
-            root_after, root_stamp1,
-            "this test documents repair-by-re-derivation of the TAGGED ROOT; the root was NOT \
-             rewritten, so the rows returned by some other route and this explanation is stale"
+        // The cold-boot reconcile (SQL sink vs Loro tree) writes the root's
+        // wiped `Page` row back; see the module doc. A page whose re-creation
+        // cannot complete (quarantined file, identity collision) is the open
+        // boundary of this self-heal.
+        assert!(
+            boot2.contains(&root_page),
+            "this test documents repair-by-re-derivation of the TAGGED ROOT: its {root_page:?} \
+             row was wiped and boot 2 did NOT write it back. block_tags = {boot2:?}"
         );
 
         let lost: Vec<_> = boot1.difference(&boot2).collect();
@@ -463,22 +435,6 @@ fn wiped_junction_is_repaired_on_next_boot() {
             boot1.len()
         );
     });
-}
-
-/// `updated_at` for a seeded block. Every ingest rewrites it
-/// (`block_params.rs` stamps `now_millis()` on each write), so it discriminates
-/// "boot 2 re-ingested this file" from "boot 2 took the cold-boot fast-path
-/// skip" without needing log capture.
-async fn updated_at(env: &TestEnvironment, id: &str) -> i64 {
-    env.query_sql(&format!(
-        "SELECT updated_at FROM block_raw WHERE id = '{id}'"
-    ))
-    .await
-    .expect("query updated_at")
-    .first()
-    .and_then(|r| r.get("updated_at"))
-    .and_then(|v| v.as_i64())
-    .expect("block must exist")
 }
 
 /// FIDELITY PROBE (task #87): does the reboot harness actually exercise the
