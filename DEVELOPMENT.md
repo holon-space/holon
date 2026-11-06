@@ -427,8 +427,12 @@ resolve too). The gate checks this, together with the build-script env:
 see "One compile shape" in docs/Testing/TimingCritical.md.
 
 `just target-gc [target-dir]` (`scripts/target-gc.py`) reclaims whatever churn
-still accumulates: for each (crate, target) it keeps the newest 2 directories
-and deletes the rest. Dry run by default; `just target-gc` itself passes
+still accumulates. It never deletes a directory the recorded cargo calls
+(`$HOLON_CARGO_RECORD`, by default `target/cargo-shape/calls.jsonl`) use: it
+replays them as `--no-run` builds and keeps every unit cargo reports. For each
+(crate, target) it keeps those plus the newest unused directories up to 2 and
+deletes the rest; below `--floor <GiB>` free (the gates pass
+`$GATE_DISK_FLOOR_GIB`) the unused ones go too, oldest first. Dry run by default; `just target-gc` itself passes
 `--apply` since it runs as the last step of `landing-gate`. It refuses to run
 (exit 3) while a cargo/rustc/sccache process is using the target directory.
 Run `python3 scripts/target-gc.py <dir>` directly for a dry-run report without

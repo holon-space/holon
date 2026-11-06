@@ -257,8 +257,10 @@ echo "== the timing gate on the integrated tip"
 : > "$probe"
 rc=0; in_stubs "$timing" g1 "1 2" "$tip" >"$scratch/timing.out" 2>&1 || rc=$?
 expect "exits 0 (got $rc)" [ "$rc" = 0 ]
-expect "calls the build check, then timing-gate, and nothing else" \
-  [ "$(grep -v -- ' --evaluate ' "$probe" | cut -d' ' -f1-2 | tr '\n' ' ')" = "just timing-gate-build just timing-gate " ]
+expect "calls the build check, then timing-gate, then target-gc's replay of the record, and nothing else" \
+  [ "$(grep -v -- ' --evaluate ' "$probe" | cut -d' ' -f1-2 | tr '\n' ' ')" = "just timing-gate-build just timing-gate cargo test " ]
+expect "the replay builds and runs nothing new: --no-run, no nextest profile" \
+  grep -q -- '^cargo test --workspace --features [^ ]* --no-run --message-format=json |' "$probe"
 
 echo "== the timing gate on a tip whose binaries are not built"
 : > "$probe"

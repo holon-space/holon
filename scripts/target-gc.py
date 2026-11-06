@@ -6,12 +6,20 @@ Two collectors, both dry runs unless --apply:
 Build hash dirs, ``target/<profile>/build/<crate>/<metadata-hash>/``. The
 metadata hash covers the resolved feature set, so two gates that unify features
 differently mint two directories for the SAME target and neither is ever
-reclaimed. A directory is garbage when ``--keep`` newer directories for the same
-(profile, crate, target) exist. Grouping is by the target identity cargo writes
-into ``fingerprint/`` (``lib-reqwest``, ``test-integration-test-loro_suite``,
-...); a directory whose identity cannot be read forms its own group and is never
-collected. Age alone never condemns a hash dir: cargo writes nothing into the
-dir of a fresh unit, so a dir the last build used can look years old.
+reclaimed. Age alone never condemns a hash dir: cargo writes nothing into the
+dir of a fresh unit, so a dir the last build used can look years old. So the
+pass first replays the cargo calls recorded in ``$HOLON_CARGO_RECORD`` (see
+scripts/cargo-shape-env.sh) as ``--no-run`` builds with their recorded env and
+takes the dirs of the units cargo reports as in use; those are never collected.
+Without a record the pass is skipped. Of the unused dirs of a (profile, crate,
+target) group, the newest survive until the group holds ``--keep`` dirs.
+Grouping is by the target identity cargo writes into ``fingerprint/``
+(``lib-reqwest``, ``test-integration-test-loro_suite``, ...); a directory whose
+identity cannot be read forms its own group.
+
+Below the disk floor (``--floor GIB``, the gates pass ``$GATE_DISK_FLOOR_GIB``)
+the incremental sweep runs, and then the unused hash dirs that ``--keep`` kept
+go too, oldest first, until the floor is free again.
 
 Incremental dirs, ``target/debug/incremental/<crate>-<hash>/`` (``--incremental``).
 Mark and sweep: ``--mark`` at the start of a build moves ``.gc-mark`` to
@@ -23,13 +31,18 @@ unit the next time it changes, never a stale build. Known limit: a fresh unit
 writes nothing into its dir, so the markers do not protect it; at keep 2 the
 first CANON one-line edit after a seed sweep measured about +170 s (test
 profile, 3 noisy runs: +318, +1, +192 s). So the incremental sweep runs only
-under disk pressure (``--incremental-below``) or at a seed refresh
+below the floor or at a seed refresh
 (``--incremental``).
 
 Refuses with exit 3 while any process holds a file open under a profile dir.
 """
 
 import argparse
+import filecmp
+import glob
+import importlib.machinery
+import importlib.util
+import json
 import os
 import re
 import shutil
@@ -137,17 +150,137 @@ def collect_units(target_dir):
     return units
 
 
-def plan(units, keep):
-    """Return [(group, survivors, doomed)] for every group that loses a member."""
+def _shape_check():
+    loader = importlib.machinery.SourceFileLoader(
+        "check_compile_shape", os.path.join(os.path.dirname(os.path.realpath(__file__)), "check-compile-shape.py"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+# Options that pick which targets a build compiles and in which cargo profile; with the build options they make a
+# replay of a nextest call build what the call built and nothing else.
+TARGET_SELECTION = {"--test": 1, "--bin": 1, "--example": 1, "--bench": 1, "--lib": 0, "--bins": 0, "--tests": 0,
+                    "--examples": 0, "--benches": 0, "--all-targets": 0, "--doc": 0}
+
+
+def replay_argv(check, argv):
+    """The `cargo` argv that builds what the recorded call built and runs nothing, or None for a call that builds
+    nothing."""
+    sub, args = check.subcommand(argv)
+    args = args[:args.index("--")] if "--" in args else args
+    if sub == "nextest":
+        if not args or args[0] not in check.NEXTEST_COMPILING or check.NEXTEST_REUSE & {a.partition("=")[0] for a in args}:
+            return None
+        sub, args = "test", cargo_options(check, args[1:])
+    if sub not in {"test", "check", "clippy", "build"}:
+        return None
+    return [sub, *args, *(["--no-run"] if sub == "test" and "--no-run" not in args else []), "--message-format=json"]
+
+
+def cargo_options(check, args):
+    """The cargo build and target-selection options of a nextest call; nextest's own options (its `--profile`
+    too) are dropped, and its `--cargo-profile` is cargo's `--profile`."""
+    from_nextest = {"--cargo-profile": "--profile"}
+    arities = {**check.BUILD_OPTIONS, **TARGET_SELECTION, "--profile": 1}
+    out, i = [], 0
+    while i < len(args):
+        name, eq, _ = args[i].partition("=")
+        arity = None if name == "--profile" else arities.get(from_nextest.get(name, name))
+        if name.startswith("-p") and not name.startswith("--") and len(name) > 2:
+            out.append(args[i])
+        elif arity is not None:
+            take = 1 if eq or not arity else 2
+            out += [from_nextest.get(name, name) + args[i][len(name):], *args[i + 1:i + take]]
+            i += take - 1
+        i += 1
+    return out
+
+
+def in_use(target_dir, record):
+    """The hash dirs of target_dir that the recorded cargo calls use, from cargo's own artifact report."""
+    check = _shape_check()
+    calls = check.load(record)
+    if not calls:
+        raise SystemExit("HOLON_CARGO_RECORD=%s holds no cargo call: the in-use units are unknown" % record)
+    target = os.path.realpath(target_dir)
+    shim = os.path.realpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "cargo-shape"))
+    path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep) if os.path.realpath(d) != shim)
+    replays = {}
+    for call in calls:
+        argv = replay_argv(check, call["argv"])
+        if argv is None:
+            continue
+        hashed = [n for n, v in call["env"].items() if isinstance(v, str) and v.startswith("sha256:")]
+        if hashed:
+            raise SystemExit("cannot replay cargo %s: the record holds only a hash of %s" % (" ".join(call["argv"]), hashed))
+        replays.setdefault(json.dumps([argv, sorted(call["env"].items())]), (argv, call["env"]))
+    used, built = set(), 0
+    for argv, recorded in replays.values():
+        env = {**os.environ, "PATH": path}
+        for name, value in recorded.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+        out = subprocess.run(["cargo", *argv], cwd=os.path.dirname(target), env=env, capture_output=True, text=True)
+        if out.returncode != 0:
+            raise SystemExit("replay `cargo %s` failed (exit %d):\n%s" % (" ".join(argv), out.returncode, out.stderr[-3000:]))
+        for line in out.stdout.splitlines():
+            msg = json.loads(line)
+            paths = msg.get("filenames", []) if msg["reason"] == "compiler-artifact" else \
+                [msg["out_dir"]] if msg["reason"] == "build-script-executed" else []
+            built += msg["reason"] == "compiler-artifact" and not msg["fresh"]
+            for p in paths:
+                unit = _unit_of(target, os.path.realpath(p))
+                if unit:
+                    used.add(unit)
+    print("in use: %d hash dirs from %d replayed call(s) of %s; the replay built %d unit(s)"
+          % (len(used), len(replays), record, built))
+    return used
+
+
+def _unit_of(target, path):
+    """target/<profile>/build/<crate>/<hash> for a path below it; None for a path of another target triple or
+    target dir, whose units this script never collects."""
+    parts = os.path.relpath(path, target).split(os.sep)
+    if parts[0] not in PROFILES:
+        return None
+    if parts[1] != "build":
+        return _copied_up_from(target, parts[0], path)
+    if len(parts) < 5:
+        raise SystemExit("cargo reported %s, outside any build hash dir: its unit dir is unknown" % path)
+    return os.path.join(target, *parts[:4])
+
+
+def _copied_up_from(target, profile, path):
+    """The hash dir whose out/ holds the file that cargo copied up to `path` (a bin or an example); its name there
+    spells `-` as `_`. Older hash dirs of the same target hold same-named files, so only the content tells."""
+    name = os.path.basename(path)
+    found = [p for n in sorted({name, name.replace("-", "_")})
+             for p in glob.glob(os.path.join(target, profile, "build", "*", "*", "out", glob.escape(n)))
+             if os.path.getsize(p) == os.path.getsize(path) and filecmp.cmp(p, path, shallow=False)]
+    if len(found) != 1:
+        raise SystemExit("cargo reported %s, a copy of %d file(s) under build hash dirs %s: its unit dir is unknown"
+                         % (path, len(found), found))
+    return os.path.dirname(os.path.dirname(found[0]))
+
+
+def plan(units, keep, used):
+    """Return [(group, survivors, doomed)] for every group that loses a member. A used dir survives and counts
+    toward ``keep``."""
     groups = {}
     for unit in units:
         groups.setdefault(unit.group, []).append(unit)
     out = []
     for group, members in sorted(groups.items()):
         members.sort(key=lambda u: u.mtime, reverse=True)
-        doomed = members[keep:]
-        if doomed:
-            out.append((group, members[:keep], doomed))
+        mine = [u for u in members if os.path.realpath(u.path) in used]
+        rest = [u for u in members if os.path.realpath(u.path) not in used]
+        room = max(0, keep - len(mine))
+        if rest[room:]:
+            out.append((group, mine + rest[:room], rest[room:]))
     return out
 
 
@@ -237,10 +370,10 @@ def free_gib(path):
     return shutil.disk_usage(path).free / 1024 ** 3
 
 
-def run(target_dir, keep, incremental, below_gib, apply_):
+def run(target_dir, keep, incremental, floor_gib, apply_):
     if not os.path.isdir(target_dir):
         raise SystemExit("no such target dir: %s" % target_dir)
-    if incremental or below_gib is not None:
+    if incremental or floor_gib is not None:
         sweep_cutoff(target_dir)
 
     busy = holders(target_dir)
@@ -253,8 +386,12 @@ def run(target_dir, keep, incremental, below_gib, apply_):
     verb = "rm" if apply_ else "--"
     totals = {}
 
-    units = collect_units(target_dir)
-    groups = plan(units, keep)
+    record = os.environ.get("HOLON_CARGO_RECORD")
+    used = in_use(target_dir, record) if record else None
+    if used is None:
+        print("build hash dirs: skipped, HOLON_CARGO_RECORD is unset, so the dirs the last build uses are unknown")
+    units = collect_units(target_dir) if used is not None else []
+    groups = plan(units, keep, used)
     freed = files = 0
     for (profile, crate, target), survivors, doomed in groups:
         print("%s/%-30s %-46s %2d superseded" % (profile, crate, target, len(doomed)))
@@ -269,10 +406,11 @@ def run(target_dir, keep, incremental, below_gib, apply_):
             print("    keep %s" % unit.hash)
     totals["build hash dirs"] = (sum(len(d) for _g, _s, d in groups), len(units), freed, files)
 
-    if below_gib is not None:
+    below = False
+    if floor_gib is not None:
         free = free_gib(target_dir)
-        incremental = free < below_gib
-        print("incremental sweep: %s, %.0f GiB free, threshold %g GiB" % ("runs" if incremental else "skipped", free, below_gib))
+        below = incremental = free < floor_gib
+        print("below the floor: %s, %.0f GiB free, floor %g GiB" % ("yes" if below else "no", free, floor_gib))
     if incremental:
         cutoff = sweep_cutoff(target_dir)
         dirs = incremental_dirs(target_dir)
@@ -284,6 +422,22 @@ def run(target_dir, keep, incremental, below_gib, apply_):
             files += n
             print("%s %s  %8s" % (verb, path, human(size)))
         totals["incremental dirs"] = (len(stale), len(dirs), freed, files)
+    if below and used is not None:
+        doomed = {u.path for _g, _s, d in groups for u in d}
+        spare = sorted((u for u in units if u.path not in doomed and os.path.realpath(u.path) not in used),
+                       key=lambda u: u.mtime)
+        # Counted in apparent bytes, not re-read from the disk, so a dry run reports what --apply deletes.
+        need = (floor_gib - free_gib(target_dir)) * 1024 ** 3
+        freed = files = gone = 0
+        for unit in spare:
+            if freed >= need:
+                break
+            size, n = remove(unit.path, apply_)
+            freed += size
+            files += n
+            gone += 1
+            print("%s %s  %8s" % (verb, unit.path, human(size)))
+        totals["unused below floor"] = (gone, len(spare), freed, files)
 
     print()
     for kind, (dirs, scanned, size, n) in totals.items():
@@ -302,8 +456,8 @@ def main():
     ap.add_argument("--keep", type=int, default=2, help="newest dirs kept per build target and per incremental unit name")
     ap.add_argument("--incremental", action="store_true",
                     help="also sweep debug/incremental dirs older than the markers")
-    ap.add_argument("--incremental-below", type=float, metavar="GIB",
-                    help="sweep debug/incremental only when less than GIB is free after the build hash sweep")
+    ap.add_argument("--floor", type=float, metavar="GIB",
+                    help="below GIB free after the build hash pass: sweep debug/incremental, then unused hash dirs")
     ap.add_argument("--mark", action="store_true", help="rotate the markers and exit")
     ap.add_argument("--apply", action="store_true", help="delete (default: dry run)")
     args = ap.parse_args()
@@ -311,9 +465,9 @@ def main():
     if args.mark:
         mark(args.target_dir)
         return 0
-    if args.incremental and args.incremental_below is not None:
-        ap.error("--incremental and --incremental-below exclude each other")
-    return run(args.target_dir, args.keep, args.incremental, args.incremental_below, args.apply)
+    if args.incremental and args.floor is not None:
+        ap.error("--incremental and --floor exclude each other")
+    return run(args.target_dir, args.keep, args.incremental, args.floor, args.apply)
 
 
 if __name__ == "__main__":

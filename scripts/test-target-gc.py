@@ -2,9 +2,11 @@
 """Self-check for scripts/target-gc.py on small fake target dirs.
 
 Run: `python3 scripts/test-target-gc.py`. Exits non-zero on the first violation.
-TARGET_GC=<path> runs the checks against another copy of the script.
+TARGET_GC=<path> runs the checks against another copy of the script. SEED=<n> replays the generated cases.
 """
+import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -20,10 +22,60 @@ PREV_MARK = 2_000_000_000
 MARK = 2_000_000_100
 
 
-def gc(target, *args):
+def gc(target, *args, env=None):
     return subprocess.run(
-        [sys.executable, str(SCRIPT), str(target), *args], capture_output=True, text=True
+        [sys.executable, str(SCRIPT), str(target), *args], capture_output=True, text=True, env=env
     )
+
+
+FAKE_CARGO = """#!/usr/bin/python3
+import json, os, sys
+with open(os.environ["FAKE_CARGO_LOG"], "a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "sha": os.environ.get("HOLON_BUILD_SHA")}) + "\\n")
+sys.stdout.write(open(os.environ["FAKE_CARGO_MESSAGES"]).read())
+"""
+
+
+RECORDED = [["test", "--workspace", "--", "--ignored"],
+            ["nextest", "run", "--profile", "load-tolerant", "--workspace", "--cargo-profile", "dev", "-E", "test(x)",
+             "--no-fail-fast", "--test", "t"],
+            ["check", "--target", "wasm32-unknown-unknown", "-p", "holon-web"],
+            ["fmt", "--check"]]
+REPLAYED = [["test", "--workspace", "--no-run", "--message-format=json"],
+            ["test", "--workspace", "--profile", "dev", "--test", "t", "--no-run", "--message-format=json"],
+            ["check", "--target", "wasm32-unknown-unknown", "-p", "holon-web", "--message-format=json"]]
+
+
+def recorded_build(target, in_use, rng=None, uplifted=()):
+    """The env of a gc run after a recorded build whose replay reports the units in `in_use`: as a compiled
+    artifact, as a build-script run (its out dir), as a bin cargo copied up to the profile dir (at most one per
+    crate, as cargo has one such path), or (without rng) as an artifact and a run."""
+    tools = target / "fake-tools"
+    tools.mkdir()
+    (tools / "cargo").write_text(FAKE_CARGO)
+    (tools / "cargo").chmod(0o755)
+    record = target / "calls.jsonl"
+    env = {"HOLON_BUILD_SHA": "0123abcd", "HOLON_BUILD_TIME": None}
+    record.write_text("".join(json.dumps({"argv": argv, "env": env}) + "\n" for argv in RECORDED))
+    messages = []
+    for unit in in_use:
+        kinds = [rng.choice(["artifact", "run", "copied"])] if rng else ["artifact", "run"]
+        copied = unit.parents[2] / unit.parent.name
+        if "copied" in kinds and copied.exists():
+            kinds = ["run"]
+        if "copied" in kinds:
+            shutil.copy(unit / "out" / unit.parent.name.replace("-", "_"), copied)
+            messages.append({"reason": "compiler-artifact", "fresh": True, "filenames": [str(copied)]})
+        if "artifact" in kinds:
+            messages.append({"reason": "compiler-artifact", "fresh": True,
+                             "filenames": [str(next((unit / "out").iterdir()))]})
+        if "run" in kinds:
+            messages.append({"reason": "build-script-executed", "out_dir": str(unit / "out")})
+    messages += [{"reason": "compiler-artifact", "fresh": True, "filenames": [str(p)]} for p in uplifted]
+    messages.append({"reason": "build-finished", "success": True})
+    (target / "messages.jsonl").write_text("".join(json.dumps(m) + "\n" for m in messages))
+    return {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "HOLON_CARGO_RECORD": str(record),
+            "FAKE_CARGO_LOG": str(target / "cargo.log"), "FAKE_CARGO_MESSAGES": str(target / "messages.jsonl")}
 
 
 def plant(path, when, size=16):
@@ -44,6 +96,8 @@ def hash_dir(target, profile, crate, digest, ident, when):
     plant(unit / "fingerprint" / ident, when)
     plant(unit / "fingerprint" / "invoked.timestamp", when)
     plant(unit / "out" / f"lib{crate}-{digest}.rmeta", when, size=64)
+    (unit / "out" / crate.replace("-", "_")).write_text(digest)
+    age_tree(unit, when)
     return unit
 
 
@@ -118,7 +172,7 @@ def check_marker_keeps_dirs_beyond_keep():
 def check_nothing_outside():
     target, p = fake_target()
     try:
-        r = gc(target, "--incremental", "--apply", "--keep", "1")
+        r = gc(target, "--incremental", "--apply", "--keep", "1", env=recorded_build(target, []))
         assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}{r.stderr}"
         for f in p["planted"]:
             assert f.exists(), f"swept a file outside debug/incremental and the build hash dirs: {f}"
@@ -205,7 +259,7 @@ def check_incremental_only_under_disk_pressure():
         old = hash_dir(target, "debug", "holon-app", "aaaaaaaaaaaaaaaa", "test-integration-test-loro_suite", OLD)
         hash_dir(target, "debug", "holon-app", "bbbbbbbbbbbbbbbb", "test-integration-test-loro_suite", MARK)
         try:
-            r = gc(target, "--apply", "--keep", "1", "--incremental-below", below)
+            r = gc(target, "--apply", "--keep", "1", "--floor", below, env=recorded_build(target, []))
             assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}{r.stderr}"
             assert not old.exists(), f"the build hash sweep did not run at threshold {below} GiB"
             assert p["stale"].exists() != swept, (
@@ -221,7 +275,7 @@ def check_supersession():
         old = hash_dir(target, "debug", "holon-app", "aaaaaaaaaaaaaaaa", "test-integration-test-loro_suite", OLD)
         new = hash_dir(target, "debug", "holon-app", "bbbbbbbbbbbbbbbb", "test-integration-test-loro_suite", MARK)
         rel = hash_dir(target, "release", "holon-app", "cccccccccccccccc", "test-integration-test-loro_suite", OLD)
-        r = gc(target, "--keep", "1", "--apply")
+        r = gc(target, "--keep", "1", "--apply", env=recorded_build(target, []))
         assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}{r.stderr}"
         assert not old.exists(), "the superseded hash dir survived"
         assert new.exists(), "the newest hash dir was collected"
@@ -230,8 +284,111 @@ def check_supersession():
         shutil.rmtree(target)
 
 
+def check_in_use_never_collected():
+    """Generated groups of hash dirs, some of them used by the recorded build: the pass keeps every used dir,
+    and of the unused ones each group keeps only the newest it has room for under --keep."""
+    seed = int(os.environ.get("SEED", random.randrange(1 << 30)))
+    print(f"SEED={seed}")
+    rng = random.Random(seed)
+    # The used dir is older than its two unused siblings: what the wasm steps and a seed leave behind.
+    examples = [[(3, {0})]]
+    cases = examples + [[(rng.randint(1, 5), None) for _ in range(rng.randint(1, 3))] for _ in range(30)]
+    for groups in cases:
+        target = Path(tempfile.mkdtemp(prefix="target-gc-test-"))
+        try:
+            plan_, in_use = [], []
+            for g, (n, used) in enumerate(groups):
+                ages = rng.sample(range(100), n)
+                used = used if used is not None else set(rng.sample(range(n), rng.randint(0, n)))
+                units = [hash_dir(target, "debug", f"crate-{g}", f"{g:x}{i:015x}", f"bin-crate-{g}", OLD + 10 * age)
+                         for i, age in enumerate(sorted(ages))]
+                in_use += [units[i] for i in used]
+                plan_.append((units, used))
+            keep = 2 if groups is examples[0] else rng.choice([1, 2])
+            env = recorded_build(target, in_use, rng)
+            r = gc(target, "--apply", "--keep", str(keep), env=env)
+            assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}{r.stderr}"
+            for units, used in plan_:
+                for i in used:
+                    assert units[i].exists(), f"collected a dir the recorded build uses (keep {keep}):\n{r.stdout}"
+                unused = [u for i, u in enumerate(units) if i not in used]
+                room = max(0, keep - len(used))
+                want = unused[len(unused) - room:] if room else []
+                assert [u for u in unused if u.exists()] == want, (
+                    f"unused survivors {[u.name for u in unused if u.exists()]}, want {[u.name for u in want]}"
+                    f" (keep {keep}, {len(used)} used):\n{r.stdout}")
+            calls = [json.loads(line) for line in (target / "cargo.log").read_text().splitlines()]
+            assert calls and all(c["sha"] == "0123abcd" for c in calls), f"the replay lost the recorded env: {calls}"
+            assert [c["argv"] for c in calls] == REPLAYED, f"replayed {calls}, want {REPLAYED}"
+        finally:
+            shutil.rmtree(target)
+
+
+def check_no_record_keeps_hash_dirs():
+    target = Path(tempfile.mkdtemp(prefix="target-gc-test-"))
+    try:
+        old = hash_dir(target, "debug", "holon-app", "aaaaaaaaaaaaaaaa", "lib-holon_app", OLD)
+        for i in range(3):
+            hash_dir(target, "debug", "holon-app", f"b{i:015x}", "lib-holon_app", MARK + i)
+        env = {k: v for k, v in os.environ.items() if k != "HOLON_CARGO_RECORD"}
+        r = gc(target, "--keep", "1", "--apply", env=env)
+        assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}{r.stderr}"
+        assert old.exists(), "collected a hash dir without knowing which dirs the last build uses"
+        assert "HOLON_CARGO_RECORD" in r.stdout, f"the skipped hash pass is not disclosed:\n{r.stdout}"
+    finally:
+        shutil.rmtree(target)
+
+
+def check_unknown_unit_fails_loud():
+    """A bin cargo reports as copied up leaves its unit unknown when no file under a hash dir equals it, or when
+    two do."""
+    for equal_copies in (0, 2):
+        target = Path(tempfile.mkdtemp(prefix="target-gc-test-"))
+        try:
+            old = hash_dir(target, "debug", "holon", "aaaaaaaaaaaaaaaa", "bin-holon", OLD)
+            for i in range(2):
+                hash_dir(target, "debug", "holon", f"b{i:015x}", "bin-holon", MARK + i)
+            plant(target / "debug" / "holon", OLD)
+            for unit in sorted((target / "debug" / "build" / "holon").iterdir())[:equal_copies]:
+                shutil.copy(target / "debug" / "holon", unit / "out" / "holon")
+            r = gc(target, "--keep", "1", "--apply", env=recorded_build(target, [], uplifted=[target / "debug" / "holon"]))
+            assert r.returncode != 0, f"collected with an unknown unit ({equal_copies} equal copies):\n{r.stdout}"
+            assert str(target / "debug" / "holon") in r.stderr, f"the failure does not name the artifact:\n{r.stderr}"
+            assert old.exists(), "deleted with an unknown unit"
+        finally:
+                shutil.rmtree(target)
+
+
+def check_hash_pass_only_below_floor():
+    """Above the floor the unused dirs that --keep keeps survive; below it they go, oldest first, until the
+    floor is free. The dirs are sparse files of 8 GiB apparent each, so what other processes write meanwhile stays
+    far below one dir."""
+    size = 8 * 1024 ** 3
+    for extra, gone in ((None, 0), (1.5 * size, 2), (1e15, 3)):
+        target = Path(tempfile.mkdtemp(prefix="target-gc-test-"))
+        try:
+            olds = [hash_dir(target, "debug", f"c{i}", "aaaaaaaaaaaaaaaa", f"lib-c{i}", OLD + 50 - 10 * i) for i in range(3)]
+            news = [hash_dir(target, "debug", f"c{i}", "bbbbbbbbbbbbbbbb", f"lib-c{i}", MARK) for i in range(3)]
+            for o in olds:
+                with open(o / "out" / "big.bin", "wb") as f:
+                    f.truncate(size)
+                age_tree(o, os.stat(o).st_mtime)
+            assert gc(target, "--mark").returncode == 0
+            free = shutil.disk_usage(target).free
+            floor = 0 if extra is None else (free + extra) / 1024 ** 3
+            r = gc(target, "--apply", "--keep", "2", "--floor", repr(floor), env=recorded_build(target, news))
+            assert r.returncode == 0, f"exit {r.returncode}: {r.stdout}{r.stderr}"
+            assert all(n.exists() for n in news), "collected a used dir"
+            order = [line.split()[1] for line in r.stdout.splitlines() if line.startswith("rm ")]
+            assert order == [str(o) for o in reversed(olds)][:gone], f"floor +{extra} B: deleted {order}:\n{r.stdout}"
+        finally:
+            shutil.rmtree(target)
+
+
 def main():
-    checks = [check_marker_sweep, check_nothing_outside, check_refuses_while_open,
+    checks = [check_in_use_never_collected, check_no_record_keeps_hash_dirs, check_hash_pass_only_below_floor,
+              check_unknown_unit_fails_loud,
+              check_marker_sweep, check_nothing_outside, check_refuses_while_open,
               check_dry_run, check_needs_marker, check_keep_newest_per_name,
               check_incremental_only_under_disk_pressure, check_mark_rotates, check_supersession,
               check_marker_keeps_dirs_beyond_keep]

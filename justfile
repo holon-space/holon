@@ -1489,11 +1489,13 @@ check-release-shape:
 # crate/target exists. The CANON feature shape above is what stops NEW churn;
 # this sweeps whatever churn predates it, or slips in from an off-shape recipe
 # (`profile`, `sample-pbt`, `scripts/capability-cert*.sh`, wasm/android checks).
+# It keeps every dir a replay of the recorded cargo calls (scripts/cargo-shape-env.sh) uses.
 # Refuses to run while cargo/rustc is using the target dir. Dry run by default.
 target-gc target_dir='target' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    /usr/bin/python3 scripts/target-gc.py {{target_dir}} --apply {{FLAGS}}
+    HOLON_CARGO_RECORD=${HOLON_CARGO_RECORD:-{{target_dir}}/cargo-shape/calls.jsonl} \
+      /usr/bin/python3 scripts/target-gc.py {{target_dir}} --apply {{FLAGS}}
 
 # Web arm (dioxus-web under test) typecheck — the SAME shape as `gate-compile`
 # above (CANON_FEATURES carries web-arm too, D85.c), so this call costs cargo
