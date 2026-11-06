@@ -11,8 +11,8 @@ stdout: first the `BASE:` and `TREE:` lines (commit ids of the fork point of `@`
   of the output is a log tied to a tree. Then one `<step>: <args>` line per step, each step name at most once, and
   printed only after the whole selection is computed: a failure prints no step line and exits non-zero.
   `clippy:` and `nextest:` hold the arguments of that command. Both carry the canonical compile shape
-  `--workspace --features <the justfile's CANON_FEATURES>`; the nextest line adds `-E '<filterset>'` naming the
-  crates to run. There is no `nextest:` line when no crate owns a changed path, and no `-E` when a root build
+  `--workspace --features <the justfile's CANON_FEATURES>`; the nextest line adds `--no-tests=fail`, so a run that
+  matches no test fails under any nextest default, and `-E '<filterset>'` naming the crates to run. There is no `nextest:` line when no crate owns a changed path, and no `-E` when a root build
   file changed (every crate runs).
   `holon-integration-tests` reached as a reverse dep enters the filterset by its test binaries, never as a whole
   crate. A binary drops its env-bound top-level modules and those the default profile excludes, by test name;
@@ -378,7 +378,7 @@ def arg_lines(pkgs, bins, features, profile=None, owners=(), path_owners=()):
     """
     canon = "--workspace --features " + ",".join(features)
     lines = [f"clippy: {canon}"]
-    run = canon + (f" --profile {profile}" if profile else "")
+    run = canon + " --no-tests=fail" + (f" --profile {profile}" if profile else "")
     sel = filterset(pkgs, bins)
     if sel:
         lines.append(f"nextest: {run} -E '{sel}'")
@@ -520,7 +520,7 @@ def fixture_workspace(root):
 
 
 CANON = f"--workspace --features {INTEGRATION}/pbt,gpui/pbt"
-RUN = f"{CANON} --profile load-tolerant"
+RUN = f"{CANON} --no-tests=fail --profile load-tolerant"
 OLD_BINARIES = f"(package({INTEGRATION}) & (binary(e2e) | binary(plain) | binary(suite)))"
 ONE_BINARY = f"(package({INTEGRATION}) & binary(integration) & not (test(/^hand::/) | test(/^latency_slo_gate::/) | test(/^web::/)))"
 UNOWNED_LEAF = f"unowned: package(leaf) is excluded by the load-tolerant profile and has no recipe in {OWNER_TABLE_FILE}"

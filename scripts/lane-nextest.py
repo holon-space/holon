@@ -118,7 +118,7 @@ def rerun(args):
         args[i] = f"({args[i]}) & ({only})"
     else:
         args += ["-E", only]
-    return subprocess.run(["cargo", "nextest", "run", "--no-fail-fast", "--no-tests=fail", *args],
+    return subprocess.run(["cargo", "nextest", "run", "--no-fail-fast", *args],
                           stderr=subprocess.STDOUT).returncode
 
 
