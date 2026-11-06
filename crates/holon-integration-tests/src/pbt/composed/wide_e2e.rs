@@ -243,11 +243,20 @@ async fn drain_dispatches(handle: &WideHandle, budget: Duration) {
     let Some(reactive) = handle.reactive() else {
         return;
     };
-    let journal = reactive.ui_state().dispatch_journal();
     let engine = handle
         .engine
         .as_ref()
         .expect("a frontend draw boots a backend engine");
+    drain_engine_dispatches(&reactive, engine, budget).await;
+}
+
+/// [`drain_dispatches`] for one session's frontend and backend engines.
+pub(crate) async fn drain_engine_dispatches(
+    reactive: &holon_frontend::reactive::ReactiveEngine,
+    engine: &BackendEngine,
+    budget: Duration,
+) {
+    let journal = reactive.ui_state().dispatch_journal();
     let hold = engine.dispatch_hold().clone();
     let cap = budget.max(CONVERGE_BUDGET);
     let started = std::time::Instant::now();

@@ -4809,11 +4809,18 @@ impl HeadlessFrontendComponent {
 }
 
 impl HeadlessFrontendComponent {
-    /// Waits until every projection reached the target of the writes made so
-    /// far, the org ingest of a seam's file writes included; panics naming the
-    /// stage short of its target when one hangs.
+    /// Waits until every dispatched intent landed and every projection reached
+    /// the target of the writes made so far, the org ingest of a seam's file
+    /// writes included; panics naming the stage short of its target when one
+    /// hangs.
     async fn settle_projections(&self, seam: &str) {
         let engine = self.engine();
+        crate::pbt::composed::wide_e2e::drain_engine_dispatches(
+            &self.reactive(),
+            &engine,
+            crate::pbt::invariants::bodies::settle_budget::wedge_deadline(),
+        )
+        .await;
         crate::pbt::convergence::converge_signals(
             crate::pbt::convergence::Signals {
                 engine: Some(&engine),
