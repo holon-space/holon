@@ -2201,8 +2201,9 @@ impl HeadlessFrontendComponent {
     }
 
     /// Settle so a watcher re-ingest driven by an external file move has
-    /// fully projected before the invariants run. Fail loud on a 5s budget --
-    /// a never-settling ingest means the cascade regressed.
+    /// fully projected before the invariants run. Fail loud when the fixed
+    /// point is never reached -- a never-settling ingest means the cascade
+    /// regressed.
     async fn settle_block_id_set(&self, label: &str) {
         self.converge(Duration::from_secs(5), label).await;
     }
@@ -4812,7 +4813,8 @@ impl HeadlessFrontendComponent {
     }
 
     /// Settle barrier for a seam org write whose expected new ids are KNOWN:
-    /// wait until every `expected` id reaches `block_raw`, then settle.
+    /// wait until every `expected` id reaches `block_raw`, then for the
+    /// projections' fixed point.
     ///
     /// The expected ids make the post-state an explicit precondition: a write
     /// that never ingests fails here, named, instead of in a later invariant.
@@ -5429,8 +5431,9 @@ impl HeadlessFrontendComponent {
         tracing::info!("[{seam}] {doc}: occurrence {occurrence} settled {settled:?}");
     }
 
-    /// Wait until the file-sync controller has processed every change up to
-    /// the latest one, `path`'s.
+    /// Wait until `id`'s stored content is `text`, then for the projections'
+    /// fixed point: an ingest can land after the projections already look
+    /// settled.
     async fn await_block_content(&self, id: &EntityUri, text: &str, seam: &str) {
         let timeout = soak_deadline(Duration::from_secs(5));
         let start = std::time::Instant::now();
@@ -5454,6 +5457,8 @@ impl HeadlessFrontendComponent {
         self.converge(timeout, seam).await;
     }
 
+    /// Wait until the file-sync controller has processed every change up to
+    /// the latest one, `path`'s.
     async fn await_ingest(&self, path: &Path, seam: &str) {
         let seq = self.org_fs().last_change_seq();
         let idle = self
