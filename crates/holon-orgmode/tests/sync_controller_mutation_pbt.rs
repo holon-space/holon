@@ -1213,6 +1213,9 @@ fn find_headlines(org_text: &str) -> Vec<HeadlineInfo> {
 fn apply_text_mutation(org_text: &str, mutation: &TextMutation) -> Option<String> {
     let mut lines: Vec<String> = org_text.lines().map(|l| l.to_string()).collect();
     let headlines = find_headlines(org_text);
+    if headlines.is_empty() {
+        return None;
+    }
 
     match mutation {
         TextMutation::ReplaceTitle {
@@ -5106,6 +5109,82 @@ mod duplicate_doc_id_tests {
     }
 }
 
+/// A file the watcher path ingested is not ingested again by the next
+/// poll pass: the poll is only the backstop for a lost event.
+async fn check_watcher_ingest_leaves_nothing_for_the_next_poll(
+    variant: u8,
+    mutations: Vec<TextMutation>,
+    path_segments: Vec<String>,
+) -> Result<(), TestCaseError> {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut fixture = TestFixture::new_with(temp_dir.path(), path_segments, true);
+    fixture.ensure_parent_dirs().await;
+    let baseline = stabilize_blocks(
+        &generate_baseline_blocks(&fixture.doc_id, variant),
+        &fixture.doc_id,
+        &fixture.root_dir,
+    );
+    prop_assume!(!baseline.is_empty());
+    fixture.seed_blocks(&baseline);
+    fixture
+        .controller
+        .initialize()
+        .await
+        .expect("initialize must succeed");
+
+    let mut org = OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id)
+        .expect("org render")
+        .text;
+    let mut writes = vec![org.clone()];
+    writes.extend(mutations.iter().filter_map(|m| {
+        org = apply_text_mutation(&org, m)?;
+        Some(org.clone())
+    }));
+    for (i, text) in writes.iter().enumerate() {
+        tokio::fs::write(&fixture.file_path(), text).await.unwrap();
+        let _ = fixture
+            .controller
+            .on_file_changed(&fixture.file_path())
+            .await
+            .expect("the watcher path ingests the write");
+        // An ingest may write the file back; the watcher delivers that too.
+        if tokio::fs::read_to_string(&fixture.file_path())
+            .await
+            .unwrap()
+            != *text
+        {
+            let _ = fixture
+                .controller
+                .on_file_changed(&fixture.file_path())
+                .await
+                .expect("the watcher path ingests the write-back");
+        }
+        let polled = fixture.controller.poll_tracked_files().await.unwrap();
+        prop_assert_eq!(polled, 0, "write {} of {}:\n{}", i, writes.len(), text);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_watcher_ingest_leaves_nothing_for_the_next_poll_fixed_cases() {
+    let cases = [(
+        1,
+        vec![
+            TextMutation::DeleteHeadline { headline_idx: 9 },
+            TextMutation::ReplaceTitle {
+                headline_idx: 0,
+                new_title: "a0".to_string(),
+            },
+        ],
+        vec!["AA".to_string()],
+    )];
+    for (variant, mutations, path_segments) in cases {
+        check_watcher_ingest_leaves_nothing_for_the_next_poll(variant, mutations, path_segments)
+            .await
+            .unwrap();
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 50,
@@ -5113,8 +5192,6 @@ proptest! {
         ..ProptestConfig::default()
     })]
 
-    /// A file the watcher path ingested is not ingested again by the next
-    /// poll pass: the poll is only the backstop for a lost event.
     #[test]
     fn a_watcher_ingest_leaves_nothing_for_the_next_poll(
         variant in 0..3u8,
@@ -5122,46 +5199,10 @@ proptest! {
         path_segments in path_chain_strategy(),
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let mut fixture = TestFixture::new_with(temp_dir.path(), path_segments, true);
-            fixture.ensure_parent_dirs().await;
-            let baseline = stabilize_blocks(
-                &generate_baseline_blocks(&fixture.doc_id, variant),
-                &fixture.doc_id,
-                &fixture.root_dir,
-            );
-            prop_assume!(!baseline.is_empty());
-            fixture.seed_blocks(&baseline);
-            fixture.controller.initialize().await.expect("initialize must succeed");
-
-            let mut org = OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id)
-                .expect("org render")
-                .text;
-            let mut writes = vec![org.clone()];
-            writes.extend(mutations.iter().filter_map(|m| {
-                org = apply_text_mutation(&org, m)?;
-                Some(org.clone())
-            }));
-            for (i, text) in writes.iter().enumerate() {
-                tokio::fs::write(&fixture.file_path(), text).await.unwrap();
-                let _ = fixture
-                    .controller
-                    .on_file_changed(&fixture.file_path())
-                    .await
-                    .expect("the watcher path ingests the write");
-                // An ingest may write the file back; the watcher delivers that too.
-                if tokio::fs::read_to_string(&fixture.file_path()).await.unwrap() != *text {
-                    let _ = fixture
-                        .controller
-                        .on_file_changed(&fixture.file_path())
-                        .await
-                        .expect("the watcher path ingests the write-back");
-                }
-                let polled = fixture.controller.poll_tracked_files().await.unwrap();
-                prop_assert_eq!(polled, 0, "write {} of {}:\n{}", i, writes.len(), text);
-            }
-            Ok(())
-        })?;
+        rt.block_on(check_watcher_ingest_leaves_nothing_for_the_next_poll(
+            variant,
+            mutations,
+            path_segments,
+        ))?;
     }
 }
