@@ -28,6 +28,8 @@
 #           Also a CROSS-FAMILY match: a row's wording fired from a site the
 #           row does not list, which is a new failure wearing a known red's
 #           words until a log proves the same root cause is re-raised there.
+# Exit 2  — usage error, missing registry, or a command this script runs
+#           failed: the log is not classified, and stderr names the command.
 # Exit 3  — at least one log admits no verdict: INDETERMINATE (empty, or
 #           truncated before the run said anything) or UNREADABLE (no such
 #           file). Never silently a pass — the input is broken, so nothing can
@@ -41,10 +43,19 @@
 #
 # The registry is the single source of truth for the patterns; this script holds
 # none of its own. Apart from that, it knows exactly one panic: the keystone's
-# injected boot fault (`injected_panic` below), which is no failure at all.
-set -euo pipefail
+# injected boot fault (`INJECTED_SITE` below), which is no failure at all.
+set -eEuo pipefail
+export LC_ALL=C
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Names the command by its first line: an awk program spans many.
+fail() {
+    echo "[known-reds] ERROR: ${1%%$'\n'*} failed (exit $2); the log is not classified." >&2
+    exit 2
+}
+trap 'fail "$BASH_COMMAND" "$?"' ERR
+
+here=$(dirname "${BASH_SOURCE[0]}")
+repo_root=$(cd "$here/.." && pwd)
 registry="$repo_root/docs/Testing/KeystoneKnownReds.md"
 
 if [ "$#" -lt 1 ]; then
@@ -55,6 +66,9 @@ if [ ! -f "$registry" ]; then
     echo "[known-reds] registry missing: $registry" >&2
     exit 2
 fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work" || fail "rm -rf $work" "$?"' EXIT
 
 # The input logs' `BASE:`/`TREE:` lines head the output, so a tee of it names
 # the tree it judged. An unreadable log is reported in the loop below.
@@ -78,169 +92,58 @@ done | awk '!seen[$0]++'
 # loudly rather than re-attributing the signature (Martin, 2026-10-13).
 #
 # `companions` are invariant-id globs the row's root cause also trips; see the
-# matching loop for when they count.
-keys=()
-patterns=()
-sites=()
-companions=()
-rows=$(python3 "$repo_root/scripts/check-known-red-evidence.py" --rows "$registry")
-while IFS=$'\x1f' read -r key pattern site companion; do
-    [ -z "$key" ] && continue
-    keys+=("$key")
-    patterns+=("$pattern")
-    sites+=("$site")
-    companions+=("$companion")
-done <<<"$rows"
-
-if [ "${#keys[@]}" -eq 0 ]; then
+# matching awk for when they count.
+rows="$work/rows"
+python3 "$repo_root/scripts/check-known-red-evidence.py" --rows "$registry" >"$rows"
+if [ ! -s "$rows" ]; then
     echo "[known-reds] registry has no known-red rows — every failure is novel."
 fi
-
-# Strip volatile payloads that make otherwise-identical panics look distinct
-# (per-run UUIDs, span Ids, resolver-map contents, split-block indices) so
-# dedup and registry matching operate on the stable shape of the signature.
-normalize_sig() {
-    printf '%s' "$1" | sed -E \
-        -e 's/^Test failed: (.*)\.$/\1/' \
-        -e 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/<uuid>/g' \
-        -e 's/\bId\([0-9]+\)/Id(N)/g' \
-        -e 's/Mapped: \[[^]]*\]/Mapped: [...]/g' \
-        -e 's/split-[0-9]+/split-N/g'
-}
-
-# A registry row names ONE violation, so a signature is known only when each of
-# its violations is. Prints one signature per violation, each shaped as the
-# panic would read had that violation fired alone: an oracle verdict
-# `…diverged from the oracle: [("inv-a", "…"), ("inv-b", "…")]…` splits per
-# invariant, and an `inv-sql-budget` message of N violations splits into N
-# `1 budget violation(s)` messages. Any other signature prints unchanged.
-# Exit 3 when a budget message holds a different number of violations than it
-# announces: the split cannot be trusted, so neither can a verdict.
-split_violations() {
-    printf '%s\n' "$1" | awk '
-        function whole() { print sig; exit }
-        # The end of the Debug-escaped string that opens at s[p], or 0.
-        function string_end(s, p,    c) {
-            for (p++; p <= length(s); p++) {
-                c = substr(s, p, 1)
-                if (c == "\\") p++
-                else if (c == "\"") return p
-            }
-            return 0
-        }
-        {
-            sig = $0
-            at = index(sig, "diverged from the oracle: [(")
-            if (at == 0) whole()
-            at += length("diverged from the oracle: ")
-            prefix = substr(sig, 1, at - 1)
-            n = 0; p = at + 1
-            while (1) {
-                if (substr(sig, p, 2) != "(\"") whole()
-                id_end = string_end(sig, p + 1)
-                if (!id_end || substr(sig, id_end, 3) != "\", ") whole()
-                msg_end = string_end(sig, id_end + 3)
-                if (!msg_end || substr(sig, msg_end + 1, 1) != ")") whole()
-                n++
-                head[n] = substr(sig, p, id_end + 4 - p)
-                msg[n] = substr(sig, id_end + 4, msg_end - id_end - 4)
-                p = msg_end + 2
-                if (substr(sig, p, 2) == ", ") { p += 2; continue }
-                if (substr(sig, p, 1) == "]") break
-                whole()
-            }
-            suffix = substr(sig, p + 1)
-            budget_head = "[inv-sql-budget] 1 budget violation(s):\\n  "
-            for (i = 1; i <= n; i++) {
-                if (!match(msg[i], /^\[inv-sql-budget\] [0-9]+ budget violation\(s\):\\n  /)) {
-                    print prefix "[" head[i] msg[i] "\")]" suffix
-                    continue
-                }
-                announced = substr(msg[i], length("[inv-sql-budget] ") + 1) + 0
-                rest = substr(msg[i], RLENGTH + 1)
-                k = 0
-                # Every metric label, not only sql_*: the budget also writes wall, query and memory ceilings.
-                while (match(rest, /\\n  [^ ]+\.[a-z_]+: /)) {
-                    one[++k] = substr(rest, 1, RSTART - 1)
-                    rest = substr(rest, RSTART + 4)
-                }
-                one[++k] = rest
-                if (k != announced) {
-                    printf "[known-reds] ERROR: an inv-sql-budget message announces %d violation(s) but splits into %d: %s\n", announced, k, msg[i] >"/dev/stderr"
-                    exit 3
-                }
-                for (j = 1; j <= k; j++) print prefix "[" head[i] budget_head one[j] "\")]" suffix
-            }
-        }'
-}
-
-# A panic is collateral (unwind noise from a thread tearing down after some
-# other panic) when its payload is an opaque `Any { .. }` or it originates in
-# tracing-subscriber's span teardown, not in workspace code. Collateral is
-# reported but never counts toward novel/matched or the PASS/FAIL verdict.
-is_collateral() {
-    local loc="$1" sig="$2"
-    [[ "$sig" == *'Any { .. }'* ]] && return 0
-    [[ "$loc" == *"tracing-subscriber-"*"sharded.rs"* ]] && return 0
-    return 1
-}
-
-# The hand-authored replay's closing panic lists its red cases, each of which
-# is judged on its own panic.
-is_replay_report() {
-    [[ "$1" =~ ^hand-authored\ replay:\ [0-9]+\ red\ case\(s\):\  ]]
-}
-
-# The index of registry row `$1`, or -1.
-row_index() {
-    local i
-    for i in "${!keys[@]}"; do
-        [ "${keys[$i]}" = "$1" ] && { echo "$i"; return; }
-    done
-    echo -1
-}
-
-# The keystone's own sample-floor panic is this gate speaking, not a bug: it is
-# reported through the sample verdict below, never as a novel signature.
-is_sample_floor() {
-    [[ "$1" == *'[keystone-sample] FLOOR BREACH:'* ]]
-}
-
-# A keystone log must disclose the sample its verdict rests on. Prints the
-# disclosure and returns non-zero when the sample is below the floor or absent.
-check_sample() {
-    local log="$1" line
-    # A run of the HEADLESS keystone only, read from the test runner's own
-    # lines: cargo build output names the target without running it, and
-    # `general_e2e_composed_pbt_windowed` discloses no sample.
-    grep -qE "^[[:space:]]*test general_e2e_composed_pbt::general_e2e_composed_pbt |thread 'general_e2e_composed_pbt::general_e2e_composed_pbt'|::integration general_e2e_composed_pbt::general_e2e_composed_pbt\$" "$log" || return 0
-    line=$(grep_selecting -hF '[keystone-sample] cases=' "$log" | tail -1)
-    if [ -z "$line" ]; then
-        echo "SAMPLE: UNDISCLOSED — this keystone run printed no [keystone-sample] line, so"
-        echo "        it stopped at its first failure (or was truncated) instead of drawing on."
-        echo "        Nothing can be said about draws it never made."
-        return 1
-    fi
-    echo "SAMPLE: ${line#*\] }"
-    [ "$line" != "${line%verdict=OK*}" ]
-}
 
 # The keystone's `BootFault::TaskPanic` panics on purpose and asserts the
 # disclosure itself. Only this payload at this site is no failure: it is
 # removed before the outcome is read, so it can neither fail a green run nor
 # take the PRIMARY slot from a real failure.
-injected_panic=$'crates/holon-integration-tests/src/pbt/composed/boot_fault.rs:22:5\tkeystone boot fault: injected task panic'
+export INJECTED_SITE=crates/holon-integration-tests/src/pbt/composed/boot_fault.rs:22:5
+export INJECTED_PAYLOAD='keystone boot fault: injected task panic'
 injected=0
 
-# grep whose "no line selected" (exit 1) is a result; a grep error (exit 2) is
-# not, and stops the script rather than leave a truncated signature file.
+# grep whose "no line selected" (exit 1) is a result; any other exit stops the run.
 grep_selecting() {
     local rc=0
     grep "$@" || rc=$?
-    if [ "$rc" -gt 1 ]; then
-        echo "[known-reds] ERROR: grep $* failed (exit $rc); the log is not classified." >&2
-        return "$rc"
+    [ "$rc" -le 1 ] || fail "grep $*" "$rc"
+    return "$rc"
+}
+
+# awk whose `exit 3` is a verdict it printed itself (the log admits none); any
+# other failure stops the run.
+awk_verdict() {
+    local rc=0
+    awk "$@" || rc=$?
+    [ "$rc" -ne 3 ] || exit 3
+    [ "$rc" -eq 0 ] || fail "awk" "$rc"
+}
+
+# A keystone log must disclose the sample its verdict rests on. Prints the
+# disclosure and counts the log into `sample_bad` when the sample is below the
+# floor or absent. It runs outside any condition, so a failing command in it
+# still stops the run.
+check_sample() {
+    local log="$1" line
+    # A run of the HEADLESS keystone only, read from the test runner's own
+    # lines: cargo build output names the target without running it, and
+    # `general_e2e_composed_pbt_windowed` discloses no sample.
+    grep_selecting -qE "^[[:space:]]*test general_e2e_composed_pbt::general_e2e_composed_pbt |thread 'general_e2e_composed_pbt::general_e2e_composed_pbt'|::integration general_e2e_composed_pbt::general_e2e_composed_pbt\$" "$log" || return 0
+    line=$(awk 'index($0, "[keystone-sample] cases=") { l = $0 } END { print l }' "$log")
+    if [ -z "$line" ]; then
+        echo "SAMPLE: UNDISCLOSED — this keystone run printed no [keystone-sample] line, so"
+        echo "        it stopped at its first failure (or was truncated) instead of drawing on."
+        echo "        Nothing can be said about draws it never made."
+        sample_bad=$((sample_bad + 1))
+        return 0
     fi
+    echo "SAMPLE: ${line#*\] }"
+    [ "$line" != "${line%verdict=OK*}" ] || sample_bad=$((sample_bad + 1))
 }
 
 # What the log says the run DID: `failed`, `green`, or `indeterminate` (it says
@@ -262,11 +165,11 @@ any_error_re='^error(\[[A-Za-z0-9]+\])?: '
 
 log_outcome() {
     local log="$1"
-    if grep -qE "$harness_failed_re" "$log"; then
+    if grep_selecting -qE "$harness_failed_re" "$log"; then
         printf 'failed'
-    elif grep -qE "$green_verdict_re" "$log"; then
+    elif grep_selecting -qE "$green_verdict_re" "$log"; then
         printf 'green'
-    elif grep -qE "$any_error_re" "$log"; then
+    elif grep_selecting -qE "$any_error_re" "$log"; then
         printf 'failed'
     else
         printf 'indeterminate'
@@ -282,15 +185,8 @@ green=0
 green_declared=0
 indeterminate=0
 unreadable=0
-# Per-key hit counts + one example each. Parallel indexed arrays, not an
-# associative array — macOS ships bash 3.2.
-counts=()
-examples=()
-for i in "${!keys[@]}"; do
-    counts[$i]=0
-    examples[$i]=""
-done
-novel_file=$(mktemp)
+: >"$work/novel"
+: >"$work/hits"
 
 for log in "$@"; do
     if [ ! -f "$log" ] || [ ! -r "$log" ]; then
@@ -331,8 +227,10 @@ for log in "$@"; do
     # failures. The stress index `[i/n]` is dropped from the signature so a
     # pattern names the test once; nextest also repeats status lines in its
     # closing summary, hence the dedup.
-    sigs_file=$(mktemp)
-    awk '
+    #
+    # The injected boot-fault panic is counted into `injected`, not printed.
+    sigs="$work/sigs"
+    awk_verdict '
         function thread_of(line,    t) {
             sub(/^ +/, "", line)
             # A stdout line written between `thread '"'"'` and the name leaves
@@ -485,29 +383,26 @@ for log in "$@"; do
             if ((getline msg) > 0) {
                 sub(/^ +/, "", msg)
                 if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
-                print loc "\t" msg
+                if (loc == ENVIRON["INJECTED_SITE"] && msg == ENVIRON["INJECTED_PAYLOAD"]) injected++
+                else print loc "\t" msg
             }
             next
         }
         END {
+            print injected + 0 >injected_out
             if (!stopped)
                 for (c in red_case) if (!(c in judged)) print "-\tthe red case printed no panic\037" c "\037" declared[c]
-        }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" "$log" "$log" >"$sigs_file" \
-        || { rc=$?; rm -f "$sigs_file" "$novel_file"; exit "$rc"; }
+        }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" "$log" "$log" >"$sigs"
 
-    log_injected=$(grep_selecting -cxF -- "$injected_panic" "$sigs_file") \
-        || { rc=$?; rm -f "$sigs_file" "$novel_file"; exit "$rc"; }
+    read -r log_injected <"$work/injected"
     if [ "$log_injected" -gt 0 ]; then
-        grep_selecting -vxF -- "$injected_panic" "$sigs_file" >"$sigs_file.real" \
-            || { rc=$?; rm -f "$sigs_file" "$sigs_file.real" "$novel_file"; exit "$rc"; }
-        mv "$sigs_file.real" "$sigs_file"
-        echo "[known-reds] INJECTED: $log_injected keystone boot-fault panic(s) at ${injected_panic%%$'\t'*} in $log — expected, not a failure."
+        echo "[known-reds] INJECTED: $log_injected keystone boot-fault panic(s) at $INJECTED_SITE in $log — expected, not a failure."
         injected=$((injected + log_injected))
     fi
 
     # Panics ARE failure evidence, and outrank the verdict lines: a run killed
     # mid-shrink is truncated before cargo ever prints `test result:`.
-    if [ -s "$sigs_file" ]; then
+    if [ -s "$sigs" ]; then
         outcome=failed
     else
         outcome=$(log_outcome "$log")
@@ -516,7 +411,6 @@ for log in "$@"; do
     if [ "$outcome" = green ]; then
         echo "[known-reds] GREEN: $log — run passed, nothing to classify."
         green=$((green + 1))
-        rm -f "$sigs_file"
         continue
     fi
 
@@ -526,173 +420,274 @@ for log in "$@"; do
         echo "               keystone run log). Tail:"
         tail -20 "$log" | sed 's/^/               | /'
         indeterminate=$((indeterminate + 1))
-        rm -f "$sigs_file"
         continue
     fi
 
-    if [ ! -s "$sigs_file" ]; then
+    if [ ! -s "$sigs" ]; then
         echo "[known-reds] NOVEL: $log — run failed but no panic signature was extracted"
         echo "               (compile error or a new failure shape). Tail:"
         tail -20 "$log" | sed 's/^/               | /'
         novel=$((novel + 1))
-        rm -f "$sigs_file"
         continue
     fi
 
-    base=$(basename "$log")
+    base=${log##*/}
     echo ""
     echo "=== $base ==="
 
+    # One awk matches every signature against every row. It prints the
+    # PRIMARY and shrink-tail entries, appends novel signatures to `novel` and
+    # known-red hits (`<row index>\t<example>`) to `hits`, and writes this
+    # log's counts to `counts`.
+    #
+    # Volatile payloads (per-run UUIDs, span Ids, resolver-map contents,
+    # split-block indices) are normalized away, so dedup and registry matching
+    # operate on the stable shape of the signature.
+    #
+    # A registry row names ONE violation, so a signature is known only when each
+    # of its violations is: an oracle verdict
+    # `…diverged from the oracle: [("inv-a", "…"), ("inv-b", "…")]…` splits per
+    # invariant, and an `inv-sql-budget` message of N violations splits into N
+    # `1 budget violation(s)` messages. A budget message that holds a different
+    # number of violations than it announces stops the run (exit 3): the split
+    # cannot be trusted, so neither can a verdict. A violation no pattern knows
+    # is still known when its invariant is a companion of a row hit by ANOTHER
+    # violation of the same signature: alone, a companion is novel.
+    #
     # The FIRST panic is what actually failed the run; proptest then re-runs
     # the same case (or a genuinely different one) while shrinking, so every
     # panic after it is a shrink-tail re-panic — printed separately so it
     # can't be mistaken for the run's real failure.
-    line_no=0
-    tail_file=$(mktemp)
-    while IFS=$'\t' read -r loc sig; do
-        if [ "$loc" = note ]; then
-            echo "[known-reds] NOTE: known_red ${sig#*$'\037'} case \"${sig%%$'\037'*}\": declared known red, ran green"
-            green_declared=$((green_declared + 1))
-            continue
-        fi
-        line_no=$((line_no + 1))
-        replay_case="" declared_row=""
-        if [[ "$sig" == *$'\037'* ]]; then
-            declared_row=${sig##*$'\037'}
-            replay_case=${sig#*$'\037'}
-            replay_case=${replay_case%$'\037'*}
-            sig=${sig%%$'\037'*}
-        fi
-        norm=$(normalize_sig "$sig")
+    #
+    # A panic is collateral (unwind noise from a thread tearing down after some
+    # other panic) when its payload is an opaque `Any { .. }` or it originates
+    # in tracing-subscriber's span teardown, not in workspace code. Collateral
+    # is reported but never counts toward novel/matched or the verdict. The
+    # keystone's own sample-floor panic is reported through the sample verdict
+    # below, and the hand-authored replay's closing report lists cases that
+    # are each judged on their own panic: neither is a signature.
+    LOG_BASE="$base" WORK="$work" awk_verdict '
+        function normalize(s,    out, pre) {
+            if (s ~ /^Test failed: .*\.$/) s = substr(s, 14, length(s) - 14)
+            gsub(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/, "<uuid>", s)
+            out = ""
+            while (match(s, /Id\([0-9]+\)/)) {
+                pre = substr(s, RSTART - 1, 1)
+                out = out substr(s, 1, RSTART - 1) ((RSTART == 1 || pre !~ /[A-Za-z0-9_]/) ? "Id(N)" : substr(s, RSTART, RLENGTH))
+                s = substr(s, RSTART + RLENGTH)
+            }
+            s = out s
+            gsub(/Mapped: \[[^]]*\]/, "Mapped: [...]", s)
+            gsub(/split-[0-9]+/, "split-N", s)
+            return s
+        }
+        # The end of the Debug-escaped string that opens at s[p], or 0.
+        function string_end(s, p,    c) {
+            for (p++; p <= length(s); p++) {
+                c = substr(s, p, 1)
+                if (c == "\\") p++
+                else if (c == "\"") return p
+            }
+            return 0
+        }
+        # Fills PIECE[1..n] with the violations of `sig`, each shaped as the
+        # panic would read had that violation fired alone; returns n.
+        function split_violations(sig,    at, prefix, n, p, id_end, msg_end, head, msg, suffix, budget_head, i, announced, rest, k, one, j, out) {
+            PIECE[1] = sig
+            at = index(sig, "diverged from the oracle: [(")
+            if (at == 0) return 1
+            at += length("diverged from the oracle: ")
+            prefix = substr(sig, 1, at - 1)
+            n = 0; p = at + 1
+            while (1) {
+                if (substr(sig, p, 2) != "(\"") return 1
+                id_end = string_end(sig, p + 1)
+                if (!id_end || substr(sig, id_end, 3) != "\", ") return 1
+                msg_end = string_end(sig, id_end + 3)
+                if (!msg_end || substr(sig, msg_end + 1, 1) != ")") return 1
+                n++
+                head[n] = substr(sig, p, id_end + 4 - p)
+                msg[n] = substr(sig, id_end + 4, msg_end - id_end - 4)
+                p = msg_end + 2
+                if (substr(sig, p, 2) == ", ") { p += 2; continue }
+                if (substr(sig, p, 1) == "]") break
+                return 1
+            }
+            suffix = substr(sig, p + 1)
+            budget_head = "[inv-sql-budget] 1 budget violation(s):\\n  "
+            out = 0
+            for (i = 1; i <= n; i++) {
+                if (!match(msg[i], /^\[inv-sql-budget\] [0-9]+ budget violation\(s\):\\n  /)) {
+                    PIECE[++out] = prefix "[" head[i] msg[i] "\")]" suffix
+                    continue
+                }
+                announced = substr(msg[i], length("[inv-sql-budget] ") + 1) + 0
+                rest = substr(msg[i], RLENGTH + 1)
+                k = 0
+                # Every metric label, not only sql_*: the budget also writes wall, query and memory ceilings.
+                while (match(rest, /\\n  [^ ]+\.[a-z_]+: /)) {
+                    one[++k] = substr(rest, 1, RSTART - 1)
+                    rest = substr(rest, RSTART + 4)
+                }
+                one[++k] = rest
+                if (k != announced) {
+                    printf "[known-reds] ERROR: an inv-sql-budget message announces %d violation(s) but splits into %d: %s\n", announced, k, msg[i] >"/dev/stderr"
+                    stopped = 1
+                    exit 3
+                }
+                for (j = 1; j <= k; j++) PIECE[++out] = prefix "[" head[i] budget_head one[j] "\")]" suffix
+            }
+            while (out > 1 && PIECE[out] == "") out--
+            return out
+        }
+        function glob_re(g,    r, i, c) {
+            r = "^"
+            for (i = 1; i <= length(g); i++) {
+                c = substr(g, i, 1)
+                if (c == "*") r = r ".*"
+                else if (c == "?") r = r "."
+                else if (index("\\.[]^$+{}()|/", c)) r = r "\\" c
+                else r = r c
+            }
+            return r "$"
+        }
+        function row_index(k,    i) {
+            for (i = 1; i <= nrows; i++) if (key[i] == k) return i
+            return 0
+        }
+        BEGIN { FS = "\037"; prefix_inv = "diverged from the oracle: [(\"" }
+        FNR == NR {
+            if ($1 != "") { key[++nrows] = $1; pat[nrows] = $2; site[nrows] = $3; comp[nrows] = $4 }
+            next
+        }
+        {
+            tab = index($0, "\t")
+            loc = tab ? substr($0, 1, tab - 1) : $0
+            sig = tab ? substr($0, tab + 1) : ""
+            sub(/^\t+/, "", sig); sub(/\t+$/, "", sig)
+            if (loc == "note") {
+                cut = index(sig, "\037")
+                print "[known-reds] NOTE: known_red " substr(sig, cut + 1) " case \"" substr(sig, 1, cut - 1) "\": declared known red, ran green"
+                green_declared++
+                next
+            }
+            line_no++
+            replay_case = ""; declared_row = ""
+            first = index(sig, "\037")
+            if (first) {
+                last = first
+                while ((cut = index(substr(sig, last + 1), "\037"))) last += cut
+                declared_row = substr(sig, last + 1)
+                replay_case = last > first ? substr(sig, first + 1, last - first - 1) : substr(sig, first + 1)
+                sig = substr(sig, 1, first - 1)
+            }
+            norm = normalize(sig)
+            if (index(sig, "[keystone-sample] FLOOR BREACH:")) {
+                class = "sample-floor"
+            } else if (replay_case == "" && sig ~ /^hand-authored replay: [0-9]+ red case\(s\): /) {
+                class = "replay-report"
+            } else if (index(sig, "Any { .. }") || loc ~ /tracing-subscriber-.*sharded\.rs/) {
+                class = "collateral"
+                collateral++
+            } else {
+                n = split_violations(norm)
+                nhits = 0; cross_hit = 0; nunmatched = 0
+                split("", is_hit)
+                for (j = 1; j <= n; j++) {
+                    hit = 0
+                    for (i = 1; i <= nrows; i++) if (PIECE[j] ~ pat[i]) { hit = i; break }
+                    if (hit && site[hit] != "" && loc !~ site[hit]) {
+                        if (!cross_hit) cross_hit = hit
+                    } else if (hit) {
+                        if (!(hit in is_hit)) { is_hit[hit] = 1; HIT[++nhits] = hit }
+                    } else UNMATCHED[++nunmatched] = PIECE[j]
+                }
+                novel_pieces = ""
+                for (j = 1; j <= nunmatched; j++) {
+                    invariant = ""
+                    if ((at = index(UNMATCHED[j], prefix_inv))) {
+                        invariant = substr(UNMATCHED[j], at + length(prefix_inv))
+                        if ((cut = index(invariant, "\""))) invariant = substr(invariant, 1, cut - 1)
+                    }
+                    claimed = 0
+                    for (h = 1; h <= nhits; h++) {
+                        ng = split(comp[HIT[h]], globs, " ")
+                        for (g = 1; g <= ng; g++) if (invariant ~ glob_re(globs[g])) claimed = 1
+                    }
+                    if (!claimed) novel_pieces = novel_pieces substr(UNMATCHED[j], 1, 240) "\n"
+                }
+                if (cross_hit) {
+                    print "[known-reds] FAIL: cross-family match: " key[cross_hit] " at " loc
+                    print "             The row" q "s wording matched, but it asserts from"
+                    print "             " site[cross_hit] " — so this signature belongs to another family."
+                    print "             Triage it (bug-gap-triage). Add this site to the row ONLY if"
+                    print "             the log shows the SAME root cause re-raised there (an outer"
+                    print "             harness re-reporting the inner verdict); never to silence it."
+                    class = "cross-family:" key[cross_hit]
+                    cross++
+                } else if (novel_pieces != "") {
+                    class = "novel"
+                    if (replay_case != "")
+                        print "[known-reds] FAIL: case \"" replay_case "\" matches no row; it names " (declared_row != "" ? declared_row : "no row")
+                    # Grouped by normalized message, not location: a panic site and
+                    # the terminal re-report proptest prints are one novel signature.
+                    printf "%s", novel_pieces >>novel_out
+                    novel++
+                } else if (replay_case != "" && !(nhits == 1 && HIT[1] == row_index(declared_row))) {
+                    class = "novel"
+                    matched_rows = ""
+                    for (h = 1; h <= nhits; h++) matched_rows = matched_rows (h > 1 ? "+" : "") key[HIT[h]]
+                    print "[known-reds] FAIL: case \"" replay_case "\" matches " matched_rows "; it names " (declared_row != "" ? declared_row : "no row")
+                    printf "case \"%s\": %s\n", replay_case, substr(norm, 1, 240) >>novel_out
+                    novel++
+                } else {
+                    class = "known-red:"
+                    for (h = 1; h <= nhits; h++) {
+                        class = class (h > 1 ? "+" : "") key[HIT[h]]
+                        print HIT[h] "\t" ENVIRON["LOG_BASE"] " @ " loc ": " substr(norm, 1, 240) >>hits_out
+                    }
+                    matched++
+                }
+            }
+            entry = "[" class "] " ENVIRON["LOG_BASE"] " @ " loc (replay_case != "" ? " case \"" replay_case "\"" : "") ": " substr(norm, 1, 240)
+            if (line_no == 1) print "PRIMARY: " entry
+            else tail[++ntail] = entry
+        }
+        END {
+            if (stopped) exit 3
+            if (ntail) {
+                print "  -- shrink tail (" ntail " re-panics after the primary; may be a"
+                print "     different bug than the one that actually failed the run) --"
+                for (t = 1; t <= ntail; t++) print "  " tail[t]
+            }
+            print novel + 0, matched + 0, cross + 0, collateral + 0, green_declared + 0 >counts_out
+        }' q="'" novel_out="$work/novel" hits_out="$work/hits" counts_out="$work/counts" "$rows" "$sigs"
+    read -r log_novel log_matched log_cross log_collateral log_green_declared <"$work/counts"
+    novel=$((novel + log_novel))
+    matched=$((matched + log_matched))
+    cross=$((cross + log_cross))
+    collateral=$((collateral + log_collateral))
+    green_declared=$((green_declared + log_green_declared))
 
-        if is_sample_floor "$sig"; then
-            class="sample-floor"
-        elif [ -z "$replay_case" ] && is_replay_report "$sig"; then
-            class="replay-report"
-        elif is_collateral "$loc" "$sig"; then
-            class="collateral"
-            collateral=$((collateral + 1))
-        else
-            pieces=$(split_violations "$norm") \
-                || { rc=$?; rm -f "$sigs_file" "$tail_file" "$novel_file"; exit "$rc"; }
-            # Each violation is matched on its own; ` i j ` holds the distinct
-            # rows hit. A violation no pattern knows is still known when its
-            # invariant is a companion of a row hit by ANOTHER violation of
-            # the same signature: alone, a companion is novel.
-            hits=" "
-            cross_hit=-1
-            unmatched=()
-            while IFS= read -r piece; do
-                hit=-1
-                for i in "${!keys[@]}"; do
-                    if printf '%s\n' "$piece" | grep -qE -- "${patterns[$i]}"; then
-                        hit=$i
-                        break
-                    fi
-                done
-                if [ "$hit" -ge 0 ] && [ -n "${sites[$hit]}" ] \
-                    && ! printf '%s\n' "$loc" | grep -qE -- "${sites[$hit]}"; then
-                    [ "$cross_hit" -lt 0 ] && cross_hit=$hit
-                elif [ "$hit" -ge 0 ]; then
-                    [[ "$hits" == *" $hit "* ]] || hits="$hits$hit "
-                else
-                    unmatched+=("$piece")
-                fi
-            done <<<"$pieces"
-            novel_pieces=""
-            for piece in ${unmatched[@]+"${unmatched[@]}"}; do
-                invariant=${piece#*diverged from the oracle: \[(\"}
-                if [ "$invariant" = "$piece" ]; then
-                    invariant=""
-                else
-                    invariant=${invariant%%\"*}
-                fi
-                claimed=0
-                for hit in $hits; do
-                    read -r -a globs <<<"${companions[$hit]}"
-                    for glob in ${globs[@]+"${globs[@]}"}; do
-                        # shellcheck disable=SC2254 # a registry glob, matched as one
-                        case "$invariant" in $glob) claimed=1 ;; esac
-                    done
-                done
-                [ "$claimed" -eq 1 ] \
-                    || novel_pieces="$novel_pieces$(printf '%.240s' "$piece")"$'\n'
-            done
-            if [ "$cross_hit" -ge 0 ]; then
-                echo "[known-reds] FAIL: cross-family match: ${keys[$cross_hit]} at $loc"
-                echo "             The row's wording matched, but it asserts from"
-                echo "             ${sites[$cross_hit]} — so this signature belongs to another family."
-                echo "             Triage it (bug-gap-triage). Add this site to the row ONLY if"
-                echo "             the log shows the SAME root cause re-raised there (an outer"
-                echo "             harness re-reporting the inner verdict); never to silence it."
-                class="cross-family:${keys[$cross_hit]}"
-                cross=$((cross + 1))
-            elif [ -n "$novel_pieces" ]; then
-                class="novel"
-                [ -z "$replay_case" ] \
-                    || echo "[known-reds] FAIL: case \"$replay_case\" matches no row; it names ${declared_row:-no row}"
-                # Grouped by normalized message only, not location: the same
-                # bug's panic site and proptest's own terminal re-report of it
-                # are two locations for one signature (see normalize_sig's
-                # Test-failed-wrapper strip) and must count as one novel hit,
-                # the same way known-red counts already ignore location. Only
-                # the violations no row knows are listed.
-                printf '%s' "$novel_pieces" >>"$novel_file"
-                novel=$((novel + 1))
-            elif [ -n "$replay_case" ] && [ "$hits" != " $(row_index "$declared_row") " ]; then
-                class="novel"
-                matched_rows=""
-                for hit in $hits; do matched_rows="$matched_rows${keys[$hit]}+"; done
-                echo "[known-reds] FAIL: case \"$replay_case\" matches ${matched_rows%+}; it names ${declared_row:-no row}"
-                printf 'case "%s": %.240s\n' "$replay_case" "$norm" >>"$novel_file"
-                novel=$((novel + 1))
-            else
-                class="known-red:"
-                for hit in $hits; do
-                    class="$class${keys[$hit]}+"
-                    counts[$hit]=$(( ${counts[$hit]} + 1 ))
-                    [ -z "${examples[$hit]}" ] && examples[$hit]="$base @ $loc: $(printf '%.240s' "$norm")"
-                done
-                class="${class%+}"
-                matched=$((matched + 1))
-            fi
-        fi
-
-        entry="[$class] $base @ $loc${replay_case:+ case \"$replay_case\"}: $(printf '%.240s' "$norm")"
-        if [ "$line_no" -eq 1 ]; then
-            echo "PRIMARY: $entry"
-        else
-            printf '%s\n' "$entry" >>"$tail_file"
-        fi
-    done <"$sigs_file"
-    rm -f "$sigs_file"
-
-    if [ -s "$tail_file" ]; then
-        tail_count=$(wc -l <"$tail_file" | tr -d ' ')
-        echo "  -- shrink tail ($tail_count re-panics after the primary; may be a"
-        echo "     different bug than the one that actually failed the run) --"
-        sed 's/^/  /' "$tail_file"
-    fi
-    rm -f "$tail_file"
-
-    if ! check_sample "$log"; then
-        sample_bad=$((sample_bad + 1))
-    fi
+    check_sample "$log"
 done
 echo ""
 
-for i in "${!keys[@]}"; do
-    if [ "${counts[$i]}" -gt 0 ]; then
-        echo "WARN known-red [${keys[$i]}] x${counts[$i]}"
-        echo "     ${examples[$i]}"
-    fi
-done
-if [ -s "$novel_file" ]; then
+awk 'BEGIN { FS = "\037" }
+    FNR == NR { if ($1 != "") key[++nrows] = $1; next }
+    {
+        tab = index($0, "\t"); i = substr($0, 1, tab - 1)
+        if (!count[i]++) example[i] = substr($0, tab + 1)
+    }
+    END {
+        for (i = 1; i <= nrows; i++)
+            if (count[i]) { print "WARN known-red [" key[i] "] x" count[i]; print "     " example[i] }
+    }' "$rows" "$work/hits"
+if [ -s "$work/novel" ]; then
     echo ""
     echo "NOVEL signatures (distinct, with occurrence counts):"
-    sort "$novel_file" | uniq -c | sort -rn | sed 's/^/  /'
+    sort "$work/novel" | uniq -c | sort -rn | sed 's/^/  /'
 fi
-rm -f "$novel_file"
 
 echo ""
 if [ "$injected" -ne 0 ]; then

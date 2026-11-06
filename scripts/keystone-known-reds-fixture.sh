@@ -70,6 +70,22 @@ trap 'rm -rf "$work"' EXIT
 bless=0
 [ "${1-}" = "--bless" ] && bless=1
 
+# Runs the classifier on logs `$4...` into file `$2`, leaving its exit code in
+# `code`. Its own error (exit 2, unless `$3` wants it) or a signal (above 128)
+# is no verdict, so it stops the fixture instead of reading as a changed one.
+# `classify_path` replaces PATH for the classifier alone.
+classify() {
+    local label="$1" out="$2" want_code="$3"
+    shift 3
+    code=0
+    PATH="${classify_path:-$PATH}" "$repo_root/scripts/keystone-known-reds.sh" "$@" >"$out" 2>&1 || code=$?
+    if { [ "$code" -eq 2 ] && [ "$want_code" -ne 2 ]; } || [ "$code" -gt 128 ]; then
+        echo "[fixture] ERROR $label: classifier exit $code" >&2
+        tail -20 "$out" | sed 's/^/          | /' >&2
+        exit 2
+    fi
+}
+
 registry="$repo_root/docs/Testing/KeystoneKnownReds.md"
 registry_rows="$work/registry-rows.txt"
 awk -F'|' '/^\| *`/ { gsub(/^ *`|` *$/, "", $2); print $2 }' "$registry" >"$registry_rows"
@@ -102,12 +118,9 @@ check_corpus() {
     done
 
     # The classifier exits 1 while any novel signature remains; that is a
-    # verdict about the corpus, not about this check, so capture it rather than
-    # inherit it.
+    # verdict about the corpus, not about this check.
     local raw="$work/$label-classification.txt"
-    set +e
-    "$repo_root/scripts/keystone-known-reds.sh" "${logs[@]}" >"$raw" 2>&1
-    set -e
+    classify "corpus/$label" "$raw" 1 "${logs[@]}"
 
     local summary="$work/$label-summary.txt"
     grep -E '^WARN known-red' "$raw" \
@@ -194,12 +207,12 @@ expect_outcome() {
         "$work"/*) require_rows "$label" "$(grep -ohE "known red: $row_name," "$log" | sed -E 's/known red: (.*),/\1/')" ;;
         esac
     done
-    local out code=0
-    out=$("$repo_root/scripts/keystone-known-reds.sh" "$@" 2>&1) || code=$?
-    if [ "$code" -ne "$want_code" ] || ! grep -q -- "$want_line" <<<"$out"; then
+    local out="$work/outcome.txt"
+    classify "outcome/$label" "$out" "$want_code" "$@"
+    if [ "$code" -ne "$want_code" ] || ! grep -q -- "$want_line" "$out"; then
         echo "[fixture] FAIL outcome/$label: want exit $want_code and a line matching"
         echo "          '$want_line'; got exit $code:"
-        printf '%s\n' "$out" | tail -20 | sed 's/^/          | /'
+        tail -20 "$out" | sed 's/^/          | /'
         outcome_fail=1
         return
     fi
@@ -269,13 +282,12 @@ EOF
 expect_outcome should-panic-only 0 '^\[known-reds\] PASS: 1 green run' "$work/should-panic-only.log"
 # The output starts with the input log's BASE:/TREE: lines, wherever the log has them.
 { echo "[flow] job c1"; echo "BASE: e213097550e6"; echo "TREE: 627b5fff5da2"; cat "$work/should-panic-only.log"; } >"$work/headed.log"
-headed_code=0
-headed_out=$("$repo_root/scripts/keystone-known-reds.sh" "$work/headed.log" 2>&1) || headed_code=$?
-if [ "$headed_code" -eq 0 ] && [ "$(head -2 <<<"$headed_out")" = $'BASE: e213097550e6\nTREE: 627b5fff5da2' ]; then
+classify outcome/headed-log-keeps-header "$work/headed.txt" 0 "$work/headed.log"
+if [ "$code" -eq 0 ] && [ "$(head -2 "$work/headed.txt")" = $'BASE: e213097550e6\nTREE: 627b5fff5da2' ]; then
     echo "[fixture] ok outcome/headed-log-keeps-header"
 else
     echo "[fixture] FAIL outcome/headed-log-keeps-header: the output does not start with the log's BASE:/TREE: lines:"
-    { echo "exit $headed_code"; head -5 <<<"$headed_out"; } | sed 's/^/          | /'
+    { echo "exit $code"; head -5 "$work/headed.txt"; } | sed 's/^/          | /'
     outcome_fail=1
 fi
 # A second panic on the thread of a passing should_panic test is not the
@@ -886,11 +898,11 @@ expect_sut_order() {
         printf '%s\n' "reconciled composed sequence diverged from the oracle: [(\"inv-blocks-match-ref/org\", \"[inv-blocks-match-ref/org] sibling order diverges under parent block:journals.\\n  ref order: [\\\"block:c1\\\", \\\"block:bulk-1-0\\\"]\\n  sut order: [$sut]\")]"
         printf '%s\n' "error: recipe \`keystone-full\` failed with exit code 101"
     } >"$log"
-    local out
-    out=$("$repo_root/scripts/keystone-known-reds.sh" "$log" 2>&1 || true)
-    if ! grep -q -- "^PRIMARY: \[$want\]" <<<"$out"; then
+    local out="$work/outcome.txt"
+    classify "$label" "$out" 1 "$log"
+    if ! grep -q -- "^PRIMARY: \[$want\]" "$out"; then
         echo "[fixture] FAIL sut-order/$label: want PRIMARY [$want]; got:"
-        printf '%s\n' "$out" | tail -5 | sed 's/^/          | /'
+        tail -5 "$out" | sed 's/^/          | /'
         outcome_fail=1
         return
     fi
@@ -912,11 +924,11 @@ expect_structural_sut_order() {
         printf '%s\n' "reconciled composed sequence diverged from the oracle: [(\"inv-blocks-match-ref/org\", \"[inv-blocks-match-ref/org] sibling order diverges under parent block:structural-page.\\n  ref order: [\\\"block:parent\\\", $a, $b, \\\"block:c1\\\", \\\"block:c2\\\"]\\n  sut order: [$sut]\")]"
         printf '%s\n' "error: recipe \`keystone-full\` failed with exit code 101"
     } >"$log"
-    local out
-    out=$("$repo_root/scripts/keystone-known-reds.sh" "$log" 2>&1 || true)
-    if ! grep -q -- "^PRIMARY: \[$want\]" <<<"$out"; then
+    local out="$work/outcome.txt"
+    classify "$label" "$out" 1 "$log"
+    if ! grep -q -- "^PRIMARY: \[$want\]" "$out"; then
         echo "[fixture] FAIL structural-sut-order/$label: want PRIMARY [$want]; got:"
-        printf '%s\n' "$out" | tail -5 | sed 's/^/          | /'
+        tail -5 "$out" | sed 's/^/          | /'
         outcome_fail=1
         return
     fi
@@ -1039,7 +1051,8 @@ expect_outcome replay/declared-green-stays-pass-with-note 0 '^\[known-reds\] PAS
 replay_log a crash-restore-window-not-disclosed "$on_window_row" b '' PASSED >"$work/replay-undeclared-green.log"
 expect_outcome replay/undeclared-green 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
     "$work/replay-undeclared-green.log"
-if "$repo_root/scripts/keystone-known-reds.sh" "$work/replay-undeclared-green.log" 2>&1 | grep -q 'NOTE: known_red'; then
+classify outcome/replay/undeclared-green-prints-no-note "$work/outcome.txt" 0 "$work/replay-undeclared-green.log"
+if grep -q 'NOTE: known_red' "$work/outcome.txt"; then
     echo "[fixture] FAIL outcome/replay/undeclared-green-prints-no-note: a case without known_red printed a NOTE line"
     outcome_fail=1
 else
@@ -1090,16 +1103,28 @@ expect_outcome injected-panic/other-payload 1 "^PRIMARY: \[novel\] .*$injected_s
 injected_log injected-longer-payload "$injected_site:22:5" "$injected_payload and the store is gone" green
 expect_outcome injected-panic/longer-payload 1 "^PRIMARY: \[novel\] .*$injected_site:22:5: $injected_payload and the store is gone\$" \
     "$work/injected-longer-payload.log"
-# A grep that cannot read the signatures must stop the classifier, not leave it
-# reading a truncated signature file as green.
-real_grep=$(command -v grep)
-for flags in -cxF -vxF; do
-    mkdir -p "$work/grep-fails$flags"
-    printf '#!/usr/bin/env bash\n[ "$1" = %s ] && { echo "grep: simulated read error" >&2; exit 2; }\nexec %s "$@"\n' \
-        "$flags" "$real_grep" >"$work/grep-fails$flags/grep"
-    chmod +x "$work/grep-fails$flags/grep"
-    PATH="$work/grep-fails$flags:$PATH" expect_outcome "injected-panic/grep$flags-error-stops" 2 \
-        "^\[known-reds\] ERROR: grep $flags " "$work/injected-only.log"
+# Every external command the classifier runs is a stub that fails at call k.
+# Whichever call that is, the classifier must stop with exit 2 and an ERROR line
+# instead of printing a verdict built on a partial result. The stubs count under
+# a lock because pipeline stages run at once.
+stubs="$work/stubs"
+mkdir -p "$stubs"
+export STUB_DIR="$stubs"
+for cmd in awk dirname grep mktemp python3 rm sed sort tail uniq; do
+    printf '#!/bin/bash\nuntil /bin/mkdir "$STUB_DIR/lock" 2>/dev/null; do :; done\nn=$(($(/bin/cat "$STUB_DIR/count") + 1))\necho "$n" >"$STUB_DIR/count"\n/bin/rmdir "$STUB_DIR/lock"\n[ "$n" -ne "$STUB_FAIL_AT" ] || { echo "%s: simulated failure" >&2; exit 2; }\nexec %s "$@"\n' \
+        "$cmd" "$(command -v "$cmd")" >"$stubs/$cmd"
+    chmod +x "$stubs/$cmd"
+done
+# A failed, a green and an indeterminate log reach every call site.
+stub_logs=("$work/injected-plus-real.log" "$work/injected-only.log" "$work/no-outcome.log")
+echo 0 >"$stubs/count"
+STUB_FAIL_AT=0 classify_path="$stubs:$PATH" classify stub/count "$work/stub-count.txt" 1 "${stub_logs[@]}"
+stub_calls=$(cat "$stubs/count")
+[ "$stub_calls" -gt 0 ] || { echo "[fixture] ERROR stub/count: the classifier ran no stubbed command" >&2; exit 2; }
+for ((k = 1; k <= stub_calls; k++)); do
+    echo 0 >"$stubs/count"
+    STUB_FAIL_AT=$k classify_path="$stubs:$PATH" expect_outcome "stub/fails-call-$k-of-$stub_calls" 2 \
+        '^\[known-reds\] ERROR: .* failed (exit [0-9]*); the log is not classified\.$' "${stub_logs[@]}"
 done
 if [ "$outcome_fail" -ne 0 ]; then
     echo ""

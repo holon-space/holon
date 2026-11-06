@@ -68,14 +68,15 @@ against this registry rather than against "zero failures".
 
 **How the matching works:** `scripts/keystone-known-reds.sh` parses THIS FILE.
 The `Match pattern` column is the single source of truth for classification —
-an extended-regex (`grep -E`) applied to each extracted failure signature line.
+a POSIX extended regex (ERE, matched by `awk` under `LC_ALL=C`) applied to each
+extracted failure signature line.
 `crates/holon-integration-tests/src/pbt/known_reds.rs` parses the same columns
 in-process, for the keep-drawing decision. Editing a pattern here changes both
 verdicts; there is no second copy of the patterns anywhere. A cell cannot hold a
 literal `|` — that is the markdown table separator — so a pattern writes
 alternation as `&#124;`, which both readers decode after splitting the row. The
-decoded pattern must be accepted by BOTH `grep -E` and the Rust `regex` crate
-(no backreferences, no lookaround).
+decoded pattern must be accepted by BOTH a POSIX ERE and the Rust `regex` crate
+(no backreferences, no lookaround, no `\d` or `\b`).
 
 **The `Site` column:** one row per ROOT CAUSE, and its `Site` is an anchored
 ERE over `<file>:<line>:<col>` listing EVERY measured site that reports that
