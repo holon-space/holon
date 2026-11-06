@@ -5105,3 +5105,63 @@ mod duplicate_doc_id_tests {
         );
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 50,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// A file the watcher path ingested is not ingested again by the next
+    /// poll pass: the poll is only the backstop for a lost event.
+    #[test]
+    fn a_watcher_ingest_leaves_nothing_for_the_next_poll(
+        variant in 0..3u8,
+        mutations in proptest::collection::vec(text_mutation_strategy(), 0..4),
+        path_segments in path_chain_strategy(),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let mut fixture = TestFixture::new_with(temp_dir.path(), path_segments, true);
+            fixture.ensure_parent_dirs().await;
+            let baseline = stabilize_blocks(
+                &generate_baseline_blocks(&fixture.doc_id, variant),
+                &fixture.doc_id,
+                &fixture.root_dir,
+            );
+            prop_assume!(!baseline.is_empty());
+            fixture.seed_blocks(&baseline);
+            fixture.controller.initialize().await.expect("initialize must succeed");
+
+            let mut org = OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id)
+                .expect("org render")
+                .text;
+            let mut writes = vec![org.clone()];
+            writes.extend(mutations.iter().filter_map(|m| {
+                org = apply_text_mutation(&org, m)?;
+                Some(org.clone())
+            }));
+            for (i, text) in writes.iter().enumerate() {
+                tokio::fs::write(&fixture.file_path(), text).await.unwrap();
+                let _ = fixture
+                    .controller
+                    .on_file_changed(&fixture.file_path())
+                    .await
+                    .expect("the watcher path ingests the write");
+                // An ingest may write the file back; the watcher delivers that too.
+                if tokio::fs::read_to_string(&fixture.file_path()).await.unwrap() != *text {
+                    let _ = fixture
+                        .controller
+                        .on_file_changed(&fixture.file_path())
+                        .await
+                        .expect("the watcher path ingests the write-back");
+                }
+                let polled = fixture.controller.poll_tracked_files().await.unwrap();
+                prop_assert_eq!(polled, 0, "write {} of {}:\n{}", i, writes.len(), text);
+            }
+            Ok(())
+        })?;
+    }
+}

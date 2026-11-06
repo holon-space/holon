@@ -3555,6 +3555,19 @@ impl FileSyncController {
     /// and ingests it when its bytes left the base.
     pub async fn on_file_changed(&mut self, path: &Path) -> Result<IngestOutcome> {
         let canonical = CanonicalPath::new(path);
+        // Stamped before the read, as the poll does, so the next poll skips
+        // bytes this ingest already read.
+        match self.fs.metadata(path).await {
+            Ok(meta) => {
+                self.disk_signatures
+                    .insert(canonical.clone(), (meta.modified, meta.len));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("[on_file_changed] Cannot stat {}", path.display()));
+            }
+        }
         if let Some(doc) = self.net_owns(&canonical) {
             self.ingest_results.remove(&doc);
             self.net.write(
