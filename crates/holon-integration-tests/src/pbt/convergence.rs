@@ -116,6 +116,9 @@ pub(crate) struct OrgProgress {
     /// The in-memory filesystem's last change seq.
     pub(crate) changed: u64,
     pub(crate) processed: u64,
+    /// The change seq a completed poll pass started after: a change whose
+    /// watcher event was lost is ingested only by that pass.
+    pub(crate) polled: u64,
     pub(crate) writeback_unsettled: Vec<String>,
 }
 
@@ -181,6 +184,13 @@ pub(crate) fn owed(progress: &Progress) -> Vec<Owed> {
                 stage: "org-ingest",
                 target: format!("file change seq {}", org.changed),
                 value: format!("processed seq {}", org.processed),
+            });
+        } else if org.polled < org.changed {
+            // A poll pass reads disk after the queue drained: owed once ingest is.
+            owed.push(Owed {
+                stage: "org-poll",
+                target: format!("a poll pass started after file change seq {}", org.changed),
+                value: format!("polled seq {}", org.polled),
             });
         }
         if !org.writeback_unsettled.is_empty() {
@@ -336,6 +346,7 @@ impl Signals<'_> {
             OrgProgress {
                 changed: files.emitted.through(),
                 processed: idle.processed_change_seq().max(files.scanned_through),
+                polled: idle.polled_change_seq().max(files.scanned_through),
                 writeback_unsettled: writeback_owed(idle),
             }
         });
@@ -428,7 +439,7 @@ mod tests {
 
     use super::*;
 
-    const STAGES: [&str; 9] = [
+    const STAGES: [&str; 10] = [
         "loro",
         "share-projection",
         "cdc-routed",
@@ -437,6 +448,7 @@ mod tests {
         "watch-register",
         "block-feed",
         "org-ingest",
+        "org-poll",
         "org-writeback",
     ];
 
@@ -460,6 +472,7 @@ mod tests {
                 org: Some(OrgProgress {
                     changed,
                     processed: changed,
+                    polled: changed,
                     writeback_unsettled: vec![],
                 }),
             },
@@ -487,6 +500,10 @@ mod tests {
             "watch-register" => cdc.watch_registrations_in_flight = by,
             "block-feed" => feed.routed += by,
             "org-ingest" => org.changed += by,
+            "org-poll" => {
+                org.changed += by;
+                org.processed += by;
+            }
             "org-writeback" => org.writeback_unsettled.push("pending render".into()),
             other => unreachable!("unknown stage {other}"),
         }
@@ -741,6 +758,42 @@ mod tests {
             vec!["org-ingest"],
             "{gave_up}"
         );
+    }
+
+    /// A processed change whose watcher event may have been lost holds the
+    /// settle until a poll pass that started after it completes.
+    #[tokio::test]
+    async fn a_processed_change_is_owed_to_org_poll_until_a_later_pass() {
+        let fs = InMemoryFileSystem::new();
+        holon_filesystem::FileSystem::create_dir_all(&fs, std::path::Path::new("/vault"))
+            .await
+            .expect("create /vault");
+        let emitted = EmittedChanges::watch(&fs);
+        let scanned_through = fs.last_change_seq();
+        let idle = OrgSyncIdleSignal::new();
+        holon_filesystem::FileSystem::write(&fs, std::path::Path::new("/vault/a.org"), b"* a\n")
+            .await
+            .expect("write a.org");
+        idle.advance_change_seq(fs.last_change_seq());
+        let gave_up = converge_signals(
+            org_signals(&idle, &emitted, scanned_through),
+            Patience::Budget(Duration::from_millis(100)),
+        )
+        .await
+        .expect_err("no poll pass started after the change");
+        assert_eq!(
+            gave_up.owed.iter().map(|o| o.stage).collect::<Vec<_>>(),
+            vec!["org-poll"],
+            "{gave_up}"
+        );
+
+        idle.advance_polled_change_seq(fs.last_change_seq());
+        converge_signals(
+            org_signals(&idle, &emitted, scanned_through),
+            Patience::Budget(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap_or_else(|gave_up| panic!("a later poll pass completed, yet {gave_up}"));
     }
 
     /// A write-back pass in flight holds the settle, though no file changes.

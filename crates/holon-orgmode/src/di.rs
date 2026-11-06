@@ -334,6 +334,10 @@ pub struct OrgSyncIdleSignal {
     /// delivery order, so `seq <= watermark` means "that change (and every
     /// earlier one) has been processed".
     change_seq: std::sync::atomic::AtomicU64,
+    /// The [`change_seq`](Self::change_seq) a completed poll pass read when it
+    /// started. A watcher can drop an event, so a change at or below it is on
+    /// disk AND was re-stat'ed; only then has its file surely been ingested.
+    polled_change_seq: std::sync::atomic::AtomicU64,
     /// Passes the loop has entered and not yet finished.
     ///
     /// [`tick`](Self::tick) advances only when a pass COMPLETES, so a pass that
@@ -403,6 +407,7 @@ impl OrgSyncIdleSignal {
             tick: std::sync::atomic::AtomicU64::new(0),
             notify: tokio::sync::Notify::new(),
             change_seq: std::sync::atomic::AtomicU64::new(0),
+            polled_change_seq: std::sync::atomic::AtomicU64::new(0),
             in_pass: std::sync::atomic::AtomicUsize::new(0),
             bulk_pending: std::sync::atomic::AtomicBool::new(false),
             writeback_fold: std::sync::OnceLock::new(),
@@ -482,6 +487,19 @@ impl OrgSyncIdleSignal {
     /// Highest fully-processed `FileChange.seq`.
     pub fn processed_change_seq(&self) -> u64 {
         self.change_seq.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Record a poll pass that started at processed seq `seq` and completed.
+    pub fn advance_polled_change_seq(&self, seq: u64) {
+        self.polled_change_seq
+            .fetch_max(seq, std::sync::atomic::Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    /// Highest change seq a completed poll pass started after.
+    pub fn polled_change_seq(&self) -> u64 {
+        self.polled_change_seq
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Wait until the processed-change watermark reaches `seq`, or `timeout`
@@ -2124,12 +2142,15 @@ async fn run_file_sync_controller(
                 idle_signal_for_task.mark_progress();
             }
             _ = poll_tick.tick() => {
+                let started_at = idle_signal_for_task.processed_change_seq();
                 match controller.poll_tracked_files().await {
-                    Ok(n) if n > 0 => {
-                        tracing::debug!("[ORGSYNC_TRACE] poll ingested {} file(s)", n);
-                        idle_signal_for_task.mark_progress();
+                    Ok(n) => {
+                        if n > 0 {
+                            tracing::debug!("[ORGSYNC_TRACE] poll ingested {} file(s)", n);
+                            idle_signal_for_task.mark_progress();
+                        }
+                        idle_signal_for_task.advance_polled_change_seq(started_at);
                     }
-                    Ok(_) => {}
                     Err(e) => {
                         tracing::debug!("[ORGSYNC_TRACE] poll ERROR: {}", e);
                         error!("[OrgMode] poll_tracked_files error: {}", e);
