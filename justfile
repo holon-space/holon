@@ -25,6 +25,12 @@ export RUST_FONTCONFIG_DLOPEN := "on"
 # `just target-gc` reclaims whatever churn predates this.
 CANON_FEATURES := "holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt"
 CANON := "--workspace --features " + CANON_FEATURES
+# The one clippy lint set. Every clippy call lints with it: another set reruns
+# every workspace member's clippy unit (scripts/check-compile-shape.py).
+# clippy.toml lists the tracing span guards; one held across `.await` leaves
+# its span current on the worker thread and panics an unrelated task. That
+# lint is allow-by-default, so it needs its own `-D` next to `-D warnings`.
+CLIPPY_LINTS := "-D warnings -D clippy::await_holding_invalid_type"
 
 # The other half of the shape is the build-script env: a variable a build
 # script reruns on (RUST_FONTCONFIG_DLOPEN, HOLON_BUILD_SHA) must hold one value
@@ -982,12 +988,12 @@ build *FLAGS: icons
     cargo build --workspace {{FLAGS}} 2>&1 | tee target/gate-logs/holon-build.log
 
 # Clippy across workspace, deny-on-warning. CI runs this recipe, so the gate and
-# a local run share ONE feature set; `analyze-clippy` is the report-only variant.
+# a local run share ONE feature set and ONE lint set.
 clippy:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo clippy {{CANON}} --all-targets -- -D warnings 2>&1 | tee target/gate-logs/holon-clippy.log
+    cargo clippy {{CANON}} --all-targets -- {{CLIPPY_LINTS}} 2>&1 | tee target/gate-logs/holon-clippy.log
 
 # Run all workspace tests (not PBTs — those are slow). Deliberately OFF the
 # canonical feature shape above: unifying would pull in every pbt-gated test
@@ -1182,7 +1188,7 @@ lint:
     cargo fmt --check || { echo "FAIL: formatting"; failed=1; }
     echo ""
     echo "=== cargo clippy ==="
-    cargo clippy {{CANON}} --all-targets -- -D warnings 2>&1 | tee target/gate-logs/holon-clippy.log || { echo "FAIL: clippy"; failed=1; }
+    cargo clippy {{CANON}} --all-targets -- {{CLIPPY_LINTS}} 2>&1 | tee target/gate-logs/holon-clippy.log || { echo "FAIL: clippy"; failed=1; }
     echo ""
     echo "=== cargo deny ==="
     just deny || { echo "FAIL: deny"; failed=1; }
@@ -1273,15 +1279,12 @@ analyze-machete:
     mkdir -p target/gate-logs
     cargo machete 2>&1 | tee target/gate-logs/holon-analyze-machete.log
 
-# Lint with clippy at the workspace level.
-# Report-only: clippy findings are surfaced but don't fail the recipe. Phase 6
-# of the code-quality plan re-tightens this gate (`-D warnings`) once the
-# workspace backlog has been paid down incrementally.
+# Lint with clippy at the workspace level, with the gate's lint set.
 analyze-clippy:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo clippy {{CANON}} --all-targets 2>&1 \
+    cargo clippy {{CANON}} --all-targets -- {{CLIPPY_LINTS}} 2>&1 \
         | tee target/gate-logs/holon-analyze-clippy.log
 
 # Copy-paste / duplication detection via polydup.
@@ -1450,7 +1453,8 @@ coverage-flutter:
 # jj does not fire git hooks — run these by hand (or scripts/install-git-hooks.sh
 # wires them up for plain-git users). See DEVELOPMENT.md "Quality gates".
 
-# The canonical typecheck. `--all-targets` plus the two pbt features is what it
+# The canonical typecheck and lint, as clippy: a `cargo check` beside it would
+# build every workspace member a second time. `--all-targets` plus the two pbt features is what it
 # takes to compile a TEST target at all: a bare `cargo check --workspace` builds
 # only lib+bin, so eight windowed GPUI test binaries were uncompilable for days
 # while every gate reported green (BugFunnel 2026-08-14 PERCEPTION). Lanes
@@ -1463,7 +1467,7 @@ gate-compile:
     # and the recipe passes however red the compile is.
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo check {{CANON}} --all-targets \
+    cargo clippy {{CANON}} --all-targets -- {{CLIPPY_LINTS}} \
         2>&1 | tee target/gate-logs/gate-compile.log
     just check-web-arm
 
@@ -1508,7 +1512,7 @@ check-web-arm:
     # exit status is `tee`'s and the recipe passes however red the compile is.
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo check {{CANON}} --all-targets \
+    cargo clippy {{CANON}} --all-targets -- {{CLIPPY_LINTS}} \
         2>&1 | tee target/gate-logs/check-web-arm.log
 
 # The gate's checks that read the tree and build nothing (about 30 s): gate-arch
@@ -1551,11 +1555,6 @@ gate-arch:
     mkdir -p target/gate-logs
     just cargo-free-checks
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
-    # clippy.toml lists the tracing span guards; one held across `.await` leaves
-    # its span current on the worker thread and panics an unrelated task. That
-    # lint is allow-by-default, so it needs its own `-D` next to `-D warnings`.
-    cargo clippy {{CANON}} --all-targets -- -D warnings -D clippy::await_holding_invalid_type \
-        2>&1 | tee target/gate-logs/gate-arch-await-span-guard.log
 
 # Tier 1 pre-commit gate: gate-integrity lints, defensive-code ratchet, typecheck.
 # The justfile guard runs FIRST and costs ~10ms: a never-fail recipe invalidates

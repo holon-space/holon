@@ -7,6 +7,7 @@ COUNT_HASH_FOLDERS=<path> runs the checks against another copy of the script. SE
 import json
 import os
 import random
+import shlex
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,10 @@ import os, sys
 sys.stdout.write(open(os.environ["FAKE_CARGO_" + ("EXCEPTION" if "--target" in sys.argv else "CANON")]).read())
 """
 CANON_CALL = ["test", "--workspace"]
+CLIPPY_LINTS = shlex.split(subprocess.run(["just", "--justfile", str(REPO / "justfile"), "--evaluate", "CLIPPY_LINTS"],
+                                          capture_output=True, text=True, check=True).stdout)
+# The lint sets of the record's clippy calls: none, the justfile's, or the justfile's and a second one.
+LINT_SETS = {"none": [], "one": [CLIPPY_LINTS], "second": [CLIPPY_LINTS, ["-D", "warnings"]]}
 EXCEPTION_CALL = ["check", "--target", "wasm32-unknown-unknown", "-p", "c0"]
 
 
@@ -57,7 +62,8 @@ def case(rng):
     os.utime(target / ".gc-mark", (BEFORE_MARK + 1, BEFORE_MARK + 1))
     c = {"n": rng.randint(1, 5), "difference": rng.choice(DIFFERENCES),
          "twin_kind": rng.choice(("same", "same", "mode", "stale")),
-         "user": rng.choice(("canon", "exception", "none")) if rng.random() < 0.5 else None}
+         "user": rng.choice(("canon", "exception", "none")) if rng.random() < 0.5 else None,
+         "lints": rng.choice(sorted(LINT_SETS))}
     c["crates"] = ["c%d" % i for i in range(c["n"])]
     c["twin_from"] = rng.randrange(c["n"] + 1)
     used = {"canon": [], "exception": [], "none": []}
@@ -89,7 +95,8 @@ def case(rng):
             (target.parent / name).write_text("".join(json.dumps(m) + "\n" for m in msgs))
             env["FAKE_CARGO_" + name] = str(target.parent / name)
         env["PATH"] = "%s:%s" % (tools, env["PATH"])
-        calls = [CANON_CALL] + ([EXCEPTION_CALL] if used["exception"] else [])
+        calls = [CANON_CALL] + ([EXCEPTION_CALL] if used["exception"] else []) + [
+            ["clippy", "--workspace", "--all-targets", "--", *lints] for lints in LINT_SETS[c["lints"]]]
         (target.parent / "calls.jsonl").write_text("".join(json.dumps(
             {"argv": a, "env": {"HOLON_BUILD_SHA": "0123abcd", "HOLON_BUILD_TIME": None}}) + "\n" for a in calls))
     return target, c, env
@@ -104,6 +111,7 @@ def check(seed):
     lines = out.stdout.splitlines()
     second = [line for line in lines if line.startswith("SECOND SHAPE")]
     unrecorded = [line for line in lines if line.startswith("UNRECORDED")]
+    lint = [line for line in lines if line.startswith("LINT ARGS")]
     where = "seed %d, case %s:\n%s%s" % (seed, c, out.stdout, out.stderr)
     twins = c["crates"][c["twin_from"]:]
     built_after = c["twin_kind"] != "stale"
@@ -112,7 +120,9 @@ def check(seed):
     want_second = twins if used and c["twin_kind"] != "mode" and c["user"] != "exception" else []
     assert len(unrecorded) == len(want_unrecorded), "want UNRECORDED for %s, " % want_unrecorded + where
     assert len(second) == len(want_second), "want SECOND SHAPE for %s, " % want_second + where
-    assert out.returncode == (1 if second or unrecorded else 0), "exit %d, " % out.returncode + where
+    want_lint = 1 if c["user"] and c["lints"] == "second" else 0
+    assert len(lint) == want_lint, "want %d LINT ARGS, " % want_lint + where
+    assert out.returncode == (1 if second or unrecorded or lint else 0), "exit %d, " % out.returncode + where
     want = {"features": ("features [] vs ['extra']", "features ['extra'] vs []"), "rustflags": ("rustflags",),
             "env": ("build script env {} vs {'SHA': 'abc'}", "build script env {'SHA': 'abc'} vs {}"),
             "wrapper": ("no fingerprint field differs",)}[c["difference"]]

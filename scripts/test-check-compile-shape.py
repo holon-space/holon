@@ -9,7 +9,7 @@ SEED=<n> replays a run. CHECK=<path> runs the properties against another copy of
 Properties:
 - a call of CANON, spelt any way, plus any narrowing (`--test`, `--no-run`, nextest `--profile`, `-E`, test filters) passes;
 - one off-shape build option, or one shape-env value that differs from the other calls, or HOLON_BUILD_TIME set,
-  fails the check;
+  or a clippy call with a lint set other than CLIPPY_LINTS, fails the check;
 - with --unit-graph: the units of a narrowed call are a subset of the units of `cargo test CANON --no-run`.
 """
 import functools
@@ -51,9 +51,33 @@ def load_check():
 
 
 @functools.lru_cache(None)
-def canon_args():
-    return tuple(shlex.split(subprocess.run(["just", "--justfile", os.path.join(REPO, "justfile"), "--evaluate", "CANON"],
+def evaluate(name):
+    return tuple(shlex.split(subprocess.run(["just", "--justfile", os.path.join(REPO, "justfile"), "--evaluate", name],
                                       capture_output=True, text=True, check=True).stdout))
+
+
+def canon_args():
+    return evaluate("CANON")
+
+
+def clippy_lints():
+    return list(evaluate("CLIPPY_LINTS"))
+
+
+def other_lints(rng):
+    """A lint set other than CLIPPY_LINTS: one pair dropped or added, the pairs reordered, or none."""
+    lints = clippy_lints()
+    pairs = [lints[i:i + 2] for i in range(0, len(lints), 2)]
+    op = rng.choice(["drop", "add", "reorder", "none"])
+    if op == "drop":
+        pairs.pop(rng.randrange(len(pairs)))
+    elif op == "add":
+        pairs.insert(rng.randrange(len(pairs) + 1), ["-D", "clippy::pedantic"])
+    elif op == "reorder":
+        pairs.reverse()
+    else:
+        pairs = []
+    return [a for p in pairs for a in p]
 
 
 def test_files():
@@ -112,7 +136,7 @@ def call(words, args, **env):
 
 
 def verdict(check, want, calls):
-    return check.judge(calls, want)
+    return check.judge(calls, want, clippy_lints())
 
 
 def check_properties(check, rng, cases, tests):
@@ -122,8 +146,11 @@ def check_properties(check, rng, cases, tests):
     for i in range(len(examples) + cases):
         words, args = examples[i] if i < len(examples) else narrowing(rng, tests)
         base = call(words, args)
-        fails = verdict(check, want, [base, call(["clippy"], [*canon, "--all-targets", "--", "-D", "warnings"])])
+        lint = call(["clippy"], [*canon, "--all-targets", "--", *clippy_lints()])
+        fails = verdict(check, want, [base, lint])
         assert not fails, "narrowed call refused: cargo %s\n%s" % (shlex.join(base["argv"]), fails)
+        relint = call(["clippy"], [*canon, "--all-targets", "--", *other_lints(rng)])
+        assert verdict(check, want, [base, lint, relint]), "second lint set passed: cargo %s" % shlex.join(relint["argv"])
 
         token = rng.choice(OFF_SHAPE)
         cut = rng.choice(breaks(args))
@@ -138,6 +165,8 @@ def check_properties(check, rng, cases, tests):
             other = "x"
         assert verdict(check, want, [base, call(words, args, **{name: other})]), \
             "%s=%r beside %r passed" % (name, other, ENV[name])
+    wasm = call(["clippy"], ["--target", "wasm32-unknown-unknown", "-p", "holon-web", "--", "-D", "warnings"])
+    assert not verdict(check, want, [call(["test"], canon), wasm]), "excepted clippy refused: cargo %s" % shlex.join(wasm["argv"])
     for argv in EXCEPTED:
         fails = verdict(check, want, [call(argv[:1], [*canon, "--no-run"]), call(argv[:1], argv[1:])])
         assert not fails, "excepted call refused: cargo %s\n%s" % (shlex.join(argv), fails)
@@ -154,6 +183,8 @@ def check_exclusions():
         "a recipe with its own feature": [call(["test"], [*canon, "--features", "holon-gpui/chrome-trace"])],
         "a call without RUST_FONTCONFIG_DLOPEN": [call(["test"], canon),
                                                   call(["nextest", "run"], canon, RUST_FONTCONFIG_DLOPEN=None)],
+        "a second lint set": [call(["clippy"], [*canon, "--all-targets", "--", *clippy_lints()]),
+                              call(["clippy"], [*canon, "--all-targets", "--", "-D", "warnings"])],
         "an empty record": [],
         "a missing record": None,
     }

@@ -40,10 +40,13 @@ RECORDED = [["test", "--workspace", "--", "--ignored"],
             ["nextest", "run", "--profile", "load-tolerant", "--workspace", "--cargo-profile", "dev", "-E", "test(x)",
              "--no-fail-fast", "--test", "t"],
             ["check", "--target", "wasm32-unknown-unknown", "-p", "holon-web"],
-            ["fmt", "--check"]]
+            ["fmt", "--check"],
+            ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings", "-D", "clippy::await_holding_invalid_type"]]
 REPLAYED = [["test", "--workspace", "--no-run", "--message-format=json"],
             ["test", "--workspace", "--profile", "dev", "--test", "t", "--no-run", "--message-format=json"],
-            ["check", "--target", "wasm32-unknown-unknown", "-p", "holon-web", "--message-format=json"]]
+            ["check", "--target", "wasm32-unknown-unknown", "-p", "holon-web", "--message-format=json"],
+            ["clippy", "--workspace", "--all-targets", "--message-format=json", "--", "-D", "warnings", "-D",
+             "clippy::await_holding_invalid_type"]]
 
 
 def recorded_build(target, in_use, rng=None, uplifted=()):

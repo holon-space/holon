@@ -5,9 +5,10 @@
 
 The record is what scripts/cargo-shape/cargo wrote. Exit 0 iff every compiling call that no EXCEPTIONS entry names
 1. has build options (BUILD_OPTIONS, reduced from its argv) equal to the justfile's CANON, and
-2. sees the same value of every recorded build-script variable as every other such call, with HOLON_BUILD_TIME unset.
-A cargo call with other build options or another value of such a variable makes cargo mint other unit hashes or
-rebuild a unit in place, so the gate compiles twice. Exit 1 names each offending call; an empty or missing record
+2. sees the same value of every recorded build-script variable as every other such call, with HOLON_BUILD_TIME unset,
+3. if it is a clippy call, has lint args (after `--`) equal to the justfile's CLIPPY_LINTS.
+A cargo call with other build options, another value of such a variable or another lint set makes cargo mint other
+unit hashes or rebuild a unit in place, so the gate compiles twice. Exit 1 names each offending call; an empty or missing record
 and an unknown cargo subcommand are failures too.
 """
 import json
@@ -106,12 +107,20 @@ def reduce(sub, args):
     return canon
 
 
-def canon():
-    out = subprocess.run(["just", "--justfile", os.path.join(REPO, "justfile"), "--evaluate", "CANON"],
+def evaluate(name):
+    out = subprocess.run(["just", "--justfile", os.path.join(REPO, "justfile"), "--evaluate", name],
                          capture_output=True, text=True)
     if out.returncode != 0 or not out.stdout.strip():
-        raise SystemExit("check-compile-shape: just --evaluate CANON failed: %s" % out.stderr.strip())
-    return reduce("check", shlex.split(out.stdout))
+        raise SystemExit("check-compile-shape: just --evaluate %s failed: %s" % (name, out.stderr.strip()))
+    return shlex.split(out.stdout)
+
+
+def canon():
+    return reduce("check", evaluate("CANON"))
+
+
+def clippy_lints():
+    return evaluate("CLIPPY_LINTS")
 
 
 def exception(sub, red, args):
@@ -121,11 +130,27 @@ def exception(sub, red, args):
     return None
 
 
-def judge(calls, want):
+def lint_fails(calls, lints):
+    """A LINT ARGS line for every clippy call no EXCEPTIONS entry names whose lint args are not `lints`."""
+    fails = []
+    for call in calls:
+        sub, args = subcommand(call["argv"])
+        if sub != "clippy":
+            continue
+        pre = call["argv"][:len(call["argv"]) - len(args) - 1]
+        if exception(sub, reduce(sub, pre + args), args):
+            continue
+        got = args[args.index("--") + 1:] if "--" in args else []
+        if got != lints:
+            fails.append("LINT ARGS: cargo %s lints with %r, not CLIPPY_LINTS %r" % (shlex.join(call["argv"]), got, lints))
+    return fails
+
+
+def judge(calls, want, lints):
     """The failure lines for the recorded calls; empty iff the record is one shape."""
     if not calls:
         return ["no cargo calls recorded"]
-    fails, judged = [], []
+    fails, judged = lint_fails(calls, lints), []
     for call in calls:
         argv = call["argv"]
         sub, args = subcommand(argv)
@@ -186,7 +211,7 @@ def main():
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
     calls = load(sys.argv[1])
-    fails = judge(calls, canon())
+    fails = judge(calls, canon(), clippy_lints())
     for line in fails:
         print(line)
     print("check-compile-shape: %d call(s) in %s, %d failure(s)" % (len(calls), sys.argv[1], len(fails)))

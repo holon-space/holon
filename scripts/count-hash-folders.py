@@ -7,8 +7,9 @@ A used dir is one built at or after the mark; with a record, also every dir a re
 calls uses (scripts/target-gc.py `in_use`), so reused fresh units count too. Inside one package, one dir per cargo
 profile hash (dev, test, build-override; check and build mode hash differently) is the single shape. Exit 1 on a
 second dir of the same hash that a CANON call (without a record: any call) uses, naming the first crate down the
-deps chain that differs in more than its deps, and on a used dir no recorded call uses. Dirs only the EXCEPTIONS of
-scripts/check-compile-shape.py use are listed, not failed.
+deps chain that differs in more than its deps, on a used dir no recorded call uses, and on a recorded clippy call
+with lint args other than CLIPPY_LINTS: another lint set reruns a unit in its own dir, so no dir count shows it.
+Dirs only the EXCEPTIONS of scripts/check-compile-shape.py use are listed, not failed.
 """
 import argparse
 import collections
@@ -170,6 +171,8 @@ def main():
             for other in us[1:]:
                 fails.append("SECOND SHAPE: %s/%s %s, dirs of profile %d: %s and %s; cause %s" % (
                     profile, crate, tgt, prof, us[0].hash, other.hash, root_cause(us[0].path, other.path, index)))
+    if args.record:
+        fails += check.lint_fails(check.load(args.record), check.clippy_lints())
     print("\n".join(fails))
     print("count-hash-folders: %d package(s) with more than one used dir, %d failure(s)" % (
         sum(len(v) > 1 for v in packages.values()), len(fails)))

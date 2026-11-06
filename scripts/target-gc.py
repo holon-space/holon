@@ -167,16 +167,17 @@ TARGET_SELECTION = {"--test": 1, "--bin": 1, "--example": 1, "--bench": 1, "--li
 
 def replay_argv(check, argv):
     """The `cargo` argv that builds what the recorded call built and runs nothing, or None for a call that builds
-    nothing."""
+    nothing. A clippy call keeps its lint args: another lint set reruns every workspace member's clippy unit."""
     sub, args = check.subcommand(argv)
-    args = args[:args.index("--")] if "--" in args else args
+    args, after = (args[:args.index("--")], args[args.index("--"):]) if "--" in args else (args, [])
     if sub == "nextest":
         if not args or args[0] not in check.NEXTEST_COMPILING or check.NEXTEST_REUSE & {a.partition("=")[0] for a in args}:
             return None
         sub, args = "test", cargo_options(check, args[1:])
     if sub not in {"test", "check", "clippy", "build"}:
         return None
-    return [sub, *args, *(["--no-run"] if sub == "test" and "--no-run" not in args else []), "--message-format=json"]
+    return [sub, *args, *(["--no-run"] if sub == "test" and "--no-run" not in args else []), "--message-format=json",
+            *(after if sub == "clippy" else [])]
 
 
 def cargo_options(check, args):

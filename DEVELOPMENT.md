@@ -642,7 +642,7 @@ Notes:
   `docs/Testing/GpuiCrateReds-2026-09-10.md`. Bug-funnel entry:
   `2026-09-10-holon-gpui-suite-red-at-main-and-ungated` (ENVIRONMENT, OPEN).
 - **The two-instance binary is in the weave list because it was in nothing
-  else** (2026-09-02). It is not in `gate-compile` (which only typechecks), not
+  else** (2026-09-02). It is not in `gate-compile` (which only compiles and lints), not
   in `keystone-smoke`, not in `loro-suite`, not in the land battery — so it
   compiled on every workspace check, ran on none, and sat red on `main` with
   nothing reporting it (BugFunnel
