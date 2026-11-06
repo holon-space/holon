@@ -4,6 +4,11 @@
 [alias]
 test-seq = "test -- --test-threads=1"
 
+# zed-font-kit's build script reruns when this value changes, and the gpui chain then rebuilds in place. Set here,
+# every cargo call (just, scripts, bare cargo) builds the same way and shares the seed.
+[env]
+RUST_FONTCONFIG_DLOPEN = "on"
+
 [target.'cfg(target_vendor = "apple")']
 rustflags = [
   "-Z",
