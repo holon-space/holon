@@ -402,6 +402,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `logseq-parity-corpus-replay-load-timeout`
 - `logseq-parity-slash-menu-offers-no-delete`
 - `loro-backend-change-count`
+- `loro-compaction-peer-trimmed-below-lacked`
 - `loro-move-false-cycle-duplicate-id`
 - `metamorphic-undo-facet-unchanged`
 - `metamorphic-undo-snapshot-missing`
@@ -420,6 +421,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `proptest-sm-shrink-seen-transitions`
 - `quick-open-vault-scale-timeout`
 - `read-model-never-seeded-sql-rows`
+- `read-only-home-refuses-writes-moved-recipe`
 - `reaper-deletes-saved-headless-newborn`
 - `ref-diverge-content-ref-empty`
 - `ref-diverge-content-text-drift`
