@@ -94,9 +94,11 @@ crate::cap_transition! {
         // `org.ingest_file`, which is 144 of the 149 raw queries in the
         // worst sample. THIN: n=3, so the 43 ceiling is not characterized;
         // re-measure before reading anything into a breach just above it.
+        // Writes: the touch and the restore are each read in (two read-ins per
+        // document), and each read-in writes the doc-root row and its file row.
         ExpectedSql {
             reads: REACTIVE_BASE + 38,
-            writes: 2,
+            writes: 2 * 2 * state.document_count(),
             ddl: 0,
             tolerance: 3 + docs_tolerance(state),
         }
