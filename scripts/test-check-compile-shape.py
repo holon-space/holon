@@ -32,7 +32,7 @@ ENV = {"RUST_FONTCONFIG_DLOPEN": "on", "HOLON_BUILD_SHA": "0123456789ab", "HOLON
 OFF_SHAPE = [["-p", "holon-org-format"], ["--package=holon-api"], ["-pholon-core"],
              ["--features", "holon-gpui/chrome-trace"], ["-F", "holon-gpui/chrome-trace"],
              ["--no-default-features"], ["--all-features"], ["--release"], ["--exclude", "holon-gpui"],
-             ["--config", "profile.dev.opt-level=1"]]
+             ["--config", "profile.dev.opt-level=1"], ["-r"], ["-Fholon-gpui/chrome-trace"]]
 STATIC_TESTS = ["integration", "deep_authored_text_never_aborts"]
 # Off-shape calls the check lets pass by its EXCEPTIONS list; a check that drops one refuses its case.
 EXCEPTED = [["run", "-p", "holon-gpui", "--features", "chrome-trace"],
@@ -141,6 +141,8 @@ def check_properties(check, rng, cases, tests):
     for argv in EXCEPTED:
         fails = verdict(check, want, [call(argv[:1], [*canon, "--no-run"]), call(argv[:1], argv[1:])])
         assert not fails, "excepted call refused: cargo %s\n%s" % (shlex.join(argv), fails)
+    glob = call(["--config", "profile.dev.debug=0", "test"], [*canon, "--no-run"])
+    assert verdict(check, want, [call(["test"], [*canon, "--no-run"]), glob]), "global --config passed: cargo %s" % shlex.join(glob["argv"])
     assert verdict(check, want, [call(["test"], canon, HOLON_BUILD_TIME="1")]), "HOLON_BUILD_TIME set passed"
     assert verdict(check, want, []) == ["no cargo calls recorded"]
 

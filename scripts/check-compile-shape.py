@@ -20,7 +20,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 # The options that pick the units and their features. Every other option only narrows what runs or how it is shown.
 BUILD_OPTIONS = {"--workspace": 0, "--all": 0, "-p": 1, "--package": 1, "--exclude": 1, "--features": 1, "-F": 1,
-                 "--all-features": 0, "--no-default-features": 0, "--release": 0, "--target": 1,
+                 "--all-features": 0, "--no-default-features": 0, "--release": 0, "-r": 0, "--target": 1,
                  "--manifest-path": 1, "--config": 1}
 # cargo's own `--profile`; nextest's `--profile` names a nextest profile and its `--cargo-profile` is cargo's.
 CARGO_PROFILE = {"nextest": "--cargo-profile"}
@@ -74,8 +74,8 @@ def reduce(sub, args):
         if a == "--":
             break
         name, eq, val = a.partition("=")
-        if name.startswith("-p") and len(name) > 2 and not name.startswith("--"):
-            name, val, eq = "-p", name[2:], "="
+        if not name.startswith("--") and len(name) > 2 and BUILD_OPTIONS.get(name[:2]) == 1:
+            name, val, eq = name[:2], a[2:], "="
         if name == profile:
             name = "--cargo-profile"
             arity = 1
@@ -97,7 +97,7 @@ def reduce(sub, args):
         out.setdefault(name, []).append(val)
     canon = {}
     for name, vals in out.items():
-        name = {"--all": "--workspace", "--package": "-p", "-F": "--features"}.get(name, name)
+        name = {"--all": "--workspace", "--package": "-p", "-F": "--features", "-r": "--release"}.get(name, name)
         canon.setdefault(name, []).extend(vals)
     if "--features" in canon:
         canon["--features"] = [",".join(sorted({f for v in canon["--features"] for f in v.replace(" ", ",").split(",") if f}))]
@@ -129,6 +129,7 @@ def judge(calls, want):
     for call in calls:
         argv = call["argv"]
         sub, args = subcommand(argv)
+        pre = argv[:len(argv) - len(args) - 1]
         shown = "cargo " + shlex.join(argv)
         if sub in NON_COMPILING or sub is None:
             continue
@@ -142,7 +143,7 @@ def judge(calls, want):
             args = args[1:]
             if NEXTEST_REUSE & {a.partition("=")[0] for a in args}:
                 continue
-        red = reduce(sub, args)
+        red = reduce(sub, pre + args)
         if exception(sub, red, args):
             continue
         if sub not in COMPILING:

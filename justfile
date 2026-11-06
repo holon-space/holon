@@ -1536,6 +1536,7 @@ cargo-free-checks:
     { ./scripts/check-red-logs.py && ./scripts/check-red-logs.py --self-check; } \
         2>&1 | tee target/gate-logs/gate-arch-red-logs.log
     ./scripts/test-check-compile-shape.py 2>&1 | tee target/gate-logs/gate-arch-compile-shape.log
+    ./scripts/test-count-hash-folders.py 2>&1 | tee target/gate-logs/gate-arch-count-hash-folders.log
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
 
 # Architecture rules (archlint + the Rust-side structural tests). Its own
