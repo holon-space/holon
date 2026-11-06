@@ -42,5 +42,10 @@ gate_step 17 timing-gate-build just timing-gate-build 2>&1 | tee "$build_log"
 ! grep -q '^ *Compiling ' "$build_log" || { echo "GATE COMPILED: the timing binaries of $tip were not built by gate-integrate.sh (see $build_log)"; exit 10; }
 rc=0
 gate_step 16 timing-gate just timing-gate || rc=$?
-/usr/bin/python3 "$(dirname "$0")/target-gc.py" target --apply --incremental-below "${GATE_DISK_FLOOR_GIB:-130}" || echo "TARGET-GC NOT RUN (exit $?), see above"
+# The hash-dir pass deletes in-use build dirs, so it runs only under disk pressure.
+if [ "$(df -g target | awk 'NR==2{print $4}')" -lt "${GATE_DISK_FLOOR_GIB:-130}" ]; then
+  /usr/bin/python3 "$(dirname "$0")/target-gc.py" target --apply --incremental-below "${GATE_DISK_FLOOR_GIB:-130}" || echo "TARGET-GC NOT RUN (exit $?), see above"
+else
+  echo "target-gc skipped: free disk is above GATE_DISK_FLOOR_GIB"
+fi
 exit $rc
