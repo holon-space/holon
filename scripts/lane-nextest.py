@@ -22,6 +22,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CLASSIFIER = REPO / "scripts" / "keystone-known-reds.sh"
+# `cargo` under the shape env of scripts/cargo-shape-env.sh, so a run and its rerun build one shape.
+CARGO = ["bash", "-c", 'source "$0" lane && exec cargo "$@"', str(REPO / "scripts" / "cargo-shape-env.sh")]
 # nextest right-aligns its status label in 12 columns: `        FAIL [   0.004s] (2/5) crate::bin some::test`.
 STATUS = re.compile(r"^ *([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\[[0-9]+/[0-9]+\] )?(?:\([^)]*\) )?(\S+) (\S+)$")
 NOT_RED = re.compile(r"^(?:TRY [0-9]+ )?(?:START|SLOW|TRMNTG|TERMINATING|PASS|LEAK|TMPASS|TIMEOUT-PASS|SLOW \+ LEAK"
@@ -62,7 +64,7 @@ def run(args):
     d.mkdir(parents=True, exist_ok=True)
     reds_file, stream_log, verdict_log = d / "reds.txt", d / "stream.log", d / "verdict.log"
     reds_file.unlink(missing_ok=True)
-    proc = subprocess.Popen(["cargo", "nextest", "run", "--no-fail-fast", *args], stdout=subprocess.PIPE,
+    proc = subprocess.Popen([*CARGO, "nextest", "run", "--no-fail-fast", *args], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
     lines = queue.Queue()
     threading.Thread(target=lambda: [lines.put(l) for l in proc.stdout] + [lines.put(None)], daemon=True).start()
@@ -118,7 +120,7 @@ def rerun(args):
         args[i] = f"({args[i]}) & ({only})"
     else:
         args += ["-E", only]
-    return subprocess.run(["cargo", "nextest", "run", "--no-fail-fast", *args],
+    return subprocess.run([*CARGO, "nextest", "run", "--no-fail-fast", *args],
                           stderr=subprocess.STDOUT).returncode
 
 

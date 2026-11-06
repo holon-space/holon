@@ -2,7 +2,7 @@
 # The steps of scripts/gate-integrate.sh that are pipelines: `step` runs one
 # command, so each runs as `gate-integrate-steps.sh <name>`.
 #
-# Needs GATE and PBT_FEATURES. With GATE_STEP_ARGS set (a selected gate),
+# Needs GATE and PBT_FEATURES (the justfile's CANON_FEATURES). With GATE_STEP_ARGS set (a selected gate),
 # extra-nextest runs only the tests that nextest filter set names.
 set -euo pipefail
 

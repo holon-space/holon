@@ -332,6 +332,9 @@ debug = "line-tables-only"
 
 [profile.dev.build-override]
 opt-level = 3
+# Unset, cargo drops debuginfo only for build units no normal unit shares, and the sharing changes with the
+# call's targets: a `--test` call would then build its build dependencies a second time.
+debug = "line-tables-only"
 
 # Unoptimized wasmi interprets a plugin parse ~140x slower than release, so a
 # debug build's boot scan over a recipe vault takes hours. At opt-level 3

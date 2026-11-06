@@ -423,7 +423,8 @@ never-reclaimed directory instead of reusing one; one such mismatch was
 measured adding 711 directories in a single run. Compose `CANON` in new
 recipes rather than retyping `-p`/`--features`; narrow what RUNS with
 `--test <name>` or nextest's `-E`, never with `-p` (that narrows the feature
-resolve too).
+resolve too). The gate checks this, together with the build-script env:
+see "One compile shape" in docs/Testing/TimingCritical.md.
 
 `just target-gc [target-dir]` (`scripts/target-gc.py`) reclaims whatever churn
 still accumulates: for each (crate, target) it keeps the newest 2 directories

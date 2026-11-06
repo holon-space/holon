@@ -26,15 +26,11 @@ export RUST_FONTCONFIG_DLOPEN := "on"
 CANON_FEATURES := "holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt"
 CANON := "--workspace --features " + CANON_FEATURES
 
-# Off-shape by necessity, each for a reason no variable can absorb:
-#   * `cargo run` / `cargo watch` app launches — `cargo run` rejects `--workspace`.
-#   * wasm and android checks — a different `--target` triple owns its own
-#     target subdirectory, so it cannot share a hash with the host profile.
-#   * out-of-workspace manifests (holon-worker, dioxus-web) and `cargo mutants`.
-#   * scripts/capability-cert-native.sh, which needs `holon/test-helpers`;
-#     folding that into CANON_FEATURES would change what every gate compiles.
-#   * `check-release-shape`, whose point is the feature set without any
-#     dev-dependency.
+# The other half of the shape is the build-script env: a variable a build
+# script reruns on (RUST_FONTCONFIG_DLOPEN, HOLON_BUILD_SHA) must hold one value
+# across a gate, or the crates above it rebuild in place. scripts/cargo-shape-env.sh
+# is its one source. scripts/check-compile-shape.py judges recorded cargo calls
+# against both halves; its EXCEPTIONS list holds the off-shape calls and why.
 
 # Gate/check recipes write their logs to `target/gate-logs/<name>.log`, never to
 # a fixed /tmp path: `target/` is per jj workspace, so parallel lanes no longer
@@ -276,6 +272,22 @@ lane-nextest *ARGS:
 [positional-arguments]
 lane-nextest-reds *ARGS:
     scripts/lane-nextest.py rerun "$@"
+
+# Reruns gate reds in the integration checkout, in the gate's compile shape, so
+# the following timing build compiles nothing: `just gate-rerun -E '<filter>'`.
+# Only the tests narrow; an option that changes what cargo builds is refused.
+[positional-arguments]
+gate-rerun *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for a in "$@"; do
+      case $a in -p* | --package* | --features* | -F* | --all-features | --no-default-features | --cargo-profile* | --release | --target* | --manifest-path* | --config* | --exclude*)
+        echo "gate-rerun: $a changes the compile shape; narrow with -E or --test only" >&2; exit 2 ;;
+      esac
+    done
+    source scripts/cargo-shape-env.sh gate
+    shape_env_header
+    HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure} cargo nextest run {{CANON}} --profile load-tolerant --no-fail-fast "$@"
 
 # Replay hand-authored keystone regressions (concrete transition sequences from
 # docs/Testing/HandAuthoredRegressions.md) through the keystone harness. Same
@@ -576,7 +588,7 @@ org-deep-text-timing *FLAGS:
     # them.
     export HOLON_PBT_TIMING=enforce
     echo "org-deep-text-timing: load before $(sysctl -n vm.loadavg 2>/dev/null || uptime)"
-    cargo test -p holon-org-format --test deep_authored_text_never_aborts \
+    cargo test {{CANON}} --test deep_authored_text_never_aborts \
         -- --ignored --nocapture --test-threads=1 {{FLAGS}} 2>&1 \
         | tee target/gate-logs/org-deep-text-timing.log
 
@@ -1521,6 +1533,7 @@ cargo-free-checks:
         2>&1 | tee target/gate-logs/gate-arch-adr-net-names.log
     { ./scripts/check-red-logs.py && ./scripts/check-red-logs.py --self-check; } \
         2>&1 | tee target/gate-logs/gate-arch-red-logs.log
+    ./scripts/test-check-compile-shape.py 2>&1 | tee target/gate-logs/gate-arch-compile-shape.log
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
 
 # Architecture rules (archlint + the Rust-side structural tests). Its own
@@ -1711,7 +1724,7 @@ timing-gate:
 timing-gate-build:
     cargo nextest run {{CANON}} --no-run
     cargo test {{CANON}} --no-run
-    cargo test -p holon-org-format --test deep_authored_text_never_aborts --no-run
+    cargo test {{CANON}} --test deep_authored_text_never_aborts --no-run
 
 # The wide nextest sweep at whatever load the lanes produce: the exact
 # complement of the timing group. JUnit is on, so every run feeds the

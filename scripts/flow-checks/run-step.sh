@@ -12,6 +12,9 @@ echo "$line"
 echo "BASE: $BASE"
 echo "TREE: $(jj log -r @ --no-graph -T commit_id)"
 echo "STARTED: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# shellcheck source=scripts/cargo-shape-env.sh
+source "$(dirname "$0")/../cargo-shape-env.sh" lane || { echo; echo "exit: 1"; exit 1; }
+shape_env_header
 # The args hold shell quoting (`-E '<filterset>'`).
 eval "set -- $args"
 case $step in

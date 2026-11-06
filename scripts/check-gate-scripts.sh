@@ -58,7 +58,7 @@ echo "== a head rewritten locally since its push"
 rc=0; combine_in_repo "${heads##* }" >/dev/null || rc=$?
 expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 
-# `just` and `cargo` stubs append each call, its HOLON_PBT_TIMING, the record file of gate-step.sh's runner
+# `just` and `cargo` stubs append each call (a `just --evaluate` then runs the real just), its HOLON_PBT_TIMING, the record file of gate-step.sh's runner
 # and the quiet marker's content to $GATE_PROBE; `just latency-slo-gate` prints $SETTLE_OUT (default: a contention line
 # and an admission), `just timing-gate-build` prints $BUILD_OUT
 # `just $STUB_RED` exits 1 and `just $STUB_SLEEP` sleeps 2 s; with STUB_RED_NEXTEST set, every nextest run
@@ -82,6 +82,7 @@ for tool in just cargo; do
   cat > "$stubs/$tool" <<'EOF'
 #!/usr/bin/env bash
 echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | record=${GATE_RECORD-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
+case " $* " in *" --evaluate "*) exec "$REAL_JUST" "$@" ;; esac
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
 [ "$*" != gate-compile ] || [ -z "${GATE_HOLD_FIRST:-}" ] || "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" --quiet-hold "$GATE_PID"
 [ "${1:-}" != latency-slo-gate ] || printf '%b' "${SETTLE_OUT-mean boot matview_ddl 1.0ms\nhost admitted\n}"
@@ -103,7 +104,7 @@ steps="1 20 2 13 17 7 14 5 6 8 9 18 19 15 11 3 4 12 10 22"
 sorted_steps=$(tr ' ' '\n' <<<"$steps" | sort -n | tr '\n' ' ')
 # Without the caller's HOLON_PBT_TIMING, only the gate scripts can set it.
 # The real wrapper asks rustup for rustc; under the scratch HOME rustup would install a toolchain.
-in_stubs() { env -u HOLON_PBT_TIMING HOME="$home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
+in_stubs() { env -u HOLON_PBT_TIMING REAL_JUST="$real_just" HOME="$home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
 marker="$home/.cache/holon-build/quiet"
 # The probe lines of the steps that go red on a loaded host: the extra nextest
 # and the windowed gate.
@@ -214,8 +215,8 @@ printf 'fmt tree-check\nkeystone-tour crate-reached\n' > "$selected"
 rc=0; in_stubs GATE_SELECT=1 GATE_SELECTED="$selected" "$orch/gate-step.sh" run "$integrate" g7 "1 2" "$tip" >"$scratch/integrate-selected.out" 2>&1 || rc=$?
 expect "exits 0 (got $rc)" [ "$rc" = 0 ]
 [ "$rc" = 0 ] || tail -n 20 "$scratch/integrate-selected.out"
-# The script itself evaluates a justfile variable; every other call is a step's.
-step_calls=$(grep -v '^just --evaluate ' "$probe")
+# The scripts evaluate justfile variables; every other call is a step's.
+step_calls=$(grep -v -- ' --evaluate ' "$probe")
 expect "runs only the selected steps (got: $(cut -d'|' -f1 <<<"$step_calls" | tr '\n' ','))" \
   [ "$(cut -d'|' -f1 <<<"$step_calls" | tr '\n' ',')" = "cargo fmt --all -- --check ,just keystone-tour ," ]
 expect "no step sees the runner's record file" [ -z "$(grep -v ' | record=unset | ' <<<"$step_calls")" ]
@@ -225,7 +226,7 @@ echo "== the timing gate of a batch that selects no timing step"
 : > "$selected"; : > "$probe"
 rc=0; in_stubs GATE_SELECT=1 GATE_SELECTED="$selected" "$orch/gate-step.sh" run "$timing" g7 "1 2" "$tip" >"$scratch/timing-selected.out" 2>&1 || rc=$?
 expect "exits 0 (got $rc)" [ "$rc" = 0 ]
-expect "calls no just or cargo" [ ! -s "$probe" ]
+expect "calls no just or cargo but to evaluate the shape" [ -z "$(grep -v -- ' --evaluate ' "$probe")" ]
 
 echo "== the timing-gate recipe while another job holds the hold"
 # The real recipe from this justfile runs; only its steps script is a stub.
@@ -257,7 +258,7 @@ echo "== the timing gate on the integrated tip"
 rc=0; in_stubs "$timing" g1 "1 2" "$tip" >"$scratch/timing.out" 2>&1 || rc=$?
 expect "exits 0 (got $rc)" [ "$rc" = 0 ]
 expect "calls the build check, then timing-gate, and nothing else" \
-  [ "$(cut -d' ' -f1-2 "$probe" | tr '\n' ' ')" = "just timing-gate-build just timing-gate " ]
+  [ "$(grep -v -- ' --evaluate ' "$probe" | cut -d' ' -f1-2 | tr '\n' ' ')" = "just timing-gate-build just timing-gate " ]
 
 echo "== the timing gate on a tip whose binaries are not built"
 : > "$probe"

@@ -350,6 +350,38 @@ way.
 The gate script that places these steps must export `HOLON_GATE_ID=$GATE`,
 which is what stamps the measure ledger; without it every line reads `local`.
 
+## One compile shape for every gate step and every rerun
+
+A cargo call builds new units, and so compiles, when its build options or the
+value of a variable that a build script reruns on differ from the call before.
+The timing gate must compile nothing under the quiet hold, so every step of
+`scripts/gate-integrate.sh` and `scripts/gate-timing.sh`, every lane check and
+every rerun builds ONE shape:
+
+- The build options are the justfile's `CANON`. A recipe narrows what RUNS
+  with `--test <name>` or `-E`, never with `-p` or its own `--features`.
+- The build-script env comes from ONE sourced helper,
+  `scripts/cargo-shape-env.sh` (`gate` or `lane`). It sets
+  `RUST_FONTCONFIG_DLOPEN` from the justfile, refuses a set
+  `HOLON_BUILD_TIME`, and in `gate` mode pins `HOLON_BUILD_SHA` to the
+  integrated tip (`@-`, with an empty `@`). Lanes leave `HOLON_BUILD_SHA`
+  unset. The gate scripts, `scripts/flow-checks/run-step.sh`,
+  `scripts/lane-nextest.py` and `just gate-rerun` source it, and their logs
+  print the values of these variables and of `RUSTFLAGS`, and only the NAMES
+  of the set `CARGO_*` variables.
+- The helper puts `scripts/cargo-shape/cargo` first on `PATH`; it records each
+  cargo call with its shape env. Step 17 of `gate-timing.sh` runs
+  `scripts/check-compile-shape.py` on that record before
+  `just timing-gate-build`, and fails the gate on a second shape. The calls
+  that are off the shape by necessity (app launches, `--target` triples,
+  out-of-workspace manifests, the release shape) are its `EXCEPTIONS` list,
+  the one place that names them.
+
+Rerun gate reds in the integration checkout with `just gate-rerun -E
+'<filter>'`: it sources the helper in `gate` mode and runs nextest in the
+`load-tolerant` profile, so the `just timing-gate-build` after it compiles
+nothing.
+
 ## Measure mode is never silent
 
 Every budget breach in `measure` is printed as

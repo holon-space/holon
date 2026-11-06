@@ -1,0 +1,61 @@
+#!/usr/bin/python3
+"""Records each cargo call for scripts/check-compile-shape.py, then runs the next `cargo` on PATH.
+
+Appends one JSON line {argv, env} to $HOLON_CARGO_RECORD. `env` holds the value (null when unset) of every
+variable a build script of this checkout reruns on (`cargo:rerun-if-env-changed=` in its output), plus the
+rustflags variables. With HOLON_CARGO_PLAN=1 the call is recorded and not run.
+"""
+import glob
+import hashlib
+import json
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
+ALWAYS = ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS",
+          "RUST_FONTCONFIG_DLOPEN", "HOLON_BUILD_SHA", "HOLON_BUILD_TIME")
+RERUN = re.compile(r"cargo::?rerun-if-env-changed=(.+)")
+# Cargo sets these for the build scripts it runs; a caller's value of them says nothing about the shape.
+CARGO_PROVIDED = re.compile(r"CARGO_(CFG|FEATURE|PKG|MANIFEST)_|OUT_DIR$")
+SECRET = re.compile(r"TOKEN|SECRET|PASSWORD|KEY", re.I)
+
+
+def watched_vars():
+    target = os.environ.get("CARGO_TARGET_DIR", os.path.join(REPO, "target"))
+    names = set(ALWAYS)
+    for path in glob.glob(os.path.join(target, "debug", "build", "*", "*", "run", "stdout")):
+        with open(path, errors="replace") as f:
+            for line in f:
+                m = RERUN.match(line.strip())
+                if m and not CARGO_PROVIDED.match(m.group(1)):
+                    names.add(m.group(1))
+    return sorted(names)
+
+
+def value(name):
+    v = os.environ.get(name)
+    if v is None or not SECRET.search(name):
+        return v
+    return "sha256:" + hashlib.sha256(v.encode()).hexdigest()[:16]
+
+
+def next_cargo():
+    for d in os.environ["PATH"].split(os.pathsep):
+        exe = os.path.join(d, "cargo")
+        if os.path.realpath(d) != HERE and os.access(exe, os.X_OK):
+            return exe
+    sys.exit("cargo-shape: no cargo on PATH after %s" % HERE)
+
+
+record = os.environ.get("HOLON_CARGO_RECORD")
+if not record:
+    sys.exit("cargo-shape: HOLON_CARGO_RECORD is not set; scripts/cargo-shape-env.sh sets it")
+os.makedirs(os.path.dirname(os.path.abspath(record)), exist_ok=True)
+with open(record, "a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "env": {n: value(n) for n in watched_vars()}}) + "\n")
+if os.environ.get("HOLON_CARGO_PLAN") == "1":
+    sys.exit(0)
+cargo = next_cargo()
+os.execv(cargo, [cargo, *sys.argv[1:]])

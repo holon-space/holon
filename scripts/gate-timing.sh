@@ -8,6 +8,8 @@
 #   scripts/gate-timing.sh --steps   prints the step names, for the selection
 #
 # Exit: 9 = the checkout is not <tip>, checked before any cargo command;
+# 1 from step 17 = scripts/check-compile-shape.py found the gate's cargo calls
+#   in more than one compile shape, or no record of them;
 # 10 = the timing binaries were not built yet, so the hold would time a compile;
 # otherwise `just timing-gate`'s exit (3 = no verdict on a busy host).
 set -euo pipefail
@@ -17,15 +19,16 @@ if [ "${1:-}" = --steps ]; then echo $STEPS; exit; fi
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
 export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1
 tip=$3
-# The gpui build script then ignores git, so a git or jj call between the two
-# scripts cannot rebuild what gate-integrate.sh built.
-export HOLON_BUILD_SHA=${tip:0:12}
 
 [ "$(jj log -r @- --no-graph -T 'commit_id')" = "$tip" ] || { echo "WRONG TREE: @- is not the integrated tip $tip"; exit 9; }
 [ -z "$(jj diff -r @ --summary)" ] || { echo "WRONG TREE: @ carries edits on top of the integrated tip $tip"; exit 9; }
 
 mkdir -p target/gate-logs
+export HOLON_CARGO_RECORD=$PWD/target/gate-logs/$GATE-cargo-calls.jsonl
+# shellcheck source=scripts/cargo-shape-env.sh
+source "$(dirname "$0")/cargo-shape-env.sh" gate
 echo "gate-timing.sh: $GATE (pid $$), tip $tip, cards: $GATE_CARDS"
+shape_env_header
 # shellcheck source=/dev/null
 source ~/.claude/skills/orchestrator/scripts/gate-step.sh
 # shellcheck disable=SC2086
@@ -38,7 +41,8 @@ gate_step() {
 }
 
 build_log=target/gate-logs/$GATE-timing-build.log
-gate_step 17 timing-gate-build just timing-gate-build 2>&1 | tee "$build_log"
+gate_step 17 timing-gate-build bash -c '"$0" "$1" && just timing-gate-build' \
+  "$(dirname "$0")/check-compile-shape.py" "$HOLON_CARGO_RECORD" 2>&1 | tee "$build_log"
 ! grep -q '^ *Compiling ' "$build_log" || { echo "GATE COMPILED: the timing binaries of $tip were not built by gate-integrate.sh (see $build_log)"; exit 10; }
 rc=0
 gate_step 16 timing-gate just timing-gate || rc=$?

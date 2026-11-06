@@ -26,8 +26,6 @@
 # nextest alone exits 12 or 13.
 set -euo pipefail
 
-export PBT_FEATURES="holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt"
-
 # Balanced by step time; the first track runs in the
 # gate's own slot. A step is <n>:<name>, its number in gate-steps.jsonl.
 TRACKS=(
@@ -105,22 +103,23 @@ gate_steps $(step_names)
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
 export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$ HOLON_BUILD_QUIET_HOLDER=$$
 tip=$3
-# The gpui build script then ignores git, so a git or jj call between the two
-# scripts cannot rebuild what gate-integrate.sh built.
-export HOLON_BUILD_SHA=${tip:0:12}
 DISK_FLOOR_GIB=${GATE_DISK_FLOOR_GIB:-130}
 
 [ "$(jj log -r @- --no-graph -T 'commit_id')" = "$tip" ] || { echo "WRONG TREE: @- is not the tip $tip"; exit 9; }
 [ -z "$(jj diff -r @ --summary)" ] || { echo "WRONG TREE: @ carries edits on top of the tip $tip"; exit 9; }
 [ "$(df -g . | awk 'NR==2{print $4}')" -ge "$DISK_FLOOR_GIB" ] || { echo "DISK BELOW $DISK_FLOOR_GIB GiB"; exit 8; }
 
-# A font-kit build script reruns when this changes: the direct cargo calls here
-# must see the justfile's value, or `just timing-gate` rebuilds the gpui crates.
-RUST_FONTCONFIG_DLOPEN=$(just --evaluate RUST_FONTCONFIG_DLOPEN)
-export RUST_FONTCONFIG_DLOPEN
-
 mkdir -p target/gate-logs
+# The tracks inherit the shape env, and scripts/gate-timing.sh checks this
+# record of every cargo call before it builds.
+export HOLON_CARGO_RECORD=$PWD/target/gate-logs/$GATE-cargo-calls.jsonl
+: >"$HOLON_CARGO_RECORD"
+# shellcheck source=scripts/cargo-shape-env.sh
+source "$(dirname "$0")/cargo-shape-env.sh" gate
+PBT_FEATURES=$(just --justfile "$(dirname "$0")/../justfile" --evaluate CANON_FEATURES)
+export PBT_FEATURES
 echo "gate-integrate.sh: $GATE (pid $$), tip $tip, cards: $GATE_CARDS"
+shape_env_header
 
 /usr/bin/python3 "$(dirname "$0")/target-gc.py" target --mark
 GATE_STEP_TMP=$(mktemp -d); export GATE_STEP_TMP
