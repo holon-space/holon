@@ -925,6 +925,85 @@ pub(crate) struct EngageTally {
 pub(crate) type SettleFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>;
 
 impl<S: ComposedSlice> ComposedSut<S> {
+    /// [`StateMachineTest::init_test`] with `build` in place of
+    /// [`ComposedSlice::build`]. `boot_peer_ids` are the primary's peer ids of
+    /// the boots before this one over the same store.
+    pub fn init_built_by<F>(
+        ref_state: &ReferenceState,
+        boot_peer_ids: BTreeSet<u64>,
+        build: impl FnOnce(IdResolver) -> F,
+    ) -> Self
+    where
+        F: std::future::Future<Output = (CapMap, S::Handle, BTreeSet<EntityUri>)>,
+    {
+        // Per-case observability isolation: this thread's panics are loud (they
+        // unwind into proptest), so exclude them from swallowed-panic capture,
+        // and clear any problems left over from a previous case/shrink
+        // iteration so `inv-no-observed-errors` only ever sees THIS case's
+        // window. Both halves guard against the shrink-time feedback loop
+        // where the harness's own divergence panic re-entered the next
+        // iteration's failure message (exponential escape blowup, 2026-07-11).
+        let scope = crate::test_tracing::begin_test_scope();
+        crate::test_tracing::SpanCollector::global().reset();
+        let mut builder = if S::MULTI_THREAD {
+            tokio::runtime::Builder::new_multi_thread()
+        } else {
+            tokio::runtime::Builder::new_current_thread()
+        };
+        builder.enable_all();
+        // Bind the SUT runtime's worker threads to THIS case's scope so a
+        // swallowed panic / `error!` on a worker is attributed here — the
+        // cross-thread capture `inv-no-observed-errors` exists for.
+        crate::test_tracing::attach_scope_to_runtime(&mut builder, scope);
+        let rt = builder.build().expect("build SUT runtime");
+        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
+        let (caps, handle, scaffold_ids) = rt.block_on(build(resolver.clone()));
+        S::align_ids(&handle, ref_state);
+        hand_over_peer_ids(&caps, ref_state);
+        let mut clock_feed = None;
+        let mut primary_peer_ids = boot_peer_ids;
+        rt.block_on(async {
+            feed_sut_clock(&caps, &mut clock_feed, ref_state).await;
+            assert_sut_peers(&caps, ref_state, &mut primary_peer_ids, BOOT).await;
+        });
+        Self {
+            caps,
+            handle,
+            resolver,
+            burned: BurnedPairs::new(),
+            redo_burned: BTreeSet::new(),
+            scaffold_ids,
+            foreign_ids: BTreeSet::new(),
+            failed_create_synthetics: BTreeSet::new(),
+            unheld_history: UnheldHistory::default(),
+            rt: SutRuntime(Some(rt)),
+            settle: Box::new(|| {}),
+            engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
+            tick: std::cell::Cell::new(0),
+            last_selected: std::cell::RefCell::new(None),
+            reboot_pending: std::cell::Cell::new(false),
+            clock_feed,
+            primary_peer_ids,
+            _slice: PhantomData,
+        }
+    }
+
+    pub fn primary_peer_ids(&self) -> &BTreeSet<u64> {
+        &self.primary_peer_ids
+    }
+
+    /// Ends the case by handing its handle to `finish` on the SUT runtime,
+    /// after the caps are dropped.
+    pub fn finish_with<T, F>(self, finish: impl FnOnce(S::Handle) -> F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let Self { caps, handle, rt, .. } = self;
+        drop(caps);
+        rt.0.as_ref().expect("the runtime lives until drop").block_on(finish(handle))
+    }
+
     /// [`StateMachineTest::apply`] with `settle` in place of the slice's
     /// post-apply settle, and `wedge` bounding apply + settle.
     pub(crate) fn apply_then_settle(
@@ -1843,57 +1922,9 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     type Reference = S::Machine;
 
     fn init_test(ref_state: &ReferenceState) -> Self {
-        // Per-case observability isolation: this thread's panics are loud (they
-        // unwind into proptest), so exclude them from swallowed-panic capture,
-        // and clear any problems left over from a previous case/shrink
-        // iteration so `inv-no-observed-errors` only ever sees THIS case's
-        // window. Both halves guard against the shrink-time feedback loop
-        // where the harness's own divergence panic re-entered the next
-        // iteration's failure message (exponential escape blowup, 2026-07-11).
-        let scope = crate::test_tracing::begin_test_scope();
-        crate::test_tracing::SpanCollector::global().reset();
-        let mut builder = if S::MULTI_THREAD {
-            tokio::runtime::Builder::new_multi_thread()
-        } else {
-            tokio::runtime::Builder::new_current_thread()
-        };
-        builder.enable_all();
-        // Bind the SUT runtime's worker threads to THIS case's scope so a
-        // swallowed panic / `error!` on a worker is attributed here — the
-        // cross-thread capture `inv-no-observed-errors` exists for.
-        crate::test_tracing::attach_scope_to_runtime(&mut builder, scope);
-        let rt = builder.build().expect("build SUT runtime");
-        let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        let (caps, handle, scaffold_ids) = rt.block_on(S::build(&resolver, ref_state));
-        S::align_ids(&handle, ref_state);
-        hand_over_peer_ids(&caps, ref_state);
-        let mut clock_feed = None;
-        let mut primary_peer_ids = BTreeSet::new();
-        rt.block_on(async {
-            feed_sut_clock(&caps, &mut clock_feed, ref_state).await;
-            assert_sut_peers(&caps, ref_state, &mut primary_peer_ids, BOOT).await;
-        });
-        Self {
-            caps,
-            handle,
-            resolver,
-            burned: BurnedPairs::new(),
-            redo_burned: BTreeSet::new(),
-            scaffold_ids,
-            foreign_ids: BTreeSet::new(),
-            failed_create_synthetics: BTreeSet::new(),
-            unheld_history: UnheldHistory::default(),
-            rt: SutRuntime(Some(rt)),
-            settle: Box::new(|| {}),
-            engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
-            telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
-            tick: std::cell::Cell::new(0),
-            last_selected: std::cell::RefCell::new(None),
-            reboot_pending: std::cell::Cell::new(false),
-            clock_feed,
-            primary_peer_ids,
-            _slice: PhantomData,
-        }
+        Self::init_built_by(ref_state, BTreeSet::new(), |resolver| async move {
+            S::build(&resolver, ref_state).await
+        })
     }
 
     fn apply(sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {

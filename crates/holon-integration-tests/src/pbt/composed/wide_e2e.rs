@@ -1369,6 +1369,18 @@ pub async fn boot_and_seed_wide_with_peer_id(
     ref_state: &ReferenceState,
     peer_id: Option<u64>,
 ) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
+    let (mut caps, handle, scaffold) = boot_wide_unaligned(resolver, ref_state, peer_id).await;
+    align_initial_focus(&mut caps, &handle, ref_state).await;
+    (caps, handle, scaffold)
+}
+
+/// [`boot_and_seed_wide_with_peer_id`] up to, not including, the initial focus
+/// align: the store a restore clones holds no navigation yet.
+pub(crate) async fn boot_wide_unaligned(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+    peer_id: Option<u64>,
+) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
     // SUT-side parameterization seam: the booted set follows the oracle's DRAWN
     // wiring (`init_state` draws `any_valid_wiring()`; `HOLON_PBT_FORCE_FULL=1`
     // pins `full_headless`). Disclose the draw per case so a run log yields
@@ -1423,6 +1435,17 @@ pub async fn boot_and_seed_wide_with_peer_id(
             provider = crate::fake_mcp_module::PROVIDER_NAME,
         )
     });
+    finish_wide_boot(bundle, ref_state, has_frontend).await
+}
+
+/// The part of [`boot_and_seed_wide`] after the builder booted the SUT: the
+/// boot's waits, the read caps and the scaffold ids. A restored boot runs it
+/// unchanged.
+pub(crate) async fn finish_wide_boot(
+    bundle: crate::pbt::composed::builder::ComposedSut,
+    ref_state: &ReferenceState,
+    has_frontend: bool,
+) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
     // The settle handles — the Turso engine (CDC watermark) and the frontend
     // component (Loro sync + org idle). Cloned out before `bundle.caps` is
     // moved so the post-write [`converge_projections`] settle can prove all
@@ -1649,25 +1672,32 @@ pub async fn boot_and_seed_wide_with_peer_id(
         .cloned()
         .collect();
 
-    // Fresh-drive the initial focus on the SUT to match the oracle (page root) —
-    // only for a focus-capable config. A non-frontend (Loro-only) SUT has no
-    // `SutFocusWrite` cap (no ViewModel/nav), and its focus/nav invariants
-    // deselect, so there is nothing to align; driving `NavigateFocus` there
-    // would hit an absent cap.
-    if has_frontend {
-        TransitionImpl::apply_to_sut(
-            &NavigateFocus {
-                region: Region::Main,
-                block_id: page_root(),
-            },
-            ref_state,
-            &mut caps,
-        )
-        .await;
-        converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
-    }
-
     (caps, handle, scaffold)
+}
+
+/// Fresh-drive the initial focus on the SUT to match the oracle (page root) —
+/// only for a focus-capable config. A non-frontend (Loro-only) SUT has no
+/// `SutFocusWrite` cap (no ViewModel/nav), and its focus/nav invariants
+/// deselect, so there is nothing to align; driving `NavigateFocus` there
+/// would hit an absent cap.
+pub(crate) async fn align_initial_focus(
+    caps: &mut CapMap,
+    handle: &WideHandle,
+    ref_state: &ReferenceState,
+) {
+    if !set_for_wiring(&ref_state.harness.wiring).has_projection(Projection::ViewModel) {
+        return;
+    }
+    TransitionImpl::apply_to_sut(
+        &NavigateFocus {
+            region: Region::Main,
+            block_id: page_root(),
+        },
+        ref_state,
+        caps,
+    )
+    .await;
+    converge_projections(handle, crate::pbt::composed::soak_seed::soak_settle()).await;
 }
 
 /// The read caps a booted frontend serves beyond the builder's map. The first

@@ -352,6 +352,65 @@ impl InMemoryFileSystem {
             .expect("the file system owns the read-hold sender");
     }
 
+    /// A new adapter that holds this one's files and directories under `to`
+    /// instead of `from`, with the same stamps and change seq, no fault armed
+    /// and no write recorded. Panics when a fault is armed here or a file
+    /// lies outside `from`: such a copy would not be the same vault.
+    pub fn copy_rebased(&self, from: &Path, to: &Path) -> Self {
+        let st = self.lock();
+        assert!(
+            !st.fail_next_write_commit
+                && st.churning.is_empty()
+                && st.failing.is_empty()
+                && st.losing.is_empty()
+                && !*self.scans_held.borrow()
+                && self.reads_held.borrow().is_empty(),
+            "copy_rebased: a fault is armed (fail_next_write_commit {}, churning {:?}, failing \
+             {:?}, losing {:?}, scans held {}, reads held {:?})",
+            st.fail_next_write_commit,
+            st.churning,
+            st.failing,
+            st.losing,
+            *self.scans_held.borrow(),
+            *self.reads_held.borrow(),
+        );
+        let from = st.spelled(&normalize(from));
+        let to = normalize(to);
+        let copy = Self::with_path_case(st.case);
+        copy.mkdir_all(&to);
+        {
+            let mut new = copy.lock();
+            new.write_targets.clear();
+            new.clock = st.clock;
+            // The ancestors of `from` are left out: `mkdir_all` made those of `to`.
+            for dir in st.dirs.iter().filter(|d| d.starts_with(&from)) {
+                new.insert_dir(to.join(dir.strip_prefix(&from).expect("starts with from")));
+            }
+            for (path, entry) in &st.files {
+                let rel = path.strip_prefix(&from).unwrap_or_else(|_| {
+                    panic!(
+                        "copy_rebased: {} lies outside {}",
+                        path.display(),
+                        from.display()
+                    )
+                });
+                new.insert_file(
+                    to.join(rel),
+                    FileEntry {
+                        bytes: entry.bytes.clone(),
+                        mtime_tick: entry.mtime_tick,
+                    },
+                );
+            }
+        }
+        copy
+    }
+
+    pub fn is_dir(&self, path: &Path) -> bool {
+        let st = self.lock();
+        st.dirs.contains(&st.spelled(&normalize(path)))
+    }
+
     /// Synchronous `create_dir_all` for non-async construction contexts
     /// (the trait method delegates here).
     pub fn mkdir_all(&self, path: &Path) {
@@ -950,5 +1009,94 @@ mod tests {
         let outcome = fs.write_if_unchanged(page, &read.stamp, b"* Holon").await;
         assert_eq!(outcome.unwrap(), WriteBack::Written);
         assert_eq!(fs.read(page).await.unwrap(), b"* Holon");
+    }
+
+    #[derive(Debug, Clone)]
+    enum Fault {
+        None,
+        FailNextWriteCommit,
+        WriteFailure(usize),
+        WriteChurn(usize),
+        LoseNextChange(usize),
+        HoldScans,
+        HoldReads,
+    }
+
+    fn fault() -> impl proptest::strategy::Strategy<Value = Fault> {
+        use proptest::prelude::*;
+        prop_oneof![
+            3 => Just(Fault::None),
+            1 => Just(Fault::FailNextWriteCommit),
+            1 => (0..3usize).prop_map(Fault::WriteFailure),
+            1 => (0..3usize).prop_map(Fault::WriteChurn),
+            1 => (0..3usize).prop_map(Fault::LoseNextChange),
+            1 => Just(Fault::HoldScans),
+            1 => Just(Fault::HoldReads),
+        ]
+    }
+
+    proptest::proptest! {
+        /// A copy holds every file of the vault at the same relative path with
+        /// the same bytes and stamps, and records no write; a vault with an
+        /// armed fault refuses to be copied.
+        #[test]
+        fn a_rebased_copy_is_the_same_vault_or_refused(
+            files in proptest::collection::btree_map(
+                proptest::sample::select(vec!["a.org", "b.org", "sub/c.org"]),
+                ".{0,12}",
+                1..3,
+            ),
+            fault in fault(),
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let from = Path::new("/v");
+            let to = Path::new("/w/copy");
+            let fs = InMemoryFileSystem::new();
+            let armed = |ix: usize| from.join(files.keys().nth(ix % files.len()).expect("one file"));
+            rt.block_on(async {
+                fs.create_dir_all(&from.join("sub")).await.unwrap();
+                for (name, body) in &files {
+                    fs.write(&from.join(name), body.as_bytes()).await.unwrap();
+                }
+            });
+            match &fault {
+                Fault::None => {}
+                Fault::FailNextWriteCommit => fs.fail_next_write_commit(),
+                Fault::WriteFailure(ix) => fs.arm_write_failure(&armed(*ix)),
+                Fault::WriteChurn(ix) => fs.arm_write_churn(&armed(*ix)),
+                Fault::LoseNextChange(ix) => fs.lose_next_change(&armed(*ix)),
+                Fault::HoldScans => fs.hold_scans(),
+                Fault::HoldReads => fs.hold_reads_with_extension("org"),
+            }
+            let copied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                fs.copy_rebased(from, to)
+            }));
+            let copy = match (&fault, copied) {
+                (Fault::None, Ok(copy)) => copy,
+                (Fault::None, Err(panic)) => std::panic::resume_unwind(panic),
+                (_, Ok(_)) => panic!("a vault with {fault:?} armed was copied"),
+                (_, Err(panic)) => {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .expect("the refusal is a formatted message");
+                    proptest::prop_assert!(message.contains("a fault is armed"), "{message}");
+                    return Ok(());
+                }
+            };
+            proptest::prop_assert!(copy.write_targets().is_empty());
+            proptest::prop_assert_eq!(copy.last_change_seq(), fs.last_change_seq());
+            rt.block_on(async {
+                for (name, body) in &files {
+                    let original = fs.metadata(&from.join(name)).await.unwrap();
+                    let copied = copy.metadata(&to.join(name)).await.unwrap();
+                    assert_eq!(copy.read(&to.join(name)).await.unwrap(), body.as_bytes());
+                    assert_eq!(
+                        (copied.modified, copied.len),
+                        (original.modified, original.len),
+                        "{name}"
+                    );
+                }
+            });
+        }
     }
 }

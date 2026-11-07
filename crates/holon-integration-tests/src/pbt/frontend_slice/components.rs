@@ -185,7 +185,9 @@ pub fn keystone_boot_journal_id() -> EntityUri {
 /// The on-disk vault a boot runs over: the Turso file (`<temp>/test.db`), the
 /// org root, and the in-memory FS holding the org files. Outlives any single
 /// boot, so a reboot re-opens the SAME store rather than a fresh one — that
-/// difference is the whole point of `SutAppLifecycle::reboot`.
+/// difference is the whole point of `SutAppLifecycle::reboot`. A restore
+/// builds one from a clone of a [`StoreSnapshot`]: a store a first boot
+/// filled and shut down.
 pub struct HeadlessStore {
     temp: TempDir,
     org_fs: Arc<holon_filesystem::InMemoryFileSystem>,
@@ -208,6 +210,102 @@ impl HeadlessStore {
     pub(crate) fn config_dir(&self) -> PathBuf {
         self.temp.path().to_path_buf()
     }
+}
+
+/// A [`HeadlessStore`] after a clean shutdown, which any number of
+/// components boot over copies of. Its own files are never booted.
+pub struct StoreSnapshot {
+    dir: TempDir,
+    org_fs: holon_filesystem::InMemoryFileSystem,
+    org_root: PathBuf,
+    /// Relative to `org_root`.
+    org_paths: Vec<PathBuf>,
+}
+
+impl StoreSnapshot {
+    /// The directory a restore clones the database, Loro and config files
+    /// from.
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// The vault files a restore copies, under [`Self::org_root`].
+    pub fn org_fs(&self) -> &holon_filesystem::InMemoryFileSystem {
+        &self.org_fs
+    }
+
+    pub fn org_root(&self) -> &Path {
+        &self.org_root
+    }
+
+    /// Panics naming every vault file whose `file` row hash is not the hash
+    /// of its bytes, and every row with no vault file: a restore of such a
+    /// store re-ingests that file.
+    pub async fn assert_file_hashes_match(&self, consolidator: holon_api::capability::Consolidator) {
+        use holon_filesystem::FileSystem;
+        let db_path = self.dir.path().join("test.db");
+        let db = holon::storage::turso::TursoBackend::open_database(&db_path)
+            .unwrap_or_else(|e| panic!("[snapshot boot] open {}: {e}", db_path.display()));
+        let conn = db
+            .connect(holon::storage::turso::ConnectOpts::new())
+            .unwrap_or_else(|e| panic!("[snapshot boot] connect to {}: {e}", db_path.display()));
+        let sql = "SELECT id, content_hash FROM file";
+        let mut rows: std::collections::BTreeMap<String, String> = conn
+            .prepare(sql)
+            .and_then(|mut stmt| stmt.run_collect_rows())
+            .unwrap_or_else(|e| panic!("[snapshot boot] {sql}: {e}"))
+            .into_iter()
+            .map(|row| match row.as_slice() {
+                [id, hash] => (id.to_string(), hash.to_string()),
+                other => panic!("[snapshot boot] {sql} gave {other:?}"),
+            })
+            .collect();
+        let scanned = FileSystem::scan_directory(&self.org_fs, &self.org_root)
+            .await
+            .expect("[snapshot boot] scan the template vault");
+        let mut stale = Vec::new();
+        for path in scanned.files {
+            let rel = path
+                .strip_prefix(&self.org_root)
+                .expect("a scanned file lies under the org root");
+            let id = EntityUri::file(&rel.to_string_lossy()).to_string();
+            let bytes = FileSystem::read_to_string(&self.org_fs, &path)
+                .await
+                .unwrap_or_else(|e| panic!("[snapshot boot] read {}: {e}", path.display()));
+            let disk = holon_filesystem::base_sidecar::BaseSidecars::hash(&format!(
+                "{}\0{consolidator:?}\0{bytes}",
+                holon_filesystem::RENDERER_VERSION
+            ));
+            match rows.remove(&id) {
+                Some(row) if row == disk => {}
+                row => stale.push(format!("{}: row {row:?}, bytes {disk}", path.display())),
+            }
+        }
+        stale.extend(rows.keys().map(|id| format!("{id}: a row with no vault file")));
+        assert!(
+            stale.is_empty(),
+            "[snapshot boot] after the template's quits, file rows disagree with their bytes:\n{}",
+            stale.join("\n")
+        );
+    }
+}
+
+/// Clones every file of `from` into the existing directory `to` as APFS
+/// copy-on-write clones.
+fn clone_dir(from: &Path, to: &Path) {
+    let status = std::process::Command::new("cp")
+        .arg("-c")
+        .arg("-R")
+        .arg(from.join("."))
+        .arg(to)
+        .status()
+        .unwrap_or_else(|e| panic!("[snapshot boot] run cp -c: {e}"));
+    assert!(
+        status.success(),
+        "[snapshot boot] cp -c -R {} {} failed: {status}",
+        from.display(),
+        to.display()
+    );
 }
 
 /// Everything one boot owns. A reboot drops this whole value and builds a
@@ -933,6 +1031,15 @@ impl HeadlessFrontendComponent {
             sidecar_yaml: sidecar_yaml.map(str::to_string),
             timings,
         };
+        Self::boot_over(store, boot_params, connect).await
+    }
+
+    /// Boots a session over `store` and builds the component around it.
+    async fn boot_over(
+        store: Arc<HeadlessStore>,
+        boot_params: BootParams,
+        connect: Option<IntegrationConnectTiming>,
+    ) -> Self {
         let integration_peer = match connect {
             Some(timing) => {
                 let peer = crate::fake_mcp_module::FakeMcpPeer::start(timing).await;
@@ -974,10 +1081,110 @@ impl HeadlessFrontendComponent {
         component
     }
 
-    /// Boot a frontend stack over `store`. Called once by `new_impl` and again
-    /// by [`Self::reboot`] — the second call finds the Turso file and the org
-    /// files already populated, which is exactly the production cold-boot shape
-    /// (persisted matview/DBSP state, `:ID:` drawers already on disk).
+    /// Shuts the session down cleanly and copies its store. The component must
+    /// be the last holder of itself; it is gone afterwards.
+    pub async fn shut_down_to_snapshot(self: Arc<Self>) -> StoreSnapshot {
+        let component = Arc::into_inner(self).unwrap_or_else(|| {
+            panic!("[snapshot boot] the component is still shared at its shutdown")
+        });
+        component.watches.lock().expect("watches lock").clear();
+        let booted = component
+            .boot
+            .write()
+            .expect("boot cell poisoned")
+            .take()
+            .expect("[snapshot boot] the template has no boot to shut down");
+        holon_app::shutdown_session(&booted.injector)
+            .await
+            .unwrap_or_else(|e| panic!("[snapshot boot] the template's shutdown failed: {e:#}"));
+        let dead = Arc::downgrade(&booted);
+        drop(booted);
+        assert!(
+            dead.upgrade().is_none(),
+            "[snapshot boot] the template's session outlives its shutdown"
+        );
+        let store = &component.store;
+        holon_app::vault_lock::VaultLock::acquire(store.temp.path())
+            .and_then(|lock| lock.release())
+            .unwrap_or_else(|e| panic!("[snapshot boot] the vault lock is held after the shutdown: {e:#}"));
+        let db_held = holon_turso::db_open::is_held(&store.db_path())
+            .unwrap_or_else(|e| panic!("[snapshot boot] probe the database lock: {e}"));
+        assert!(!db_held, "[snapshot boot] the database is held after the shutdown");
+
+        let dir = TempDir::new().expect("snapshot temp dir");
+        clone_dir(store.temp.path(), dir.path());
+        let org_root = std::fs::canonicalize(dir.path()).expect("canonicalize snapshot dir");
+        StoreSnapshot {
+            org_fs: store.org_fs.copy_rebased(&store.org_root, &org_root),
+            org_paths: store
+                .org_paths
+                .iter()
+                .map(|path| {
+                    path.strip_prefix(&store.org_root)
+                        .expect("an org path lies under the org root")
+                        .to_path_buf()
+                })
+                .collect(),
+            org_root,
+            dir,
+        }
+    }
+
+    /// A component booted over a copy of `snapshot`. Panics when the boot
+    /// writes into the vault: a restored store must already hold every file.
+    pub async fn new_from_snapshot(
+        snapshot: &StoreSnapshot,
+        settle: Duration,
+        loro_enabled: bool,
+        editor_leg: holon_pbt_core::EditorLeg,
+        clock: Arc<holon_api::TestClock>,
+        peer_id: Option<u64>,
+        connect: IntegrationConnectTiming,
+    ) -> Self {
+        let temp = TempDir::new().expect("temp dir");
+        clone_dir(snapshot.dir.path(), temp.path());
+        let org_root = std::fs::canonicalize(temp.path()).expect("canonicalize temp dir");
+        let org_fs = Arc::new(snapshot.org_fs.copy_rebased(&snapshot.org_root, &org_root));
+        let store = Arc::new(HeadlessStore {
+            temp,
+            org_emitted: crate::pbt::convergence::EmittedChanges::watch(&org_fs),
+            org_fs,
+            org_paths: snapshot.org_paths.iter().map(|p| org_root.join(p)).collect(),
+            org_root,
+        });
+        let boot_params = BootParams {
+            settle,
+            loro_enabled,
+            editor_leg,
+            clock: Some(clock),
+            peer_id,
+            sidecar_yaml: None,
+            timings: keystone_boot_timings(),
+        };
+        Self::boot_over(store, boot_params, Some(connect)).await
+    }
+
+    /// Panics naming every vault file a restored boot wrote. A directory it
+    /// creates holds no content, so it is no write.
+    pub fn assert_restore_wrote_nothing(&self) {
+        let fs = &self.store.org_fs;
+        let written: Vec<PathBuf> = fs
+            .write_targets()
+            .into_iter()
+            .filter(|path| !fs.is_dir(path))
+            .collect();
+        assert!(
+            written.is_empty(),
+            "[snapshot boot] the restore ingested {written:?}: a restored store must already \
+             hold every file"
+        );
+    }
+
+    /// Boot a frontend stack over `store`. Called once by `new_impl`, again
+    /// by [`Self::reboot`], and once by [`Self::new_from_snapshot`] — the last
+    /// two find the Turso file, the Loro files and the org files already
+    /// populated, which is exactly the production cold-boot shape (persisted
+    /// matview/DBSP state, `:ID:` drawers already on disk).
     async fn boot_session(store: &HeadlessStore, params: &BootParams) -> BootedSession {
         use holon_frontend::HolonConfig;
         use holon_frontend::SessionConfig;
@@ -1803,6 +2010,10 @@ impl HeadlessFrontendComponent {
             .optional_resolve_async::<Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
             .await
             .map(|backend| (*backend).clone())
+    }
+
+    pub fn loro_enabled(&self) -> bool {
+        self.boot_params.loro_enabled
     }
 
     pub fn loro_doc_store(&self) -> Option<holon_loro::LoroDocumentStore> {

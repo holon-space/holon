@@ -22,6 +22,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::pbt::composed::harness::ComposedSut;
+use crate::pbt::composed::snapshot_boot;
 use crate::pbt::composed::wide_e2e::WideE2E;
 use crate::pbt::composed::wide_e2e::wide_e2e_ref_for;
 use crate::pbt::reference_state::ReferenceState;
@@ -104,6 +105,7 @@ pub const KNOWN_CASE_KEYS: &[&str] = &[
     ALSO_CHECK_AFTER_KEY,
     LOCKS_KEY,
     KNOWN_RED_KEY,
+    BOOT_KEY,
 ];
 
 /// The replay-only key naming extra checkpoints; see [`Checkpoints`].
@@ -116,6 +118,31 @@ pub const LOCKS_KEY: &str = "locks";
 /// red case is registered under; `scripts/keystone-known-reds.sh` accepts the
 /// case's panic only when it matches that row.
 pub const KNOWN_RED_KEY: &str = "known_red";
+
+/// The replay-only key that makes a case boot fresh; see [`Boot`].
+pub const BOOT_KEY: &str = "boot";
+
+/// How [`replay`] boots a case. A case whose bug lives in the first boot
+/// boots fresh: a restore would skip the work that holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Boot {
+    Fresh,
+    /// From a copy of a finished first boot of the case's key, when the SUT
+    /// type can restore it.
+    Restored,
+}
+
+impl Boot {
+    fn parse(raw: Option<&serde_json::Value>, provenance: &str) -> Self {
+        match raw {
+            None => Boot::Restored,
+            Some(serde_json::Value::String(s)) if s == "fresh" => Boot::Fresh,
+            Some(other) => {
+                panic!("{provenance}: `{BOOT_KEY}` must be \"fresh\" or absent, got {other}")
+            }
+        }
+    }
+}
 
 /// Judged by every case on top of its [`Locks`]; the reason for each member is
 /// in `docs/Testing/HandAuthoredRegressions.md`.
@@ -244,10 +271,21 @@ pub struct ReplayCase {
     pub checkpoints: Checkpoints,
     pub locks: Locks,
     pub known_red: Option<String>,
+    pub boot: Boot,
 }
 
 /// A [`StateMachineTest`] whose check can be narrowed to part of the catalog.
 pub trait LockedReplay: StateMachineTest {
+    /// [`StateMachineTest::init_test`] booted as `boot` asks. A SUT without a
+    /// store to restore boots fresh.
+    fn init_replay(
+        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+        boot: Boot,
+    ) -> Self::SystemUnderTest {
+        let _ = boot;
+        Self::init_test(ref_state)
+    }
+
     /// Judges `scope`; returns the judged ids with a non-`Skipped` verdict.
     fn check_locked(
         sut: &Self::SystemUnderTest,
@@ -264,6 +302,22 @@ pub trait LockedReplay: StateMachineTest {
 }
 
 impl LockedReplay for ComposedSut<WideE2E> {
+    /// Restores when `boot` asks for it and the case's key can be restored;
+    /// prints why a case boots fresh.
+    fn init_replay(ref_state: &ReferenceState, boot: Boot) -> Self {
+        let fresh_because = match boot {
+            Boot::Fresh => Some(format!("the case sets `{BOOT_KEY}: fresh`")),
+            Boot::Restored => snapshot_boot::why_not_restorable(ref_state),
+        };
+        match fresh_because {
+            Some(reason) => {
+                eprintln!("[snapshot boot] fresh boot: {reason}");
+                Self::init_test(ref_state)
+            }
+            None => Self::init_restored(&snapshot_boot::template_for(ref_state), ref_state),
+        }
+    }
+
     fn check_locked(
         sut: &Self,
         ref_state: &ReferenceState,
@@ -290,11 +344,12 @@ pub fn replay<M: LockedReplay>(
     transitions: Vec<<M::Reference as ReferenceStateMachine>::Transition>,
     checkpoints: &Checkpoints,
     locks: &Locks,
+    boot: Boot,
 ) {
     let scope = locks.scope();
     let mut engaged = BTreeSet::new();
     let total = transitions.len();
-    let mut sut = M::init_test(&ref_state);
+    let mut sut = M::init_replay(&ref_state, boot);
     if checkpoints.after(0) {
         engaged.extend(M::check_locked(&sut, &ref_state, &scope));
     }
@@ -393,11 +448,13 @@ pub fn parse_replay_case(path: &std::path::Path, lineno: usize, line: &str) -> R
         Some(key) if !key.is_empty() => key.to_string(),
         _ => panic!("{provenance}: `{KNOWN_RED_KEY}` must name a known-reds row key, got {row}"),
     });
+    let boot = Boot::parse(raw.get(BOOT_KEY), &provenance);
     ReplayCase {
         case,
         checkpoints,
         locks,
         known_red,
+        boot,
     }
 }
 

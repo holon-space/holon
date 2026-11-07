@@ -88,6 +88,7 @@ use holon_integration_tests::pbt::hand_authored::HandAuthoredCase;
 use holon_integration_tests::pbt::hand_authored::LockedReplay;
 use holon_integration_tests::pbt::hand_authored::Locks;
 use holon_integration_tests::pbt::hand_authored::ReplayCase;
+use holon_integration_tests::pbt::hand_authored::Boot;
 use holon_integration_tests::pbt::hand_authored::load_replay_cases;
 use holon_integration_tests::pbt::hand_authored::parse_case;
 use holon_integration_tests::pbt::hand_authored::parse_replay_case;
@@ -120,6 +121,7 @@ fn hand_authored_keystone_regressions() {
         checkpoints,
         locks,
         known_red,
+        boot,
     } in cases
     {
         let name = case.name.clone();
@@ -131,7 +133,7 @@ fn hand_authored_keystone_regressions() {
         );
         // The panic hook has already printed this case's panic block; catching it
         // lets every later case be judged too.
-        match std::panic::catch_unwind(AssertUnwindSafe(|| replay_case(case, &checkpoints, &locks)))
+        match std::panic::catch_unwind(AssertUnwindSafe(|| replay_case(case, &checkpoints, &locks, boot)))
         {
             Ok(()) => eprintln!("[hand-authored regression] PASSED case {name:?}"),
             Err(_) => {
@@ -148,7 +150,7 @@ fn hand_authored_keystone_regressions() {
     );
 }
 
-fn replay_case(case: HandAuthoredCase, checkpoints: &Checkpoints, locks: &Locks) {
+fn replay_case(case: HandAuthoredCase, checkpoints: &Checkpoints, locks: &Locks, boot: Boot) {
     // A pinned `initial_state` rebuilds the failing draw's oracle exactly;
     // without one the base is `HOLON_PBT_FORCE_FULL=1`'s `full_headless`
     // wiring, so `init_test` boots the full Turso + frontend SUT.
@@ -171,7 +173,7 @@ fn replay_case(case: HandAuthoredCase, checkpoints: &Checkpoints, locks: &Locks)
              starting state differs from the one this case pins:\n{report}"
         );
     }
-    replay::<ComposedSut<WideE2E>>(initial_state, case.transitions, checkpoints, locks);
+    replay::<ComposedSut<WideE2E>>(initial_state, case.transitions, checkpoints, locks, boot);
 }
 
 /// PARKED pin — echo-loop `BlockToPage` embedded-page child render-leak
@@ -375,7 +377,7 @@ fn sweeps_of_replay(line: &str) -> Vec<usize> {
         ..
     } = parse_replay_case(std::path::Path::new("<inline>"), 1, line);
     SWEPT.with(|swept| swept.borrow_mut().clear());
-    replay::<CountingSut>(0, vec![(); case.transitions.len()], &checkpoints, &locks);
+    replay::<CountingSut>(0, vec![(); case.transitions.len()], &checkpoints, &locks, Boot::Fresh);
     SWEPT.with(|swept| swept.take())
 }
 
@@ -470,7 +472,7 @@ fn judged_windows_start_swept_and_only_pre_sweeps_do_not() {
         checkpoints, locks, ..
     } = parse_replay_case(std::path::Path::new("<inline>"), 1, &line);
     STARTED_SWEPT.with(|log| log.borrow_mut().clear());
-    replay::<BudgetWindowSut>(0, vec![(); 6], &checkpoints, &locks);
+    replay::<BudgetWindowSut>(0, vec![(); 6], &checkpoints, &locks, Boot::Fresh);
     assert_eq!(
         STARTED_SWEPT.with(|log| log.take()),
         vec![(1, false), (2, true), (5, false), (6, true)]
@@ -553,5 +555,5 @@ fn a_lock_skipped_at_every_checkpoint_is_refused() {
         1,
         r#"{"name": "n", "locks": ["inv-x"], "transitions": []}"#,
     );
-    replay::<VacuousSut>(0, Vec::new(), &checkpoints, &locks);
+    replay::<VacuousSut>(0, Vec::new(), &checkpoints, &locks, Boot::Fresh);
 }

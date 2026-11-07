@@ -1,31 +1,47 @@
 //! Boots a keystone case from a restored copy of a finished first boot.
 //!
-//! A [`BootTemplate`] is one fresh boot of a [`BootKey`], shut down cleanly and
-//! copied. A restore boots the unchanged production session over a copy of
-//! that template, so it skips only the work the template already holds on
-//! disk. [`Obs`] is what a restore must reproduce: a restore that observes
-//! anything other than its template's fresh boot panics.
+//! A [`BootTemplate`] is one fresh boot of a [`BootKey`], shut down cleanly
+//! before the harness aligns the initial focus, and copied. A restore boots the
+//! unchanged production session over a copy of that template and then aligns
+//! the focus, so it skips only the work the template already holds on disk.
+//! [`Obs`] is what a restore must reproduce: a restore that observes anything
+//! other than its template's first restore panics.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
+use holon_api::EntityUri;
 use holon_pbt_core::BootFault;
 use holon_pbt_core::EditorLeg;
+use holon_pbt_core::Projection;
 use holon_pbt_core::capabilities::IntegrationConnectTiming;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutConditions;
 use holon_pbt_core::capabilities::SutOrderKeys;
 use holon_pbt_core::capabilities::SutRenderer;
+use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::wiring::Actor;
 use holon_pbt_core::wiring::StorageAdapter;
 use holon_pbt_core::wiring::SyncAdapter;
 
+use crate::pbt::composed::builder::compose_sut_over_existing;
 use crate::pbt::composed::harness::ComposedSut;
 use crate::pbt::composed::wide_e2e::JournalsSeed;
 use crate::pbt::composed::wide_e2e::WideE2E;
+use crate::pbt::composed::wide_e2e::WideHandle;
+use crate::pbt::composed::wide_e2e::align_initial_focus;
+use crate::pbt::composed::wide_e2e::boot_wide_unaligned;
+use crate::pbt::composed::wide_e2e::finish_wide_boot;
+use crate::pbt::composed::wide_e2e::set_for_wiring;
 use crate::pbt::composed::wide_e2e::wide_seed_files;
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
+use crate::pbt::frontend_slice::components::StoreSnapshot;
+use crate::pbt::frontend_slice::components::keystone_boot_clock;
+use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
 
 /// Everything in a [`ReferenceState`] the first boot reads. Two states with
@@ -39,7 +55,17 @@ pub struct BootKey {
     seed_files: Vec<(String, String)>,
     boot_fault: BootFault,
     timing: IntegrationConnectTiming,
+    read_only_homes: Vec<EntityUri>,
+    /// Each variable in [`BOOT_ENV`] with its value in this process.
+    env: Vec<Option<String>>,
 }
+
+/// The environment variables the first boot reads.
+const BOOT_ENV: [&str; 3] = [
+    "HOLON_FOLDER_COMPANION_SEED",
+    "PBT_MUTABLE_TEXT",
+    "HOLON_SOAK_SEED_BLOCKS",
+];
 
 impl BootKey {
     pub fn of(ref_state: &ReferenceState) -> Self {
@@ -55,8 +81,38 @@ impl BootKey {
                 .collect(),
             boot_fault: ref_state.boot_fault.clone(),
             timing: ref_state.integration.timing,
+            read_only_homes: ref_state.read_only.homes().iter().cloned().collect(),
+            env: BOOT_ENV
+                .iter()
+                .map(|name| std::env::var(name).ok())
+                .collect(), // ALLOW(ok): an unset variable is a key value
         }
     }
+
+    /// Panics unless a boot of this key can be restored.
+    fn assert_restorable(&self) {
+        assert!(
+            self.boot_fault == BootFault::None && self.timing == IntegrationConnectTiming::Instant,
+            "[snapshot boot] key {self} has a boot fault / integration timing; such a boot must \
+             run fresh"
+        );
+    }
+}
+
+/// Why a case of `ref_state` cannot boot from a template, or `None` when it
+/// can.
+pub fn why_not_restorable(ref_state: &ReferenceState) -> Option<String> {
+    let key = BootKey::of(ref_state);
+    if key.boot_fault != BootFault::None {
+        return Some(format!("boot fault {:?}", key.boot_fault));
+    }
+    if key.timing != IntegrationConnectTiming::Instant {
+        return Some(format!("integration timing {:?}", key.timing));
+    }
+    if !set_for_wiring(&ref_state.harness.wiring).has_projection(Projection::ViewModel) {
+        return Some("the wiring boots no session".to_string());
+    }
+    None
 }
 
 impl fmt::Display for BootKey {
@@ -64,13 +120,16 @@ impl fmt::Display for BootKey {
         let names: Vec<&str> = self.seed_files.iter().map(|(n, _)| n.as_str()).collect();
         write!(
             f,
-            "storage={:?} sync={:?} actors={:?} editor-leg={:?} fault={:?} timing={:?} seed={names:?}",
+            "storage={:?} sync={:?} actors={:?} editor-leg={:?} fault={:?} timing={:?} \
+             read-only-homes={:?} env={:?} seed={names:?}",
             self.storage_adapters,
             self.sync_adapters,
             self.actors,
             self.editor_leg,
             self.boot_fault,
             self.timing,
+            self.read_only_homes,
+            BOOT_ENV.iter().zip(&self.env).collect::<Vec<_>>(),
         )
     }
 }
@@ -183,13 +242,20 @@ async fn observe_frontend(frontend: &HeadlessFrontendComponent) -> Obs {
             .collect(),
     );
 
-    let store = frontend
-        .loro_doc_store()
-        .expect("[snapshot boot] a session boot keeps its Loro store");
-    for (name, scope) in [
-        ("loro_tree", holon_loro::DocScope::Global),
-        ("loro_layout", holon_loro::DocScope::Layout),
-    ] {
+    let loro_store = match (frontend.loro_enabled(), frontend.loro_doc_store()) {
+        (true, Some(store)) => Some(store),
+        (false, None) => None,
+        (enabled, store) => panic!(
+            "[snapshot boot] Loro enabled {enabled}, but the session {} a Loro store",
+            if store.is_some() { "holds" } else { "lacks" }
+        ),
+    };
+    for (name, scope, store) in loro_store.iter().flat_map(|store| {
+        [
+            ("loro_tree", holon_loro::DocScope::Global, store),
+            ("loro_layout", holon_loro::DocScope::Layout, store),
+        ]
+    }) {
         let doc = store
             .get_doc(scope)
             .await
@@ -345,10 +411,13 @@ fn loro_text(text: &str, peers: &mut Vec<String>) -> String {
     out
 }
 
-/// A finished, cleanly shut down first boot of one [`BootKey`].
+/// A cleanly shut down first boot of one [`BootKey`], with no navigation yet:
+/// an aligned focus would make the restore's own align a no-op.
 pub struct BootTemplate {
     key: BootKey,
     obs: Obs,
+    snapshot: StoreSnapshot,
+    peer_ids: BTreeSet<u64>,
 }
 
 impl BootTemplate {
@@ -356,24 +425,167 @@ impl BootTemplate {
         &self.key
     }
 
-    /// The [`Obs`] of the fresh boot, read before its shutdown.
+    /// The [`Obs`] of the first restore of the template.
     pub fn obs(&self) -> &Obs {
         &self.obs
     }
+
+    /// The copied store: a test corrupts it to show the restore's checks.
+    pub fn snapshot(&self) -> &StoreSnapshot {
+        &self.snapshot
+    }
+
+    /// A template of `ref_state`'s key that no other case shares.
+    pub fn build(ref_state: &ReferenceState) -> Self {
+        Self::build_after_boot(ref_state, || {})
+    }
+
+    /// [`Self::build`] that runs `after_boot` on the boot's runtime once the
+    /// boot finished. Panics on any error the template's boot or shutdown
+    /// logged: the restore's scope never sees them.
+    pub fn build_after_boot(ref_state: &ReferenceState, after_boot: impl FnOnce()) -> Self {
+        let key = BootKey::of(ref_state);
+        key.assert_restorable();
+        let sut = ComposedSut::<WideE2E>::init_built_by(
+            ref_state,
+            BTreeSet::new(),
+            move |resolver| async move {
+                let booted = boot_wide_unaligned(&resolver, ref_state, None).await;
+                after_boot();
+                booted
+            },
+        );
+        let peer_ids = sut.primary_peer_ids().clone();
+        let snapshot = sut.finish_with(|handle| async move {
+            let frontend = handle
+                .frontend()
+                .expect("[snapshot boot] only a session boot has a template")
+                .clone();
+            drop(handle);
+            let loro_enabled = set_for_wiring(&ref_state.harness.wiring)
+                .has_projection(Projection::EditorState);
+            let snapshot = frontend.shut_down_to_snapshot().await;
+            snapshot
+                .assert_file_hashes_match(if loro_enabled {
+                    holon_api::capability::Consolidator::Upstream
+                } else {
+                    holon_api::capability::Consolidator::Store
+                })
+                .await;
+            snapshot
+        });
+        let problems = crate::test_tracing::SpanCollector::global().captured_problems();
+        assert!(
+            problems.is_empty(),
+            "[snapshot boot] the template boot of {key} logged {} error(s) or panic(s): {problems:#?}",
+            problems.len()
+        );
+        let obs = observe(&ComposedSut::<WideE2E>::boot_restored(
+            ref_state, &snapshot, &peer_ids,
+        ));
+        Self {
+            key,
+            obs,
+            snapshot,
+            peer_ids,
+        }
+    }
 }
+
+// shortcut: the templates live until the process exits, so their temp dirs
+// are never removed; give them a drop at exit if the temp dir fills up.
+static TEMPLATES: Mutex<Vec<Arc<BootTemplate>>> = Mutex::new(Vec::new());
 
 /// The template for `ref_state`'s key, built on first use and kept for the
 /// rest of the process.
 pub fn template_for(ref_state: &ReferenceState) -> Arc<BootTemplate> {
     let key = BootKey::of(ref_state);
-    todo!("[snapshot boot] build the template for {key}")
+    let cached = TEMPLATES
+        .lock()
+        .expect("[snapshot boot] template cache poisoned")
+        .iter()
+        .find(|t| t.key == key)
+        .cloned();
+    if let Some(template) = cached {
+        return template;
+    }
+    // Built outside the lock: a build that panics leaves the cache usable.
+    let template = Arc::new(BootTemplate::build(ref_state));
+    TEMPLATES
+        .lock()
+        .expect("[snapshot boot] template cache poisoned")
+        .push(template.clone());
+    template
 }
 
 impl ComposedSut<WideE2E> {
-    /// [`proptest_state_machine::StateMachineTest::init_test`] over a copy of
-    /// `template` instead of a fresh vault.
+    /// [`init_test`](proptest_state_machine::StateMachineTest::init_test) over
+    /// a copy of `template` instead of a fresh vault. Panics unless the case's
+    /// key is the template's and the restore observes what the template's
+    /// first restore observed.
     pub fn init_restored(template: &BootTemplate, ref_state: &ReferenceState) -> Self {
-        let _ = (template, ref_state);
-        todo!("[snapshot boot] restore a boot from its template")
+        let key = BootKey::of(ref_state);
+        assert!(
+            key == template.key,
+            "[snapshot boot] template built for {}, case needs {key}",
+            template.key
+        );
+        key.assert_restorable();
+        let sut = Self::boot_restored(ref_state, &template.snapshot, &template.peer_ids);
+        assert_obs_eq(
+            template.obs(),
+            &observe(&sut),
+            "the restore differs from its template's first restore",
+        );
+        sut
     }
+
+    fn boot_restored(
+        ref_state: &ReferenceState,
+        snapshot: &StoreSnapshot,
+        peer_ids: &BTreeSet<u64>,
+    ) -> Self {
+        let sut = Self::init_built_by(ref_state, peer_ids.clone(), |resolver| async move {
+            restore_wide(&resolver, ref_state, snapshot).await
+        });
+        sut.handle()
+            .frontend()
+            .expect("a restore boots a session")
+            .assert_restore_wrote_nothing();
+        sut
+    }
+}
+
+/// [`boot_and_seed_wide`](crate::pbt::composed::wide_e2e::boot_and_seed_wide)
+/// over a copy of `snapshot`.
+async fn restore_wide(
+    resolver: &IdResolver,
+    ref_state: &ReferenceState,
+    snapshot: &StoreSnapshot,
+) -> (CapMap, WideHandle, BTreeSet<EntityUri>) {
+    let set = set_for_wiring(&ref_state.harness.wiring);
+    let frontend = Arc::new(
+        HeadlessFrontendComponent::new_from_snapshot(
+            snapshot,
+            Duration::from_millis(300),
+            set.has_projection(Projection::EditorState),
+            set.wiring.editor_leg,
+            keystone_boot_clock(),
+            None,
+            ref_state.integration.timing,
+        )
+        .await,
+    );
+    frontend.set_resolver(resolver.clone());
+    let drained = frontend
+        .injector()
+        .resolve::<holon_orgmode::VaultBacklogDrained>();
+    tokio::time::timeout(Duration::from_secs(60), drained.wait_drained())
+        .await
+        .expect("[snapshot boot] the restored backlog did not end within 60s")
+        .expect("[snapshot boot] the restored backlog failed");
+    let bundle = compose_sut_over_existing(&set, resolver, frontend).await;
+    let (mut caps, handle, scaffold) = finish_wide_boot(bundle, ref_state, true).await;
+    align_initial_focus(&mut caps, &handle, ref_state).await;
+    (caps, handle, scaffold)
 }
