@@ -12,6 +12,11 @@ autotests = false
 # holon-orgmode stay storage-agnostic. Only frontends that assemble backends
 # depend on this crate — never the storage-agnostic layers.
 
+[features]
+# `kill_session`, the crash teardown the tests end a session with. A release
+# build has none.
+crash-injection = []
+
 [dependencies]
 holon.workspace = true
 holon-api.workspace = true

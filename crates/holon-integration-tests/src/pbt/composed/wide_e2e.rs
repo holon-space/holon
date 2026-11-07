@@ -2523,6 +2523,7 @@ impl ComposedSlice for WideE2E {
             E2ETransition::CrashRestart(t) => RebootGap::Crashed {
                 doc: t.doc.clone(),
                 retitle: t.retitle_while_down.clone(),
+                owed: ref_state.files.crash_owed_write_back,
             },
             E2ETransition::DeleteHeadlineWhileOff(t) => RebootGap::DeleteHeadline {
                 block_id: t.block_id.clone(),

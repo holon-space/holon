@@ -33,6 +33,7 @@ test-infra = [
     # The D229 write-ahead test crashes the file-sync controller mid-ingest.
     "holon-filesystem?/crash-injection",
     "holon-orgmode?/crash-injection",
+    "holon-app?/crash-injection",
     # The keystone holds its database "from another process" through it.
     "holon-turso?/held-lock-seam",
     "dep:holon",

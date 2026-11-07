@@ -79,6 +79,8 @@ pub use mcp_integrations::McpIntegrationsModule;
 pub use no_turso::from_block_query_source;
 pub use no_turso::register_block_query_frontend;
 pub use seed::seed_default_layout;
+#[cfg(all(feature = "crash-injection", not(target_arch = "wasm32")))]
+pub use session::kill_session;
 pub use session::new_from_config;
 pub use session::new_from_config_with_di;
 pub use session::shutdown_session;

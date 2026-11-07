@@ -28,10 +28,15 @@ use crate::pbt::transition_budgets::docs_tolerance;
 
 const CRASH_RESTORE_AMBIGUOUS: &str = "crash-restore-ambiguous";
 
-/// Crash-restart over a document whose write-back is owed: the store holds an
-/// edit, `doc`'s file does not (a churning writer stalled the write), and the
-/// process ends there. The churn dies with it, so the next boot meets a healthy
-/// file system and ONE divergence — a file behind its store.
+/// Crash-restart over a document whose file churns: when its write-back is
+/// owed, the store holds an edit and `doc`'s file does not (the churn stalled
+/// the write), and the process ends there. The churn dies with it, so the next
+/// boot meets a healthy file system and ONE divergence — a file behind its
+/// store. A held file owes nothing, and the crash must leave it as it is.
+///
+/// The process dies by `holon_app::kill_session`: no wait for the write-back,
+/// no save. The harness checks first that the dying session's write-back owes
+/// `doc` exactly when the model does.
 ///
 /// What a crash keeps is the oracle: the store keeps every committed edit (it
 /// is a database, the write-back is not what commits it), the file keeps the
@@ -101,8 +106,8 @@ impl TransitionRef<ReferenceState> for CrashRestart {
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
         let file = crate::pbt::copies_model::file_name_of(state, &self.doc);
-        let boots_equal_to_base =
-            self.retitle_while_down.is_none() && state.write_back_owed(&self.doc);
+        let owed = state.write_back_owed(&self.doc);
+        let boots_equal_to_base = self.retitle_while_down.is_none() && owed;
         let base_texts: Vec<String> = state.files.merge_base[&self.doc]
             .blocks
             .iter()
@@ -111,6 +116,7 @@ impl TransitionRef<ReferenceState> for CrashRestart {
             .collect();
         state.reboot_drops_in_memory_state();
         state.files.write_churn.remove(&self.doc);
+        state.files.crash_owed_write_back = owed;
         let copies = state
             .files
             .crash_restore_copies

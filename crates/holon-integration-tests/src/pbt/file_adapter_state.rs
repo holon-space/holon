@@ -93,6 +93,10 @@ pub struct FileAdapterState {
     /// The conflict copies a crash-restore left beside each file, by the
     /// file's final path component, each as the block texts it holds.
     pub crash_restore_copies: BTreeMap<String, Vec<Vec<String>>>,
+
+    /// Whether the document of the last crash owed its write-back when the
+    /// app died: the harness checks the dying session's write-back agrees.
+    pub crash_owed_write_back: bool,
 }
 
 /// A document's file as a landed write-back or ingest recorded it.

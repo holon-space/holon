@@ -31,6 +31,8 @@ mod introduced_connection_secret_field;
 mod invalid_connection_config_boots_degraded;
 mod irreversible_share_ops_record_history;
 mod is_program_net_agrees_with_the_profile;
+#[cfg(feature = "crash-injection")]
+mod kill_session_stops_every_writer;
 mod loro_document_manager_page_position;
 mod loro_seam_edge_fields;
 mod loro_ui_row_matches_sql_row;

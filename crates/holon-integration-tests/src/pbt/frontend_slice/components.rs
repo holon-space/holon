@@ -257,17 +257,19 @@ pub enum RebootGap {
     /// The database records another scalar-function set, as one an older
     /// binary built does.
     FunctionSetChanged,
-    /// The app dies with `doc`'s write-back still owed: the store holds the
-    /// edit, the file does not, and the churn that stalled the write ends with
-    /// the process. What the next boot meets is the whole point — a file behind
-    /// its store.
+    /// The app dies while `doc`'s file churns: the store holds every edit,
+    /// the file what the last landed write left, and the churn ends with the
+    /// process. What the next boot meets is the whole point — when `owed`, a
+    /// file behind its store.
     ///
-    /// The death is modelled by the production teardown REFUSING (it reports
-    /// the unwritten files); the dying process's tasks are still stopped, so a
-    /// crash that leaves an actor mid-write is out of reach here.
+    /// The death is `holon_app::kill_session`: it waits for nothing and saves
+    /// nothing, so the step ends when the tasks have stopped and the locks are
+    /// free. Just before it, the live write-back must owe `doc` exactly when
+    /// the model says `owed`.
     Crashed {
         doc: EntityUri,
         retitle: Option<holon_pbt_core::types::RetitleWhileDown>,
+        owed: bool,
     },
 }
 
@@ -1351,23 +1353,40 @@ impl HeadlessFrontendComponent {
         // closes. Calling it here is what makes this transition a reboot rather
         // than a store yanked out from under a live session.
         let crashed = matches!(between, RebootGap::Crashed { .. });
-        if crashed {
+        if let RebootGap::Crashed { doc, owed, .. } = &between {
+            let idle = old
+                .injector
+                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+                .expect("[reboot] a crash needs the org file sync, whose write-back it interrupts");
+            let unsettled = idle
+                .writeback_net()
+                .read(holon_filesystem::writeback_net::unsettled)
+                .contains(&doc.to_string());
+            assert!(
+                unsettled || !owed,
+                "[reboot] crash with {doc}'s write-back owed, but the write-back owes nothing"
+            );
+            assert!(
+                !unsettled || *owed,
+                "[reboot] crash with {doc}'s file equal to its store, but the write-back still \
+                 owes it"
+            );
             // A crash ends the process where it stands: the orderly stop's
             // hash stamp never runs, so every row the write-back left with
             // the empty hash is still empty at the next boot.
             holon_filesystem::crash_injection::arm("skip_written_hash_stamp");
-        }
-        if let Err(e) = holon_app::shutdown_session(&old.injector).await {
-            // A crash's teardown refuses on the files it could not write — that
-            // refusal IS the crash. Any other failure is a bug.
-            let refusal = format!("{e:#}");
-            assert!(
-                crashed && refusal.contains("refused the org write-back"),
-                "[reboot] session shutdown failed: {refusal}"
+            holon_app::kill_session(&old.injector)
+                .await
+                .unwrap_or_else(|e| panic!("[reboot] the crash left the session running: {e:#}"));
+            assert_eq!(
+                holon_filesystem::crash_injection::armed(),
+                None,
+                "[reboot] the killed file sync never reached its hash stamp"
             );
-        }
-        if crashed {
-            holon_filesystem::crash_injection::disarm();
+        } else {
+            holon_app::shutdown_session(&old.injector)
+                .await
+                .unwrap_or_else(|e| panic!("[reboot] session shutdown failed: {e:#}"));
         }
         let dead = Arc::downgrade(&old);
         drop(old);
@@ -6216,11 +6235,10 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         doc: &EntityUri,
         retitle_while_down: Option<&holon_pbt_core::types::RetitleWhileDown>,
     ) {
-        self.reboot_through(RebootGap::Crashed {
-            doc: doc.clone(),
-            retitle: retitle_while_down.cloned(),
-        })
-        .await;
+        unreachable!(
+            "the composed harness applies a crash of {doc} (retitle {retitle_while_down:?}) as a \
+             reboot, with the model's owed write-back"
+        )
     }
 
     async fn reboot_after_upgrade(&self) {

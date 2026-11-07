@@ -136,20 +136,13 @@ where
 /// [`DEFAULT_SHUTDOWN_TIMEOUT`](holon_api::lifecycle::DEFAULT_SHUTDOWN_TIMEOUT)
 /// is an `Err` naming it — never a silent detach.
 pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
-    #[cfg(not(target_arch = "wasm32"))]
-    let vault = injector
-        .try_resolve::<crate::vault_lock::SessionVault>()
-        .map_err(|e| {
-            anyhow::anyhow!("shutdown: the container registers no SessionVault to release: {e}")
-        })?;
-
     // Before anything stops: the write-back loop lets shutdown win over its
     // backlog, so an edit still on its way to disk would stay only in the
     // store, and the next boot with another DB reads the stale file as a user
     // edit that deletes it. A write-back that does not settle does not stop
     // the shutdown; its error is returned once the rest has run.
     #[cfg(not(target_arch = "wasm32"))]
-    let settled = match &*vault {
+    let settled = match &*session_vault(injector)? {
         crate::vault_lock::SessionVault::Held(_) => {
             wait_for_writeback(injector, WRITEBACK_SETTLE_BUDGET).await
         }
@@ -158,15 +151,52 @@ pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
     #[cfg(target_arch = "wasm32")]
     let settled: Result<()> = Ok(());
 
+    stop_session(injector, Teardown::Quit).await?;
+    settled
+}
+
+/// End a session as a killed process ends: the same teardown as
+/// [`shutdown_session`], without waiting for the write-back and without the
+/// Loro checkpoint, so the store and the files stay as the last acknowledged
+/// write left them. What survives is the next boot's to find.
+#[cfg(all(feature = "crash-injection", not(target_arch = "wasm32")))]
+pub async fn kill_session(injector: &fluxdi::Injector) -> Result<()> {
+    stop_session(injector, Teardown::Kill).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Teardown {
+    Quit,
+    #[cfg(all(feature = "crash-injection", not(target_arch = "wasm32")))]
+    Kill,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn session_vault(
+    injector: &fluxdi::Injector,
+) -> Result<fluxdi::Shared<crate::vault_lock::SessionVault>> {
+    injector
+        .try_resolve::<crate::vault_lock::SessionVault>()
+        .map_err(|e| {
+            anyhow::anyhow!("shutdown: the container registers no SessionVault to release: {e}")
+        })
+}
+
+/// The tasks stop, then the store closes, then the vault is released.
+async fn stop_session(injector: &fluxdi::Injector, teardown: Teardown) -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let vault = session_vault(injector)?;
+
     injector
         .resolve::<holon_api::lifecycle::SessionShutdown>()
         .shutdown(holon_api::lifecycle::DEFAULT_SHUTDOWN_TIMEOUT)
         .await?;
 
     // `LoroConfig` is registered exactly when the CRDT layer is on.
-    if injector
-        .try_resolve::<holon_loro_wiring::LoroConfig>()
-        .is_ok()
+    if teardown == Teardown::Quit
+        && injector
+            .try_resolve::<holon_loro_wiring::LoroConfig>()
+            .is_ok()
     {
         let store = injector
             .try_resolve::<holon_loro::LoroDocumentStore>()
@@ -208,7 +238,7 @@ pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
         lock.release()?;
     }
     tracing::info!("session shut down");
-    settled
+    Ok(())
 }
 
 /// The exit status of a step followed by another that runs whatever the first
