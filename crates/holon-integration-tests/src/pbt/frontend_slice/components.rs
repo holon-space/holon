@@ -587,6 +587,22 @@ impl HeadlessFrontendComponent {
         out
     }
 
+    /// Every file under the vault root paired with its full text.
+    pub async fn vault_file_contents(&self) -> Vec<(PathBuf, String)> {
+        use holon_filesystem::FileSystem;
+        let scanned = FileSystem::scan_directory(self.org_fs().as_ref(), self.org_root())
+            .await
+            .expect("vault_file_contents: scan_directory failed");
+        let mut out = Vec::new();
+        for path in scanned.files {
+            let content = FileSystem::read_to_string(self.org_fs().as_ref(), &path)
+                .await
+                .unwrap_or_else(|e| panic!("vault_file_contents: read {}: {e}", path.display()));
+            out.push((path, content));
+        }
+        out
+    }
+
     /// Page-files the production `FileSyncController` MATERIALIZED reactively
     /// after boot (a rule-minted journal date, `convert_block_to_page`, the B2
     /// sweep) that are NOT among `already_tracked` paths — each paired with its

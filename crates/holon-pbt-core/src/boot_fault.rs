@@ -5,7 +5,7 @@
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BootFault {
     None,
     /// The previous run panicked: its panic record is in the config dir
@@ -16,7 +16,7 @@ pub enum BootFault {
 }
 
 /// The panic record a [`BootFault::PriorCrash`] leaves behind.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PriorPanic {
     pub message: String,
     /// `file:line:column`, as a panic location reads.

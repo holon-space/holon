@@ -2367,68 +2367,80 @@ fn integration_connect_timing() -> BoxedStrategy<IntegrationConnectTiming> {
     }
 }
 
+/// [`WideE2EMachine::init_state`] over the given connect-timing and boot-fault
+/// axes.
+pub fn wide_init_state(
+    timing: BoxedStrategy<IntegrationConnectTiming>,
+    fault: BoxedStrategy<holon_pbt_core::BootFault>,
+) -> BoxedStrategy<ReferenceState> {
+    // Draw the FULL valid-wiring space (shrinking toward Loro-only — the cheap
+    // minimal backend) and build the per-wiring oracle. `wide_e2e_ref_for`
+    // does a `block_on` for cap-set extraction, valid here because proptest
+    // calls `init_state` in a sync context with no ambient runtime (see
+    // `loro_only_wide_seed_runs_block_invariants_green`). The per-draw
+    // non-vacuity floor (`required_invariants`) keeps a Loro-only draw from
+    // false-REDing on the SQL/ViewModel ids it has no caps for.
+    // `HOLON_PBT_FORCE_FULL=1` pins every draw to `full_headless` — the
+    // deterministic exerciser for the frontend-only composed arms
+    // (`ApplyMutation` External / `BulkExternalAdd`). NOT actually rare by
+    // default: the validity filter (`Wiring::validate` rejects
+    // empty-storage and ActionEngine-without-Turso draws) reweights the raw
+    // 0.20 Turso inclusion to ≈0.39 of VALID draws, so a 16-case run misses
+    // Turso entirely with probability well under 0.1%. `HOLON_PBT_PIN_WIRING="
+    // storage;sync;actors"` pins every draw to ONE exact
+    // manifest (fail-loud on a typo or invalid manifest; an optional
+    // `;Cell` or `;Dispatch` pins the editor leg) — the external-supply seam
+    // for bottom-up ladder runs and subset-wiring repros. Mutually exclusive with
+    // FORCE_FULL to keep a run's provenance unambiguous.
+    let wired = if let Ok(spec) = std::env::var("HOLON_PBT_PIN_WIRING") {
+        assert!(
+            std::env::var("HOLON_PBT_FORCE_FULL").is_err(),
+            "HOLON_PBT_PIN_WIRING and HOLON_PBT_FORCE_FULL are mutually exclusive"
+        );
+        let wiring = holon_pbt_core::wiring_from_exact_spec(&spec);
+        ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(wide_e2e_ref_for(
+            &wiring,
+        )))
+    } else if std::env::var("HOLON_PBT_FORCE_FULL").is_ok() {
+        ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(wide_e2e_ref()))
+    } else {
+        holon_pbt_core::any_valid_wiring()
+            .prop_map(|w| wide_e2e_ref_for(&w))
+            .boxed()
+    };
+    (
+        wired,
+        timing,
+        fault,
+        holon_loro_testing::ref_ext::peer_ids_strategy(),
+    )
+        .prop_map(|(mut state, timing, fault, peer_ids)| {
+            state.integration.timing = timing;
+            state.loro.peer_ids = peer_ids;
+            // A boot fault is disclosed on the session's bus, so only a
+            // wiring that boots a session can draw one.
+            let fault = if set_for_wiring(&state.harness.wiring)
+                .has_projection(Projection::ViewModel)
+            {
+                fault
+            } else {
+                holon_pbt_core::BootFault::None
+            };
+            crate::pbt::composed::boot_fault::model_boot_fault(&mut state, fault);
+            state
+        })
+        .boxed()
+}
+
 impl ReferenceStateMachine for WideE2EMachine {
     type State = ReferenceState;
     type Transition = E2ETransition;
 
     fn init_state() -> BoxedStrategy<Self::State> {
-        // Draw the FULL valid-wiring space (shrinking toward Loro-only — the cheap
-        // minimal backend) and build the per-wiring oracle. `wide_e2e_ref_for`
-        // does a `block_on` for cap-set extraction, valid here because proptest
-        // calls `init_state` in a sync context with no ambient runtime (see
-        // `loro_only_wide_seed_runs_block_invariants_green`). The per-draw
-        // non-vacuity floor (`required_invariants`) keeps a Loro-only draw from
-        // false-REDing on the SQL/ViewModel ids it has no caps for.
-        // `HOLON_PBT_FORCE_FULL=1` pins every draw to `full_headless` — the
-        // deterministic exerciser for the frontend-only composed arms
-        // (`ApplyMutation` External / `BulkExternalAdd`). NOT actually rare by
-        // default: the validity filter (`Wiring::validate` rejects
-        // empty-storage and ActionEngine-without-Turso draws) reweights the raw
-        // 0.20 Turso inclusion to ≈0.39 of VALID draws, so a 16-case run misses
-        // Turso entirely with probability well under 0.1%. `HOLON_PBT_PIN_WIRING="
-        // storage;sync;actors"` pins every draw to ONE exact
-        // manifest (fail-loud on a typo or invalid manifest; an optional
-        // `;Cell` or `;Dispatch` pins the editor leg) — the external-supply seam
-        // for bottom-up ladder runs and subset-wiring repros. Mutually exclusive with
-        // FORCE_FULL to keep a run's provenance unambiguous.
-        let wired = if let Ok(spec) = std::env::var("HOLON_PBT_PIN_WIRING") {
-            assert!(
-                std::env::var("HOLON_PBT_FORCE_FULL").is_err(),
-                "HOLON_PBT_PIN_WIRING and HOLON_PBT_FORCE_FULL are mutually exclusive"
-            );
-            let wiring = holon_pbt_core::wiring_from_exact_spec(&spec);
-            ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(wide_e2e_ref_for(
-                &wiring,
-            )))
-        } else if std::env::var("HOLON_PBT_FORCE_FULL").is_ok() {
-            ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(wide_e2e_ref()))
-        } else {
-            holon_pbt_core::any_valid_wiring()
-                .prop_map(|w| wide_e2e_ref_for(&w))
-                .boxed()
-        };
-        (
-            wired,
+        wide_init_state(
             integration_connect_timing(),
             crate::pbt::composed::boot_fault::boot_fault_strategy(),
-            holon_loro_testing::ref_ext::peer_ids_strategy(),
         )
-            .prop_map(|(mut state, timing, fault, peer_ids)| {
-                state.integration.timing = timing;
-                state.loro.peer_ids = peer_ids;
-                // A boot fault is disclosed on the session's bus, so only a
-                // wiring that boots a session can draw one.
-                let fault = if set_for_wiring(&state.harness.wiring)
-                    .has_projection(Projection::ViewModel)
-                {
-                    fault
-                } else {
-                    holon_pbt_core::BootFault::None
-                };
-                crate::pbt::composed::boot_fault::model_boot_fault(&mut state, fault);
-                state
-            })
-            .boxed()
     }
 
     fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {

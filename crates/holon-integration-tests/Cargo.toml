@@ -229,3 +229,7 @@ holon-transition-contract.workspace = true
 [[test]]
 name = "integration"
 path = "tests/main.rs"
+
+[[test]]
+name = "snapshot_boot"
+path = "tests/snapshot_boot_pbt.rs"

@@ -4965,7 +4965,7 @@ pub trait RefRemoteListSync {
 }
 
 /// When the keystone's fake MCP peer starts answering, relative to the boot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum IntegrationConnectTiming {
     /// Answers from the first request.
     Instant,

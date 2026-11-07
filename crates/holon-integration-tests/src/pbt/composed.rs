@@ -139,6 +139,8 @@ pub mod seed_primitives;
 pub mod two_instance;
 pub mod two_instance_transport;
 pub mod wide_e2e;
+/// Boots a keystone case from a restored copy of a finished first boot.
+pub mod snapshot_boot;
 
 /// The `full_headless` session's MCP tools over the embedded server.
 #[cfg(any(test, feature = "pbt"))]
