@@ -451,6 +451,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `two-instance-loro-docs-no-common-state`
 - `two-instance-one-way-share-receiver-org-missing`
 - `two-instance-receiver-outside-sanctioned-audience`
+- `two-instance-viewmodel-stale-displayed-text`
 - `typechars-sql-reads-budget`
 - `typed-link-in-pasted-decision-block-file-disagrees`
 - `undo-create-sibling-order`

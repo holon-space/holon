@@ -7,6 +7,7 @@ TARGET_GC=<path> runs the checks against another copy of the script. SEED=<n> re
 import json
 import os
 import random
+import shlex
 import shutil
 import subprocess
 import sys
@@ -28,10 +29,22 @@ def gc(target, *args, env=None):
     )
 
 
+# A manifest in FAKE_CARGO_OWN_WORKSPACES is a workspace of its own with its own target dir, whose build script needs
+# a variable that its recipe sets per call and that no record holds (napi-build's EMNAPI_LINK_DIR).
 FAKE_CARGO = """#!/usr/bin/python3
 import json, os, sys
+argv = sys.argv[1:]
+manifest = next((a.partition("=")[2] or argv[i + 1] for i, a in enumerate(argv) if a.partition("=")[0] == "--manifest-path"), None)
+own = manifest in json.loads(os.environ.get("FAKE_CARGO_OWN_WORKSPACES", "[]"))
+if argv[0] == "metadata":
+    root = os.path.join(os.path.dirname(os.path.abspath(manifest)), "target") if own else os.environ["FAKE_CARGO_TARGET"]
+    print(json.dumps({"target_directory": root}))
+    sys.exit(0)
 with open(os.environ["FAKE_CARGO_LOG"], "a") as f:
-    f.write(json.dumps({"argv": sys.argv[1:], "sha": os.environ.get("HOLON_BUILD_SHA")}) + "\\n")
+    f.write(json.dumps({"argv": argv, "sha": os.environ.get("HOLON_BUILD_SHA")}) + "\\n")
+if own and "EMNAPI_LINK_DIR" not in os.environ:
+    sys.stderr.write("EMNAPI_LINK_DIR must be set: NotPresent\\n")
+    sys.exit(101)
 sys.stdout.write(open(os.environ["FAKE_CARGO_MESSAGES"]).read())
 """
 
@@ -48,8 +61,33 @@ REPLAYED = [["test", "--workspace", "--no-run", "--message-format=json"],
             ["clippy", "--workspace", "--all-targets", "--message-format=json", "--", "-D", "warnings", "-D",
              "clippy::await_holding_invalid_type"]]
 
+OWN_WORKSPACES = ["frontends/holon-worker/Cargo.toml", "frontends/dioxus-web/Cargo.toml"]
+LINTS = ["-D", "warnings", "-D", "clippy::await_holding_invalid_type"]
+# Recorded calls of a full gate, by what the replay must do with each.
+BUILDS_NOTHING = [["fmt", "--all", "--", "--check"],
+                  ["deny", "--locked", "--manifest-path", "frontends/holon-worker/Cargo.toml", "--config", "deny.toml",
+                   "check", "licenses"],
+                  ["tree", "--locked", "--workspace", "-e", "normal,build,features", "-i", "gpui"],
+                  ["metadata", "--format-version", "1"],
+                  ["nextest", "run", "--binaries-metadata", "b.json", "--cargo-metadata", "c.json", "--workspace-remap",
+                   ".", "-E", "test(/^x::/)", "--no-fail-fast"]]
+BUILDS_HERE = [["check", "--locked", "--workspace", "--lib", "--bins"],
+               ["check", "-p", "holon-frontend", "--target", "wasm32-unknown-unknown"],
+               ["nextest", "run", "--workspace", "--features", "holon-gpui/pbt", "--no-run"],
+               ["test", "--workspace", "--test", "integration", "keystone_tour::", "--", "--nocapture"],
+               ["clippy", "--workspace", "--all-targets", "--", *LINTS],
+               ["check", "--manifest-path", "crates/holon-api/Cargo.toml"]]
+BUILDS_ELSEWHERE = [["check", "--manifest-path", "frontends/holon-worker/Cargo.toml", "--target", "wasm32-wasip1-threads",
+                     "--features", "browser"],
+                    ["test", "--manifest-path", "frontends/holon-worker/Cargo.toml", "--lib", "--no-default-features"],
+                    ["check", "--manifest-path=frontends/dioxus-web/Cargo.toml", "--target", "wasm32-unknown-unknown"]]
+# The integrate record that failed the count: its build calls and one call of each kind that builds nothing.
+GATE_RECORD = [BUILDS_NOTHING[0], BUILDS_NOTHING[1], BUILDS_HERE[4], BUILDS_HERE[0], BUILDS_HERE[1],
+               ["check", "--manifest-path", "frontends/dioxus-web/Cargo.toml", "--target", "wasm32-unknown-unknown"],
+               BUILDS_ELSEWHERE[0], BUILDS_ELSEWHERE[1], BUILDS_HERE[2], BUILDS_NOTHING[4]]
 
-def recorded_build(target, in_use, rng=None, uplifted=()):
+
+def recorded_build(target, in_use, rng=None, uplifted=(), calls=RECORDED):
     """The env of a gc run after a recorded build whose replay reports the units in `in_use`: as a compiled
     artifact, as a build-script run (its out dir), as a bin cargo copied up to the profile dir (at most one per
     crate, as cargo has one such path), or (without rng) as an artifact and a run."""
@@ -59,7 +97,7 @@ def recorded_build(target, in_use, rng=None, uplifted=()):
     (tools / "cargo").chmod(0o755)
     record = target / "calls.jsonl"
     env = {"HOLON_BUILD_SHA": "0123abcd", "HOLON_BUILD_TIME": None}
-    record.write_text("".join(json.dumps({"argv": argv, "env": env}) + "\n" for argv in RECORDED))
+    record.write_text("".join(json.dumps({"argv": argv, "env": env}) + "\n" for argv in calls))
     messages = []
     for unit in in_use:
         kinds = [rng.choice(["artifact", "run", "copied"])] if rng else ["artifact", "run"]
@@ -78,6 +116,7 @@ def recorded_build(target, in_use, rng=None, uplifted=()):
     messages.append({"reason": "build-finished", "success": True})
     (target / "messages.jsonl").write_text("".join(json.dumps(m) + "\n" for m in messages))
     return {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "HOLON_CARGO_RECORD": str(record),
+            "FAKE_CARGO_TARGET": str(target), "FAKE_CARGO_OWN_WORKSPACES": json.dumps(OWN_WORKSPACES),
             "FAKE_CARGO_LOG": str(target / "cargo.log"), "FAKE_CARGO_MESSAGES": str(target / "messages.jsonl")}
 
 
@@ -327,6 +366,42 @@ def check_in_use_never_collected():
             shutil.rmtree(target)
 
 
+def check_every_recorded_call_replays_or_is_listed():
+    """Generated full-gate records: every recorded call either replays or is listed as not replayed with its
+    reason, and neither target-gc nor scripts/count-hash-folders.py fails on any of them."""
+    seed = int(os.environ.get("SEED", random.randrange(1 << 30)))
+    print(f"SEED={seed}")
+    rng = random.Random(seed)
+    pool = BUILDS_NOTHING + BUILDS_HERE + BUILDS_ELSEWHERE
+    # A record with no call of the canonical shape left the count with an empty canonical replay.
+    cases = [GATE_RECORD, [BUILDS_ELSEWHERE[2], BUILDS_NOTHING[1], BUILDS_ELSEWHERE[1]]] + [[rng.choice(pool) for _ in range(rng.randint(1, 12))] for _ in range(30)]
+    for calls in cases:
+        target = Path(tempfile.mkdtemp(prefix="target-gc-test-"))
+        try:
+            env = recorded_build(target, [], calls=calls)
+            r = gc(target, "--apply", "--keep", "2", env=env)
+            assert r.returncode == 0, f"exit {r.returncode} on {calls}:\n{r.stdout}{r.stderr}"
+            lines = r.stdout.splitlines()
+            for argv in calls:
+                shown = shlex.join(["cargo", *argv])
+                manifest = (argv[1].partition("=")[2] or argv[2]).removesuffix("/Cargo.toml")
+                want = ("replayed: " if argv in BUILDS_HERE else
+                        "not replayed (builds nothing): " if argv in BUILDS_NOTHING else
+                        f"not replayed (builds into {target.resolve().parent / manifest / 'target'},")
+                assert any(line.startswith(want) and line.endswith(shown) for line in lines), (
+                    f"{shown}: no line starting {want!r}:\n{r.stdout}")
+            replayed = [c["argv"] for c in map(json.loads, (target / "cargo.log").read_text().splitlines())] \
+                if (target / "cargo.log").exists() else []
+            assert not [a for a in replayed if any(m in " ".join(a) for m in OWN_WORKSPACES)], f"replayed {replayed}"
+            assert gc(target, "--mark").returncode == 0
+            c = subprocess.run([sys.executable, str(REPO / "scripts" / "count-hash-folders.py"), str(target),
+                                "--mark", str(target / ".gc-mark"), "--record", env["HOLON_CARGO_RECORD"]],
+                               capture_output=True, text=True, env=env)
+            assert c.returncode == 0, f"count-hash-folders exit {c.returncode} on {calls}:\n{c.stdout}{c.stderr}"
+        finally:
+            shutil.rmtree(target)
+
+
 def check_no_record_keeps_hash_dirs():
     target = Path(tempfile.mkdtemp(prefix="target-gc-test-"))
     try:
@@ -389,7 +464,7 @@ def check_hash_pass_only_below_floor():
 
 
 def main():
-    checks = [check_in_use_never_collected, check_no_record_keeps_hash_dirs, check_hash_pass_only_below_floor,
+    checks = [check_every_recorded_call_replays_or_is_listed, check_in_use_never_collected, check_no_record_keeps_hash_dirs, check_hash_pass_only_below_floor,
               check_unknown_unit_fails_loud,
               check_marker_sweep, check_nothing_outside, check_refuses_while_open,
               check_dry_run, check_needs_marker, check_keep_newest_per_name,

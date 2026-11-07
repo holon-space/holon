@@ -129,7 +129,7 @@ def classes(target, record):
             args = args[1:]
         (excepted if check.exception(sub, check.reduce(sub, pre + args), args) else canon).append(call)
     out = {p: "exception" for p in replay(target, excepted)} if excepted else {}
-    out.update({p: "canon" for p in replay(target, canon)})
+    out.update({p: "canon" for p in replay(target, canon)} if canon else {})
     return out
 
 

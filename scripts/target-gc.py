@@ -45,6 +45,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -208,23 +209,30 @@ def in_use(target_dir, record):
     target = os.path.realpath(target_dir)
     shim = os.path.realpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "cargo-shape"))
     path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep) if os.path.realpath(d) != shim)
-    replays = {}
+    replays, skipped = {}, {}
     for call in calls:
         argv = replay_argv(check, call["argv"])
         if argv is None:
+            skipped.setdefault(shlex.join(["cargo", *call["argv"]]), "builds nothing")
             continue
         hashed = [n for n, v in call["env"].items() if isinstance(v, str) and v.startswith("sha256:")]
         if hashed:
             raise SystemExit("cannot replay cargo %s: the record holds only a hash of %s" % (" ".join(call["argv"]), hashed))
-        replays.setdefault(json.dumps([argv, sorted(call["env"].items())]), (argv, call["env"]))
-    used, built = set(), 0
-    for argv, recorded in replays.values():
+        replays.setdefault(json.dumps([argv, sorted(call["env"].items())]), (argv, call))
+    used, built, replayed = set(), 0, {}
+    for argv, call in replays.values():
         env = {**os.environ, "PATH": path}
-        for name, value in recorded.items():
+        for name, value in call["env"].items():
             if value is None:
                 env.pop(name, None)
             else:
                 env[name] = value
+        shown = shlex.join(["cargo", *call["argv"]])
+        elsewhere = manifest_target_dir(argv, env, os.path.dirname(target))
+        if elsewhere not in (None, target):
+            skipped.setdefault(shown, "builds into %s, whose hash dirs this pass never collects" % elsewhere)
+            continue
+        replayed[shown] = True
         out = subprocess.run(["cargo", *argv], cwd=os.path.dirname(target), env=env, capture_output=True, text=True)
         if out.returncode != 0:
             raise SystemExit("replay `cargo %s` failed (exit %d):\n%s" % (" ".join(argv), out.returncode, out.stderr[-3000:]))
@@ -237,9 +245,28 @@ def in_use(target_dir, record):
                 unit = _unit_of(target, os.path.realpath(p))
                 if unit:
                     used.add(unit)
+    for shown in replayed:
+        print("replayed: %s" % shown)
+    for shown, reason in skipped.items():
+        print("not replayed (%s): %s" % (reason, shown))
     print("in use: %d hash dirs from %d replayed call(s) of %s; the replay built %d unit(s)"
-          % (len(used), len(replays), record, built))
+          % (len(used), len(replayed), record, built))
     return used
+
+
+def manifest_target_dir(argv, env, cwd):
+    """The real path of the target dir that the --manifest-path of `cargo argv` builds into, by cargo's own answer
+    (an out-of-workspace manifest has a target dir of its own), or None for a call without one."""
+    args = argv[:argv.index("--")] if "--" in argv else argv
+    manifest = next((a.partition("=")[2] or args[i + 1] for i, a in enumerate(args)
+                     if a.partition("=")[0] == "--manifest-path"), None)
+    if manifest is None:
+        return None
+    out = subprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1", "--manifest-path", manifest],
+                         cwd=cwd, env=env, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit("cargo metadata --manifest-path %s failed (exit %d):\n%s" % (manifest, out.returncode, out.stderr[-3000:]))
+    return os.path.realpath(json.loads(out.stdout)["target_directory"])
 
 
 def _unit_of(target, path):
