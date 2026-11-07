@@ -279,22 +279,6 @@ lane-nextest *ARGS:
 lane-nextest-reds *ARGS:
     scripts/lane-nextest.py rerun "$@"
 
-# Reruns gate reds in the integration checkout, in the gate's compile shape, so
-# the following timing build compiles nothing: `just gate-rerun -E '<filter>'`.
-# Only the tests narrow; an option that changes what cargo builds is refused.
-[positional-arguments]
-gate-rerun *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for a in "$@"; do
-      case $a in -p* | --package* | --features* | -F* | --all-features | --no-default-features | --cargo-profile* | --release | --target* | --manifest-path* | --config* | --exclude*)
-        echo "gate-rerun: $a changes the compile shape; narrow with -E or --test only" >&2; exit 2 ;;
-      esac
-    done
-    source scripts/cargo-shape-env.sh gate
-    shape_env_header
-    HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure} cargo nextest run {{CANON}} --profile load-tolerant --no-fail-fast "$@"
-
 # Replay hand-authored keystone regressions (concrete transition sequences from
 # docs/Testing/HandAuthoredRegressions.md) through the keystone harness. Same
 # --features pbt gate as the keystone; fail-loud on any red or parse error.

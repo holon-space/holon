@@ -10,6 +10,9 @@ combine="$here/gate-combine.sh"
 integrate="$here/gate-integrate.sh"
 timing="$here/gate-timing.sh"
 real_just=$(command -v just)
+# A caller that sourced cargo-shape-env.sh (run-step.sh does) put this checkout's
+# shim on PATH; behind the stubs it would keep the gate scripts from adding it in front.
+PATH=$(tr ':' '\n' <<<"$PATH" | grep -vxF "$here/cargo-shape" | paste -sd: -)
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 fails=0
@@ -286,7 +289,7 @@ rerun_case() {
   fi
   expect "$what: exits 0 (got $rc)" [ "$rc" = 0 ]
   expect "$what: runs the gate's nextest arm, narrowed by the filter" \
-    [ "$(grep '^cargo nextest' "$probe" | cut -d'|' -f1)" = "cargo nextest run --profile load-tolerant --no-fail-fast -E $filter --no-tests=fail --workspace --features $pbt " ]
+    [ "$(sed -n 's/^\(cargo nextest .*\) | timing=.*/\1/p' "$probe")" = "cargo nextest run --profile load-tolerant --no-fail-fast -E $filter --no-tests=fail --workspace --features $pbt" ]
   expect "$what: in the gate's shape" [ "$(shape_of <"$probe")" = "$gate_shape" ]
   expect "$what: appends its call to the gate's record" [ "$(($(wc -l <"$record")))" = $((calls + 1)) ]
 }

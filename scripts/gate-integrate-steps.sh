@@ -3,8 +3,13 @@
 # command, so each runs as `gate-integrate-steps.sh <name>`.
 #
 # Needs GATE and PBT_FEATURES (the justfile's CANON_FEATURES). With GATE_STEP_ARGS set (a selected gate),
-# extra-nextest runs only the tests that nextest filter set names.
+# extra-nextest runs only the tests that nextest filter set names. `rerun <filterset>`
+# runs the extra nextest step on those tests alone.
 set -euo pipefail
+
+gate_nextest() {
+  HOLON_PBT_TIMING=measure cargo nextest run --profile load-tolerant --no-fail-fast "$@" --workspace --features "$PBT_FEATURES"
+}
 
 keystone_smoke() {
   local log=target/gate-logs/$GATE-smoke.log classified=target/gate-logs/$GATE-smoke-classify.txt
@@ -28,8 +33,7 @@ extra_nextest() {
   # A selected crate may hold no test of this profile: that is a pass, not a wrong filter.
   [ -z "${GATE_STEP_ARGS:-}" ] || filter=(-E "$GATE_STEP_ARGS" --no-tests=warn)
   mark=$(mktemp); trap 'rm -f "$mark"' EXIT
-  if ! HOLON_PBT_TIMING=measure cargo nextest run --profile load-tolerant --no-fail-fast ${filter[@]+"${filter[@]}"} \
-      --workspace --features "$PBT_FEATURES" 2>&1 | tee "$log"; then
+  if ! gate_nextest ${filter[@]+"${filter[@]}"} 2>&1 | tee "$log"; then
     bash scripts/keystone-known-reds.sh "$log" | tee "$classified" || true
     grep -q 'PASS-WITH-NOTE' "$classified" || rc=12
     [ $rc -ne 0 ] || echo "extra nextest: pass-with-note (known reds only)"
@@ -42,5 +46,6 @@ case "${1:-}" in
   keystone-smoke) keystone_smoke ;;
   hand-authored) hand_authored ;;
   extra-nextest) extra_nextest ;;
-  *) echo "usage: $0 keystone-smoke|hand-authored|extra-nextest" >&2; exit 2 ;;
+  rerun) gate_nextest -E "$2" --no-tests=fail ;;
+  *) echo "usage: $0 keystone-smoke|hand-authored|extra-nextest|rerun <filterset>" >&2; exit 2 ;;
 esac

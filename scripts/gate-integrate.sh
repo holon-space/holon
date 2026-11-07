@@ -9,6 +9,12 @@
 #   GATE_DISK_FLOOR_GIB  free disk the gate needs (default: the justfile's).
 #
 #   scripts/gate-integrate.sh --steps   prints the step names, for the selection
+#   scripts/gate-integrate.sh rerun <gate-id> <tip> <filterset>
+#     reruns the gate tests that nextest filterset names, with the gate's nextest
+#     step in the gate's shape env, and appends its cargo call to the gate's
+#     record, so gate-timing.sh after it compiles nothing. Log:
+#     target/gate-logs/rerun-<UTC>.log. Exit: nextest's; 9 = the checkout is not
+#     <tip>, 2 = no record of that gate here; an empty selection is red.
 #
 # After gate-compile the steps run at once in TRACKS, one build slot per track:
 # no step reads another step's output. The steps of QUIET_TRACK go red on a
@@ -100,24 +106,45 @@ source ~/.claude/skills/orchestrator/scripts/gate-step.sh
 gate_steps $(step_names)
 [ "${1:-}" != --track ] || { track "$2"; exit; }
 
+# Needs GATE and tip. The tracks and reruns inherit the shape env, and
+# scripts/gate-timing.sh checks the gate's record of every cargo call before it builds.
+gate_env() {
+  [ "$(jj log -r @- --no-graph -T 'commit_id')" = "$tip" ] || { echo "WRONG TREE: @- is not the tip $tip"; exit 9; }
+  [ -z "$(jj diff -r @ --summary)" ] || { echo "WRONG TREE: @ carries edits on top of the tip $tip"; exit 9; }
+  mkdir -p target/gate-logs
+  export HOLON_CARGO_RECORD=$PWD/target/gate-logs/$GATE-cargo-calls.jsonl
+  # shellcheck source=scripts/cargo-shape-env.sh
+  source "$(dirname "$0")/cargo-shape-env.sh" gate
+  PBT_FEATURES=$(just --justfile "$(dirname "$0")/../justfile" --evaluate CANON_FEATURES)
+  export PBT_FEATURES
+}
+
+if [ "${1:-}" = rerun ]; then
+  [ "$#" -eq 4 ] || { echo "usage: $0 rerun <gate-id> <tip> <filterset>" >&2; exit 2; }
+  export GATE=$2 HOLON_GATE_ID=$2
+  tip=$3
+  [ -s "target/gate-logs/$GATE-cargo-calls.jsonl" ] || { echo "NO GATE RECORD: target/gate-logs/$GATE-cargo-calls.jsonl"; exit 2; }
+  gate_env
+  log=target/gate-logs/rerun-$(date -u +%Y%m%dT%H%M%SZ).log
+  {
+    echo "BASE: $(jj log -r main --no-graph -T commit_id)"
+    echo "TREE: $tip"
+    echo "STARTED: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "gate-integrate.sh rerun: $GATE, -E '$4'"
+    shape_env_header
+    bash "$(dirname "$0")/gate-integrate-steps.sh" rerun "$4"
+  } 2>&1 | tee "$log"
+  exit
+fi
+
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
 export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$ HOLON_BUILD_QUIET_HOLDER=$$
 tip=$3
 
-[ "$(jj log -r @- --no-graph -T 'commit_id')" = "$tip" ] || { echo "WRONG TREE: @- is not the tip $tip"; exit 9; }
-[ -z "$(jj diff -r @ --summary)" ] || { echo "WRONG TREE: @ carries edits on top of the tip $tip"; exit 9; }
+gate_env
 DISK_FLOOR_GIB=$(just --justfile "$(dirname "$0")/../justfile" --evaluate GATE_DISK_FLOOR_GIB)
 [ "$(df -g . | awk 'NR==2{print $4}')" -ge "$DISK_FLOOR_GIB" ] || { echo "DISK BELOW $DISK_FLOOR_GIB GiB"; exit 8; }
-
-mkdir -p target/gate-logs
-# The tracks inherit the shape env, and scripts/gate-timing.sh checks this
-# record of every cargo call before it builds.
-export HOLON_CARGO_RECORD=$PWD/target/gate-logs/$GATE-cargo-calls.jsonl
 : >"$HOLON_CARGO_RECORD"
-# shellcheck source=scripts/cargo-shape-env.sh
-source "$(dirname "$0")/cargo-shape-env.sh" gate
-PBT_FEATURES=$(just --justfile "$(dirname "$0")/../justfile" --evaluate CANON_FEATURES)
-export PBT_FEATURES
 echo "gate-integrate.sh: $GATE (pid $$), tip $tip, cards: $GATE_CARDS"
 shape_env_header
 
