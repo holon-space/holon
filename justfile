@@ -1495,6 +1495,9 @@ check-release-shape:
 # (`profile`, `sample-pbt`, `scripts/capability-cert*.sh`, wasm/android checks).
 # It keeps every dir a replay of the recorded cargo calls (scripts/cargo-shape-env.sh) uses.
 # Refuses to run while cargo/rustc is using the target dir. Dry run by default.
+# The free disk a gate needs, and the floor below which every target-gc pass (gates, seed) frees hash dirs.
+GATE_DISK_FLOOR_GIB := env("GATE_DISK_FLOOR_GIB", "130")
+
 target-gc target_dir='target' *FLAGS:
     #!/usr/bin/env bash
     set -euo pipefail

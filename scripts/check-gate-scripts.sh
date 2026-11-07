@@ -91,6 +91,11 @@ case " $* " in *" --evaluate "*) exec "$REAL_JUST" "$@" ;; esac
 [ -z "${STUB_RED_NEXTEST:-}" ] || [ "${1:-} ${2:-}" != "nextest run" ] || { echo "        FAIL [   1.000s] holon-integration-tests::integration org_suite::stub_red"; exit 100; }
 EOF
 done
+cat > "$stubs/df" <<'EOF'
+#!/bin/sh
+[ -n "${STUB_DF_FREE:-}" ] || exec /bin/df "$@"
+printf 'Filesystem 1G-blocks Used Available\nstub 1000 0 %s\n' "$STUB_DF_FREE"
+EOF
 chmod +x "$stubs"/*
 tip=$(cat target/gate-tip)
 # "<n> <name> <exit>" per gate-steps.jsonl row of gate $1, by step number.
@@ -261,6 +266,15 @@ expect "calls the build check, then timing-gate, then target-gc's replay of the 
   [ "$(grep -v -- ' --evaluate ' "$probe" | cut -d' ' -f1-2 | tr '\n' ' ')" = "just timing-gate-build just timing-gate cargo test " ]
 expect "the replay builds and runs nothing new: --no-run, no nextest profile" \
   grep -q -- '^cargo test --workspace --features [^ ]* --no-run --message-format=json |' "$probe"
+
+echo "== one disk floor: the integrate guard and the timing gate's target-gc both use the justfile's"
+floor=$(env -u GATE_DISK_FLOOR_GIB "$real_just" --justfile "$here/../justfile" --evaluate GATE_DISK_FLOOR_GIB)
+rc=0; in_stubs env -u GATE_DISK_FLOOR_GIB "$timing" g1 "1 2" "$tip" >"$scratch/timing-floor.out" 2>&1 || rc=$?
+expect "the timing gate exits 0 (got $rc)" [ "$rc" = 0 ]
+expect "its target-gc pass runs at floor $floor GiB" grep -q ", floor $floor GiB\$" "$scratch/timing-floor.out"
+rc=0; in_stubs env -u GATE_DISK_FLOOR_GIB STUB_DF_FREE=$((floor - 1)) "$integrate" g1 "1 2" "$tip" >"$scratch/integrate-floor.out" 2>&1 || rc=$?
+expect "the integrate run refuses 1 GiB below it: exits 8 (got $rc)" [ "$rc" = 8 ]
+expect "and names that floor" grep -qx "DISK BELOW $floor GiB" "$scratch/integrate-floor.out"
 
 echo "== the timing gate on a tip whose binaries are not built"
 : > "$probe"

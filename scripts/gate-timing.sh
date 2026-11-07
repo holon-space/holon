@@ -46,5 +46,5 @@ gate_step 17 timing-gate-build bash -c '"$0" "$1" && just timing-gate-build' \
 ! grep -q '^ *Compiling ' "$build_log" || { echo "GATE COMPILED: the timing binaries of $tip were not built by gate-integrate.sh (see $build_log)"; exit 10; }
 rc=0
 gate_step 16 timing-gate just timing-gate || rc=$?
-/usr/bin/python3 "$(dirname "$0")/target-gc.py" target --apply --floor "${GATE_DISK_FLOOR_GIB:-130}" || echo "TARGET-GC NOT RUN (exit $?), see above"
+/usr/bin/python3 "$(dirname "$0")/target-gc.py" target --apply --floor "$(just --justfile "$(dirname "$0")/../justfile" --evaluate GATE_DISK_FLOOR_GIB)" || echo "TARGET-GC NOT RUN (exit $?), see above"
 exit $rc

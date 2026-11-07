@@ -76,7 +76,8 @@ BUILDS_HERE = [["check", "--locked", "--workspace", "--lib", "--bins"],
                ["nextest", "run", "--workspace", "--features", "holon-gpui/pbt", "--no-run"],
                ["test", "--workspace", "--test", "integration", "keystone_tour::", "--", "--nocapture"],
                ["clippy", "--workspace", "--all-targets", "--", *LINTS],
-               ["check", "--manifest-path", "crates/holon-api/Cargo.toml"]]
+               ["check", "--manifest-path", "crates/holon-api/Cargo.toml"],
+               ["test", "--workspace", "--features", "holon-gpui/pbt", "--no-run"]]
 BUILDS_ELSEWHERE = [["check", "--manifest-path", "frontends/holon-worker/Cargo.toml", "--target", "wasm32-wasip1-threads",
                      "--features", "browser"],
                     ["test", "--manifest-path", "frontends/holon-worker/Cargo.toml", "--lib", "--no-default-features"],
@@ -374,7 +375,8 @@ def check_every_recorded_call_replays_or_is_listed():
     rng = random.Random(seed)
     pool = BUILDS_NOTHING + BUILDS_HERE + BUILDS_ELSEWHERE
     # A record with no call of the canonical shape left the count with an empty canonical replay.
-    cases = [GATE_RECORD, [BUILDS_ELSEWHERE[2], BUILDS_NOTHING[1], BUILDS_ELSEWHERE[1]]] + [[rng.choice(pool) for _ in range(rng.randint(1, 12))] for _ in range(30)]
+    # Two recorded calls whose replays are one cargo call, as a gate's nextest run and its `cargo test --no-run`.
+    cases = [[BUILDS_HERE[2], BUILDS_HERE[6]], GATE_RECORD, [BUILDS_ELSEWHERE[2], BUILDS_NOTHING[1], BUILDS_ELSEWHERE[1]]] + [[rng.choice(pool) for _ in range(rng.randint(1, 12))] for _ in range(30)]
     for calls in cases:
         target = Path(tempfile.mkdtemp(prefix="target-gc-test-"))
         try:

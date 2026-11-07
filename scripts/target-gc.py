@@ -218,21 +218,22 @@ def in_use(target_dir, record):
         hashed = [n for n, v in call["env"].items() if isinstance(v, str) and v.startswith("sha256:")]
         if hashed:
             raise SystemExit("cannot replay cargo %s: the record holds only a hash of %s" % (" ".join(call["argv"]), hashed))
-        replays.setdefault(json.dumps([argv, sorted(call["env"].items())]), (argv, call))
+        replays.setdefault(json.dumps([argv, sorted(call["env"].items())]), (argv, call, []))[2].append(
+            shlex.join(["cargo", *call["argv"]]))
     used, built, replayed = set(), 0, {}
-    for argv, call in replays.values():
+    for argv, call, shown in replays.values():
         env = {**os.environ, "PATH": path}
         for name, value in call["env"].items():
             if value is None:
                 env.pop(name, None)
             else:
                 env[name] = value
-        shown = shlex.join(["cargo", *call["argv"]])
         elsewhere = manifest_target_dir(argv, env, os.path.dirname(target))
         if elsewhere not in (None, target):
-            skipped.setdefault(shown, "builds into %s, whose hash dirs this pass never collects" % elsewhere)
+            for one in shown:
+                skipped.setdefault(one, "builds into %s, whose hash dirs this pass never collects" % elsewhere)
             continue
-        replayed[shown] = True
+        replayed.update(dict.fromkeys(shown, True))
         out = subprocess.run(["cargo", *argv], cwd=os.path.dirname(target), env=env, capture_output=True, text=True)
         if out.returncode != 0:
             raise SystemExit("replay `cargo %s` failed (exit %d):\n%s" % (" ".join(argv), out.returncode, out.stderr[-3000:]))

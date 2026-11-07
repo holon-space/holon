@@ -6,10 +6,12 @@
 A used dir is one built at or after the mark; with a record, also every dir a replay of the recorded
 calls uses (scripts/target-gc.py `in_use`), so reused fresh units count too. Inside one package, one dir per cargo
 profile hash (dev, test, build-override; check and build mode hash differently) is the single shape. Exit 1 on a
-second dir of the same hash that a CANON call (without a record: any call) uses, naming the first crate down the
+pair of dirs of the same hash that CANON calls (without a record: any call) use, naming the first crate down the
 deps chain that differs in more than its deps, on a used dir no recorded call uses, and on a recorded clippy call
 with lint args other than CLIPPY_LINTS: another lint set reruns a unit in its own dir, so no dir count shows it.
-Dirs only the EXCEPTIONS of scripts/check-compile-shape.py use are listed, not failed.
+A pair is no second shape when one replayed call uses both dirs (cargo's own unit graph made both), or when only
+check-mode calls (clippy, check) use one and only build-mode calls (test, nextest, build) the other: the two modes
+cannot share artifacts. Dirs only the EXCEPTIONS of scripts/check-compile-shape.py use are listed, not failed.
 """
 import argparse
 import collections
@@ -119,8 +121,12 @@ def replay(target, calls):
         os.unlink(f.name)
 
 
+COMPILE_MODE = {"clippy": "check", "check": "check", "test": "build", "nextest": "build", "build": "build"}
+
+
 def classes(target, record):
-    """{realpath: 'canon' | 'exception'} of the dirs the recorded calls use."""
+    """{realpath: 'canon' | 'exception'} of the dirs the recorded calls use, and {realpath: {(replay, compile mode)}}
+    of the replays of CANON calls that use each dir. Calls with one replay argv and env share one replay."""
     canon, excepted = [], []
     for call in check.load(record):
         sub, args = check.subcommand(call["argv"])
@@ -129,8 +135,29 @@ def classes(target, record):
             args = args[1:]
         (excepted if check.exception(sub, check.reduce(sub, pre + args), args) else canon).append(call)
     out = {p: "exception" for p in replay(target, excepted)} if excepted else {}
-    out.update({p: "canon" for p in replay(target, canon)} if canon else {})
-    return out
+    groups = {}
+    for call in canon:
+        groups.setdefault(json.dumps([gc.replay_argv(check, call["argv"]), sorted(call["env"].items())]), []).append(call)
+    users = collections.defaultdict(set)
+    for i, group in enumerate(groups.values()):
+        dirs = replay(target, group)
+        if dirs:
+            compile_mode = COMPILE_MODE[check.subcommand(group[0]["argv"])[0]]
+            print("replay %d, %s mode, uses %d dir(s): cargo %s" % (i, compile_mode, len(dirs), " ".join(group[0]["argv"])))
+        for p in dirs:
+            out[p] = "canon"
+            users[p].add((i, compile_mode))
+    return out, users
+
+
+def verdict(a, b, users):
+    """'one call', 'check vs build' (see the module doc) or 'second shape' for two used dirs of one profile hash."""
+    ua, ub = users.get(os.path.realpath(a), frozenset()), users.get(os.path.realpath(b), frozenset())
+    if {i for i, _ in ua} & {i for i, _ in ub}:
+        return "one call"
+    if {frozenset(m for _, m in ua), frozenset(m for _, m in ub)} == {frozenset({"check"}), frozenset({"build"})}:
+        return "check vs build"
+    return "second shape"
 
 
 def main():
@@ -142,7 +169,7 @@ def main():
     units = gc.collect_units(args.target)
     cutoff = os.stat(args.mark).st_mtime
     since = {os.path.realpath(u.path) for u in units if gc.used_since(u.path, cutoff)}
-    cls = classes(args.target, args.record) if args.record else {}
+    cls, users = classes(args.target, args.record) if args.record else ({}, {})
     used = [u for u in units if os.path.realpath(u.path) in since | set(cls)]
     print("used: %d of %d hash dirs (%d built at or after %s%s)" % (
         len(used), len(units), len(since), args.mark, ", %d used by a replay of %s" % (len(cls), args.record) if cls else ""))
@@ -162,15 +189,21 @@ def main():
         for u in sorted(members, key=lambda u: u.hash):
             fp = fingerprint(u.path)
             c = cls.get(os.path.realpath(u.path), "unrecorded" if cls else "since mark")
-            print("  %s %s profile %d, %d feature(s), %s" % (u.hash, mode(u), fp["profile"], len(fp["features"]), c))
+            print("  %s %s profile %d, %d feature(s), %s%s" % (u.hash, mode(u), fp["profile"], len(fp["features"]), c, "".join(
+                ", replay %d (%s)" % r for r in sorted(users.get(os.path.realpath(u.path), ())))))
             if c == "unrecorded":
                 fails.append("UNRECORDED: %s/%s %s %s is used, and no recorded call uses it" % (profile, crate, tgt, u.hash))
             if c != "exception":
                 kinds[fp["profile"]].append(u)
         for prof, us in kinds.items():
-            for other in us[1:]:
-                fails.append("SECOND SHAPE: %s/%s %s, dirs of profile %d: %s and %s; cause %s" % (
-                    profile, crate, tgt, prof, us[0].hash, other.hash, root_cause(us[0].path, other.path, index)))
+            for i, a in enumerate(us):
+                for b in us[i + 1:]:
+                    v = verdict(a.path, b.path, users)
+                    if v != "second shape":
+                        print("  %s and %s: %s" % (a.hash, b.hash, v))
+                        continue
+                    fails.append("SECOND SHAPE: %s/%s %s, dirs of profile %d: %s and %s; cause %s" % (
+                        profile, crate, tgt, prof, a.hash, b.hash, root_cause(a.path, b.path, index)))
     if args.record:
         fails += check.lint_fails(check.load(args.record), check.clippy_lints())
     print("\n".join(fails))

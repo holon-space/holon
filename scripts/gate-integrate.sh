@@ -6,7 +6,7 @@
 #
 # Usage, inside a build slot (`flow job run ... -- scripts/gate-integrate.sh ...`):
 #   scripts/gate-integrate.sh <gate-id> "<cards>" <tip>
-#   GATE_DISK_FLOOR_GIB  free disk the gate needs (default 130).
+#   GATE_DISK_FLOOR_GIB  free disk the gate needs (default: the justfile's).
 #
 #   scripts/gate-integrate.sh --steps   prints the step names, for the selection
 #
@@ -103,10 +103,10 @@ gate_steps $(step_names)
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
 export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$ HOLON_BUILD_QUIET_HOLDER=$$
 tip=$3
-DISK_FLOOR_GIB=${GATE_DISK_FLOOR_GIB:-130}
 
 [ "$(jj log -r @- --no-graph -T 'commit_id')" = "$tip" ] || { echo "WRONG TREE: @- is not the tip $tip"; exit 9; }
 [ -z "$(jj diff -r @ --summary)" ] || { echo "WRONG TREE: @ carries edits on top of the tip $tip"; exit 9; }
+DISK_FLOOR_GIB=$(just --justfile "$(dirname "$0")/../justfile" --evaluate GATE_DISK_FLOOR_GIB)
 [ "$(df -g . | awk 'NR==2{print $4}')" -ge "$DISK_FLOOR_GIB" ] || { echo "DISK BELOW $DISK_FLOOR_GIB GiB"; exit 8; }
 
 mkdir -p target/gate-logs
