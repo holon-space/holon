@@ -414,7 +414,9 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `org-suite-backward-sync-ui-delete-load-timeout`
 - `orgmode-file-watcher-no-event`
 - `overlay-sidebar-pre-warm-timeout-unpainted`
+- `pairing-conflict-badge-conflict-copy-content-unpainted`
 - `pairing-conflict-badge-long-copy-content-unpainted`
+- `pairing-conflict-badge-long-copy-load-timeout`
 - `pairing-conflict-badge-page-copy-unbadged`
 - `paste-block-copy-sql-read-repeat-budget`
 - `pinblock-lazy-day-page-shell`

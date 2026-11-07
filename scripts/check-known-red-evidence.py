@@ -41,6 +41,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "flow-checks"))
+import known_reds_table  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRIES = [REPO / "docs/Testing/KeystoneKnownReds.md"]
 
@@ -143,44 +146,36 @@ def check_citation(path, lines, snippet):
     return None
 
 
-def unticked(cell):
-    return cell.strip().removeprefix("`").removesuffix("`")
-
-
 def registry_rows(registry):
     """Yield (lineno, key, status, pattern, site, companions) per registry row,
-    or (lineno, key, error) for a row whose Companions cell does not parse.
-
-    Cells split on every `|`, as the classifier always has, so the companions
-    are the LAST cell: a prose cell holding a stray `|` cannot shift them.
+    or (lineno, key, error) for a row the registry grammar does not admit.
     """
-    companions_table = False
-    for lineno, line in enumerate(registry.read_text().splitlines(), 1):
-        if not line.startswith("|"):
-            companions_table = False
+    for lineno, header, cells in known_reds_table.table_rows(registry.read_text()):
+        if header is None:
+            if cells[0].startswith("`") and cells[1:2] == ["known-red"]:
+                yield lineno, known_reds_table.unticked(cells[0]), "is a known-red row in a table without a Companions column"
             continue
-        cells = line.split("|")
-        if cells[1].strip() == "Key":
-            companions_table = cells[-2].strip() == "Companions"
+        try:
+            row = known_reds_table.registry_row(header, cells)
+        except known_reds_table.RowError as e:
+            yield lineno, e.key, str(e)
             continue
-        if not cells[1].strip().startswith("`") or len(cells) < 4:
+        key, status, pattern = row["Key"], row["Status"], row["Match pattern"]
+        if not pattern:
             continue
-        key, status, pattern = unticked(cells[1]), cells[2].strip(), unticked(cells[3]).replace("&#124;", "|")
-        if not key or not pattern:
-            continue
-        if not companions_table:
+        if header[-1] != "Companions":
             if status == "known-red":
                 yield lineno, key, "is a known-red row in a table without a Companions column"
             continue
-        site = unticked(cells[4]).replace("&#124;", "|")
+        site = row["Site"]
         # A site is one whitespace-free ERE; `—` leaves the row unpinned.
         if site == "—" or re.search(r"\s", site):
             site = ""
-        cell = cells[-2].strip()
+        cell = row["Companions"]
         if cell == "—":
             companions = []
         else:
-            companions = [c.strip() for c in unticked(cell).split(",")] if cell.startswith("`") and cell.endswith("`") else None
+            companions = [c.strip() for c in known_reds_table.unticked(cell).split(",")] if cell.startswith("`") and cell.endswith("`") else None
             if not companions or not all(COMPANION.fullmatch(c) for c in companions):
                 yield lineno, key, f"Companions cell {cell!r} is not `—` or a code span of invariant ids"
                 continue
