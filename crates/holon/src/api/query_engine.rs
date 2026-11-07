@@ -387,6 +387,19 @@ impl QueryEngine for BackendEngine {
         .await
     }
 
+    fn routed_through(&self) -> Result<u64> {
+        Ok(self.matview_manager().settled_up_to().routed_through)
+    }
+
+    fn emitted_through(&self) -> Result<u64> {
+        Ok(self.db_handle().cdc_emitted_watermark())
+    }
+
+    fn operations_in_flight(&self) -> usize {
+        let census = self.admission().census();
+        census.released + census.waiting
+    }
+
     async fn delivery_owed(&self) -> Result<Vec<String>> {
         let emitted = self.db_handle().cdc_emitted_watermark();
         let settled = self.matview_manager().settled_up_to();

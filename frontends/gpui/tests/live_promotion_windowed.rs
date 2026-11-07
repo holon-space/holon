@@ -57,40 +57,30 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Same cross-runtime fixed-point settle the other TestPlatform tests use.
-fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        futures::executor::block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    futures::executor::block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    env: &TestEnvironment,
+    deadline: Duration,
+) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || futures::executor::block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 /// Every text this row currently PAINTS, by element id. Read from the bounds
@@ -185,7 +175,7 @@ fn the_focused_row_paints_its_vault_syntax_and_cmd_z_walks_the_text_back() {
     let boot_deadline = Instant::now() + Duration::from_secs(180);
     let mut painted = false;
     while Instant::now() < boot_deadline {
-        settle(&mut app, &bounds, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &env, Duration::from_secs(30));
         painted = bounds
             .all_elements()
             .iter()
@@ -239,14 +229,14 @@ fn the_focused_row_paints_its_vault_syntax_and_cmd_z_walks_the_text_back() {
     // bullet — so this is the same targeting a user's click gets.
     futures::executor::block_on(driver.click_entity(&target, "main"))
         .expect("click the promotion target row's painted text");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &env, Duration::from_secs(30));
     futures::executor::block_on(driver.send_raw_keystroke("home", &[]))
         .expect("caret to the head of the row");
     for key in ["T", "O", "D", "O", "space"] {
         futures::executor::block_on(driver.send_raw_keystroke(key, &[]))
             .unwrap_or_else(|e| panic!("typing {key:?} into the promotion target row: {e}"));
     }
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &env, Duration::from_secs(30));
 
     // ── the promoted rendering ───────────────────────────────────────────
     assert_eq!(
@@ -289,7 +279,7 @@ fn the_focused_row_paints_its_vault_syntax_and_cmd_z_walks_the_text_back() {
         ))
         .map(|_| ())
         .map_err(|e| format!("{label}: {e}"));
-        settle(app, &bounds, Duration::from_secs(30));
+        settle_frame(app, &bounds, &env, Duration::from_secs(30));
         delivered
     };
 

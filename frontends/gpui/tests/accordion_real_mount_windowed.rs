@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -34,9 +35,47 @@ use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+
+/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
+/// pump until the element count is stable and no `"loading"` placeholders
+/// remain.
+fn settle_to_fixed_point(
+    app: &mut HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    timeout: Duration,
+) {
+    let start = Instant::now();
+    let mut last_count = 0usize;
+    let mut stable_iters = 0u32;
+    while start.elapsed() < timeout {
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
+        app.run_until_parked();
+        app.advance_clock(Duration::from_secs(1));
+        app.run_until_parked();
+        bounds.flush();
+        let elements = bounds.all_elements();
+        let count = elements.len();
+        let still_loading = elements
+            .iter()
+            .any(|(_, info)| info.widget_type.as_ref() == "loading");
+        if count == last_count && count > 0 && !still_loading {
+            stable_iters += 1;
+            if stable_iters >= 5 {
+                return;
+            }
+        } else {
+            stable_iters = 0;
+        }
+        last_count = count;
+    }
+    panic!(
+        "window never reached a fixed point within {timeout:?}: {} elements",
+        bounds.all_elements().len()
+    );
+}
 
 /// Above both layout breakpoints — the width the dogfood pass called wide.
 const DESKTOP_WINDOW: &str = "1200x900";

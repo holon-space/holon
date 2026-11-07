@@ -445,10 +445,10 @@ pub struct RowDropLedgersParams {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AwaitQuiescenceParams {
-    /// Upper bound on the combined-fixed-point wait, in milliseconds. When the
-    /// budget is exhausted before every reachable signal is simultaneously
-    /// stable, the tool returns an error naming the still-moving signal(s) —
-    /// it never reports a non-converged wait as success. Defaults to 30000.
+    /// Upper bound on the wait, in milliseconds. When the budget is exhausted
+    /// while a delivery is still owed, the tool returns an error with the owed
+    /// list — it never reports a non-converged wait as success. Defaults to
+    /// 30000.
     #[serde(default)]
     pub budget_ms: Option<u64>,
 }

@@ -32,7 +32,6 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -67,48 +66,20 @@ use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
-/// pump until the element count is stable and no `"loading"` placeholders
-/// remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
-    runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len()
-    );
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 #[test]
@@ -173,7 +144,7 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
         })
         .expect("window opened over compose_sut session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     // (3) SutLayout over the window reads real, non-degenerate geometry — proving
     // the     window RENDERS compose_sut's session (the foundational Hard-B
@@ -267,7 +238,7 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
         })
         .expect("window opened over compose_sut session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     // The same real windowed driver the windowed PBT loop uses.
     let interaction_tx = debug

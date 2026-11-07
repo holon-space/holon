@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 pub mod capture;
+pub mod settle;
 pub mod sim_windowed_replay;
 pub mod windowed_wide;
 

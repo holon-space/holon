@@ -58,9 +58,19 @@ use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 use pbt_harness::windowed_wide::resize_window;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// The modal has no command and no keybinding — the toolbar gear is its one
 /// door.
@@ -363,7 +373,7 @@ fn an_introduced_rows_origin_line_stays_inside_its_column() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let gear = bounds.element_info(SETTINGS_GEAR).unwrap_or_else(|| {
         panic!(
@@ -373,7 +383,7 @@ fn an_introduced_rows_origin_line_stays_inside_its_column() {
     });
     let window = rebind.window();
     click_at(&mut app, window, center_of(&gear), "gear");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     // Make one row an INTRODUCED one, after the modal is already open, so the
     // update reaches the screen through the section's own `live_query` — the
@@ -394,7 +404,7 @@ fn an_introduced_rows_origin_line_stays_inside_its_column() {
         .await
         .expect("the mirror must carry the disclosure columns");
     });
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let painted = Painted::snapshot(&bounds);
     let headers = painted.headers();
@@ -424,7 +434,7 @@ fn an_introduced_rows_origin_line_stays_inside_its_column() {
             .await
             .expect("the mirror must take the disclosure columns");
         });
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
         let snapshot = Painted::snapshot(&bounds);
         let headers = snapshot.headers();
         let cells = snapshot.cells();

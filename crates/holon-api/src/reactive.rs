@@ -536,13 +536,16 @@ impl UiState {
                 render_expr,
                 candidates: _,
                 generation,
+                seq: _,
             } => {
                 self.render_expr = render_expr.clone();
                 self.data = CdcAccumulator::from_rows(vec![]);
                 self.generation = generation;
                 UiEventResult::StructureChanged(render_expr)
             }
-            crate::UiEvent::Data { batch, generation } => {
+            crate::UiEvent::Data {
+                batch, generation, ..
+            } => {
                 if self.generation != generation {
                     return UiEventResult::NoChange;
                 }

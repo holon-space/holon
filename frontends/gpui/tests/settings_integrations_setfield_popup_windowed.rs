@@ -51,9 +51,19 @@ use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_s
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// The toolbar affordance that opens Settings — the modal's only door.
 const SETTINGS_GEAR: &str = "settings-gear";
@@ -228,14 +238,14 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
         .expect("window opened over the booted session");
     let window = rebind.window();
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     // Open Settings.
     let gear = bounds
         .element_info(SETTINGS_GEAR)
         .expect("the toolbar gear must be painted so Settings can be opened");
     click_at(&mut app, window, center_of(&gear), "gear");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     // The multi-param button must be on screen; the whole test is about clicking
     // it, so its absence is a harness failure, not a feature red.
@@ -256,7 +266,7 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
     // message, never a hang. Once the popup exists this settles with it painted.
     let click_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         click_at(&mut app, window, center_of(&set_field_btn), "set_field");
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(10));
+        settle_frame(&app, &bounds, &engine, Duration::from_secs(10));
     }));
 
     let popup_painted = painted_count(&bounds, PARAM_POPUP_TAG) > 0;
@@ -270,7 +280,7 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
             .element_info(FIELD_ITEM_ENABLED)
             .expect("the popup's first step must offer the Enum field choice 'enabled'");
         click_at(&mut app, window, center_of(&field_item), "field=enabled");
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(10));
+        settle_frame(&app, &bounds, &engine, Duration::from_secs(10));
 
         let value_id = if target_enabled == 1 {
             VALUE_ITEM_ON
@@ -295,7 +305,7 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
         // Give the dispatch → store write → projector mirror chain time to land.
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
-            settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(2));
+            settle_frame(&app, &bounds, &engine, Duration::from_secs(2));
             final_enabled = mirror_enabled(&runtime, &db, GCAL).unwrap_or(initial_enabled);
             if final_enabled == target_enabled {
                 break;
@@ -382,6 +392,7 @@ fn with_settings_open(
         &BoundsRegistry,
         &Arc<tokio::runtime::Runtime>,
         &DbHandle,
+        &holon_frontend::reactive::ReactiveEngine,
     ),
 ) {
     let text_system = real_text_system();
@@ -429,15 +440,15 @@ fn with_settings_open(
         .expect("window opened over the booted session");
     let window = rebind.window();
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
     let gear = bounds
         .element_info(SETTINGS_GEAR)
         .expect("the toolbar gear must be painted so Settings can be opened");
     click_at(&mut app, window, center_of(&gear), "gear");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        body(&mut app, window, &bounds, &runtime, &db);
+        body(&mut app, window, &bounds, &runtime, &db, &engine);
     }));
 
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -455,13 +466,13 @@ fn with_settings_open(
 
 #[test]
 fn outside_click_on_inert_space_closes_the_popup_without_dispatching() {
-    with_settings_open(|app, window, bounds, runtime, db| {
+    with_settings_open(|app, window, bounds, runtime, db, engine| {
         let initial = mirror_enabled(runtime, db, GCAL).expect("gcal has a mirror row");
         let btn = bounds
             .element_info(SET_FIELD_GCAL)
             .expect("gcal's set_field op_button must be painted");
         click_at(app, window, center_of(&btn), "gcal set_field");
-        settle_to_fixed_point(app, bounds, runtime, Duration::from_secs(10));
+        settle_frame(app, bounds, engine, Duration::from_secs(10));
         assert!(
             painted_count(bounds, PARAM_POPUP_TAG) > 0,
             "precondition: clicking set_field opens the popup"
@@ -483,7 +494,7 @@ fn outside_click_on_inert_space_closes_the_popup_without_dispatching() {
             y: Pixels::from(btn.y + 60.0),
         };
         click_at(app, window, inert, "inert space on gcal's row");
-        settle_to_fixed_point(app, bounds, runtime, Duration::from_secs(10));
+        settle_frame(app, bounds, engine, Duration::from_secs(10));
 
         assert_eq!(
             painted_count(bounds, PARAM_POPUP_TAG),
@@ -501,13 +512,13 @@ fn outside_click_on_inert_space_closes_the_popup_without_dispatching() {
 
 #[test]
 fn escape_closes_the_param_popup_without_dispatching() {
-    with_settings_open(|app, window, bounds, runtime, db| {
+    with_settings_open(|app, window, bounds, runtime, db, engine| {
         let initial = mirror_enabled(runtime, db, GCAL).expect("gcal has a mirror row");
         let btn = bounds
             .element_info(SET_FIELD_GCAL)
             .expect("gcal's set_field op_button must be painted");
         click_at(app, window, center_of(&btn), "set_field");
-        settle_to_fixed_point(app, bounds, runtime, Duration::from_secs(10));
+        settle_frame(app, bounds, engine, Duration::from_secs(10));
         assert!(
             painted_count(bounds, PARAM_POPUP_TAG) > 0,
             "precondition: clicking set_field opens the popup"
@@ -518,7 +529,7 @@ fn escape_closes_the_param_popup_without_dispatching() {
         // the loop simply runs out — the red.
         for _ in 0..5 {
             press_escape(app, window);
-            settle_to_fixed_point(app, bounds, runtime, Duration::from_secs(2));
+            settle_frame(app, bounds, engine, Duration::from_secs(2));
             if painted_count(bounds, PARAM_POPUP_TAG) == 0 {
                 break;
             }
@@ -539,13 +550,13 @@ fn escape_closes_the_param_popup_without_dispatching() {
 
 #[test]
 fn opening_a_second_rows_op_button_closes_the_first() {
-    with_settings_open(|app, window, bounds, runtime, db| {
+    with_settings_open(|app, window, bounds, runtime, db, engine| {
         let gcal_initial = mirror_enabled(runtime, db, GCAL).expect("gcal has a mirror row");
         let gcal_btn = bounds
             .element_info(SET_FIELD_GCAL)
             .expect("gcal's set_field op_button must be painted");
         click_at(app, window, center_of(&gcal_btn), "gcal set_field");
-        settle_to_fixed_point(app, bounds, runtime, Duration::from_secs(10));
+        settle_frame(app, bounds, engine, Duration::from_secs(10));
         assert_eq!(
             painted_count(bounds, PARAM_POPUP_TAG),
             1,
@@ -563,7 +574,7 @@ fn opening_a_second_rows_op_button_closes_the_first() {
             .element_info(SET_FIELD_TODOIST)
             .expect("todoist's set_field op_button must be painted");
         click_at(app, window, center_of(&todoist_btn), "todoist set_field");
-        settle_to_fixed_point(app, bounds, runtime, Duration::from_secs(10));
+        settle_frame(app, bounds, engine, Duration::from_secs(10));
 
         // gcal's popup must be gone — the click landed outside it (on another
         // row), so its `on_mouse_down_out` dismissed it.

@@ -57,9 +57,19 @@ use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_s
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// The modal has no command and no keybinding — the toolbar gear is its one
 /// door.
@@ -421,7 +431,7 @@ fn the_last_integrations_row_switch_is_clickable() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let gear = bounds.element_info(SETTINGS_GEAR).unwrap_or_else(|| {
         panic!(
@@ -432,7 +442,7 @@ fn the_last_integrations_row_switch_is_clickable() {
     let window = rebind.window();
     click_at(&mut app, window, center_of(&gear), "gear");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let unscrolled = Painted::snapshot(&bounds);
     let headers = unscrolled.headers();
@@ -469,7 +479,7 @@ fn the_last_integrations_row_switch_is_clickable() {
         && notches < MAX_NOTCHES
     {
         wheel(&mut app, window, modal_center(), -WHEEL_DY);
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(5));
+        settle_frame(&app, &bounds, &engine, Duration::from_secs(5));
         notches += 1;
         painted = Painted::snapshot(&bounds);
     }
@@ -512,7 +522,7 @@ fn the_last_integrations_row_switch_is_clickable() {
     if let Some(provider) = &target_provider {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(2));
+            settle_frame(&app, &bounds, &engine, Duration::from_secs(2));
             after = mirror_enabled();
             if after.get(provider) != before.get(provider) {
                 break;

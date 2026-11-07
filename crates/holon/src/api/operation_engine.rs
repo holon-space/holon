@@ -712,7 +712,6 @@ impl DispatchingOperationEngine {
         &self.dispatch_hold
     }
 
-    #[cfg(feature = "dispatch-hold")]
     pub fn admission(&self) -> &AdmissionOverlay {
         &self.admission
     }

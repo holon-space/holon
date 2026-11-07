@@ -831,7 +831,8 @@ impl Render for FixtureView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Matches HolonApp::render: reset the registry at the top of every
         // render pass so bounds from the previous pass don't pollute queries.
-        self.bounds.begin_pass();
+        self.bounds
+            .begin_pass(holon_frontend::render_epoch::EngineSeq::default());
 
         let ctx = FrontendRenderContext::default();
         let gctx = GpuiRenderContext::new(
@@ -966,7 +967,8 @@ impl ReactiveFixtureView {
 
 impl Render for ReactiveFixtureView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.bounds.begin_pass();
+        self.bounds
+            .begin_pass(holon_frontend::render_epoch::EngineSeq::default());
         let ctx = FrontendRenderContext::default();
         let local = LocalEntityScope::new().with_cache(self.entity_cache.clone());
         let gctx = GpuiRenderContext::new(
@@ -1341,7 +1343,8 @@ impl ScrollableListView {
 
 impl Render for ScrollableListView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.bounds.begin_pass();
+        self.bounds
+            .begin_pass(holon_frontend::render_epoch::EngineSeq::default());
 
         let item_count = self.item_count;
         let item_height = self.item_height;
@@ -1491,6 +1494,18 @@ impl holon_api::QueryEngine for DeclaresNothingQueryEngine {
 
     async fn delivery_owed(&self) -> Result<Vec<String>> {
         anyhow::bail!("DeclaresNothingQueryEngine does not track delivery")
+    }
+
+    fn routed_through(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    fn emitted_through(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    fn operations_in_flight(&self) -> usize {
+        0
     }
 
     async fn search_link_candidates(&self, _: &str) -> Result<Vec<holon_api::LinkCandidate>> {

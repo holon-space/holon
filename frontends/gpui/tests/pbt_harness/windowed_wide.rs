@@ -11,7 +11,6 @@ use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -29,10 +28,12 @@ use holon_gpui::user_driver::derived_items;
 use holon_integration_tests::pbt::ReferenceState;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::harness::SettleHook;
+use holon_integration_tests::pbt::composed::wide_e2e::CONVERGE_BUDGET;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
 use holon_integration_tests::pbt::composed::wide_e2e::WideHandle;
 use holon_integration_tests::pbt::composed::wide_e2e::boot_and_seed_wide_windowed_base;
+use holon_integration_tests::pbt::composed::wide_e2e::settle_within;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::composed::wide_e2e::windowed_composed_sut;
 use holon_integration_tests::pbt::fixtures::NamedFixture;
@@ -42,6 +43,7 @@ use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 
 use super::capture::FrameSink;
+use super::settle::settle_window;
 use super::sim_windowed_replay::SimUserDriver;
 
 pub fn real_text_system() -> Arc<dyn PlatformTextSystem> {
@@ -74,45 +76,6 @@ pub fn resize_window(
             })
             .expect("the window being resized is alive")
     })
-}
-
-/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
-/// pump until the element count is stable and no `"loading"` placeholders
-/// remain.
-pub fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
-    bounds: &BoundsRegistry,
-    runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
-) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len()
-    );
 }
 
 /// `*const HeadlessAppContext` behind a `Send` newtype so the window-settle
@@ -162,9 +125,18 @@ pub struct LivePanels<'a> {
     rebind: &'a RebindHandle,
     engine: Arc<ReactiveEngine>,
     bounds: BoundsRegistry,
+    settle_deadline: Arc<std::sync::Mutex<Duration>>,
 }
 
+/// The hang deadline of the per-check window settle.
+pub const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
+
 impl LivePanels<'_> {
+    /// Set the hang deadline of the per-check window settle.
+    pub fn set_settle_deadline(&self, deadline: Duration) {
+        *self.settle_deadline.lock().unwrap() = deadline;
+    }
+
     pub fn lists(&self, region: Region) -> Vec<(EntityUri, Vec<EntityUri>)> {
         // SAFETY: the gpui thread owns `app`, pinned for this value's life.
         let app = unsafe { &mut *(self.app_ptr as *mut HeadlessAppContext) };
@@ -253,7 +225,19 @@ pub fn with_windowed_wide_sut_live(
         })
         .expect("window opened over wide compose_sut session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    let handle = WideHandle::from_bundle(&bundle);
+    let mut settle_engine = {
+        let (runtime, handle) = (runtime.clone(), handle.clone());
+        move || runtime.block_on(settle_within(&handle, CONVERGE_BUDGET))
+    };
+    settle_window(
+        &app,
+        &bounds,
+        engine.ui_watermark(),
+        &mut settle_engine,
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("boot: {e}"));
 
     // Build the live windowed driver + overlay its gesture caps onto the wide base.
     let interaction_tx = debug
@@ -278,7 +262,6 @@ pub fn with_windowed_wide_sut_live(
     // Capture the settle handle (engine + frontend) before `bundle.caps` is moved,
     // so the windowed per-apply settle converges CDC + Loro + org like the
     // headless path.
-    let handle = WideHandle::from_bundle(&bundle);
     let overlaid = overlay_windowed_caps(
         bundle.caps,
         frontend,
@@ -289,36 +272,24 @@ pub fn with_windowed_wide_sut_live(
         WindowMountConvention::PerBlockShell,
     );
 
-    // The window-settle hook the ComposedSut pumps before each check (mirror sim
-    // `pump_cycle`: real wall-clock time for backend watchers on their own worker
-    // threads, drain gpui, fire fake timers, promote staged bounds — no
-    // block_on, driver methods may already be inside a tokio context).
+    // The window settle the ComposedSut runs before each check, after its
+    // engine settle.
     let settle_app = SendApp(app_ptr);
     let settle_bounds = bounds.clone();
+    let watermark = engine.ui_watermark().clone();
+    let settle_deadline = Arc::new(std::sync::Mutex::new(SETTLE_DEADLINE));
+    let hook_deadline = settle_deadline.clone();
     let settle: SettleHook = Box::new(move || {
-        let app = settle_app.app();
-        let mut last = usize::MAX;
-        let mut stable = 0u32;
-        for _ in 0..500 {
-            std::thread::sleep(Duration::from_millis(10));
-            app.run_until_parked();
-            app.advance_clock(Duration::from_millis(500));
-            app.run_until_parked();
-            settle_bounds.flush();
-            let els = settle_bounds.all_elements();
-            let count = els.len();
-            let loading = els.iter().any(|(_, i)| i.widget_type.as_ref() == "loading");
-            if count > 0 && count == last && !loading {
-                stable += 1;
-                if stable >= 3 {
-                    return;
-                }
-            } else {
-                stable = 0;
-            }
-            last = count;
+        let deadline = *hook_deadline.lock().unwrap();
+        if let Err(e) = settle_window(
+            settle_app.app(),
+            &settle_bounds,
+            &watermark,
+            &mut || settle_engine(),
+            deadline,
+        ) {
+            panic!("windowed settle: {e}");
         }
-        panic!("windowed settle hook never reached a fixed point");
     });
 
     // A dedicated runtime drives the apply/check leaf futures; the booted backend
@@ -347,6 +318,7 @@ pub fn with_windowed_wide_sut_live(
         rebind: &rebind,
         engine: engine.clone(),
         bounds: bounds.clone(),
+        settle_deadline,
     };
     let sut = run(sut, &oracle, &sink, &live);
     drop(live);

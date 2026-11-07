@@ -761,13 +761,33 @@ pub enum UiEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         candidates: Vec<RenderVariant>,
         generation: u64,
+        /// The CDC seq this event settles; see [`UiEvent::seq`]. 0 when a data
+        /// stream follows: the render is shown only once its rows are.
+        #[serde(default)]
+        seq: u64,
     },
     /// CDC deltas for the active query.
     /// `generation` matches the Structure that created the matview.
     Data {
         batch: BatchMapChangeWithMetadata,
         generation: u64,
+        /// The CDC seq this event settles; see [`UiEvent::seq`]. At least
+        /// `batch.metadata.seq`: the first batch of a render also settles what
+        /// that render read.
+        #[serde(default)]
+        seq: u64,
     },
+}
+
+impl UiEvent {
+    /// Once this event is applied, the watcher reflects every CDC batch up to
+    /// this seq that was routed to its subscriptions. The consumer reports it
+    /// to the watcher's delivery cursor.
+    pub fn seq(&self) -> u64 {
+        match self {
+            UiEvent::Structure { seq, .. } | UiEvent::Data { seq, .. } => *seq,
+        }
+    }
 }
 
 /// Command channel for controlling a UiWatcher.

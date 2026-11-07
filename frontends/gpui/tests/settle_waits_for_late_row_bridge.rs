@@ -1,6 +1,7 @@
 //! A late row bridge: the engine created a row under a visible row, but the
 //! window's list did not take the insert yet. Settling the window must not
-//! return before a frame paints the row.
+//! return before a frame paints the row: while the bridge is held it fails
+//! loud naming the row, and once it opens it returns with the row painted.
 //!
 //! The defect class is a block created under any task row of the booted main
 //! panel, with the new row's bridges held shut across the step's settle and
@@ -39,16 +40,21 @@ use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 
 use crate::pbt_harness::panic_message;
+use crate::pbt_harness::windowed_wide::SETTLE_DEADLINE;
 use crate::pbt_harness::windowed_wide::with_windowed_wide_sut;
 use crate::pbt_harness::windowed_wide::with_windowed_wide_sut_live;
 
-/// The first divergence of one late-bridge case, or `None` when the window
-/// matched the engine after every settle.
+/// The settle deadline while a bridge is held: the settle must time out on
+/// the held row, and this bounds how long each case waits for that.
+const HELD_SETTLE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One late-bridge case: a failure on the first divergence, a rejection when
+/// the insert never reached the held bridge.
 fn late_bridge_case(
     initial: &ReferenceState,
     parent: EntityUri,
     content: String,
-) -> Option<String> {
+) -> Result<(), TestCaseError> {
     let row = EntityUri::block(&format!("block-{}", initial.next_block_id()));
     let write = ApplyMutation {
         event: MutationEvent {
@@ -69,12 +75,12 @@ fn late_bridge_case(
         write.preconditions(initial).is_good(),
         "{write:?} is not a legal step on the booted state"
     );
-    let out: RefCell<Option<String>> = RefCell::new(None);
+    let out: RefCell<Result<(), TestCaseError>> = RefCell::new(Ok(()));
     with_windowed_wide_sut_live(|sut, _default_oracle, sink, live| {
         if let Err(p) = catch_unwind(AssertUnwindSafe(|| {
             ComposedSut::<WideE2E>::check_invariants(&sut, initial)
         })) {
-            *out.borrow_mut() = Some(format!("boot: {}", panic_message(&p)));
+            *out.borrow_mut() = Err(TestCaseError::fail(format!("boot: {}", panic_message(&p))));
             return Some(sut);
         }
         let transition = E2ETransition::ApplyMutation(write.clone());
@@ -87,32 +93,53 @@ fn late_bridge_case(
         })) {
             Ok(sut) => sut,
             Err(p) => {
-                *out.borrow_mut() = Some(format!("SUT apply panicked: {}", panic_message(&p)));
+                *out.borrow_mut() = Err(TestCaseError::fail(format!(
+                    "SUT apply panicked: {}",
+                    panic_message(&p)
+                )));
                 return None;
             }
         };
-        let checked = catch_unwind(AssertUnwindSafe(|| {
+        live.set_settle_deadline(HELD_SETTLE_DEADLINE);
+        let held = catch_unwind(AssertUnwindSafe(|| {
             ComposedSut::<WideE2E>::check_invariants(&sut, &ref_state);
-            assert!(
-                live.painted(&row),
-                "the settle returned before a frame painted {row}"
-            );
         }));
-        assert!(
-            hold.engaged(),
-            "{write:?} never reached the held bridge of {row}: the case does not exercise a late bridge"
-        );
+        live.set_settle_deadline(SETTLE_DEADLINE);
+        // Some inserts paint without passing a row bridge; such a case cannot
+        // hold a row late, and the reject limit still fails a generator that
+        // stops reaching the bridge.
+        if !hold.engaged() {
+            hold.open();
+            *out.borrow_mut() = Err(TestCaseError::reject(format!(
+                "{write:?} never reached the held bridge of {row}"
+            )));
+            return Some(sut);
+        }
+        let verdict = match held {
+            Ok(()) => Some(format!(
+                "the settle returned while the bridge of {row} was held (painted: {})",
+                live.painted(&row)
+            )),
+            Err(p) => {
+                let msg = panic_message(&p);
+                match msg.contains("window did not settle") && msg.contains(row.as_str()) {
+                    true => None,
+                    false => Some(format!(
+                        "the held settle failed, but not by timing out on {row}: {msg}"
+                    )),
+                }
+            }
+        };
         hold.open();
         ComposedSut::<WideE2E>::check_invariants(&sut, &ref_state);
         assert!(
             live.painted(&row),
-            "{write:?}: {row} is not painted even after its bridge opened, so the case \
-             cannot show a late paint"
+            "{write:?}: the settle returned after the bridge opened, but {row} is not painted"
         );
-        if let Err(p) = checked {
-            let msg = format!("{write:?} with a late bridge: {}", panic_message(&p));
+        if let Some(msg) = verdict {
+            let msg = format!("{write:?} with a late bridge: {msg}");
             sink.capture_fail("ApplyMutation", &msg);
-            *out.borrow_mut() = Some(msg);
+            *out.borrow_mut() = Err(TestCaseError::fail(msg));
         }
         Some(sut)
     });
@@ -132,8 +159,8 @@ fn settle_waits_for_a_late_row_bridge() {
 
     let examples = [(EntityUri::block("parent"), "late bridge".to_string())];
     for (parent, content) in examples {
-        if let Some(msg) = late_bridge_case(&initial, parent, content) {
-            panic!("[late-bridge] static example diverged:\n{msg}");
+        if let Err(e) = late_bridge_case(&initial, parent, content) {
+            panic!("[late-bridge] static example: {e}");
         }
     }
 
@@ -149,12 +176,15 @@ fn settle_waits_for_a_late_row_bridge() {
         max_shrink_iters: 4,
         ..Config::default()
     });
+    let rejected = std::cell::Cell::new(0u32);
     let result = runner.run(&strategy, |(parent, content)| {
-        match late_bridge_case(&initial, parent, content) {
-            None => Ok(()),
-            Some(msg) => Err(TestCaseError::fail(msg)),
+        let verdict = late_bridge_case(&initial, parent, content);
+        if let Err(TestCaseError::Reject(_)) = verdict {
+            rejected.set(rejected.get() + 1);
         }
+        verdict
     });
+    eprintln!("[late-bridge] rejected cases: {}", rejected.get());
     if let Err(e) = result {
         panic!("[late-bridge] {e}");
     }

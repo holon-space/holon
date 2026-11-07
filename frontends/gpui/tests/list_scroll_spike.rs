@@ -69,7 +69,8 @@ impl Render for SpikeView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         // Mirror the real root view: rotate staged→committed at the start
         // of every render pass.
-        self.bounds_registry.begin_pass();
+        self.bounds_registry
+            .begin_pass(holon_frontend::render_epoch::EngineSeq::default());
 
         let registry = self.bounds_registry.clone();
         let list_element = list(self.list_state.clone(), move |ix, _, _| {

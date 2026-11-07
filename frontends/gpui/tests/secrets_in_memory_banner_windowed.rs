@@ -40,9 +40,30 @@ use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    env: &TestEnvironment,
+    deadline: Duration,
+) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// The sentence the banner must carry. Taken from the fact that changes what a
 /// user does — that the credential does not survive the session — rather than
@@ -166,7 +187,7 @@ fn an_in_memory_secret_session_paints_the_banner_that_admits_it() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     let painted = painted_text(&bounds);
 

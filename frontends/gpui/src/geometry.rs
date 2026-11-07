@@ -43,6 +43,9 @@ use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::geometry::Rect;
 use holon_frontend::geometry::VmNode;
+use holon_frontend::render_epoch::EngineSeq;
+use holon_frontend::render_epoch::FrameNo;
+use holon_frontend::render_epoch::RenderEpoch;
 use holon_frontend::size_expectation::SizeBounds;
 use holon_frontend::theme::Rgba8;
 
@@ -59,11 +62,9 @@ use holon_frontend::theme::Rgba8;
 ///   - Frame N+1's `begin_pass()` moves frame N's data into `committed`.
 ///   - Readers see frame N's data until frame N+2 arrives.
 ///
-/// Note: readers see data that is one frame behind. This is fine because GPUI
-/// renders continuously and tests wait (sleep + settle) between state
-/// mutations, so `committed` reflects the stable "last complete render" by the
-/// time tests read. If the UI becomes empty in a re-render, that propagates to
-/// `committed` after the next pass, so empty-UI regressions are detected.
+/// Each pass is stamped with the engine seq it shows; the rotation that commits
+/// it publishes that stamp as the [`RenderEpoch`] a test waits for. A reader
+/// waits for the epoch, not for the UI to look quiet.
 #[derive(Clone)]
 pub struct BoundsRegistry {
     inner: Arc<RwLock<BoundsState>>,
@@ -93,6 +94,10 @@ struct BoundsState {
     /// the windowed capture-minimizer, which re-points one window at successive
     /// SUTs and must wait for the rebound frame, not read the previous one.
     committed_gen: u64,
+    /// The engine seq the pass that writes `staged` shows.
+    staged_reflects: EngineSeq,
+    /// The stamp of the frame in `committed`.
+    epoch: RenderEpoch,
 }
 
 impl Default for BoundsRegistry {
@@ -110,6 +115,8 @@ impl BoundsRegistry {
                 seq: 0,
                 cold: true,
                 committed_gen: 0,
+                staged_reflects: EngineSeq::default(),
+                epoch: RenderEpoch::default(),
             })),
             commit_notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -144,21 +151,23 @@ impl BoundsRegistry {
         s
     }
 
-    /// Begin a new render pass. Promotes staged → committed (if staged has
-    /// data), resets staged for the new pass, and resets the per-pass
-    /// sequence counter.
+    /// Begin a new render pass that shows engine seq `reflects`. Promotes
+    /// staged → committed (if staged has data), resets staged for the new
+    /// pass, and resets the per-pass sequence counter.
     ///
     /// The first successful rotation (non-empty staged) clears the cold-start
     /// flag — from then on records only hit staged.
-    pub fn begin_pass(&self) {
+    pub fn begin_pass(&self, reflects: EngineSeq) {
         let mut state = self.inner.write().unwrap();
-        let new = std::mem::take(&mut state.staged);
-        let rotated = !new.is_empty();
-        if rotated {
-            state.committed = new;
-            state.cold = false;
-            state.committed_gen += 1;
-        }
+        let rotated = state.commit_staged();
+        assert!(
+            reflects >= state.staged_reflects,
+            "render epoch regressed: a pass after frame {:?} reflects {reflects:?}, the pass \
+             before it {:?}",
+            state.epoch.frame,
+            state.staged_reflects
+        );
+        state.staged_reflects = reflects;
         state.seq = 0;
         drop(state);
         if rotated {
@@ -173,6 +182,11 @@ impl BoundsRegistry {
         self.inner.read().unwrap().committed_gen
     }
 
+    /// The stamp of the last committed frame.
+    pub fn epoch(&self) -> RenderEpoch {
+        self.inner.read().unwrap().epoch
+    }
+
     /// Promote the current staged buffer to committed without starting a new
     /// pass. Use this in tests when the last render has finished but the
     /// double-buffer hasn't rotated yet (GPUI test scheduler runs renders
@@ -182,14 +196,27 @@ impl BoundsRegistry {
     /// re-render. No-op when staged is empty so repeated calls are safe.
     pub fn flush(&self) {
         let mut state = self.inner.write().unwrap();
-        let new = std::mem::take(&mut state.staged);
-        if !new.is_empty() {
-            state.committed = new;
-            state.cold = false;
-            state.committed_gen += 1;
+        if state.commit_staged() {
             drop(state);
             self.commit_notify.notify_waiters();
         }
+    }
+}
+
+impl BoundsState {
+    fn commit_staged(&mut self) -> bool {
+        let new = std::mem::take(&mut self.staged);
+        if new.is_empty() {
+            return false;
+        }
+        self.committed = new;
+        self.cold = false;
+        self.committed_gen += 1;
+        self.epoch = RenderEpoch {
+            frame: FrameNo(self.committed_gen),
+            reflects: self.staged_reflects,
+        };
+        true
     }
 }
 
@@ -651,7 +678,7 @@ mod tests {
         // Leave cold start: the first non-empty rotation clears `cold`, after
         // which records hit staged only (real double-buffering).
         reg.record("render-entity-block:warmup".into(), elem("block:warmup"));
-        reg.begin_pass();
+        reg.begin_pass(EngineSeq::default());
         assert!(
             GeometryProvider::element_info(&reg, "render-entity-block:warmup").is_some(),
             "warmup element must be committed after its begin_pass rotation"
@@ -682,5 +709,32 @@ mod tests {
             "flush must rotate committed_gen so retry loops waking on `changed()`/generation \
              observe the new frame"
         );
+    }
+
+    proptest::proptest! {
+        /// A pass that reflects a lower seq than the pass before it panics, and
+        /// only such a pass: a committed frame never claims a seq it later
+        /// takes back.
+        #[test]
+        fn begin_pass_panics_exactly_on_a_regressing_epoch(
+            passes in proptest::collection::vec((0u64..6, proptest::bool::ANY), 1..12)
+        ) {
+            let reg = BoundsRegistry::new();
+            let mut before = EngineSeq::default();
+            for (i, (seq, records)) in passes.into_iter().enumerate() {
+                if records {
+                    reg.record(format!("e{i}"), elem("block:x"));
+                }
+                let reflects = EngineSeq(seq);
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    reg.begin_pass(reflects)
+                }));
+                proptest::prop_assert_eq!(outcome.is_err(), reflects < before);
+                if outcome.is_err() {
+                    break;
+                }
+                before = reflects;
+            }
+        }
     }
 }

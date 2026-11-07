@@ -7,71 +7,51 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
+use gpui::HeadlessAppContext;
 use gpui::Keystroke;
 use gpui::PlatformTextSystem;
-use gpui::TestApp;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
 
+use crate::pbt_harness::settle::settle_window;
+
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Cross-runtime fixed-point settle. Runs tokio between gpui pump cycles
-/// so backend-to-frontend signals can deliver through the channel bridge.
-fn settle(
-    app: &mut TestApp,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
+    deadline: Duration,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        // Let the tokio runtime advance — delivers pending backend signals
-        // into the channels the gpui pump reads. Real sleep (not yield) so
-        // backend watchers get actual wall-clock time to run queries.
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        // Fact 6: timer-based code (prewarm) needs clock advancement.
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        // Fixed point: element count unchanged for several iterations AND
-        // no remaining "loading" placeholders.
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    // One more cycle for the cascade to settle.
-    runtime.block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 #[test]
 fn holon_renders_under_test_platform() {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_platform(text_system, assets, || {
+        gpui_platform::current_headless_renderer()
+    });
 
     // Create a real Turso backend (temp dir + in-memory org FS).
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
@@ -135,7 +115,7 @@ fn holon_renders_under_test_platform() {
 
     // Cross-runtime settle: the prewarm timeout and root-layout signal
     // pump need tokio advancement between gpui pump cycles.
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     let elements = bounds.all_elements();
     eprintln!(

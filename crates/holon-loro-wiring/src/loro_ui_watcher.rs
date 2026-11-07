@@ -259,6 +259,9 @@ pub async fn loro_watch_ui(
     block_id: EntityUri,
     advice_status: holon_advice::AdviceRuleStatusHandle,
 ) -> Result<WatchHandle> {
+    // A poll loop routes no CDC batch, so the enclosing cursor never lags:
+    // every event claims seq 0.
+    let _cursor = holon_api::live_data::reporting_cursor();
     let (output_tx, output_rx) = mpsc::channel(64);
     let (command_tx, _command_rx) = mpsc::channel(16);
     let mut aborts = ActorAbortGuard::new();
@@ -363,6 +366,7 @@ async fn run_watch_loop(
                     render_expr: expr.clone(),
                     candidates: Vec::new(),
                     generation,
+                    seq: 0,
                 })
                 .await
                 .is_err()
@@ -427,7 +431,11 @@ async fn run_watch_loop(
                 },
             };
             if output_tx
-                .send(UiEvent::Data { batch, generation })
+                .send(UiEvent::Data {
+                    batch,
+                    generation,
+                    seq: 0,
+                })
                 .await
                 .is_err()
             {
@@ -813,7 +821,9 @@ mod tests {
                 }
                 match tokio::time::timeout(Duration::from_millis(100), handle.recv()).await {
                     Ok(Some(UiEvent::Structure { generation, .. })) => *current_gen = generation,
-                    Ok(Some(UiEvent::Data { batch, generation })) => {
+                    Ok(Some(UiEvent::Data {
+                        batch, generation, ..
+                    })) => {
                         if generation == *current_gen {
                             for change in batch.inner.items {
                                 match change {

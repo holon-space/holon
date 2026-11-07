@@ -4204,23 +4204,25 @@ impl HolonMcpServer {
 impl HolonMcpServer {
     /// Block-until-quiescent: the MCP-facing twin of the composed PBT's
     /// `converge_projections` combined-fixed-point settle. Waits — capped at
-    /// `budget_ms` (default 30000) — until the CDC watermark, the Loro
-    /// sync-controller frontier (vs the authority doc's oplog frontier), and
-    /// the org idle tick are ALL simultaneously stable for one quiet floor,
-    /// then reports the signals it actually watched. Budget exhaustion is
-    /// an error naming the still-moving signal(s) — a non-converged wait is
-    /// NEVER reported as success. Reads the swappable `live_debug` handles,
-    /// so it follows a `reset_vault` onto the fresh session.
+    /// `budget_ms` (default 30000) — until nothing is owed: every CDC change up
+    /// to the emitted watermark is routed and applied, the Loro sync-controller
+    /// frontier has caught up with the authority oplog, and the org write-back
+    /// has written every change handed to it. The result names the reached CDC
+    /// seq; budget exhaustion is an error with the owed list. Reads the
+    /// swappable `live_debug` handles, so it follows a `reset_vault` onto the
+    /// fresh session.
     #[tool(
-        description = "TEST-ONLY: block until the live session reaches a combined fixed point \
-                       (Turso CDC + Loro frontier + org idle tick all quiet for one floor), \
-                       capped at budget_ms (default 30000). Errors naming the still-moving \
-                       signal(s) if the budget is exhausted."
+        description = "TEST-ONLY: block until the live session owes nothing (CDC routed and \
+                       applied through the emitted seq, Loro frontier caught up, org write-back \
+                       idle), capped at budget_ms (default 30000). Returns the reached CDC seq \
+                       as reached_seq; errors with the owed list if the budget is exhausted."
     )]
     async fn await_quiescence(
         &self,
         Parameters(params): Parameters<AwaitQuiescenceParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        use holon_api::QueryEngine as _;
+
         let budget = std::time::Duration::from_millis(params.budget_ms.unwrap_or(30_000));
 
         // Snapshot the swappable handles once: a concurrent `reset_vault` swaps
@@ -4251,88 +4253,74 @@ impl HolonMcpServer {
         }
 
         let engine = self.engine();
-        let check_loro = loro_sync.is_some() && loro_store.is_some();
+        let loro_sync = loro_sync.filter(|_| loro_store.is_some());
 
         let mut signals: Vec<&str> = vec!["cdc"];
-        if check_loro {
+        if loro_sync.is_some() {
             signals.push("loro");
         }
         if org_idle.is_some() {
             signals.push("org");
         }
 
+        let internal = |what: &str, e: anyhow::Error| {
+            rmcp::ErrorData::internal_error(format!("await_quiescence: {what}: {e:#}"), None)
+        };
         let start = tokio::time::Instant::now();
         let deadline = start + budget;
-        let quiet = std::time::Duration::from_millis(50);
         let poll = std::time::Duration::from_millis(2);
 
-        let mut last_cdc = engine.db_handle().cdc_emitted_watermark();
-        let mut last_tick = org_idle.as_ref().map(|s| s.current_tick());
-        let mut last_activity = tokio::time::Instant::now();
-        let mut still_moving: Vec<&str> = Vec::new();
-
         loop {
-            tokio::time::sleep(poll).await;
-            let mut moving: Vec<&str> = Vec::new();
-
-            // Loro FIRST (the projection that writes the reordered sort_key CDC
-            // then fires): a frontier not yet caught up counts as activity.
-            if let (true, Some(sync)) = (check_loro, &loro_sync) {
-                let settled = sync.is_settled().await.map_err(|e| {
-                    rmcp::ErrorData::internal_error(
-                        format!("await_quiescence: reading the Loro settle predicate: {e:#}"),
-                        None,
-                    )
-                })?;
+            let target = engine
+                .emitted_through()
+                .map_err(|e| internal("reading the emitted CDC seq", e))?;
+            let mut owed = engine
+                .delivery_owed()
+                .await
+                .map_err(|e| internal("reading the owed CDC deliveries", e))?;
+            if let Some(sync) = &loro_sync {
+                let settled = sync
+                    .is_settled()
+                    .await
+                    .map_err(|e| internal("reading the Loro settle predicate", e))?;
                 if !settled {
-                    moving.push("loro");
+                    owed.push(
+                        "loro: the sync-controller frontier is behind the authority oplog".into(),
+                    );
                 }
             }
-
-            let now_cdc = engine.db_handle().cdc_emitted_watermark();
-            if now_cdc != last_cdc {
-                last_cdc = now_cdc;
-                moving.push("cdc");
-            }
-
             if let Some(idle) = &org_idle {
-                let now_tick = idle.current_tick();
-                if last_tick != Some(now_tick) {
-                    last_tick = Some(now_tick);
-                    moving.push("org");
-                }
+                owed.extend(
+                    idle.writeback_unsettled()
+                        .into_iter()
+                        .map(|b| format!("org: {b}")),
+                );
             }
 
+            if owed.is_empty() {
+                let lamport_height = self.live_lamport_height().await?;
+                let result = serde_json::json!({
+                    "converged": true,
+                    "reached_seq": target,
+                    "waited_ms": start.elapsed().as_millis() as u64,
+                    "lamport_height": lamport_height,
+                    "signals": signals,
+                });
+                return Ok(CallToolResult::success(vec![Content::text(
+                    result.to_string(),
+                )]));
+            }
             let now = tokio::time::Instant::now();
-            if moving.is_empty() {
-                if now.duration_since(last_activity) >= quiet {
-                    let lamport_height = self.live_lamport_height().await?;
-                    let result = serde_json::json!({
-                        "converged": true,
-                        "waited_ms": start.elapsed().as_millis() as u64,
-                        "lamport_height": lamport_height,
-                        "signals": signals,
-                    });
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        result.to_string(),
-                    )]));
-                }
-            } else {
-                last_activity = now;
-                still_moving = moving;
-            }
-
             if now >= deadline {
                 return Err(rmcp::ErrorData::internal_error(
                     format!(
-                        "await_quiescence: budget {}ms exhausted before a combined fixed point; \
-                         still-moving signal(s): {:?}",
+                        "await_quiescence: budget {}ms exhausted at emitted seq {target}; owed: {owed:?}",
                         budget.as_millis(),
-                        still_moving
                     ),
                     None,
                 ));
             }
+            tokio::time::sleep(poll).await;
         }
     }
 

@@ -912,12 +912,51 @@ fn spawn_boot_report_pump(
 
 // ── HolonApp: GPUI view ────────────────────────────────────────────────────
 
+/// Publishes the UI watermark and draws a frame that shows it.
+///
+/// A bridge for data up to the sampled seq was woken before the sample, but
+/// may still be queued behind this task, or re-queued after a poll it was in:
+/// one yield lets every such bridge apply its diff first.
+fn spawn_epoch_relay(
+    watermark: Arc<holon_frontend::render_epoch::UiWatermark>,
+    cx: &mut Context<HolonApp>,
+) {
+    cx.spawn(async move |this, cx| {
+        loop {
+            let changed = watermark.changed();
+            #[cfg(feature = "pbt")]
+            let changed = futures::future::select(
+                Box::pin(changed),
+                Box::pin(crate::bridge_hold::released()),
+            );
+            let reached = watermark
+                .sample()
+                .expect("the query engine reports its routed seq");
+            tokio::task::yield_now().await;
+            #[cfg(feature = "pbt")]
+            let in_flight = !crate::bridge_hold::engaged_rows().is_empty();
+            #[cfg(not(feature = "pbt"))]
+            let in_flight = false;
+            if !in_flight
+                && watermark.publish(reached)
+                && this.update(cx, |_, cx| cx.notify()).is_err()
+            {
+                return;
+            }
+            changed.await;
+        }
+    })
+    .detach();
+}
+
 pub struct HolonApp {
     pub session: Arc<FrontendSession>,
     pub rt_handle: tokio::runtime::Handle,
     app_model: Entity<AppModel>,
     nav: NavigationState,
     pub bounds_registry: BoundsRegistry,
+    /// Sampled at the start of each render pass: the engine seq the pass shows.
+    ui_watermark: Arc<holon_frontend::render_epoch::UiWatermark>,
     /// Persistent entity cache for the root render (survives across frames).
     entity_cache: entity_view_registry::EntityCache,
     /// Top safe area inset in logical pixels (status bar on mobile, 0 on
@@ -986,7 +1025,7 @@ impl Render for HolonApp {
         fields(component = "root")
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.bounds_registry.begin_pass();
+        self.bounds_registry.begin_pass(self.ui_watermark.current());
         #[cfg(any(target_os = "ios", target_os = "android"))]
         {
             self.safe_area_top = crate::mobile::safe_area_top_px();
@@ -2966,12 +3005,16 @@ fn launch_holon_window_impl(
             )
             .detach();
 
+            let ui_watermark = engine.ui_watermark().clone();
+            spawn_epoch_relay(ui_watermark.clone(), cx);
+
             HolonApp {
                 session: session_clone,
                 rt_handle: handle_clone,
                 app_model,
                 nav,
                 bounds_registry,
+                ui_watermark,
                 entity_cache: entity_cache_for_view,
                 safe_area_top: 0.0,
                 safe_area_bottom: 0.0,

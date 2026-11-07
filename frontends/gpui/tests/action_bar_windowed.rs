@@ -42,9 +42,30 @@ use holon_integration_tests::pbt::window_slice::seed::graft_displayed_text_tree;
 use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    env: &TestEnvironment,
+    deadline: Duration,
+) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// A phone-shaped window: narrower than the `if_space(600, …)` breakpoint, so
 /// the synthesized layout takes its `bottom_dock` branch. Tall enough that the
@@ -228,17 +249,19 @@ struct Fixture<'a> {
     rebind: &'a RebindHandle,
     bounds: BoundsRegistry,
     runtime: Arc<tokio::runtime::Runtime>,
+    env: &'a TestEnvironment,
     driver: SimUserDriver,
     window: gpui::AnyWindowHandle,
 }
 
 impl Fixture<'_> {
     fn settle(&mut self) {
-        settle_to_fixed_point(
+        settle_frame(
             self.app,
             &self.bounds,
             &self.runtime,
-            Duration::from_secs(120),
+            self.env,
+            Duration::from_secs(60),
         );
     }
 
@@ -345,13 +368,13 @@ fn with_action_bar_window(window_size: &str, run: impl FnOnce(&mut Fixture<'_>))
             )
         })
         .expect("window opened");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft the outline the panel draws");
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     let app_ptr: *const HeadlessAppContext = &app;
     let driver = SimUserDriver::new(
@@ -374,6 +397,7 @@ fn with_action_bar_window(window_size: &str, run: impl FnOnce(&mut Fixture<'_>))
             rebind: &rebind,
             bounds: bounds.clone(),
             runtime: runtime.clone(),
+            env: &env,
             driver,
             window,
         };

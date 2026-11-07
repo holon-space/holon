@@ -1354,6 +1354,7 @@ impl BackendEngine {
             disclosure,
             initial,
             cdc_rx,
+            holon_api::live_data::reporting_cursor().unwrap_or_default(),
         ))
     }
 
@@ -1409,7 +1410,8 @@ impl BackendEngine {
     /// on each base-table CDC batch re-runs `sql`, emitting `Deleted` for rows
     /// that vanished and `Created` for rows that are new or whose content
     /// changed (the reactive layer folds a `Created` for a known key into an
-    /// update).
+    /// update). Each re-execution emits a batch, empty too, stamped with the
+    /// highest CDC seq it read, so `cursor` settles through it.
     fn spawn_eager_stream(
         db_handle: DbHandle,
         sql: String,
@@ -1417,6 +1419,7 @@ impl BackendEngine {
         disclosure: String,
         initial: Vec<StorageEntity>,
         mut cdc_rx: broadcast::Receiver<BatchWithMetadata<RowChange>>,
+        cursor: std::sync::Arc<holon_api::live_data::DeliveryCursor>,
     ) -> RowChangeStream {
         use holon_api::streaming::Batch;
         use holon_api::streaming::BatchMetadata;
@@ -1476,12 +1479,15 @@ impl BackendEngine {
 
             loop {
                 match cdc_rx.recv().await {
-                    Ok(_) => {}
+                    Ok(batch) => seq = seq.max(batch.metadata.seq),
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
                 // Coalesce a burst of changes into one re-execution.
-                while cdc_rx.try_recv().is_ok() {}
+                while let Ok(batch) = cdc_rx.try_recv() {
+                    seq = seq.max(batch.metadata.seq);
+                }
+                cursor.routed(seq);
 
                 let rows = match db_handle.query(&sql, HashMap::new()).await {
                     Ok(rows) => rows,
@@ -1532,10 +1538,6 @@ impl BackendEngine {
                 }
 
                 prev = next;
-                if items.is_empty() {
-                    continue;
-                }
-                seq += 1;
                 if tx
                     .send(make_batch(items, &relation, seq, &disclosure))
                     .await
@@ -1775,7 +1777,6 @@ impl BackendEngine {
         self.op_engine.dispatch_hold()
     }
 
-    #[cfg(feature = "dispatch-hold")]
     pub fn admission(&self) -> &holon_api::admission::AdmissionOverlay {
         self.op_engine.admission()
     }

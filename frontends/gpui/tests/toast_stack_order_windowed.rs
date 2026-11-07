@@ -45,9 +45,19 @@ use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_s
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 const WINDOW: &str = "1512x900";
 
@@ -125,7 +135,7 @@ fn the_toast_stack_follows_raise_order_not_subject_order() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let lines: Vec<(String, ElementInfo)> = bounds
         .all_elements()

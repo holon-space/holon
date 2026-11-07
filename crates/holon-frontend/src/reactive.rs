@@ -1459,21 +1459,27 @@ impl ReactiveRenderedRows {
     /// Structure → sets render_expr + generation. Does NOT clear data — the new
     /// data stream will overwrite when it arrives, avoiding flash of empty
     /// content. Data → row-level diffs into the row set. Stale generations
-    /// discarded.
-    pub fn apply_event(&self, event: UiEvent) {
+    /// are discarded, and only then is the result false.
+    pub fn apply_event(&self, event: UiEvent) -> bool {
         match event {
             UiEvent::Structure {
                 render_expr,
                 candidates: _,
                 generation,
+                seq: _,
             } => {
                 self.rows.set_generation(generation);
                 if *self.render_expr.lock_ref() != render_expr {
                     self.render_expr.set(render_expr);
                 }
                 self.structure_ready.notify_waiters();
+                true
             }
-            UiEvent::Data { batch, generation } => {
+            UiEvent::Data {
+                batch,
+                generation,
+                seq: _,
+            } => {
                 let current = self.rows.generation();
                 if generation != current {
                     generation_drops::record(
@@ -1487,7 +1493,7 @@ impl ReactiveRenderedRows {
                             batch.inner.items.len()
                         ),
                     );
-                    return;
+                    return false;
                 }
                 // First batch of a new generation = the full authoritative
                 // snapshot of the (possibly different) query. Apply it, then
@@ -1535,6 +1541,7 @@ impl ReactiveRenderedRows {
                 self.first_data_seen
                     .store(true, std::sync::atomic::Ordering::Release);
                 self.data_ready.notify_waiters();
+                true
             }
         }
     }
@@ -2590,6 +2597,7 @@ pub struct ReactiveEngine {
     /// `BuilderServices::interpret`.
     interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
     watchers: Arc<Mutex<HashMap<EntityUri, WatcherState>>>,
+    ui_watermark: Arc<crate::render_epoch::UiWatermark>,
     ui_state: UiState,
     /// Reactive keybinding registry: operation_name → key chord.
     /// Keybindings are joined into OperationDescriptors during ViewModel
@@ -2679,6 +2687,7 @@ impl ReactiveEngine {
 
         let engine = Self {
             registry: Arc::new(ReactiveRegistry::new()),
+            ui_watermark: crate::render_epoch::UiWatermark::new(session.query_engine()),
             session,
             runtime_handle,
             interpret_fn: Arc::new(interpret_fn),
@@ -3424,6 +3433,11 @@ impl ReactiveEngine {
         entry.map(|rows| rows.row_ids())
     }
 
+    /// The engine seq this engine's block and query watchers have applied.
+    pub fn ui_watermark(&self) -> &Arc<crate::render_epoch::UiWatermark> {
+        &self.ui_watermark
+    }
+
     /// Spawn the CDC watcher task for `block_id`, feeding `reactive`.
     /// Callers hold the `watchers` lock and insert the returned state.
     fn spawn_block_watcher(
@@ -3438,8 +3452,14 @@ impl ReactiveEngine {
         let (proxy_cmd_tx, mut proxy_cmd_rx) =
             tokio::sync::mpsc::channel::<holon_api::WatcherCommand>(16);
 
+        let subscription = self.ui_watermark.register(bid.as_str());
         let task = self.runtime_handle.spawn(async move {
-            match session.watch_ui(&bid).await {
+            let watched = holon_api::live_data::reporting_to(
+                subscription.cursor().clone(),
+                session.watch_ui(&bid),
+            )
+            .await;
+            match watched {
                 Ok(watch) => {
                     // `_aborts` keeps the watcher's actor pipeline alive for as long
                     // as this task holds the receiver — dropping the guard cancels
@@ -3473,7 +3493,9 @@ impl ReactiveEngine {
                                         "[mp_event] Structure gen={generation} expr={name}"
                                     );
                                 }
-                                UiEvent::Data { batch, generation } => {
+                                UiEvent::Data {
+                                    batch, generation, ..
+                                } => {
                                     let cur_gen = reactive.rows.generation();
                                     let n = batch.inner.items.len();
                                     let dropped = *generation != cur_gen;
@@ -3556,6 +3578,7 @@ impl ReactiveEngine {
                                 if let UiEvent::Data {
                                     batch,
                                     generation: ev_gen,
+                                    ..
                                 } = &event
                                 {
                                     let cur_gen = reactive.rows.generation();
@@ -3593,7 +3616,10 @@ impl ReactiveEngine {
                                 }
                             }
                         }
-                        reactive.apply_event(event);
+                        let seq = event.seq();
+                        if reactive.apply_event(event) {
+                            subscription.applied(seq);
+                        }
                         if bid.as_str() == "block:default-main-panel"
                             && tracing::enabled!(tracing::Level::TRACE)
                         {
@@ -3803,6 +3829,7 @@ impl ReactiveEngine {
         {
             let session = self.session.clone();
             let reactive = results.clone();
+            let subscription = self.ui_watermark.register(key.as_str());
             let task = self.runtime_handle.spawn(async move {
                 // A watch target can be missing merely because it has not been
                 // BUILT yet — an MCP integration creating its tables takes
@@ -3811,9 +3838,8 @@ impl ReactiveEngine {
                 // changes. `unwatch` aborts this task at either await.
                 let mut backoff = Duration::from_millis(250);
                 loop {
-                    let cursor = Arc::new(holon_api::live_data::DeliveryCursor::default());
                     match holon_api::live_data::reporting_to(
-                        cursor.clone(),
+                        subscription.cursor().clone(),
                         session.watch_query(
                             &query,
                             lang,
@@ -3843,13 +3869,14 @@ impl ReactiveEngine {
                                 for enriched_change in batch.inner.items {
                                     reactive.apply_change(enriched_change, 1);
                                 }
-                                cursor.applied_through(seq);
+                                subscription.applied(seq);
                             }
                             return;
                         }
                         Err(e) if e.downcast_ref::<holon_api::QueryRefused>().is_some() => {
                             tracing::warn!("watch_query refused: {e:#}");
                             reactive.set_error(format!("query refused: {e:#}"));
+                            drop(subscription);
                             return;
                         }
                         Err(e) => {
@@ -5900,6 +5927,7 @@ mod tests {
                     },
                 },
                 generation,
+                seq: 0,
             }
         }
         fn structure_event(generation: u64) -> UiEvent {
@@ -5909,6 +5937,7 @@ mod tests {
                 },
                 candidates: Vec::new(),
                 generation,
+                seq: 0,
             }
         }
         fn ids(rqr: &ReactiveRenderedRows) -> Vec<String> {
@@ -5972,6 +6001,7 @@ mod tests {
             },
             candidates: Vec::new(),
             generation: 1,
+            seq: 0,
         });
         rqr.apply_event(UiEvent::Data {
             batch: WithMetadata {
@@ -5994,6 +6024,7 @@ mod tests {
                 },
             },
             generation: 1,
+            seq: 0,
         });
 
         rqr.set_degraded("served by re-execution (correlated NOT EXISTS)");
@@ -6068,6 +6099,7 @@ mod tests {
             },
             candidates: Vec::new(),
             generation: 1,
+            seq: 0,
         });
 
         // The exact id-less row from the crash log.
@@ -6096,6 +6128,7 @@ mod tests {
                 },
             },
             generation: 1,
+            seq: 0,
         });
 
         // No panic, and the degraded row is retained (survives the first-batch
@@ -6949,6 +6982,7 @@ mod tests {
             },
             candidates: vec![],
             generation: 1,
+            seq: 0,
         });
 
         let interpret = Arc::new(test_interpret);
@@ -6966,6 +7000,7 @@ mod tests {
             },
             candidates: vec![],
             generation: 1,
+            seq: 0,
         });
         rq.apply_event(UiEvent::Data {
             batch: holon_api::streaming::BatchMapChangeWithMetadata {
@@ -6985,6 +7020,7 @@ mod tests {
                 },
             },
             generation: 1,
+            seq: 0,
         });
 
         let interpret = Arc::new(test_interpret);
@@ -7002,6 +7038,7 @@ mod tests {
             },
             candidates: vec![],
             generation: 2,
+            seq: 0,
         });
         // Stale generation=1
         rq.apply_event(UiEvent::Data {
@@ -7022,6 +7059,7 @@ mod tests {
                 },
             },
             generation: 1,
+            seq: 0,
         });
 
         let interpret = Arc::new(test_interpret);
@@ -7039,6 +7077,7 @@ mod tests {
             },
             candidates: vec![],
             generation: 1,
+            seq: 0,
         });
         rq.apply_event(UiEvent::Data {
             batch: holon_api::streaming::BatchMapChangeWithMetadata {
@@ -7058,6 +7097,7 @@ mod tests {
                 },
             },
             generation: 1,
+            seq: 0,
         });
 
         // New structure event — data should NOT be cleared
@@ -7068,6 +7108,7 @@ mod tests {
             },
             candidates: vec![],
             generation: 2,
+            seq: 0,
         });
 
         let interpret = Arc::new(test_interpret);
@@ -7086,6 +7127,7 @@ mod tests {
             },
             candidates: vec![],
             generation: 1,
+            seq: 0,
         });
         rq.apply_event(UiEvent::Data {
             batch: holon_api::streaming::BatchMapChangeWithMetadata {
@@ -7111,6 +7153,7 @@ mod tests {
                 },
             },
             generation: 1,
+            seq: 0,
         });
 
         let (expr, rows) = rq.snapshot();

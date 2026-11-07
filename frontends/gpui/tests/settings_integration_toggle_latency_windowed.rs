@@ -41,9 +41,19 @@ use holon_integration_tests::pbt::composed::slo_probe::SloProbe;
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 const SETTINGS_GEAR: &str = "settings-gear";
 
@@ -228,14 +238,14 @@ fn clicking_the_settings_switch_opens_and_closes_a_latency_interaction() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let gear = bounds
         .element_info(SETTINGS_GEAR)
         .expect("the toolbar gear is the modal's only door");
     let window = rebind.window();
     click_at(&mut app, window, center_of(&gear), "gear");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let before = mirror_enabled(&runtime, &db, SUBJECT)
         .expect("the projector writes a row for every bundled provider");
@@ -290,7 +300,7 @@ fn clicking_the_settings_switch_opens_and_closes_a_latency_interaction() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut after = before;
     while Instant::now() < deadline {
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(2));
+        settle_frame(&app, &bounds, &engine, Duration::from_secs(2));
         after = mirror_enabled(&runtime, &db, SUBJECT).unwrap_or(before);
         if after != before {
             break;

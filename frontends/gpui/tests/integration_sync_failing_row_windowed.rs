@@ -51,9 +51,19 @@ use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_s
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// The three rows under test: a provider, the word written into its mirror row,
 /// and the glyph a reader must see. The glyphs are written out here instead of
@@ -207,7 +217,7 @@ fn a_failing_sync_paints_its_own_glyph_not_the_healthy_one() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         main_test(&bounds);

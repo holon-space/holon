@@ -60,7 +60,7 @@ use tokio::sync::RwLock;
 
 /// Only detects a hang: a session that is making progress reaches its
 /// targets long before it.
-const SETTLE_HANG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+const SETTLE_HANG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Give `session` an in-memory secret store, so its secret writes have
 /// somewhere to go.

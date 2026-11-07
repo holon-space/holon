@@ -95,6 +95,7 @@ mod settings_setup_column_wraps_windowed;
 mod settings_stored_secret_windowed;
 #[cfg(feature = "pbt")]
 mod settle_waits_for_late_row_bridge;
+mod settle_window_fixed_point;
 mod sidebar_disclosure_affordance;
 mod sidebar_scroll_reaches_bottom;
 mod slash_command_text_hidden_windowed;

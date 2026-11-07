@@ -194,6 +194,18 @@ pub trait QueryEngine: Send + Sync {
     /// or release is in flight. A test driver waits for empty after a gesture.
     async fn delivery_owed(&self) -> Result<Vec<String>>;
 
+    /// The CDC seq through which every change has been routed to its watchers.
+    /// A frontend's paint can reflect no seq above it.
+    fn routed_through(&self) -> Result<u64>;
+
+    /// The CDC seq of the last change the store emitted: the seq a settled
+    /// frontend reflects.
+    fn emitted_through(&self) -> Result<u64>;
+
+    /// The admitted operations that have not finished: their writes may not
+    /// be emitted yet.
+    fn operations_in_flight(&self) -> usize;
+
     /// Non-settling read of a single block's stored task keyword
     /// (`properties.task_state`), the companion of
     /// [`Self::block_content_by_id`]. An editor needs it to run the live

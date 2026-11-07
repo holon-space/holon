@@ -84,49 +84,31 @@ use holon_pbt_core::invariant::InvariantResult;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Cross-runtime fixed-point settle (same proven pattern as
-/// `test_platform_smoke` / `test_platform_geometry_determinism`): pump until
-/// the element count is stable and no `"loading"` placeholders remain. Panics
-/// if it never settles.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
+    deadline: Duration,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len()
-    );
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 #[test]
@@ -172,7 +154,7 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
         .expect("window opened");
 
     // Harness settle (the windowed realization's pump-to-fixed-point).
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     // The component holds only the Send geometry handle; build the composed CapMap.
     let geometry: Box<dyn GeometryProvider> = Box::new(bounds.clone());
@@ -305,7 +287,7 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
         .expect("graft fixed-id tree under Main focus root");
     // Re-settle: the new blocks must propagate (Turso → CDC → engine → paint) and
     // the window must repaint them before the invariants read geometry/VM.
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     // Both displayed-text arms compare the grafted content: `/widget` reads the
     // on-screen geometry (`SutLayout`), and `/viewmodel` reads the ViewModel tree —
@@ -417,7 +399,7 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
         .block_on(async { driver.click_entity(&c1, "main").await })
         .expect("click block:c1 to focus it (mount its editable_text)");
     // Settle the editor mount + the spawned window-focus binding to a fixed point.
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     // Prove the click actually focused c1's editor on-screen, so the Ok below is
     // non-vacuous: c1 must be window-focused AND its editable_text mounted.
@@ -598,7 +580,7 @@ fn nested_live_block_paints_the_rows_its_model_holds() {
     let model_deadline = Instant::now() + Duration::from_secs(60);
     let mut vm_rows = 0usize;
     while Instant::now() < model_deadline {
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
         vm_rows = marker_rows_in_vm(&sut, &runtime);
         if vm_rows >= NESTED_QUERY_ROW_COUNT {
             break;
@@ -609,7 +591,7 @@ fn nested_live_block_paints_the_rows_its_model_holds() {
     // defective build this simply runs to its deadline.
     let paint_deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < paint_deadline {
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
         let painted_now = bounds.all_elements().iter().any(|(_, i)| {
             i.displayed_text
                 .as_deref()
@@ -784,7 +766,7 @@ fn boot_band_page(app: &mut HeadlessAppContext, post_count: usize) -> BandPage {
     let mut round = 0u32;
     let mut vm_rows = 0usize;
     while Instant::now() < deadline {
-        settle_to_fixed_point(app, &bounds, &runtime, Duration::from_secs(30));
+        settle_frame(app, &bounds, &runtime, &env, Duration::from_secs(30));
         let vm = runtime.block_on(async { SutRenderer::widget_tree_snapshot(&sut).await });
         vm_rows = vm
             .walk()
@@ -1000,10 +982,11 @@ fn band_rows_do_not_overlap_the_following_sibling_row() {
     // nothing this simply runs to its deadline and the assert below reports it.
     let paint_deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < paint_deadline {
-        settle_to_fixed_point(
-            &mut app,
+        settle_frame(
+            &app,
             &page.bounds,
             &page.runtime,
+            &page.env,
             Duration::from_secs(30),
         );
         if painted_rows(&page.bounds, BAND_ROW_MARKER).len() >= BAND_ROW_COUNT {
@@ -1155,10 +1138,11 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
     // regression.
     let paint_deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < paint_deadline {
-        settle_to_fixed_point(
-            &mut app,
+        settle_frame(
+            &app,
             &page.bounds,
             &page.runtime,
+            &page.env,
             Duration::from_secs(30),
         );
         if !painted_rows(&page.bounds, BAND_ROW_MARKER).is_empty() {
@@ -1202,10 +1186,11 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
         page.runtime
             .block_on(async { driver.scroll_at(wheel_x, wheel_y, 0.0, -400.0).await })
             .expect("wheel-scroll the main panel down");
-        settle_to_fixed_point(
-            &mut app,
+        settle_frame(
+            &app,
             &page.bounds,
             &page.runtime,
+            &page.env,
             Duration::from_secs(30),
         );
         let last = painted_rows(&page.bounds, BAND_LAST_CONTENT);

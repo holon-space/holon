@@ -27,7 +27,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -48,9 +47,19 @@ use holon_pbt_core::ComponentSet;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::SutFocusWrite;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 const GLYPH_COLLAPSED: &str = "\u{25B6}";
 const GLYPH_EXPANDED: &str = "\u{25BC}";
@@ -229,7 +238,7 @@ fn a_real_engine_nested_page_paints_its_children_when_opened() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     eprintln!(
         "engine focus after boot: {:?}",
@@ -295,26 +304,7 @@ fn a_real_engine_nested_page_paints_its_children_when_opened() {
             .expect("window alive for the chevron click");
     });
 
-    // Bounded settle: a real engine has to run the nested page's query and
-    // project its rows. Break early once both children are on screen.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        app.run_until_parked();
-        app.advance_clock(Duration::from_millis(200));
-        app.run_until_parked();
-        bounds.flush();
-        let texts = painted_texts(&bounds);
-        if [CHILD_A, CHILD_B]
-            .iter()
-            .all(|c| texts.iter().any(|t| t.contains(c)))
-        {
-            break;
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(5));
 
     dump_painted("AFTER CLICK", &bounds);
 

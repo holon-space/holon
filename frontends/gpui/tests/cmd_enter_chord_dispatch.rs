@@ -44,45 +44,31 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Same cross-runtime fixed-point settle the other TestPlatform tests use.
-fn settle(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
+    deadline: Duration,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    runtime.block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 #[test]
@@ -134,7 +120,7 @@ fn cmd_enter_cycles_task_state_and_plain_enter_still_splits() {
     let boot_deadline = Instant::now() + Duration::from_secs(180);
     let mut painted = false;
     while Instant::now() < boot_deadline {
-        settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
         painted = bounds
             .all_elements()
             .iter()
@@ -197,7 +183,7 @@ fn cmd_enter_cycles_task_state_and_plain_enter_still_splits() {
     // Click TARGETING is a separate concern with its own coverage; mixing it in
     // would let a click regression masquerade as a chord regression.
     engine.set_focus_with_caret(target.clone(), 0);
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     let blocks = || runtime.block_on(env.non_page_block_rows()).len();
     let before_cmd_enter = blocks();
@@ -213,7 +199,7 @@ fn cmd_enter_cycles_task_state_and_plain_enter_still_splits() {
             Default::default(),
         ))
         .expect("cmd+enter pressed into the chord target row");
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     let dispatched = journal.since(mark).expect("read back the dispatch journal");
     let ops: Vec<&str> = dispatched.iter().map(|d| d.op_name.as_str()).collect();
@@ -245,7 +231,7 @@ fn cmd_enter_cycles_task_state_and_plain_enter_still_splits() {
             Default::default(),
         ))
         .expect("enter pressed into the chord target row");
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     let dispatched = journal.since(mark).expect("read back the dispatch journal");
     let ops: Vec<&str> = dispatched.iter().map(|d| d.op_name.as_str()).collect();
@@ -271,7 +257,7 @@ fn cmd_enter_cycles_task_state_and_plain_enter_still_splits() {
     // and the driver would otherwise fall back to click-to-focus (the gap
     // this test routes around).
     engine.set_focus_with_caret(target.clone(), 0);
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
     let mark = journal.mark();
     runtime
         .block_on(driver.send_key_chord(
@@ -282,7 +268,7 @@ fn cmd_enter_cycles_task_state_and_plain_enter_still_splits() {
             Default::default(),
         ))
         .expect("cmd+z pressed into the chord target row");
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     let dispatched = journal.since(mark).expect("read back the dispatch journal");
     let undo = dispatched

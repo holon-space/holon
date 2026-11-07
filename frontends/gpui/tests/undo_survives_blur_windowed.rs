@@ -64,40 +64,30 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Same cross-runtime fixed-point settle the other TestPlatform tests use.
-fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        futures::executor::block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    futures::executor::block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    env: &TestEnvironment,
+    deadline: Duration,
+) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || futures::executor::block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 /// What the STORE holds for `id`, read straight from `block_raw`. This is the
@@ -220,7 +210,7 @@ fn drive_undo_then_blur(
     let boot_deadline = Instant::now() + Duration::from_secs(180);
     let mut painted = false;
     while Instant::now() < boot_deadline {
-        settle(&mut app, &bounds, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &env, Duration::from_secs(30));
         let ids: Vec<String> = bounds
             .all_elements()
             .iter()
@@ -274,20 +264,20 @@ fn drive_undo_then_blur(
     if rebuild_rowset_first {
         futures::executor::block_on(driver.click_entity(&blur_target, "main"))
             .expect("pre-click the sibling row to rebuild the row set");
-        settle(&mut app, &bounds, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &env, Duration::from_secs(30));
     }
 
     // ── append `QQ` through a REAL click + REAL keystrokes ────────────────
     futures::executor::block_on(driver.click_entity(&edit_target, "main"))
         .expect("click the edit target row's painted text");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &env, Duration::from_secs(30));
     futures::executor::block_on(driver.send_raw_keystroke("end", &[]))
         .expect("caret to the end of the row");
     for key in ["Q", "Q"] {
         futures::executor::block_on(driver.send_raw_keystroke(key, &[]))
             .unwrap_or_else(|e| panic!("typing {key:?} into the edit target row: {e}"));
     }
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &env, Duration::from_secs(30));
 
     let typed = format!("{UNDO_EDIT_CONTENT}QQ");
     assert_eq!(
@@ -306,7 +296,7 @@ fn drive_undo_then_blur(
         Default::default(),
     ))
     .expect("cmd+z pressed into the edited row");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &env, Duration::from_secs(30));
 
     // The state the dogfooder saw and trusted: store and render both undone.
     assert_eq!(
@@ -329,7 +319,7 @@ fn drive_undo_then_blur(
     // carries the pre-undo buffer, the undo is silently thrown away.
     futures::executor::block_on(driver.click_entity(&blur_target, "main"))
         .expect("click the sibling row to blur the edited one");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &env, Duration::from_secs(30));
 
     // NON-VACUITY: the whole finding is about what a blur commits, so a click
     // that never moved focus would make the assertion below pass for the wrong

@@ -5,6 +5,10 @@
 //! window's list does not, so a settle that returns in that state returns on a
 //! stale frame. A content write is no such case: a row's text reads the shared
 //! row cell at paint, so any repaint shows it.
+//!
+//! An engaged hold is a bridge in flight: the epoch relay publishes no new
+//! watermark while one is engaged, as a bridge that awaits before its apply
+//! would need.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,6 +30,8 @@ struct Gate {
 }
 
 static HOLDS: LazyLock<Mutex<HashMap<EntityUri, Gate>>> = LazyLock::new(Default::default);
+static RELEASES: LazyLock<tokio::sync::watch::Sender<u64>> =
+    LazyLock::new(|| tokio::sync::watch::channel(0).0);
 
 /// Shut until [`BridgeHold::open`] or drop.
 #[must_use = "dropping the hold opens it"]
@@ -59,6 +65,26 @@ impl Drop for BridgeHold {
     fn drop(&mut self) {
         HOLDS.lock().unwrap().remove(&self.row);
         self.gate.opened.set(true);
+        RELEASES.send_modify(|n| *n += 1);
+    }
+}
+
+/// The rows whose bridge waits on a shut hold.
+pub fn engaged_rows() -> Vec<EntityUri> {
+    HOLDS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, gate)| gate.engaged.load(Ordering::SeqCst))
+        .map(|(row, _)| row.clone())
+        .collect()
+}
+
+/// Resolves after the next hold opens.
+pub(crate) fn released() -> impl std::future::Future<Output = ()> + 'static {
+    let mut rx = RELEASES.subscribe();
+    async move {
+        rx.changed().await.expect("the release sender is static");
     }
 }
 

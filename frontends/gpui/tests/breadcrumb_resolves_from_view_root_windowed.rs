@@ -13,14 +13,12 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
 use holon_api::EntityUri;
 use holon_api::Value;
-use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::user_driver::UserDriver;
@@ -32,6 +30,7 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 /// The row `graft_displayed_text_tree` hangs `c1`/`c2` under. Navigating Main
 /// onto it is a zoom-in: a view root that is NOT itself a page, so the trail
@@ -69,42 +68,25 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Cross-runtime fixed-point settle (the shared windowed pattern): pump until
-/// the element count is stable and no `"loading"` placeholders remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
+    deadline: Duration,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len(),
-    );
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 /// The Main region's view root, read from the tables the panel itself is a
@@ -234,7 +216,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
             )
         })
         .expect("window opened");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     // THE COLD-BOOT CLAIM. Nothing has been navigated, tapped or typed yet:
     // this is the frame the user is handed when the app opens.
@@ -272,14 +254,14 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft a page and navigate Main onto it");
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     // Navigating Main moves the bar with the view.
     let services: Arc<dyn BuilderServices> = engine.clone();
     let zoom = EntityUri::block(ZOOM_ROW);
     navigate_main_to(&services, &zoom);
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     let zoomed_root = active_main_root(&env, &runtime);
     assert_eq!(
@@ -338,7 +320,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
     runtime
         .block_on(async { driver.click_entity(&tapped, "main").await })
         .expect("tap the outline row to put the caret in it");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     assert_eq!(
         engine.ui_state().focused_block().as_ref(),
@@ -364,7 +346,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
         vec![("region", Value::String("main".into()))],
     );
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     let back_root = active_main_root(&env, &runtime);
     assert_ne!(
@@ -404,7 +386,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
         ],
     );
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     let tabs = open_main_tabs(&env, &runtime);
     let current = active_main_root(&env, &runtime);
@@ -425,7 +407,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
         ],
     );
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     let switched_root = active_main_root(&env, &runtime);
     assert_eq!(
@@ -451,7 +433,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
     runtime
         .block_on(async { driver.click_entity(&recaret, "main").await })
         .expect("put the caret back in an outline row");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
     let bar_before_close = app.update(|cx| rebind.breadcrumb_block(cx));
     assert_eq!(
         bar_before_close.as_ref(),
@@ -468,7 +450,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
         vec![("history_id", Value::Integer(background))],
     );
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     let root_after_close = active_main_root(&env, &runtime);
     let block = app.update(|cx| rebind.breadcrumb_block(cx));
@@ -506,7 +488,7 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
             .collect(),
     ));
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     assert_eq!(
         engine.ui_state().focused_block(),

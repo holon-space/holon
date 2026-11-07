@@ -76,9 +76,19 @@ use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_s
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// The modal has no command and no keybinding — the toolbar gear is its one
 /// door.
@@ -413,7 +423,7 @@ fn the_setup_columns_operation_buttons_wrap_instead_of_leaving_the_column() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let gear = bounds.element_info(SETTINGS_GEAR).unwrap_or_else(|| {
         panic!(
@@ -423,7 +433,7 @@ fn the_setup_columns_operation_buttons_wrap_instead_of_leaving_the_column() {
     });
     let window = rebind.window();
     click_at(&mut app, window, center_of(&gear), "gear");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     // Give the first row a consent flow, after the modal is already open, so the
     // update reaches the screen through the section's own `live_query` — the
@@ -439,7 +449,7 @@ fn the_setup_columns_operation_buttons_wrap_instead_of_leaving_the_column() {
         .await
         .expect("the mirror must carry the consent-flow columns");
     });
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     // Bring the subject row onto the screen. The Integrations table is the last
     // section of the modal, so its first row sits against the panel's bottom
@@ -463,7 +473,7 @@ fn the_setup_columns_operation_buttons_wrap_instead_of_leaving_the_column() {
     let mut notches = 0usize;
     while !subject_whole(&painted) && notches < MAX_NOTCHES {
         wheel(&mut app, window, modal_center(), -WHEEL_DY);
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(5));
+        settle_frame(&app, &bounds, &engine, Duration::from_secs(5));
         notches += 1;
         painted = Painted::snapshot(&bounds);
     }

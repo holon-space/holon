@@ -182,7 +182,8 @@ struct M1DecorView {
 
 impl gpui::Render for M1DecorView {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        self.bounds.begin_pass();
+        self.bounds
+            .begin_pass(holon_frontend::render_epoch::EngineSeq::default());
         let row_bounds = self.bounds.clone();
         let handle = self.list_handle.clone();
 
@@ -309,7 +310,8 @@ fn build_section(s: usize, nrows: usize, bounds: &BoundsRegistry) -> Div {
 
 impl gpui::Render for M2StickyView {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        self.bounds.begin_pass();
+        self.bounds
+            .begin_pass(holon_frontend::render_epoch::EngineSeq::default());
 
         // Scroller: definite viewport comes from the `.relative().h(H)` root;
         // `flex_1 + min_h_0 + overflow_y_scroll` makes it its own scroll region.

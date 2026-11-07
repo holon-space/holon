@@ -23,7 +23,6 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -79,42 +78,25 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Cross-runtime fixed-point settle (the shared windowed pattern): pump until
-/// the element count is stable and no `"loading"` placeholders remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
+    deadline: Duration,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len(),
-    );
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 fn dispatch(services: &Arc<dyn BuilderServices>, op: &str, params: Vec<(&str, Value)>) {
@@ -219,7 +201,13 @@ fn count_settles_to(w: &mut TwoTabWindow, expected: &str) -> Option<String> {
         if seen.as_deref() == Some(expected) {
             break;
         }
-        settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+        settle_frame(
+            &w.app,
+            &w.bounds,
+            &w.runtime,
+            &w.env,
+            Duration::from_secs(60),
+        );
         seen = count_button_text(&w.bounds);
     }
     seen
@@ -366,13 +354,13 @@ fn boot_two_tab_window(title: &str) -> TwoTabWindow {
             )
         })
         .expect("window opened");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft a page and navigate Main onto it");
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     let services: Arc<dyn BuilderServices> = engine.clone();
     dispatch(
@@ -387,7 +375,7 @@ fn boot_two_tab_window(title: &str) -> TwoTabWindow {
         ],
     );
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     TwoTabWindow {
         app,
@@ -410,7 +398,13 @@ fn set_viewport(w: &mut TwoTabWindow, (width, height): (f32, f32)) {
         });
     let rebind = &w.rebind;
     w.app.update(|cx| rebind.set_safe_area_bottom(0.0, cx));
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 }
 
 fn shutdown(w: TwoTabWindow) {
@@ -530,7 +524,13 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
 
     let window = w.rebind.window();
     click_at(&mut w.app, window, center_of(&button), "tab-count button");
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 
     let rows = tab_list_rows(&w.bounds);
     let missing_close: Vec<i64> = rows
@@ -589,7 +589,13 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
         .expect("the list draws a row for the tab being switched to");
     click_at(&mut w.app, window, target_row, "tab list row");
     w.runtime.block_on(w.env.settle());
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 
     let switched_root = active_main_root(&w.env, &w.runtime);
     eprintln!(
@@ -625,7 +631,13 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
         .element_info(TAB_COUNT_BUTTON)
         .expect("the count button survives a tab switch");
     click_at(&mut w.app, window, center_of(&button), "tab-count button");
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 
     let doomed = tabs
         .iter()
@@ -643,7 +655,13 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
         "tab list close",
     );
     w.runtime.block_on(w.env.settle());
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 
     let open_after_close = open_main_tabs(&w.env, &w.runtime);
     let cursor_after_close = cursor_history_id(&w.env, &w.runtime);
@@ -680,7 +698,13 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
         .expect("closing a tab keeps the list open, so its new-tab action is still drawn");
     click_at(&mut w.app, window, center_of(&new_button), "new tab");
     w.runtime.block_on(w.env.settle());
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 
     let list_after_new: Vec<i64> = tab_list_rows(&w.bounds)
         .iter()
@@ -787,7 +811,13 @@ fn the_count_button_shows_the_failure_not_a_plausible_zero() {
         // carries a notify; stand in for one.
         let rebind = &w.rebind;
         w.app.update(|cx| rebind.set_safe_area_bottom(0.0, cx));
-        settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+        settle_frame(
+            &w.app,
+            &w.bounds,
+            &w.runtime,
+            &w.env,
+            Duration::from_secs(60),
+        );
     }
     let after = count_button_text(&w.bounds);
     let rebind = &w.rebind;
@@ -803,7 +833,13 @@ fn the_count_button_shows_the_failure_not_a_plausible_zero() {
         .expect("the count button is still drawn while the read is failing");
     let window = w.rebind.window();
     click_at(&mut w.app, window, center_of(&button), "tab-count button");
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 
     let error_panel = w
         .bounds
@@ -839,7 +875,13 @@ fn the_count_button_shows_the_failure_not_a_plausible_zero() {
         w.runtime.block_on(w.env.settle());
         let rebind = &w.rebind;
         w.app.update(|cx| rebind.set_safe_area_bottom(0.0, cx));
-        settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+        settle_frame(
+            &w.app,
+            &w.bounds,
+            &w.runtime,
+            &w.env,
+            Duration::from_secs(60),
+        );
         recovered = count_button_text(&w.bounds);
     }
     eprintln!("[chrome-tab-error] recovered={recovered:?}");
@@ -882,7 +924,13 @@ fn the_tab_list_hangs_under_the_title_row_beneath_a_notch() {
     const NOTCH: f32 = 40.0;
     let rebind = &w.rebind;
     w.app.update(|cx| rebind.set_safe_area_top(NOTCH, cx));
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 
     let button = w
         .bounds
@@ -891,7 +939,13 @@ fn the_tab_list_hangs_under_the_title_row_beneath_a_notch() {
     let button_y = button.y;
     let window = w.rebind.window();
     click_at(&mut w.app, window, center_of(&button), "tab-count button");
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 
     let rows = tab_list_rows(&w.bounds);
     let first_row_y = rows.first().map(|(_, info)| info.y);
@@ -939,7 +993,13 @@ fn closing_the_active_tab_counts_down_and_moves_the_highlight() {
         .expect("the count button is drawn");
     let window = w.rebind.window();
     click_at(&mut w.app, window, center_of(&button), "tab-count button");
-    settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+    settle_frame(
+        &w.app,
+        &w.bounds,
+        &w.runtime,
+        &w.env,
+        Duration::from_secs(60),
+    );
 
     // Close the ACTIVE tab, not a background one.
     let close_control = w
@@ -1020,7 +1080,13 @@ fn a_no_op_tab_switch_costs_one_read() {
     for _ in 0..6 {
         let rebind = &w.rebind;
         w.app.update(|cx| rebind.set_safe_area_bottom(0.0, cx));
-        settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+        settle_frame(
+            &w.app,
+            &w.bounds,
+            &w.runtime,
+            &w.env,
+            Duration::from_secs(60),
+        );
     }
 
     let rebind = &w.rebind;
@@ -1078,7 +1144,13 @@ fn a_refused_tab_write_keeps_saying_so() {
 
     let mut frames = Vec::new();
     for _ in 0..6 {
-        settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+        settle_frame(
+            &w.app,
+            &w.bounds,
+            &w.runtime,
+            &w.env,
+            Duration::from_secs(60),
+        );
         frames.push(count_button_text(&w.bounds));
     }
     let logged: Vec<String> = test_init::captured_problems()
@@ -1145,7 +1217,13 @@ fn a_write_that_never_lands_says_the_count_is_waiting() {
         if label.as_deref() == Some(TAB_COUNT_WAITING_LABEL) {
             break;
         }
-        settle_to_fixed_point(&mut w.app, &w.bounds, &w.runtime, Duration::from_secs(120));
+        settle_frame(
+            &w.app,
+            &w.bounds,
+            &w.runtime,
+            &w.env,
+            Duration::from_secs(60),
+        );
         label = count_button_text(&w.bounds);
     }
     let warned: Vec<String> = test_init::captured_warnings()
@@ -1171,4 +1249,5 @@ fn a_write_that_never_lands_says_the_count_is_waiting() {
     );
 }
 
+use crate::pbt_harness::settle::settle_window;
 use crate::test_init;

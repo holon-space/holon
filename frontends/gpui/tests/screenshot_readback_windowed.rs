@@ -26,38 +26,30 @@ use holon_mcp::server::CapturedImage;
 use holon_mcp::server::InteractionCommand;
 use holon_mcp::server::InteractionEvent;
 
+use crate::pbt_harness::settle::settle_window;
+
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        futures::executor::block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    futures::executor::block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    env: &TestEnvironment,
+    deadline: Duration,
+) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || futures::executor::block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 fn distinct_colors_in(img: &CapturedImage, x0: u32, y0: u32, x1: u32, y1: u32) -> usize {
@@ -120,7 +112,7 @@ fn capture_screenshot_through_the_pump_returns_the_painted_frame() {
     let row_element = format!("block:{second_id}");
     let boot_deadline = Instant::now() + Duration::from_secs(180);
     let row = loop {
-        settle(&mut app, &bounds, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &env, Duration::from_secs(30));
         let row = bounds.all_elements().into_iter().find(|(_, info)| {
             info.entity_id.as_deref() == Some(row_element.as_str())
                 && info.widget_type.as_ref() == "rendered_text"

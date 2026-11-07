@@ -257,7 +257,8 @@ impl gpui::Render for ComposeFixture {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
-        self.bounds.begin_pass();
+        self.bounds
+            .begin_pass(holon_frontend::render_epoch::EngineSeq::default());
         let gctx = GpuiRenderContext::new(
             RenderContext::default(),
             self.services.clone(),

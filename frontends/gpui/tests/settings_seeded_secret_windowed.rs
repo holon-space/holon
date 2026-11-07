@@ -46,9 +46,19 @@ use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_s
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// The toolbar affordance that opens Settings — the modal's only door.
 const SETTINGS_GEAR: &str = "settings-gear";
@@ -215,14 +225,14 @@ fn a_secret_planted_by_a_seed_file_paints_as_stored_and_masked() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let gear = bounds
         .element_info(SETTINGS_GEAR)
         .unwrap_or_else(|| panic!("the toolbar gear is the only door into Settings"));
     let window = rebind.window();
     click_at(&mut app, window, center_of(&gear), "gear");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let texts = painted_texts(&bounds);
     let widgets = census(&bounds);

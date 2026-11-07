@@ -5,6 +5,7 @@
 //! a Zed fork change — `from_window` is public.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::Keystroke;
 use gpui::TestAppContext;
@@ -14,6 +15,8 @@ use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
+
+use crate::pbt_harness::settle::settle_window;
 
 #[test]
 fn blur_commits_pending_text() {
@@ -32,6 +35,7 @@ fn blur_commits_pending_text() {
 
     let session = env.session_arc();
     let engine = env.reactive_engine.get().cloned().expect("reactive engine");
+    let watermark = engine.ui_watermark().clone();
 
     // Warm the root layout watcher on tokio (real time) before the window
     // subscribes — under TestPlatform the launch pre-warm time-skips its
@@ -43,7 +47,7 @@ fn blur_commits_pending_text() {
         let sig = engine.watch_data_signal(&root_uri);
         let got = runtime.block_on(async move {
             let mut stream = sig.to_stream();
-            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::time::timeout(Duration::from_secs(30), async {
                 while let Some(rvm) = stream.next().await {
                     if rvm.widget_name().as_deref() != Some("loading") {
                         return true;
@@ -80,34 +84,14 @@ fn blur_commits_pending_text() {
 
     let window = rebind_handle.window();
 
-    // Settle to a fixed point: real tokio time between gpui pump cycles so
-    // the multi-level reactive cascade (panels → rows) fully renders.
-    {
-        let mut last_count = 0usize;
-        let mut stable = 0u32;
-        for _ in 0..500 {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            cx.run_until_parked();
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(500));
-            cx.run_until_parked();
-            bounds.flush();
-            let elements = bounds.all_elements();
-            let count = elements.len();
-            let still_loading = elements
-                .iter()
-                .any(|(_, info)| info.widget_type.as_ref() == "loading");
-            if count > 0 && count == last_count && !still_loading {
-                stable += 1;
-                if stable >= 3 {
-                    break;
-                }
-            } else {
-                stable = 0;
-            }
-            last_count = count;
-        }
-    }
+    settle_window(
+        &cx,
+        &bounds,
+        &watermark,
+        &mut || runtime.block_on(env.settle()),
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("boot: {e}"));
 
     // Bind a VisualTestContext so we can call deactivate_window().
     let mut visual = VisualTestContext::from_window(window, &cx);

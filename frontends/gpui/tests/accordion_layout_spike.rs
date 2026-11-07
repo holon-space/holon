@@ -81,7 +81,8 @@ struct AccordionSpikeView {
 
 impl gpui::Render for AccordionSpikeView {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
-        self.bounds.begin_pass();
+        self.bounds
+            .begin_pass(holon_frontend::render_epoch::EngineSeq::default());
 
         // MAIN region: enough rows to overflow (proves it is its own viewport,
         // independent of the accordion). Not asserted on here — the main-scroll

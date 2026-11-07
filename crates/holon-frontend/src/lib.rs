@@ -144,6 +144,7 @@ pub mod reactive;
 pub mod reactive_view;
 pub mod reactive_view_model;
 mod render_context;
+pub mod render_epoch;
 pub mod render_interpreter;
 pub mod rich_text_selection;
 pub mod row_origin;

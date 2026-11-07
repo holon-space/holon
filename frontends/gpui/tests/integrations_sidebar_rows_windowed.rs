@@ -56,9 +56,19 @@ use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_s
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// One integration as the mirror holds it, which is the oracle for what its row
 /// must paint.
@@ -491,7 +501,7 @@ fn integration_rows_show_name_icon_aligned_status_and_open_their_view() {
         .expect("window opened over the booted session");
     let window = rebind.window();
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     // The oracle is the mirror as it stands when the paint is judged. Reading
     // it back rather than hardcoding the bundle keeps it true when the bundled
@@ -569,7 +579,7 @@ fn integration_rows_show_name_icon_aligned_status_and_open_their_view() {
         let row = visible(&bounds, &selectable_id(CLAUDE_HISTORY))
             .expect("the Claude History row must be painted to be clicked");
         click_at(&mut app, window, center_of(&row), "the Claude History row");
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
         let after = focus_of_main();
         assert_eq!(
@@ -586,7 +596,7 @@ fn integration_rows_show_name_icon_aligned_status_and_open_their_view() {
         let todoist_row = visible(&bounds, &selectable_id(TODOIST))
             .expect("the Todoist row must be painted to be clicked");
         click_at(&mut app, window, center_of(&todoist_row), "the Todoist row");
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
         let after_todoist = focus_of_main();
         assert_eq!(

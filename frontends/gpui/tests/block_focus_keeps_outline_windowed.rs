@@ -63,6 +63,7 @@ use holon_pbt_core::composition::CapMap;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 /// The grafted outline: a page with a `parent` row owning `c1` and `c2`.
 /// `graft_displayed_text_tree` fixes these ids.
@@ -152,6 +153,27 @@ fn settle_to_fixed_point(
         bounds.all_elements().len(),
         tail.join(" "),
     );
+}
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    env: &TestEnvironment,
+    deadline: Duration,
+) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 /// The outline rows the window is currently PAINTING: a grafted row counts only
@@ -264,13 +286,13 @@ fn raising_the_keyboard_must_not_hide_the_block_rows() {
             )
         })
         .expect("window opened");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft the outline the panel draws");
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     let sut = window_wide(Box::new(bounds.clone()), engine.clone());
 
@@ -293,7 +315,7 @@ fn raising_the_keyboard_must_not_hide_the_block_rows() {
     runtime
         .block_on(async { driver.click_entity(&tapped, "main").await })
         .expect("tap the outline row to put the caret in it");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     // CONTROL. With the keyboard down the frame is fine, so a failure after the
     // inset belongs to the inset and not to the tap or the fixture.
@@ -311,7 +333,7 @@ fn raising_the_keyboard_must_not_hide_the_block_rows() {
     // Raise the keyboard: grow the bottom safe-area inset, which is exactly
     // what the platform does to the app on Android.
     app.update(|cx| rebind.set_safe_area_bottom(KEYBOARD_INSET_PX, cx));
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     let after = painted_outline_rows(&sut, &runtime);
     let panel_after = panel_box_height(&sut, &runtime);

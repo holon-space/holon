@@ -662,25 +662,99 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
 /// modes — the backing matview exists with or without Loro.
 pub struct BlockFeed(pub Arc<LiveData<crate::block::Block>>);
 
+/// An owed child of a [`DeliveryCursor`]. Its parent stops owing the child's
+/// batches when this handle drops, even while a router still holds the cursor
+/// of a subscription it has not yet found closed.
+#[derive(Debug)]
+pub struct OwedChild(Arc<DeliveryCursor>);
+
+impl OwedChild {
+    pub fn cursor(&self) -> &Arc<DeliveryCursor> {
+        &self.0
+    }
+}
+
+impl Drop for OwedChild {
+    fn drop(&mut self) {
+        let parent = self.0.parent.as_ref().expect("an owed child has a parent");
+        parent
+            .children
+            .lock()
+            .expect("children mutex")
+            .retain(|c| !std::ptr::eq(c.as_ptr(), Arc::as_ptr(&self.0)));
+    }
+}
+
 /// One CDC subscription's progress: the last batch `seq` routed to it, and
 /// the last one its consumer applied.
 #[derive(Debug, Default)]
 pub struct DeliveryCursor {
     sent: AtomicU64,
     applied: AtomicU64,
+    taken: std::sync::atomic::AtomicBool,
+    /// Set on an owed child: its batches reach the parent's consumer, so the
+    /// parent's `applied` is the child's.
+    parent: Option<Arc<DeliveryCursor>>,
+    children: std::sync::Mutex<Vec<std::sync::Weak<DeliveryCursor>>>,
 }
 
 impl DeliveryCursor {
+    /// A cursor whose routed batches this one owes while the returned handle
+    /// lives, until this cursor's consumer applies through them.
+    pub fn owed_child(self: &Arc<Self>) -> OwedChild {
+        let child = Arc::new(Self {
+            parent: Some(self.clone()),
+            ..Self::default()
+        });
+        self.children
+            .lock()
+            .expect("children mutex")
+            .push(Arc::downgrade(&child));
+        OwedChild(child)
+    }
+
+    fn live_children(&self) -> Vec<Arc<Self>> {
+        let children = self.children.lock().expect("children mutex");
+        children
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .collect()
+    }
+
     pub fn sent(&self) -> u64 {
         self.sent.load(Ordering::Acquire)
     }
 
+    /// The highest seq routed to this cursor or to a live owed child.
+    pub fn sent_with_children(&self) -> u64 {
+        self.live_children()
+            .iter()
+            .map(|child| child.sent())
+            .fold(self.sent(), u64::max)
+    }
+
     pub fn applied(&self) -> u64 {
-        self.applied.load(Ordering::Acquire)
+        match &self.parent {
+            Some(parent) => parent.applied(),
+            None => self.applied.load(Ordering::Acquire),
+        }
     }
 
     pub fn is_lagging(&self) -> bool {
-        self.applied() < self.sent()
+        self.owed_floor().is_some()
+    }
+
+    /// The highest seq through which every batch routed to this cursor and
+    /// its live owed children is applied, while some later batch is not.
+    pub fn owed_floor(&self) -> Option<u64> {
+        let applied = self.applied();
+        (applied < self.sent_with_children()).then_some(applied)
+    }
+
+    /// Whether a subscription took this cursor through [`reporting_cursor`],
+    /// i.e. something routes batches to it.
+    pub fn is_taken(&self) -> bool {
+        self.taken.load(Ordering::Acquire)
     }
 
     /// Called by the router before it hands the subscriber batch `seq`.
@@ -690,15 +764,20 @@ impl DeliveryCursor {
 
     /// Called by the consumer once batch `seq` is applied.
     pub fn applied_through(&self, seq: u64) {
+        assert!(
+            self.parent.is_none(),
+            "an owed child's batches are applied through its parent"
+        );
         self.applied.fetch_max(seq, Ordering::Release);
     }
 
     /// Called by the router for a batch that holds nothing for this
-    /// subscriber: a caught-up subscriber is settled through it too.
+    /// subscriber: a caught-up subscriber is settled through it too. An owed
+    /// child owes nothing for it, so it stays as it is.
     pub fn skipped(&self, seq: u64) {
         // Safe without a lock: the consumer only applies seqs up to `sent`,
         // and the router is the only writer of `sent`.
-        if !self.is_lagging() {
+        if self.parent.is_none() && !self.is_lagging() {
             self.sent.fetch_max(seq, Ordering::Release);
             self.applied.fetch_max(seq, Ordering::Release);
         }
@@ -720,7 +799,9 @@ pub async fn reporting_to<F: std::future::Future>(
 
 /// The cursor of the enclosing [`reporting_to`], if any.
 pub fn reporting_cursor() -> Option<Arc<DeliveryCursor>> {
-    REPORTING_CURSOR.try_with(Arc::clone).ok() // ALLOW(ok): outside a scope no consumer reports
+    let cursor = REPORTING_CURSOR.try_with(Arc::clone).ok()?; // ALLOW(ok): outside a scope no consumer reports
+    cursor.taken.store(true, Ordering::Release);
+    Some(cursor)
 }
 
 /// A [`LiveData`] whose HOLDER is the authority — the handle

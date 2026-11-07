@@ -47,13 +47,11 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
 use holon_api::EntityUri;
-use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::row_origin::RowOrigin;
 use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
@@ -69,6 +67,7 @@ use holon_pbt_core::capabilities::SutLayout;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 /// A day header wider than this is an h2 HEADING, not body text. Height cannot
 /// discriminate — text elements carry a `min_h` floor, so both `style:"h2"`
@@ -94,36 +93,25 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-fn settle(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
+    deadline: Duration,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, i)| i.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !loading {
-            stable += 1;
-            if stable >= 5 {
-                return;
-            }
-        } else {
-            stable = 0;
-        }
-        last_count = count;
-    }
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 /// The tallest painted header text for `day` (the main-panel h2 header, not the
@@ -226,7 +214,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
             )
         })
         .expect("window opened");
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     // Three days with a block each, plus one truly EMPTY day (no blocks) — the
     // fresh-journal case whose bullet needs the explicit-empty affordance.
@@ -238,7 +226,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         .expect("graft empty day");
     feed.push(empty_day.clone());
     runtime.block_on(env.settle());
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     // Click the journals page in the sidebar to focus the Main panel on the
     // feed (the click's bound `navigation.focus` is what writes `focus_roots`).
@@ -260,7 +248,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
     runtime
         .block_on(async { driver.click_entity(&journals, "left_sidebar").await })
         .expect("click journals");
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     // ── REQ5 drive: mutate the feed while it is LIVE ─────────────────────────
     // Everything above grafts BEFORE the feed view exists, so the feed's first
@@ -293,7 +281,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         .expect("graft the late day's entry row");
     feed.push(late_day.clone());
     runtime.block_on(env.settle());
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     // Rename to another date that still sorts FIRST — a real content change, so
     // the `set_neq` CDC-echo suppressor cannot swallow it.
@@ -303,7 +291,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         .expect("rename the late day");
     feed.last_mut().expect("late day in feed").1 = LATE_DAY_RENAMED.to_string();
     runtime.block_on(env.settle());
-    settle(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     // Converge the frame, don't just settle it. `settle` stops at the first
     // STABLE element count, and the streaming creation slot can arrive after
@@ -321,7 +309,7 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
         if slot_painted(&elements, &empty) {
             break;
         }
-        settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
         elements = runtime.block_on(async { sut.rendered_elements().await });
     }
 

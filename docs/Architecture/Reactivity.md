@@ -18,9 +18,12 @@ Three refinements that make this precise:
 
 1. **Convergence, not instantaneous equality.** Mid-flight frames may lag
    (IVM maintenance, debounced renders). The standard is equality at
-   quiescence within a bounded window; oracles therefore use
-   bounded-wait-for-stable, never one-shot strict snapshots
+   quiescence; oracles therefore wait for a signal that names the reached
+   state, never a quiet period and never a one-shot strict snapshot
    (`inv-org-render-fixed-point`, `inv-matview-consistent-with-recompute`).
+   The engine owes nothing (`delivery_owed` is empty), and a GPUI frame's
+   `RenderEpoch` reflects the emitted CDC seq; a hang deadline only turns a
+   missing signal into an error.
 2. **Applies to every derived holder, not just SQL matviews.** Turso matviews,
    `LiveData` mirrors, stream combinators, per-doc render caches
    (`render_with_cache`'s `doc_blocks`), UI row snapshots

@@ -29,39 +29,30 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        futures::executor::block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    futures::executor::block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    env: &TestEnvironment,
+    deadline: Duration,
+) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || futures::executor::block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 static ONE_WINDOWED_APP_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -162,7 +153,7 @@ fn drive(home_first: bool) {
     let boot_deadline = Instant::now() + Duration::from_secs(180);
     let mut painted = false;
     while Instant::now() < boot_deadline {
-        settle(&mut app, &bounds, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &env, Duration::from_secs(30));
         painted = bounds
             .all_elements()
             .iter()
@@ -198,7 +189,7 @@ fn drive(home_first: bool) {
 
     futures::executor::block_on(driver.click_entity(&second_uri, "main"))
         .expect("click the second row's painted text");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &env, Duration::from_secs(30));
     assert_eq!(
         engine.focused_block(),
         Some(second_uri.clone()),
@@ -213,12 +204,12 @@ fn drive(home_first: bool) {
     if home_first {
         futures::executor::block_on(driver.send_raw_keystroke("home", &[]))
             .expect("caret to the start of the row");
-        settle(&mut app, &bounds, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &env, Duration::from_secs(30));
     }
 
     futures::executor::block_on(driver.send_raw_keystroke("up", &[]))
         .expect("the window must consume a bare up arrow");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &env, Duration::from_secs(30));
     let first_element = format!("block:{first_id}");
     assert_eq!(
         engine.focused_block(),
@@ -233,7 +224,7 @@ fn drive(home_first: bool) {
 
     futures::executor::block_on(driver.send_raw_keystroke("down", &[]))
         .expect("the window must consume a bare down arrow");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &env, Duration::from_secs(30));
     assert_eq!(
         engine.focused_block(),
         Some(second_uri),

@@ -164,7 +164,9 @@ fn watch_ui_emits_data_events_after_structure() {
             loop {
                 let event = watch.recv().await.expect("stream should stay open");
                 match event {
-                    UiEvent::Data { batch, generation } => {
+                    UiEvent::Data {
+                        batch, generation, ..
+                    } => {
                         assert!(generation > 0, "generation should be positive");
                         assert!(
                             !batch.inner.items.is_empty(),

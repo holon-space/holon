@@ -36,9 +36,19 @@ use holon_pbt_core::ComponentSet;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::SutFocusWrite;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
+) {
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
 
 /// The owner's node, and the child holding what this device wrote before it
 /// was paired. The child's id is what `conflict_copy_id` derives.
@@ -223,7 +233,7 @@ fn paint(page_id: &str, file: &str, org: &str, window_title: &'static str) -> Pa
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let texts = painted_texts(&bounds);
     let census = painted_widget_census(&bounds);

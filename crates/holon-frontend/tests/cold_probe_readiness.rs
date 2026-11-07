@@ -62,6 +62,7 @@ fn structure(expr: RenderExpr, generation: u64) -> UiEvent {
         render_expr: expr,
         candidates: Vec::new(),
         generation,
+        seq: 0,
     }
 }
 
@@ -91,6 +92,7 @@ fn data_batch(generation: u64) -> UiEvent {
             },
         },
         generation,
+        seq: 0,
     }
 }
 

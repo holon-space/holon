@@ -35,6 +35,7 @@ mod state_toggle_bool_binding;
 mod stored_secret_row;
 mod text_color_token;
 mod text_style_kwarg;
+mod ui_watermark_schedule;
 mod unknown_function_call_is_an_error_node;
 mod untrusted_entity_names_in_frontend_are_parsed;
 mod value_fn_panic_degrades_only_its_widget;

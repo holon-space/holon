@@ -36,9 +36,47 @@ use holon_integration_tests::pbt::composed::builder::compose_sut_windowed_base_s
 use holon_integration_tests::pbt::op_write_cap::IdResolver;
 use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
-use pbt_harness::windowed_wide::settle_to_fixed_point;
 
 use crate::pbt_harness;
+
+/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
+/// pump until the element count is stable and no `"loading"` placeholders
+/// remain.
+fn settle_to_fixed_point(
+    app: &mut HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    timeout: Duration,
+) {
+    let start = Instant::now();
+    let mut last_count = 0usize;
+    let mut stable_iters = 0u32;
+    while start.elapsed() < timeout {
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
+        app.run_until_parked();
+        app.advance_clock(Duration::from_secs(1));
+        app.run_until_parked();
+        bounds.flush();
+        let elements = bounds.all_elements();
+        let count = elements.len();
+        let still_loading = elements
+            .iter()
+            .any(|(_, info)| info.widget_type.as_ref() == "loading");
+        if count == last_count && count > 0 && !still_loading {
+            stable_iters += 1;
+            if stable_iters >= 5 {
+                return;
+            }
+        } else {
+            stable_iters = 0;
+        }
+        last_count = count;
+    }
+    panic!(
+        "window never reached a fixed point within {timeout:?}: {} elements",
+        bounds.all_elements().len()
+    );
+}
 
 /// The toolbar affordance that opens Settings. The modal has no command and no
 /// keybinding — this is the only door.

@@ -2,6 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use holon_api::EntityUri;
+use holon_api::live_data::DeliveryCursor;
+use holon_api::live_data::OwedChild;
+use holon_api::live_data::reporting_cursor;
+use holon_api::live_data::reporting_to;
 use holon_api::reactive::ReactiveStreamExt;
 use holon_api::render_requirements::RenderRequirements;
 use holon_api::render_types::Arg;
@@ -53,6 +57,73 @@ enum RenderTrigger {
     Initial,
 }
 
+/// The delivery cursors of one [`watch_ui`]. `data` is the consumer's cursor
+/// from the enclosing [`reporting_to`]. The trigger subscriptions report to
+/// `triggers` and each render's data subscription to its own cursor, all owed
+/// children of `data`: a superseded render's batches stop counting once it
+/// ends, since its events are never applied.
+#[derive(Clone)]
+struct Delivery {
+    data: Arc<DeliveryCursor>,
+    triggers: Arc<OwedChild>,
+    reported: bool,
+}
+
+impl Delivery {
+    fn enclosing() -> Self {
+        let reporting = reporting_cursor();
+        let reported = reporting.is_some();
+        let data = reporting.unwrap_or_default();
+        let triggers = Arc::new(data.owed_child());
+        Self {
+            data,
+            triggers,
+            reported,
+        }
+    }
+
+    async fn subscribe<F: std::future::Future>(
+        &self,
+        cursor: &Arc<DeliveryCursor>,
+        subscribe: F,
+    ) -> F::Output {
+        if self.reported {
+            reporting_to(cursor.clone(), subscribe).await
+        } else {
+            subscribe.await
+        }
+    }
+
+    /// The seq a render that reads the store after this call reflects: every
+    /// batch routed so far was committed before it. The render owes it on
+    /// `data` until the event that shows the render claims it.
+    fn begin_render(&self) -> u64 {
+        let seq = self.data.sent_with_children();
+        self.data.routed(seq);
+        seq
+    }
+
+    /// The seq a render that `begun` at that seq reflects once its own
+    /// subscription is registered: the predecessor's batches routed so far are
+    /// in its read, unless batches routed to the render itself already follow
+    /// that read. The render owes it on `data`, so the predecessor can end.
+    fn take_over(
+        &self,
+        begun: u64,
+        render: &DeliveryCursor,
+        predecessor: Option<&DeliveryCursor>,
+    ) -> u64 {
+        let handed = predecessor.map_or(0, DeliveryCursor::sent);
+        // shortcut: a batch the router hands to both cursors between these two
+        // loads is claimed one apply early; close it with a seq from the router.
+        if render.sent() > 0 || handed <= begun {
+            return begun;
+        }
+        self.data.routed(handed);
+        handed
+    }
+}
+
 /// Start watching a block's UI, returning a stream of UiEvents and a command
 /// channel.
 ///
@@ -68,11 +139,20 @@ pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri) -> Result
         id = block_id,
     );
 
-    let struct_stream = engine.subscribe_sql(&structural_sql).await?;
-    let focus_stream = engine
-        .subscribe_sql_keyed(
-            crate::api::block_domain::FOCUS_ROOT_MEMBERSHIP_SQL,
-            block_id.as_str(),
+    let delivery = Delivery::enclosing();
+    let struct_stream = delivery
+        .subscribe(
+            delivery.triggers.cursor(),
+            engine.subscribe_sql(&structural_sql),
+        )
+        .await?;
+    let focus_stream = delivery
+        .subscribe(
+            delivery.triggers.cursor(),
+            engine.subscribe_sql_keyed(
+                crate::api::block_domain::FOCUS_ROOT_MEMBERSHIP_SQL,
+                block_id.as_str(),
+            ),
         )
         .await?;
 
@@ -106,6 +186,7 @@ pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri) -> Result
         profile_resolver,
         block_id,
         output_tx,
+        delivery,
     ));
     aborts.push(watcher_handle.abort_handle());
 
@@ -236,12 +317,14 @@ async fn run_reactive_watcher(
     profile_resolver: Arc<dyn ProfileResolving>,
     block_id: EntityUri,
     output_tx: mpsc::Sender<UiEvent>,
+    delivery: Delivery,
 ) {
     let mut generation: u64 = 0;
     let mut variant = None;
     // Dropped by the next generation once its watch is registered, which is
     // what lets the current one go.
     let mut release_current: Option<oneshot::Sender<std::convert::Infallible>> = None;
+    let mut current_render: Option<Arc<DeliveryCursor>> = None;
 
     // switch_map: each trigger produces an inner stream of UiEvents.
     // When a new trigger arrives, the previous inner stream is aborted.
@@ -278,12 +361,15 @@ async fn run_reactive_watcher(
         let current_var = variant.clone();
         let engine = engine.clone();
         let resolver = profile_resolver.clone();
+        let delivery = delivery.clone();
 
         // Inner stream: Structure event followed by Data events.
         // Spawned as a task so render_entity can be awaited.
         let (inner_tx, inner_rx) = mpsc::channel::<UiEvent>(64);
         let (release_tx, release_rx) = oneshot::channel();
         let release_predecessor = release_current.replace(release_tx);
+        let render_cursor = delivery.data.owed_child();
+        let predecessor = current_render.replace(render_cursor.cursor().clone());
         let block_id_clone = block_id.clone();
         crate::util::spawn_actor(async move {
             render_and_forward(
@@ -296,7 +382,10 @@ async fn run_reactive_watcher(
                 Handover {
                     release_predecessor,
                     released: release_rx,
+                    predecessor,
                 },
+                render_cursor,
+                &delivery,
             )
             .await;
         });
@@ -325,12 +414,15 @@ struct Handover {
     /// Resolves when the next generation holds its claim, or when no next
     /// generation can come because the watcher ended.
     released: oneshot::Receiver<std::convert::Infallible>,
+    /// The data cursor of the generation this one supersedes.
+    predecessor: Option<Arc<DeliveryCursor>>,
 }
 
 /// Render a block and forward the result + data stream into the inner channel.
 ///
 /// On success: emits Structure event, then forwards data CDC as Data events.
 /// On failure: emits Structure event with error WidgetSpec (stream stays open).
+#[allow(clippy::too_many_arguments)] // one generation's inputs; each arg is a distinct concern
 async fn render_and_forward(
     tx: mpsc::Sender<UiEvent>,
     engine: Arc<BackendEngine>,
@@ -339,11 +431,15 @@ async fn render_and_forward(
     variant: &Option<String>,
     generation: u64,
     handover: Handover,
+    render_cursor: OwedChild,
+    delivery: &Delivery,
 ) {
     let Handover {
         release_predecessor,
         released,
+        predecessor,
     } = handover;
+    let rendered = delivery.begin_render();
     // Advice-rule status surface (ADR 0022 "rule blocks render their own status"):
     // a rule block whose id carries a NON-Active status has its render replaced
     // by the error surface, so parse errors and async DDL failures are visible
@@ -357,13 +453,22 @@ async fn render_and_forward(
                 render_expr: error_render_expr(&format!("advice rule: {status}")),
                 candidates: Vec::new(),
                 generation,
+                seq: rendered,
             })
             .await;
         return;
     }
 
-    match engine.blocks().render_entity(block_id, variant).await {
+    match delivery
+        .subscribe(
+            render_cursor.cursor(),
+            engine.blocks().render_entity(block_id, variant),
+        )
+        .await
+    {
         Ok((render_expr, mut data_stream)) => {
+            let rendered =
+                delivery.take_over(rendered, render_cursor.cursor(), predecessor.as_deref());
             drop(release_predecessor);
             tracing::info!(
                 "[UiWatcher] render_entity('{}') OK: gen={}, render={:?}",
@@ -380,11 +485,19 @@ async fn render_and_forward(
                     render_expr,
                     candidates: Vec::new(),
                     generation,
+                    seq: 0,
                 })
                 .await
                 .is_ok()
             {
-                forward_data_stream(&mut data_stream, &tx, profile_resolver, generation).await;
+                forward_data_stream(
+                    &mut data_stream,
+                    &tx,
+                    profile_resolver,
+                    generation,
+                    rendered,
+                )
+                .await;
             }
             let Err(oneshot::error::RecvError { .. }) = released.await;
         }
@@ -405,6 +518,7 @@ async fn render_and_forward(
                         render_expr: error_render_expr(&format!("{e:#}")),
                         candidates: Vec::new(),
                         generation,
+                        seq: rendered,
                     })
                     .await;
                 return;
@@ -420,6 +534,7 @@ async fn render_and_forward(
                         render_expr: error_render_expr(&format!("{e:#}")),
                         candidates: Vec::new(),
                         generation,
+                        seq: rendered,
                     })
                     .await;
                 return;
@@ -441,6 +556,7 @@ async fn render_and_forward(
                         render_expr: disclosed_render_expr(verdict),
                         candidates: Vec::new(),
                         generation,
+                        seq: rendered,
                     })
                     .await;
                 return;
@@ -476,6 +592,7 @@ async fn render_and_forward(
                     render_expr: error_render_expr(&format!("{e:#}{attribution}")),
                     candidates: Vec::new(),
                     generation,
+                    seq: rendered,
                 })
                 .await;
         }
@@ -488,6 +605,7 @@ async fn forward_data_stream(
     output_tx: &mpsc::Sender<UiEvent>,
     profile_resolver: Arc<dyn ProfileResolving>,
     generation: u64,
+    rendered: u64,
 ) {
     loop {
         // A superseded generation's output closes while its data stream is
@@ -521,13 +639,18 @@ async fn forward_data_stream(
             .map(|c| c.map(EnrichedRow::into_inner))
             .collect();
 
+        let seq = metadata.seq.max(rendered);
         let batch = BatchMapChangeWithMetadata {
             inner: BatchMapChange { items: map_changes },
             metadata,
         };
 
         if output_tx
-            .send(UiEvent::Data { batch, generation })
+            .send(UiEvent::Data {
+                batch,
+                generation,
+                seq,
+            })
             .await
             .is_err()
         {

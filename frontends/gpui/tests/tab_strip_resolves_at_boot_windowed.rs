@@ -26,58 +26,41 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
-use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::pbt::window_slice::seed::graft_displayed_text_tree;
 use holon_integration_tests::test_environment::TestEnvironment;
 
+use crate::pbt_harness::settle::settle_window;
+
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Cross-runtime fixed-point settle (the shared windowed pattern): pump until
-/// the element count is stable and no `"loading"` placeholders remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
+    deadline: Duration,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len(),
-    );
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        deadline,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 #[test]
@@ -119,7 +102,7 @@ fn the_tab_strip_draws_an_open_tab_without_being_prodded() {
             )
         })
         .expect("window opened");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     // Open a tab, the way navigating to a page opens one. Nothing here touches
     // the editor, so the focused block never moves — which is the whole point:
@@ -128,7 +111,7 @@ fn the_tab_strip_draws_an_open_tab_without_being_prodded() {
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft a page and navigate Main onto it");
     runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
     // VACUITY GUARD, read from the table the strip is a view of. Without this a
     // failure below could just mean no tab was ever opened.
