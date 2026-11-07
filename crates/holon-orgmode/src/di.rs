@@ -338,6 +338,8 @@ pub struct OrgSyncIdleSignal {
     /// started. A watcher can drop an event, so a change at or below it is on
     /// disk AND was re-stat'ed; only then has its file surely been ingested.
     polled_change_seq: std::sync::atomic::AtomicU64,
+    /// Starts a poll pass before the next poll tick.
+    poll_requested: tokio::sync::Notify,
     /// Passes the loop has entered and not yet finished.
     ///
     /// [`tick`](Self::tick) advances only when a pass COMPLETES, so a pass that
@@ -408,6 +410,7 @@ impl OrgSyncIdleSignal {
             notify: tokio::sync::Notify::new(),
             change_seq: std::sync::atomic::AtomicU64::new(0),
             polled_change_seq: std::sync::atomic::AtomicU64::new(0),
+            poll_requested: tokio::sync::Notify::new(),
             in_pass: std::sync::atomic::AtomicUsize::new(0),
             bulk_pending: std::sync::atomic::AtomicBool::new(false),
             writeback_fold: std::sync::OnceLock::new(),
@@ -500,6 +503,11 @@ impl OrgSyncIdleSignal {
     pub fn polled_change_seq(&self) -> u64 {
         self.polled_change_seq
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Ask the loop for a poll pass now instead of at its next tick.
+    pub fn request_poll(&self) {
+        self.poll_requested.notify_one();
     }
 
     /// Wait until the processed-change watermark reaches `seq`, or `timeout`
@@ -1701,6 +1709,25 @@ fn record_boot_ingest(
     }
 }
 
+/// Re-stats every tracked file; a completed pass advances the polled watermark
+/// to the change seq processed when it started.
+async fn poll_pass(controller: &mut FileSyncController, idle: &OrgSyncIdleSignal) {
+    let started_at = idle.processed_change_seq();
+    match controller.poll_tracked_files().await {
+        Ok(n) => {
+            if n > 0 {
+                tracing::debug!("[ORGSYNC_TRACE] poll ingested {} file(s)", n);
+                idle.mark_progress();
+            }
+            idle.advance_polled_change_seq(started_at);
+        }
+        Err(e) => {
+            tracing::debug!("[ORGSYNC_TRACE] poll ERROR: {}", e);
+            tracing::error!("[OrgMode] poll_tracked_files error: {}", e);
+        }
+    }
+}
+
 /// Backend-blind FileSyncController driver: initialize, build the file watcher,
 /// run the initial scan, hand over to the boot seed (when a [`BootSeedGate`]
 /// is wired), signal readiness, arm the watcher, and run the main `select!`
@@ -2142,20 +2169,10 @@ async fn run_file_sync_controller(
                 idle_signal_for_task.mark_progress();
             }
             _ = poll_tick.tick() => {
-                let started_at = idle_signal_for_task.processed_change_seq();
-                match controller.poll_tracked_files().await {
-                    Ok(n) => {
-                        if n > 0 {
-                            tracing::debug!("[ORGSYNC_TRACE] poll ingested {} file(s)", n);
-                            idle_signal_for_task.mark_progress();
-                        }
-                        idle_signal_for_task.advance_polled_change_seq(started_at);
-                    }
-                    Err(e) => {
-                        tracing::debug!("[ORGSYNC_TRACE] poll ERROR: {}", e);
-                        error!("[OrgMode] poll_tracked_files error: {}", e);
-                    }
-                }
+                poll_pass(&mut controller, &idle_signal_for_task).await;
+            }
+            () = idle_signal_for_task.poll_requested.notified() => {
+                poll_pass(&mut controller, &idle_signal_for_task).await;
             }
             _ = discovery_tick.tick() => {
                 let tick = Some(idle_signal_for_task.current_tick());

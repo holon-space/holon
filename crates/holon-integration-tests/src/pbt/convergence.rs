@@ -387,6 +387,7 @@ pub(crate) async fn converge_signals(
     let mut last_progress_at = started;
     let mut last = signals.progress().await;
     let mut polls_owed_by_stage = std::collections::BTreeMap::<&str, u32>::new();
+    let mut poll_requested_for = 0;
 
     loop {
         tokio::time::sleep(poll).await;
@@ -398,6 +399,14 @@ pub(crate) async fn converge_signals(
         }
         for o in &owing {
             *polls_owed_by_stage.entry(o.stage).or_default() += 1;
+        }
+        // The loop's own poll tick would leave each such settle waiting out its period.
+        if let (Some(idle), Some(org)) = (&signals.org_idle, &now_progress.org)
+            && owing.iter().any(|o| o.stage == "org-poll")
+            && org.changed > poll_requested_for
+        {
+            idle.request_poll();
+            poll_requested_for = org.changed;
         }
 
         let now = tokio::time::Instant::now();
