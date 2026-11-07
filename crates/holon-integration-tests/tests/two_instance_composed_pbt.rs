@@ -2821,3 +2821,196 @@ fn joining_a_received_page_away_is_refused_and_leaves_it_placed() {
     assert_engaged_and_ok(&report, "inv-overlay-placement-local");
     <Sut as StateMachineTest>::check_invariants(&sut, &ref_state);
 }
+
+// ─── A receiver whose Loro store was rebuilt from its org files ─────────────
+
+/// One owner vault file, as a device that lost its Loro store finds it in its
+/// own vault: absent, as the owner has it, or edited while the device was
+/// alone.
+#[derive(Debug, Clone, Copy)]
+enum RebuiltFile {
+    Absent,
+    Same,
+    Edited,
+}
+
+/// A device that rebuilt its Loro store from its org files. `kept_record` is a
+/// store whose snapshot was undecodable: only the snapshot and its log were
+/// replaced, so the pairing record beside them survived.
+#[derive(Debug, Clone)]
+struct RebuiltReceiver {
+    files: Vec<RebuiltFile>,
+    kept_record: bool,
+}
+
+fn rebuilt_receiver() -> impl Strategy<Value = RebuiltReceiver> {
+    (
+        proptest::collection::vec(
+            prop_oneof![
+                Just(RebuiltFile::Absent),
+                Just(RebuiltFile::Same),
+                Just(RebuiltFile::Edited)
+            ],
+            8,
+        ),
+        any::<bool>(),
+    )
+        .prop_map(|(files, kept_record)| RebuiltReceiver { files, kept_record })
+}
+
+/// `body` with its first headline's text changed: a block the owner holds under
+/// the same id with other text. A file without a headline (a recipe, a journal
+/// index) comes back unchanged: its text lines are page metadata, and the
+/// re-import diverges every format through the same per-id compare.
+fn edited_org(body: &str) -> String {
+    match body.find("\n* ") {
+        Some(i) => format!("{}rebuilt alone {}", &body[..i + 3], &body[i + 3..]),
+        None => body.to_string(),
+    }
+}
+
+/// Every id that names more than one live Loro node on one side.
+async fn duplicated_nodes(
+    handle: &holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    owner: bool,
+) -> Vec<String> {
+    duplicate_ids(&handle.live_node_counts(owner).await, None)
+}
+
+async fn check_rebuilt_receiver(
+    ref_state: &holon_integration_tests::pbt::reference_state::ReferenceState,
+    case: &RebuiltReceiver,
+) {
+    let owner_files = holon_integration_tests::pbt::composed::wide_e2e::wide_seed_files(
+        ref_state,
+        holon_integration_tests::pbt::composed::wide_e2e::JournalsSeed::File,
+    );
+    assert!(
+        owner_files.len() <= case.files.len(),
+        "the generator draws {} files, the owner vault has {}",
+        case.files.len(),
+        owner_files.len()
+    );
+    let seed: Vec<(&str, String)> = owner_files
+        .iter()
+        .zip(&case.files)
+        .filter_map(|(&(name, body), file)| match file {
+            RebuiltFile::Absent => None,
+            RebuiltFile::Same => Some((name, body.to_string())),
+            RebuiltFile::Edited => Some((name, edited_org(body))),
+        })
+        .collect();
+    let seed: Vec<(&str, &str)> = seed.iter().map(|(n, b)| (*n, b.as_str())).collect();
+
+    let resolver = IdResolver::default();
+    let (owner_caps, _receiver_caps, handle, _) =
+        holon_integration_tests::pbt::composed::two_instance::boot_two_instances_seeded_on(
+            &resolver,
+            ref_state,
+            TransportChoice::Relay,
+            &seed,
+        )
+        .await;
+    let two = caps_two(&owner_caps);
+    let owner_before = handle.loro_tree_state(true, &BTreeSet::new()).await;
+    if case.kept_record {
+        holon_loro::pairing_swap::write_record(
+            &handle.store_dir(false),
+            &holon_loro::pairing_swap::PairingRecord {
+                owner: "the owner this device paired with before its snapshot broke".into(),
+                paired_at: "20261101T000000.000Z".into(),
+                containers: vec![holon_loro::loro_document_store::GLOBAL_DOC_ID.into()],
+                archive: handle.store_dir(false).join("archive"),
+            },
+        )
+        .expect("writing the surviving pairing record");
+    }
+
+    let invite = mint_pairing_invite(&handle, "write")
+        .await
+        .expect("a write pair offer must be mintable");
+    let accepted = consume_pairing_invite(&handle, &invite).await;
+    if !case.kept_record {
+        accepted
+            .clone()
+            .unwrap_or_else(|e| panic!("the pair of a rebuilt receiver must be accepted: {e}"));
+        drive_to_sync_fixpoint(&two, &handle).await;
+    }
+
+    for owner in [true, false] {
+        let dups = duplicated_nodes(&handle, owner).await;
+        assert!(
+            dups.is_empty(),
+            "{}: after a pair with a rebuilt receiver ({case:?}, accept: {accepted:?}), {} id(s) \
+             name more than one live Loro node:\n  {}",
+            if owner { "owner" } else { "receiver" },
+            dups.len(),
+            dups.join("\n  ")
+        );
+    }
+
+    if case.kept_record {
+        let refusal =
+            accepted.expect_err("a device that is already paired must refuse a second pair");
+        assert!(
+            refusal.contains("already paired"),
+            "the refusal must say the device is already paired; got {refusal}"
+        );
+        assert_eq!(
+            handle.loro_tree_state(true, &BTreeSet::new()).await,
+            owner_before,
+            "a refused pair must leave the owner's tree as it was"
+        );
+        return;
+    }
+    let device_local: BTreeSet<holon_api::EntityUri> = layout_subtree(&owner_before)
+        .iter()
+        .map(|id| holon_api::EntityUri::parse(id).expect("a layout id is a URI"))
+        .collect();
+    let owner = handle.loro_tree_state(true, &device_local).await;
+    let receiver = handle.loro_tree_state(false, &device_local).await;
+    let differ: Vec<&String> = owner
+        .keys()
+        .filter(|id| receiver.get(*id) != owner.get(*id))
+        .collect();
+    assert!(
+        differ.is_empty(),
+        "{} of {} owner block(s) differ on the rebuilt receiver after the pair ({case:?}): \
+         {differ:?}",
+        differ.len(),
+        owner.len()
+    );
+}
+
+/// The two fixed cases run first: the whole vault rebuilt after the snapshot
+/// broke (the pairing record survived), and after the whole store was deleted.
+#[test]
+fn a_rebuilt_receiver_pairs_without_a_second_node_per_id_fixed_cases() {
+    let rt = rt();
+    let ref_state = wide_e2e_ref();
+    for kept_record in [true, false] {
+        let case = RebuiltReceiver {
+            files: vec![RebuiltFile::Same; 8],
+            kept_record,
+        };
+        rt.block_on(check_rebuilt_receiver(&ref_state, &case));
+    }
+}
+
+proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        cases: std::env::var("REBUILT_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(6),
+        max_shrink_iters: 20,
+        failure_persistence: None,
+        .. proptest::test_runner::Config::default()
+    })]
+
+    /// A device whose Loro store was rebuilt from its org files pairs with the
+    /// owner, and no id names two live nodes on either side.
+    #[test]
+    fn a_rebuilt_receiver_pairs_without_a_second_node_per_id(case in rebuilt_receiver()) {
+        let rt = rt();
+        let ref_state = wide_e2e_ref();
+        rt.block_on(check_rebuilt_receiver(&ref_state, &case));
+    }
+}

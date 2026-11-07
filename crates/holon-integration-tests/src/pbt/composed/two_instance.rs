@@ -1141,7 +1141,7 @@ async fn boot_two_instances_with_receiver_caps_on(
 // The harness holds single-threaded SUT parts in `Arc` because the
 // production trait signatures it feeds require `Arc`, not `Rc`.
 #[allow(clippy::arc_with_non_send_sync)]
-async fn boot_two_instances_seeded_on(
+pub async fn boot_two_instances_seeded_on(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
     transport: TransportChoice,
