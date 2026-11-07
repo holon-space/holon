@@ -5,9 +5,13 @@ Run: `python3 scripts/test-count-hash-folders.py`. Exits non-zero on the first v
 COUNT_HASH_FOLDERS=<path> runs the checks against another copy of the script. SEED=<n> replays the generated cases;
 EXAMPLE=<i> runs the fixed example i only.
 """
+import collections
+import importlib.machinery
+import importlib.util
 import json
 import os
 import random
+import re
 import shlex
 import shutil
 import subprocess
@@ -63,11 +67,23 @@ USERS = ("same call", "other call", "check mode", "exception", "none")
 EXAMPLES = [
     # ahash <- once_cell <- portable-atomic: one `cargo test --no-run` builds both chains, which differ in the
     # features of portable-atomic.
-    {"n": 3, "difference": "features", "twin_kind": "same", "user": "same call", "lints": "one", "twin_from": 0},
+    {"n": 3, "difference": "features", "twin_kind": "same", "user": "same call", "lints": "one", "twin_from": 0,
+     "baseline": None},
     # aegis's build script run: clippy uses one dir, the test builds the other; no fingerprint field differs.
-    {"n": 1, "difference": "wrapper", "twin_kind": "same", "user": "check mode", "lints": "one", "twin_from": 0},
+    {"n": 1, "difference": "wrapper", "twin_kind": "same", "user": "check mode", "lints": "one", "twin_from": 0,
+     "baseline": None},
     # Outside both: two test builds of one crate in two feature sets.
-    {"n": 2, "difference": "features", "twin_kind": "same", "user": "other call", "lints": "one", "twin_from": 1},
+    {"n": 2, "difference": "features", "twin_kind": "same", "user": "other call", "lints": "one", "twin_from": 1,
+     "baseline": None},
+    # heapless in the integration record: clippy and the test build differ in features, so not the same unit.
+    {"n": 1, "difference": "features", "twin_kind": "same", "user": "check mode", "lints": "one", "twin_from": 0,
+     "baseline": None},
+    # Example 2 against a baseline of other pairs: a pair outside the baseline still fails.
+    {"n": 2, "difference": "features", "twin_kind": "same", "user": "other call", "lints": "one", "twin_from": 1,
+     "baseline": "other"},
+    # Example 2 against a baseline that holds its pair and one pair the run does not see: listed, not failed.
+    {"n": 2, "difference": "features", "twin_kind": "same", "user": "other call", "lints": "one", "twin_from": 1,
+     "baseline": "match"},
 ]
 
 
@@ -79,6 +95,7 @@ def draw(rng):
          "user": rng.choice(USERS) if rng.random() < 0.6 else None}
     c["lints"] = rng.choice(("one", "second") if c["user"] == "check mode" else sorted(LINT_SETS))
     c["twin_from"] = rng.randrange(c["n"] + 1)
+    c["baseline"] = rng.choice((None, "match", "other"))
     return c
 
 
@@ -127,9 +144,54 @@ def build(c, rng):
     return target, env
 
 
+# The leaf cause of the twin crate's pair, as `pair_key` orders the two dirs.
+CAUSES = {"features": "features ['extra'] vs []", "rustflags": "rustflags", "env": "build script env {'SHA': 'abc'} vs {}"}
+UNSEEN = "debug/zz lib-zz: zz: rustflags"
+
+
+def baseline(c):
+    """The baseline lines of the case: the key of every twin pair ("match", plus one pair no run sees), or keys
+    of the twin crates with another cause ("other")."""
+    if c["baseline"] is None or c["difference"] == "wrapper":
+        return []
+    k = c["twin_from"]
+    chain = lambda j: " <- ".join("c%d" % i for i in range(j, k - 1, -1))
+    cause = CAUSES[c["difference"]] if c["baseline"] == "match" else "declared_features"
+    return ["debug/c%d lib-c%d: %s: %s" % (j, j, chain(j), cause) for j in range(k, c["n"])] + (
+        [UNSEEN] if c["baseline"] == "match" else [])
+
+
+def check_committed_baseline():
+    """Every line of scripts/compile-shape-baseline.txt is a pair key without a hash dir name."""
+    lines = [line for line in (REPO / "scripts" / "compile-shape-baseline.txt").read_text().splitlines()
+             if line.strip() and not line.startswith("#")]
+    assert lines, "the committed baseline holds no pair"
+    for line in lines:
+        assert re.fullmatch(r"[^/ ]+/[^/ ]+ [^ ]+: .+", line), "not a pair key: %r" % line
+        assert not re.search(r"\b[0-9a-f]{16}\b", line), "a hash dir name in the baseline: %r" % line
+
+
+def check_take(rng, where):
+    """`take` over a run of pair keys: each key is excused as often as the baseline lists it, the rest fail."""
+    loader = importlib.machinery.SourceFileLoader("count_hash_folders", str(SCRIPT))
+    count = importlib.util.module_from_spec(importlib.util.spec_from_loader("count_hash_folders", loader))
+    loader.exec_module(count)
+    names = "abc"
+    baseline = collections.Counter(rng.choice(names) for _ in range(rng.randrange(5)))
+    run = [rng.choice(names) for _ in range(rng.randrange(6))]
+    seen = collections.Counter()
+    excused = collections.Counter(k for k in run if count.take(baseline, seen, k))
+    for k in names:
+        want = min(baseline[k], run.count(k))
+        assert excused[k] == want, "key %s: %d excused, want %d; baseline %s, run %s, %s" % (
+            k, excused[k], want, dict(baseline), run, where)
+
+
 def check(c, rng, where):
     target, env = build(c, rng)
-    argv = [sys.executable, str(SCRIPT), str(target), "--mark", str(target / ".gc-mark")] + (
+    (target.parent / "baseline.txt").write_text("".join(line + "\n" for line in baseline(c)))
+    argv = [sys.executable, str(SCRIPT), str(target), "--mark", str(target / ".gc-mark"),
+            "--baseline", str(target.parent / "baseline.txt")] + (
         ["--record", str(target.parent / "calls.jsonl")] if c["user"] else [])
     out = subprocess.run(argv, capture_output=True, text=True, env=env)
     lines = out.stdout.splitlines()
@@ -141,13 +203,20 @@ def check(c, rng, where):
     built_after = c["twin_kind"] != "stale"
     used = c["user"] not in (None, "none") or built_after
     want_unrecorded = twins if c["user"] == "none" and built_after else []
-    apart = c["user"] in (None, "none", "other call")
-    want_second = twins if used and c["twin_kind"] != "mode" and apart else []
+    same_unit = c["difference"] == "wrapper"
+    apart = c["user"] in (None, "none", "other call") or (c["user"] == "check mode" and not same_unit)
+    pairs = twins if used and c["twin_kind"] != "mode" and apart else []
+    excused = pairs if c["baseline"] == "match" and c["difference"] != "wrapper" else []
+    want_second = [t for t in pairs if t not in excused]
     assert len(unrecorded) == len(want_unrecorded), "want UNRECORDED for %s, " % want_unrecorded + where
     assert len(second) == len(want_second), "want SECOND SHAPE for %s, " % want_second + where
-    if c["user"] in ("same call", "check mode") and c["twin_kind"] != "mode":
+    if (c["user"] == "same call" or c["user"] == "check mode" and same_unit) and c["twin_kind"] != "mode":
         listed = [line for line in lines if line.endswith(": " + {"same call": "one call"}.get(c["user"], "check vs build"))]
         assert len(listed) == len(twins), "want the %s pair of %s listed, " % (c["user"], twins) + where
+    listed = [line for line in lines if line.endswith(": baseline")]
+    assert len(listed) == len(excused), "want the pairs of %s listed as baseline, " % excused + where
+    lines_in = len(baseline(c))
+    assert "%d pair(s) seen, %d not seen" % (len(excused), lines_in - len(excused)) in out.stdout, "baseline tally, " + where
     want_lint = 1 if c["user"] and c["lints"] == "second" else 0
     assert len(lint) == want_lint, "want %d LINT ARGS, " % want_lint + where
     assert out.returncode == (1 if second or unrecorded or lint else 0), "exit %d, " % out.returncode + where
@@ -160,6 +229,7 @@ def check(c, rng, where):
 
 
 def main():
+    check_committed_baseline()
     examples = [] if "SEED" in os.environ else [int(os.environ["EXAMPLE"])] if "EXAMPLE" in os.environ else range(len(EXAMPLES))
     seeds = [] if "EXAMPLE" in os.environ else [int(os.environ["SEED"])] if "SEED" in os.environ else range(200)
     for i in examples:
@@ -167,6 +237,7 @@ def main():
     for seed in seeds:
         rng = random.Random(seed)
         check(draw(rng), rng, "seed %d" % seed)
+        check_take(rng, "seed %d" % seed)
     print("test-count-hash-folders: %d example(s) and %d generated case(s) ok" % (len(examples), len(seeds)))
 
 

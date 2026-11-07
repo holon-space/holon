@@ -1,0 +1,41 @@
+# Second compile shapes that scripts/count-hash-folders.py lists instead of failing: one line per pair of used dirs.
+# Owner: Remove the second compile shapes in the baseline
+# A line is `<profile>/<crate> <target>: <cause>` as `pair_key` prints it, with no hash dir name.
+# Only remove lines. A new line needs a code review of the shape it lets through; no recipe writes this file.
+debug/aws-lc-rs lib-aws_lc_rs: aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/aws-lc-rs run-build-script-build-script-build: aws-lc-rs <- aws-lc-sys: build script env read in another order or twice
+debug/aws-lc-rs run-build-script-build-script-build: aws-lc-rs: deps differ in order only
+debug/heapless run-build-script-build-script-build: heapless <- heapless: declared_features, path
+debug/heapless run-build-script-build-script-build: heapless <- heapless: declared_features, path
+debug/heapless run-build-script-build-script-build: heapless <- heapless: features ['atomic-polyfill', 'cas', 'serde'] vs [], declared_features, path, target
+debug/heapless run-build-script-build-script-build: heapless <- heapless: features ['atomic-polyfill', 'cas', 'serde'] vs [], declared_features, path, target
+debug/holon-lens lib-holon_lens: holon-lens <- workspace-hack <- workspace-hack <- workspace-hack <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/holon-macros lib-holon_macros: holon-macros <- holon-pattern <- holon-lens <- workspace-hack <- workspace-hack <- workspace-hack <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/holon-pattern lib-holon_pattern: holon-pattern <- holon-lens <- workspace-hack <- workspace-hack <- workspace-hack <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/hyper-rustls lib-hyper_rustls: hyper-rustls <- http <- bytes: features ['serde'] vs []
+debug/hyper-rustls lib-hyper_rustls: hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/nix run-build-script-build-script-build: nix <- nix: features ['poll', 'process', 'signal'] vs ['term'], declared_features, path
+debug/oauth2 lib-oauth2: oauth2 <- http <- bytes: features ['serde'] vs []
+debug/oauth2 lib-oauth2: oauth2 <- reqwest <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/parking_lot_core run-build-script-build-script-build: parking_lot_core <- parking_lot_core: declared_features, path, target
+debug/reqwest lib-reqwest: reqwest <- bytes: features ['serde'] vs []
+debug/reqwest lib-reqwest: reqwest <- bytes: features ['serde'] vs []
+debug/reqwest lib-reqwest: reqwest <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/reqwest lib-reqwest: reqwest <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/rmcp lib-rmcp: rmcp <- bytes: features ['serde'] vs []
+debug/rmcp lib-rmcp: rmcp <- oauth2 <- reqwest <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/rustls lib-rustls: rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/rustls lib-rustls: rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/rustls run-build-script-build-script-build: rustls: deps differ in order only
+debug/rustls run-build-script-build-script-build: rustls: deps differ in order only
+debug/rustls-platform-verifier lib-rustls_platform_verifier: rustls-platform-verifier <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/rustls-platform-verifier lib-rustls_platform_verifier: rustls-platform-verifier <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/rustls-webpki lib-webpki: rustls-webpki <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/tokio-rustls lib-tokio_rustls: tokio-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/tokio-rustls lib-tokio_rustls: tokio-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/workspace-hack build-script-build-script-build: workspace-hack <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/workspace-hack lib-workspace_hack: workspace-hack <- workspace-hack <- workspace-hack <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/workspace-hack run-build-script-build-script-build: workspace-hack <- workspace-hack <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/workspace-hack run-build-script-build-script-build: workspace-hack <- workspace-hack <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/workspace-hack run-build-script-build-script-build: workspace-hack <- workspace-hack <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only
+debug/workspace-hack run-build-script-build-script-build: workspace-hack <- workspace-hack <- hyper-rustls <- rustls <- aws-lc-rs <- aws-lc-rs: deps differ in order only

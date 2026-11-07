@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """Count the hash dirs one gate used per unit, and fail on a unit built in a second compile shape.
 
-    scripts/count-hash-folders.py <target dir> --mark <file> [--record <cargo-calls.jsonl>]
+    scripts/count-hash-folders.py <target dir> --mark <file> [--record <cargo-calls.jsonl>] [--baseline <file>]
 
 A used dir is one built at or after the mark; with a record, also every dir a replay of the recorded
 calls uses (scripts/target-gc.py `in_use`), so reused fresh units count too. Inside one package, one dir per cargo
@@ -10,8 +10,10 @@ pair of dirs of the same hash that CANON calls (without a record: any call) use,
 deps chain that differs in more than its deps, on a used dir no recorded call uses, and on a recorded clippy call
 with lint args other than CLIPPY_LINTS: another lint set reruns a unit in its own dir, so no dir count shows it.
 A pair is no second shape when one replayed call uses both dirs (cargo's own unit graph made both), or when only
-check-mode calls (clippy, check) use one and only build-mode calls (test, nextest, build) the other: the two modes
-cannot share artifacts. Dirs only the EXCEPTIONS of scripts/check-compile-shape.py use are listed, not failed.
+check-mode calls (clippy, check) use one and only build-mode calls (test, nextest, build) the other and no
+fingerprint field differs down the deps chain: the same unit in two modes, which cannot share artifacts. Dirs
+only the EXCEPTIONS of scripts/check-compile-shape.py use are listed, not failed. A second shape whose key
+(`pair_key`) the baseline (default scripts/compile-shape-baseline.txt) holds is listed, not failed, once per line.
 """
 import argparse
 import collections
@@ -80,20 +82,26 @@ def differ(a, b):
     return fa, fb, sorted(k for k in set(fa) | set(fb) if fa.get(k) != fb.get(k))
 
 
+SAME_UNIT = "no fingerprint field differs (a workspace member under cargo clippy vs cargo check)"
+
+
 def root_cause(a, b, index, seen=None):
     """`crate: field ...` of the first pair down the deps chain of a and b that differs in more than deps."""
     seen = seen or set()
     fa, fb, fields = differ(a, b)
     crate = os.path.basename(os.path.dirname(a))
     if not fields:
-        return "%s: no fingerprint field differs (a workspace member under cargo clippy vs cargo check)" % crate
+        return "%s: %s" % (crate, SAME_UNIT)
     if fields != ["deps"]:
         detail = []
         if "features" in fields:
             detail.append("features %s vs %s" % (sorted(set(fa["features"]) - set(fb["features"])),
                                                   sorted(set(fb["features"]) - set(fa["features"]))))
         if "local" in fields:
-            detail.append("build script env %s vs %s" % (dict(fa["local"]), dict(fb["local"])))
+            ea, eb = dict(fa["local"]), dict(fb["local"])
+            env = sorted(v for v in set(ea) | set(eb) if ea.get(v, ()) != eb.get(v, ()))
+            detail.append("build script env %s vs %s" % ({v: ea[v] for v in env if v in ea}, {v: eb[v] for v in env if v in eb})
+                          if env else "build script env read in another order or twice")
         detail += [f for f in fields if f not in ("features", "local", "deps")]
         return "%s: %s" % (crate, ", ".join(detail))
     da, db = {d[1]: d[3] for d in fa["deps"]}, {d[1]: d[3] for d in fb["deps"]}
@@ -110,6 +118,24 @@ def root_cause(a, b, index, seen=None):
     if names:
         return "%s: dep %s was rebuilt in place after this dir was built" % (crate, names[0])
     return "%s: deps differ in order only" % crate
+
+
+def pair_key(profile, crate, tgt, a, b, index):
+    """The pair without its hash dir names, in either order of a and b."""
+    return min("%s/%s %s: %s" % (profile, crate, tgt, root_cause(x, y, index)) for x, y in ((a, b), (b, a)))
+
+
+def load_baseline(path):
+    with open(path) as f:
+        return collections.Counter(line.rstrip("\n") for line in f if line.strip() and not line.startswith("#"))
+
+
+def take(baseline, seen, key):
+    """True, and one baseline line of key used up, while the baseline holds a line of key not yet used."""
+    if seen[key] >= baseline[key]:
+        return False
+    seen[key] += 1
+    return True
 
 
 def replay(target, calls):
@@ -150,12 +176,13 @@ def classes(target, record):
     return out, users
 
 
-def verdict(a, b, users):
+def verdict(a, b, users, index):
     """'one call', 'check vs build' (see the module doc) or 'second shape' for two used dirs of one profile hash."""
     ua, ub = users.get(os.path.realpath(a), frozenset()), users.get(os.path.realpath(b), frozenset())
     if {i for i, _ in ua} & {i for i, _ in ub}:
         return "one call"
-    if {frozenset(m for _, m in ua), frozenset(m for _, m in ub)} == {frozenset({"check"}), frozenset({"build"})}:
+    if {frozenset(m for _, m in ua), frozenset(m for _, m in ub)} == {frozenset({"check"}), frozenset({"build"})} \
+            and root_cause(a, b, index).endswith(SAME_UNIT):
         return "check vs build"
     return "second shape"
 
@@ -165,6 +192,7 @@ def main():
     parser.add_argument("target")
     parser.add_argument("--mark", required=True)
     parser.add_argument("--record")
+    parser.add_argument("--baseline", default=os.path.join(SCRIPTS, "compile-shape-baseline.txt"))
     args = parser.parse_args()
     units = gc.collect_units(args.target)
     cutoff = os.stat(args.mark).st_mtime
@@ -180,6 +208,7 @@ def main():
     dist = collections.Counter(len(v) for v in packages.values())
     print("packages: %d; used dirs per package: %s" % (
         len(packages), ", ".join("%d dir(s): %d" % (n, c) for n, c in sorted(dist.items()))))
+    baseline, seen = load_baseline(args.baseline), collections.Counter()
     fails = []
     for ((profile, crate, tgt), _path), members in sorted(packages.items(), key=lambda kv: kv[0][0]):
         if len(members) == 1:
@@ -198,14 +227,20 @@ def main():
         for prof, us in kinds.items():
             for i, a in enumerate(us):
                 for b in us[i + 1:]:
-                    v = verdict(a.path, b.path, users)
+                    v = verdict(a.path, b.path, users, index)
                     if v != "second shape":
                         print("  %s and %s: %s" % (a.hash, b.hash, v))
+                        continue
+                    key = pair_key(profile, crate, tgt, a.path, b.path, index)
+                    if take(baseline, seen, key):
+                        print("  %s and %s: baseline" % (a.hash, b.hash))
                         continue
                     fails.append("SECOND SHAPE: %s/%s %s, dirs of profile %d: %s and %s; cause %s" % (
                         profile, crate, tgt, prof, a.hash, b.hash, root_cause(a.path, b.path, index)))
     if args.record:
         fails += check.lint_fails(check.load(args.record), check.clippy_lints())
+    print("baseline %s: %d pair(s) seen, %d not seen" % (
+        args.baseline, sum(seen.values()), sum(baseline.values()) - sum(seen.values())))
     print("\n".join(fails))
     print("count-hash-folders: %d package(s) with more than one used dir, %d failure(s)" % (
         sum(len(v) > 1 for v in packages.values()), len(fails)))
