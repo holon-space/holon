@@ -3,7 +3,8 @@
 #
 # This check replays archived full-depth corpora through the classifier and
 # asserts each still-registered key's hit count is exactly what that corpus
-# contains.
+# contains. It also pins the verdict on hand-made logs of one shape each, and
+# on the fixed examples of scripts/test-known-reds-classifier.py.
 #
 # What it CAN catch: a `Match pattern` edited so it no longer matches the very
 # payload that motivated its row, and an over-broad pattern that starts
@@ -1103,6 +1104,14 @@ expect_outcome injected-panic/other-payload 1 "^PRIMARY: \[novel\] .*$injected_s
 injected_log injected-longer-payload "$injected_site:22:5" "$injected_payload and the store is gone" green
 expect_outcome injected-panic/longer-payload 1 "^PRIMARY: \[novel\] .*$injected_site:22:5: $injected_payload and the store is gone\$" \
     "$work/injected-longer-payload.log"
+# The fixed examples of the drawn-log property check; its random draws run in
+# scripts/test-known-reds-classifier.py.
+mkdir "$work/examples"
+python3 "$repo_root/scripts/known_reds_logs.py" write-examples "$work/examples" >"$work/examples.tsv" ||
+    { echo "[fixture] ERROR examples: known_reds_logs.py write-examples failed" >&2; exit 2; }
+while IFS=$'\t' read -r -u 3 name want_code want_line; do
+    expect_outcome "example/$name" "$want_code" "$want_line" "$work/examples/$name.log"
+done 3<"$work/examples.tsv"
 # Every external command the classifier runs is a stub that fails at call k.
 # Whichever call that is, the classifier must stop with exit 2 and an ERROR line
 # instead of printing a verdict built on a partial result. The stubs count under

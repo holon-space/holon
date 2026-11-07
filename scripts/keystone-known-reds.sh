@@ -215,6 +215,12 @@ for log in "$@"; do
     # surplus keeps them all, because nothing tells the expected panic from the
     # real one.
     #
+    # Another thread's output can also split a head. Text before the name on
+    # the head's line is skipped. A head cut after the name continues the one
+    # head its scope has open (a line ending in `thread '<name>`); with two or
+    # more open, the name is lost, and a scope with a lost name drops none of
+    # its panics.
+    #
     # A failed test whose output holds a panic has that panic as its signature.
     # Otherwise its status line is the signature, under nextest's long label
     # (`TMT` reads as `TIMEOUT`), followed by the first `Error: ` line of its
@@ -231,14 +237,29 @@ for log in "$@"; do
     # The injected boot-fault panic is counted into `injected`, not printed.
     sigs="$work/sigs"
     awk_verdict '
-        function thread_of(line,    t) {
+        # The thread name of panic head `line`, or "" when the text lost it.
+        function thread_of(line,    t, s) {
             sub(/^ +/, "", line)
-            # A stdout line written between `thread '"'"'` and the name leaves
-            # the name at the start of the next line.
-            if (index(line, "thread " q) != 1)
-                return match(line, /^[^ '"'"']+'"'"' (\([0-9]+\) )?panicked at /) ? substr(line, 1, index(line, q) - 1) : ""
             t = substr(line, 9)
-            return substr(t, 1, index(t, q) - 1)
+            if (index(line, "thread " q) == 1 && index(t, q)) return substr(t, 1, index(t, q) - 1)
+            # Text written before the name on its line.
+            if (match(line, "[^ " q "]*" q " [(][0-9]+[)] panicked at |[^ " q "]*" q " panicked at ") && substr(line, RSTART, 1) != q)
+                return substr(line, RSTART, index(substr(line, RSTART), q) - 1)
+            # Text written after the name: the head continues an open one.
+            s = scope()
+            if (open_heads[s] != 1) return ""
+            open_heads[s] = 0
+            return head_name[s]
+        }
+        # A line that ends in `thread '"'"'<name>` opens a panic head; it stays
+        # open until a `'"'"' (id) panicked at` line continues it.
+        function track_head(line,    rest, i, s) {
+            if (line ~ /panicked at /) return
+            rest = line
+            while ((i = index(rest, "thread " q)) > 0) rest = substr(rest, i + 8)
+            if (rest == line || index(rest, q)) return
+            s = scope()
+            if (!open_heads[s]++) head_name[s] = rest
         }
         # Sets LABEL, STRESS and UNIT from a nextest status line, whose label
         # nextest right-aligns in 12 columns and spells in capitals; returns 0
@@ -310,7 +331,7 @@ for log in "$@"; do
         function has_real_panic(inst,    k, parts) {
             for (k in panics) {
                 split(k, parts, SUBSEP)
-                if (parts[1] == inst && !((k in expected) && expected[k] == panics[k])) return 1
+                if (parts[1] == inst && ((inst in unnamed) || !((k in expected) && expected[k] == panics[k]))) return 1
             }
             return 0
         }
@@ -321,7 +342,7 @@ for log in "$@"; do
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
-        FNR == 1 { section = ""; live = ""; captured = ""; replay_case = "" }
+        FNR == 1 { section = ""; live = ""; captured = ""; replay_case = ""; split("", open_heads); split("", head_name) }
         /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = $0 }
         FNR == NR {
             if (parse_status($0)) {
@@ -334,6 +355,7 @@ for log in "$@"; do
                 next
             }
             track_line($0)
+            track_head($0)
             if (scope() in verdict_due && match($0, /^ *(ok|FAILED|ignored)/)) {
                 if ($0 ~ /^ *ok/) expected[scope() SUBSEP verdict_due[scope()]]++
                 delete verdict_due[scope()]
@@ -345,7 +367,9 @@ for log in "$@"; do
                 if (substr($0, RSTART + RLENGTH) ~ /^ok/) expected[scope() SUBSEP name]++
                 else if (substr($0, RSTART + RLENGTH) !~ /^(FAILED|ignored)/) verdict_due[scope()] = name
             } else if (/panicked at /) {
-                panics[scope() SUBSEP thread_of($0)]++
+                name = thread_of($0)
+                panics[scope() SUBSEP name]++
+                if (name == "") unnamed[scope()] = 1
             } else if (OWNER != "" && /^ *Error: / && !(OWNER in error_of)) {
                 error_of[OWNER] = $0; sub(/^ +/, "", error_of[OWNER])
             }
@@ -363,7 +387,7 @@ for log in "$@"; do
             else if (!has_real_panic(inst)) emit(FAIL_LABEL ": " UNIT ((inst in error_of) ? ": " error_of[inst] : ""))
             next
         }
-        { track_line($0) }
+        { track_line($0); track_head($0) }
         # A hand-authored replay names the case it runs and the row that case
         # is registered under; a panic between those lines is that case'"'"'s.
         /\[hand-authored regression\] running case "/ {
@@ -376,16 +400,16 @@ for log in "$@"; do
             replay_case = ""
         }
         /panicked at / {
-            if ((OWNER in passed) && !(OWNER in flaky_failed)) { getline; next }
-            key = scope() SUBSEP thread_of($0)
-            if ((key in expected) && expected[key] == panics[key]) next
+            s = scope(); owner = OWNER; key = s SUBSEP thread_of($0)
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/\r$/, "", loc); sub(/:$/, "", loc)
-            if ((getline msg) > 0) {
-                sub(/^ +/, "", msg)
-                if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
-                if (loc == ENVIRON["INJECTED_SITE"] && msg == ENVIRON["INJECTED_PAYLOAD"]) injected++
-                else print loc "\t" msg
-            }
+            if ((getline msg) <= 0) next
+            track_line(msg); track_head(msg)
+            if ((owner in passed) && !(owner in flaky_failed)) next
+            if (!(s in unnamed) && (key in expected) && expected[key] == panics[key]) next
+            sub(/^ +/, "", msg)
+            if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
+            if (loc == ENVIRON["INJECTED_SITE"] && msg == ENVIRON["INJECTED_PAYLOAD"]) injected++
+            else print loc "\t" msg
             next
         }
         END {

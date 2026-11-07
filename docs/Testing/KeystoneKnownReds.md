@@ -424,6 +424,16 @@ are committed `.log.zst` for the same reason the corpus is: `.gitignore`'s
 `*.log` would otherwise drop them from every clean checkout and silently take
 the cases that depend on them along.
 
+Which test a panic belongs to is checked on drawn logs as well:
+`python3 scripts/test-known-reds-classifier.py` renders random runs
+(`scripts/known_reds_logs.py`) as libtest output, captured nextest output and
+`--no-capture` output with and without its marker line, with other threads'
+text between and inside panic heads, and compares the classifier's verdict to
+the model's. A panic of a passing `- should panic` test is dropped by its thread
+name; a head cut after `thread '` takes the name of the one head its scope has
+open, and a scope where a name is lost drops none of its panics. The fixture
+runs the fixed examples of that check (`example/*`), cut from real gate logs.
+
 **It cannot detect assertion-message drift, and must not be trusted to.** The
 corpus is ARCHIVED logs, so it pins each pattern against the wording that
 existed when the log was captured — never against what the code emits today.
