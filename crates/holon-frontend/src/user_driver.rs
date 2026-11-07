@@ -20,6 +20,7 @@
 //! tests simulate a real key press. The default impl uses
 //! `bubble_input_oneshot` to DFS the tree and match keybindings.
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -908,64 +909,100 @@ impl ReactiveEngineDriver {
     /// nested `live_block` so the resolved tree contains the sidebar/panel
     /// children where the bound action lives.
     ///
-    /// Poll for the entity in the resolved tree: nested `live_block`
-    /// watches stream in async, so a click that lands immediately after
-    /// `apply_start_app` may see an empty list. Same pattern
-    /// ALLOW(fallback): pre-existing doc on router-poll behavior
-    /// `send_key_chord` uses for its router fallback. If the entity is
-    /// never found, we fall through to cursor placement — same as GPUI
-    /// when nothing intercepts the click.
+    /// The click reads a DELIVERED tree: first every `live_block` in it gets
+    /// its first rowset (`ReactiveRenderedRows::wait_until_ready`, released by
+    /// the watcher's first data batch) and the engine owes no CDC delivery
+    /// ([`Self::settle_delivery`]); the tree is read again until its
+    /// `live_block` set stops growing. No timer decides the outcome; a hang
+    /// is bounded by the caller and disclosed with the region and the id.
+    /// An entity absent from the delivered tree still gets the bare focus
+    /// (no navigate) with a warning, as GPUI focuses when nothing intercepts
+    /// the click.
     pub async fn click_entity_with_modifiers(
         &self,
         entity_id: &EntityUri,
         region: &str,
         modifiers: holon_api::ClickModifiers,
     ) -> Result<()> {
-        let root_uri = holon_api::root_layout_block_uri();
-        let resolve_budget = Duration::from_secs(2);
-        let deadline = Instant::now() + resolve_budget;
-        loop {
-            let resolved = self.engine.snapshot_resolved(&root_uri);
-            // Scope the intent lookup to the clicked region. The same
-            // entity_id can appear in multiple panels (e.g. `block:journals`
-            // is both a LeftSidebar list item and a Main-panel doc), and the
-            // wrappers bind different actions per region. The unscoped
-            // walker would return the LeftSidebar's `navigation.focus` for a
-            // Main click and diverge from production GPUI semantics. See
-            // FU-15 in `devlog/2026-05-07-164740-logseq-sidebar-followups.md`.
-            if let Some(intent) = crate::focus_path::find_click_intent_in_region(
-                &resolved, entity_id, region, modifiers,
-            ) {
-                return self.apply_intent(intent).await;
+        fn live_blocks(node: &crate::view_model::ViewModel, out: &mut BTreeSet<EntityUri>) {
+            if let crate::view_model::ViewKind::LiveBlock { .. } = &node.kind {
+                out.insert(node.entity_id().expect("a live_block names its block"));
             }
-            // The entity is already rendered in this region but binds no
-            // click-intent (e.g. an `editable_text` block in Main, where a
-            // click just places the cursor / focuses). Polling cannot make an
-            // intent materialise, so stop waiting and let the focus path below
-            // run immediately — the same focus-on-click GPUI does for a block
-            // with no bound action. Keep polling only while the entity is
-            // still ABSENT, a genuine "tree not resolved yet" race. This turns
-            // SplitBlock's per-click cost from a flat 2s deadline burn into a
-            // single snapshot.
-            if crate::focus_path::region_contains_entity(&resolved, entity_id, region) {
-                break;
+            for child in node.children() {
+                live_blocks(child, out);
             }
-            if Instant::now() >= deadline {
-                tracing::warn!(
-                    entity_id = %entity_id,
-                    region,
-                    deadline_ms = resolve_budget.as_millis() as u64,
-                    "click_entity: entity never appeared in the resolved tree; the click binds no \
-                     intent and degrades to bare focus (no navigate)."
-                );
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        // No bound action found within the deadline — fall through to
-        // focusing the block, matching GPUI's `render_entity` click handler.
-        // Focus is pure in-memory state (ADR 0010): set the authority
-        // directly instead of dispatching `navigation.editor_focus`.
+        /// Discloses a click wait that its caller abandoned (the harness wedge
+        /// drops the future), naming what it waited for.
+        struct Waiting<'a> {
+            entity_id: &'a EntityUri,
+            region: &'a str,
+            on: Option<EntityUri>,
+        }
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                if let Some(on) = &self.on {
+                    tracing::error!(
+                        entity_id = %self.entity_id,
+                        region = self.region,
+                        live_block = %on,
+                        "click_entity: abandoned while a live_block of the resolved tree had \
+                         not delivered its rowset"
+                    );
+                }
+            }
+        }
+
+        let root_uri = holon_api::root_layout_block_uri();
+        let services: &dyn BuilderServices = self.engine.as_ref();
+        let mut delivered: Option<BTreeSet<EntityUri>> = None;
+        let resolved = loop {
+            let resolved = self.engine.snapshot_resolved(&root_uri);
+            let mut seen = BTreeSet::new();
+            live_blocks(&resolved, &mut seen);
+            if delivered.as_ref().is_some_and(|d| seen.is_subset(d)) {
+                break resolved;
+            }
+            let delivered = delivered.get_or_insert_default();
+            let mut waiting = Waiting {
+                entity_id,
+                region,
+                on: None,
+            };
+            for block in seen.difference(delivered) {
+                waiting.on = Some(block.clone());
+                services.await_ready(block).await;
+            }
+            waiting.on = None;
+            self.settle_delivery()
+                .await
+                .with_context(|| format!("click_entity({region}, {entity_id})"))?;
+            delivered.extend(seen);
+        };
+        // Scope the intent lookup to the clicked region. The same
+        // entity_id can appear in multiple panels (e.g. `block:journals`
+        // is both a LeftSidebar list item and a Main-panel doc), and the
+        // wrappers bind different actions per region. The unscoped
+        // walker would return the LeftSidebar's `navigation.focus` for a
+        // Main click and diverge from production GPUI semantics. See
+        // FU-15 in `devlog/2026-05-07-164740-logseq-sidebar-followups.md`.
+        if let Some(intent) =
+            crate::focus_path::find_click_intent_in_region(&resolved, entity_id, region, modifiers)
+        {
+            return self.apply_intent(intent).await;
+        }
+        if !crate::focus_path::region_contains_entity(&resolved, entity_id, region) {
+            tracing::warn!(
+                entity_id = %entity_id,
+                region,
+                "click_entity: entity absent from the delivered resolved tree; the click binds \
+                 no intent and degrades to bare focus (no navigate)."
+            );
+        }
+        // No bound action — fall through to focusing the block, matching
+        // GPUI's `render_entity` click handler. Focus is pure in-memory state
+        // (ADR 0010): set the authority directly instead of dispatching
+        // `navigation.editor_focus`.
         //
         // A real click also RE-PLACES the caret: GPUI re-mounts the block's
         // editor at the click position (modeled as end-of-text, see
@@ -976,7 +1013,6 @@ impl ReactiveEngineDriver {
         // survives the click and diverges from the freshly-mounted editor.
         // Clicking the already-focused block is a no-op on the caret, like
         // the already-active early-return in the ref model.
-        let _ = region;
         if self.engine.focused_block().as_ref() != Some(entity_id) {
             self.editor_mirror
                 .seed_for_click(&self.engine, entity_id)

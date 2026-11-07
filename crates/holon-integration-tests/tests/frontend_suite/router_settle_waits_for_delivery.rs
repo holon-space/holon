@@ -4,9 +4,14 @@
 //! quiet alone is red. While the subscriber lags, the engine names what it
 //! owes: stage, target and last value.
 //!
+//! A click reads the resolved tree only after the same delivery: an owed
+//! batch held back longer than any timer still decides when the click returns.
+//!
 //! @pbt kind harness
 //! @pbt covers router-settle-waits-for-delivery — the headless driver waits
 //! for delivery targets, never for quiet
+//! @pbt covers click-waits-for-delivery — a click resolves its target on the
+//! delivered tree, never after a timer
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +23,7 @@ use holon::api::BackendEngine;
 use holon_api::Value;
 use holon_api::live_data::DeliveryCursor;
 use holon_api::live_data::reporting_to;
+use holon_frontend::reactive::BuilderServices;
 use holon_frontend::user_driver::ReactiveEngineDriver;
 use holon_frontend::user_driver::UserDriver;
 use holon_integration_tests::TestEnvironment;
@@ -25,6 +31,22 @@ use proptest::prelude::*;
 use tokio_stream::StreamExt;
 
 const SLOW_APPLY: Duration = Duration::from_millis(300);
+/// Longer than the timer a click ever waited out before degrading.
+const CLICK_HOLD: Duration = Duration::from_millis(2500);
+
+/// Clicks on blocks the main panel never shows, from stored replay cases.
+const ABSENT_CLICKS: &[&str] = &[
+    "block:wbd8-a",
+    "block:wbi7-a",
+    "block:wbi7-b",
+    "block:hm4r-a",
+    "block:hm4r-a",
+    "block:hm4d-a",
+    "block:hm4e-a",
+    "block:wbsc-a",
+    "block:wbsf-a",
+    "block:sva-b",
+];
 
 const VAULT_ORG: &str = "\
 * Alpha
@@ -46,9 +68,9 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
     )
 }
 
-/// A watch whose consumer applies each batch only after [`SLOW_APPLY`].
+/// A watch whose consumer applies each batch only after `hold`.
 /// Returns the count of applied rows.
-async fn slow_subscriber(engine: &Arc<BackendEngine>) -> Arc<AtomicU64> {
+async fn slow_subscriber(engine: &Arc<BackendEngine>, hold: Duration) -> Arc<AtomicU64> {
     engine
         .db_handle()
         .execute_ddl("CREATE TABLE router_probe (id TEXT PRIMARY KEY, owner TEXT NOT NULL)")
@@ -68,7 +90,7 @@ async fn slow_subscriber(engine: &Arc<BackendEngine>) -> Arc<AtomicU64> {
     let consumer_applied = applied.clone();
     tokio::spawn(async move {
         while let Some(batch) = stream.next().await {
-            tokio::time::sleep(SLOW_APPLY).await;
+            tokio::time::sleep(hold).await;
             consumer_applied.fetch_add(batch.inner.items.len() as u64, Ordering::SeqCst);
             cursor.applied_through(batch.metadata.seq);
         }
@@ -83,7 +105,7 @@ async fn gestures_settle_on_delivery(rt: Arc<tokio::runtime::Runtime>, rows_per_
         .expect("write vault.org");
     env.start_app(true).await.expect("start_app");
     env.settle().await;
-    let applied = slow_subscriber(env.engine()).await;
+    let applied = slow_subscriber(env.engine(), SLOW_APPLY).await;
     env.settle().await;
 
     let reactive = env
@@ -152,6 +174,78 @@ async fn gestures_settle_on_delivery(rt: Arc<tokio::runtime::Runtime>, rows_per_
     }
 }
 
+/// Each click (target, rows inserted just before it) returns only after the
+/// subscriber applied every row; a click on a block no panel shows leaves the
+/// focus on it.
+async fn clicks_settle_on_delivery(rt: Arc<tokio::runtime::Runtime>, clicks: &[(String, u8)]) {
+    let env = TestEnvironment::new(rt).expect("TestEnvironment::new");
+    env.write_org_file("vault.org", VAULT_ORG)
+        .await
+        .expect("write vault.org");
+    env.start_app(true).await.expect("start_app");
+    env.settle().await;
+    let applied = slow_subscriber(env.engine(), CLICK_HOLD).await;
+    env.settle().await;
+
+    let reactive = env
+        .reactive_engine
+        .get()
+        .expect("start_app wires the reactive engine")
+        .clone();
+    let driver = ReactiveEngineDriver::new(reactive.clone());
+    driver
+        .warm_for_block(&holon_api::root_layout_block_uri())
+        .await
+        .expect("warm the router on the root layout");
+
+    let mut inserted = 0u64;
+    for (target, rows) in clicks {
+        for _ in 0..*rows {
+            env.engine()
+                .db_handle()
+                .execute(
+                    &format!("INSERT INTO router_probe (id, owner) VALUES ('r{inserted}', 'mine')"),
+                    vec![],
+                )
+                .await
+                .expect("insert a probe row");
+            inserted += 1;
+        }
+        let target = holon_api::EntityUri::parse(target).expect("a click target is a block uri");
+        driver
+            .click_entity(&target, "main")
+            .await
+            .unwrap_or_else(|e| panic!("click {target}: {e:#}"));
+        assert_eq!(
+            applied.load(Ordering::SeqCst),
+            inserted,
+            "click {target} returned before the subscriber applied its batch (clicks {clicks:?})"
+        );
+        if ABSENT_CLICKS.contains(&target.as_str()) {
+            assert_eq!(
+                reactive.focused_block().as_ref(),
+                Some(&target),
+                "a click on {target}, which no panel shows, keeps the bare focus"
+            );
+        }
+    }
+}
+
+fn click_target() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("block:alpha".to_string()),
+        Just("block:beta".to_string()),
+        proptest::sample::select(ABSENT_CLICKS).prop_map(str::to_string),
+    ]
+}
+
+#[test]
+fn clicks_from_stored_cases_settle_on_delivery() {
+    let clicks: Vec<(String, u8)> = ABSENT_CLICKS.iter().map(|id| (id.to_string(), 1)).collect();
+    let rt = runtime();
+    rt.block_on(clicks_settle_on_delivery(rt.clone(), &clicks));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 4,
@@ -165,5 +259,13 @@ proptest! {
     ) {
         let rt = runtime();
         rt.block_on(gestures_settle_on_delivery(rt.clone(), &rows_per_gesture));
+    }
+
+    #[test]
+    fn a_click_resolves_only_when_every_delivery_is_applied(
+        clicks in proptest::collection::vec((click_target(), 1u8..3), 1..3)
+    ) {
+        let rt = runtime();
+        rt.block_on(clicks_settle_on_delivery(rt.clone(), &clicks));
     }
 }
