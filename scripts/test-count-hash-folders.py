@@ -319,9 +319,83 @@ def check_diamond(rng, where):
     shutil.rmtree(target.parent)
 
 
+def run_count(target, uses, baseline_lines):
+    """The count's stdout on target, with each call of uses answered by its dirs."""
+    answers = {" ".join(call): "".join(json.dumps(m) + "\n" for m in [
+        {"reason": "compiler-artifact", "fresh": True, "filenames": [str(next((d / "out").iterdir()))]} for d in dirs
+    ] + [{"reason": "build-finished", "success": True}]) for call, dirs in uses}
+    tools = target.parent / "tools"
+    tools.mkdir(exist_ok=True)
+    (tools / "cargo").write_text(FAKE_CARGO)
+    (tools / "cargo").chmod(0o755)
+    (target.parent / "answers.json").write_text(json.dumps(answers))
+    (target.parent / "calls.jsonl").write_text("".join(json.dumps(
+        {"argv": a, "env": {"HOLON_BUILD_SHA": "0123abcd", "HOLON_BUILD_TIME": None}}) + "\n" for a, _ in uses))
+    (target.parent / "baseline.txt").write_text("".join(line + "\n" for line in baseline_lines))
+    env = dict(os.environ, FAKE_CARGO_ANSWERS=str(target.parent / "answers.json"), PATH="%s:%s" % (tools, os.environ["PATH"]))
+    return subprocess.run([sys.executable, str(SCRIPT), str(target), "--mark", str(target / ".gc-mark"), "--record",
+                           str(target.parent / "calls.jsonl"), "--baseline", str(target.parent / "baseline.txt")],
+                          capture_output=True, text=True, env=env).stdout
+
+
+def fresh_target():
+    target = Path(tempfile.mkdtemp(prefix="count-hash-folders-")) / "target"
+    target.mkdir()
+    (target / ".gc-mark").write_text("")
+    os.utime(target / ".gc-mark", (BEFORE_MARK + 1, BEFORE_MARK + 1))
+    return target
+
+
+def check_two_deps_of_one_name():
+    """A run-build-script unit names its own build script and a links dep's run alike: build_script_build. c3's two
+    deps of that name differ, c1 only by mode, c2 in features. Not the same unit."""
+    rng = random.Random(8)
+    target = fresh_target()
+    v = [rng.getrandbits(63) for _ in range(6)]
+    c1a, c1b = (unit(target, "c1", rng, x, [], AFTER_MARK) for x in v[0:2])
+    c2a = unit(target, "c2", rng, v[2], [], AFTER_MARK)
+    c2b = unit(target, "c2", rng, v[3], [], AFTER_MARK, features=("default", "extra"))
+    c3a = unit(target, "c3", rng, v[4], [("build_script_build", v[2]), ("build_script_build", v[0])], AFTER_MARK)
+    c3b = unit(target, "c3", rng, v[5], [("build_script_build", v[3]), ("build_script_build", v[1])], AFTER_MARK)
+    out = run_count(target, [(TEST_CALL, [c1a, c2a, c3a]),
+                             (["clippy", "--workspace", "--all-targets", "--", *CLIPPY_LINTS], [c1b, c2b, c3b])], [])
+    second = sorted(line.split(",")[0] for line in out.splitlines() if line.startswith("SECOND SHAPE"))
+    assert second == ["SECOND SHAPE: debug/c2 lib-c2", "SECOND SHAPE: debug/c3 lib-c3"], "two deps of one name: %s\n%s" % (
+        second, out)
+    shutil.rmtree(target.parent)
+
+
+def check_second_version_drifts():
+    """c3 depends on two versions of c1 (one crate dir). The baseline lists c3's pair with only the first version's
+    features drift; the same drift in the second version too is a difference the listed pair did not have."""
+    rng = random.Random(9)
+    outs = []
+    for second_drifts in (False, True):
+        target = fresh_target()
+        v = [rng.getrandbits(63) for _ in range(6)]
+        c1a = unit(target, "c1", rng, v[0], [], AFTER_MARK)
+        c1b = unit(target, "c1", rng, v[1], [], AFTER_MARK, features=("default", "extra"))
+        c1v2 = [unit(target, "c1", rng, v[2], [], AFTER_MARK)] + (
+            [unit(target, "c1", rng, v[3], [], AFTER_MARK, features=("default", "extra"))] if second_drifts else [])
+        for d in c1v2:
+            fp = json.loads((d / "fingerprint" / "lib-c1.json").read_text())
+            (d / "fingerprint" / "lib-c1.json").write_text(json.dumps(dict(fp, path=11)))
+        c3a = unit(target, "c3", rng, v[4], [("c1", v[0]), ("c1_v2", v[2])], AFTER_MARK)
+        c3b = unit(target, "c3", rng, v[5], [("c1", v[1]), ("c1_v2", v[3] if second_drifts else v[2])], AFTER_MARK)
+        listed = min("debug/c3 lib-c3: c3 <- c1: features %s" % f for f in ("['extra'] vs []", "[] vs ['extra']"))
+        outs.append(run_count(target, [(TEST_CALL, [c1a, c1b, *c1v2, c3a]), (OTHER_TEST_CALL, [c1b, c1v2[-1], c3b])],
+                              [listed]))
+        shutil.rmtree(target.parent)
+    assert "1 pair(s) seen" in outs[0], "the listed pair is not excused:\n" + outs[0]
+    assert any(line.startswith("SECOND SHAPE: debug/c3 ") for line in outs[1].splitlines()), \
+        "second version drift excused by the listed line:\n" + outs[1]
+
+
 def main():
     check_committed_baseline()
     check_two_differing_deps()
+    check_second_version_drifts()
+    check_two_deps_of_one_name()
     examples = [] if "SEED" in os.environ else [int(os.environ["EXAMPLE"])] if "EXAMPLE" in os.environ else range(len(EXAMPLES))
     seeds = [] if "EXAMPLE" in os.environ else [int(os.environ["SEED"])] if "SEED" in os.environ else range(200)
     for i in examples:

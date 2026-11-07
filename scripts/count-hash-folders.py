@@ -87,12 +87,16 @@ SAME_UNIT = "no fingerprint field differs (a workspace member under cargo clippy
 
 def root_causes(a, b, index, memo=None):
     """`crate <- ... <- crate: field ...` down the differing deps of a and b to each pair that differs in more than
-    deps: one path per distinct leaf (the first in dep name order), since the paths of a dep graph multiply."""
-    memo = {} if memo is None else memo
+    deps: one path per distinct leaf pair of dirs (the first in dep name order), since the paths of a dep graph
+    multiply. Two versions of one crate share the crate dir name, so their leaves can read alike and both stay."""
+    return list(leaves(a, b, index, {} if memo is None else memo).values())
+
+
+def leaves(a, b, index, memo):
     fa, fb, fields = differ(a, b)
     crate = os.path.basename(os.path.dirname(a))
     if not fields:
-        return ["%s: %s" % (crate, SAME_UNIT)]
+        return {(a, b): "%s: %s" % (crate, SAME_UNIT)}
     if fields != ["deps"]:
         detail = []
         if "features" in fields:
@@ -104,26 +108,31 @@ def root_causes(a, b, index, memo=None):
             detail.append("build script env %s vs %s" % ({v: ea[v] for v in env if v in ea}, {v: eb[v] for v in env if v in eb})
                           if env else "build script env read in another order or twice")
         detail += [f for f in fields if f not in ("features", "local", "deps")]
-        return ["%s: %s" % (crate, ", ".join(detail))]
-    da, db = {d[1]: d[3] for d in fa["deps"]}, {d[1]: d[3] for d in fb["deps"]}
-    names = [n for n in sorted(set(da) | set(db)) if da.get(n) != db.get(n)]
+        return {(a, b): "%s: %s" % (crate, ", ".join(detail))}
+    # A run-build-script unit names its own build script and a `links` dep's run alike, so one name can hold two deps.
+    da, db = collections.defaultdict(list), collections.defaultdict(list)
+    for deps, by_name in ((fa["deps"], da), (fb["deps"], db)):
+        for d in deps:
+            by_name[d[1]].append(d[3])
+    names = [n for n in sorted(set(da) | set(db)) if da[n] != db[n]]
     if not names:
-        return ["%s: deps differ in order only" % crate]
-    causes = []
+        return {(a, b): "%s: deps differ in order only" % crate}
+    found = {}
     for name in names:
-        ha, hb = da.get(name), db.get(name)
-        if ha is None or hb is None:
-            causes.append("%s: dep %s only in one dir" % (crate, name))
-        elif ha in index and hb in index:
-            if (ha, hb) not in memo:
-                memo[(ha, hb)] = root_causes(index[ha], index[hb], index, memo)
-            causes += ["%s <- %s" % (crate, c) for c in memo[(ha, hb)]]
-        else:
-            causes.append("%s: dep %s was rebuilt in place after this dir was built" % (crate, name))
-    first = {}
-    for c in causes:
-        first.setdefault(c.rsplit(" <- ", 1)[-1], c)
-    return list(first.values())
+        if len(da[name]) != len(db[name]):
+            found[(a, b, name)] = "%s: dep %s only in one dir" % (crate, name)
+            continue
+        for ha, hb in zip(da[name], db[name]):
+            if ha == hb:
+                continue
+            if ha in index and hb in index:
+                if (ha, hb) not in memo:
+                    memo[(ha, hb)] = leaves(index[ha], index[hb], index, memo)
+                for leaf, c in memo[(ha, hb)].items():
+                    found.setdefault(leaf, "%s <- %s" % (crate, c))
+            else:
+                found[(a, b, name, ha)] = "%s: dep %s was rebuilt in place after this dir was built" % (crate, name)
+    return found
 
 
 def cause(a, b, index):
