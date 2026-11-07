@@ -161,6 +161,7 @@ pub struct LivePanels<'a> {
     app_ptr: *const HeadlessAppContext,
     rebind: &'a RebindHandle,
     engine: Arc<ReactiveEngine>,
+    bounds: BoundsRegistry,
 }
 
 impl LivePanels<'_> {
@@ -168,6 +169,12 @@ impl LivePanels<'_> {
         // SAFETY: the gpui thread owns `app`, pinned for this value's life.
         let app = unsafe { &mut *(self.app_ptr as *mut HeadlessAppContext) };
         app.update(|cx| self.rebind.live_panel_lists(region, cx))
+    }
+
+    /// Whether the last painted frame drew a widget bound to `row`.
+    pub fn painted(&self, row: &EntityUri) -> bool {
+        self.bounds.flush();
+        self.bounds.find_by_entity_id(row.as_str()).is_some()
     }
 
     /// Panics when a list's live rows, as a multiset, differ from a fresh
@@ -339,6 +346,7 @@ pub fn with_windowed_wide_sut_live(
         app_ptr,
         rebind: &rebind,
         engine: engine.clone(),
+        bounds: bounds.clone(),
     };
     let sut = run(sut, &oracle, &sink, &live);
     drop(live);

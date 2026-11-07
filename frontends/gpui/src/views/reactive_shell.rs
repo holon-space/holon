@@ -296,6 +296,8 @@ impl ReactiveShell {
             use futures_signals::signal_vec::SignalVecExt;
             let mut stream = signal_vec.to_stream();
             while let Some(diff) = stream.next().await {
+                #[cfg(feature = "pbt")]
+                crate::bridge_hold::wait_while_diff_held(&diff).await;
                 let _ = this.update(cx, |view, cx| {
                     view.apply_diff(diff, cx);
                 });
@@ -584,7 +586,9 @@ impl ReactiveShell {
                 use futures::StreamExt;
                 use futures_signals::signal_vec::SignalVecExt;
                 let mut stream = signal_vec.to_stream();
-                while stream.next().await.is_some() {
+                while let Some(_diff) = stream.next().await {
+                    #[cfg(feature = "pbt")]
+                    crate::bridge_hold::wait_while_diff_held(&_diff).await;
                     if this.update(cx, |_view, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -629,12 +633,18 @@ impl ReactiveShell {
         });
 
         let data_signal = item.data.signal_cloned();
+        #[cfg(feature = "pbt")]
+        let held_row = item.row_id();
         let data_task = cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             use futures_signals::signal::SignalExt;
             let mut stream = data_signal.to_stream();
             stream.next().await; // skip initial value (same as the props path)
             while stream.next().await.is_some() {
+                #[cfg(feature = "pbt")]
+                if let Some(row) = &held_row {
+                    crate::bridge_hold::wait_while_held(row).await;
+                }
                 match this.update(cx, |_, cx| cx.notify()) {
                     Ok(_) => {}
                     Err(_) => break,

@@ -9,6 +9,8 @@
 #![recursion_limit = "1024"]
 
 pub mod breadcrumb;
+#[cfg(feature = "pbt")]
+pub mod bridge_hold;
 pub mod di;
 pub mod entity_view_registry;
 pub mod geometry;

@@ -29,6 +29,7 @@ mod editor_task_keyword_promotion;
 mod editor_trailing_space_echo;
 mod element_builder_panic_paints_error_windowed;
 mod empty_block_hint_windowed;
+mod foreground_wake_order;
 mod gpui_compose_sut_windowed;
 mod gpui_composed_windowed_loop;
 mod gpui_journals_logseq_look;
@@ -92,6 +93,8 @@ mod settings_introduced_row_fits_windowed;
 mod settings_seeded_secret_windowed;
 mod settings_setup_column_wraps_windowed;
 mod settings_stored_secret_windowed;
+#[cfg(feature = "pbt")]
+mod settle_waits_for_late_row_bridge;
 mod sidebar_disclosure_affordance;
 mod sidebar_scroll_reaches_bottom;
 mod slash_command_text_hidden_windowed;
