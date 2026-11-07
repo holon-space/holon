@@ -1360,6 +1360,11 @@ impl ProfileResolver {
         build_lookup_engine(live_entities)
     }
 
+    /// The entity collections the lookups currently read.
+    pub fn live_entities(&self) -> LiveEntities {
+        self.live_entities.read().unwrap().clone()
+    }
+
     /// Replace the live entities used for Rhai lookup functions.
     ///
     /// Called after `preload_startup_views` to avoid the matviews being

@@ -9,6 +9,7 @@
 
 pub mod add_peer;
 pub mod create_stale_loro;
+pub mod doc_churn;
 pub mod merge_from_peer;
 pub mod peer_char_edit;
 pub mod peer_edit;

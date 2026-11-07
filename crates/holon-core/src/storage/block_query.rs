@@ -196,10 +196,10 @@ pub trait BlockQuerySource: Send + Sync {
     /// point-in-time [`BlockSnapshot`].
     async fn snapshot(&self) -> Result<BlockSnapshot>;
 
-    /// A cheap monotone version of the underlying substrate, for pollers that
-    /// want to skip a full [`snapshot`](Self::snapshot) while nothing has
-    /// changed. Two calls returning the same `Some(v)` promise an unchanged
-    /// snapshot.
+    /// A cheap monotone version of every input [`snapshot`](Self::snapshot)
+    /// reads, for pollers that want to skip a snapshot while nothing has
+    /// changed. Two calls returning the same `Some(v)` promise that no such
+    /// input changed between them.
     ///
     /// `None` — the default — means "no cheap signal here"; a caller must
     /// snapshot every time rather than assume anything.

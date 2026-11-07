@@ -5746,6 +5746,7 @@ dependencies = [
  "holon-conditions",
  "holon-core",
  "holon-loro",
+ "holon-loro-testing",
  "holon-profiles",
  "holon-sharing",
  "holon-turso",

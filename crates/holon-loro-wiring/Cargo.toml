@@ -52,8 +52,9 @@ iroh = { workspace = true, features = ["default"], optional = true }
 
 [dev-dependencies]
 holon-loro = { workspace = true, features = ["test-helpers"] }
+holon-loro-testing = { path = "../holon-loro-testing" }
 proptest.workspace = true
 proptest-state-machine.workspace = true
 tempfile.workspace = true
 turso_core.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

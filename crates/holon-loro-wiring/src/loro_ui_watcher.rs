@@ -10,13 +10,6 @@
 //! 1. [`UiEvent::Structure`] — the render expression for `block_id`.
 //! 2. [`UiEvent::Data`] — the block plus its direct children, the same row set
 //!    the structural query `… WHERE id = X OR parent_id = X` would surface.
-//!
-//! **Phase 0 (V2 paint-proof gate):** the render expression is a hard-coded
-//! placeholder and the watcher is one-shot (no Loro re-snapshot on change). The
-//! point this proves is the async `snapshot()` → sync `UiEvent` bridge — the
-//! one load-bearing unknown of the slice. Phase 1 replaces the placeholder with
-//! a profile-derived render expression and makes the watcher re-emit on Loro
-//! change. See `~/.claude/plans/playful-waddling-flute.md`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,6 +60,20 @@ pub fn build_turso_free_profile_resolver(
     shutdown: &holon_api::lifecycle::SessionShutdown,
     conditions: Arc<holon_conditions::ConditionBus>,
 ) -> Arc<dyn ProfileResolving> {
+    turso_free_profile_resolver(source, type_registry, shutdown, conditions).0
+}
+
+/// [`build_turso_free_profile_resolver`] plus the vault profile rows its
+/// refresh feeds.
+fn turso_free_profile_resolver(
+    source: Arc<dyn BlockQuerySource>,
+    type_registry: Arc<holon_profiles::TypeRegistry>,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
+    conditions: Arc<holon_conditions::ConditionBus>,
+) -> (
+    Arc<ProfileResolver>,
+    Arc<holon_api::live_data::LiveData<String>>,
+) {
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry, &conditions);
 
     let vault_profiles = holon_profiles::vault_profiles::vault_profile_mirror(
@@ -87,10 +94,10 @@ pub fn build_turso_free_profile_resolver(
     spawn_live_entity_refresh(
         source,
         Arc::downgrade(&resolver),
-        vault_profiles.rows,
+        Arc::clone(&vault_profiles.rows),
         shutdown,
     );
-    resolver
+    (resolver, vault_profiles.rows)
 }
 
 /// Keep a Turso-free resolver's entity lookups in step with the Loro tree.
@@ -118,7 +125,9 @@ fn spawn_live_entity_refresh(
             };
             // Two gates, cheapest first: the substrate's own version skips the
             // whole tree walk while the doc is idle, the key skips the engine
-            // rebuild when the walk found nothing the lookups read.
+            // rebuild when the walk found nothing the lookups read. The version
+            // is read before the snapshot: a write in between costs one extra
+            // snapshot, never a missed one.
             let version = source.change_version();
             if version.is_none() || version != polled_version {
                 match source.snapshot().await {
@@ -237,9 +246,9 @@ fn source_block_key(snapshot: &holon_core::storage::BlockSnapshot) -> SourceBloc
     key
 }
 
-/// How often the Loro watcher re-snapshots to detect tree changes. The
-/// [`BlockQuerySource`] trait exposes only `snapshot()` (no push signal), so
-/// liveness here is poll-based — the same shape as the PBT settle barriers.
+/// How often the Loro pollers read [`BlockQuerySource::change_version`] to
+/// detect tree changes. The trait has no push signal, so liveness here is
+/// poll-based; a source without a version re-snapshots on every poll.
 const LORO_WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// Build a [`WatchHandle`] that renders `block_id` from a pure-Loro
@@ -336,22 +345,44 @@ async fn run_watch_loop(
     let mut prev_expr: Option<RenderExpr> = None;
     // Last emitted structural rows, keyed by id (for delta computation).
     let mut prev_rows: HashMap<EntityUri, holon_api::StorageEntity> = HashMap::new();
+    // The source version the last successful render read; while the source
+    // still reports it, a new render would repeat the last one.
+    let mut rendered_version: Option<u64> = None;
 
     loop {
+        // Advice-rule status surface (ADR 0022): a NON-Active rule block renders its
+        // error in place. Inert in a no-Turso session (the map is empty there).
+        let advice_error = advice_status
+            .get(block_id.as_str())
+            .filter(|status| !status.is_active());
+        // Read before the snapshot: a write in between costs one extra render,
+        // never a missed one.
+        let version = source.change_version();
+        if advice_error.is_none() && version.is_some() && version == rendered_version {
+            if !wait_for_next_poll(&output_tx).await {
+                return;
+            }
+            continue;
+        }
         // A snapshot failure is surfaced as an error render expr that flows
         // through the same diff path, so the watcher recovers automatically
         // when the underlying block is fixed (matches the Turso watcher's
         // error-recovery semantics) — it never silently stalls.
-        // Advice-rule status surface (ADR 0022): a NON-Active rule block renders its
-        // error in place. Inert in a no-Turso session (the map is empty there).
-        let (expr, ordered) = match advice_status.get(block_id.as_str()) {
-            Some(status) if !status.is_active() => (
-                error_render_expr(&format!("advice rule: {status}")),
-                Vec::new(),
-            ),
-            _ => match render_state(&source, &block_id).await {
-                Ok(state) => state,
+        let (expr, ordered) = match advice_error {
+            Some(status) => {
+                rendered_version = None;
+                (
+                    error_render_expr(&format!("advice rule: {status}")),
+                    Vec::new(),
+                )
+            }
+            None => match render_state(&source, &block_id).await {
+                Ok(state) => {
+                    rendered_version = version;
+                    state
+                }
                 Err(e) => {
+                    rendered_version = None;
                     tracing::warn!("[LoroWatcher] render of '{block_id}' failed: {e}");
                     (error_render_expr(&format!("{e:#}")), Vec::new())
                 }
@@ -446,11 +477,19 @@ async fn run_watch_loop(
         prev_expr = Some(expr);
         prev_rows = ordered.into_iter().collect();
 
-        if output_tx.is_closed() {
+        if !wait_for_next_poll(&output_tx).await {
             return;
         }
-        tokio::time::sleep(LORO_WATCH_POLL).await;
     }
+}
+
+/// Wait one poll period; `false` when the consumer dropped the handle.
+async fn wait_for_next_poll(output_tx: &mpsc::Sender<UiEvent>) -> bool {
+    if output_tx.is_closed() {
+        return false;
+    }
+    tokio::time::sleep(LORO_WATCH_POLL).await;
+    true
 }
 
 /// Capture one snapshot and derive the render expression plus the structural
@@ -628,6 +667,10 @@ fn error_render_expr(message: &str) -> RenderExpr {
         }],
     }
 }
+
+#[cfg(test)]
+#[path = "loro_ui_watcher_refresh_pbt.rs"]
+mod refresh_pbt;
 
 #[cfg(test)]
 mod tests {

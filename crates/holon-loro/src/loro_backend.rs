@@ -2456,22 +2456,32 @@ impl LoroBackend {
         self.collab_doc.doc_id()
     }
 
-    /// A cheap monotone version of this backend's tree: [`doc_lamport_height`]
-    /// of the underlying doc, which advances on every applied op (local or
-    /// imported). Pollers use it to skip a full tree walk while nothing has
-    /// changed.
+    /// A cheap monotone version of the collab doc, the one doc
+    /// [`Self::projected_blocks`] reads: the sum of its oplog version-vector
+    /// counters. It grows on every applied op, local or imported, also on an
+    /// import whose Lamport stamps lie below the doc's own, which
+    /// [`doc_lamport_height`] misses. Pollers use it to skip a full tree walk
+    /// while nothing has changed.
     ///
-    /// `None` once a shared-tree store is attached: mounted subtrees carry
-    /// their own oplogs, so this doc's height cannot see a change inside one
-    /// and a caller must re-read instead of trusting it.
-    pub fn change_version(&self) -> Option<u32> {
-        if self.shared_trees.is_some() {
-            return None;
-        }
-        match self.collab_doc.with_read(|doc| Ok(doc_lamport_height(doc))) {
-            Ok(height) => Some(height),
-            // Same contract as the shared-tree arm: `None` tells the caller to
-            // re-read rather than trust a version. Disclosed, never silent.
+    /// A read failure logs and returns `None`, which tells the caller to
+    /// re-read rather than trust a version.
+    pub fn change_version(&self) -> Option<u64> {
+        match self.collab_doc.with_read(|doc| {
+            // A checkout changes the state but not the oplog counters.
+            assert!(
+                !doc.is_detached(),
+                "change_version: doc '{}' is checked out to an old version",
+                self.collab_doc.doc_id()
+            );
+            Ok(doc
+                .oplog_vv()
+                .values()
+                .map(|counter| {
+                    u64::try_from(*counter).expect("a version-vector counter is never negative")
+                })
+                .sum())
+        }) {
+            Ok(version) => Some(version),
             Err(e) => {
                 tracing::error!("change_version: could not read the doc: {e:#}");
                 None
@@ -4482,7 +4492,9 @@ impl LoroBackend {
     /// Every block the Loro→SQL projection would write, with its sort key,
     /// read from one commit-boundary state: a concurrent structural write
     /// lands wholly before or wholly after it. The doc lock covers only the
-    /// fork; the walk reads the private copy.
+    /// fork; the walk reads the private copy. It reads only the collab doc,
+    /// never a mounted shared tree: [`Self::change_version`] versions exactly
+    /// that doc.
     pub fn projected_blocks(&self) -> Result<Vec<SnapshotBlock>, ApiError> {
         let copy = self
             .collab_doc
