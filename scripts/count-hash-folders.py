@@ -6,12 +6,12 @@
 A used dir is one built at or after the mark; with a record, also every dir a replay of the recorded
 calls uses (scripts/target-gc.py `in_use`), so reused fresh units count too. Inside one package, one dir per cargo
 profile hash (dev, test, build-override; check and build mode hash differently) is the single shape. Exit 1 on a
-pair of dirs of the same hash that CANON calls (without a record: any call) use, naming the first crate down the
-deps chain that differs in more than its deps, on a used dir no recorded call uses, and on a recorded clippy call
+pair of dirs of the same hash that CANON calls (without a record: any call) use, naming down every differing dep
+path the first crate that differs in more than its deps, on a used dir no recorded call uses, and on a recorded clippy call
 with lint args other than CLIPPY_LINTS: another lint set reruns a unit in its own dir, so no dir count shows it.
 A pair is no second shape when one replayed call uses both dirs (cargo's own unit graph made both), or when only
 check-mode calls (clippy, check) use one and only build-mode calls (test, nextest, build) the other and no
-fingerprint field differs down the deps chain: the same unit in two modes, which cannot share artifacts. Dirs
+fingerprint field differs down any differing dep path: the same unit in two modes, which cannot share artifacts. Dirs
 only the EXCEPTIONS of scripts/check-compile-shape.py use are listed, not failed. A second shape whose key
 (`pair_key`) the baseline (default scripts/compile-shape-baseline.txt) holds is listed, not failed, once per line.
 """
@@ -85,13 +85,14 @@ def differ(a, b):
 SAME_UNIT = "no fingerprint field differs (a workspace member under cargo clippy vs cargo check)"
 
 
-def root_cause(a, b, index, seen=None):
-    """`crate: field ...` of the first pair down the deps chain of a and b that differs in more than deps."""
-    seen = seen or set()
+def root_causes(a, b, index, memo=None):
+    """`crate <- ... <- crate: field ...` down the differing deps of a and b to each pair that differs in more than
+    deps: one path per distinct leaf (the first in dep name order), since the paths of a dep graph multiply."""
+    memo = {} if memo is None else memo
     fa, fb, fields = differ(a, b)
     crate = os.path.basename(os.path.dirname(a))
     if not fields:
-        return "%s: %s" % (crate, SAME_UNIT)
+        return ["%s: %s" % (crate, SAME_UNIT)]
     if fields != ["deps"]:
         detail = []
         if "features" in fields:
@@ -103,26 +104,35 @@ def root_cause(a, b, index, seen=None):
             detail.append("build script env %s vs %s" % ({v: ea[v] for v in env if v in ea}, {v: eb[v] for v in env if v in eb})
                           if env else "build script env read in another order or twice")
         detail += [f for f in fields if f not in ("features", "local", "deps")]
-        return "%s: %s" % (crate, ", ".join(detail))
+        return ["%s: %s" % (crate, ", ".join(detail))]
     da, db = {d[1]: d[3] for d in fa["deps"]}, {d[1]: d[3] for d in fb["deps"]}
     names = [n for n in sorted(set(da) | set(db)) if da.get(n) != db.get(n)]
+    if not names:
+        return ["%s: deps differ in order only" % crate]
+    causes = []
     for name in names:
         ha, hb = da.get(name), db.get(name)
         if ha is None or hb is None:
-            return "%s: dep %s only in one dir" % (crate, name)
-    for name in names:
-        ha, hb = da[name], db[name]
-        if ha in index and hb in index and (ha, hb) not in seen:
-            seen.add((ha, hb))
-            return "%s <- %s" % (crate, root_cause(index[ha], index[hb], index, seen))
-    if names:
-        return "%s: dep %s was rebuilt in place after this dir was built" % (crate, names[0])
-    return "%s: deps differ in order only" % crate
+            causes.append("%s: dep %s only in one dir" % (crate, name))
+        elif ha in index and hb in index:
+            if (ha, hb) not in memo:
+                memo[(ha, hb)] = root_causes(index[ha], index[hb], index, memo)
+            causes += ["%s <- %s" % (crate, c) for c in memo[(ha, hb)]]
+        else:
+            causes.append("%s: dep %s was rebuilt in place after this dir was built" % (crate, name))
+    first = {}
+    for c in causes:
+        first.setdefault(c.rsplit(" <- ", 1)[-1], c)
+    return list(first.values())
+
+
+def cause(a, b, index):
+    return "; ".join(root_causes(a, b, index))
 
 
 def pair_key(profile, crate, tgt, a, b, index):
     """The pair without its hash dir names, in either order of a and b."""
-    return min("%s/%s %s: %s" % (profile, crate, tgt, root_cause(x, y, index)) for x, y in ((a, b), (b, a)))
+    return min("%s/%s %s: %s" % (profile, crate, tgt, cause(x, y, index)) for x, y in ((a, b), (b, a)))
 
 
 def load_baseline(path):
@@ -182,7 +192,7 @@ def verdict(a, b, users, index):
     if {i for i, _ in ua} & {i for i, _ in ub}:
         return "one call"
     if {frozenset(m for _, m in ua), frozenset(m for _, m in ub)} == {frozenset({"check"}), frozenset({"build"})} \
-            and root_cause(a, b, index).endswith(SAME_UNIT):
+            and all(c.endswith(SAME_UNIT) for c in root_causes(a, b, index)):
         return "check vs build"
     return "second shape"
 
@@ -236,7 +246,7 @@ def main():
                         print("  %s and %s: baseline" % (a.hash, b.hash))
                         continue
                     fails.append("SECOND SHAPE: %s/%s %s, dirs of profile %d: %s and %s; cause %s" % (
-                        profile, crate, tgt, prof, a.hash, b.hash, root_cause(a.path, b.path, index)))
+                        profile, crate, tgt, prof, a.hash, b.hash, cause(a.path, b.path, index)))
     if args.record:
         fails += check.lint_fails(check.load(args.record), check.clippy_lints())
     print("baseline %s: %d pair(s) seen, %d not seen" % (

@@ -228,8 +228,100 @@ def check(c, rng, where):
     shutil.rmtree(target.parent)
 
 
+def check_two_differing_deps():
+    """c3's clippy dir and test dir differ in two deps: c1 only by mode, c2 in features. Not the same unit."""
+    rng = random.Random(7)
+    target = Path(tempfile.mkdtemp(prefix="count-hash-folders-")) / "target"
+    target.mkdir()
+    (target / ".gc-mark").write_text("")
+    os.utime(target / ".gc-mark", (BEFORE_MARK + 1, BEFORE_MARK + 1))
+    v = [rng.getrandbits(63) for _ in range(6)]
+    c1a, c1b = (unit(target, "c1", rng, x, [], AFTER_MARK) for x in v[0:2])
+    c2a = unit(target, "c2", rng, v[2], [], AFTER_MARK)
+    c2b = unit(target, "c2", rng, v[3], [], AFTER_MARK, features=("default", "extra"))
+    c3a = unit(target, "c3", rng, v[4], [("c1", v[0]), ("c2", v[2])], AFTER_MARK)
+    c3b = unit(target, "c3", rng, v[5], [("c1", v[1]), ("c2", v[3])], AFTER_MARK)
+    uses = [(TEST_CALL, [c1a, c2a, c3a]), (["clippy", "--workspace", "--all-targets", "--", *CLIPPY_LINTS], [c1b, c2b, c3b])]
+    answers = {" ".join(call): "".join(json.dumps(m) + "\n" for m in [
+        {"reason": "compiler-artifact", "fresh": True, "filenames": [str(next((d / "out").iterdir()))]} for d in dirs
+    ] + [{"reason": "build-finished", "success": True}]) for call, dirs in uses}
+    tools = target.parent / "tools"
+    tools.mkdir()
+    (tools / "cargo").write_text(FAKE_CARGO)
+    (tools / "cargo").chmod(0o755)
+    (target.parent / "answers.json").write_text(json.dumps(answers))
+    (target.parent / "calls.jsonl").write_text("".join(json.dumps(
+        {"argv": a, "env": {"HOLON_BUILD_SHA": "0123abcd", "HOLON_BUILD_TIME": None}}) + "\n" for a, _ in uses))
+    (target.parent / "baseline.txt").write_text("")
+    env = dict(os.environ, FAKE_CARGO_ANSWERS=str(target.parent / "answers.json"), PATH="%s:%s" % (tools, os.environ["PATH"]))
+    out = subprocess.run([sys.executable, str(SCRIPT), str(target), "--mark", str(target / ".gc-mark"), "--record",
+                          str(target.parent / "calls.jsonl"), "--baseline", str(target.parent / "baseline.txt")],
+                         capture_output=True, text=True, env=env)
+    second = sorted(line.split(",")[0] for line in out.stdout.splitlines() if line.startswith("SECOND SHAPE"))
+    assert second == ["SECOND SHAPE: debug/c2 lib-c2", "SECOND SHAPE: debug/c3 lib-c3"], "two differing deps: %s\n%s" % (
+        second, out.stdout)
+    shutil.rmtree(target.parent)
+
+
+KWARGS = {"features": {"features": ("default", "extra")}, "rustflags": {"rustflags": ("-Cx",)}, "env": {"env": "abc"},
+          "wrapper": {}}
+WANT = {"features": ("features [] vs ['extra']", "features ['extra'] vs []"), "rustflags": ("rustflags",),
+        "env": ("build script env {} vs {'SHA': 'abc'}", "build script env {'SHA': 'abc'} vs {}"),
+        "wrapper": ("no fingerprint field differs",)}
+SAME_UNIT = "no fingerprint field differs (a workspace member under cargo clippy vs cargo check)"
+
+
+def check_diamond(rng, where):
+    """c3 depends on c1 and c2, whose clippy and test dirs each differ in a drawn field. c3's pair is the same unit
+    only when both deps are; its key names both dep paths, so a baseline line naming one path does not excuse it."""
+    d = {"c1": rng.choice(DIFFERENCES), "c2": rng.choice(DIFFERENCES)}
+    listed_as = rng.choice((None, "first path", "every path"))
+    target = Path(tempfile.mkdtemp(prefix="count-hash-folders-")) / "target"
+    target.mkdir()
+    (target / ".gc-mark").write_text("")
+    os.utime(target / ".gc-mark", (BEFORE_MARK + 1, BEFORE_MARK + 1))
+    v = [rng.getrandbits(63) for _ in range(6)]
+    dirs = {"c1": (unit(target, "c1", rng, v[0], [], AFTER_MARK), unit(target, "c1", rng, v[1], [], AFTER_MARK, **KWARGS[d["c1"]])),
+            "c2": (unit(target, "c2", rng, v[2], [], AFTER_MARK), unit(target, "c2", rng, v[3], [], AFTER_MARK, **KWARGS[d["c2"]]))}
+    dirs["c3"] = (unit(target, "c3", rng, v[4], [("c1", v[0]), ("c2", v[2])], AFTER_MARK),
+                  unit(target, "c3", rng, v[5], [("c1", v[1]), ("c2", v[3])], AFTER_MARK))
+    uses = [(TEST_CALL, [a for a, _ in dirs.values()]),
+            (["clippy", "--workspace", "--all-targets", "--", *CLIPPY_LINTS], [b for _, b in dirs.values()])]
+    answers = {" ".join(call): "".join(json.dumps(m) + "\n" for m in [
+        {"reason": "compiler-artifact", "fresh": True, "filenames": [str(next((x / "out").iterdir()))]} for x in ds
+    ] + [{"reason": "build-finished", "success": True}]) for call, ds in uses}
+    tools = target.parent / "tools"
+    tools.mkdir()
+    (tools / "cargo").write_text(FAKE_CARGO)
+    (tools / "cargo").chmod(0o755)
+    (target.parent / "answers.json").write_text(json.dumps(answers))
+    (target.parent / "calls.jsonl").write_text("".join(json.dumps(
+        {"argv": a, "env": {"HOLON_BUILD_SHA": "0123abcd", "HOLON_BUILD_TIME": None}}) + "\n" for a, _ in uses))
+    leaf = lambda k: CAUSES.get(d[k], SAME_UNIT)
+    lines = {None: [], "first path": ["debug/c3 lib-c3: c3 <- c1: %s" % leaf("c1")],
+             "every path": ["debug/c3 lib-c3: c3 <- c1: %s; c3 <- c2: %s" % (leaf("c1"), leaf("c2"))]}[listed_as]
+    (target.parent / "baseline.txt").write_text("".join(line + "\n" for line in lines))
+    env = dict(os.environ, FAKE_CARGO_ANSWERS=str(target.parent / "answers.json"), PATH="%s:%s" % (tools, os.environ["PATH"]))
+    out = subprocess.run([sys.executable, str(SCRIPT), str(target), "--mark", str(target / ".gc-mark"), "--record",
+                          str(target.parent / "calls.jsonl"), "--baseline", str(target.parent / "baseline.txt")],
+                         capture_output=True, text=True, env=env)
+    where = "%s, deps %s, baseline %s:\n%s" % (where, d, listed_as, out.stdout)
+    drifted = [k for k in ("c1", "c2") if d[k] != "wrapper"]
+    c3_excused = bool(drifted) and listed_as == "every path"
+    want = sorted(drifted + (["c3"] if drifted and not c3_excused else []))
+    second = [line for line in out.stdout.splitlines() if line.startswith("SECOND SHAPE")]
+    assert sorted(line.split(" ")[2].split("/")[1] for line in second) == want, "want SECOND SHAPE for %s, " % want + where
+    for line in second:
+        if line.startswith("SECOND SHAPE: debug/c3 "):
+            for k in ("c1", "c2"):
+                assert any("c3 <- %s: %s" % (k, w) in line for w in WANT[d[k]]), "dep path %s missing, " % k + where
+    assert "%d pair(s) seen" % c3_excused in out.stdout, "baseline tally, " + where
+    shutil.rmtree(target.parent)
+
+
 def main():
     check_committed_baseline()
+    check_two_differing_deps()
     examples = [] if "SEED" in os.environ else [int(os.environ["EXAMPLE"])] if "EXAMPLE" in os.environ else range(len(EXAMPLES))
     seeds = [] if "EXAMPLE" in os.environ else [int(os.environ["SEED"])] if "SEED" in os.environ else range(200)
     for i in examples:
@@ -238,6 +330,7 @@ def main():
         rng = random.Random(seed)
         check(draw(rng), rng, "seed %d" % seed)
         check_take(rng, "seed %d" % seed)
+        check_diamond(rng, "seed %d" % seed)
     print("test-count-hash-folders: %d example(s) and %d generated case(s) ok" % (len(examples), len(seeds)))
 
 
