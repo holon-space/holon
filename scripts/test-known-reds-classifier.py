@@ -46,7 +46,7 @@ def kept_within(small, big):
 
 
 def show(v):
-    return f"exit={v.exit} novel={v.novel} matched={v.matched} listed={dict(v.listed)}"
+    return f"exit={v.exit} novel={v.novel} matched={v.matched} note={v.note} listed={dict(v.listed)}"
 
 
 def check(work, text, want, label):
@@ -55,7 +55,7 @@ def check(work, text, want, label):
     log.write_text(text)
     got = stated(log)
     failures = []
-    if (got.exit, got.novel, got.matched, got.listed) != (want.exit, want.novel, want.matched, want.listed):
+    if (got.exit, got.novel, got.matched, got.listed, got.note) != (want.exit, want.novel, want.matched, want.listed, want.note):
         failures.append(f"P1 {label}: classifier {show(got)}\n   model {show(want)}")
     env = dict(os.environ, LC_ALL="en_US.UTF-8", TMPDIR=str(work / "tmp"))
     (work / "tmp").mkdir(exist_ok=True)
@@ -95,6 +95,11 @@ def main():
             failures = f1 + f2
             reached["a panic without its thread name"] += any(name == "" for _, name, _ in mixed.panics)
             reached["the --no-capture marker"] += logs.SERIAL_MARKER in clean.text
+            reached["a panic inside a passing test whose owner the text proves"] += any(
+                scope in clean.certain and scope[1] in passing for scope, _, _ in clean.panics
+                for passing in [{unit for unit, label in clean.statuses if label in logs.PASS_LABELS}])
+            reached["a run without the marker after a serial run"] += any(
+                a.shape == "serial" and b.shape == "parallel" for a, b in zip(runs, runs[1:]))
             if not kept_within(got_clean, got_mixed):
                 failures.append(f"P3: interleaving dropped a panic: clean {show(got_clean)}\n   interleaved {show(got_mixed)}")
             if logs.SERIAL_MARKER in clean.text:
@@ -106,7 +111,7 @@ def main():
             if failures:
                 failed += 1
                 report(clean.text if f1 or failures[-1].startswith("P4") else mixed.text, failures)
-        for what in ("a panic without its thread name", "the --no-capture marker"):
+        for what in reached:
             print(f"draws reaching {what}: {reached[what]}")
             if not reached[what]:
                 failed += 1

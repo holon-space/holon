@@ -41,6 +41,9 @@
 # one row never covers another case; a red case without a panic is novel.
 # A case that names a row and runs green prints a NOTE line, not a failure.
 #
+# A panic inside a passing test is no failure either: the
+# `NOTE: N panic(s) inside passing tests (ignored)` line counts it.
+#
 # The registry is the single source of truth for the patterns; this script holds
 # none of its own. Apart from that, it knows exactly one panic: the keystone's
 # injected boot fault (`INJECTED_SITE` below), which is no failure at all.
@@ -180,6 +183,7 @@ novel=0
 matched=0
 cross=0
 collateral=0
+in_passing=0
 sample_bad=0
 green=0
 green_declared=0
@@ -205,6 +209,10 @@ for log in "$@"; do
     # `--no-capture`, the lines between its `START` and its status line. Thread
     # names cannot do this: a `harness = false` binary panics on `main`, a test
     # may panic on a worker thread, and names repeat across binaries.
+    #
+    # Under `--no-capture` behind its marker line nextest runs one test at a
+    # time until the run's `Summary`, so START to status proves the owner as a
+    # captured block does; a panic owned so by a passing test is dropped.
     #
     # A panic on the thread of a test cargo reports as `- should panic ... ok`
     # is that test passing. libtest writes the verdict apart from its head, so
@@ -316,6 +324,7 @@ for log in "$@"; do
                 captured = ""
             } else if (o == "meta") {
                 captured = ""; live = ""
+                if (LABEL == "Summary") serial = 0
             } else {
                 if (inst == live) live = ""
                 captured = inst
@@ -326,6 +335,8 @@ for log in "$@"; do
             OWNER = captured != "" ? captured : live
         }
         function scope() { return OWNER != "" ? OWNER : section }
+        # Whether the text proves which test the current line belongs to.
+        function owner_certain() { return captured != "" || (serial && live != "") }
         # Whether the output of test instance `inst` holds a panic that is not
         # a passing should_panic test'"'"'s own.
         function has_real_panic(inst,    k, parts) {
@@ -342,13 +353,15 @@ for log in "$@"; do
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
-        FNR == 1 { section = ""; live = ""; captured = ""; replay_case = ""; split("", open_heads); split("", head_name) }
+        FNR == 1 { section = ""; live = ""; captured = ""; serial = 0; replay_case = ""; split("", open_heads); split("", head_name) }
+        index($0, "ignoring --test-threads because --no-capture is specified") { serial = 1 }
         /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = $0 }
         FNR == NR {
             if (parse_status($0)) {
                 inst = STRESS UNIT
                 o = outcome(LABEL)
                 track_status(o, inst)
+                if (o == "pass" || o == "fail") final[inst] = o
                 if (LABEL ~ /^FLAKY / || (LABEL ~ /^TRY / && o == "pass")) passed[inst] = 1
                 else if (LABEL ~ /^FLKY-FL /) flaky_failed[inst] = 1
                 else if (LABEL ~ /^TRY [0-9]+ / && o == "fail" && try_of(LABEL) + 0 > last_try[inst] + 0) last_try[inst] = try_of(LABEL)
@@ -400,12 +413,12 @@ for log in "$@"; do
             replay_case = ""
         }
         /panicked at / {
-            s = scope(); owner = OWNER; key = s SUBSEP thread_of($0)
+            s = scope(); owner = OWNER; certain = owner_certain(); key = s SUBSEP thread_of($0)
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/\r$/, "", loc); sub(/:$/, "", loc)
             if ((getline msg) <= 0) next
             track_line(msg); track_head(msg)
             if ((owner in passed) && !(owner in flaky_failed)) next
-            if (!(s in unnamed) && (key in expected) && expected[key] == panics[key]) next
+            if ((certain && final[owner] == "pass") || (!(s in unnamed) && (key in expected) && expected[key] == panics[key])) { in_passing++; next }
             sub(/^ +/, "", msg)
             if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
             if (loc == ENVIRON["INJECTED_SITE"] && msg == ENVIRON["INJECTED_PAYLOAD"]) injected++
@@ -413,12 +426,13 @@ for log in "$@"; do
             next
         }
         END {
-            print injected + 0 >injected_out
+            print injected + 0, in_passing + 0 >injected_out
             if (!stopped)
                 for (c in red_case) if (!(c in judged)) print "-\tthe red case printed no panic\037" c "\037" declared[c]
         }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" "$log" "$log" >"$sigs"
 
-    read -r log_injected <"$work/injected"
+    read -r log_injected log_in_passing <"$work/injected"
+    in_passing=$((in_passing + log_in_passing))
     if [ "$log_injected" -gt 0 ]; then
         echo "[known-reds] INJECTED: $log_injected keystone boot-fault panic(s) at $INJECTED_SITE in $log — expected, not a failure."
         injected=$((injected + log_injected))
@@ -714,6 +728,9 @@ if [ -s "$work/novel" ]; then
 fi
 
 echo ""
+if [ "$in_passing" -ne 0 ]; then
+    echo "[known-reds] NOTE: $in_passing panic(s) inside passing tests (ignored)"
+fi
 if [ "$injected" -ne 0 ]; then
     echo "[known-reds] $injected injected boot-fault panic(s) excluded — see INJECTED above."
 fi

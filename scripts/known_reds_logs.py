@@ -86,6 +86,8 @@ class Rendered:
     expects: list = field(default_factory=list)
     # (unit, label) of each nextest status line.
     statuses: list = field(default_factory=list)
+    # Scopes whose text proves the owner: captured blocks, and units of a serial run.
+    certain: set = field(default_factory=set)
     failed: bool = False
 
     @property
@@ -99,6 +101,7 @@ class Verdict:
     novel: int
     matched: int
     listed: Counter  # the NOVEL signature lines with their counts
+    note: int  # panics inside passing tests
 
 
 def word(rng, used):
@@ -262,11 +265,13 @@ def render_nextest(run, rng, interleave, out):
     for i, (t, unit) in enumerate(zip(run.tests, units), 1):
         if run.shape == "serial":
             out.lines.append(status_line("START", i, n, unit))
+            out.certain.add(("inst", unit))
             render_body(t, ("inst", unit), rng, interleave, out)
         out.lines.append(status_line(t.status, i, n, unit))
         out.statuses.append((unit, t.status))
         if run.shape == "captured" and (t.panics or t.should_panic):
             out.lines.append("  stderr ───")
+            out.certain.add(("inst", unit))
             render_body(t, ("inst", unit), rng, interleave, out, indent="    ")
     failing = [(i, t, unit) for i, (t, unit) in enumerate(zip(run.tests, units), 1) if t.status in FAIL_LABELS]
     out.lines.append(f"     Summary [   1.000s] {n} tests run: {n - len(failing)} passed, {len(failing)} failed, 0 skipped")
@@ -290,18 +295,21 @@ def render(runs, rng, interleave):
 def verdict(r):
     """The classifier's verdict on `r`, from the owners and names its text states.
 
-    A panic is a passing should_panic test's own, and dropped, when its scope
-    holds as many `- should panic ... ok` lines for its thread name as panics on
-    that name, and no panic whose name the text loses. Every other panic is
-    printed, except an injected one. A failing
-    status is a signature unless its label is FAIL / FAIL + LEAK and its owner
-    printed a panic or an injected one.
+    A panic is inside a passing test, and dropped into the note, when its scope
+    is certain and its unit passed, or when its scope holds as many
+    `- should panic ... ok` lines for its thread name as panics on that name and no panic whose name
+    the text loses. Every other panic is printed, except an injected one. A
+    failing status is a signature unless its label is FAIL / FAIL + LEAK and
+    its owner printed a panic or an injected one.
     """
     expected = Counter(r.expects)
     count = Counter((scope, name) for scope, name, _ in r.panics)
     unnamed = {scope for scope, name, _ in r.panics if name == ""}
+    passing = {("inst", unit) for unit, label in r.statuses if label in PASS_LABELS}
     kept = [(scope, p) for scope, name, p in r.panics
-            if scope in unnamed or not (expected[(scope, name)] and expected[(scope, name)] == count[(scope, name)])]
+            if not (scope in r.certain and scope in passing)
+            and (scope in unnamed or not (expected[(scope, name)] and expected[(scope, name)] == count[(scope, name)]))]
+    note = len(r.panics) - len(kept)
     listed = Counter(p.msg for _, p in kept if p.kind == "novel")
     matched = sum(p.kind == "known" for _, p in kept)
     owners = {scope for scope, _ in kept}
@@ -312,9 +320,10 @@ def verdict(r):
     novel = sum(listed.values())
     if novel + matched == 0 and r.failed:
         novel = 1  # "run failed but no panic signature was extracted"
-    return Verdict(1 if novel else 0, novel, matched, listed)
+    return Verdict(1 if novel else 0, novel, matched, listed, note)
 
 
+NOTE = re.compile(r"^\[known-reds\] NOTE: (\d+) panic\(s\) inside passing tests \(ignored\)$", re.M)
 FINAL = re.compile(r"^\[known-reds\] (?:FAIL: (\d+) novel panic\(s\), (\d+) known-red|PASS-WITH-NOTE: (\d+) known-red|PASS: \d+ green run)", re.M)
 
 
@@ -330,7 +339,9 @@ def parse(stdout):
             m = re.match(r"^ +(\d+) (.*)$", line)
             assert m, f"unreadable NOVEL line {line!r}"
             listed[m.group(2)] = int(m.group(1))
-    return Verdict(0, int(novel or 0), int(matched or note or 0), listed)
+    notes = NOTE.findall(stdout)
+    assert len(notes) <= 1, f"want at most one NOTE line, got {notes}"
+    return Verdict(0, int(novel or 0), int(matched or note or 0), listed, int(notes[0]) if notes else 0)
 
 
 W123 = r'''     Running tests/main.rs (target/debug/build/holon-integration-tests/c316d237e1494d27/out/integration-c316d237e1494d27)
@@ -430,6 +441,38 @@ def also_check_split(verdict):
     return text.replace("test result: ok. 19 passed; 0 failed", KNOWN_FAILED + "test result: FAILED. 18 passed; 1 failed")
 
 
+CRASH_HEAD = "thread 'tokio-runtime-worker' (11) panicked at crates/holon-filesystem/src/crash_injection.rs:43:9:"
+CRASH_MSG = "[crash-injection] the file-sync controller dies at after_write_back"
+
+
+def no_capture_run(a_head, a_msg, a_status, marker=True):
+    """A `--no-capture` run: test `a` prints the given panic and ends in `a_status`, test `b` fails by the known red."""
+    a, b = "holon-filesystem::crash a_controller_dies", "holon-filesystem::crash b_diverges"
+    verdict = "ok" if a_status == "PASS" else "FAILED"
+    failing = [status_line("FAIL", 2, 2, b)] + ([status_line(a_status, 1, 2, a)] if a_status != "PASS" else [])
+    return "\n".join(([SERIAL_MARKER] if marker else []) + [
+        "    Starting 2 tests across 1 binary",
+        status_line("START", 1, 2, a), "", "running 1 test", a_head, a_msg,
+        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+        f"test a_controller_dies ... {verdict}", status_line(a_status, 1, 2, a),
+        status_line("START", 2, 2, b), "", "running 1 test", f"thread 'b_diverges' (12) panicked at {KNOWN_SITE}:", KNOWN_MSG,
+        "test b_diverges ... FAILED", status_line("FAIL", 2, 2, b),
+        f"     Summary [   1.000s] 2 tests run: {2 - len(failing)} passed, {len(failing)} failed, 0 skipped",
+    ] + failing + ["error: test run failed"]) + "\n"
+
+
+GREEN_SERIAL_RUN = "\n".join([
+    SERIAL_MARKER, "    Starting 1 test across 1 binary",
+    status_line("START", 1, 1, "holon-filesystem::scan scans"), status_line("PASS", 1, 1, "holon-filesystem::scan scans"),
+    "     Summary [   1.000s] 1 test run: 1 passed, 0 skipped",
+]) + "\n"
+CAUGHT_HEAD = "thread 'a_controller_dies' (13) panicked at crates/holon-integration-tests/src/pbt/composed/slo_probe.rs:106:9:"
+CAUGHT_MSG = 'slo probe: armed while clocks were pending on ["block:slo-probe-leftover"]. They belong to an earlier stretch of this process'
+
+# Parentheses as bracket expressions: grep reads `\(` as a group.
+NOTE_ONE = r"^\[known-reds\] NOTE: 1 panic[(]s[)] inside passing tests [(]ignored[)]$"
+
+
 def examples():
     """(name, log text, want exit, a regex one output line must match), in grep's and Python's common syntax."""
     gate = GATE
@@ -448,6 +491,21 @@ def examples():
         ("should-panic-split-beside-a-red", also_check_split("ok"), 0, r"^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic"),
         # A failing test's panic on no list stays novel.
         ("should-panic-split-beside-a-red-failed", also_check_split("FAILED"), 1, r"^\[known-reds\] FAIL: 1 novel panic"),
+        # Under the serial marker a worker panic between a passing test's START and status is that test's.
+        ("serial-worker-panic-in-a-passing-test", no_capture_run(CRASH_HEAD, CRASH_MSG, "PASS"), 0, NOTE_ONE),
+        ("serial-worker-panic-in-a-passing-test-beside-a-red", no_capture_run(CRASH_HEAD, CRASH_MSG, "PASS"), 0,
+         r"^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic"),
+        ("serial-worker-panic-in-a-failing-test", no_capture_run(CRASH_HEAD, CRASH_MSG, "FAIL"), 1, r"^\[known-reds\] FAIL: 1 novel panic"),
+        # Without the marker tests may overlap, so the START does not prove the owner.
+        ("unmarked-worker-panic-in-a-passing-test", no_capture_run(CRASH_HEAD, CRASH_MSG, "PASS", marker=False), 1,
+         r"^\[known-reds\] FAIL: 1 novel panic"),
+        # The marker holds until its run's Summary.
+        ("worker-panic-after-a-serial-run", GREEN_SERIAL_RUN + no_capture_run(CRASH_HEAD, CRASH_MSG, "PASS", marker=False), 1,
+         r"^\[known-reds\] FAIL: 1 novel panic"),
+        # A panic a passing test catches, as the latency gate's serial run prints it.
+        ("caught-panic-in-a-passing-test", no_capture_run(CAUGHT_HEAD, CAUGHT_MSG, "PASS"), 0, NOTE_ONE),
+        ("caught-panic-in-a-failing-test", no_capture_run(CAUGHT_HEAD, CAUGHT_MSG, "FAIL"), 1,
+         r"^\[known-reds\] FAIL: 1 novel panic"),
     ]
 
 

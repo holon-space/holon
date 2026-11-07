@@ -431,7 +431,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `shell-effect-stubborn-member-pid-race`
 - `shopping-mapping-cost-slo`
 - `shrinker-capmap-trigger-passed`
-- `slo-probe-arm-refusal-caught-panic`
 - `slot-reconcile-props-before-rebuild-under-load`
 - `slot-withdrawn-last-claim-no-retraction`
 - `span-trace-block-mirror-apply-unparented-under-load`
