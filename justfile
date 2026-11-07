@@ -1538,6 +1538,7 @@ cargo-free-checks:
         2>&1 | tee target/gate-logs/gate-arch-timeout-margins.log
     { ./scripts/check-known-red-evidence.py && ./scripts/check-known-red-evidence.py --self-check; } \
         2>&1 | tee target/gate-logs/gate-arch-known-red-evidence.log
+    ./scripts/keystone-known-reds-fixture.sh 2>&1 | tee target/gate-logs/gate-arch-known-reds-fixture.log
     { ./scripts/check-adr-net-names.py && ./scripts/check-adr-net-names.py --self-check; } \
         2>&1 | tee target/gate-logs/gate-arch-adr-net-names.log
     { ./scripts/check-red-logs.py && ./scripts/check-red-logs.py --self-check; } \

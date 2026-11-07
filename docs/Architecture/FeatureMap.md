@@ -476,6 +476,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-overlay-sidebar-page-tap-dismiss-pre-warm-flake`
 - `windowed-overlay-sidebar-page-tap-navigate-pre-warm-flake`
 - `windowed-previous-run-toast-box-under-load`
+- `windowed-quick-open-fresh-slot-pre-warm-timeout`
 - `windowed-reboot-misses-observability-caps`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
