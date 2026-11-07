@@ -18,7 +18,7 @@ on:
       - "Cargo.lock"
       - ".github/workflows/devex-gates.yml"
   pull_request:
-    branches: [main, master]
+    branches: [main, master, integration]
     paths:
       - "frontends/**"
       - "crates/**"
