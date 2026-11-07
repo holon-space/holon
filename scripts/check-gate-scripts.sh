@@ -108,7 +108,7 @@ for l in open(sys.argv[1]):
     r = json.loads(l)
     if r["gate"] == sys.argv[2]: print(r["step"], r["name"], r.get("exit", "skipped"))' "$home/.cache/holon-build/gate-steps.jsonl" "$1" | sort -n
 }
-steps="1 20 2 13 17 7 14 5 6 8 9 18 19 15 11 3 4 12 10 22"
+steps="1 20 23 2 13 17 7 14 5 6 8 9 18 19 15 11 3 4 12 10 22"
 sorted_steps=$(tr ' ' '\n' <<<"$steps" | sort -n | tr '\n' ' ')
 # Without the caller's HOLON_PBT_TIMING, only the gate scripts can set it.
 # The real wrapper asks rustup for rustc; under the scratch HOME rustup would install a toolchain.
