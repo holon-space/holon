@@ -61,8 +61,8 @@ impl BlockQuerySource for LoroBlockQuerySource {
         ))
     }
 
-    fn change_version(&self) -> Option<u64> {
-        self.backend.change_version()
+    fn change_version(&self) -> Result<Option<u64>> {
+        Ok(Some(self.backend.change_version()?))
     }
 }
 

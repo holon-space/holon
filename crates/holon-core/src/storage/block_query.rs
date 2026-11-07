@@ -198,13 +198,13 @@ pub trait BlockQuerySource: Send + Sync {
 
     /// A cheap monotone version of every input [`snapshot`](Self::snapshot)
     /// reads, for pollers that want to skip a snapshot while nothing has
-    /// changed. Two calls returning the same `Some(v)` promise that no such
+    /// changed. Two calls returning the same `Ok(Some(v))` promise that no such
     /// input changed between them.
     ///
-    /// `None` — the default — means "no cheap signal here"; a caller must
+    /// `Ok(None)` — the default — means "no cheap signal here"; a caller must
     /// snapshot every time rather than assume anything.
-    fn change_version(&self) -> Option<u64> {
-        None
+    fn change_version(&self) -> Result<Option<u64>> {
+        Ok(None)
     }
 }
 

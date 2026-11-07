@@ -2462,31 +2462,26 @@ impl LoroBackend {
     /// import whose Lamport stamps lie below the doc's own, which
     /// [`doc_lamport_height`] misses. Pollers use it to skip a full tree walk
     /// while nothing has changed.
-    ///
-    /// A read failure logs and returns `None`, which tells the caller to
-    /// re-read rather than trust a version.
-    pub fn change_version(&self) -> Option<u64> {
-        match self.collab_doc.with_read(|doc| {
-            // A checkout changes the state but not the oplog counters.
-            assert!(
-                !doc.is_detached(),
-                "change_version: doc '{}' is checked out to an old version",
-                self.collab_doc.doc_id()
-            );
-            Ok(doc
-                .oplog_vv()
-                .values()
-                .map(|counter| {
-                    u64::try_from(*counter).expect("a version-vector counter is never negative")
-                })
-                .sum())
-        }) {
-            Ok(version) => Some(version),
-            Err(e) => {
-                tracing::error!("change_version: could not read the doc: {e:#}");
-                None
-            }
-        }
+    pub fn change_version(&self) -> Result<u64, ApiError> {
+        self.collab_doc
+            .with_read(|doc| {
+                // A checkout changes the state but not the oplog counters.
+                assert!(
+                    !doc.is_detached(),
+                    "change_version: doc '{}' is checked out to an old version",
+                    self.collab_doc.doc_id()
+                );
+                Ok(doc
+                    .oplog_vv()
+                    .values()
+                    .map(|counter| {
+                        u64::try_from(*counter).expect("a version-vector counter is never negative")
+                    })
+                    .sum())
+            })
+            .map_err(|e| ApiError::InternalError {
+                message: format!("change_version: {e:#}"),
+            })
     }
 
     pub fn collab_for_test(&self) -> Arc<LoroDocument> {

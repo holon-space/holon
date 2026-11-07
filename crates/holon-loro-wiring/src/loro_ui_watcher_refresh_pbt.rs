@@ -2,18 +2,24 @@
 //! the tree exactly when the tree changed: P1, an idle doc costs neither of
 //! them a snapshot; P2, after every step
 //! the resolver's lookups and the vault profile rows equal a recomputation
-//! from a fresh snapshot.
+//! from a fresh snapshot; P3, after a poll whose version read failed the
+//! block shows the error, after every other poll it shows a fresh render.
 //!
 //! Time is paused on a current-thread runtime, so the poller runs only while
 //! the test waits for its next poll and every wait ends at a whole poll.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use holon_api::EntityUri;
+use holon_api::UiState;
+use holon_api::streaming::WatchHandle;
+use holon_api::widget_spec::DataRow;
 use holon_core::storage::BlockQuerySource;
 use holon_core::storage::BlockSnapshot;
 use holon_core::storage::block_query::Result;
@@ -35,6 +41,11 @@ struct CountingSource {
     inner: LoroBlockQuerySource,
     snapshots: AtomicUsize,
     polls: watch::Sender<usize>,
+    versions_fail: AtomicBool,
+}
+
+fn injected_failure() -> Box<dyn std::error::Error + Send + Sync> {
+    "injected version read failure".into()
 }
 
 #[async_trait]
@@ -44,8 +55,11 @@ impl BlockQuerySource for CountingSource {
         self.inner.snapshot().await
     }
 
-    fn change_version(&self) -> Option<u64> {
+    fn change_version(&self) -> Result<Option<u64>> {
         self.polls.send_modify(|n| *n += 1);
+        if self.versions_fail.load(Ordering::SeqCst) {
+            return Err(injected_failure());
+        }
         self.inner.change_version()
     }
 }
@@ -56,11 +70,29 @@ impl CountingSource {
             inner: LoroBlockQuerySource::new(Arc::clone(backend)),
             snapshots: AtomicUsize::new(0),
             polls: watch::channel(0).0,
+            versions_fail: AtomicBool::new(false),
         })
     }
 
     fn snapshots(&self) -> usize {
         self.snapshots.load(Ordering::SeqCst)
+    }
+
+    fn fail_versions(&self, fail: bool) {
+        self.versions_fail.store(fail, Ordering::SeqCst);
+    }
+}
+
+/// Apply every event the watcher has sent, as a frontend does.
+fn drain(watcher: &mut WatchHandle, ui: &mut UiState) {
+    loop {
+        match watcher.try_recv() {
+            Ok(event) => {
+                ui.apply_event(event);
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
+            Err(e) => panic!("the watcher stopped: {e}"),
+        }
     }
 }
 
@@ -142,9 +174,12 @@ fn expected_profile_rows(snapshot: &BlockSnapshot) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// A churn step, and whether the pollers' version reads fail after it.
+type FaultyStep = (DocChurnStep, bool);
+
 async fn refresh_follows_the_doc(
     shared_trees: usize,
-    steps: &[DocChurnStep],
+    steps: &[FaultyStep],
 ) -> std::result::Result<(), TestCaseError> {
     let mut churn = DocChurn::new(shared_trees).await.expect("a fresh doc");
     let source = CountingSource::new(&churn.backend);
@@ -158,7 +193,9 @@ async fn refresh_follows_the_doc(
     )
     .await
     .expect("the watcher starts");
-    tokio::spawn(async move { while watcher.recv().await.is_some() {} });
+    let mut ui = UiState::new(super::error_render_expr("no render yet"));
+    let fresh_source: Arc<dyn BlockQuerySource> =
+        Arc::new(LoroBlockQuerySource::new(Arc::clone(&churn.backend)));
     let shutdown = holon_api::lifecycle::SessionShutdown::new();
     let (resolver, profile_rows) = turso_free_profile_resolver(
         Arc::clone(&source) as Arc<dyn BlockQuerySource>,
@@ -169,7 +206,9 @@ async fn refresh_follows_the_doc(
     wait_polls(&mut polls, 1).await;
     wait_polls(&mut watcher_polls, 1).await;
 
-    for (i, step) in steps.iter().enumerate() {
+    for (i, (step, versions_fail)) in steps.iter().enumerate() {
+        source.fail_versions(*versions_fail);
+        watcher_source.fail_versions(*versions_fail);
         let before = source.inner.snapshot().await.expect("a snapshot");
         let live: Vec<EntityUri> = before
             .iter_blocks()
@@ -179,6 +218,42 @@ async fn refresh_follows_the_doc(
         churn.apply(step, &live).await.expect("the step applies");
         wait_polls(&mut polls, 1).await;
         wait_polls(&mut watcher_polls, 1).await;
+        drain(&mut watcher, &mut ui);
+
+        if *versions_fail {
+            prop_assert_eq!(
+                ui.render_expr(),
+                super::error_render_expr(&format!("{:#}", injected_failure())),
+                "P3: the failed version read after step {} {:?} is not rendered",
+                i,
+                step
+            );
+        } else {
+            let (expr, ordered) = super::render_state(&fresh_source, &churn.root)
+                .await
+                .expect("a render");
+            let rows: HashMap<String, DataRow> = ordered
+                .into_iter()
+                .map(|(id, row)| {
+                    let row = row.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+                    (id.to_string(), row)
+                })
+                .collect();
+            prop_assert_eq!(
+                ui.render_expr(),
+                expr,
+                "P3: the block's render is stale after step {} {:?}",
+                i,
+                step
+            );
+            prop_assert_eq!(
+                ui.data(),
+                &rows,
+                "P3: the block's rows are stale after step {} {:?}",
+                i,
+                step
+            );
+        }
 
         let fresh = source.inner.snapshot().await.expect("a snapshot");
         let rows = entity_rows(&resolver.live_entities());
@@ -208,13 +283,17 @@ async fn refresh_follows_the_doc(
             let (snapshots, renders) = (source.snapshots(), watcher_source.snapshots());
             wait_polls(&mut polls, *idle).await;
             wait_polls(&mut watcher_polls, *idle).await;
-            prop_assert_eq!(
-                source.snapshots() - snapshots,
-                0,
-                "P1: {} idle polls over {} shared trees re-read the tree",
-                idle,
-                shared_trees
-            );
+            drain(&mut watcher, &mut ui);
+            // A failed read cannot tell an idle doc from a changed one.
+            if !versions_fail {
+                prop_assert_eq!(
+                    source.snapshots() - snapshots,
+                    0,
+                    "P1: {} idle polls over {} shared trees re-read the tree",
+                    idle,
+                    shared_trees
+                );
+            }
             prop_assert_eq!(
                 watcher_source.snapshots() - renders,
                 0,
@@ -227,7 +306,7 @@ async fn refresh_follows_the_doc(
     Ok(())
 }
 
-fn run(shared_trees: usize, steps: &[DocChurnStep]) -> std::result::Result<(), TestCaseError> {
+fn run(shared_trees: usize, steps: &[FaultyStep]) -> std::result::Result<(), TestCaseError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .start_paused(true)
@@ -241,14 +320,35 @@ fn text(s: &str) -> ChurnContent {
 }
 
 /// Fixed cases, run through the property before the generated ones.
-fn fixed_cases() -> Vec<(usize, Vec<DocChurnStep>)> {
+fn fixed_cases() -> Vec<(usize, Vec<FaultyStep>)> {
+    let reads_succeed = |steps: Vec<DocChurnStep>| steps.into_iter().map(|s| (s, false)).collect();
     vec![
         // An attached shared tree must not make an idle doc re-read itself.
-        (1, vec![DocChurnStep::Idle { polls: 40 }]),
-        // A peer's import whose Lamport stamps lie below the doc's own.
+        (1, reads_succeed(vec![DocChurnStep::Idle { polls: 40 }])),
+        // Failed reads over a change and over an idle doc, each followed by a
+        // good read with nothing new.
         (
             0,
             vec![
+                (
+                    DocChurnStep::Create {
+                        parent: 0,
+                        content: ChurnContent::Source {
+                            language: "holon_prql".to_string(),
+                            code: "q".to_string(),
+                        },
+                    },
+                    true,
+                ),
+                (DocChurnStep::Idle { polls: 1 }, false),
+                (DocChurnStep::Idle { polls: 1 }, true),
+                (DocChurnStep::Idle { polls: 1 }, false),
+            ],
+        ),
+        // A peer's import whose Lamport stamps lie below the doc's own.
+        (
+            0,
+            reads_succeed(vec![
                 DocChurnStep::Create {
                     parent: 0,
                     content: text("a"),
@@ -267,12 +367,12 @@ fn fixed_cases() -> Vec<(usize, Vec<DocChurnStep>)> {
                         code: "rule".to_string(),
                     }],
                 },
-            ],
+            ]),
         ),
         // Two sources under one parent: either may hold the lookup.
         (
             0,
-            vec![
+            reads_succeed(vec![
                 DocChurnStep::ConcurrentImport {
                     creates: vec![ChurnContent::Source {
                         language: "holon_gql".to_string(),
@@ -288,7 +388,7 @@ fn fixed_cases() -> Vec<(usize, Vec<DocChurnStep>)> {
                         text("  z  "),
                     ],
                 },
-            ],
+            ]),
         ),
     ]
 }
@@ -313,7 +413,13 @@ fn the_live_entity_refresh_reads_the_tree_exactly_when_it_changed() {
     .run(
         &(
             0..=2usize,
-            proptest::collection::vec(doc_churn_step(MAX_IDLE_POLLS), 1..12),
+            proptest::collection::vec(
+                (
+                    doc_churn_step(MAX_IDLE_POLLS),
+                    proptest::bool::weighted(0.25),
+                ),
+                1..12,
+            ),
         ),
         |(shared_trees, steps)| run(shared_trees, &steps),
     )

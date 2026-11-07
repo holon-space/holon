@@ -128,7 +128,16 @@ fn spawn_live_entity_refresh(
             // rebuild when the walk found nothing the lookups read. The version
             // is read before the snapshot: a write in between costs one extra
             // snapshot, never a missed one.
-            let version = source.change_version();
+            let version = match source.change_version() {
+                Ok(version) => version,
+                Err(e) => {
+                    tracing::error!(
+                        "[LoroLiveEntities] version read failed; entity lookups are stale: {e:#}"
+                    );
+                    polled_version = None;
+                    None
+                }
+            };
             if version.is_none() || version != polled_version {
                 match source.snapshot().await {
                     Ok(snapshot) => {
@@ -358,7 +367,8 @@ async fn run_watch_loop(
         // Read before the snapshot: a write in between costs one extra render,
         // never a missed one.
         let version = source.change_version();
-        if advice_error.is_none() && version.is_some() && version == rendered_version {
+        if advice_error.is_none() && matches!(&version, Ok(Some(v)) if rendered_version == Some(*v))
+        {
             if !wait_for_next_poll(&output_tx).await {
                 return;
             }
@@ -368,15 +378,20 @@ async fn run_watch_loop(
         // through the same diff path, so the watcher recovers automatically
         // when the underlying block is fixed (matches the Turso watcher's
         // error-recovery semantics) — it never silently stalls.
-        let (expr, ordered) = match advice_error {
-            Some(status) => {
+        let (expr, ordered) = match (advice_error, version) {
+            (Some(status), _) => {
                 rendered_version = None;
                 (
                     error_render_expr(&format!("advice rule: {status}")),
                     Vec::new(),
                 )
             }
-            None => match render_state(&source, &block_id).await {
+            (None, Err(e)) => {
+                rendered_version = None;
+                tracing::warn!("[LoroWatcher] version read of '{block_id}' failed: {e:#}");
+                (error_render_expr(&format!("{e:#}")), Vec::new())
+            }
+            (None, Ok(version)) => match render_state(&source, &block_id).await {
                 Ok(state) => {
                     rendered_version = version;
                     state
