@@ -276,6 +276,11 @@ rc=0; in_stubs env -u GATE_DISK_FLOOR_GIB STUB_DF_FREE=$((floor - 1)) "$integrat
 expect "the integrate run refuses 1 GiB below it: exits 8 (got $rc)" [ "$rc" = 8 ]
 expect "and names that floor" grep -qx "DISK BELOW $floor GiB" "$scratch/integrate-floor.out"
 
+echo "== a red timing gate under disk pressure"
+rc=0; in_stubs STUB_RED=timing-gate GATE_DISK_FLOOR_GIB=999999999 "$timing" g1 "1 2" "$tip" >"$scratch/timing-red.out" 2>&1 || rc=$?
+expect "exits 1 (got $rc)" [ "$rc" = 1 ]
+expect "leaves the target GC out" grep -qx 'target-gc skipped: the timing run is red (exit 1)' "$scratch/timing-red.out"
+
 echo "== the timing gate on a tip whose binaries are not built"
 : > "$probe"
 rc=0; in_stubs BUILD_OUT="   Compiling holon v0.1.0" "$timing" g1 "1 2" "$tip" >/dev/null 2>&1 || rc=$?

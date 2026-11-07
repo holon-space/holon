@@ -46,5 +46,10 @@ gate_step 17 timing-gate-build bash -c '"$0" "$1" && just timing-gate-build' \
 ! grep -q '^ *Compiling ' "$build_log" || { echo "GATE COMPILED: the timing binaries of $tip were not built by gate-integrate.sh (see $build_log)"; exit 10; }
 rc=0
 gate_step 16 timing-gate just timing-gate || rc=$?
-/usr/bin/python3 "$(dirname "$0")/target-gc.py" target --apply --floor "$(just --justfile "$(dirname "$0")/../justfile" --evaluate GATE_DISK_FLOOR_GIB)" || echo "TARGET-GC NOT RUN (exit $?), see above"
+# A red run keeps its build dirs for the rerun.
+if [ "$rc" -ne 0 ]; then
+  echo "target-gc skipped: the timing run is red (exit $rc)"
+else
+  /usr/bin/python3 "$(dirname "$0")/target-gc.py" target --apply --floor "$(just --justfile "$(dirname "$0")/../justfile" --evaluate GATE_DISK_FLOOR_GIB)" || echo "TARGET-GC NOT RUN (exit $?), see above"
+fi
 exit $rc
