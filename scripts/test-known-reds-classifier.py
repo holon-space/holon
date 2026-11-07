@@ -59,7 +59,7 @@ def check(work, text, want, label):
         failures.append(f"P1 {label}: classifier {show(got)}\n   model {show(want)}")
     env = dict(os.environ, LC_ALL="en_US.UTF-8", TMPDIR=str(work / "tmp"))
     (work / "tmp").mkdir(exist_ok=True)
-    if classify(log.resolve(), env=env, cwd=work)[1] != classify(log)[1]:
+    if classify(log, env=env, cwd=work)[1] != classify(log)[1]:
         failures.append(f"P2 {label}: LC_ALL / TMPDIR / cwd changed the output")
     return failures, got
 

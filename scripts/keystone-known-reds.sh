@@ -346,6 +346,16 @@ for log in "$@"; do
             }
             return 0
         }
+        # The pass/fail status of `inst` that owns a panic at line `at`: the one
+        # that opened its captured block, or the one that ends its serial run.
+        function status_at(inst, at, opened,    k, o) {
+            o = ""
+            for (k = 1; k <= n_status[inst]; k++) {
+                if (status_line[inst, k] < at) o = status_is[inst, k]
+                else return opened ? o : status_is[inst, k]
+            }
+            return opened ? o : ""
+        }
         function try_of(label,    n) {
             n = label; sub(/^TRY /, "", n); sub(/ .*$/, "", n)
             return n
@@ -361,7 +371,7 @@ for log in "$@"; do
                 inst = STRESS UNIT
                 o = outcome(LABEL)
                 track_status(o, inst)
-                if (o == "pass" || o == "fail") final[inst] = o
+                if (o == "pass" || o == "fail") { n_status[inst]++; status_line[inst, n_status[inst]] = FNR; status_is[inst, n_status[inst]] = o }
                 if (LABEL ~ /^FLAKY / || (LABEL ~ /^TRY / && o == "pass")) passed[inst] = 1
                 else if (LABEL ~ /^FLKY-FL /) flaky_failed[inst] = 1
                 else if (LABEL ~ /^TRY [0-9]+ / && o == "fail" && try_of(LABEL) + 0 > last_try[inst] + 0) last_try[inst] = try_of(LABEL)
@@ -413,12 +423,12 @@ for log in "$@"; do
             replay_case = ""
         }
         /panicked at / {
-            s = scope(); owner = OWNER; certain = owner_certain(); key = s SUBSEP thread_of($0)
+            s = scope(); owner = OWNER; certain = owner_certain(); key = s SUBSEP thread_of($0); at = FNR; opened = captured != ""
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/\r$/, "", loc); sub(/:$/, "", loc)
             if ((getline msg) <= 0) next
             track_line(msg); track_head(msg)
             if ((owner in passed) && !(owner in flaky_failed)) next
-            if ((certain && final[owner] == "pass") || (!(s in unnamed) && (key in expected) && expected[key] == panics[key])) { in_passing++; next }
+            if ((certain && status_at(owner, at, opened) == "pass") || (!(s in unnamed) && (key in expected) && expected[key] == panics[key])) { in_passing++; next }
             sub(/^ +/, "", msg)
             if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
             if (loc == ENVIRON["INJECTED_SITE"] && msg == ENVIRON["INJECTED_PAYLOAD"]) injected++

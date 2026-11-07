@@ -1518,7 +1518,7 @@ check-web-arm:
     cargo clippy {{CANON}} --all-targets -- {{CLIPPY_LINTS}} \
         2>&1 | tee target/gate-logs/check-web-arm.log
 
-# The gate's checks that read the tree and build nothing (about 30 s): gate-arch
+# The gate's checks that read the tree and build nothing (about 60 s): gate-arch
 # and the landing gate's feature-map step run them. No cargo command belongs
 # here: scripts/test-cargo-free-checks.py fails on one.
 cargo-free-checks:

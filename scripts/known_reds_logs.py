@@ -506,6 +506,29 @@ def examples():
         ("caught-panic-in-a-passing-test", no_capture_run(CAUGHT_HEAD, CAUGHT_MSG, "PASS"), 0, NOTE_ONE),
         ("caught-panic-in-a-failing-test", no_capture_run(CAUGHT_HEAD, CAUGHT_MSG, "FAIL"), 1,
          r"^\[known-reds\] FAIL: 1 novel panic"),
+        # A test that fails and passes in a later run of the same log is still red.
+        ("failed-test-that-passes-in-a-later-run", r'''    Starting 2 tests across 1 binary
+        FAIL [   0.010s] (1/2) holon-x::main a::case_b
+  stderr ───
+
+    running 1 test
+    thread 'a::case_b' (7) panicked at crates/x/tests/y.rs:1:1:
+    novel defect zzz
+        FAIL [   0.010s] (2/2) holon-x::main c::case_d
+  stderr ───
+
+    running 1 test
+    thread 'c::case_d' (8) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
+    reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  field deltas (1):\n    block:a: content: sut=\"x\" ref=\"y\"\n")]
+     Summary [   1.000s] 2 tests run: 0 passed, 2 failed, 0 skipped
+        FAIL [   0.010s] (1/2) holon-x::main a::case_b
+        FAIL [   0.010s] (2/2) holon-x::main c::case_d
+error: test run failed
+    Starting 1 tests across 1 binary
+        PASS [   0.010s] (1/1) holon-x::main a::case_b
+     Summary [   1.000s] 1 tests run: 1 passed, 0 failed, 0 skipped
+''', 1,
+         r"^\[known-reds\] FAIL: 1 novel panic"),
     ]
 
 
