@@ -1,12 +1,16 @@
 """The rows of the known-red registry tables in docs/Testing/*KnownReds*.md.
 
-A table is a run of lines that start with `|`. A row whose first cell is `Key` is a registry header; the rows below it,
-up to the end of the table, are registry rows. A cell holds no literal `|`: a pattern writes alternation as `&#124;`,
+A table is a run of lines that start with `|`. A header row with any of the columns `Key`, `Status`, `Task`, `Owner`
+opens a registry table and must be the exact registry `HEADER`, else `HeaderError`: a table under a changed header
+would hide its rows. The rows below it, up to the end of the table, are registry rows. A table whose header has none
+of these columns is no registry table. A cell holds no literal `|`: a pattern writes alternation as `&#124;`,
 decoded after the split. The prose columns (Signature, Evidence) do carry stray `|`s, so the columns before them are
 read from the left and the columns after them from the right; the surplus cells belong to the last prose column.
 """
 import re
 
+HEADER = ["Key", "Status", "Match pattern", "Site", "Signature", "Evidence", "Task", "Owner", "Companions"]
+REGISTRY_COLUMNS = {"Key", "Status", "Task", "Owner"}
 STATUSES = ("known-red", "fixed-pending-soak", "no-longer-fires", "proposed")
 PROSE = ("Signature", "Evidence")
 SEPARATOR = re.compile(r":?-+:?")
@@ -18,6 +22,16 @@ class RowError(Exception):
         self.key = key
 
 
+class HeaderError(Exception):
+    def __init__(self, lineno, cells):
+        missing = [c for c in HEADER if c not in cells]
+        extra = [c for c in cells if c not in HEADER]
+        why = "; ".join(filter(None, [missing and f"missing {', '.join(missing)}", extra and f"extra {', '.join(extra)}"]))
+        super().__init__(f"the table header names registry columns but is not the registry header "
+                         f"({why or 'the columns stand in another order'})")
+        self.lineno = lineno
+
+
 def unticked(cell):
     return cell.strip().removeprefix("`").removesuffix("`")
 
@@ -27,17 +41,21 @@ def split(line):
 
 
 def table_rows(text):
-    """Yield (lineno, header, cells) per data row of every table; `header` is None outside a registry table."""
-    header = None
+    """Yield (lineno, header, cells) per data row of every table; `header` is None outside a registry table.
+    Raises HeaderError at a header that names a registry column but is not the registry header."""
+    header, first = None, True
     for lineno, line in enumerate(text.splitlines(), 1):
         if not line.startswith("|"):
-            header = None
+            header, first = None, True
             continue
         cells = split(line)
-        if cells and cells[0] == "Key":
+        if first and REGISTRY_COLUMNS & set(cells):
+            if cells != HEADER:
+                raise HeaderError(lineno, cells)
             header = cells
         elif cells and not all(SEPARATOR.fullmatch(c) for c in cells):
             yield lineno, header, cells
+        first = False
 
 
 def registry_row(header, cells):

@@ -150,36 +150,35 @@ def registry_rows(registry):
     """Yield (lineno, key, status, pattern, site, companions) per registry row,
     or (lineno, key, error) for a row the registry grammar does not admit.
     """
-    for lineno, header, cells in known_reds_table.table_rows(registry.read_text()):
-        if header is None:
-            if cells[0].startswith("`") and cells[1:2] == ["known-red"]:
-                yield lineno, known_reds_table.unticked(cells[0]), "is a known-red row in a table without a Companions column"
-            continue
-        try:
-            row = known_reds_table.registry_row(header, cells)
-        except known_reds_table.RowError as e:
-            yield lineno, e.key, str(e)
-            continue
-        key, status, pattern = row["Key"], row["Status"], row["Match pattern"]
-        if not pattern:
-            continue
-        if header[-1] != "Companions":
-            if status == "known-red":
-                yield lineno, key, "is a known-red row in a table without a Companions column"
-            continue
-        site = row["Site"]
-        # A site is one whitespace-free ERE; `—` leaves the row unpinned.
-        if site == "—" or re.search(r"\s", site):
-            site = ""
-        cell = row["Companions"]
-        if cell == "—":
-            companions = []
-        else:
-            companions = [c.strip() for c in known_reds_table.unticked(cell).split(",")] if cell.startswith("`") and cell.endswith("`") else None
-            if not companions or not all(COMPANION.fullmatch(c) for c in companions):
-                yield lineno, key, f"Companions cell {cell!r} is not `—` or a code span of invariant ids"
+    try:
+        for lineno, header, cells in known_reds_table.table_rows(registry.read_text()):
+            if header is None:
+                if cells[0].startswith("`") and cells[1:2] == ["known-red"]:
+                    yield lineno, known_reds_table.unticked(cells[0]), "is a known-red row in a table without a Companions column"
                 continue
-        yield lineno, key, status, pattern, site, companions
+            try:
+                row = known_reds_table.registry_row(header, cells)
+            except known_reds_table.RowError as e:
+                yield lineno, e.key, str(e)
+                continue
+            key, status, pattern = row["Key"], row["Status"], row["Match pattern"]
+            if not pattern:
+                continue
+            site = row["Site"]
+            # A site is one whitespace-free ERE; `—` leaves the row unpinned.
+            if site == "—" or re.search(r"\s", site):
+                site = ""
+            cell = row["Companions"]
+            if cell == "—":
+                companions = []
+            else:
+                companions = [c.strip() for c in known_reds_table.unticked(cell).split(",")] if cell.startswith("`") and cell.endswith("`") else None
+                if not companions or not all(COMPANION.fullmatch(c) for c in companions):
+                    yield lineno, key, f"Companions cell {cell!r} is not `—` or a code span of invariant ids"
+                    continue
+            yield lineno, key, status, pattern, site, companions
+    except known_reds_table.HeaderError as e:
+        yield e.lineno, "table header", str(e)
 
 
 def lint(registry):
@@ -204,7 +203,8 @@ def lint(registry):
 
 
 def self_check():
-    companions_header = "| Key | Status | Match pattern | Site | Companions |\n| --- | --- | --- | --- | --- |\n"
+    companions_header = f"| {' | '.join(known_reds_table.HEADER)} |\n|{' --- |' * len(known_reds_table.HEADER)}\n"
+    known_red = "| `k` | known-red | `p` | — | sig | ev | — | — |"
     good = "docs/Testing/known-red-evidence/slot-withdrawn-last-claim-no-retraction/green.log.zst"
     quote = "the slot of 'journals' differs between the devices"
     cases = {
@@ -214,11 +214,13 @@ def self_check():
         "an ignored path": ("| `k` | `target/known-red-evidence-probe.log` |", 1),
         "a range without a snippet": (f"| `k` | `{good}:166-168` |", 1),
         "a range without the snippet": (f"| `k` | `{good}:1-2` quotes `{quote}` |", 1),
-        "a known-red row with companions": (f"{companions_header}| `k` | known-red | `p` | — | `inv-a/*, inv-b/sql` |", 0),
-        "a known-red row without companions": (f"{companions_header}| `k` | known-red | `p` | — | — |", 0),
+        "a known-red row with companions": (f"{companions_header}{known_red} `inv-a/*, inv-b/sql` |", 0),
+        "a known-red row without companions": (f"{companions_header}{known_red} — |", 0),
         "a known-red row outside a companions table": ("| `k` | known-red | `p` | — | — |", 1),
-        "a companion that is no invariant id": (f"{companions_header}| `k` | known-red | `p` | — | `inv-a, block_raw` |", 1),
-        "a companions cell without a code span": (f"{companions_header}| `k` | known-red | `p` | — | inv-a |", 1),
+        "a companion that is no invariant id": (f"{companions_header}{known_red} `inv-a, block_raw` |", 1),
+        "a companions cell without a code span": (f"{companions_header}{known_red} inv-a |", 1),
+        "a row under a changed registry header": (f"{companions_header.replace('| Key |', '| **Key** |')}{known_red.replace('known-red', 'proposed')} — |", 1),
+        "a table without registry columns": ("| Run | Summary line |\n| --- | --- |\n| r1 | `639 tests run` |", 0),
     }
     ignored = REPO / "target/known-red-evidence-probe.log"
     ignored.parent.mkdir(exist_ok=True)

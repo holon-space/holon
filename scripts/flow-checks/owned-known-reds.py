@@ -56,20 +56,18 @@ def registry(texts, where):
     """({key: row}, [(key, problem)]) of every registry row of `texts` ({path: text})."""
     rows, bad = {}, []
     for path, text in sorted(texts.items()):
-        for lineno, header, cells in known_reds_table.table_rows(text):
-            if header is None:
-                continue
-            at = f"({path}:{lineno} at {where})"
-            try:
-                row = known_reds_table.registry_row(header, cells)
-            except known_reds_table.RowError as e:
-                bad.append((e.key, f"registry row {e.key} {at} {e}"))
-                continue
-            if missing := {"Task", "Owner"} - set(row):
-                bad.append((row["Key"], f"registry row {row['Key']} {at} sits in a table without "
-                                        f"{' and '.join(sorted(missing))}"))
-                continue
-            rows[row["Key"]] = row
+        try:
+            for lineno, header, cells in known_reds_table.table_rows(text):
+                if header is None:
+                    continue
+                try:
+                    row = known_reds_table.registry_row(header, cells)
+                except known_reds_table.RowError as e:
+                    bad.append((e.key, f"registry row {e.key} ({path}:{lineno} at {where}) {e}"))
+                    continue
+                rows[row["Key"]] = row
+        except known_reds_table.HeaderError as e:
+            bad.append((None, f"{path}:{e.lineno} at {where}: {e}"))
     return rows, bad
 
 

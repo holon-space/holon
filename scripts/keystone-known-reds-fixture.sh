@@ -587,6 +587,16 @@ cat >"$work/windowed-known-red.log" <<'EOF'
 EOF
 expect_outcome windowed-known-red-discloses-no-sample 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
     "$work/windowed-known-red.log"
+# The paint assertion's message runs on into the painted list, which differs per run.
+cat >"$work/windowed-typing-slot-pre-warm.log" <<'EOF'
+        FAIL [   2.915s] (7/7) holon-gpui::main quick_open_returns_focus_windowed::typing_into_a_slot_creates_the_node_before_the_write
+    [GPUI] pre-warm timeout — window will open with loading state
+    thread 'quick_open_returns_focus_windowed::typing_into_a_slot_creates_the_node_before_the_write' (2) panicked at frontends/gpui/tests/quick_open_returns_focus_windowed.rs:731:5:
+    the destination's creation slot must be PAINTED before typing — an empty paint list here means the window never finished pre-warming, not that the product is wrong. Painted: [("block:journals", "selectable", None)]
+        FAIL [   2.915s] (7/7) holon-gpui::main quick_open_returns_focus_windowed::typing_into_a_slot_creates_the_node_before_the_write
+EOF
+expect_outcome windowed-typing-slot-pre-warm 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
+    "$work/windowed-typing-slot-pre-warm.log"
 # A cargo build line names the keystone's test target without running it, so
 # it must not make a log a keystone run that owes a sample disclosure.
 cat >"$work/build-warning-names-keystone.log" <<'EOF'

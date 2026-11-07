@@ -182,6 +182,17 @@ def static_examples():
                         ("a registry of garbage", {REGISTRY: "| a | b |\n|---|---|\n| c | d |\n"})]:
         got = check.problems(texts, texts, summary_for({}, {5}), {5}, is_log)
         assert got and all("no registry row" in p for p in got), f"{name}: {got}"
+    misnamed = {REGISTRY: HEADER + row("ok-row", owner="#5") + "\n" + HEADER.replace("| Key |", "| **Key** |")
+                + row("hidden-row", owner="#5")}
+    got = check.problems(misnamed, misnamed, summary_for({"ok-row": "kept"}, {5}), {5}, is_log)
+    assert got, "an owned row under a table whose header is not `Key` passes unnamed"
+    expect("a changed registry header", got,
+           [f"{REGISTRY}:5 at the tip: the table header names registry columns but is not the registry header "
+            "(missing Key; extra **Key**)"])
+    windowed = {**misnamed, REGISTRY: HEADER + row("ok-row", owner="#5"),
+                "docs/Testing/WindowedKnownReds.md": (HERE / "../../docs/Testing/WindowedKnownReds.md").read_text()}
+    expect("a table without registry columns", check.problems(
+        windowed, windowed, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
     expect("Cards line", check.lane_cards("x\nCards: #3, #40\n", "lane-7-slug"), {3, 40})
     expect("lane folder", check.lane_cards("x\n", "lane-7-slug"), {7})
     expect("neither", check.lane_cards("x\n", "_sw_integ"), None)
