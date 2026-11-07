@@ -434,7 +434,10 @@ counted on one `[known-reds] NOTE: N panic(s) inside passing tests (ignored)`
 line. Inside means the text proves the owner — a captured block, or a
 no-capture run behind its marker line, where tests run one at a time — or
 the panic is on the thread of a passing `- should panic` test. Without the
-marker, tests overlap and a `START` proves nothing. A head cut after `thread '` takes the name of the one head its scope
+marker, tests overlap and a `START` proves nothing. A test is one unit in one
+run (each `Starting` line opens a run): a later run of the same unit in the
+same log, which the drawn logs include, neither passes nor fails it, and a run
+cut off after a panic hands its marker to no later run. A head cut after `thread '` takes the name of the one head its scope
 has open, and a scope where a name is lost drops none of its panics. The
 fixture runs the fixed examples of that check (`example/*`), cut from real gate
 logs.

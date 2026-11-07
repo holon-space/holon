@@ -204,7 +204,8 @@ for log in "$@"; do
     # every shrink step, so one failing case yields dozens of near-identical
     # lines — hence the aggregation below.
     #
-    # In a nextest log every line of test output belongs to one test instance:
+    # In a nextest log every line of test output belongs to one test instance
+    # (a unit in one run; each `Starting` line opens a run):
     # the captured block (indented by 4) under its status line, or, under
     # `--no-capture`, the lines between its `START` and its status line. Thread
     # names cannot do this: a `harness = false` binary panics on `main`, a test
@@ -363,12 +364,15 @@ for log in "$@"; do
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
-        FNR == 1 { section = ""; live = ""; captured = ""; serial = 0; replay_case = ""; split("", open_heads); split("", head_name) }
-        index($0, "ignoring --test-threads because --no-capture is specified") { serial = 1 }
+        FNR == 1 { section = ""; live = ""; captured = ""; serial = 0; marked = 0; run = 0; replay_case = ""; split("", open_heads); split("", head_name) }
+        # The marker comes before the `Starting` of its run; a run cut off before
+        # its `Summary` does not carry it into the next run.
+        index($0, "ignoring --test-threads because --no-capture is specified") { marked = 1 }
         /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = $0 }
+        /^ +Starting [0-9]+ tests? across / { run++; serial = marked; marked = 0 }
         FNR == NR {
             if (parse_status($0)) {
-                inst = STRESS UNIT
+                inst = run "/" STRESS UNIT
                 o = outcome(LABEL)
                 track_status(o, inst)
                 if (o == "pass" || o == "fail") { n_status[inst]++; status_line[inst, n_status[inst]] = FNR; status_is[inst, n_status[inst]] = o }
@@ -399,7 +403,7 @@ for log in "$@"; do
             next
         }
         parse_status($0) {
-            inst = STRESS UNIT
+            inst = run "/" STRESS UNIT
             o = outcome(LABEL)
             track_status(o, inst)
             if (o != "fail") next

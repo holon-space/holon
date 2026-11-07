@@ -41,8 +41,12 @@ def stated(log, **kw):
 
 
 def kept_within(small, big):
-    """True when `big` prints every panic `small` prints."""
-    return all(big.listed[k] >= n for k, n in small.listed.items()) and big.matched >= small.matched and big.exit >= small.exit
+    """True when `big` prints every panic `small` prints.
+
+    Exit codes are not compared: a printed known red masks the "no panic
+    signature" exit of a failed run, which is no panic.
+    """
+    return all(big.listed[k] >= n for k, n in small.listed.items()) and big.matched >= small.matched
 
 
 def show(v):
@@ -95,9 +99,9 @@ def main():
             failures = f1 + f2
             reached["a panic without its thread name"] += any(name == "" for _, name, _ in mixed.panics)
             reached["the --no-capture marker"] += logs.SERIAL_MARKER in clean.text
-            reached["a panic inside a passing test whose owner the text proves"] += any(
-                scope in clean.certain and scope[1] in passing for scope, _, _ in clean.panics
-                for passing in [{unit for unit, label in clean.statuses if label in logs.PASS_LABELS}])
+            reached["a panic inside a passing test whose owner the text proves"] += bool(clean.in_passing)
+            reached["a test run twice in one log"] += any(n > 1 for n in Counter(inst[2] for inst, _ in clean.statuses).values())
+            reached["a serial run cut off after a panic"] += any(r.cut for r in runs)
             reached["a run without the marker after a serial run"] += any(
                 a.shape == "serial" and b.shape == "parallel" for a, b in zip(runs, runs[1:]))
             if not kept_within(got_clean, got_mixed):

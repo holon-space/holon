@@ -75,19 +75,22 @@ class Run:
     shape: str  # libtest | captured | serial | parallel
     binary: str
     tests: list
+    # A serial run killed in its last test, after that test's panics.
+    cut: bool = False
 
 
 @dataclass
 class Rendered:
     lines: list = field(default_factory=list)
-    # (scope, thread name as the text states it, Panic); scope is ("section", run) or ("inst", unit).
+    # (scope, thread name as the text states it, Panic); scope is ("section", run) or ("inst", run, unit).
     panics: list = field(default_factory=list)
     # (scope, name) of each `- should panic ... ok` line.
     expects: list = field(default_factory=list)
-    # (unit, label) of each nextest status line.
+    # (("inst", run, unit), label) of each nextest status line.
     statuses: list = field(default_factory=list)
-    # Scopes whose text proves the owner: captured blocks, and units of a serial run.
-    certain: set = field(default_factory=set)
+    # Indexes into `panics` whose owner the text proves (a captured block, a
+    # serial run's START to status) and whose status in that run passes.
+    in_passing: set = field(default_factory=set)
     failed: bool = False
 
     @property
@@ -122,8 +125,8 @@ def draw_panic(rng, used, thread):
     return Panic(kind, thread, site, "novel defect " + " ".join(word(rng, used) for _ in range(3)))
 
 
-def draw_test(rng, used, shape):
-    name = f"{word(rng, used)}::case_{word(rng, used)}"
+def draw_test(rng, used, shape, name=None):
+    name = name or f"{word(rng, used)}::case_{word(rng, used)}"
     should_panic = rng.random() < 0.5
     if shape == "libtest":
         status = rng.choice(["ok", "ok", "FAILED"])
@@ -144,13 +147,29 @@ def draw_test(rng, used, shape):
 
 
 def draw(rng):
-    """One log's runs: one or two runs of one to five tests."""
+    """One log's runs: one or two runs of one to five tests.
+
+    A nextest run after a nextest run may rerun tests of it, as a rerun or a
+    second recipe in the same log does.
+    """
     used = set()
     runs = []
-    for _ in range(rng.choice([1, 1, 2])):
+    for _ in range(rng.choice([1, 2])):
         shape = rng.choice(["libtest", "captured", "serial", "parallel"])
         binary = f"holon-{word(rng, used)}::{word(rng, used)}"
-        runs.append(Run(shape, binary, [draw_test(rng, used, shape) for _ in range(rng.randint(1, 5))]))
+        earlier = []
+        if runs and runs[-1].shape != "libtest" and shape != "libtest" and rng.random() < 0.5:
+            binary = runs[-1].binary
+            earlier = [t.name for t in runs[-1].tests]
+        tests = []
+        for _ in range(rng.randint(1, 5)):
+            again = [n for n in earlier if n not in {t.name for t in tests}]
+            tests.append(draw_test(rng, used, shape, rng.choice(again) if again and rng.random() < 0.6 else None))
+        runs.append(Run(shape, binary, tests))
+    # Only a run with a later one may be cut: a log that ends cut off states no
+    # outcome, which the classifier reports as no verdict (exit 3).
+    if len(runs) == 2 and runs[0].shape == "serial" and runs[0].tests[-1].panics:
+        runs[0].cut = rng.random() < 0.7
     return runs
 
 
@@ -222,12 +241,14 @@ def render_libtest(run, index, rng, interleave, out):
     out.lines.append(f"test result: {'FAILED' if failed else 'ok'}. {len(run.tests) - failed} passed; {failed} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s")
 
 
-def body(t):
+def body(t, cut=False):
     """The libtest lines a nextest test prints: (line, panic or None)."""
     lines = [("", None), ("running 1 test", None)]
     for p in t.panics:
         lines += [(panic_head(p, 7), p), (p.msg, None)]
-    if t.status in BODY_OK:
+    if cut:
+        pass
+    elif t.status in BODY_OK:
         lines.append((verdict_line(t, "ok"), None))
     elif t.status in BODY_FAILED:
         lines.append((verdict_line(t, "FAILED"), None))
@@ -238,8 +259,10 @@ def status_line(label, i, n, unit):
     return f"{label:>12} [   0.010s] ({i}/{n}) {unit}"
 
 
-def render_body(t, scope, rng, interleave, out, indent=""):
-    for line, p in body(t):
+def render_body(t, scope, rng, interleave, out, indent="", cut=False, proven=False):
+    """`proven`: the text proves `t` owns its panics, so each counts by `t`'s own status."""
+    first = len(out.panics)
+    for line, p in body(t, cut):
         out.lines.append(indent + line if line else "")
         if p is not None:
             out.panics.append((scope, p.thread, p))
@@ -248,9 +271,11 @@ def render_body(t, scope, rng, interleave, out, indent=""):
         # nextest captures a test's output whole: only --no-capture output interleaves.
         if interleave and not indent and p is None and rng.random() < 0.3:
             foreign(rng, out)
+    if proven and not cut and t.status in PASS_LABELS:
+        out.in_passing.update(range(first, len(out.panics)))
 
 
-def render_nextest(run, rng, interleave, out):
+def render_nextest(run, index, rng, interleave, out):
     n = len(run.tests)
     units = [f"{run.binary} {t.name}" for t in run.tests]
     if run.shape == "serial":
@@ -261,18 +286,19 @@ def render_nextest(run, rng, interleave, out):
             out.lines.append(status_line("START", i, n, unit))
         # With every test started, the text names only the last START as owner.
         for t in run.tests:
-            render_body(t, ("inst", units[-1]), rng, interleave, out)
+            render_body(t, ("inst", index, units[-1]), rng, interleave, out)
     for i, (t, unit) in enumerate(zip(run.tests, units), 1):
         if run.shape == "serial":
             out.lines.append(status_line("START", i, n, unit))
-            out.certain.add(("inst", unit))
-            render_body(t, ("inst", unit), rng, interleave, out)
+            cut = run.cut and i == n
+            render_body(t, ("inst", index, unit), rng, interleave, out, cut=cut, proven=True)
+            if cut:
+                return
         out.lines.append(status_line(t.status, i, n, unit))
-        out.statuses.append((unit, t.status))
+        out.statuses.append((("inst", index, unit), t.status))
         if run.shape == "captured" and (t.panics or t.should_panic):
             out.lines.append("  stderr ───")
-            out.certain.add(("inst", unit))
-            render_body(t, ("inst", unit), rng, interleave, out, indent="    ")
+            render_body(t, ("inst", index, unit), rng, interleave, out, indent="    ", proven=True)
     failing = [(i, t, unit) for i, (t, unit) in enumerate(zip(run.tests, units), 1) if t.status in FAIL_LABELS]
     out.lines.append(f"     Summary [   1.000s] {n} tests run: {n - len(failing)} passed, {len(failing)} failed, 0 skipped")
     for i, t, unit in failing:
@@ -288,15 +314,15 @@ def render(runs, rng, interleave):
         if run.shape == "libtest":
             render_libtest(run, index, rng, interleave, out)
         else:
-            render_nextest(run, rng, interleave, out)
+            render_nextest(run, index, rng, interleave, out)
     return out
 
 
 def verdict(r):
     """The classifier's verdict on `r`, from the owners and names its text states.
 
-    A panic is inside a passing test, and dropped into the note, when its scope
-    is certain and its unit passed, or when its scope holds as many
+    A panic is inside a passing test, and dropped into the note, when the text
+    proves its owner and the owner passed in that run, or when its scope holds as many
     `- should panic ... ok` lines for its thread name as panics on that name and no panic whose name
     the text loses. Every other panic is printed, except an injected one. A
     failing status is a signature unless its label is FAIL / FAIL + LEAK and
@@ -305,18 +331,17 @@ def verdict(r):
     expected = Counter(r.expects)
     count = Counter((scope, name) for scope, name, _ in r.panics)
     unnamed = {scope for scope, name, _ in r.panics if name == ""}
-    passing = {("inst", unit) for unit, label in r.statuses if label in PASS_LABELS}
-    kept = [(scope, p) for scope, name, p in r.panics
-            if not (scope in r.certain and scope in passing)
+    kept = [(scope, p) for i, (scope, name, p) in enumerate(r.panics)
+            if i not in r.in_passing
             and (scope in unnamed or not (expected[(scope, name)] and expected[(scope, name)] == count[(scope, name)]))]
     note = len(r.panics) - len(kept)
     listed = Counter(p.msg for _, p in kept if p.kind == "novel")
     matched = sum(p.kind == "known" for _, p in kept)
     owners = {scope for scope, _ in kept}
-    for unit, label in r.statuses:
+    for inst, label in r.statuses:
         long = FAIL_LABELS.get(label)
-        if long and not (long in ("FAIL", "FAIL + LEAK") and ("inst", unit) in owners):
-            listed[f"{long}: {unit}"] = 1
+        if long and not (long in ("FAIL", "FAIL + LEAK") and inst in owners):
+            listed[f"{long}: {inst[2]}"] = 1
     novel = sum(listed.values())
     if novel + matched == 0 and r.failed:
         novel = 1  # "run failed but no panic signature was extracted"
@@ -529,6 +554,32 @@ error: test run failed
      Summary [   1.000s] 1 tests run: 1 passed, 0 failed, 0 skipped
 ''', 1,
          r"^\[known-reds\] FAIL: 1 novel panic"),
+        # A serial run cut off after a panic is red, though a later run of the same log passes the test.
+        ("serial-panic-cut-off-then-passing-in-a-later-run", "\n".join([
+            SERIAL_MARKER, "    Starting 2 tests across 1 binary",
+            status_line("START", 1, 2, "holon-x::main a::case_b"), "", "running 1 test",
+            "thread 'a::case_b' (7) panicked at crates/x/tests/y.rs:1:1:", "novel defect zzz",
+        ]) + "\n" + no_capture_run(CAUGHT_HEAD, CAUGHT_MSG, "PASS").replace(
+            "holon-filesystem::crash a_controller_dies", "holon-x::main a::case_b"), 1,
+         r"^\[known-reds\] FAIL: 1 novel panic"),
+        # The marker of a run cut off before its Summary does not hold for the next run.
+        ("unmarked-worker-panic-after-a-cut-serial-run", "\n".join([
+            SERIAL_MARKER, "    Starting 1 test across 1 binary",
+            status_line("START", 1, 1, "holon-x::main a::case_b"), "", "running 1 test",
+            "thread 'a::case_b' (7) panicked at crates/x/tests/y.rs:1:1:", "novel defect zzz",
+        ]) + "\n" + no_capture_run(CRASH_HEAD, CRASH_MSG, "PASS", marker=False), 1,
+         r"^\[known-reds\] FAIL: 2 novel panic"),
+        # A test failing without a panic is red, though it panics while passing in a later run.
+        ("failed-without-panic-then-passing-with-one-in-a-later-run", "\n".join([
+            "    Starting 1 test across 1 binary", status_line("FL+LK", 1, 1, "holon-x::main a::case_b"),
+            "     Summary [   1.000s] 1 test run: 0 passed, 1 failed, 0 skipped", status_line("FL+LK", 1, 1, "holon-x::main a::case_b"),
+            "error: test run failed",
+            SERIAL_MARKER, "    Starting 1 test across 1 binary",
+            status_line("START", 1, 1, "holon-x::main a::case_b"), "", "running 1 test",
+            "thread 'a::case_b' (7) panicked at crates/x/tests/y.rs:1:1:", "novel defect zzz",
+            "test a::case_b ... ok", status_line("PASS", 1, 1, "holon-x::main a::case_b"),
+            "     Summary [   1.000s] 1 test run: 1 passed, 0 skipped",
+        ]) + "\n", 1, r"^ *1 FAIL [+] LEAK: holon-x::main a::case_b$"),
     ]
 
 
