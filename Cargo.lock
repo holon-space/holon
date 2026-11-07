@@ -5874,7 +5874,6 @@ dependencies = [
  "futures",
  "futures-signals",
  "holon-api",
- "holon-conditions",
  "holon-connections",
  "holon-core",
  "holon-macros",

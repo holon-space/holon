@@ -463,7 +463,7 @@ INERT_ROOTS = frozenset({"docs", "devlog", "wiki", "scripts", "assets", "archlin
                          ".devcontainer", ".gc", ".github", ".qlty", ".resolve-scratch", ".runtime", "dist",
                          "lane-logs", ".lane-logs", "observability", "report"})
 # Steps that read the whole tree (docs, scripts, every manifest) and run on every batch.
-TREE_STEPS = ("fmt", "deny", "gate-arch", "arch-validate", "featuremap", "analyze-arch", "guests-verify")
+TREE_STEPS = ("fmt", "deny", "machete", "gate-arch", "arch-validate", "featuremap", "analyze-arch", "guests-verify")
 INTEGRATION_STEPS = ("keystone-smoke", "hand-authored", "loro-suite", "projector-lag-lock", "keystone-tour")
 # Steps that build a crate outside the workspace: they run when a workspace crate it names by `path` is reached.
 NON_MEMBER_STEPS = {"check-dioxus-web-wasm": "frontends/dioxus-web", "check-worker-wasm": "frontends/holon-worker"}

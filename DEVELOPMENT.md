@@ -740,7 +740,7 @@ with `--steps`.
 
 The scoped rule, per changed path:
 
-- the tree checks (fmt, deny, the arch checks, guests-verify) run for every
+- the tree checks (fmt, deny, machete, the arch checks, guests-verify) run for every
   batch;
 - a path inside a workspace crate reaches that crate and every crate that
   depends on it; each step runs when it builds or tests a reached crate, and

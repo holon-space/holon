@@ -41,7 +41,7 @@ TRACKS=(
 )
 QUIET_TRACK=1
 read -ra STEPS <<<"${TRACKS[*]}"
-step_names() { echo fmt deny gate-compile "${STEPS[@]#*:}"; }
+step_names() { echo fmt deny machete gate-compile "${STEPS[@]#*:}"; }
 if [ "${1:-}" = --steps ]; then step_names; exit; fi
 step_file() { echo "target/gate-logs/$GATE-step-$1.$2"; }
 SLOT=~/.claude/skills/orchestrator/scripts/with-build-slot.sh
@@ -153,6 +153,7 @@ GATE_STEP_TMP=$(mktemp -d); export GATE_STEP_TMP
 trap 'rm -rf "$GATE_STEP_TMP"' EXIT
 gate_step 1 fmt cargo fmt --all -- --check
 gate_step 20 deny just deny
+gate_step 23 machete just machete
 gate_step 2 gate-compile just gate-compile
 rm -f target/gate-logs/"$GATE"-step-*
 pids=()
