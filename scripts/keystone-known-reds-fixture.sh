@@ -1070,6 +1070,26 @@ else
     echo "[fixture] ok outcome/replay/undeclared-green-prints-no-note"
 fi
 
+# A row whose site is a file at any line holds after a line move in that file.
+renamed_payload='reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 expected disclosure(s) are NOT in effect: [\"edit-refused-read-only-format on a subject whose final path component is `moved-recipe-1.cook`\"]. The transition'"'"'s outcome happened and the user was never told, which from inside the store is indistinguishable from it having succeeded. Raised (governed kinds only): [RaisedCondition { subject: \"cooklang\", kind: \"vault-ingest-failed\", files: [\"moved-recipe-0.cook\", \"moved-recipe-1.cook\"], count: Some(2), message: None }]")]'
+replay_site=crates/holon-integration-tests/src/pbt/composed/harness.rs:2231:5 \
+    replay_log renamed hand-authored-renamed-recipe-refusal-not-disclosed-load "$renamed_payload" >"$work/replay-renamed-recipe.log"
+expect_outcome any-line/renamed-recipe 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/replay-renamed-recipe.log"
+cat >"$work/tui-stderr-write.log" <<'EOF'
+        FAIL [  33.210s] (1/1) holon-tui::main stop_signals_quit_through_the_session_shutdown::a_stderr_write_while_the_tui_draws_lands_in_the_log
+  stderr ───
+
+    thread 'a_stderr_write_while_the_tui_draws_lands_in_the_log' (156066076) panicked at frontends/tui/tests/stop_signals_quit_through_the_session_shutdown.rs:156:5:
+    `[chord] indent:` is not in the TUI log after the shutdown: it never arrived, or a later log write overwrote it; on the terminal: false; log:
+────────────
+     Summary [  33.214s] 1 test run: 0 passed, 1 failed, 20 skipped
+        FAIL [  33.210s] (1/1) holon-tui::main stop_signals_quit_through_the_session_shutdown::a_stderr_write_while_the_tui_draws_lands_in_the_log
+error: test run failed
+EOF
+expect_outcome any-line/tui-stderr-write 0 '^PRIMARY: \[known-red:tui-stderr-write-missing-from-log-load\]' \
+    "$work/tui-stderr-write.log"
+
 # The keystone's `BootFault::TaskPanic` panics on purpose. Only that exact
 # payload at that exact site is no failure; anything else stays a signature.
 injected_site=crates/holon-integration-tests/src/pbt/composed/boot_fault.rs
