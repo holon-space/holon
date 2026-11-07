@@ -25,8 +25,10 @@ class RowError(Exception):
 class HeaderError(Exception):
     def __init__(self, lineno, cells):
         missing = [c for c in HEADER if c not in cells]
-        extra = [c for c in cells if c not in HEADER]
-        why = "; ".join(filter(None, [missing and f"missing {', '.join(missing)}", extra and f"extra {', '.join(extra)}"]))
+        extra = list(dict.fromkeys(c for c in cells if c not in HEADER))
+        doubled = [c for c in HEADER if cells.count(c) > 1]
+        why = "; ".join(f"{name} {', '.join(columns)}" for name, columns in
+                        [("missing", missing), ("extra", extra), ("doubled", doubled)] if columns)
         super().__init__(f"the table header names registry columns but is not the registry header "
                          f"({why or 'the columns stand in another order'})")
         self.lineno = lineno

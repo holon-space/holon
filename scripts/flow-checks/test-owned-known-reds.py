@@ -12,6 +12,7 @@ import random
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -22,6 +23,8 @@ spec.loader.exec_module(check)
 REGISTRY = "docs/Testing/KeystoneKnownReds.md"
 HEADER = ("| Key | Status | Match pattern | Site | Signature | Evidence | Task | Owner | Companions |\n"
           "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
+HEADER_CELLS = [cell.strip() for cell in HEADER.splitlines()[0].split("|")[1:-1]]
+FOREIGN_COLUMNS = ["Note", "Test", "Count", "Where", "key", "Owners"]
 STATUSES = ["known-red", "fixed-pending-soak", "no-longer-fires", "proposed"]
 WORDS = ["boot", "undo", "slot", "load", "timeout", "toast", "focus", "org", "sql", "budget", "drift", "peer", "page"]
 OWNER_FORMS = ["#{}", "holon-work#{}", "holon-space/holon-work#{}", "load reds (#{})", "#{} — load-tolerant caps"]
@@ -101,6 +104,61 @@ def lane(rng):
     owned = {k for k in keys if check.owners(registry_row_of(rows[k])) & cards}
     outcomes = {k: "deleted" if k in deleted else "kept" for k in sorted(owned)}
     return cards, base, tip, owned, outcomes, set(keys) - owned
+
+
+def random_header(rng):
+    """The cells of a header row: the registry header, an edit of it, or a table of other columns."""
+    shape = rng.choice(["exact", "edited", "edited", "edited", "foreign"])
+    if shape == "exact":
+        return list(HEADER_CELLS)
+    if shape == "foreign":
+        return rng.sample(FOREIGN_COLUMNS + ["Match pattern", "Site", "Evidence"], rng.randint(1, 4))
+    cells = list(HEADER_CELLS)
+    for _ in range(rng.randint(1, 3)):
+        i, j = rng.randrange(len(cells)), rng.randrange(len(cells) + 1)
+        op = rng.choice(["drop", "double", "extra", "markup", "swap"])
+        if op == "drop" and len(cells) > 1:
+            del cells[i]
+        elif op == "double":
+            cells.insert(j, cells[i])
+        elif op == "extra":
+            cells.insert(j, rng.choice(FOREIGN_COLUMNS))
+        elif op == "markup":
+            cells[i] = rng.choice([f"**{cells[i]}**", cells[i].lower(), f"`{cells[i]}`"])
+        elif op == "swap":
+            j = rng.randrange(len(cells))
+            cells[i], cells[j] = cells[j], cells[i]
+    return cells
+
+
+def header_rule(cells):
+    """The table rule as an oracle: the exact header opens a registry table, a header that names a registry column
+    but is not exact is an error naming what differs, any other header is ignored. Returns the class and the reason."""
+    if cells == HEADER_CELLS:
+        return "registry", None
+    if not {"Key", "Status", "Task", "Owner"} & set(cells):
+        return "ignored", None
+    have, want = Counter(cells), Counter(HEADER_CELLS)
+    surplus = have - want
+    parts = [("missing", [c for c in HEADER_CELLS if c in want - have]),
+             ("extra", [c for c in dict.fromkeys(cells) if c in surplus and c not in want]),
+             ("doubled", [c for c in HEADER_CELLS if c in surplus])]
+    return "error", "; ".join(f"{name} {', '.join(cs)}" for name, cs in parts if cs) or "the columns stand in another order"
+
+
+def header_property(cells):
+    text = "| " + " | ".join(cells) + " |\n|" + " --- |" * len(cells) + "\n" + row("ok-row", owner="#5")
+    want, why = header_rule(cells)
+    try:
+        headers = [header for _, header, _ in check.known_reds_table.table_rows(text)]
+    except check.known_reds_table.HeaderError as e:
+        expect(f"header {cells}", (e.lineno, str(e)), (1, "the table header names registry columns but is not the "
+                                                          f"registry header ({why})"))
+        assert want == "error", f"header {cells}: HeaderError, the rule says {want}"
+        assert ("another order" in why) == (sorted(cells) == sorted(HEADER_CELLS)), f"header {cells}: {why}"
+        return want
+    expect(f"header {cells}", headers, [HEADER_CELLS] if want == "registry" else [None, None])
+    return want
 
 
 def registry_row_of(line):
@@ -193,6 +251,9 @@ def static_examples():
                 "docs/Testing/WindowedKnownReds.md": (HERE / "../../docs/Testing/WindowedKnownReds.md").read_text()}
     expect("a table without registry columns", check.problems(
         windowed, windowed, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
+    doubled = {REGISTRY: HEADER.replace("| Companions |", "| Companions | Companions |", 1) + row("ok-row", owner="#5")}
+    got = check.problems(doubled, doubled, summary_for({"ok-row": "kept"}, {5}), {5}, is_log)
+    assert got and not any("another order" in p for p in got), f"a header with a doubled column, in the registry order: {got}"
     expect("Cards line", check.lane_cards("x\nCards: #3, #40\n", "lane-7-slug"), {3, 40})
     expect("lane folder", check.lane_cards("x\n", "lane-7-slug"), {7})
     expect("neither", check.lane_cards("x\n", "_sw_integ"), None)
@@ -281,6 +342,14 @@ def main():
             raise SystemExit(f"[owned-known-reds] case {case} of seed {seed}: {e}")
     assert with_deletions >= n // 10, f"only {with_deletions} of {n} lanes deleted an owned row"
     print(f"[owned-known-reds] {n} random lanes ({with_deletions} delete an owned row), seed {seed}: PASS")
+    classes = Counter()
+    for case in range(n):
+        try:
+            classes[header_property(random_header(rng))] += 1
+        except AssertionError as e:
+            raise SystemExit(f"[owned-known-reds] header case {case} of seed {seed}: {e}")
+    assert all(classes[c] >= n // 20 for c in ("registry", "error", "ignored")), f"header classes {dict(classes)}"
+    print(f"[owned-known-reds] {n} random headers {dict(classes)}, seed {seed}: PASS")
 
 
 if __name__ == "__main__":
