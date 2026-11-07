@@ -30,6 +30,20 @@ cd "$(dirname "$0")/.." || exit 2
 fail=0
 at_risk=0
 
+# The name of the test target built from tests/main.rs: the `[[test]]` that
+# declares that path (it may name it other than `main`), else cargo's
+# auto-discovered `main`.
+main_test_target() {
+    local name
+    name=$(awk '
+        /^\[/ { if (t && p) { print n; done = 1; exit } t = ($0 == "[[test]]"); n = ""; p = 0; next }
+        t && /^name *=/ { n = $0 }
+        t && /^path *= *"tests\/main\.rs"/ { p = 1 }
+        END { if (!done && t && p) print n }
+    ' "$1" | sed -E 's/^name *= *"([^"]+)".*/\1/')
+    printf '%s\n' "${name:-main}"
+}
+
 # Discover top-level `#![cfg(feature = "...")]` files under any `tests/` dir.
 # (Portable array fill — macOS ships bash 3.2, which lacks `mapfile`.)
 gated_files=()
@@ -53,13 +67,13 @@ for file in "${gated_files[@]}"; do
     # compiles to ONE target named after its DIRECTORY, so `--test` must name
     # the suite while messages still name the member file.
     # A crate whose tests/main.rs declares the file as a module builds it into
-    # its one `main` binary, so the suite is the tests under `<stem>::`.
+    # its one tests/main.rs binary, so the suite is the tests under `<stem>::`.
     rel="${file#*/tests/}"
     filter=""
     if [ "$rel" != "${rel##*/}" ]; then
         target="${rel%%/*}"
     elif grep -qE "^mod $stem;" "$crate_dir/tests/main.rs" 2>/dev/null; then
-        target="main"
+        target=$(main_test_target "$manifest")
         filter="$stem::"
     else
         target="$stem"
@@ -107,7 +121,7 @@ for file in "${gated_files[@]}"; do
     rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "FAIL: compiling/listing $pkg/$stem with --features $feat exited $rc"
-        printf '%s\n' "$list_out" | tail -20
+        printf '%s\n' "$list_out"
         fail=1
         continue
     fi
