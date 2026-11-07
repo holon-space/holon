@@ -58,8 +58,8 @@ echo "== a head rewritten locally since its push"
 rc=0; combine_in_repo "${heads##* }" >/dev/null || rc=$?
 expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 
-# `just` and `cargo` stubs append each call (a `just --evaluate` then runs the real just), its HOLON_PBT_TIMING, the record file of gate-step.sh's runner
-# and the quiet marker's content to $GATE_PROBE; `just latency-slo-gate` prints $SETTLE_OUT (default: a contention line
+# `just` and `cargo` stubs append each call (a `just --evaluate` then runs the real just), its HOLON_PBT_TIMING, the record file of gate-step.sh's runner,
+# the build-script env the gate pins and the quiet marker's content to $GATE_PROBE; `just latency-slo-gate` prints $SETTLE_OUT (default: a contention line
 # and an admission), `just timing-gate-build` prints $BUILD_OUT
 # `just $STUB_RED` exits 1 and `just $STUB_SLEEP` sleeps 2 s; with STUB_RED_NEXTEST set, every nextest run
 # fails one org_suite test no known-red row lists. HOME is a scratch dir, so the hold's marker,
@@ -81,7 +81,7 @@ chmod +x "$orch/with-build-slot.sh"
 for tool in just cargo; do
   cat > "$stubs/$tool" <<'EOF'
 #!/usr/bin/env bash
-echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | record=${GATE_RECORD-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
+echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | record=${GATE_RECORD-unset} | shape=font:${RUST_FONTCONFIG_DLOPEN-unset} sha:${HOLON_BUILD_SHA-unset} time:${HOLON_BUILD_TIME-unset} rustflags:${RUSTFLAGS-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 case " $* " in *" --evaluate "*) exec "$REAL_JUST" "$@" ;; esac
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
 [ "$*" != gate-compile ] || [ -z "${GATE_HOLD_FIRST:-}" ] || "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" --quiet-hold "$GATE_PID"
@@ -258,6 +258,57 @@ for case in "host admitted\n|probe line absent — judging" "|the probe round pr
   expect "settle output '${case%%|*}': names the state '${case#*|}'" grep -q "${case#*|}" "$scratch/recipe-noprobe.out"
 done
 
+echo "== a rerun of one gate test, from any caller env"
+# The caller's own values of the variables the gate pins, drawn unset or stale: the rerun's
+# nextest call sees the gate's values anyway, and lands in the gate's record.
+shape_of() { sed -n 's/^cargo nextest run .* | \(shape=[^|]*\) | quiet=.*/\1/p'; }
+gate_shape=$(shape_of <<<"$extra_runs")
+pbt=$("$real_just" --justfile "$here/../justfile" --evaluate CANON_FEATURES)
+: > "$probe"
+in_stubs env -u RUST_FONTCONFIG_DLOPEN -u HOLON_BUILD_SHA -u HOLON_BUILD_TIME \
+  cargo nextest run --profile load-tolerant --no-fail-fast --no-tests=fail --workspace --features "$pbt" -E 'test(=x)' >/dev/null
+expect "a bare cargo rerun builds another shape than the gate ($(shape_of <"$probe"))" [ "$(shape_of <"$probe")" != "$gate_shape" ]
+record=target/gate-logs/g1-cargo-calls.jsonl
+filters=('test(=x)' 'package(holon-loro) & test(=iroh_advertiser::tests::a_b)' 'binary(integration) | test(/^org_suite::/)')
+draw() { if ((RANDOM % 2)); then printf -v "$1" '%04x%04x' $RANDOM $RANDOM; else printf -v "$1" unset; fi; }
+rerun_case() {
+  local font=$1 sha=$2 time=$3 filter=$4 unsets=() sets=() kv rc=0 calls
+  local what="rerun from font=$font sha=$sha time=$time, -E '$filter'"
+  for kv in RUST_FONTCONFIG_DLOPEN=$font HOLON_BUILD_SHA=$sha HOLON_BUILD_TIME=$time; do
+    if [ "${kv#*=}" = unset ]; then unsets+=(-u "${kv%%=*}"); else sets+=("$kv"); fi
+  done
+  : > "$probe"; calls=$(($(wc -l <"$record")))
+  in_stubs env "${unsets[@]}" "${sets[@]}" "$integrate" rerun g1 "$tip" "$filter" >"$scratch/rerun.out" 2>&1 || rc=$?
+  if [ "$time" != unset ]; then
+    expect "$what: refused (got $rc)" [ "$rc" != 0 ]
+    expect "$what: before any nextest call" [ -z "$(grep '^cargo nextest' "$probe")" ]
+    return
+  fi
+  expect "$what: exits 0 (got $rc)" [ "$rc" = 0 ]
+  expect "$what: runs the gate's nextest arm, narrowed by the filter" \
+    [ "$(grep '^cargo nextest' "$probe" | cut -d'|' -f1)" = "cargo nextest run --profile load-tolerant --no-fail-fast -E $filter --no-tests=fail --workspace --features $pbt " ]
+  expect "$what: in the gate's shape" [ "$(shape_of <"$probe")" = "$gate_shape" ]
+  expect "$what: appends its call to the gate's record" [ "$(($(wc -l <"$record")))" = $((calls + 1)) ]
+}
+SEED=${SEED:-$RANDOM}; RANDOM=$SEED; echo "rerun cases: SEED=$SEED"
+# The bare caller of a hand-written rerun script, a shell left from another tip, a release shell.
+rerun_case unset unset unset "${filters[0]}"
+rerun_case off 0123456789ab unset "${filters[1]}"
+rerun_case unset unset 1 "${filters[0]}"
+for _ in 1 2 3 4 5 6 7 8; do
+  draw font; draw sha; draw time
+  rerun_case "$font" "$sha" "$time" "${filters[RANDOM % ${#filters[@]}]}"
+done
+rc=0; in_stubs "$integrate" rerun g0 "$tip" 'test(=x)' >/dev/null 2>&1 || rc=$?
+expect "a rerun of a gate with no record on this checkout exits 2 (got $rc)" [ "$rc" = 2 ]
+
+echo "== a rerun under another RUSTFLAGS than its gate"
+cp "$record" target/gate-logs/g9-cargo-calls.jsonl
+in_stubs RUSTFLAGS=-Cdebuginfo=0 "$integrate" rerun g9 "$tip" 'test(=x)' >/dev/null 2>&1 || true
+rc=0; /usr/bin/python3 "$here/check-compile-shape.py" target/gate-logs/g9-cargo-calls.jsonl >"$scratch/shape-g9.out" 2>&1 || rc=$?
+expect "fails the timing gate's shape check (got $rc)" [ "$rc" = 1 ]
+expect "which names RUSTFLAGS" grep -q '^ENV DIFFERS: RUSTFLAGS ' "$scratch/shape-g9.out"
+
 echo "== the timing gate on the integrated tip"
 : > "$probe"
 rc=0; in_stubs "$timing" g1 "1 2" "$tip" >"$scratch/timing.out" 2>&1 || rc=$?
@@ -294,6 +345,10 @@ for script in "$integrate" "$timing"; do
   expect "$(basename "$script"): a tip other than @- exits 9 (got $rc)" [ "$rc" = 9 ]
   expect "$(basename "$script"): before any cargo or just call" [ ! -s "$probe" ]
 done
+: > "$probe"
+rc=0; in_stubs "$integrate" rerun g1 "$(cid main)" 'test(=x)' >/dev/null 2>&1 || rc=$?
+expect "gate-integrate.sh rerun: a tip other than @- exits 9 (got $rc)" [ "$rc" = 9 ]
+expect "gate-integrate.sh rerun: before any cargo or just call" [ ! -s "$probe" ]
 jj new --quiet main
 rc=0; in_stubs "$timing" g1 "1 2" "$tip" >/dev/null 2>&1 || rc=$?
 expect "@- off the tip exits 9 (got $rc)" [ "$rc" = 9 ]
