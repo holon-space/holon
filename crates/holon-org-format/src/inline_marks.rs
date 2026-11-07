@@ -2415,7 +2415,7 @@ mod source_content_offset_tests {
 /// Each render pass timed alone, after its parse. Inside the whole render (or a
 /// pass that parses first), the parse costs so much more than the pass's own
 /// loop that the loop can be quadratic and the total still look linear.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod render_pass_cost_tests {
     use std::hint::black_box;
 
@@ -2549,10 +2549,6 @@ mod render_pass_cost_tests {
     /// The instruction count is per process, so the measurement runs in a
     /// process of its own, where no other test retires instructions.
     #[test]
-    #[cfg_attr(
-        not(target_os = "macos"),
-        ignore = "counts retired instructions through macOS proc_pid_rusage"
-    )]
     fn each_render_pass_works_linearly_in_its_input() {
         const ALONE: &str = "HOLON_RENDER_PASS_COST_ALONE";
         if std::env::var_os(ALONE).is_none() {
