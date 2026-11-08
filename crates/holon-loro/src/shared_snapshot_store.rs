@@ -301,12 +301,7 @@ impl SharedSnapshotStore {
     pub fn load(&self, shared_tree_id: &str) -> Result<LoroDoc> {
         let path = self.snapshot_path(shared_tree_id);
         let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        // Configure mark styles before any import so subsequent mark
-        // applications honor the per-key `ExpandType` policy. Without
-        // this, `LoroText::mark` silently no-ops and reads return empty
-        // mark sets — see Phase 0.1 spike S3.
-        let doc = LoroDoc::new();
-        crate::loro_backend::configure_text_styles(&doc);
+        let doc = crate::loro_backend::styled_loro_doc();
         match doc.import(&bytes) {
             Ok(_) => Ok(doc),
             Err(e) => {

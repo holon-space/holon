@@ -2329,15 +2329,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             return Err(already_accepted(&t.shared_tree_id, &existing));
         }
 
-        // Create a fresh LoroDoc for the shared tree. `configure_text_styles`
-        // installs the per-key `ExpandType` policy and must run before any
-        // mark is applied — Loro silently latches the first config and
-        // returns no-ops on conflicting re-configs (Phase 0.1 spike S3).
-        // Without this call, `LoroText::mark` either fails silently or stores
-        // the mark in a way `to_delta()` doesn't surface, so reads return
-        // empty mark sets even though the writer thinks the mark applied.
-        let shared_doc = LoroDoc::new();
-        crate::loro_backend::configure_text_styles(&shared_doc);
+        let shared_doc = crate::loro_backend::styled_loro_doc();
         let generation = self
             .snapshot_store
             .next_generation(&t.shared_tree_id)
@@ -3687,7 +3679,7 @@ mod tests {
         use loro::ExportMode;
 
         use crate::loro_backend::TREE_NAME;
-        use crate::loro_backend::configure_text_styles;
+        use crate::loro_backend::styled_loro_doc;
         use crate::loro_backend::snapshot_blocks_from_doc;
 
         // Owner side: a tree with one shared node.
@@ -3705,8 +3697,7 @@ mod tests {
         let snapshot = owner
             .export(ExportMode::shallow_snapshot(&owner.oplog_frontiers()))
             .unwrap();
-        let recipient = loro::LoroDoc::new();
-        configure_text_styles(&recipient);
+        let recipient = styled_loro_doc();
         recipient.set_peer_id(0x5eed).unwrap();
         recipient.import(&snapshot).unwrap();
         assert!(recipient.is_shallow(), "recipient doc must be shallow");

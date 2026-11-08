@@ -240,7 +240,7 @@ mod tests {
             /// preserves marks — Phase 0.1 spike already verified Loro's
             /// CRDT merge semantics, so we don't re-test those here.
             ///
-            /// Specifically: this surfaces missing `configure_text_styles`
+            /// Specifically: this surfaces a doc not made by `styled_loro_doc`
             /// calls on shared docs created by accept / extract /
             /// gc / snapshot-load paths (each of which calls
             /// `LoroDoc::new()` directly, bypassing the global doc's
@@ -830,7 +830,7 @@ mod tests {
             // P-MARKS: every mark recorded in `expected_marks` must be
             // observable on the shared root text — by suffix range +
             // Loro key. Surfaces:
-            //   - shared docs created without `configure_text_styles` (mark API still
+            //   - shared docs not made by `styled_loro_doc` (mark API still
             //     applies but ExpandType policy is wrong)
             //   - snapshot save/load not preserving Peritext deltas
             //   - sync paths dropping mark deltas

@@ -151,11 +151,7 @@ impl LoroDocument {
     /// precedence.
     pub fn new_with_peer_id(doc_id: String, peer_id: Option<PeerID>) -> Result<Self> {
         let peer_id = resolve_peer_id(peer_id)?;
-        let doc = LoroDoc::new();
-        // Install the rich-text mark policy (Bold/Italic/.../Link/Verbatim
-        // expand types). Must run before any LoroText is created or marked,
-        // and is a no-op if re-called — see `configure_text_styles` doc.
-        crate::loro_backend::configure_text_styles(&doc);
+        let doc = crate::loro_backend::styled_loro_doc();
         doc.set_peer_id(peer_id)?;
 
         info!(
@@ -555,7 +551,7 @@ impl LoroDocument {
         let bytes = std::fs::read(path)?;
         let peer_id = resolve_peer_id(peer_id)?;
 
-        let doc = LoroDoc::new();
+        let doc = crate::loro_backend::styled_loro_doc();
         doc.set_peer_id(peer_id)?;
         doc.import(&bytes)?;
 

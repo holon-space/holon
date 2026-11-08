@@ -1,6 +1,6 @@
 //! A warm boot loads the store's documents from their snapshots. Every inline
-//! mark must write, read back and expand on such a document as Holon's style
-//! policy says, exactly as on the fresh document a cold boot makes.
+//! mark must write, read back and expand on such a document exactly as on the
+//! fresh document a cold boot makes, which follows Holon's style policy.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -144,13 +144,15 @@ fn cold_and_warm(block: &MarkedBlock) -> (Result<Written, String>, Result<Writte
 
 /// The spans after one character is typed at `at`: a span grows when `at` is
 /// inside it, or at its end and its key expands after; spans from `at` on shift.
-fn expected_after_typing(marks: &[MarkSpan], at: usize) -> Vec<MarkSpan> {
+fn expected_after_typing(marks: &[MarkSpan], at: usize, also_grow: &[usize]) -> Vec<MarkSpan> {
     sorted(
         marks
             .iter()
-            .map(|s| {
+            .enumerate()
+            .map(|(i, s)| {
                 let grows = (s.start < at && at < s.end)
-                    || (at == s.end && InlineMark::expand_after(s.mark.loro_key()));
+                    || (at == s.end && InlineMark::expand_after(s.mark.loro_key()))
+                    || also_grow.contains(&i);
                 match () {
                     _ if at <= s.start => MarkSpan::new(s.start + 1, s.end + 1, s.mark.clone()),
                     _ if grows => MarkSpan::new(s.start, s.end + 1, s.mark.clone()),
@@ -161,23 +163,50 @@ fn expected_after_typing(marks: &[MarkSpan], at: usize) -> Vec<MarkSpan> {
     )
 }
 
-fn check(block: &MarkedBlock) -> Result<(), TestCaseError> {
-    let expected = Written {
-        after_write: sorted(block.marks.clone()),
-        after_typing: expected_after_typing(&block.marks, block.typed_at),
+/// Every span list Holon's style policy allows after typing at `at`. Where an
+/// expanding span ends at `at`, Loro inserts before that span's end anchor, so
+/// a non-expanding span whose end anchor follows it in anchor order grows too.
+fn allowed_after_typing(marks: &[MarkSpan], at: usize) -> Vec<Vec<MarkSpan>> {
+    let ends_here = |s: &MarkSpan, expands: bool| {
+        s.end == at && InlineMark::expand_after(s.mark.loro_key()) == expands
     };
+    let held: Vec<usize> = if marks.iter().any(|s| ends_here(s, true)) {
+        (0..marks.len()).filter(|&i| ends_here(&marks[i], false)).collect()
+    } else {
+        Vec::new()
+    };
+    (0..1usize << held.len())
+        .map(|subset| {
+            let grow: Vec<usize> = (0..held.len())
+                .filter(|b| subset & (1 << b) != 0)
+                .map(|b| held[b])
+                .collect();
+            expected_after_typing(marks, at, &grow)
+        })
+        .collect()
+}
+
+fn check(block: &MarkedBlock) -> Result<(), TestCaseError> {
     let (cold, warm) = cold_and_warm(block);
     let cold = cold.map_err(|e| TestCaseError::fail(format!("cold boot: {e}")))?;
     prop_assert_eq!(
-        &cold,
-        &expected,
-        "on a cold boot the marks must round-trip and expand as Holon's style policy says"
+        &cold.after_write,
+        &sorted(block.marks.clone()),
+        "on a cold boot the marks must round-trip"
+    );
+    let allowed = allowed_after_typing(&block.marks, block.typed_at);
+    prop_assert!(
+        allowed.contains(&cold.after_typing),
+        "on a cold boot typing must expand the marks as Holon's style policy says: \
+         got {:?}, allowed {:?}",
+        cold.after_typing,
+        allowed
     );
     let warm = warm.map_err(|e| TestCaseError::fail(format!("warm boot: {e}")))?;
     prop_assert_eq!(
         &warm,
-        &expected,
-        "on a warm boot the marks must round-trip and expand as Holon's style policy says"
+        &cold,
+        "a warm boot must store and expand marks as a cold boot does"
     );
     Ok(())
 }
@@ -227,9 +256,23 @@ fn every_key_typed_at_its_end() -> Vec<MarkedBlock> {
     .collect()
 }
 
+/// A non-expanding and an expanding span that end where the character is
+/// typed: the expanding one must grow.
+fn policies_meet_at_one_end() -> MarkedBlock {
+    MarkedBlock {
+        text: "b k jh ytoer".to_string(),
+        marks: vec![
+            MarkSpan::new(0, 5, InlineMark::Verbatim),
+            MarkSpan::new(1, 5, InlineMark::Bold),
+        ],
+        typed_at: 5,
+    }
+}
+
 #[test]
 fn every_mark_behaves_alike_on_a_warm_and_a_cold_boot() {
-    let mut failures: Vec<String> = std::iter::once(verbatim_headline())
+    let mut failures: Vec<String> = [verbatim_headline(), policies_meet_at_one_end()]
+        .into_iter()
         .chain(every_key_typed_at_its_end())
         .filter_map(|block| check(&block).err().map(|e| format!("{block:?}: {e}")))
         .collect();

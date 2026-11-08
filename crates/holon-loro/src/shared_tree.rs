@@ -229,11 +229,8 @@ pub fn extract_subtree(
 
     let snapshot_size = snapshot.len();
 
-    // Step 5: Import into a fresh LoroDoc. Configure mark styles before
-    // any import so subsequent mark applications honor `ExpandType` —
-    // see `configure_text_styles` doc and Phase 0.1 spike S3.
-    let shared_doc = LoroDoc::new();
-    crate::loro_backend::configure_text_styles(&shared_doc);
+    // Step 5: Import into a fresh LoroDoc.
+    let shared_doc = crate::loro_backend::styled_loro_doc();
     shared_doc.set_peer_id(rand::random::<u64>())?;
     shared_doc
         .import(&snapshot)
@@ -258,8 +255,7 @@ pub fn gc_after_extraction(source_doc: &LoroDoc) -> Result<LoroDoc> {
         .export(ExportMode::shallow_snapshot(&current_frontiers))
         .context("Failed to export shallow snapshot for GC")?;
 
-    let compacted = LoroDoc::new();
-    crate::loro_backend::configure_text_styles(&compacted);
+    let compacted = crate::loro_backend::styled_loro_doc();
     compacted.set_peer_id(rand::random::<u64>())?;
     compacted
         .import(&shallow)
@@ -1087,8 +1083,7 @@ mod tests {
         const URL: &str = "https://secret.example.invalid/PROD-LINK-SECRET-7f31";
         const LABEL: &str = "PROD-LINK-LABEL-SECRET-7f31";
 
-        let doc = LoroDoc::new();
-        crate::loro_backend::configure_text_styles(&doc);
+        let doc = crate::loro_backend::styled_loro_doc();
         doc.set_peer_id(1).unwrap();
         let tree = doc.get_tree(TREE_NAME);
         tree.enable_fractional_index(0);
@@ -1140,8 +1135,7 @@ mod tests {
     fn commit_share_prune_leaves_no_pruned_plaintext_in_the_source_or_a_later_share() {
         const FIRST_SECRET: &str = "FIRST-SHARE-SECRET-4a2e";
 
-        let doc = LoroDoc::new();
-        crate::loro_backend::configure_text_styles(&doc);
+        let doc = crate::loro_backend::styled_loro_doc();
         doc.set_peer_id(1).unwrap();
         let tree = doc.get_tree(TREE_NAME);
         tree.enable_fractional_index(0);
@@ -1207,8 +1201,7 @@ mod tests {
     fn full_retention_still_leaks_the_pruned_subtree_into_a_later_share() {
         const FIRST_SECRET: &str = "FULL-RETENTION-TRIPWIRE-SECRET-8c5b";
 
-        let doc = LoroDoc::new();
-        crate::loro_backend::configure_text_styles(&doc);
+        let doc = crate::loro_backend::styled_loro_doc();
         doc.set_peer_id(1).unwrap();
         let tree = doc.get_tree(TREE_NAME);
         tree.enable_fractional_index(0);

@@ -266,21 +266,20 @@ pub fn mark_to_loro_value(mark: &holon_api::InlineMark) -> loro::LoroValue {
     }
 }
 
-/// Install the per-mark `ExpandType` policy on a freshly-created `LoroDoc`.
+/// The only constructor of a `LoroDoc` that may receive inline marks: a
+/// fresh doc with Holon's per-mark `ExpandType` policy installed.
 ///
-/// **Call this exactly once per LoroDoc, immediately after `LoroDoc::new()`.**
-///
-/// Phase 0.1 spike S3 (`crates/holon/examples/loro_marks_spike.rs`) confirmed
-/// that re-calling `config_text_style` with a conflicting `ExpandType` is a
-/// silent no-op — the first config wins and there's no runtime "fix". The
-/// policy must therefore be installed once at doc creation, before any
-/// `LoroText` is created or any mark is applied.
+/// Loro keeps the style config per doc instance, not in its snapshot or
+/// updates, and latches the first config it gets (Phase 0.1 spike S3,
+/// `crates/holon/examples/loro_marks_spike.rs`). So every doc that will
+/// receive marks, a snapshot-loaded one included, comes from here before any
+/// import or `LoroText` exists.
 ///
 /// Policy (per `holon_api::InlineMark::expand_after`):
 /// - `bold/italic/code/strike/underline/sub/super` → `ExpandType::After`
 ///   (typing at the trailing edge inherits the mark)
 /// - `link/verbatim` → `ExpandType::None` (typing at the boundary escapes)
-pub fn configure_text_styles(doc: &loro::LoroDoc) {
+pub fn styled_loro_doc() -> loro::LoroDoc {
     use holon_api::InlineMark;
     use loro::ExpandType;
     use loro::StyleConfig;
@@ -295,7 +294,9 @@ pub fn configure_text_styles(doc: &loro::LoroDoc) {
         };
         cfg.insert((*key).into(), StyleConfig { expand });
     }
+    let doc = loro::LoroDoc::new();
     doc.config_text_style(cfg);
+    doc
 }
 
 /// Helper trait for extracting typed values from Loro maps.
@@ -3747,7 +3748,7 @@ impl LoroBackend {
     ///
     /// Incremental complement to `update_block_text`'s wholesale replace.
     /// Marks adjust according to their `ExpandType` policy (configured once
-    /// at LoroDoc creation, see `configure_text_styles`):
+    /// at LoroDoc creation, see `styled_loro_doc`):
     /// `ExpandType::After` keys (Bold/Italic/Code/Strike/Underline/Sub/Super)
     /// extend when typed-into at the right boundary; `ExpandType::None` keys
     /// (Link/Verbatim) do not.
