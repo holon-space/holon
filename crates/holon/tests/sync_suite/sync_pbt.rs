@@ -830,8 +830,8 @@ mod tests {
             // P-MARKS: every mark recorded in `expected_marks` must be
             // observable on the shared root text — by suffix range +
             // Loro key. Surfaces:
-            //   - shared docs not made by `styled_loro_doc` (mark API still
-            //     applies but ExpandType policy is wrong)
+            //   - shared docs not made by `styled_loro_doc` (mark API still applies but
+            //     ExpandType policy is wrong)
             //   - snapshot save/load not preserving Peritext deltas
             //   - sync paths dropping mark deltas
             //   - rehydration creating a fresh LoroDoc that loses marks

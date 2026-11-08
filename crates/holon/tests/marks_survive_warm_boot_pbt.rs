@@ -143,7 +143,8 @@ fn cold_and_warm(block: &MarkedBlock) -> (Result<Written, String>, Result<Writte
 }
 
 /// The spans after one character is typed at `at`: a span grows when `at` is
-/// inside it, or at its end and its key expands after; spans from `at` on shift.
+/// inside it, or at its end and its key expands after; spans from `at` on
+/// shift.
 fn expected_after_typing(marks: &[MarkSpan], at: usize, also_grow: &[usize]) -> Vec<MarkSpan> {
     sorted(
         marks
@@ -171,7 +172,9 @@ fn allowed_after_typing(marks: &[MarkSpan], at: usize) -> Vec<Vec<MarkSpan>> {
         s.end == at && InlineMark::expand_after(s.mark.loro_key()) == expands
     };
     let held: Vec<usize> = if marks.iter().any(|s| ends_here(s, true)) {
-        (0..marks.len()).filter(|&i| ends_here(&marks[i], false)).collect()
+        (0..marks.len())
+            .filter(|&i| ends_here(&marks[i], false))
+            .collect()
     } else {
         Vec::new()
     };
@@ -216,7 +219,9 @@ fn check(block: &MarkedBlock) -> Result<(), TestCaseError> {
 fn verbatim_headline() -> MarkedBlock {
     let (text, marks) = holon_org_format::extract_block_marks("run =cargo test= now");
     assert!(
-        marks.iter().any(|s| s.mark == holon_api::InlineMark::Verbatim),
+        marks
+            .iter()
+            .any(|s| s.mark == holon_api::InlineMark::Verbatim),
         "the headline parses to a verbatim mark: {marks:?}"
     );
     let typed_at = text.chars().count();

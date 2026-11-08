@@ -3679,8 +3679,8 @@ mod tests {
         use loro::ExportMode;
 
         use crate::loro_backend::TREE_NAME;
-        use crate::loro_backend::styled_loro_doc;
         use crate::loro_backend::snapshot_blocks_from_doc;
+        use crate::loro_backend::styled_loro_doc;
 
         // Owner side: a tree with one shared node.
         let owner = loro::LoroDoc::new();

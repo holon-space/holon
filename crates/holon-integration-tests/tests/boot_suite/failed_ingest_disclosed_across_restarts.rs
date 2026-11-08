@@ -136,6 +136,8 @@ impl Run {
                 let Some(content) = self.content(*file, *bytes) else {
                     return;
                 };
+                // Bytes equal to the disk's change nothing, so no ingest is owed.
+                let changed = self.disk(*file).await != content;
                 self.env
                     .write_org_file(FILES[*file], &content)
                     .await
@@ -145,7 +147,8 @@ impl Run {
                     .wait_for_org_change_processed(seq, SYNC_TIMEOUT)
                     .await;
                 self.env.settle().await;
-                self.after_attempt(*file, true, false).await;
+                let observed = self.disclosed()[FILES[*file]];
+                self.after_attempt(*file, changed, observed).await;
             }
             Step::FailIngests(file, on) => {
                 self.model[*file].failing = *on;
@@ -281,13 +284,23 @@ fn reverted_after_a_failed_boot() -> Vec<Step> {
     ]
 }
 
+/// Putting back the bytes already on disk while ingests fail owes no ingest,
+/// so nothing is disclosed.
+fn unchanged_bytes_while_failing() -> Vec<Step> {
+    vec![Step::FailIngests(1, true), Step::Edit(1, Bytes::Revert)]
+}
+
 #[test]
 fn a_failed_ingest_stays_disclosed_until_the_file_ingests() {
     init_tracing();
-    let mut failures: Vec<String> = [reverted_while_off(), reverted_after_a_failed_boot()]
-        .into_iter()
-        .filter_map(|steps| check(&steps).err().map(|e| format!("{steps:?}: {e}")))
-        .collect();
+    let mut failures: Vec<String> = [
+        reverted_while_off(),
+        reverted_after_a_failed_boot(),
+        unchanged_bytes_while_failing(),
+    ]
+    .into_iter()
+    .filter_map(|steps| check(&steps).err().map(|e| format!("{steps:?}: {e}")))
+    .collect();
     if let Err(e) = proptest::test_runner::TestRunner::new(ProptestConfig {
         cases: 8,
         failure_persistence: None,
