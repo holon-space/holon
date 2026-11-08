@@ -261,8 +261,8 @@ fn check(steps: &[Step]) -> Result<(), TestCaseError> {
 }
 
 /// The ingest fails partway, then the user puts back the bytes of the last
-/// good ingest while Holon is off: the file hash matches again, but the store
-/// still holds what the failed ingest wrote.
+/// good ingest while Holon is off. The stored hash still lags the disk, so
+/// the boot ingests the file again rather than taking the hash skip.
 fn reverted_while_off() -> Vec<Step> {
     vec![
         Step::Edit(0, Bytes::Variant(2)),
@@ -272,9 +272,9 @@ fn reverted_while_off() -> Vec<Step> {
     ]
 }
 
-/// A clean stop records the file's hash; the next boot's ingest of an offline
-/// edit fails, and the user puts back the recorded bytes: the boot after that
-/// sees a matching hash although the store holds what the failed ingest wrote.
+/// The next boot's ingest of an offline edit fails, and the user puts back
+/// the bytes of the last good ingest. One clean restart leaves the stored hash
+/// behind the disk, so the boot after that ingests the file again.
 fn reverted_after_a_failed_boot() -> Vec<Step> {
     vec![
         Step::Restart(Vec::new()),
@@ -290,6 +290,27 @@ fn unchanged_bytes_while_failing() -> Vec<Step> {
     vec![Step::FailIngests(1, true), Step::Edit(1, Bytes::Revert)]
 }
 
+/// Two clean restarts let the stored hash catch up with the disk, so the boot
+/// after a revert while off takes the hash skip for the failed file.
+fn reverted_once_the_skip_is_armed() -> Vec<Step> {
+    vec![
+        Step::Restart(Vec::new()),
+        Step::Restart(Vec::new()),
+        Step::FailIngests(0, true),
+        Step::Edit(0, Bytes::Variant(1)),
+        Step::Restart(vec![(0, Bytes::Revert)]),
+    ]
+}
+
+/// Steps that start after the boot skip is armed for every file.
+fn armed_steps() -> impl Strategy<Value = Vec<Step>> {
+    prop::collection::vec(step(), 1..6).prop_map(|steps| {
+        let mut armed = vec![Step::Restart(Vec::new()), Step::Restart(Vec::new())];
+        armed.extend(steps);
+        armed
+    })
+}
+
 #[test]
 fn a_failed_ingest_stays_disclosed_until_the_file_ingests() {
     init_tracing();
@@ -297,6 +318,7 @@ fn a_failed_ingest_stays_disclosed_until_the_file_ingests() {
         reverted_while_off(),
         reverted_after_a_failed_boot(),
         unchanged_bytes_while_failing(),
+        reverted_once_the_skip_is_armed(),
     ]
     .into_iter()
     .filter_map(|steps| check(&steps).err().map(|e| format!("{steps:?}: {e}")))
@@ -306,8 +328,10 @@ fn a_failed_ingest_stays_disclosed_until_the_file_ingests() {
         failure_persistence: None,
         ..ProptestConfig::default()
     })
-    .run(&prop::collection::vec(step(), 1..6), |steps| check(&steps))
-    {
+    .run(
+        &prop_oneof![prop::collection::vec(step(), 1..6), armed_steps()],
+        |steps| check(&steps),
+    ) {
         failures.push(format!("generated: {e}"));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

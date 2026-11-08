@@ -379,6 +379,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `fs-watcher-arm-no-event-agent-session`
 - `fs-watcher-move-out-lost-remove`
 - `fs-watcher-no-events-agent-session`
+- `fs-watcher-rename-no-pair-in-seen-list`
 - `fs-watcher-rename-unpaired-agent-session`
 - `fts-query-block-watch-view-create-fails`
 - `hand-authored-hm4-reboot-settle-load-timeout`

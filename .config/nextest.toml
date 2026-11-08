@@ -111,7 +111,7 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 # budget, so the restart PBT takes over a minute alone.
 [[profile.default.overrides]]
 filter = "binary_id(holon-integration-tests::integration) & test(=boot_suite::failed_ingest_disclosed_across_restarts::a_failed_ingest_stays_disclosed_until_the_file_ingests)"
-slow-timeout = { period = "60s", terminate-after = 3 }  # 3 min hard cap
+slow-timeout = { period = "60s", terminate-after = 4 }  # 4 min hard cap
 
 # The vault-scale main-panel guard asserts a 5s wall-clock budget on a cold
 # matview create + first read (~70 pages). It measures the machine as much as

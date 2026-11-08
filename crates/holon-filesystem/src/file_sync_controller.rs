@@ -5551,7 +5551,12 @@ impl FileSyncController {
             // next degradation class through the same skip. Store-health repair
             // is a separate, unconditional concern owned by
             // `heal_title_less_doc_roots` (boot sweep) + the file-watch heal seam.
-            if stored == &disk_hash && self.content_present_in_all_stores(root).await? {
+            // A failed ingest bails before it stamps the hash, so a recorded
+            // refusal means the store may hold what that ingest wrote.
+            if stored == &disk_hash
+                && !self.persisted_refusals.contains_key(&canonical)
+                && self.content_present_in_all_stores(root).await?
+            {
                 debug!(
                     "[FileSyncController] Skipping {} — disk hash matches stored \
                      file.content_hash and content present in all active stores (cold-boot fast \
