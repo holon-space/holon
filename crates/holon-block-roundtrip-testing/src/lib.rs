@@ -357,6 +357,16 @@ fn mark_kind_strategy() -> impl Strategy<Value = InlineMark> {
     ]
 }
 
+/// Every `InlineMark` variant, `Sub`/`Super` included — for properties of
+/// the mark store itself, which hold for every key whatever org can render.
+pub fn inline_mark_strategy() -> impl Strategy<Value = InlineMark> {
+    prop_oneof![
+        7 => mark_kind_strategy(),
+        1 => Just(InlineMark::Sub),
+        1 => Just(InlineMark::Super),
+    ]
+}
+
 /// `Link` marks with real targets — the data-bearing class. The label is left
 /// empty-ish on purpose: the renderer derives the emitted label from the
 /// content span, and a mismatch between the two is itself worth exercising.

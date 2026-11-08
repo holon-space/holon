@@ -50,6 +50,7 @@ mod kitchen_cookable_now_e2e;
 mod link_candidate_dedup_e2e;
 mod live_edit_link_marks;
 mod loro_binary_benchmark;
+mod marks_survive_warm_boot_pbt;
 #[cfg(feature = "test-helpers")]
 mod malformed_reference_engine_route;
 #[cfg(feature = "test-helpers")]
