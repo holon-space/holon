@@ -57,12 +57,19 @@ def random_row(rng, key, pool):
     return row(key, rng.choice(STATUSES), pattern, evidence, owner_cell(rng, pool), owner_cell(rng, pool), companions)
 
 
-def registry_text(rows, rng):
+def foreign_rows(rng):
+    """Rows of a table that is no registry: any cell count but the registry's, a first cell that is no registry key."""
+    count = lambda: rng.choice([1, 2, 2, 3, 5, 8, 10, 12])
+    return "".join("| " + " | ".join([rng.choice([f"`fam-{rng.choice(WORDS)}`", "see #1", "plain"])]
+                                     + ["x"] * (count() - 1)) + " |\n" for _ in range(rng.randint(1, 3)))
+
+
+def registry_text(rows, rng, first_header=HEADER):
     """`rows` in two registry tables, with prose and a table that is no registry between them."""
     cut = rng.randint(0, len(rows))
-    return ("# Known reds\n\nProse naming `a-key` and #1.\n\n" + HEADER + "".join(rows[:cut])
-            + "\n## Families\n\n| Family | Cause |\n| --- | --- |\n| `fam` | see #1, #2 |\n\n## More\n\n"
-            + HEADER + "".join(rows[cut:]) + "\nTrailing prose.\n")
+    return ("# Known reds\n\nProse naming `a-key` and #1.\n\n" + first_header + "".join(rows[:cut])
+            + "\n## Families\n\n| Family | Cause |\n| --- | --- |\n| `fam` | see #1, #2 |\n" + foreign_rows(rng)
+            + "\n## More\n\n" + HEADER + "".join(rows[cut:]) + "\nTrailing prose.\n")
 
 
 def summary_row(key, outcome, cause="wait"):
@@ -206,6 +213,155 @@ def properties(rng, cards, base, tip, owned, outcomes, others):
     return bool(deleted)
 
 
+def lines_of(lines):
+    return "\n".join(lines) + "\n"
+
+
+def altered_header(rng):
+    """A header line that names no registry column exactly: each of the four registry names bold, lower-case or ticked."""
+    alter = [lambda c: f"**{c}**", str.lower, lambda c: f"`{c}`"]
+    cells = [rng.choice(alter)(c) if c in check.known_reds_table.REGISTRY_COLUMNS else c for c in HEADER_CELLS]
+    return "| " + " | ".join(cells) + " |"
+
+
+def stray_registry(rng, shape, visible, hidden, listed_key):
+    """(text, linenos of the `|` lines that are registry-shaped but outside every registry table).
+    `visible` rows stand in a registry table; `hidden` rows are placed so that the registry grammar cannot see them."""
+    lines = ["# Known reds", "", *HEADER.splitlines(), *(r.rstrip("\n") for r in visible), ""]
+    stray = []
+
+    def add(line, is_stray=False):
+        lines.append(line)
+        if is_stray:
+            stray.append(len(lines))
+
+    def add_hidden():
+        for r in hidden:
+            add(r.rstrip("\n"), True)
+
+    if shape == "blank":
+        add_hidden()
+    elif shape == "header":
+        add(altered_header(rng), True)
+        add("|" + " --- |" * len(HEADER_CELLS))
+        add_hidden()
+    elif shape == "note-above":
+        add("")
+        add("| note |")
+        add(HEADER.splitlines()[0], True)
+        add(HEADER.splitlines()[1])
+        add_hidden()
+    elif shape == "listed-key":
+        add(f"| `{listed_key}` | see above |", True)
+    return lines_of(lines), stray
+
+
+STRAY_SHAPES = ["blank", "header", "note-above", "listed-key"]
+
+
+def stray_message(n):
+    return f"{REGISTRY}:{n} at the tip: registry-shaped row outside a table"
+
+
+def stray_property(rng, shape):
+    """A registry row that the grammar cannot see is an error naming its line; everything else is unaffected."""
+    pool = list(range(1, 10))
+    card = rng.choice(pool[:6])
+    keys = rng.sample(sorted({f"{a}-{b}-{c}" for a in WORDS for b in WORDS for c in WORDS if len({a, b, c}) == 3}), 6)
+    visible_keys, hidden_keys, gone_key = keys[:rng.randint(1, 3)], keys[3:5], keys[5]
+    visible = [random_row(rng, k, pool) for k in visible_keys]
+    hidden = [row(k, owner=f"#{card}") for k in hidden_keys]
+    base_rows = visible + [row(gone_key)]
+    base = {REGISTRY: registry_text(base_rows, rng)}
+    text, stray = stray_registry(rng, shape, visible, hidden, rng.choice(visible_keys + [gone_key]))
+    owned = {k: "kept" for k, r in zip(visible_keys, visible) if check.owners(registry_row_of(r)) & {card}}
+    summary = summary_for(owned, {card})
+    expect(f"stray {shape}", check.problems(base, {REGISTRY: text}, summary, {card}, is_log), [stray_message(n) for n in stray])
+    return shape
+
+
+def broken_header(rng):
+    while header_rule(cells := random_header(rng))[0] != "error":
+        pass
+    return cells, "| " + " | ".join(cells) + " |\n|" + " --- |" * len(cells) + "\n"
+
+
+def broken_row(rng, key, good):
+    """(line, message after `registry row <key> (<where>) `) of a row the registry grammar refuses."""
+    if rng.random() < 0.5:
+        return "| `{}` | known-red | `p` | — | sig | ev | — |\n".format(key), "has 7 cells, its table header has 9"
+    return (row(key, status="flaky", owner=good[key].split("|")[8].strip()),
+            "has the Status 'flaky', none of known-red, fixed-pending-soak, no-longer-fires, proposed")
+
+
+def repair_property(rng):
+    """A base error that the tip fixes or deletes passes; one that the tip keeps is reported once, at the tip."""
+    pool = list(range(1, 10))
+    cards = {rng.choice(pool[:6])}
+    keys = rng.sample(sorted({f"{a}-{b}-{c}" for a in WORDS for b in WORDS for c in WORDS if len({a, b, c}) == 3}),
+                      rng.randint(3, 8))
+    good = {k: random_row(rng, k, pool) for k in keys}
+    summary = lambda text: summary_for({k: "kept" for k, r in check.registry({REGISTRY: text}, "the tip")[0].items()
+                                        if check.owners(r) & cards}, cards)
+    if rng.random() < 0.3:
+        fate = rng.choice(["fixed", "kept"])
+        cells, header = broken_header(rng)
+        base = registry_text(list(good.values()), rng, first_header=header)
+        tip = registry_text(list(good.values()), rng, first_header=HEADER if fate == "fixed" else header)
+        want = [] if fate == "fixed" else [f"{REGISTRY}:5 at the tip: the table header names registry columns but is not "
+                                             f"the registry header ({header_rule(cells)[1]})"]
+        if fate == "kept":
+            summary_text = summary_for({}, cards)
+        else:
+            summary_text = summary(tip)
+        expect(f"header {fate} {cells}", check.problems({REGISTRY: base}, {REGISTRY: tip}, summary_text, cards, is_log), want)
+        return "header", fate
+    victims = keys[:rng.randint(1, 2)]
+    fates = {k: rng.choice(["fixed", "deleted", "kept"]) for k in victims}
+    broken = {k: broken_row(rng, k, good) for k in victims}
+    base_rows = [broken[k][0] if k in broken else good[k] for k in keys]
+    tip_rows = [broken[k][0] if fates.get(k) == "kept" else good[k] for k in keys if fates.get(k) != "deleted"]
+    base, tip = registry_text(base_rows, rng), registry_text(tip_rows, rng)
+    tip_lines = tip.splitlines()
+    want = [f"registry row {k} ({REGISTRY}:{tip_lines.index(broken[k][0].rstrip(chr(10))) + 1} at the tip) {broken[k][1]}"
+            for k in victims if fates[k] == "kept"]
+    want.sort(key=lambda m: int(m.split(":")[1].split(" ")[0]))
+    owned = {k: "kept" for k, r in check.registry({REGISTRY: tip}, "the tip")[0].items() if check.owners(r) & cards}
+    expect(f"rows {fates}", check.problems({REGISTRY: base}, {REGISTRY: tip}, summary_for(owned, cards), cards, is_log), want)
+    return "rows", tuple(sorted(fates.values()))
+
+
+def stray_examples():
+    ok, hidden = row("ok-row", owner="#5"), row("hidden-row", owner="#5")
+    bold = "| " + " | ".join(f"**{c}**" if c in check.known_reds_table.REGISTRY_COLUMNS else c for c in HEADER_CELLS) + " |\n"
+    lower = "| " + " | ".join(c.lower() if c in check.known_reds_table.REGISTRY_COLUMNS else c for c in HEADER_CELLS) + " |\n"
+    sep = HEADER.splitlines(True)[1]
+    shapes = [
+        ("a blank line inside the table", HEADER + ok + "\n" + hidden, [5]),
+        ("an all-bold header", HEADER + ok + "\n" + bold + sep + hidden, [5, 7]),
+        ("an all-lower-case header", HEADER + ok + "\n" + lower + sep + hidden, [5, 7]),
+        ("a one-cell line above the header", HEADER + ok + "\n| note |\n" + HEADER + hidden, [6, 8]),
+        ("a registry key in a two-cell line", HEADER + ok + "\n| `ok-row` | see above |\n", [5]),
+        ("a registry key, short, in a prose table", HEADER + ok + "\n| Note | Cause |\n| --- | --- |\n| `hidden-row` | x |\n"
+         + hidden, [7, 8]),
+    ]
+    for name, text, stray in shapes:
+        reg = {REGISTRY: text}
+        base = {REGISTRY: HEADER + ok + hidden} if "hidden-row" in text else reg
+        got = check.problems(base, reg, summary_for({"ok-row": "kept", **({"hidden-row": "kept"} if base is not reg else {})},
+                                                    {5}), {5}, is_log)
+        expect(f"stray: {name}", [p for p in got if "outside a table" in p], [stray_message(n) for n in stray])
+    prose = {REGISTRY: HEADER + ok + "\n| Note | Cause |\n| --- | --- |\n| `other` | x |\n| plain | y | z |\n"}
+    expect("a prose table with no registry key", check.problems(prose, prose, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
+    base = {REGISTRY: HEADER.replace("| Key |", "| **Key** |", 1).replace("| Status |", "| **Status** |", 1)
+            .replace("| Task |", "| **Task** |", 1).replace("| Owner |", "| **Owner** |", 1) + ok}
+    tip = {REGISTRY: HEADER + ok}
+    expect("an all-bold header at the base that the tip repairs", check.problems(base, tip, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
+    base = {REGISTRY: HEADER.replace("| Key |", "| **Key** |", 1) + ok}
+    expect("a changed header at the base that the tip repairs", check.problems(base, tip, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
+    print("[owned-known-reds] stray and repair static examples: PASS")
+
+
 def static_examples():
     two = row("two-card-row", owner="#12, holon-work#34", task="—")
     base = {REGISTRY: HEADER + two + row("other-row", owner="#99")}
@@ -230,8 +386,7 @@ def static_examples():
            check.problems(short, fixed, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
     gone = {REGISTRY: HEADER + row("ok-row", owner="#5")}
     expect("a short row at the base that the tip deleted",
-           check.problems(short, gone, summary_for({"ok-row": "kept"}, {5}), {5}, is_log),
-           [f"registry row short-row ({REGISTRY}:3 at the base) has 7 cells, its table header has 9"])
+           check.problems(short, gone, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
     odd = {REGISTRY: HEADER + row("odd-row", status="flaky", owner="#5")}
     expect("an unknown Status", check.problems(odd, odd, summary_for({}, {5}), {5}, is_log),
            [f"registry row odd-row ({REGISTRY}:3 at the tip) has the Status 'flaky', none of "
@@ -329,6 +484,7 @@ def cli_examples():
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 200
     static_examples()
+    stray_examples()
     history_example()
     cli_examples()
     rng = random.Random()
@@ -350,6 +506,16 @@ def main():
             raise SystemExit(f"[owned-known-reds] header case {case} of seed {seed}: {e}")
     assert all(classes[c] >= n // 20 for c in ("registry", "error", "ignored")), f"header classes {dict(classes)}"
     print(f"[owned-known-reds] {n} random headers {dict(classes)}, seed {seed}: PASS")
+    shapes, repairs = Counter(), Counter()
+    for case in range(n):
+        try:
+            shapes[stray_property(rng, rng.choice(STRAY_SHAPES))] += 1
+            repairs[repair_property(rng)[0]] += 1
+        except AssertionError as e:
+            raise SystemExit(f"[owned-known-reds] stray/repair case {case} of seed {seed}: {e}")
+    assert all(shapes[s] >= n // 10 for s in STRAY_SHAPES) and all(repairs[r] >= n // 10 for r in ("header", "rows")), \
+        f"stray shapes {dict(shapes)}, repairs {dict(repairs)}"
+    print(f"[owned-known-reds] {n} stray cases {dict(shapes)}, {n} repair cases {dict(repairs)}, seed {seed}: PASS")
 
 
 if __name__ == "__main__":
