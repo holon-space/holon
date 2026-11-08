@@ -53,22 +53,34 @@ def lane_cards(summary_text, root_name):
 
 
 def registry(texts, where):
-    """({key: row}, [(key, problem)]) of every registry row of `texts` ({path: text})."""
-    rows, bad = {}, []
+    """({key: row}, [(key, path, lineno, problem)], [(path, lineno, first cell, [second cell], cell count)]) of `texts` ({path: text}).
+    The last list holds the table lines outside every registry table. A prose table may name a registry key in its
+    first cell, so a short line counts as registry-shaped only with a Status in its second."""
+    rows, bad, loose = {}, [], []
     for path, text in sorted(texts.items()):
         try:
             for lineno, header, cells in known_reds_table.table_rows(text):
                 if header is None:
+                    loose.append((path, lineno, known_reds_table.unticked(cells[0]), cells[1:2], len(cells)))
                     continue
                 try:
                     row = known_reds_table.registry_row(header, cells)
                 except known_reds_table.RowError as e:
-                    bad.append((e.key, f"registry row {e.key} ({path}:{lineno} at {where}) {e}"))
+                    bad.append((e.key, path, lineno, f"registry row {e.key} ({path}:{lineno} at {where}) {e}"))
                     continue
                 rows[row["Key"]] = row
         except known_reds_table.HeaderError as e:
-            bad.append((None, f"{path}:{e.lineno} at {where}: {e}"))
-    return rows, bad
+            bad.append((None, path, e.lineno, f"{path}:{e.lineno} at {where}: {e}"))
+    return rows, bad, loose
+
+
+def fixed_base_errors(base_texts, tip_texts):
+    """The notes of the base errors that the tip fixes or deletes; a base error that the tip keeps is the tip's error."""
+    tip_bad = registry(tip_texts, "the tip")[1]
+    kept = {(key, path if key is None else None) for key, path, _, _ in tip_bad}
+    return [f"base error at {path}:{lineno}, fixed by this diff"
+            for key, path, lineno, _ in registry(base_texts, "the base")[1]
+            if (key, path if key is None else None) not in kept]
 
 
 def owners(row):
@@ -122,13 +134,15 @@ def outcome_problem(key, cells, is_log):
 
 def problems(base_texts, tip_texts, summary_text, cards, is_log):
     """The problems of `summary_text` against the registry at the base and the tip, for the lane's `cards`."""
-    base, base_bad = registry(base_texts, "the base")
-    tip, tip_bad = registry(tip_texts, "the tip")
-    # A malformed base row matters only for a key the tip no longer holds: the tip row decides the rest.
-    tip_keys = set(tip) | {key for key, _ in tip_bad}
-    bad = [p for key, p in base_bad if key not in tip_keys] + [p for _, p in tip_bad]
+    base, base_bad, _ = registry(base_texts, "the base")
+    tip, tip_bad, loose = registry(tip_texts, "the tip")
+    bad = [problem for _, _, _, problem in tip_bad]
     if not base and not base_bad:
         bad.append(f"no registry row in {', '.join(sorted(base_texts)) or REGISTRY_GLOB} at the base")
+    keys = set(base) | set(tip) | {key for key, _, _, _ in base_bad + tip_bad}
+    bad += [f"{path}:{lineno} at the tip: registry-shaped row outside a table"
+            for path, lineno, first, second, count in loose
+            if count == len(known_reds_table.HEADER) or (first in keys and second and second[0] in known_reds_table.STATUSES)]
     rows = {**base, **tip}
     owned = {key for key, row in rows.items() if owners(row) & cards}
     named = summary_rows(summary_text, bad)
@@ -178,8 +192,10 @@ def main():
     except (OSError, UnicodeDecodeError) as e:
         print(f"owned-known-reds: {e}", file=sys.stderr)
         sys.exit(2)
-    bad = problems(base, {str(Path(p).relative_to(Path.cwd())): t for p, t in tip.items()}, summary_text, cards,
-                   lambda log: Path(log).expanduser().is_file())
+    tips = {str(Path(p).relative_to(Path.cwd())): t for p, t in tip.items()}
+    bad = problems(base, tips, summary_text, cards, lambda log: Path(log).expanduser().is_file())
+    for note in fixed_base_errors(base, tips):
+        print(f"owned-known-reds: {note}")
     for problem in bad:
         print(f"owned-known-reds: {problem}", file=sys.stderr)
     sys.exit(1 if bad else 0)

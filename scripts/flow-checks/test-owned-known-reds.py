@@ -252,7 +252,7 @@ def stray_registry(rng, shape, visible, hidden, listed_key):
         add(HEADER.splitlines()[1])
         add_hidden()
     elif shape == "listed-key":
-        add(f"| `{listed_key}` | see above |", True)
+        add(f"| `{listed_key}` | known-red |", True)
     return lines_of(lines), stray
 
 
@@ -315,6 +315,8 @@ def repair_property(rng):
         else:
             summary_text = summary(tip)
         expect(f"header {fate} {cells}", check.problems({REGISTRY: base}, {REGISTRY: tip}, summary_text, cards, is_log), want)
+        expect(f"header {fate} {cells} notes", check.fixed_base_errors({REGISTRY: base}, {REGISTRY: tip}),
+               [f"base error at {REGISTRY}:5, fixed by this diff"] if fate == "fixed" else [])
         return "header", fate
     victims = keys[:rng.randint(1, 2)]
     fates = {k: rng.choice(["fixed", "deleted", "kept"]) for k in victims}
@@ -328,6 +330,10 @@ def repair_property(rng):
     want.sort(key=lambda m: int(m.split(":")[1].split(" ")[0]))
     owned = {k: "kept" for k, r in check.registry({REGISTRY: tip}, "the tip")[0].items() if check.owners(r) & cards}
     expect(f"rows {fates}", check.problems({REGISTRY: base}, {REGISTRY: tip}, summary_for(owned, cards), cards, is_log), want)
+    base_lines = base.splitlines()
+    notes = sorted(base_lines.index(broken[k][0].rstrip("\n")) + 1 for k in victims if fates[k] != "kept")
+    expect(f"rows {fates} notes", check.fixed_base_errors({REGISTRY: base}, {REGISTRY: tip}),
+           [f"base error at {REGISTRY}:{n}, fixed by this diff" for n in notes])
     return "rows", tuple(sorted(fates.values()))
 
 
@@ -341,8 +347,8 @@ def stray_examples():
         ("an all-bold header", HEADER + ok + "\n" + bold + sep + hidden, [5, 7]),
         ("an all-lower-case header", HEADER + ok + "\n" + lower + sep + hidden, [5, 7]),
         ("a one-cell line above the header", HEADER + ok + "\n| note |\n" + HEADER + hidden, [6, 8]),
-        ("a registry key in a two-cell line", HEADER + ok + "\n| `ok-row` | see above |\n", [5]),
-        ("a registry key, short, in a prose table", HEADER + ok + "\n| Note | Cause |\n| --- | --- |\n| `hidden-row` | x |\n"
+        ("a registry key and a Status in a two-cell line", HEADER + ok + "\n| `ok-row` | known-red |\n", [5]),
+        ("a registry key, short, in a prose table", HEADER + ok + "\n| Note | Cause |\n| --- | --- |\n| `hidden-row` | proposed |\n"
          + hidden, [7, 8]),
     ]
     for name, text, stray in shapes:
@@ -351,14 +357,17 @@ def stray_examples():
         got = check.problems(base, reg, summary_for({"ok-row": "kept", **({"hidden-row": "kept"} if base is not reg else {})},
                                                     {5}), {5}, is_log)
         expect(f"stray: {name}", [p for p in got if "outside a table" in p], [stray_message(n) for n in stray])
-    prose = {REGISTRY: HEADER + ok + "\n| Note | Cause |\n| --- | --- |\n| `other` | x |\n| plain | y | z |\n"}
-    expect("a prose table with no registry key", check.problems(prose, prose, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
-    base = {REGISTRY: HEADER.replace("| Key |", "| **Key** |", 1).replace("| Status |", "| **Status** |", 1)
-            .replace("| Task |", "| **Task** |", 1).replace("| Owner |", "| **Owner** |", 1) + ok}
+    prose = {REGISTRY: HEADER + ok + "\n| Note | Cause |\n| --- | --- |\n| `other` | x |\n| `ok-row` | see above |\n| plain | y | z |\n"}
+    expect("a prose table that names a registry key without a Status", check.problems(prose, prose, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
+    base = {REGISTRY: HEADER + ok + "\n" + bold + sep + hidden}
+    tip = {REGISTRY: HEADER + ok + hidden}
+    expect("an all-bold table at the base that the tip repairs",
+           check.problems(base, tip, summary_for({"ok-row": "kept", "hidden-row": "kept"}, {5}), {5}, is_log), [])
     tip = {REGISTRY: HEADER + ok}
-    expect("an all-bold header at the base that the tip repairs", check.problems(base, tip, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
     base = {REGISTRY: HEADER.replace("| Key |", "| **Key** |", 1) + ok}
     expect("a changed header at the base that the tip repairs", check.problems(base, tip, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
+    expect("a changed header at the base that the tip repairs, note", check.fixed_base_errors(base, tip),
+           [f"base error at {REGISTRY}:1, fixed by this diff"])
     print("[owned-known-reds] stray and repair static examples: PASS")
 
 
@@ -387,6 +396,8 @@ def static_examples():
     gone = {REGISTRY: HEADER + row("ok-row", owner="#5")}
     expect("a short row at the base that the tip deleted",
            check.problems(short, gone, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
+    expect("a short row at the base that the tip deleted, note", check.fixed_base_errors(short, gone),
+           [f"base error at {REGISTRY}:3, fixed by this diff"])
     odd = {REGISTRY: HEADER + row("odd-row", status="flaky", owner="#5")}
     expect("an unknown Status", check.problems(odd, odd, summary_for({}, {5}), {5}, is_log),
            [f"registry row odd-row ({REGISTRY}:3 at the tip) has the Status 'flaky', none of "
