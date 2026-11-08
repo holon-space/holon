@@ -7,6 +7,7 @@ at the tip, the lane's cards, and a summary built from the rows the cards own.
 The real-history example reads the registry of two commits of this repository with `jj`; fixtures/owned-known-reds-summary.md
 is the summary of that lane in the `## Known-red rows` shape.
 """
+import re
 import importlib.util
 import random
 import subprocess
@@ -140,10 +141,11 @@ def random_header(rng):
 
 def header_rule(cells):
     """The table rule as an oracle: the exact header opens a registry table, a header that names a registry column
-    but is not exact is an error naming what differs, any other header is ignored. Returns the class and the reason."""
+    but is not exact is an error naming what differs, any other header is ignored. Names compare without emphasis
+    and case. Returns the class and the reason."""
     if cells == HEADER_CELLS:
         return "registry", None
-    if not {"Key", "Status", "Task", "Owner"} & set(cells):
+    if not {"key", "status", "task", "owner"} & {re.sub(r"[*_`]+", "", c).strip().lower() for c in cells}:
         return "ignored", None
     have, want = Counter(cells), Counter(HEADER_CELLS)
     surplus = have - want
@@ -164,7 +166,7 @@ def header_property(cells):
         assert want == "error", f"header {cells}: HeaderError, the rule says {want}"
         assert ("another order" in why) == (sorted(cells) == sorted(HEADER_CELLS)), f"header {cells}: {why}"
         return want
-    expect(f"header {cells}", headers, [HEADER_CELLS] if want == "registry" else [None, None])
+    expect(f"header {cells}", headers, [HEADER_CELLS] if want == "registry" else [None])
     return want
 
 
@@ -218,45 +220,45 @@ def lines_of(lines):
 
 
 def altered_header(rng):
-    """A header line that names no registry column exactly: each of the four registry names bold, lower-case or ticked."""
+    """The cells of a header that names each registry column bold, lower-case or ticked, so it is not the exact header."""
     alter = [lambda c: f"**{c}**", str.lower, lambda c: f"`{c}`"]
-    cells = [rng.choice(alter)(c) if c in check.known_reds_table.REGISTRY_COLUMNS else c for c in HEADER_CELLS]
-    return "| " + " | ".join(cells) + " |"
+    return [rng.choice(alter)(c) if c in check.known_reds_table.REGISTRY_COLUMNS else c for c in HEADER_CELLS]
 
 
 def stray_registry(rng, shape, visible, hidden, listed_key):
-    """(text, linenos of the `|` lines that are registry-shaped but outside every registry table).
+    """(text, linenos of the orphan `|` lines that are registry-shaped, lineno and message of a header error or None).
     `visible` rows stand in a registry table; `hidden` rows are placed so that the registry grammar cannot see them."""
     lines = ["# Known reds", "", *HEADER.splitlines(), *(r.rstrip("\n") for r in visible), ""]
-    stray = []
+    stray, header_error = [], None
 
     def add(line, is_stray=False):
         lines.append(line)
         if is_stray:
             stray.append(len(lines))
 
-    def add_hidden():
+    if shape == "blank":
         for r in hidden:
             add(r.rstrip("\n"), True)
-
-    if shape == "blank":
-        add_hidden()
     elif shape == "header":
-        add(altered_header(rng), True)
+        cells = altered_header(rng)
+        add("| " + " | ".join(cells) + " |")
+        header_error = (len(lines), f"{REGISTRY}:{len(lines)} at the tip: the table header names registry columns but is not "
+                                    f"the registry header ({header_rule(cells)[1]})")
         add("|" + " --- |" * len(HEADER_CELLS))
-        add_hidden()
-    elif shape == "note-above":
-        add("")
-        add("| note |")
-        add(HEADER.splitlines()[0], True)
-        add(HEADER.splitlines()[1])
-        add_hidden()
+        for r in hidden:
+            add(r.rstrip("\n"))
+    elif shape == "prose-table":
+        add("| Note | Cause |")
+        add("| --- | --- |")
+        for r in hidden:
+            add(r.rstrip("\n"))
+        add(f"| `{listed_key}` | known-red |")
     elif shape == "listed-key":
-        add(f"| `{listed_key}` | known-red |", True)
-    return lines_of(lines), stray
+        add(f"| `{listed_key}` | {rng.choice(['known-red', 'flaky', 'x'])} |", True)
+    return lines_of(lines), stray, header_error
 
 
-STRAY_SHAPES = ["blank", "header", "note-above", "listed-key"]
+STRAY_SHAPES = ["blank", "header", "prose-table", "listed-key"]
 
 
 def stray_message(n):
@@ -273,10 +275,10 @@ def stray_property(rng, shape):
     hidden = [row(k, owner=f"#{card}") for k in hidden_keys]
     base_rows = visible + [row(gone_key)]
     base = {REGISTRY: registry_text(base_rows, rng)}
-    text, stray = stray_registry(rng, shape, visible, hidden, rng.choice(visible_keys + [gone_key]))
+    text, stray, header_error = stray_registry(rng, shape, visible, hidden, rng.choice(visible_keys + [gone_key]))
     owned = {k: "kept" for k, r in zip(visible_keys, visible) if check.owners(registry_row_of(r)) & {card}}
     summary = summary_for(owned, {card})
-    expect(f"stray {shape}", check.problems(base, {REGISTRY: text}, summary, {card}, is_log), [stray_message(n) for n in stray])
+    expect(f"stray {shape}", check.problems(base, {REGISTRY: text}, summary, {card}, is_log), [stray_message(n) for n in stray] + ([header_error[1]] if header_error else []))
     return shape
 
 
@@ -344,19 +346,17 @@ def stray_examples():
     sep = HEADER.splitlines(True)[1]
     shapes = [
         ("a blank line inside the table", HEADER + ok + "\n" + hidden, [5]),
-        ("an all-bold header", HEADER + ok + "\n" + bold + sep + hidden, [5, 7]),
-        ("an all-lower-case header", HEADER + ok + "\n" + lower + sep + hidden, [5, 7]),
-        ("a one-cell line above the header", HEADER + ok + "\n| note |\n" + HEADER + hidden, [6, 8]),
+        ("a one-cell line above the header", HEADER + ok + "\n| note |\n" + HEADER + hidden, []),
         ("a registry key and a Status in a two-cell line", HEADER + ok + "\n| `ok-row` | known-red |\n", [5]),
+        ("a registry key and a bad Status in a two-cell line", HEADER + ok + "\n| `ok-row` | flaky |\n", [5]),
+        ("a registry key in a three-cell orphan", HEADER + ok + "\n| `ok-row` | a | b |\n", [5]),
         ("a registry key, short, in a prose table", HEADER + ok + "\n| Note | Cause |\n| --- | --- |\n| `hidden-row` | proposed |\n"
-         + hidden, [7, 8]),
+         + hidden, []),
     ]
-    for name, text, stray in shapes:
-        reg = {REGISTRY: text}
-        base = {REGISTRY: HEADER + ok + hidden} if "hidden-row" in text else reg
-        got = check.problems(base, reg, summary_for({"ok-row": "kept", **({"hidden-row": "kept"} if base is not reg else {})},
-                                                    {5}), {5}, is_log)
-        expect(f"stray: {name}", [p for p in got if "outside a table" in p], [stray_message(n) for n in stray])
+    for name, header in (("an all-bold header", bold), ("an all-lower-case header", lower)):
+        reg = {REGISTRY: HEADER + ok + "\n" + header + sep + hidden}
+        got = check.problems({REGISTRY: HEADER + ok}, reg, summary_for({"ok-row": "kept"}, {5}), {5}, is_log)
+        assert len(got) == 1 and got[0].startswith(f"{REGISTRY}:5 at the tip: the table header names registry columns"), (name, got)
     prose = {REGISTRY: HEADER + ok + "\n| Note | Cause |\n| --- | --- |\n| `other` | x |\n| `ok-row` | see above |\n| plain | y | z |\n"}
     expect("a prose table that names a registry key without a Status", check.problems(prose, prose, summary_for({"ok-row": "kept"}, {5}), {5}, is_log), [])
     base = {REGISTRY: HEADER + ok + "\n" + bold + sep + hidden}

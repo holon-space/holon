@@ -53,15 +53,16 @@ def lane_cards(summary_text, root_name):
 
 
 def registry(texts, where):
-    """({key: row}, [(key, path, lineno, problem)], [(path, lineno, first cell, [second cell], cell count)]) of `texts` ({path: text}).
-    The last list holds the table lines outside every registry table. A prose table may name a registry key in its
-    first cell, so a short line counts as registry-shaped only with a Status in its second."""
+    """({key: row}, [(key, path, lineno, problem)], [(path, lineno, first cell, cell count)]) of `texts` ({path: text}).
+    The last list holds the `|` lines that belong to no table."""
     rows, bad, loose = {}, [], []
     for path, text in sorted(texts.items()):
         try:
-            for lineno, header, cells in known_reds_table.table_rows(text):
+            for lineno, header, cells, in_table in known_reds_table.scan(text):
+                if not in_table:
+                    loose.append((path, lineno, known_reds_table.unticked(cells[0]), len(cells)))
+                    continue
                 if header is None:
-                    loose.append((path, lineno, known_reds_table.unticked(cells[0]), cells[1:2], len(cells)))
                     continue
                 try:
                     row = known_reds_table.registry_row(header, cells)
@@ -141,8 +142,7 @@ def problems(base_texts, tip_texts, summary_text, cards, is_log):
         bad.append(f"no registry row in {', '.join(sorted(base_texts)) or REGISTRY_GLOB} at the base")
     keys = set(base) | set(tip) | {key for key, _, _, _ in base_bad + tip_bad}
     bad += [f"{path}:{lineno} at the tip: registry-shaped row outside a table"
-            for path, lineno, first, second, count in loose
-            if count == len(known_reds_table.HEADER) or (first in keys and second and second[0] in known_reds_table.STATUSES)]
+            for path, lineno, first, count in loose if count == len(known_reds_table.HEADER) or first in keys]
     rows = {**base, **tip}
     owned = {key for key, row in rows.items() if owners(row) & cards}
     named = summary_rows(summary_text, bad)
