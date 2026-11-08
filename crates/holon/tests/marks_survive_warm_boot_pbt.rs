@@ -1,13 +1,15 @@
 //! A warm boot loads the store's documents from their snapshots. Every inline
-//! mark must write, read back and expand on such a document exactly as on the
-//! fresh document a cold boot makes.
+//! mark must write, read back and expand on such a document as Holon's style
+//! policy says, exactly as on the fresh document a cold boot makes.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 
 use holon_api::BlockContent;
 use holon_api::BlockEdges;
+use holon_api::EntityRef;
 use holon_api::EntityUri;
+use holon_api::InlineMark;
 use holon_api::MarkSpan;
 use holon_api::repository::CoreOperations;
 use holon_block_roundtrip_testing::inline_mark_strategy;
@@ -26,7 +28,8 @@ struct MarkedBlock {
 }
 
 /// One span per mark key: Loro merges two spans of the same key, so a second
-/// one would make the round-trip oracle compare against a union.
+/// one would make the round-trip oracle compare against a union. Half of the
+/// cases type at a span's end, where the expand policy decides.
 fn marked_block() -> impl Strategy<Value = MarkedBlock> {
     "[a-z]{1,8}( [a-z]{1,8}){0,3}".prop_flat_map(|text| {
         let len = text.chars().count();
@@ -34,18 +37,29 @@ fn marked_block() -> impl Strategy<Value = MarkedBlock> {
             let (start, end) = if a < b { (a, b) } else { (b - 1, a + 1) };
             MarkSpan::new(start, end, mark)
         });
-        (prop::collection::vec(span, 1..5), 0..=len).prop_map(move |(spans, typed_at)| {
-            let mut keys = HashSet::new();
-            let marks = spans
-                .into_iter()
-                .filter(|s| keys.insert(s.mark.loro_key()))
-                .collect();
-            MarkedBlock {
-                text: text.clone(),
-                marks,
-                typed_at,
-            }
-        })
+        (
+            prop::collection::vec(span, 1..5),
+            0..=len,
+            any::<bool>(),
+            any::<prop::sample::Index>(),
+        )
+            .prop_map(move |(spans, anywhere, at_an_end, end_of)| {
+                let mut keys = HashSet::new();
+                let marks: Vec<MarkSpan> = spans
+                    .into_iter()
+                    .filter(|s| keys.insert(s.mark.loro_key()))
+                    .collect();
+                let typed_at = if at_an_end {
+                    end_of.get(&marks).end
+                } else {
+                    anywhere
+                };
+                MarkedBlock {
+                    text: text.clone(),
+                    marks,
+                    typed_at,
+                }
+            })
     })
 }
 
@@ -128,19 +142,42 @@ fn cold_and_warm(block: &MarkedBlock) -> (Result<Written, String>, Result<Writte
     })
 }
 
+/// The spans after one character is typed at `at`: a span grows when `at` is
+/// inside it, or at its end and its key expands after; spans from `at` on shift.
+fn expected_after_typing(marks: &[MarkSpan], at: usize) -> Vec<MarkSpan> {
+    sorted(
+        marks
+            .iter()
+            .map(|s| {
+                let grows = (s.start < at && at < s.end)
+                    || (at == s.end && InlineMark::expand_after(s.mark.loro_key()));
+                match () {
+                    _ if at <= s.start => MarkSpan::new(s.start + 1, s.end + 1, s.mark.clone()),
+                    _ if grows => MarkSpan::new(s.start, s.end + 1, s.mark.clone()),
+                    _ => s.clone(),
+                }
+            })
+            .collect(),
+    )
+}
+
 fn check(block: &MarkedBlock) -> Result<(), TestCaseError> {
+    let expected = Written {
+        after_write: sorted(block.marks.clone()),
+        after_typing: expected_after_typing(&block.marks, block.typed_at),
+    };
     let (cold, warm) = cold_and_warm(block);
     let cold = cold.map_err(|e| TestCaseError::fail(format!("cold boot: {e}")))?;
     prop_assert_eq!(
-        &cold.after_write,
-        &sorted(block.marks.clone()),
-        "the marks must round-trip on a cold boot"
+        &cold,
+        &expected,
+        "on a cold boot the marks must round-trip and expand as Holon's style policy says"
     );
     let warm = warm.map_err(|e| TestCaseError::fail(format!("warm boot: {e}")))?;
     prop_assert_eq!(
         &warm,
-        &cold,
-        "a warm boot must store and expand marks as a cold boot does"
+        &expected,
+        "on a warm boot the marks must round-trip and expand as Holon's style policy says"
     );
     Ok(())
 }
@@ -161,13 +198,48 @@ fn verbatim_headline() -> MarkedBlock {
     }
 }
 
+/// Each mark key alone over a word, typed at the span's end: every key's
+/// write and expand, whether or not Loro's built-in styles know the key.
+fn every_key_typed_at_its_end() -> Vec<MarkedBlock> {
+    let link = InlineMark::Link {
+        target: EntityRef::External {
+            url: "https://example.com/page".to_string(),
+        },
+        label: "word".to_string(),
+    };
+    [
+        InlineMark::Bold,
+        InlineMark::Italic,
+        InlineMark::Code,
+        InlineMark::Verbatim,
+        InlineMark::Strike,
+        InlineMark::Underline,
+        link,
+        InlineMark::Sub,
+        InlineMark::Super,
+    ]
+    .into_iter()
+    .map(|mark| MarkedBlock {
+        text: "word tail".to_string(),
+        marks: vec![MarkSpan::new(0, 4, mark)],
+        typed_at: 4,
+    })
+    .collect()
+}
+
 #[test]
 fn every_mark_behaves_alike_on_a_warm_and_a_cold_boot() {
-    check(&verbatim_headline()).unwrap();
-    proptest::test_runner::TestRunner::new(ProptestConfig {
+    let mut failures: Vec<String> = std::iter::once(verbatim_headline())
+        .chain(every_key_typed_at_its_end())
+        .filter_map(|block| check(&block).err().map(|e| format!("{block:?}: {e}")))
+        .collect();
+    if let Err(e) = proptest::test_runner::TestRunner::new(ProptestConfig {
         failure_persistence: None,
         ..ProptestConfig::default()
     })
     .run(&marked_block(), |block| check(&block))
-    .unwrap();
+    {
+        failures.push(format!("generated: {e}"));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
