@@ -29,7 +29,8 @@ N = 8
 TESTS = [f"t{i:02}" for i in range(N)]
 EXAMPLES = [("PPPUPPPP", set()), ("PKPPPKPP", set()), ("PPPPPPPP", set()), ("UPPPPPPP", {"t00"}),
             ("KPKPUPPP", {"t02"}), ("PKKPKUPP", {"t01", "t02"}), ("KKKPPPPP", set()),
-            ("PKUUPUPU", {"t07"}), ("PKPKPPPU", set()), ("PPPPPPPU", set()), ("PPUPKPPP", set())]
+            ("PKUUPUPU", {"t07"}), ("PKPKPPPU", set()), ("PPPPPPPU", set()), ("PPUPKPPP", set()),
+            ("PPPPPPPP", set(TESTS))]
 UNLISTED = "planted red outside the known-reds list"
 STATUS = re.compile(r"^ *([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\([^)]*\) )?\S+ (t\d\d)$")
 SUMMARY = re.compile(r"^ *Summary \[.*\] (\d+) tests? run: ")
@@ -86,13 +87,15 @@ def check(root, out, plan, excluded, show):
     label = f"plan={plan} excluded={sorted(excluded)}"
     selected = [i for i, t in enumerate(TESTS) if t not in excluded]
     novel = any(plan[i] == "U" for i in selected)
+    # nextest exits non-zero when the filter selects no test; the run must not read that as green.
+    failed = novel or not selected
     r, done = nextest(root, out, "run", plan, excluded)
     log = f"{label}\n{r.stdout}\n{r.stderr}"
     if show:
         print(f"run {label}\n{r.stdout}{(out / 'reds.txt').read_text()}")
     want = [(TESTS[i], "PASS" if plan[i] == "P" else "FAIL") for i in selected]
     assert done == want, f"{log}\nran {done}, want {want}"
-    assert (r.returncode != 0) == novel, f"{log}\nexit {r.returncode}"
+    assert (r.returncode != 0) == failed, f"{log}\nexit {r.returncode}"
     named = [l for l in r.stdout.splitlines() if l.startswith("[lane-nextest] novel: ")]
     assert bool(named) == novel and all(UNLISTED in l for l in named), f"{log}\nnovel lines {named}"
     reds = [t for t, s in done if s == "FAIL"]
@@ -111,10 +114,15 @@ def check(root, out, plan, excluded, show):
     assert summary == [str(len(reds))], f"{log}\nrerun summary {summary}\n{r.stdout}"
 
 
+def draw_excluded(rng):
+    """A run filter: a random subset of the tests excluded, the whole set included."""
+    return set(rng.sample(TESTS, rng.choice([0, 0, 1, 2, N])))
+
+
 def main():
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 24
     rng = random.Random(int(os.environ.get("SEED", random.randrange(1 << 30))))
-    generated = [("".join(rng.choice("PPKU") for _ in TESTS), set(rng.sample(TESTS, rng.choice([0, 0, 1, 2]))))
+    generated = [("".join(rng.choice("PPKU") for _ in TESTS), draw_excluded(rng))
                  for _ in range(cases)]
     with tempfile.TemporaryDirectory() as tmp:
         root, out = Path(tmp) / "fixture", Path(tmp) / "out"

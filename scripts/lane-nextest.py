@@ -8,7 +8,8 @@
 Both runs pass the nextest output through to stdout. `run` writes the red list to $LANE_NEXTEST_DIR/reds.txt
 (default target/lane-nextest/), one `<binary id> <test name>` line per red test, known reds included, and prints
 its path. It exits 0 when nextest passed or every red is on the known-reds list, else 1 with one `[lane-nextest]
-novel:` line per novel signature of the classifier's verdict. A classifier error is an error of `run` too.
+novel:` line per novel signature of the classifier's verdict. A nextest failure without a red test (no test
+selected, a build error) exits with nextest's code. A classifier error is an error of `run` too.
 `rerun` refuses an empty or missing red list.
 """
 import os
@@ -62,8 +63,8 @@ def run(args):
     reds = list(dict.fromkeys(reds))
     reds_file.write_text("".join(f"{b} {t}\n" for b, t in reds))
     print(f"[lane-nextest] red list: {reds_file} ({len(reds)} tests)", flush=True)
-    if rc == 0:
-        return 0
+    if rc == 0 or not reds:
+        return rc
     with open(verdict_log, "w") as f:
         verdict = subprocess.run([str(CLASSIFIER), str(stream_log)], stdout=f, stderr=subprocess.STDOUT).returncode
     if verdict not in (0, 1):
