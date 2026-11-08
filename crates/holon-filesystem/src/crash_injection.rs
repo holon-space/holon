@@ -95,3 +95,30 @@ pub(crate) async fn render_reached(path: &Path) {
     };
     release.notified().await;
 }
+
+static FAILING_INGESTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Every ingest of the file at `path` fails after its blocks are written,
+/// until [`stop_failing_ingests`]. Keyed by path because the tests of one
+/// binary share this process.
+pub fn fail_ingests_of(path: PathBuf) {
+    let mut failing = FAILING_INGESTS.lock().expect("failing-ingests lock");
+    if !failing.contains(&path) {
+        failing.push(path);
+    }
+}
+
+pub fn stop_failing_ingests(path: &Path) {
+    FAILING_INGESTS
+        .lock()
+        .expect("failing-ingests lock")
+        .retain(|failing| failing != path);
+}
+
+pub(crate) fn ingest_fails(path: &Path) -> bool {
+    FAILING_INGESTS
+        .lock()
+        .expect("failing-ingests lock")
+        .iter()
+        .any(|failing| failing == path)
+}

@@ -7766,6 +7766,13 @@ impl FileSyncController {
         // Ingest image files from disk into the image data provider (if any).
         // At this point blocks are in the store and image files are on disk.
         self.ingest_images(&document_uri).await?;
+        #[cfg(feature = "crash-injection")]
+        if crate::crash_injection::ingest_fails(path) {
+            anyhow::bail!(
+                "[crash-injection] the ingest of {} fails after its blocks are written",
+                path.display()
+            );
+        }
 
         // For UPDATE-only ingestion (no creates/deletes), the disk content already
         // reflects the authoritative state — we just parsed it and persisted the
