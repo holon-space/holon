@@ -268,8 +268,8 @@ capability-sweep:
 known-reds-fixture *FLAGS:
     scripts/keystone-known-reds-fixture.sh {{FLAGS}}
 
-# A lane's nextest run (the printed `nextest:` args): stops at the first red that
-# scripts/keystone-known-reds.sh does not list, and writes the red list.
+# A lane's nextest run (the printed `nextest:` args): runs to its end, judges its
+# reds with scripts/keystone-known-reds.sh, and writes the red list.
 [positional-arguments]
 lane-nextest *ARGS:
     scripts/lane-nextest.py run "$@"

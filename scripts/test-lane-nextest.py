@@ -5,12 +5,15 @@ Run: `python3 scripts/test-lane-nextest.py [cases]`. Builds a one-crate workspac
 non-zero on the first violation.
 The crate's tests t00..t07 run one at a time in name order; the env var PLAN gives each test's outcome:
 `P` passes, `K` panics with the wording of a known-red row of docs/Testing/KeystoneKnownReds.md, `U` panics with a
-wording no row lists. A test after the first `U` sleeps, so a run that does not stop there is seen.
+wording no row lists.
 Generators: the plan (each test P, K or U) and the run filter (a random subset of the tests excluded by `-E`).
-Properties, per case: every test the run completes has its planned outcome, the run completes the tests up to the
-first `U` among the filtered ones and stops within one more, its red list names exactly its completed red tests,
-and the rerun from that list runs exactly the listed tests with the same filter.
-A `nextest:` step line of scripts/flow-checks/run-step.sh runs through scripts/lane-nextest.py.
+Properties, per case: the run completes every filtered test with its planned outcome, exits non-zero iff a `U` ran
+and names a novel signature iff it did, its red list names exactly its red tests, and the rerun from that list runs
+exactly the listed tests with the same filter.
+Fixed plans run first through the same properties: the orders of red kinds a run can end in (a novel red last, a
+novel red before a known one, no red) and earlier finds.
+A `nextest:` step line of scripts/flow-checks/run-step.sh runs through scripts/lane-nextest.py, and runs on past a
+novel red whose later tests take seconds each.
 """
 import os
 import random
@@ -24,10 +27,9 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "lane-nextest.py"
 N = 8
 TESTS = [f"t{i:02}" for i in range(N)]
-# Fixed cases first: the card's planted red, planted known red, an all-green run, and adjacent reds.
 EXAMPLES = [("PPPUPPPP", set()), ("PKPPPKPP", set()), ("PPPPPPPP", set()), ("UPPPPPPP", {"t00"}),
             ("KPKPUPPP", {"t02"}), ("PKKPKUPP", {"t01", "t02"}), ("KKKPPPPP", set()),
-            ("PKUUPUPU", {"t07"}), ("PKPKPPPU", set())]
+            ("PKUUPUPU", {"t07"}), ("PKPKPPPU", set()), ("PPPPPPPU", set()), ("PPUPKPPP", set())]
 UNLISTED = "planted red outside the known-reds list"
 STATUS = re.compile(r"^ *([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\([^)]*\) )?\S+ (t\d\d)$")
 SUMMARY = re.compile(r"^ *Summary \[.*\] (\d+) tests? run: ")
@@ -54,7 +56,7 @@ def fixture(root, wording):
     (root / "tests/main.rs").write_text(f"""fn act(i: usize) {{
     let plan = std::env::var("PLAN").unwrap();
     if plan[..i].contains('U') {{
-        let secs = std::env::var("SLEEP_AFTER_U").map_or(30, |s| s.parse().unwrap());
+        let secs = std::env::var("SLEEP_AFTER_U").map_or(0, |s| s.parse().unwrap());
         std::thread::sleep(std::time::Duration::from_secs(secs));
     }}
     match &plan[i..=i] {{
@@ -83,26 +85,16 @@ def nextest(root, out, mode, plan, excluded):
 def check(root, out, plan, excluded, show):
     label = f"plan={plan} excluded={sorted(excluded)}"
     selected = [i for i, t in enumerate(TESTS) if t not in excluded]
-    first_u = next((k for k, i in enumerate(selected) if plan[i] == "U"), None)
-    r, ran = nextest(root, out, "run", plan, excluded)
+    novel = any(plan[i] == "U" for i in selected)
+    r, done = nextest(root, out, "run", plan, excluded)
     log = f"{label}\n{r.stdout}\n{r.stderr}"
     if show:
         print(f"run {label}\n{r.stdout}{(out / 'reds.txt').read_text()}")
-    done = [(t, s) for t, s in ran if s != "SIGTERM"]
-    in_flight = ran[len(done):]
-    # Tests after the first U may complete while the classifier runs; each still matches its plan.
     want = [(TESTS[i], "PASS" if plan[i] == "P" else "FAIL") for i in selected]
-    assert done == want[:len(done)], f"{log}\nran {ran}, want a prefix of {want}"
-    if first_u is None:
-        assert done == want and not in_flight, f"{log}\nran {ran}, want {want}"
-    else:
-        assert len(done) > first_u, f"{log}\nstopped before the first unlisted red: {ran}"
-        assert [t for t, _ in in_flight] in ([], [want[len(done)][0]] if len(done) < len(want) else []), \
-            f"{log}\nnot one test in flight: {in_flight}"
-        # A test after the first U sleeps 30 s, so a run that reaches two of them did not stop.
-        assert len(done) <= first_u + 2, f"{log}\nran past the stop: {ran}"
-        assert "[fail-fast] stopped at fixture::main " + want[first_u][0] in r.stdout, log
-    assert (r.returncode == 0) == (first_u is None and all(s == "PASS" for _, s in done)), f"{log}\nexit {r.returncode}"
+    assert done == want, f"{log}\nran {done}, want {want}"
+    assert (r.returncode != 0) == novel, f"{log}\nexit {r.returncode}"
+    named = [l for l in r.stdout.splitlines() if l.startswith("[lane-nextest] novel: ")]
+    assert bool(named) == novel and all(UNLISTED in l for l in named), f"{log}\nnovel lines {named}"
     reds = [t for t, s in done if s == "FAIL"]
     listed = [l.split(" ") for l in (out / "reds.txt").read_text().splitlines()]
     assert listed == [["fixture::main", t] for t in reds], f"{log}\nred list {listed}, want {reds}"
@@ -131,16 +123,13 @@ def main():
         subprocess.run(["cargo", "build", "--tests", "--quiet"], cwd=root, check=True)
         step = subprocess.run([str(REPO / "scripts/flow-checks/run-step.sh"), "nextest: --test-threads 1 -E 'all()'"],
                               cwd=root, capture_output=True, text=True,
-                              env={**os.environ, "BASE": "0" * 40, "PLAN": "PPPUPPPP", "LANE_NEXTEST_DIR": str(out)})
+                              env={**os.environ, "BASE": "0" * 40, "PLAN": "PPPUPPPP", "SLEEP_AFTER_U": "3",
+                                   "LANE_NEXTEST_DIR": str(out)})
         print(step.stdout)
-        assert "[fail-fast] stopped at fixture::main t03" in step.stdout, step
+        ran = [m.groups()[::-1] for m in map(STATUS.match, step.stdout.splitlines()) if m]
+        assert ran[:N] == [(t, "FAIL" if t == "t03" else "PASS") for t in TESTS], step
+        assert (out / "reds.txt").read_text() == "fixture::main t03\n", step
         assert step.stdout.splitlines()[-1] == "exit: 1", step
-        # Tests after the unlisted red finish while the classifier runs, and nextest exits before the stop.
-        fast = subprocess.run([sys.executable, str(SCRIPT), "run", "--test-threads", "1", "-E", "all()"], cwd=root,
-                              capture_output=True, text=True,
-                              env={**os.environ, "PLAN": "PPPUPPPP", "SLEEP_AFTER_U": "0", "LANE_NEXTEST_DIR": str(out)})
-        assert "[fail-fast] stopped at fixture::main t03" in fast.stdout, fast
-        assert (out / "reds.txt").read_text() == "fixture::main t03\n", fast
         for k, (plan, excluded) in enumerate(EXAMPLES + generated):
             check(root, out, plan, excluded, k < len(EXAMPLES))
             print(f"ok plan={plan} excluded={sorted(excluded)}", flush=True)

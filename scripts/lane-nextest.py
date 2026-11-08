@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
-"""A lane's nextest run that stops at the first red outside the known-reds list, and the rerun of its reds.
+"""A lane's nextest run that runs to its end and judges its reds against the known-reds list, and the rerun of its reds.
 
-    scripts/lane-nextest.py run <nextest args>      `cargo nextest run --no-fail-fast <args>`, stopped at the first
-                                                    red that scripts/keystone-known-reds.sh does not list
+    scripts/lane-nextest.py run <nextest args>      `cargo nextest run --no-fail-fast <args>`, then the reds of the
+                                                    whole run judged by scripts/keystone-known-reds.sh
     scripts/lane-nextest.py rerun <nextest args>    the same args, `-E` narrowed to the tests of the red list
 
 Both runs pass the nextest output through to stdout. `run` writes the red list to $LANE_NEXTEST_DIR/reds.txt
 (default target/lane-nextest/), one `<binary id> <test name>` line per red test, known reds included, and prints
-its path and the reason it stopped as `[fail-fast]` lines.
-A red is judged when its output block is complete: by the classifier over the run's output so far, so a red is
-known only when every red before it is too. `rerun` refuses an empty or missing red list.
+its path. It exits 0 when nextest passed or every red is on the known-reds list, else 1 with one `[lane-nextest]
+novel:` line per novel signature of the classifier's verdict. A classifier error is an error of `run` too.
+`rerun` refuses an empty or missing red list.
 """
 import os
-import queue
 import re
-import signal
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -29,7 +26,8 @@ STATUS = re.compile(r"^ *([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\[[0-9]+/[0-9]+\] )
 NOT_RED = re.compile(r"^(?:TRY [0-9]+ )?(?:START|SLOW|TRMNTG|TERMINATING|PASS|LEAK|TMPASS|TIMEOUT-PASS|SLOW \+ LEAK"
                      r"|SLOW\+TMPASS|SKIP|FLAKY [0-9]+/[0-9]+|SETUP|SETUP SLOW|SETUP PASS|SETUP LEAK|SETUP TMPASS)$")
 END_OF_RUN = re.compile(r"^ *(?:Summary|Cancelling|Canceling) ")
-IDLE_SECONDS = 1.0
+# The classifier's line of a signature that no known-reds row covers: the run's first signature, or a later one.
+NOVEL = re.compile(r"^(?:PRIMARY: |  )(\[(?:novel|cross-family:).*)")
 
 
 def out_dir():
@@ -42,70 +40,40 @@ def red_of(line):
     return None if m is None or NOT_RED.match(m.group(1)) else (m.group(2), m.group(3))
 
 
-def classify(stream_log, verdict_log):
-    """True when every red in `stream_log` so far is on the known-reds list."""
-    with open(verdict_log, "w") as f:
-        rc = subprocess.run([str(CLASSIFIER), str(stream_log)], stdout=f, stderr=subprocess.STDOUT).returncode
-    return rc == 0
-
-
-def stop(proc):
-    """SIGTERM nextest's process group, unless nextest has already exited."""
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except (PermissionError, ProcessLookupError):
-        # macOS answers EPERM for a group whose leader exited and is not yet reaped.
-        if proc.poll() is None:
-            raise
-
-
 def run(args):
     d = out_dir()
     d.mkdir(parents=True, exist_ok=True)
     reds_file, stream_log, verdict_log = d / "reds.txt", d / "stream.log", d / "verdict.log"
     reds_file.unlink(missing_ok=True)
+    verdict_log.unlink(missing_ok=True)
     proc = subprocess.Popen([*CARGO, "nextest", "run", "--no-fail-fast", *args], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
-    lines = queue.Queue()
-    threading.Thread(target=lambda: [lines.put(l) for l in proc.stdout] + [lines.put(None)], daemon=True).start()
-    reds, pending, stopped, summary = [], None, None, False
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    reds, summary = [], False
     with open(stream_log, "w") as log:
-        def judge():
-            log.flush()
-            if not classify(stream_log, verdict_log):
-                stop(proc)
-                return pending
-            print(f"[fail-fast] {pending[0]} {pending[1]}: on the known-reds list, the run goes on", flush=True)
-            return None
-
-        while True:
-            try:
-                line = lines.get(timeout=IDLE_SECONDS)
-            except queue.Empty:
-                if pending and not stopped:
-                    stopped, pending = judge(), None
-                continue
-            if line is None:
-                break
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            log.write(line)
             text = line.rstrip("\n")
             summary = summary or bool(END_OF_RUN.match(text))
             red = None if summary else red_of(text)
-            # The judged red's block ends before this line: the classifier must not see the next red's status line.
-            if pending and not stopped and not summary and (red or STATUS.match(text)):
-                stopped, pending = judge(), None
-            sys.stdout.write(line)
-            log.write(line)
             if red:
                 reds.append(red)
-                pending = red
-        if pending and not stopped:
-            stopped = judge()
     rc = proc.wait()
-    reds_file.write_text("".join(f"{b} {t}\n" for b, t in dict.fromkeys(reds)))
-    if stopped:
-        print(f"[fail-fast] stopped at {stopped[0]} {stopped[1]}: a red outside the known-reds list ({verdict_log})")
-    print(f"[fail-fast] red list: {reds_file} ({len(dict.fromkeys(reds))} tests)", flush=True)
-    return 1 if stopped else rc
+    reds = list(dict.fromkeys(reds))
+    reds_file.write_text("".join(f"{b} {t}\n" for b, t in reds))
+    print(f"[lane-nextest] red list: {reds_file} ({len(reds)} tests)", flush=True)
+    if rc == 0:
+        return 0
+    with open(verdict_log, "w") as f:
+        verdict = subprocess.run([str(CLASSIFIER), str(stream_log)], stdout=f, stderr=subprocess.STDOUT).returncode
+    if verdict not in (0, 1):
+        raise SystemExit(f"run: {CLASSIFIER.name} exited {verdict}, the reds are not judged ({verdict_log})")
+    if verdict == 1:
+        for line in verdict_log.read_text().splitlines():
+            if m := NOVEL.match(line):
+                print(f"[lane-nextest] novel: {m.group(1)}")
+        print(f"[lane-nextest] a red outside the known-reds list: {verdict_log}", flush=True)
+    return verdict
 
 
 def rerun(args):
