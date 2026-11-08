@@ -344,7 +344,10 @@ fn every_shipped_render_source_draws_no_error_node() {
 fn the_root_layout_draws_exactly_its_perspective_panels() {
     let name = "index.org";
     let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default/index.org"),
+        std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .join("../../assets/default/index.org"),
     )
     .expect("assets/default/index.org readable");
     let parsed = holon_org_format::parse_org_file(

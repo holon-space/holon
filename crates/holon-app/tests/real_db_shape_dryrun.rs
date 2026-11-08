@@ -23,7 +23,10 @@ use holon_turso::turso_adapter::TursoAdapter;
 use tokio::sync::broadcast;
 
 fn hand_written_declarations() -> Vec<String> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../holon-turso/sql/schema");
+    let dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../holon-turso/sql/schema");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .expect("schema dir")
         .map(|e| e.expect("entry").path())

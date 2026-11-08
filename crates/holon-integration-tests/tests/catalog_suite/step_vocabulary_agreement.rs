@@ -21,7 +21,9 @@ use holon_integration_tests::pbt::transitions::E2ETransition;
 
 /// Every `.feature` file the tree ships, headless and windowed.
 fn feature_files() -> Vec<PathBuf> {
-    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crate_root = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    );
     let repo_root = crate_root.parent().unwrap().parent().unwrap();
     let files: Vec<PathBuf> = vec![
         crate_root.join("tests/fixtures/split_block_content_pbt/split_outline_positions.feature"),

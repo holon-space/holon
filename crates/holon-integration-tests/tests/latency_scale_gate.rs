@@ -85,7 +85,10 @@ fn latency_scale_cold_navigation() {
         return;
     }
 
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(CORPUS);
+    let path = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join(CORPUS);
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("latency-scale corpus {path:?} is unreadable: {e}"));
     let cases: Vec<_> = raw

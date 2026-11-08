@@ -146,9 +146,9 @@ fn assert_skip_gated_is_ref_invariant(ceiling: &ComponentSet, transitions: &[E2E
 /// at `full_headless`: the §4 invariant holds for a real recorded sequence.
 #[test]
 fn skip_gated_replay_is_portable_for_committed_capture() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/general_e2e_pbt/loro-content-drop-set-field.json"
+    let path = format!(
+        "{}/tests/fixtures/general_e2e_pbt/loro-content-drop-set-field.json",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     );
     let transitions = load_capture(path);
     assert!(
@@ -257,7 +257,7 @@ fn bisect_capture_from_env() {
         (Ok(path), _) => path,
         (Err(_), Ok(slice)) => format!(
             "{}/tests/.captures/{slice}.captured.json",
-            env!("CARGO_MANIFEST_DIR")
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
         ),
         (Err(_), Err(_)) => {
             eprintln!(
@@ -334,7 +334,7 @@ fn replay_capture_verbose_from_env() {
         (Ok(path), _) => path,
         (Err(_), Ok(slice)) => format!(
             "{}/tests/.captures/{slice}.captured.json",
-            env!("CARGO_MANIFEST_DIR")
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
         ),
         (Err(_), Err(_)) => {
             eprintln!(
@@ -441,7 +441,7 @@ fn minimize_capture_from_env() {
         (Ok(path), _) => path,
         (Err(_), Ok(slice)) => format!(
             "{}/tests/.captures/{slice}.captured.json",
-            env!("CARGO_MANIFEST_DIR")
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
         ),
         (Err(_), Err(_)) => {
             eprintln!(

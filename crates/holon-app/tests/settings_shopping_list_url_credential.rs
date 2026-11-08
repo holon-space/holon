@@ -59,8 +59,10 @@ fn env_url() -> String {
 /// agreement this rung is about is between the Settings key and the `${VAR}`
 /// THAT file names.
 fn shopping_sidecar() -> IntegrationFileConfig {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/integrations/shopping.yaml");
+    let path = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../../assets/integrations/shopping.yaml");
     let yaml =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     IntegrationFileConfig::from_yaml(&yaml)

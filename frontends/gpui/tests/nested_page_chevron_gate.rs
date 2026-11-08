@@ -795,8 +795,10 @@ fn an_opened_nested_page_paints_its_children(cx: &mut TestAppContext) {
 /// deterministic indent-driven extraction of the folded block, guarded by the
 /// caller's content assertions.
 fn shipped_render_expr(variant: &str) -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/default/types/block_profile.yaml");
+    let path = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../../assets/default/types/block_profile.yaml");
     let yaml = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("shipped profile yaml at {}: {e}", path.display()));
 

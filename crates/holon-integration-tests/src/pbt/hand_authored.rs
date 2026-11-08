@@ -320,7 +320,9 @@ pub fn replay<M: LockedReplay>(
 }
 
 pub fn sidecar_path() -> PathBuf {
-    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let crate_root = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    );
     match std::env::var(SIDECAR_ENV) {
         Ok(override_path) => crate_root.join(override_path),
         Err(std::env::VarError::NotPresent) => crate_root.join(DEFAULT_SIDECAR),

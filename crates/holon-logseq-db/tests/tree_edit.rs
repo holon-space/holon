@@ -9,7 +9,6 @@
 //! The edits are deliberately chosen to force BOTH paths: enough inserts into
 //! one region to overflow leaves, and enough removals to underflow them.
 
-use std::path::Path;
 use std::path::PathBuf;
 
 use holon_logseq_db::TransitNode;
@@ -19,7 +18,10 @@ use holon_logseq_db::tree::Index;
 use holon_logseq_db::tree::TreeDatom;
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/logseq-db/holontest.sqlite")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-db/holontest.sqlite")
 }
 
 /// Insert into a sorted vector at the position the index's own comparator

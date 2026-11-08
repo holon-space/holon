@@ -51,11 +51,11 @@ fn shipped_chat_sql(entity: &str) -> String {
 }
 
 fn sidecar() -> serde_yaml::Value {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/integrations/claude-history.yaml"
+    let path = format!(
+        "{}/../../assets/integrations/claude-history.yaml",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     );
-    let raw = std::fs::read_to_string(path)
+    let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read claude-history.yaml at {path}: {e}"));
     serde_yaml::from_str(&raw).unwrap_or_else(|e| panic!("parse claude-history.yaml: {e}"))
 }

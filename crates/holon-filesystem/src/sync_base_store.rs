@@ -359,9 +359,9 @@ mod tests {
     /// column layout ever changes).
     #[test]
     fn legacy_sidecar_sample_recovers_edge_fields() {
-        let bytes = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/sync_base_legacy_sample.json"
+        let bytes = std::fs::read(format!(
+            "{}/tests/fixtures/sync_base_legacy_sample.json",
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
         ))
         .expect("read checked-in legacy sidecar sample");
 

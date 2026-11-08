@@ -21,9 +21,9 @@ use proptest::test_runner::TestRunner;
 
 #[test]
 fn profile_active_generators_still_shrink_to_small() {
-    let profile_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/profiles/martin-vault-2026-07-23.json"
+    let profile_path = format!(
+        "{}/profiles/martin-vault-2026-07-23.json",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     );
     // SAFETY: set before any generator reads the cached profile; single-threaded
     // at this point in this dedicated test binary.

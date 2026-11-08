@@ -80,7 +80,10 @@ async fn setup_db() -> DbHandle {
 }
 
 fn load_fixture(name: &str) -> IntegrationFileConfig {
-    let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/fixtures/{name}",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
+    );
     let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"))
 }

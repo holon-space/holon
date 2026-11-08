@@ -73,7 +73,10 @@ fn org_files_under(dir: &Path) -> Vec<std::path::PathBuf> {
 /// ship green.
 #[test]
 fn every_shipped_default_asset_ingests_with_the_production_parser() {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default");
+    let assets = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../../assets/default");
     let assets = assets.canonicalize().expect("assets/default must exist");
 
     let mut org_files = org_files_under(&assets);
@@ -264,7 +267,10 @@ fn instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge()
     use holon_api::template_instantiation::InstantiateRequest;
     use holon_api::template_instantiation::plan_instantiation;
 
-    let asset = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default/Compass.org");
+    let asset = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../../assets/default/Compass.org");
     let asset = asset
         .canonicalize()
         .expect("shipped Compass.org must exist");

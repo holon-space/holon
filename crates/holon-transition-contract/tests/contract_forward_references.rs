@@ -27,11 +27,13 @@ const CONTRACT_SYMBOLS: [&str; 3] = ["work_occurrence", "ask_hash", "lower"];
 const CONTRACT_CRATES: [&str; 2] = ["holon-transition-contract", "holon-net"];
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("the manifest sits at <root>/crates/<crate>")
-        .to_path_buf()
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .ancestors()
+    .nth(2)
+    .expect("the manifest sits at <root>/crates/<crate>")
+    .to_path_buf()
 }
 
 fn src_files(path: &Path, out: &mut Vec<PathBuf>) {

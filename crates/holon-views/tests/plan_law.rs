@@ -362,10 +362,14 @@ fn law_of(plan: &Rc<Plan>, commits: Vec<Vec<Change>>) -> Result<(), TestCaseErro
 
 fn config() -> ProptestConfig {
     ProptestConfig {
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/plan_law.proptest-regressions"
-        )))),
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            format!(
+                "{}/tests/plan_law.proptest-regressions",
+                std::env::var("CARGO_MANIFEST_DIR")
+                    .expect("cargo sets CARGO_MANIFEST_DIR at run time")
+            )
+            .leak(),
+        ))),
         ..ProptestConfig::with_cases(256)
     }
 }

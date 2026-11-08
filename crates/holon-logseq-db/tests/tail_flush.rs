@@ -19,7 +19,10 @@ use holon_logseq_db::base::ImportBase;
 use holon_logseq_db::kvs_writer;
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/logseq-db/holontest.sqlite")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-db/holontest.sqlite")
 }
 
 /// Titles for successive edits, so every one is a real change.

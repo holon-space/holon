@@ -56,9 +56,9 @@
 /// Background docstring and the split step. Pure parse — no SUT.
 #[test]
 fn split_block_content_pbt_gherkin_outline_expands() {
-    let cases = holon_integration_tests::pbt::fixtures::gherkin::parse_feature_file(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/split_block_content_pbt/split_outline_positions.feature"
+    let cases = holon_integration_tests::pbt::fixtures::gherkin::parse_feature_file(format!(
+        "{}/tests/fixtures/split_block_content_pbt/split_outline_positions.feature",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     ))
     .expect("parse outline feature");
     assert_eq!(
@@ -87,8 +87,8 @@ fn split_block_content_composed_gherkin() {
         holon_integration_tests::pbt::composed::harness::ComposedSut<
             holon_integration_tests::pbt::composed::wide_e2e::WideE2E,
         >,
-    >(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/composed_split_gherkin/split_routes_prefix_suffix.feature"
+    >(format!(
+        "{}/tests/fixtures/composed_split_gherkin/split_routes_prefix_suffix.feature",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     ));
 }

@@ -17,7 +17,10 @@ async fn fresh(path: &Path) -> (TursoBackend, DbHandle) {
 }
 
 fn declared_tables() -> Vec<(String, String)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("sql/schema");
+    let dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("sql/schema");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .expect("schema dir")
         .map(|e| e.expect("entry").path())

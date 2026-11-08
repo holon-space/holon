@@ -371,7 +371,7 @@ fn fixture_path() -> String {
     std::env::var("HOLON_WORK_RUNTIME_FIXTURE").unwrap_or_else(|_| {
         format!(
             "{}/tests/fixtures/work-runtime-2026-10-16.jsonl",
-            env!("CARGO_MANIFEST_DIR")
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
         )
     })
 }

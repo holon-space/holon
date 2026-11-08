@@ -1259,9 +1259,9 @@ filter_mapping:
 /// finish_integration clash invariant, locked in config).
 #[test]
 fn claude_history_yaml_multi_project_shape() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/integrations/claude-history.yaml"
+    let path = format!(
+        "{}/../../assets/integrations/claude-history.yaml",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     );
     let body = std::fs::read_to_string(path).expect("read claude-history.yaml");
     let cfg = IntegrationFileConfig::from_yaml(&body)

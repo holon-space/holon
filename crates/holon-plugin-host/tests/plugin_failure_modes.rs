@@ -18,7 +18,10 @@ use holon_plugin_host::PluginLimits;
 use crate::support;
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures")
 }
 
 fn testkit() -> PluginFormatAdapter {

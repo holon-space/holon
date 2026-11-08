@@ -579,10 +579,14 @@ fn event() -> impl Strategy<Value = Event> {
 
 fn config() -> ProptestConfig {
     ProptestConfig {
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/engine_law.proptest-regressions"
-        )))),
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            format!(
+                "{}/tests/engine_law.proptest-regressions",
+                std::env::var("CARGO_MANIFEST_DIR")
+                    .expect("cargo sets CARGO_MANIFEST_DIR at run time")
+            )
+            .leak(),
+        ))),
         ..ProptestConfig::with_cases(512)
     }
 }

@@ -36,9 +36,10 @@ fn walk_rs(dir: &Path, out: &mut Vec<(String, String)>) {
 
 #[test]
 fn no_concrete_reference_state_reach() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time");
     let mut files = Vec::new();
-    walk_rs(&Path::new(manifest_dir).join("src"), &mut files);
+    walk_rs(&Path::new(&manifest_dir).join("src"), &mut files);
 
     for (path, src) in &files {
         assert!(
@@ -48,7 +49,7 @@ fn no_concrete_reference_state_reach() {
         );
     }
 
-    let manifest = fs::read_to_string(Path::new(manifest_dir).join("Cargo.toml")).unwrap();
+    let manifest = fs::read_to_string(Path::new(&manifest_dir).join("Cargo.toml")).unwrap();
     assert!(
         !manifest.contains("holon-integration-tests"),
         "holon-turso-testing must NOT depend on holon-integration-tests (dependency cycle + \

@@ -188,7 +188,10 @@ async fn a_probe_that_cannot_start_fails_with_the_reason() {
 /// probe reads a registry the test writes, not the machine's.
 #[tokio::test]
 async fn the_orchestration_probes_report_this_machine() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../..");
     let text = fs::read_to_string(root.join("crates/holon-net/nets/work-runtime.yaml"))
         .expect("the work-runtime net is readable");
     let (file, mut exec) = load("work-runtime.yaml", &text);

@@ -37,16 +37,21 @@ use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestError;
 use proptest::test_runner::TestRunner;
 
-const BUILDER_SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shadow_builders");
-const VALUE_FN_SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/value_fns");
+const BUILDER_SOURCES: &str = "src/shadow_builders";
+const VALUE_FN_SOURCES: &str = "src/value_fns";
 /// The helpers every builder's args pass through.
 const SHARED_BUILDER_HELPERS: &[&str] = &[
-    concat!(env!("CARGO_MANIFEST_DIR"), "/src/render_interpreter.rs"),
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../holon-api/src/render_eval.rs"
-    ),
+    "src/render_interpreter.rs",
+    "../holon-api/src/render_eval.rs",
 ];
+
+fn in_crate(relative: &str) -> String {
+    format!(
+        "{}/{relative}",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
+    )
+}
+
 /// Keys a builder reads under a name its source spells only as a prefix.
 const DYNAMIC_KEYS: &[(&str, &[&str])] = &[("view_mode_switcher", &["mode_tree", "mode_table"])];
 
@@ -85,10 +90,10 @@ fn read(path: &str) -> String {
 fn arg_names_per_builder() -> (Vec<(String, Vec<String>)>, Vec<String>) {
     let shared: BTreeSet<String> = SHARED_BUILDER_HELPERS
         .iter()
-        .flat_map(|path| arg_names_read_by(&read(path)))
+        .flat_map(|path| arg_names_read_by(&read(&in_crate(path))))
         .collect();
     let mut all_sources = String::new();
-    for entry in std::fs::read_dir(BUILDER_SOURCES).expect("builder source dir") {
+    for entry in std::fs::read_dir(in_crate(BUILDER_SOURCES)).expect("builder source dir") {
         all_sources.push_str(&read(
             entry.expect("dir entry").path().to_str().expect("utf-8"),
         ));
@@ -111,7 +116,7 @@ fn arg_names_per_builder() -> (Vec<(String, Vec<String>)>, Vec<String>) {
                 .filter(|m| m.name == name)
                 .flat_map(|m| m.params.iter().map(|p| p.name.to_string()))
                 .collect();
-            let file = format!("{BUILDER_SOURCES}/{name}.rs");
+            let file = in_crate(&format!("{BUILDER_SOURCES}/{name}.rs"));
             if std::path::Path::new(&file).exists() {
                 own.extend(arg_names_read_by(&read(&file)));
             }
@@ -133,7 +138,7 @@ fn arg_names_per_builder() -> (Vec<(String, Vec<String>)>, Vec<String>) {
         "the shadow interpreter registers suspiciously few value functions: {value_fns:?}"
     );
     per_builder.extend(value_fns.into_iter().map(|name| {
-        let file = format!("{VALUE_FN_SOURCES}/{name}.rs");
+        let file = in_crate(&format!("{VALUE_FN_SOURCES}/{name}.rs"));
         let own = match std::path::Path::new(&file).exists() {
             true => arg_names_read_by(&read(&file)).into_iter().collect(),
             false => Vec::new(),

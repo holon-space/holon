@@ -387,10 +387,14 @@ fn edit() -> impl Strategy<Value = Edit> {
 
 fn config(cases: u32) -> ProptestConfig {
     ProptestConfig {
-        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/views_law.proptest-regressions"
-        )))),
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            format!(
+                "{}/tests/views_law.proptest-regressions",
+                std::env::var("CARGO_MANIFEST_DIR")
+                    .expect("cargo sets CARGO_MANIFEST_DIR at run time")
+            )
+            .leak(),
+        ))),
         ..ProptestConfig::with_cases(cases)
     }
 }

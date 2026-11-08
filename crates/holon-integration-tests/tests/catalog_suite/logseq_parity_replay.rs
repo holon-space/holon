@@ -10,7 +10,6 @@
 
 #![cfg(feature = "pbt")]
 
-use std::path::Path;
 use std::path::PathBuf;
 
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
@@ -18,7 +17,10 @@ use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
 
 fn parity_features() -> Vec<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/logseq-parity");
+    let dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-parity");
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
         .map(|e| e.expect("dir entry").path())

@@ -147,7 +147,10 @@ fn a_warm_host_spends_fuel_on_the_recipe_rather_than_on_setup() {
     };
 
     let real = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pancakes.cook"),
+        PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .join("tests/fixtures/pancakes.cook"),
     )
     .unwrap();
     spend(&real);

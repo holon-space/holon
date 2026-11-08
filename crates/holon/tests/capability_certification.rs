@@ -12,7 +12,6 @@
 //! "create", …)` is the same path the app writes through.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -78,8 +77,11 @@ impl HolonNative {
         let path = std::env::var_os("HOLON_CAPABILITY_PROFILE")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../assets/default/capability/holon-native.yaml")
+                std::path::PathBuf::from(
+                    std::env::var("CARGO_MANIFEST_DIR")
+                        .expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+                )
+                .join("../../assets/default/capability/holon-native.yaml")
             });
         let doc = Arc::new(
             holon_loro::LoroDocument::new("certify".to_string())
@@ -840,7 +842,10 @@ async fn an_authored_engine_owned_key_is_refused_at_the_write_boundary() -> anyh
 /// returned the same answer both ways would be comparing sets, not homes.
 #[test]
 fn moving_between_the_two_certified_homes_has_a_price_in_both_directions() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../..");
     let native =
         CapabilityProfile::from_path(root.join("assets/default/capability/holon-native.yaml"))
             .expect("the native profile loads");

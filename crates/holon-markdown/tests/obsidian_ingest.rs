@@ -1,6 +1,5 @@
 //! Directed Tier R/O ingest of a committed Obsidian fixture vault.
 
-use std::path::Path;
 use std::path::PathBuf;
 
 use holon_api::EntityUri;
@@ -16,7 +15,10 @@ use holon_markdown::detect_flavor;
 use holon_org_format::OrgBlockExt;
 
 fn vault() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/obsidian")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/obsidian")
 }
 
 fn parse(rel: &str) -> FileFormatParseResult {

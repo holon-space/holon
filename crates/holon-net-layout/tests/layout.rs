@@ -262,7 +262,10 @@ fn a_subnet_id_that_is_also_a_node_id_is_refused() {
 #[test]
 fn the_chain_net_geometry_is_golden() {
     let laid_out = layout(&chain_net(), &BTreeSet::new()).expect("the chain net lays out");
-    let golden = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/chain_net.json");
+    let golden = format!(
+        "{}/tests/golden/chain_net.json",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
+    );
     let actual = json(&laid_out);
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         std::fs::write(golden, format!("{actual}\n")).expect("the golden file is writable");

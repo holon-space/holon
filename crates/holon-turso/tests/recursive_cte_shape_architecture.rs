@@ -46,11 +46,13 @@ struct FoundCte {
 }
 
 fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("holon-turso sits two levels below the workspace root")
-        .to_path_buf()
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .ancestors()
+    .nth(2)
+    .expect("holon-turso sits two levels below the workspace root")
+    .to_path_buf()
 }
 
 /// Production source only: `src/` trees plus the checked-in schema SQL.

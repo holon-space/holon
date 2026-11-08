@@ -28,7 +28,6 @@
 //!   the field is empty and `holon_obs.py` fills it from `git rev-parse HEAD`.
 
 use std::cell::RefCell;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Once;
 use std::sync::atomic::AtomicU64;
@@ -126,14 +125,16 @@ fn disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// The workspace this test binary was built from. A `.git` marker cannot find
+/// The workspace this test binary runs in. A `.git` marker cannot find
 /// it: a jj workspace has none, so a walk would reach an enclosing checkout.
 pub fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("the crate lives two levels under the workspace root")
-        .to_path_buf()
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .ancestors()
+    .nth(2)
+    .expect("the crate lives two levels under the workspace root")
+    .to_path_buf()
 }
 
 /// Resolve the output directory: `HOLON_RESULT_DIR` if set, else
@@ -251,17 +252,6 @@ impl Drop for RunResultGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn repo_root_is_the_workspace_that_compiled_this_crate() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .unwrap()
-            .canonicalize()
-            .unwrap();
-        assert_eq!(repo_root().canonicalize().unwrap(), workspace);
-    }
 
     #[test]
     fn green_guard_writes_a_record() {

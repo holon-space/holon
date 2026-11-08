@@ -793,7 +793,10 @@ fn bypasses(tests: &std::path::Path, file: &std::path::Path) -> Vec<String> {
 
 #[test]
 fn no_test_bypasses_the_twin_factory() {
-    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let tests = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests");
     let files = twin_run(&tests);
     let names: Vec<_> = files
         .iter()
@@ -811,7 +814,10 @@ fn no_test_bypasses_the_twin_factory() {
 /// support directory too.
 #[test]
 fn the_bypass_check_names_every_near_miss() {
-    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let tests = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests");
     let found: Vec<_> = sources(&tests, ".rs.txt")
         .iter()
         .flat_map(|f| bypasses(&tests, f))

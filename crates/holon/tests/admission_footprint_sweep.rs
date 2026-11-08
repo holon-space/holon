@@ -951,7 +951,9 @@ async fn footprint_census_report_only() {
 
     let text = census(&rows);
     println!("{text}");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/Testing/AdmissionFootprintCensus.md");
+    let path = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../../docs/Testing/AdmissionFootprintCensus.md");
     std::fs::write(&path, &text).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }

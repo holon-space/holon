@@ -8,7 +8,6 @@
 
 #![cfg(feature = "pbt")]
 
-use std::path::Path;
 use std::path::PathBuf;
 
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
@@ -16,8 +15,10 @@ use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
 
 fn parentage_feature() -> PathBuf {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/_gherkin_assert/parentage.feature");
+    let path = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/_gherkin_assert/parentage.feature");
     assert!(path.is_file(), "feature file missing: {}", path.display());
     path
 }

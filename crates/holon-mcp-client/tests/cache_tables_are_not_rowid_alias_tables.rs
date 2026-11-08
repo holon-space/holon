@@ -36,7 +36,10 @@ use holon_mcp_client::mcp_sidecar::McpSidecar;
 
 /// Every YAML under `assets/integrations/`, as (file name, parsed sidecar).
 fn shipped_sidecars() -> Vec<(String, McpSidecar)> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/integrations");
+    let dir = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../../assets/integrations");
     let mut out = Vec::new();
     for entry in std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))

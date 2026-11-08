@@ -248,8 +248,11 @@ mod tests {
 
     #[test]
     fn the_guard_outlasts_every_nextest_cap() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.config/nextest.toml");
-        let config = std::fs::read_to_string(path).expect("read .config/nextest.toml");
+        let path = format!(
+            "{}/../../.config/nextest.toml",
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
+        );
+        let config = std::fs::read_to_string(&path).expect("read .config/nextest.toml");
         let caps: Vec<u64> = config
             .lines()
             .filter(|l| l.trim_start().starts_with("slow-timeout"))

@@ -45,19 +45,23 @@ use rmcp::model::ReadResourceResult;
 use rmcp::service::ServiceError;
 use turso_core::foreign::ForeignDataWrapper;
 
-const SIDECAR_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../assets/integrations/claude-history.yaml"
-);
-const FIXTURE_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/claude_history_identity.json"
-);
+fn sidecar_path() -> String {
+    format!(
+        "{}/../../assets/integrations/claude-history.yaml",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
+    )
+}
+fn fixture_path() -> String {
+    format!(
+        "{}/tests/fixtures/claude_history_identity.json",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
+    )
+}
 
 fn sidecar() -> IntegrationFileConfig {
-    let yaml = std::fs::read_to_string(SIDECAR_PATH)
-        .unwrap_or_else(|e| panic!("read {SIDECAR_PATH}: {e}"));
-    IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse {SIDECAR_PATH}: {e}"))
+    let path = sidecar_path();
+    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"))
 }
 
 /// What the yaml INTENDS each entity's row identity to be, spelled out
@@ -264,14 +268,14 @@ fn assert_measured(arm: &str, m: &Measurement, expected: Verdict) {
 // --- fixture arm -----------------------------------------------------------
 
 fn fixture_measurement(entity: &'static str, key: &str) -> Measurement {
-    let raw = std::fs::read_to_string(FIXTURE_PATH)
-        .unwrap_or_else(|e| panic!("read {FIXTURE_PATH}: {e}"));
+    let path = fixture_path();
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let doc: serde_json::Value =
-        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {FIXTURE_PATH}: {e}"));
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {path}: {e}"));
     let e = doc
         .get("entities")
         .and_then(|m| m.get(key))
-        .unwrap_or_else(|| panic!("{FIXTURE_PATH} records no entity '{key}'"));
+        .unwrap_or_else(|| panic!("{path} records no entity '{key}'"));
     let identity = e["identity"]
         .as_array()
         .expect("identity is an array")
@@ -476,7 +480,10 @@ async fn the_declared_identity_is_a_key_over_an_unpinned_fan_out() {
             assert_recorded_message_and_agent_message();
         }
         None => {
-            eprintln!("[fixture arm] provider binary absent; replaying {FIXTURE_PATH}");
+            eprintln!(
+                "[fixture arm] provider binary absent; replaying {}",
+                fixture_path()
+            );
             assert_measured(
                 "fixture",
                 &fixture_measurement("session", "session"),
@@ -507,9 +514,11 @@ async fn the_recorded_measurement_covers_the_declared_identities() {
             .identity_columns();
         let recorded = fixture_measurement("x", entity).identity;
         assert_eq!(
-            declared, recorded,
-            "{FIXTURE_PATH} recorded '{entity}' over a different identity than the sidecar \
-             now declares — re-record it"
+            declared,
+            recorded,
+            "{} recorded '{entity}' over a different identity than the sidecar \
+             now declares — re-record it",
+            fixture_path()
         );
     }
 }
@@ -521,7 +530,10 @@ async fn the_recorded_measurement_covers_the_declared_identities() {
 const MOCK_BIN: &str = env!("CARGO_BIN_EXE_mock-mcp-server");
 
 async fn connect_fixture(fixture: &str) -> anyhow::Result<McpConnectionResult> {
-    let path = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/fixtures/{fixture}",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
+    );
     let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut cfg =
         IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"));

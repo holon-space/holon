@@ -53,8 +53,10 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 
 /// The committed fixture lives with the importer crate that owns it.
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../holon-logseq-db/tests/fixtures/logseq-db/holontest.sqlite")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../holon-logseq-db/tests/fixtures/logseq-db/holontest.sqlite")
 }
 
 /// The blocks the importer PROJECTS. `LogSeq`'s own property, class and system

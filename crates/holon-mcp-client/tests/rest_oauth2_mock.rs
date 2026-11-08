@@ -433,9 +433,9 @@ async fn pagination_exceeding_max_pages_fails_loud() {
 
 #[test]
 fn shipped_gcal_sidecar_shape() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/integrations/gcal.yaml"
+    let path = format!(
+        "{}/../../assets/integrations/gcal.yaml",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     );
     let yaml = std::fs::read_to_string(path).expect("read gcal.yaml");
     let cfg =

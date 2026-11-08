@@ -153,8 +153,9 @@ fn complete_document_strategy() -> impl Strategy<Value = CompleteDocument> {
 }
 
 fn corpus_document_from_index_org() -> CompleteDocument {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let path = std::path::Path::new(manifest_dir).join("../../assets/default/index.org");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time");
+    let path = std::path::Path::new(&manifest_dir).join("../../assets/default/index.org");
     let org_text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e));
 

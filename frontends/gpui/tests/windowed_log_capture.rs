@@ -176,7 +176,9 @@ fn declares_test_init(source: &str) -> bool {
 /// rather than by review, because the failure mode is silence.
 #[test]
 fn every_windowed_target_declares_test_init() {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = &std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    );
     let targets = windowed_target_sources(manifest_dir);
     assert!(
         targets.contains(&manifest_dir.join("tests/main.rs")),
@@ -207,7 +209,9 @@ fn every_windowed_target_declares_test_init() {
 /// Cargo.toml lists it as a target); until then it is silently dead.
 #[test]
 fn every_windowed_test_file_is_compiled() {
-    let unreached = unreached_test_files(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
+    let unreached = unreached_test_files(&std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    ));
     assert!(
         unreached.is_empty(),
         "these tests/*.rs files are compiled into no target — add `mod <name>;` to \

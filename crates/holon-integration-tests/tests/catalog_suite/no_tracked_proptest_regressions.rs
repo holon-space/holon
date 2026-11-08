@@ -16,7 +16,9 @@ use std::path::Path;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
-    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    );
     loop {
         if dir.join("archlint").is_dir() && dir.join("Cargo.toml").is_file() {
             return dir;

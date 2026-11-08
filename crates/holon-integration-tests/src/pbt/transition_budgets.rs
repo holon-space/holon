@@ -729,7 +729,13 @@ fn regression_tolerance() -> f64 {
 fn baseline_path() -> PathBuf {
     std::env::var("HOLON_NFR_BASELINE")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("nfr_baseline.json"))
+        .unwrap_or_else(|_| {
+            PathBuf::from(
+                std::env::var("CARGO_MANIFEST_DIR")
+                    .expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+            )
+            .join("nfr_baseline.json")
+        })
 }
 
 /// Loaded baseline, or `None` when the file is absent (feature dormant). A

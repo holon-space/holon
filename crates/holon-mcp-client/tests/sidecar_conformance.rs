@@ -32,9 +32,9 @@ use holon_turso::turso::TursoBackend;
 
 /// Absolute paths of every shipped sidecar YAML.
 fn sidecar_paths() -> Vec<PathBuf> {
-    let dir = PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/integrations"
+    let dir = PathBuf::from(format!(
+        "{}/../../assets/integrations",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     ));
     let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))

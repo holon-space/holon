@@ -74,11 +74,11 @@ async fn setup_db() -> DbHandle {
 }
 
 async fn connect_shipped_sidecar(db: &DbHandle) -> McpIntegration {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/integrations/claude-history.yaml"
+    let path = format!(
+        "{}/../../assets/integrations/claude-history.yaml",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     );
-    let yaml = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut cfg =
         IntegrationFileConfig::from_yaml(&yaml).unwrap_or_else(|e| panic!("parse {path}: {e}"));
     let cp = cfg

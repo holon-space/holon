@@ -10,8 +10,10 @@
 use std::path::PathBuf;
 
 fn input_view_source() -> String {
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time");
     let path: PathBuf = [
-        env!("CARGO_MANIFEST_DIR"),
+        manifest_dir.as_str(),
         "android",
         "java",
         "dev",

@@ -3,7 +3,6 @@
 //! when a key is unknown, ill-typed or empty, or names a field its service
 //! cannot read.
 
-use std::path::Path;
 use std::path::PathBuf;
 
 use holon_api::ComputedSpec;
@@ -215,7 +214,10 @@ fn block_declares_its_own_services() {
 }
 
 fn shipped_type_dirs() -> Vec<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../..");
     vec![
         root.join("assets/default/types"),
         root.join("crates/holon-kitchen/assets/types"),

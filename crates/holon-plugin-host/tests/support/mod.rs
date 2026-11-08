@@ -15,7 +15,10 @@ use holon_plugin_host::PluginLimits;
 use proptest::prelude::*;
 
 pub fn plugins_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("plugins")
 }
 
 /// The installed cooklang plugin, loaded from its sidecar exactly as the
@@ -38,7 +41,10 @@ pub fn bundled_cook_plugin() -> PluginFormatAdapter {
 }
 
 pub fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures")
 }
 
 pub fn pancakes_fixture() -> String {

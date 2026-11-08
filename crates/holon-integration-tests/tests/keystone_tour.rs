@@ -177,7 +177,10 @@ fn load_tour(path: &Path) -> Vec<TourStep> {
 }
 
 fn tour_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(TOUR)
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join(TOUR)
 }
 
 /// The alphabet kinds neither toured nor excluded, plus every exclusion that

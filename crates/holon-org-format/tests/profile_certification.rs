@@ -84,7 +84,13 @@ impl OrgFormat {
     fn load() -> Self {
         let path = std::env::var_os("HOLON_CAPABILITY_PROFILE")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("profile.yaml"));
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(
+                    std::env::var("CARGO_MANIFEST_DIR")
+                        .expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+                )
+                .join("profile.yaml")
+            });
         Self {
             profile: CapabilityProfile::from_path(&path)
                 .unwrap_or_else(|e| panic!("the org profile must load: {e:#}")),

@@ -579,15 +579,20 @@ mod arch_tests {
             "extracted no variant names from declare_e2e_transitions! body — parser drifted"
         );
 
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pbt/transitions");
+        let dir = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .join("src/pbt/transitions");
         // The peer-sync transitions were co-located into `holon-loro-testing`
         // (Phase-1a Step 4 — see the `pub use holon_loro_testing::transitions::…`
         // re-export above). Their dedicated files live in that crate's
         // `src/transitions/` dir, not here. The file-per-transition invariant
         // still holds — it just spans the crate seam, so these variants are
         // searched for in the co-located crate instead.
-        let loro_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../holon-loro-testing/src/transitions");
+        let loro_dir = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .join("../holon-loro-testing/src/transitions");
         let relocated_to_loro: &[&str] = &[
             "AddPeer",
             "CreateStaleLoro",
@@ -630,7 +635,10 @@ mod arch_tests {
     #[test]
     fn every_file_is_registered_as_a_module() {
         let module_source = include_str!("./mod.rs");
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pbt/transitions");
+        let dir = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .join("src/pbt/transitions");
 
         let mut registered_modules: Vec<String> = Vec::new();
         for line in module_source.lines() {

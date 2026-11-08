@@ -35,7 +35,10 @@ use holon_logseq_db::kvs_writer;
 use holon_logseq_db::kvs_writer::KvsGraph;
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/logseq-db/holontest.sqlite")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-db/holontest.sqlite")
 }
 
 async fn base_of(path: &Path) -> ImportBase {
@@ -85,8 +88,10 @@ struct LogseqVerdict {
 }
 
 fn logseq_verdict() -> LogseqVerdict {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/logseq-db/built-in-entities.json");
+    let path = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-db/built-in-entities.json");
     serde_json::from_str(
         &std::fs::read_to_string(&path).expect("the recorded verdict is committed"),
     )
@@ -1587,8 +1592,10 @@ struct IdentReference {
 /// no skips now.
 #[tokio::test]
 async fn the_ident_rule_matches_logseq_except_for_a_recorded_over_refusal_set() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/logseq-db/internal-ident-reference.json");
+    let path = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-db/internal-ident-reference.json");
     let reference: IdentReference =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the recording is committed"))
             .expect("it parses");

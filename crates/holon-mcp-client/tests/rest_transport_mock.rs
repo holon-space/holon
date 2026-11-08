@@ -816,9 +816,9 @@ async fn rest_transport_read_resource_fails_loud() {
 #[test]
 fn shipped_jsonplaceholder_sidecar_parses_as_rest() {
     // The committed example file is a valid rest-transport sidecar.
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/integrations/jsonplaceholder.yaml"
+    let path = format!(
+        "{}/../../assets/integrations/jsonplaceholder.yaml",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     );
     let yaml = std::fs::read_to_string(path).expect("read jsonplaceholder.yaml");
     let cfg = IntegrationFileConfig::from_yaml(&yaml).expect("example parses");

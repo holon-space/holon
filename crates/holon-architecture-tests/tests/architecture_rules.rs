@@ -16,11 +16,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("repo root above crates/holon-architecture-tests")
-        .to_path_buf()
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .parent()
+    .and_then(|p| p.parent())
+    .expect("repo root above crates/holon-architecture-tests")
+    .to_path_buf()
 }
 
 #[test]
@@ -899,4 +901,154 @@ fn archlint_check(files: &[&str]) {
 #[test]
 fn the_loro_document_store_reads_time_only_through_the_clock_port() {
     archlint_check(&["crates/holon-loro/src/loro_document_store.rs"]);
+}
+
+const MANIFEST_DIR_MACRO: &str = r#"env!("CARGO_MANIFEST_DIR")"#;
+
+/// Lines of `src` that use the compile-time manifest dir for anything but an
+/// `include_str!`/`include_bytes!` argument, skipping `//` comment lines.
+fn compile_time_manifest_dir_lines(src: &str) -> Vec<usize> {
+    src.match_indices(MANIFEST_DIR_MACRO)
+        .filter(|(i, _)| {
+            let before = &src[..*i];
+            let line_start = before.rfind('\n').map_or(0, |n| n + 1);
+            if before[line_start..].trim_start().starts_with("//") {
+                return false;
+            }
+            let included = before
+                .trim_end()
+                .strip_suffix("concat!(")
+                .map(str::trim_end)
+                .is_some_and(|b| b.ends_with("include_str!(") || b.ends_with("include_bytes!("));
+            !included
+        })
+        .map(|(i, _)| src[..i].matches('\n').count() + 1)
+        .collect()
+}
+
+/// `env!("CARGO_MANIFEST_DIR")` is the crate dir of the tree that BUILT the
+/// binary, and cargo reuses a binary across workspaces whose sources match, so
+/// a path built from it reads another tree's files. Read the variable at run
+/// time with `std::env::var`; an include is baked in at build time and may
+/// keep the macro.
+#[test]
+fn files_are_located_through_the_run_time_manifest_dir() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("crates"), &mut files);
+    rust_sources(&root.join("frontends"), &mut files);
+
+    let mut offenders = Vec::new();
+    for file in &files {
+        let rel = file
+            .strip_prefix(&root)
+            .expect("source under repo root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel == file!() {
+            continue;
+        }
+        let src = std::fs::read_to_string(file).expect("readable rust source");
+        for line in compile_time_manifest_dir_lines(&src) {
+            offenders.push(format!("  {rel}:{line}"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these lines locate files through the compile-time {MANIFEST_DIR_MACRO}, which names the \
+         tree the binary was built in, not the tree it runs in:\n{}\n\nUse \
+         `std::env::var(\"CARGO_MANIFEST_DIR\")` instead.\n",
+        offenders.join("\n"),
+    );
+}
+
+/// Every placement of the macro the lint must tell apart: a comment line, an
+/// include argument, and a run-time path, each across the layouts rustfmt
+/// produces.
+#[test]
+fn the_manifest_dir_lint_flags_exactly_the_run_time_paths() {
+    let separators = ["", " ", "\n    ", "\n\t"];
+    let forms = [
+        ("PathBuf::from(", ")", false),
+        ("concat!(", r#", "/x")"#, false),
+        ("include_str!(concat!(", r#", "/x"))"#, true),
+        ("include_bytes!(concat!(", r#", "/x"))"#, true),
+        ("format!(\"{}/x\",", ")", false),
+    ];
+    for comment in [false, true] {
+        for (open, close, included) in forms {
+            for sep in separators {
+                let stmt = format!("let _ = {open}{sep}{MANIFEST_DIR_MACRO}{close};");
+                let stmt = if comment {
+                    stmt.lines()
+                        .map(|l| format!("// {l}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    stmt
+                };
+                let src = format!("fn f() {{}}\n{stmt}\n");
+                let flagged = compile_time_manifest_dir_lines(&src);
+                let want = if comment || included {
+                    vec![]
+                } else {
+                    vec![
+                        src[..src.find(MANIFEST_DIR_MACRO).unwrap()]
+                            .matches('\n')
+                            .count()
+                            + 1,
+                    ]
+                };
+                assert_eq!(flagged, want, "lint verdict on:\n{src}");
+            }
+        }
+    }
+}
+
+/// This binary, run in a tree it was not built in, scans that tree. An
+/// example test by reason: the subject is one environment shape (a binary
+/// reused from another workspace), not an input space.
+#[test]
+fn a_reused_binary_scans_the_tree_it_runs_in() {
+    let root = repo_root();
+    let tree = std::env::temp_dir().join(format!("archtest-other-tree-{}", std::process::id()));
+    let crates = tree.join("crates");
+    std::fs::create_dir_all(&crates).expect("create the other tree");
+    for entry in std::fs::read_dir(root.join("crates")).expect("readable crates dir") {
+        let path = entry.expect("readable dir entry").path();
+        std::os::unix::fs::symlink(&path, crates.join(path.file_name().unwrap()))
+            .expect("link a crate into the other tree");
+    }
+    std::os::unix::fs::symlink(root.join("frontends"), tree.join("frontends"))
+        .expect("link frontends into the other tree");
+    let planted = crates.join("planted-escape/src");
+    std::fs::create_dir_all(&planted).expect("create the planted crate");
+    std::fs::write(
+        planted.join("lib.rs"),
+        "fn escape(d: &LoroDocument) { d.doc(); }\n",
+    )
+    .expect("plant the escape");
+
+    let output = Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", "loro_doc_escapes_match_the_allow_list"])
+        .env(
+            "CARGO_MANIFEST_DIR",
+            crates.join("holon-architecture-tests"),
+        )
+        .output()
+        .expect("run this binary in the other tree");
+    std::fs::remove_dir_all(&tree).expect("remove the other tree");
+
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && report.contains("crates/planted-escape/src/lib.rs"),
+        "the doc-escape lint, run in a tree with a planted escape, did not report it — it \
+         scanned another tree.\nexit: {:?}\n{report}",
+        output.status.code(),
+    );
 }

@@ -21,9 +21,9 @@ use pbt_harness::windowed_wide::replay_fixture_windowed;
 
 fn feature_path() -> String {
     std::env::var("GHERKIN_FEATURE").unwrap_or_else(|_| {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/features/ordinary_block_interaction.feature"
+        format!(
+            "{}/tests/features/ordinary_block_interaction.feature",
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
         )
         .to_string()
     })

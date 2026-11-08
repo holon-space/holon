@@ -4898,7 +4898,10 @@ mod tests {
     /// The PRODUCTION file that D3 showed the first guard was inert on.
     #[test]
     fn the_production_cursor_statements_are_seen_as_replaces() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../holon/sql/navigation");
+        let dir = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .join("../holon/sql/navigation");
         for file in ["set_cursor_to_history.sql", "upsert_cursor.sql"] {
             let sql = std::fs::read_to_string(dir.join(file))
                 .unwrap_or_else(|e| panic!("read production SQL {file}: {e}"));

@@ -29,9 +29,9 @@ fn main() {
         return;
     }
     let path = std::env::var("HOLON_CAPTURE").unwrap_or_else(|_| {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/presskey_loro_split_backspace.json"
+        format!(
+            "{}/tests/fixtures/presskey_loro_split_backspace.json",
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
         )
         .to_string()
     });

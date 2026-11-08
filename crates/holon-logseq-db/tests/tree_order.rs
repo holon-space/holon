@@ -9,7 +9,6 @@
 //! The rules under test are written up, with their measurements, in
 //! docs/Testing/LogseqDbTreeOrder.md.
 
-use std::path::Path;
 use std::path::PathBuf;
 
 use holon_logseq_db::kvs_writer;
@@ -17,7 +16,10 @@ use holon_logseq_db::tree::Index;
 use holon_logseq_db::tree::Tree;
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/logseq-db/holontest.sqlite")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-db/holontest.sqlite")
 }
 
 /// No index of the real graph is DECIDABLY out of order under our comparator,

@@ -109,9 +109,9 @@ const PARITY: &[(&str, Parity)] = &[
 /// The production column list, re-read from the file rather than copied, so
 /// this test tracks the real constant.
 fn hydrated_columns() -> Vec<String> {
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../holon-turso/src/block_table_names.rs"
+    let src = std::fs::read_to_string(format!(
+        "{}/../holon-turso/src/block_table_names.rs",
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     ))
     .expect("read block_table_names.rs");
     let start = src

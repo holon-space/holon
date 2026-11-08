@@ -18,7 +18,6 @@
 //! and the answer; this one prices the reads
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -317,8 +316,10 @@ async fn the_derived_home_profile_lookup_fits_the_interaction_budget() {
     // the SET-HASH it is trying to confirm. Asserting and printing always
     // happen; publishing is asked for explicitly.
     if std::env::var_os("HOLON_WRITE_LATENCY_DOC").is_some() {
-        let out = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/Testing/HomeProfileLookupLatency.txt");
+        let out = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .join("../../docs/Testing/HomeProfileLookupLatency.txt");
         std::fs::write(&out, &report).expect("write the measurement");
         println!("[home-profile-latency] wrote {}", out.display());
     } else {

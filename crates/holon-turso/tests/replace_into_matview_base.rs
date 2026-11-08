@@ -44,9 +44,11 @@ const BLOCK_LINKS_SCHEMA: &str = include_str!("../sql/schema/block_links.sql");
 /// the statement in `crates/holon/sql/` and this test measures the fixed
 /// statement on the next run.
 fn holon_crate_sql(relative: &str) -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../holon")
-        .join(relative);
+    let path = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../holon")
+    .join(relative);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read production SQL {}: {e}", path.display()))
 }

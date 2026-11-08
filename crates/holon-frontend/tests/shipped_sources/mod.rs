@@ -69,7 +69,10 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
 /// `(label, render source)` for every shipped render source, labelled by its
 /// path under `assets/` (or the kitchen profile name) and its index there.
 pub fn shipped_render_strings() -> Vec<(String, String)> {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+    let assets = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../../assets");
     let mut out = Vec::new();
     for (label, yaml) in [
         (

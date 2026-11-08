@@ -408,11 +408,13 @@ mod tests {
     use crate::pbt::reference_state::ReferenceState;
 
     fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .expect("the crate lives two levels under the repo root")
-            .to_path_buf()
+        PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .ancestors()
+        .nth(2)
+        .expect("the crate lives two levels under the repo root")
+        .to_path_buf()
     }
 
     /// The `hand-authored` recipe's DEFAULT quarantine list: the cases

@@ -126,7 +126,13 @@ fn the_disclosed_remedy_writes_the_file_it_names_under_an_override_dir() {
     let out = std::process::Command::new("bash")
         .arg("-c")
         .arg(remedy)
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .current_dir(
+            std::path::PathBuf::from(
+                std::env::var("CARGO_MANIFEST_DIR")
+                    .expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+            )
+            .join("../.."),
+        )
         .env("HOME", dir.path())
         .output()
         .expect("run the disclosed remedy");
@@ -302,11 +308,13 @@ fn the_enable_script_writes_a_state_file_this_build_accepts() {
 /// The path to the script every disclosure names, so a test that runs it is
 /// running what the user is told to run.
 fn enable_script() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(holon_mcp_client::ENABLE_COMMAND)
-        .canonicalize()
-        .expect("the disclosed command must name a script that exists")
+    std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../..")
+    .join(holon_mcp_client::ENABLE_COMMAND)
+    .canonicalize()
+    .expect("the disclosed command must name a script that exists")
 }
 
 fn run_enable(dir: &Path, args: &[&str]) -> std::process::Output {

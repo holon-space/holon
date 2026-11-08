@@ -12,7 +12,6 @@
 //! honest branch — the profile has to say so rather than let a caller discover
 //! it by losing an edit.
 
-use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
@@ -41,7 +40,10 @@ const TAIL_LEG: Carrier = Carrier {
 };
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/logseq-db/holontest.sqlite")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-db/holontest.sqlite")
 }
 
 struct LogseqDb {
@@ -52,7 +54,13 @@ impl LogseqDb {
     fn load() -> anyhow::Result<Self> {
         let path = std::env::var_os("HOLON_CAPABILITY_PROFILE")
             .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("profile.yaml"));
+            .unwrap_or_else(|| {
+                PathBuf::from(
+                    std::env::var("CARGO_MANIFEST_DIR")
+                        .expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+                )
+                .join("profile.yaml")
+            });
         Ok(Self {
             profile: CapabilityProfile::from_path(&path)
                 .context("the logseq-db profile must load")?,
@@ -463,7 +471,10 @@ async fn a_title_push_reaches_a_re_imported_graph() -> anyhow::Result<()> {
 /// promotion story's cost, stated by the profiles rather than by prose.
 #[test]
 fn moving_between_org_and_logseq_db_has_a_price() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../..");
     let logseq = CapabilityProfile::from_path(root.join("crates/holon-logseq-db/profile.yaml"))
         .expect("the logseq-db profile loads");
     let org = CapabilityProfile::from_path(root.join("crates/holon-org-format/profile.yaml"))

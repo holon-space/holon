@@ -18,7 +18,10 @@ use holon_logseq_db::base::BaseError;
 use holon_logseq_db::base::ImportBase;
 
 fn fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/logseq-db/holontest.sqlite")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-db/holontest.sqlite")
 }
 
 fn seeded(pairs: &[(&str, &str)]) -> ImportBase {

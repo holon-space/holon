@@ -15,8 +15,10 @@ use holon_api::expr_parser;
 
 /// The shipped `assets/default/types/person_profile.yaml`, read from disk.
 fn display_name_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/default/types/person_profile.yaml");
+    let path = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("../../assets/default/types/person_profile.yaml");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("must read {}: {e}", path.display()));
     let doc: serde_yaml::Value =

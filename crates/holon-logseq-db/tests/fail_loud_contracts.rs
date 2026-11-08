@@ -17,7 +17,10 @@ use holon_logseq_db::ImportError;
 use holon_logseq_db::read_datoms;
 
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/logseq-db/holontest.sqlite")
+    PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    )
+    .join("tests/fixtures/logseq-db/holontest.sqlite")
 }
 
 /// Copy the fixture into `dir` and apply a length-preserving rewrite to every

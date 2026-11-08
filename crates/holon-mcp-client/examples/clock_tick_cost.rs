@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     for file in ["claude-history.yaml", "gcal.yaml"] {
         let yaml = std::fs::read_to_string(format!(
             "{}/../../assets/integrations/{file}",
-            env!("CARGO_MANIFEST_DIR")
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
         ))?;
         let config = IntegrationFileConfig::from_yaml(&yaml)?;
         let prefix = config.sidecar().entity_prefix.clone().unwrap_or_default();

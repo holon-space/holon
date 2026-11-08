@@ -143,8 +143,6 @@ pub(crate) fn bag_and_kinds_set_clause(entries: &[BagEntry<'_>]) -> Result<Strin
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
 
     #[test]
@@ -214,10 +212,12 @@ mod tests {
     /// while the next variant walks through it.
     #[test]
     fn only_this_module_patches_the_bag() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("the workspace root must resolve");
+        let workspace = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .join("../..")
+        .canonicalize()
+        .expect("the workspace root must resolve");
         let mut offenders = Vec::new();
         let mut stack = vec![workspace.join("crates"), workspace.join("frontends")];
         while let Some(dir) = stack.pop() {

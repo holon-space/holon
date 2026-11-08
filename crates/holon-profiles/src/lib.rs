@@ -2279,8 +2279,10 @@ mod tests {
     /// every shipped profile's conditions must split.
     #[test]
     fn every_shipped_profile_condition_splits() {
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default/types");
+        let dir = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+        )
+        .join("../../assets/default/types");
         let mut conditions = 0;
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
