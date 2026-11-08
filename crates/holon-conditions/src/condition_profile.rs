@@ -871,6 +871,15 @@ const LORO_UPDATE_LOG_TAIL_DROPPED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const LORO_SNAPSHOT_SET_ASIDE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "An unreadable store was set aside",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const VIEW_ENGINE_STOPPED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Holon's view engine stopped",
@@ -1104,6 +1113,7 @@ impl ConditionKind {
             Self::VaultStartIncomplete { .. } => VAULT_START_INCOMPLETE,
             Self::WrittenFilesUnrecorded { .. } => WRITTEN_FILES_UNRECORDED,
             Self::LoroUpdateLogTailDropped { .. } => LORO_UPDATE_LOG_TAIL_DROPPED,
+            Self::LoroSnapshotSetAside { .. } => LORO_SNAPSHOT_SET_ASIDE,
             Self::ViewEngineStopped(_) => VIEW_ENGINE_STOPPED,
             Self::OperationCatalogStopped(_) => OPERATION_CATALOG_STOPPED,
             Self::DatabaseStuck { .. } => DATABASE_STUCK,

@@ -17,6 +17,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::Result;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -279,13 +280,7 @@ impl LoroDocumentStore {
                         if error_str.contains("Decode error")
                             || error_str.contains("Invalid import data")
                         {
-                            tracing::warn!(
-                                "Corrupted snapshot at {}: {}. Recreating.",
-                                snapshot_path.display(),
-                                e
-                            );
-                            let _ = std::fs::remove_file(&snapshot_path);
-                            let _ = std::fs::remove_file(&log_path);
+                            self.set_aside(&snapshot_path, &log_path, error_str)?;
                             let fresh = Arc::new(LoroDocument::new_with_peer_id(
                                 doc_id.to_string(),
                                 self.peer_id,
@@ -557,6 +552,49 @@ impl LoroDocumentStore {
         }
     }
 
+    /// Renames an undecodable snapshot and its log next to themselves, named
+    /// with the time and the reason, so a fresh store can start in their place.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_aside(&self, snapshot: &Path, log: &Path, cause: String) -> Result<()> {
+        let stamp = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+            .expect("the clock reads a representable time")
+            .format("%Y%m%dT%H%M%S%.3fZ");
+        let mut moved = Vec::new();
+        for file in [snapshot, log] {
+            if !file.exists() {
+                continue;
+            }
+            let mut target = file.as_os_str().to_owned();
+            target.push(format!(".undecodable-{stamp}"));
+            let target = PathBuf::from(target);
+            anyhow::ensure!(
+                !target.exists(),
+                "cannot set the undecodable {} aside: {} already exists",
+                file.display(),
+                target.display()
+            );
+            std::fs::rename(file, &target).with_context(|| {
+                format!(
+                    "set the undecodable {} aside as {}",
+                    file.display(),
+                    target.display()
+                )
+            })?;
+            moved.push(target.display().to_string());
+        }
+        tracing::warn!(
+            "{} is undecodable ({cause}); moved to {moved:?}, starting a fresh store",
+            snapshot.display()
+        );
+        if let Some(bus) = &self.conditions {
+            bus.emit(holon_conditions::Condition {
+                subject: snapshot.display().to_string(),
+                reason: holon_conditions::ConditionKind::LoroSnapshotSetAside { moved, cause },
+            });
+        }
+        Ok(())
+    }
+
     /// No-op on wasm: the snapshot writer is the native atomic-replacement
     /// helper (`holon_filesystem::fs_port`), so both documents stay in memory
     /// for the lifetime of the instance.
@@ -618,6 +656,7 @@ impl LoroDocumentStore {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use tempfile::TempDir;
 
     use super::*;
@@ -666,5 +705,114 @@ mod tests {
         let doc = store.get_or_load(Path::new("whatever.org")).await?;
         assert_eq!(doc.doc_id(), GLOBAL_DOC_ID);
         Ok(())
+    }
+
+    #[derive(Clone, Debug)]
+    enum Damage {
+        Replace(Vec<u8>),
+        Truncate(prop::sample::Index),
+        Flip(prop::sample::Index, u8),
+    }
+
+    fn damage() -> impl Strategy<Value = Damage> {
+        prop_oneof![
+            prop::collection::vec(any::<u8>(), 0..64).prop_map(Damage::Replace),
+            any::<prop::sample::Index>().prop_map(Damage::Truncate),
+            (any::<prop::sample::Index>(), 1..=u8::MAX).prop_map(|(i, m)| Damage::Flip(i, m)),
+        ]
+    }
+
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flat_map(|entry| {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files_under(&path)
+                } else {
+                    vec![path]
+                }
+            })
+            .collect()
+    }
+
+    fn holder_of(dir: &Path, bytes: &[u8]) -> Option<PathBuf> {
+        files_under(dir)
+            .into_iter()
+            .find(|f| std::fs::read(f).unwrap() == bytes)
+    }
+
+    /// Whatever a damaged snapshot and its log hold when the store opens
+    /// stays on disk byte-equal, Holon still boots, and when the files left
+    /// their place a notice names where they are now.
+    async fn opening_a_damaged_snapshot_keeps_its_bytes(damage: &Damage, with_log: bool) {
+        let dir = TempDir::new().unwrap();
+        let store = LoroDocumentStore::new(dir.path().to_path_buf());
+        let doc = store.get_doc(DocScope::Global).await.unwrap();
+        doc.insert_text("body", 0, &"seed ".repeat(2_000)).unwrap();
+        store.save_all().await.unwrap();
+        if with_log {
+            doc.insert_text("body", 0, "logged ").unwrap();
+            store.save_all().await.unwrap();
+        }
+        drop((store, doc));
+
+        let snapshot = dir.path().join(GLOBAL_SNAPSHOT_NAME);
+        let log = crate::update_log::log_path(&snapshot);
+        let mut bytes = std::fs::read(&snapshot).unwrap();
+        match damage {
+            Damage::Replace(garbage) => bytes = garbage.clone(),
+            Damage::Truncate(at) => bytes.truncate(at.index(bytes.len())),
+            Damage::Flip(at, mask) => {
+                let i = at.index(bytes.len());
+                bytes[i] ^= mask;
+            }
+        }
+        std::fs::write(&snapshot, &bytes).unwrap();
+        let mut kept = vec![("snapshot", snapshot.clone(), bytes)];
+        if log.exists() {
+            kept.push(("log", log.clone(), std::fs::read(&log).unwrap()));
+        }
+
+        let bus = Arc::new(holon_conditions::ConditionBus::new());
+        LoroDocumentStore::new(dir.path().to_path_buf())
+            .with_condition_bus(bus.clone())
+            .get_doc(DocScope::Global)
+            .await
+            .unwrap_or_else(|e| panic!("Holon must boot over {damage:?}: {e:#}"));
+
+        let notices = format!("{:?}", bus.current());
+        for (what, original, kept) in kept {
+            let holder = holder_of(dir.path(), &kept)
+                .unwrap_or_else(|| panic!("the {what} bytes are gone after {damage:?}"));
+            assert!(
+                holder == original || notices.contains(&holder.display().to_string()),
+                "the {what} moved to {} after {damage:?}, but no notice names it: {notices}",
+                holder.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_of_garbage_keeps_its_bytes() {
+        for with_log in [false, true] {
+            opening_a_damaged_snapshot_keeps_its_bytes(
+                &Damage::Replace(b"not loro".to_vec()),
+                with_log,
+            )
+            .await;
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 40, failure_persistence: None, ..ProptestConfig::default() })]
+
+        #[test]
+        fn a_damaged_snapshot_keeps_its_bytes(damage in damage(), with_log in any::<bool>()) {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(opening_a_damaged_snapshot_keeps_its_bytes(&damage, with_log));
+        }
     }
 }

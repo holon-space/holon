@@ -599,6 +599,15 @@ impl ConditionKind {
                  short ({reason}). Edits made just before the crash may be missing."
             )),
 
+            Self::LoroSnapshotSetAside { moved, cause } => ConditionDetail::with_body(
+                format!(
+                    "Holon could not read {subject} ({cause}) and rebuilt the store from the org \
+                     files. Edits that only reached the store, such as ones received from a \
+                     peer, may be missing. The unreadable files are kept at:"
+                ),
+                moved.clone(),
+            ),
+
             Self::ViewEngineStopped(reason) => ConditionDetail::prose(format!(
                 "Holon's view engine stopped: {reason}. Its views keep the state before the \
                  error until Holon restarts."

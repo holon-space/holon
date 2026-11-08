@@ -598,6 +598,12 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     LoroUpdateLogTailDropped { bytes: u64, reason: String },
+    /// `subject`, a Loro snapshot, could not be decoded (`cause`). It and its
+    /// update log were moved to `moved` and Holon started on an empty store
+    /// that the org files fill again.
+    ///
+    /// All-clear: none in this process.
+    LoroSnapshotSetAside { moved: Vec<String>, cause: String },
     /// The view engine stopped at its first error (`reason`, which names the
     /// cause). Its views keep the last version before the error.
     ///
@@ -836,6 +842,7 @@ impl ConditionKind {
     pub const VAULT_START_INCOMPLETE: &'static str = "vault-start-incomplete";
     pub const WRITTEN_FILES_UNRECORDED: &'static str = "written-files-unrecorded";
     pub const LORO_UPDATE_LOG_TAIL_DROPPED: &'static str = "loro-update-log-tail-dropped";
+    pub const LORO_SNAPSHOT_SET_ASIDE: &'static str = "loro-snapshot-set-aside";
     pub const VIEW_ENGINE_STOPPED: &'static str = "view-engine-stopped";
     pub const OPERATION_CATALOG_STOPPED: &'static str = "operation-catalog-stopped";
     pub const DATABASE_STUCK: &'static str = "database-stuck";
@@ -931,6 +938,7 @@ impl ConditionKind {
             Self::VaultStartIncomplete { .. } => Self::VAULT_START_INCOMPLETE,
             Self::WrittenFilesUnrecorded { .. } => Self::WRITTEN_FILES_UNRECORDED,
             Self::LoroUpdateLogTailDropped { .. } => Self::LORO_UPDATE_LOG_TAIL_DROPPED,
+            Self::LoroSnapshotSetAside { .. } => Self::LORO_SNAPSHOT_SET_ASIDE,
             Self::ViewEngineStopped(_) => Self::VIEW_ENGINE_STOPPED,
             Self::OperationCatalogStopped(_) => Self::OPERATION_CATALOG_STOPPED,
             Self::DatabaseStuck { .. } => Self::DATABASE_STUCK,
