@@ -59,7 +59,9 @@ use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::hold_tokio_workers;
 use crate::pbt_harness::settle::settle_window;
+use crate::pbt_harness::settle::settle_window_until;
 
 fn settle_frame(
     app: &HeadlessAppContext,
@@ -272,6 +274,10 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
 
     settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
+    // The toasts reach the window through a tokio task, which the watermark
+    // does not count.
+    hold_tokio_workers(&runtime, Duration::from_millis(500));
+
     // The reason every real load refusal uses, with the loader's own words, and
     // FIRST: the stack paints as many toasts as fit and counts the rest, so a
     // case raised last would sit in the overflow and be judged by nothing.
@@ -299,7 +305,18 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
         });
     }
 
-    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
+    settle_window_until(
+        &app,
+        &bounds,
+        engine.ui_watermark(),
+        &|b| {
+            b.all_elements()
+                .iter()
+                .any(|(id, _)| id.starts_with(TOAST_LINE))
+        },
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 
     let lines: Vec<(String, ElementInfo)> = bounds
         .all_elements()

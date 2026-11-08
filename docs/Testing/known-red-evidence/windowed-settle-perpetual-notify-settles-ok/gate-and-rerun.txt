@@ -1,0 +1,7 @@
+RED       holon-gpui::main settle_window_fixed_point  tests=4  wall=0.5s  log=target/gate-logs/windowed/holon-gpui__main__settle_window_fixed_point.log
+RED       holon-gpui::main settle_window_fixed_point  rerun wall=0.4s  logs=target/gate-logs/windowed/holon-gpui__main__settle_window_fixed_point.log target/gate-logs/windowed/holon-gpui__main__settle_window_fixed_point.rerun.log
+  FAIL: RED holon-gpui::main settle_window_fixed_point (log target/gate-logs/windowed/holon-gpui__main__settle_window_fixed_point.rerun.log)
+    Starting 4 tests across 1 binary (340 tests and 141 binaries skipped)
+    perpetual-notify renders 1, result: Ok(RenderEpoch { frame: FrameNo(1), reflects: EngineSeq(0) })
+    thread 'settle_window_fixed_point::perpetual_notify_never_settles::settle_window_refuses_a_view_that_notifies_in_every_render' (1862716506) panicked at frontends/gpui/tests/settle_window_fixed_point.rs:393:23:
+    perpetual-notify settled Ok under a perpetual cx.notify: RenderEpoch { frame: FrameNo(1), reflects: EngineSeq(0) }

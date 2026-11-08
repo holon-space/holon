@@ -39,6 +39,8 @@ pub enum SettleError {
     Timeout(SettleTimeout),
     Loading(RenderEpoch),
     Engine(anyhow::Error),
+    /// The window settled, but the change the caller waits for is not painted.
+    Undelivered(RenderEpoch),
 }
 
 impl std::fmt::Display for SettleError {
@@ -65,6 +67,11 @@ impl std::fmt::Display for SettleError {
                 )
             }
             SettleError::Engine(e) => write!(f, "the engine cannot report its emitted seq: {e:#}"),
+            SettleError::Undelivered(epoch) => write!(
+                f,
+                "window settled at frame {:?}, but the change the caller waits for is not painted",
+                epoch.frame
+            ),
         }
     }
 }
@@ -143,5 +150,37 @@ pub fn settle_window(
                 held_bridges: holon_gpui::bridge_hold::engaged_rows(),
             }));
         }
+    }
+}
+
+/// [`settle_window`] until `delivered` holds: for a change that reaches the
+/// window over a hop the watermark does not count, such as a tokio task.
+pub fn settle_window_until(
+    app: &impl Pump,
+    bounds: &BoundsRegistry,
+    watermark: &UiWatermark,
+    delivered: &dyn Fn(&BoundsRegistry) -> bool,
+    deadline: Duration,
+) -> Result<RenderEpoch, SettleError> {
+    let start = Instant::now();
+    loop {
+        let left = deadline.saturating_sub(start.elapsed());
+        let epoch = settle_window(app, bounds, watermark, &mut || {}, left)?;
+        if delivered(bounds) {
+            return Ok(epoch);
+        }
+        if start.elapsed() >= deadline {
+            return Err(SettleError::Undelivered(epoch));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Keep every tokio worker of `runtime` busy for `hold`, so a task woken now
+/// runs only after it: a tokio hop then takes longer than a window settle, as
+/// it does on a loaded host.
+pub fn hold_tokio_workers(runtime: &tokio::runtime::Runtime, hold: Duration) {
+    for _ in 0..runtime.metrics().num_workers() {
+        runtime.spawn(async move { std::thread::sleep(hold) });
     }
 }
