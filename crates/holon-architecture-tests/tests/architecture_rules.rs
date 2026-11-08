@@ -879,3 +879,24 @@ fn the_keystone_reference_never_mutates_production_globals() {
         offenders.join("\n"),
     );
 }
+
+fn archlint_check(files: &[&str]) {
+    let root = repo_root();
+    let output = Command::new(root.join("archlint").join("archlint"))
+        .arg("check")
+        .args(files)
+        .current_dir(&root)
+        .output()
+        .expect("failed to spawn archlint");
+    assert!(
+        output.status.success(),
+        "archlint check {files:?} reported violations:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn the_loro_document_store_reads_time_only_through_the_clock_port() {
+    archlint_check(&["crates/holon-loro/src/loro_document_store.rs"]);
+}

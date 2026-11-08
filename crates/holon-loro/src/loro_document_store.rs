@@ -89,6 +89,8 @@ pub struct LoroDocumentStore {
     /// in `LoroDocument::new`. Two instances in ONE process must each
     /// inject their own — the env var is process-global and would collide.
     peer_id: Option<u64>,
+    /// Stamps the name of a snapshot set aside as undecodable.
+    clock: Arc<dyn holon_api::Clock>,
     /// The vault document's text-undo manager, built with the global doc.
     /// Layout has none: a device-local UI arrangement is not the user's typing.
     /// Install-once, and readable WITHOUT an executor: the journal asks for the
@@ -131,6 +133,7 @@ impl LoroDocumentStore {
             saved: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             conditions: None,
             peer_id: None,
+            clock: Arc::new(holon_api::SystemClock),
             text_undo: Arc::new(std::sync::OnceLock::new()),
             #[cfg(not(target_arch = "wasm32"))]
             peer_versions: Arc::new(std::sync::OnceLock::new()),
@@ -152,6 +155,11 @@ impl LoroDocumentStore {
     /// injection seam).
     pub fn with_peer_id(mut self, peer_id: Option<u64>) -> Self {
         self.peer_id = peer_id;
+        self
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn holon_api::Clock>) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -556,7 +564,7 @@ impl LoroDocumentStore {
     /// with the time and the reason, so a fresh store can start in their place.
     #[cfg(not(target_arch = "wasm32"))]
     fn set_aside(&self, snapshot: &Path, log: &Path, cause: String) -> Result<()> {
-        let stamp = chrono::DateTime::from_timestamp_millis(holon_api::clock::now_millis())
+        let stamp = chrono::DateTime::from_timestamp_millis(self.clock.now_millis())
             .expect("the clock reads a representable time")
             .format("%Y%m%dT%H%M%S%.3fZ");
         let mut moved = Vec::new();
@@ -744,8 +752,13 @@ mod tests {
 
     /// Whatever a damaged snapshot and its log hold when the store opens
     /// stays on disk byte-equal, Holon still boots, and when the files left
-    /// their place a notice names where they are now.
-    async fn opening_a_damaged_snapshot_keeps_its_bytes(damage: &Damage, with_log: bool) {
+    /// their place a notice names where they are now, under a name stamped
+    /// with the injected clock's time.
+    async fn opening_a_damaged_snapshot_keeps_its_bytes(
+        damage: &Damage,
+        with_log: bool,
+        at_millis: i64,
+    ) {
         let dir = TempDir::new().unwrap();
         let store = LoroDocumentStore::new(dir.path().to_path_buf());
         let doc = store.get_doc(DocScope::Global).await.unwrap();
@@ -776,6 +789,7 @@ mod tests {
 
         let bus = Arc::new(holon_conditions::ConditionBus::new());
         LoroDocumentStore::new(dir.path().to_path_buf())
+            .with_clock(Arc::new(holon_api::TestClock::new(at_millis)))
             .with_condition_bus(bus.clone())
             .get_doc(DocScope::Global)
             .await
@@ -790,6 +804,19 @@ mod tests {
                 "the {what} moved to {} after {damage:?}, but no notice names it: {notices}",
                 holder.display()
             );
+            if holder != original {
+                let stamp = chrono::DateTime::from_timestamp_millis(at_millis)
+                    .unwrap()
+                    .format("%Y%m%dT%H%M%S%.3fZ");
+                assert_eq!(
+                    holder.file_name().unwrap().to_string_lossy(),
+                    format!(
+                        "{}.undecodable-{stamp}",
+                        original.file_name().unwrap().to_string_lossy()
+                    ),
+                    "the {what} set aside at {at_millis} ms must carry the clock's time"
+                );
+            }
         }
     }
 
@@ -799,6 +826,7 @@ mod tests {
             opening_a_damaged_snapshot_keeps_its_bytes(
                 &Damage::Replace(b"not loro".to_vec()),
                 with_log,
+                1_762_560_000_123,
             )
             .await;
         }
@@ -808,11 +836,15 @@ mod tests {
         #![proptest_config(ProptestConfig { cases: 40, failure_persistence: None, ..ProptestConfig::default() })]
 
         #[test]
-        fn a_damaged_snapshot_keeps_its_bytes(damage in damage(), with_log in any::<bool>()) {
+        fn a_damaged_snapshot_keeps_its_bytes(
+            damage in damage(),
+            with_log in any::<bool>(),
+            at_millis in 0..4_102_444_800_000i64,
+        ) {
             tokio::runtime::Builder::new_current_thread()
                 .build()
                 .unwrap()
-                .block_on(opening_a_damaged_snapshot_keeps_its_bytes(&damage, with_log));
+                .block_on(opening_a_damaged_snapshot_keeps_its_bytes(&damage, with_log, at_millis));
         }
     }
 }

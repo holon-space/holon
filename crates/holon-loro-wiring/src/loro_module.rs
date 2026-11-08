@@ -117,6 +117,7 @@ impl Module for LoroModule {
             Shared::new(
                 LoroDocumentStore::new(config.storage_dir.clone())
                     .with_peer_id(config.peer_id)
+                    .with_clock(resolver.resolve::<holon_api::InjectedClock>().0.clone())
                     .with_condition_bus((*bus).clone()),
             )
         }));
@@ -795,6 +796,9 @@ mod tests {
         }));
         injector.provide::<Arc<holon_conditions::ConditionBus>>(Provider::root(|_| {
             Shared::new(Arc::new(holon_conditions::ConditionBus::new()))
+        }));
+        injector.provide::<holon_api::InjectedClock>(Provider::root(|_| {
+            Shared::new(holon_api::InjectedClock(Arc::new(holon_api::SystemClock)))
         }));
         LoroModule.configure(&injector).unwrap();
         injector
