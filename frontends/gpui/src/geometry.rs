@@ -248,6 +248,10 @@ impl GeometryProvider for BoundsRegistry {
         self.committed_generation()
     }
 
+    fn render_epoch(&self) -> Option<RenderEpoch> {
+        Some(self.epoch())
+    }
+
     fn clone_box(&self) -> Box<dyn GeometryProvider> {
         Box::new(self.clone())
     }
@@ -282,6 +286,11 @@ impl GeometryProvider for FlushOnReadGeometry {
 
     fn generation(&self) -> u64 {
         GeometryProvider::generation(&self.0)
+    }
+
+    fn render_epoch(&self) -> Option<RenderEpoch> {
+        self.0.flush();
+        GeometryProvider::render_epoch(&self.0)
     }
 
     fn clone_box(&self) -> Box<dyn GeometryProvider> {
@@ -736,5 +745,53 @@ mod tests {
                 before = reflects;
             }
         }
+
+        /// The holon MCP's `render_epoch` reports the frame the registry last
+        /// committed and the seq of the pass that drew it: over any schedule
+        /// of records, passes and MCP reads (which promote the staged frame).
+        #[test]
+        fn mcp_render_epoch_reports_the_last_committed_frame(
+            steps in proptest::collection::vec((0u8..3, 0u64..3), 1..24)
+        ) {
+            let reg = BoundsRegistry::new();
+            let mcp = FlushOnReadGeometry(reg.clone());
+            let (mut seq, mut staged, mut staged_reflects) = (0, false, 0);
+            let (mut frame, mut committed_reflects) = (0, 0);
+            for (i, (step, bump)) in steps.into_iter().enumerate() {
+                match step {
+                    0 => {
+                        reg.record(format!("e{i}"), elem("block:x"));
+                        staged = true;
+                    }
+                    1 => {
+                        seq += bump;
+                        reg.begin_pass(EngineSeq(seq));
+                        if std::mem::take(&mut staged) {
+                            frame += 1;
+                            committed_reflects = staged_reflects;
+                        }
+                        staged_reflects = seq;
+                    }
+                    _ => {
+                        if std::mem::take(&mut staged) {
+                            frame += 1;
+                            committed_reflects = staged_reflects;
+                        }
+                        let report = holon_mcp::describe_ui_geometry::render_epoch_report(Some(&mcp))
+                            .expect("a GPUI registry publishes its epoch");
+                        proptest::prop_assert_eq!(
+                            report,
+                            serde_json::json!({ "frame": frame, "reflects": committed_reflects })
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_render_epoch_without_a_window_names_the_absence() {
+        let err = holon_mcp::describe_ui_geometry::render_epoch_report(None).unwrap_err();
+        assert!(err.contains("no geometry provider"), "{err}");
     }
 }

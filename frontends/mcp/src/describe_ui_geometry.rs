@@ -282,6 +282,19 @@ pub fn annotate_json(tree: &Value, geometry: Option<&dyn GeometryProvider>) -> V
     out
 }
 
+/// The frontend's last committed frame and the engine seq it reflects, as
+/// `{"frame", "reflects"}`; an error names why there is none.
+pub fn render_epoch_report(geometry: Option<&dyn GeometryProvider>) -> Result<Value, String> {
+    let provider = geometry.ok_or(
+        "no render epoch: no geometry provider registered (headless run, or a frontend with no \
+         painted window)",
+    )?;
+    let epoch = provider
+        .render_epoch()
+        .ok_or("no render epoch: this frontend's geometry provider publishes none")?;
+    Ok(json!({ "frame": epoch.frame.0, "reflects": epoch.reflects.0 }))
+}
+
 /// Compact geometry report appended under the `text` rendering of the tree —
 /// one line per entity-bound node, measured or explicitly absent.
 pub fn geometry_text_report(tree: &Value, geometry: Option<&dyn GeometryProvider>) -> String {

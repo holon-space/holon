@@ -43,6 +43,8 @@ use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 
 use super::capture::FrameSink;
+use super::settle::SettleError;
+use super::settle::SettleTimeout;
 use super::settle::settle_window;
 use super::sim_windowed_replay::SimUserDriver;
 
@@ -126,6 +128,7 @@ pub struct LivePanels<'a> {
     engine: Arc<ReactiveEngine>,
     bounds: BoundsRegistry,
     settle_deadline: Arc<std::sync::Mutex<Duration>>,
+    last_timeout: Arc<std::sync::Mutex<Option<SettleTimeout>>>,
 }
 
 /// The hang deadline of the per-check window settle.
@@ -135,6 +138,12 @@ impl LivePanels<'_> {
     /// Set the hang deadline of the per-check window settle.
     pub fn set_settle_deadline(&self, deadline: Duration) {
         *self.settle_deadline.lock().unwrap() = deadline;
+    }
+
+    /// The timeout of the last per-check settle that timed out; taking it
+    /// clears it.
+    pub fn take_settle_timeout(&self) -> Option<SettleTimeout> {
+        self.last_timeout.lock().unwrap().take()
     }
 
     pub fn lists(&self, region: Region) -> Vec<(EntityUri, Vec<EntityUri>)> {
@@ -279,16 +288,24 @@ pub fn with_windowed_wide_sut_live(
     let watermark = engine.ui_watermark().clone();
     let settle_deadline = Arc::new(std::sync::Mutex::new(SETTLE_DEADLINE));
     let hook_deadline = settle_deadline.clone();
+    let last_timeout = Arc::new(std::sync::Mutex::new(None));
+    let hook_timeout = last_timeout.clone();
     let settle: SettleHook = Box::new(move || {
         let deadline = *hook_deadline.lock().unwrap();
-        if let Err(e) = settle_window(
+        match settle_window(
             settle_app.app(),
             &settle_bounds,
             &watermark,
             &mut || settle_engine(),
             deadline,
         ) {
-            panic!("windowed settle: {e}");
+            Ok(_) => {}
+            Err(SettleError::Timeout(t)) => {
+                let msg = SettleError::Timeout(t.clone()).to_string();
+                *hook_timeout.lock().unwrap() = Some(t);
+                panic!("windowed settle: {msg}");
+            }
+            Err(e) => panic!("windowed settle: {e}"),
         }
     });
 
@@ -319,6 +336,7 @@ pub fn with_windowed_wide_sut_live(
         engine: engine.clone(),
         bounds: bounds.clone(),
         settle_deadline,
+        last_timeout,
     };
     let sut = run(sut, &oracle, &sink, &live);
     drop(live);

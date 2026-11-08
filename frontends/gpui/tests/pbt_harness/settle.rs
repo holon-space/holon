@@ -19,7 +19,7 @@ pub const HANG_DEADLINE: Duration = Duration::from_secs(60);
 
 /// The window was not at rest with a frame at the engine's target by the hang
 /// deadline.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SettleTimeout {
     pub deadline: Duration,
     pub epoch: RenderEpoch,

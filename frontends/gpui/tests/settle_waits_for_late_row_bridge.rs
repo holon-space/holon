@@ -122,25 +122,37 @@ fn late_bridge_case(
             )),
             Err(p) => {
                 let msg = panic_message(&p);
-                match msg.contains("window did not settle") && msg.contains(row.as_str()) {
-                    true => None,
-                    false => Some(format!(
+                match (
+                    msg.contains("window did not settle") && msg.contains(row.as_str()),
+                    live.take_settle_timeout(),
+                ) {
+                    (true, Some(t)) if t.epoch.reflects < t.target => None,
+                    (true, Some(t)) => Some(format!(
+                        "the held settle timed out on {row} with a frame that reflects {:?}, \
+                         not below the target {:?}",
+                        t.epoch.reflects, t.target
+                    )),
+                    (true, None) => Some(format!(
+                        "the held settle timed out on {row} but recorded no timeout"
+                    )),
+                    (false, _) => Some(format!(
                         "the held settle failed, but not by timing out on {row}: {msg}"
                     )),
                 }
             }
         };
         hold.open();
+        if let Some(msg) = verdict {
+            let msg = format!("{write:?} with a late bridge: {msg}");
+            sink.capture_fail("ApplyMutation", &msg);
+            *out.borrow_mut() = Err(TestCaseError::fail(msg));
+            return Some(sut);
+        }
         ComposedSut::<WideE2E>::check_invariants(&sut, &ref_state);
         assert!(
             live.painted(&row),
             "{write:?}: the settle returned after the bridge opened, but {row} is not painted"
         );
-        if let Some(msg) = verdict {
-            let msg = format!("{write:?} with a late bridge: {msg}");
-            sink.capture_fail("ApplyMutation", &msg);
-            *out.borrow_mut() = Err(TestCaseError::fail(msg));
-        }
         Some(sut)
     });
     out.into_inner()

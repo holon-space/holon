@@ -254,6 +254,12 @@ pub trait GeometryProvider: Send + Sync {
         0
     }
 
+    /// The stamp of the last committed frame; `None` for a frontend that
+    /// publishes no render epoch.
+    fn render_epoch(&self) -> Option<crate::render_epoch::RenderEpoch> {
+        None
+    }
+
     /// Clone into a boxed trait object. `SharedBoundsRegistry` is `Arc`-backed,
     /// so the clone reads the SAME live registry — used by the per-tick
     /// windowed composed check (`E2ESut::run_invariant_registry_gated`) to

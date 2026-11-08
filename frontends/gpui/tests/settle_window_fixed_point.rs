@@ -315,3 +315,82 @@ proptest! {
         settles_on_every_shown_view(n, arrivals)?;
     }
 }
+
+mod perpetual_notify_never_settles {
+    use gpui::AppContext as _;
+    use gpui::HeadlessAppContext;
+    use gpui::IntoElement;
+    use gpui::Render;
+    use gpui::Window;
+
+    use super::*;
+
+    struct Spinner {
+        bounds: BoundsRegistry,
+        watermark: Arc<UiWatermark>,
+        renders: Arc<AtomicUsize>,
+    }
+
+    impl Render for Spinner {
+        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            self.renders.fetch_add(1, Ordering::SeqCst);
+            self.bounds.begin_pass(self.watermark.current());
+            self.bounds
+                .record("spinner".to_string(), element("live_block"));
+            cx.notify();
+            gpui::div()
+        }
+    }
+
+    #[test]
+    fn settle_window_refuses_a_view_that_notifies_in_every_render() {
+        let renders = Arc::new(AtomicUsize::new(0));
+        {
+            let renders = renders.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(40));
+                eprintln!(
+                    "perpetual-notify HANG: settle_window did not return within 40 s; renders so far {}",
+                    renders.load(Ordering::SeqCst)
+                );
+                std::process::exit(42);
+            });
+        }
+        let mut app = HeadlessAppContext::new(gpui_platform::current_text_system());
+        let engine = Arc::new(SeqEngine::default());
+        let watermark = UiWatermark::new(Some(engine));
+        let bounds = BoundsRegistry::new();
+        eprintln!("perpetual-notify opening window");
+        let (b, w, r) = (bounds.clone(), watermark.clone(), renders.clone());
+        app.open_window(
+            gpui::size(gpui::px(400.0), gpui::px(300.0)),
+            move |_, cx| {
+                cx.new(|_| Spinner {
+                    bounds: b,
+                    watermark: w,
+                    renders: r,
+                })
+            },
+        )
+        .expect("open_window");
+        eprintln!(
+            "perpetual-notify window open, renders {}",
+            renders.load(Ordering::SeqCst)
+        );
+        let r = settle_window(
+            &app,
+            &bounds,
+            &watermark,
+            &mut || {},
+            Duration::from_secs(3),
+        );
+        eprintln!(
+            "perpetual-notify renders {}, result: {r:?}",
+            renders.load(Ordering::SeqCst)
+        );
+        match r {
+            Err(e) => eprintln!("perpetual-notify display: {e}"),
+            Ok(ep) => panic!("perpetual-notify settled Ok under a perpetual cx.notify: {ep:?}"),
+        }
+    }
+}

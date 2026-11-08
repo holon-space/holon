@@ -4324,6 +4324,24 @@ impl HolonMcpServer {
         }
     }
 
+    /// The render epoch of the frontend's last committed frame: its frame
+    /// number and the engine seq its content reflects. A frame that reflects
+    /// `await_quiescence`'s `reached_seq` shows every change through it.
+    #[tool(
+        description = "TEST-ONLY: the render epoch of the last committed frame: `frame` (the \
+                       frontend's frame count) and `reflects` (the CDC seq every UI subscription \
+                       of that frame applied). Compare `reflects` with await_quiescence's \
+                       reached_seq. Errors when the frontend publishes no epoch."
+    )]
+    async fn render_epoch(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let geometry = self.debug.geometry.get().cloned();
+        let report = crate::describe_ui_geometry::render_epoch_report(geometry.as_deref())
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("render_epoch: {e}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            report.to_string(),
+        )]))
+    }
+
     /// Capture the live PBT-facing snapshot: the CDC-driven `LiveData` block
     /// mirror (NOT a matview SQL read) + focus-roots, plus the Loro tree's
     /// error flag, lamport height, and per-parent child lists. The block
