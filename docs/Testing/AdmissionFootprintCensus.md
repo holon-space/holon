@@ -76,10 +76,10 @@ Counts: 95 ops; inside 7; outside 9; undeclared 79 (of which 35 failed on the fi
 | cookware.update | none | (none) | Undeclared |  | cookware:x — covers | - |
 | identity.accept_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | fence — covers | - |
 | identity.delete_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
-| identity.merge_entities | none | ERROR: merge_entities: select canonical_a: Database error: Failed to prepare query: Parse error: no such table: canonical_entity | Undeclared |  | relation identity — covers | - |
+| identity.merge_entities | none | ERROR: merge_entities: select canonical_a: Database error: Failed to prepare query: no such table: canonical_entity | Undeclared |  | relation identity — covers | - |
 | identity.propose_merge | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
 | identity.reject_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | fence — covers | - |
-| identity.restore_canonical_after_merge | none | ERROR: restore_canonical_after_merge: insert canonical: Database error: Failed to prepare query: Parse error: no such table: canonical_entity | Undeclared |  | relation identity — covers | - |
+| identity.restore_canonical_after_merge | none | ERROR: restore_canonical_after_merge: insert canonical: Database error: Failed to prepare query: no such table: canonical_entity | Undeclared |  | relation identity — covers | - |
 | identity.restore_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
 | identity.revert_proposal_status | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
 | ingredient-use.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: ingredient_use_raw.recipe_id | Undeclared |  | ingredient-use:x — covers | - |

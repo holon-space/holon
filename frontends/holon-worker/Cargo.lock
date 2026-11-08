@@ -184,7 +184,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -195,7 +195,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -614,7 +614,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.11.0",
  "lazy_static",
  "lazycell",
  "log",
@@ -1936,7 +1936,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2292,21 +2292,6 @@ dependencies = [
  "pin-project-lite",
  "slab",
 ]
-
-[[package]]
-name = "genawaiter"
-version = "0.99.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c86bd0361bcbde39b13475e6e36cb24c329964aa2611be285289d1e4b751c1a0"
-dependencies = [
- "genawaiter-macro",
-]
-
-[[package]]
-name = "genawaiter-macro"
-version = "0.99.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b32dfe1fdfc0bbde1f22a5da25355514b5e450c33a6af6770884c8750aedfbc"
 
 [[package]]
 name = "generator"
@@ -3147,6 +3132,7 @@ dependencies = [
  "turso",
  "turso_core",
  "turso_sdk_kit",
+ "turso_sqlite",
  "wasm-bindgen-futures",
  "web-time",
  "workspace-hack",
@@ -3728,7 +3714,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4720,7 +4706,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5348,29 +5334,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prost"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
-dependencies = [
- "bytes",
- "prost-derive",
-]
-
-[[package]]
-name = "prost-derive"
-version = "0.14.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
-dependencies = [
- "anyhow",
- "itertools 0.14.0",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "prqlc"
 version = "0.13.8"
 source = "git+https://github.com/nightscape/prql.git?branch=main#4fb96cbce8e87d961526717b53d22c6c6000286f"
@@ -5542,7 +5505,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6114,7 +6077,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6127,7 +6090,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6186,7 +6149,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6625,15 +6588,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "simsimd"
-version = "6.5.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4fb3bc3cdce07a7d7d4caa4c54f8aa967f6be41690482b54b24100a2253fa70"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6697,7 +6651,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6780,7 +6734,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7177,7 +7131,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7187,7 +7141,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7736,21 +7690,20 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "turso"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
  "turso_core",
  "turso_sdk_kit",
- "turso_sync_sdk_kit",
 ]
 
 [[package]]
 name = "turso_core"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "aegis",
  "aes",
@@ -7805,7 +7758,6 @@ dependencies = [
  "serde_json",
  "shuttle",
  "simdutf8",
- "simsimd",
  "smallvec",
  "strum 0.26.3",
  "strum_macros 0.26.4",
@@ -7826,8 +7778,8 @@ dependencies = [
 
 [[package]]
 name = "turso_ext"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
@@ -7836,8 +7788,8 @@ dependencies = [
 
 [[package]]
 name = "turso_macros"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7846,8 +7798,8 @@ dependencies = [
 
 [[package]]
 name = "turso_parser"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "bitflags 2.13.2",
  "memchr",
@@ -7861,8 +7813,8 @@ dependencies = [
 
 [[package]]
 name = "turso_sdk_kit"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "bindgen",
  "env_logger",
@@ -7874,12 +7826,13 @@ dependencies = [
  "turso_core",
  "turso_ext",
  "turso_sdk_kit_macros",
+ "turso_sqlite",
 ]
 
 [[package]]
 name = "turso_sdk_kit_macros"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7887,43 +7840,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "turso_sync_engine"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+name = "turso_sqlite"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
- "base64 0.22.1",
- "bytes",
- "crc32c",
- "genawaiter",
- "http",
- "libc",
- "prost",
- "roaring",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tracing",
  "turso_core",
  "turso_parser",
- "uuid",
-]
-
-[[package]]
-name = "turso_sync_sdk_kit"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
-dependencies = [
- "bindgen",
- "env_logger",
- "genawaiter",
- "parking_lot",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "turso_core",
- "turso_sdk_kit",
- "turso_sdk_kit_macros",
- "turso_sync_engine",
 ]
 
 [[package]]
@@ -7991,7 +7913,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8424,7 +8346,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

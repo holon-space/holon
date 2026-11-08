@@ -4165,21 +4165,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "genawaiter"
-version = "0.99.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c86bd0361bcbde39b13475e6e36cb24c329964aa2611be285289d1e4b751c1a0"
-dependencies = [
- "genawaiter-macro",
-]
-
-[[package]]
-name = "genawaiter-macro"
-version = "0.99.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b32dfe1fdfc0bbde1f22a5da25355514b5e450c33a6af6770884c8750aedfbc"
-
-[[package]]
 name = "generational-box"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4200,8 +4185,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -6304,6 +6289,7 @@ dependencies = [
  "turso",
  "turso_core",
  "turso_sdk_kit",
+ "turso_sqlite",
  "wasm-bindgen-futures",
  "web-time",
  "workspace-hack 0.1.0",
@@ -12552,15 +12538,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "simsimd"
-version = "6.5.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4fb3bc3cdce07a7d7d4caa4c54f8aa967f6be41690482b54b24100a2253fa70"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14435,21 +14412,20 @@ dependencies = [
 
 [[package]]
 name = "turso"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
  "turso_core",
  "turso_sdk_kit",
- "turso_sync_sdk_kit",
 ]
 
 [[package]]
 name = "turso_core"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "aegis",
  "aes",
@@ -14504,7 +14480,6 @@ dependencies = [
  "serde_json",
  "shuttle",
  "simdutf8",
- "simsimd",
  "smallvec",
  "strum 0.26.3",
  "strum_macros 0.26.4",
@@ -14525,8 +14500,8 @@ dependencies = [
 
 [[package]]
 name = "turso_ext"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
@@ -14535,8 +14510,8 @@ dependencies = [
 
 [[package]]
 name = "turso_macros"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -14545,8 +14520,8 @@ dependencies = [
 
 [[package]]
 name = "turso_parser"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "bitflags 2.13.2",
  "memchr",
@@ -14560,8 +14535,8 @@ dependencies = [
 
 [[package]]
 name = "turso_sdk_kit"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger 0.11.11",
@@ -14573,12 +14548,13 @@ dependencies = [
  "turso_core",
  "turso_ext",
  "turso_sdk_kit_macros",
+ "turso_sqlite",
 ]
 
 [[package]]
 name = "turso_sdk_kit_macros"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -14586,43 +14562,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "turso_sync_engine"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
+name = "turso_sqlite"
+version = "0.9.0-pre.2"
+source = "git+https://github.com/nightscape/turso.git?rev=ac81f0251738eb462383f5a6d5eb5748fda887f5#ac81f0251738eb462383f5a6d5eb5748fda887f5"
 dependencies = [
- "base64 0.22.1",
- "bytes",
- "crc32c",
- "genawaiter",
- "http",
- "libc",
- "prost 0.14.4",
- "roaring",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tracing",
  "turso_core",
  "turso_parser",
- "uuid",
-]
-
-[[package]]
-name = "turso_sync_sdk_kit"
-version = "0.9.0-pre.1"
-source = "git+https://github.com/nightscape/turso.git?rev=637918ffd2e1c2021043908e21f292fb54044bb1#637918ffd2e1c2021043908e21f292fb54044bb1"
-dependencies = [
- "bindgen 0.69.5",
- "env_logger 0.11.11",
- "genawaiter",
- "parking_lot 0.12.5",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "turso_core",
- "turso_sdk_kit",
- "turso_sdk_kit_macros",
- "turso_sync_engine",
 ]
 
 [[package]]

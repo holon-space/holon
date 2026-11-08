@@ -178,7 +178,7 @@ const FIXTURE_VIEW: &str =
 /// without the view-state layout.
 fn record_as_the_previous_engine_did(path: &std::path::Path) {
     let io = Arc::new(turso_core::UnixIO::new().expect("file IO"));
-    let options = turso_core::OpenOptions::new(Arc::new(turso_core::SqliteDialect))
+    let options = turso_core::OpenOptions::new(Arc::new(turso_sqlite::SqliteDialect))
         .db_opts(turso_core::DatabaseOpts::default().with_views(true));
     let db = turso_core::Database::open(io, path.to_str().unwrap(), options).expect("raw open");
     let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");

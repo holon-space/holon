@@ -679,36 +679,55 @@ fn drop_computed(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Vec<String>> {
     .filter(|(name, sql)| is_materialized(sql) || unloadable.contains(name))
     .collect();
     let run = |sql: &str| conn.execute(sql).map_err(engine(sql));
-    run("BEGIN IMMEDIATE")?;
-    let mut dropped = Vec::new();
-    while !views.is_empty() {
-        let (free, held): (Vec<_>, Vec<_>) = views.iter().cloned().partition(|(name, _)| {
-            !views
-                .iter()
-                .any(|(other, sql)| other != name && names_word(sql, name))
-        });
-        if free.is_empty() {
-            run("ROLLBACK")?;
-            return Err(invalid(format!(
-                "the views [{}] read each other, so none can be dropped first",
-                held.iter()
-                    .map(|(n, _)| n.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
+    in_write_tx(&conn, || {
+        let mut dropped = Vec::new();
+        while !views.is_empty() {
+            let (free, held): (Vec<_>, Vec<_>) = views.iter().cloned().partition(|(name, _)| {
+                !views
+                    .iter()
+                    .any(|(other, sql)| other != name && names_word(sql, name))
+            });
+            if free.is_empty() {
+                return Err(invalid(format!(
+                    "the views [{}] read each other, so none can be dropped first",
+                    held.iter()
+                        .map(|(n, _)| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            for (name, _) in free {
+                run(&format!("DROP VIEW \"{name}\""))?;
+                dropped.push(name);
+            }
+            views = held;
         }
-        for (name, _) in free {
-            run(&format!("DROP VIEW \"{name}\""))?;
-            dropped.push(name);
+        if has_table(&conn, DERIVED_CACHE_TABLE)? {
+            run(&format!("DELETE FROM {DERIVED_CACHE_TABLE}"))?;
         }
-        views = held;
+        write_signature(&conn, fns)?;
+        Ok(dropped)
+    })
+}
+
+/// Runs `body` in one write transaction. The engine keeps a transaction open
+/// after a failed statement, so a failed body or COMMIT is rolled back here.
+fn in_write_tx<T>(conn: &Arc<Connection>, body: impl FnOnce() -> Step<T>) -> Step<T> {
+    conn.execute("BEGIN IMMEDIATE")
+        .map_err(engine("BEGIN IMMEDIATE"))?;
+    let result = body().and_then(|value| {
+        conn.execute("COMMIT").map_err(engine("COMMIT"))?;
+        Ok(value)
+    });
+    match result {
+        Err(error) if !conn.get_auto_commit() => match conn.execute("ROLLBACK") {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(invalid(format!(
+                "{error}; the ROLLBACK after it failed too: {rollback}"
+            ))),
+        },
+        result => result,
     }
-    if has_table(&conn, DERIVED_CACHE_TABLE)? {
-        run(&format!("DELETE FROM {DERIVED_CACHE_TABLE}"))?;
-    }
-    write_signature(&conn, fns)?;
-    run("COMMIT")?;
-    Ok(dropped)
 }
 
 fn is_materialized(sql: &str) -> bool {
@@ -806,7 +825,7 @@ fn open_with_io(
     // only in the native turso_core build.
     #[cfg(target_family = "unix")]
     let opts = opts.with_index_method(true);
-    let options = OpenOptions::new(Arc::new(turso_core::SqliteDialect))
+    let options = OpenOptions::new(Arc::new(turso_sqlite::SqliteDialect))
         .flags(flags)
         .db_opts(opts);
     Database::open(io, path, scalar_fns::register_on_options(options, fns)).map_err(engine("open"))
@@ -914,10 +933,7 @@ fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<()> {
     {
         return Ok(());
     }
-    let run = |sql: &str| conn.execute(sql).map_err(engine(sql));
-    run("BEGIN IMMEDIATE")?;
-    write_signature(&conn, fns)?;
-    run("COMMIT")
+    in_write_tx(&conn, || write_signature(&conn, fns))
 }
 
 /// What a file built by `fns` on this engine holds in [`FN_SET_TABLE`].
@@ -1444,6 +1460,55 @@ mod tests {
                 *bytes,
                 "{moved} must hold the original bytes"
             );
+        }
+    }
+
+    fn ids(conn: &Arc<Connection>) -> Vec<i64> {
+        rows(conn, "SELECT id FROM k ORDER BY id")
+            .expect("read k")
+            .into_iter()
+            .map(|row| match row.as_slice() {
+                [Value::Numeric(Numeric::Integer(n))] => *n,
+                other => panic!("k row is {other:?}"),
+            })
+            .collect()
+    }
+
+    proptest::proptest! {
+        /// A write transaction whose statements may fail on a duplicate key:
+        /// a failed one leaves the connection out of the transaction and the
+        /// table as it was before, and another connection can write next.
+        #[test]
+        fn a_failed_write_transaction_is_rolled_back_and_releases_the_file(
+            seeded in proptest::collection::btree_set(0i64..6, 0..4),
+            inserts in proptest::collection::vec(0i64..6, 0..6),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let (db, _) = open(&dir.path().join("holon.db"), &[], WhenHeld::Wait).unwrap();
+            exec(&db, "CREATE TABLE k (id INTEGER PRIMARY KEY)").unwrap();
+            for id in &seeded {
+                exec(&db, &format!("INSERT INTO k (id) VALUES ({id})")).unwrap();
+            }
+            let conn = connect(&db).unwrap();
+            let result = in_write_tx(&conn, || {
+                for id in &inserts {
+                    let sql = format!("INSERT INTO k (id) VALUES ({id})");
+                    conn.execute(&sql).map_err(engine(&sql))?;
+                }
+                Ok(())
+            });
+
+            let mut taken = seeded.clone();
+            let collides = !inserts.iter().all(|id| taken.insert(*id));
+            proptest::prop_assert_eq!(result.is_err(), collides);
+            proptest::prop_assert!(conn.get_auto_commit(), "the connection is still in a transaction");
+            let expected: Vec<i64> = match collides {
+                true => seeded.iter().copied().collect(),
+                false => taken.iter().copied().collect(),
+            };
+            proptest::prop_assert_eq!(ids(&conn), expected);
+            exec(&db, "INSERT INTO k (id) VALUES (100)")
+                .map_err(|e| proptest::test_runner::TestCaseError::fail(format!("next writer: {e}")))?;
         }
     }
 }
