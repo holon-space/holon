@@ -261,6 +261,24 @@ def stray_registry(rng, shape, visible, hidden, listed_key):
 STRAY_SHAPES = ["blank", "header", "prose-table", "listed-key"]
 
 
+def orphan_property(rng):
+    """A `|` line outside every table that has the registry's cell count, or a registry key with any cell count,
+    is an error naming its line, wherever it stands: after a blank line, after prose, or directly above a header."""
+    ok = row("ok-row", owner="#5")
+    if rng.random() < 0.5:
+        cells = ["`ok-row`"] + [rng.choice(["known-red", "flaky", "x", "—"]) for _ in range(rng.randint(0, 7))]
+    else:
+        cells = ["`new-row`"] + ["x"] * (len(HEADER_CELLS) - 1)
+    line = "| " + " | ".join(cells) + " |\n"
+    place = rng.choice(["after-blank", "after-prose", "above-header"])
+    lead = HEADER + ok + ("\n" if place == "after-blank" else "\nSome prose.\n" if place == "after-prose" else "\n")
+    text = lead + line + (HEADER if place == "above-header" else "")
+    n = text.splitlines().index(line.rstrip("\n")) + 1
+    got = check.problems({REGISTRY: HEADER + ok}, {REGISTRY: text}, summary_for({"ok-row": "kept"}, {5}), {5}, is_log)
+    expect(f"orphan {place} {cells}", [p for p in got if "outside a table" in p], [stray_message(n)])
+    return place
+
+
 def stray_message(n):
     return f"{REGISTRY}:{n} at the tip: registry-shaped row outside a table"
 
@@ -353,6 +371,10 @@ def stray_examples():
         ("a registry key, short, in a prose table", HEADER + ok + "\n| Note | Cause |\n| --- | --- |\n| `hidden-row` | proposed |\n"
          + hidden, []),
     ]
+    for name, text, stray in shapes:
+        got = check.problems({REGISTRY: HEADER + ok + hidden}, {REGISTRY: text},
+                             summary_for({"ok-row": "kept", "hidden-row": "kept"}, {5}), {5}, is_log)
+        expect(f"stray: {name}", [p for p in got if "outside a table" in p], [stray_message(n) for n in stray])
     for name, header in (("an all-bold header", bold), ("an all-lower-case header", lower)):
         reg = {REGISTRY: HEADER + ok + "\n" + header + sep + hidden}
         got = check.problems({REGISTRY: HEADER + ok}, reg, summary_for({"ok-row": "kept"}, {5}), {5}, is_log)
@@ -517,6 +539,9 @@ def main():
             raise SystemExit(f"[owned-known-reds] header case {case} of seed {seed}: {e}")
     assert all(classes[c] >= n // 20 for c in ("registry", "error", "ignored")), f"header classes {dict(classes)}"
     print(f"[owned-known-reds] {n} random headers {dict(classes)}, seed {seed}: PASS")
+    places = Counter(orphan_property(rng) for _ in range(n))
+    assert all(places[p] >= n // 10 for p in ("after-blank", "after-prose", "above-header")), f"orphan places {dict(places)}"
+    print(f"[owned-known-reds] {n} orphan cases {dict(places)}, seed {seed}: PASS")
     shapes, repairs = Counter(), Counter()
     for case in range(n):
         try:
