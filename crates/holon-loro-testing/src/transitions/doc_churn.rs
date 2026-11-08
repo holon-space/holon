@@ -169,8 +169,9 @@ impl DocChurn {
                         .await?;
                 }
                 let primary = self.backend.collab_for_test();
-                let since = primary.doc().oplog_vv();
-                let update = peer_doc.doc().export(ExportMode::updates(&since))?;
+                let since = primary.with_read(|doc| Ok(doc.oplog_vv()))?;
+                let update =
+                    peer_doc.with_read(|doc| Ok(doc.export(ExportMode::updates(&since))?))?;
                 primary.apply_update(&update)?;
             }
             DocChurnStep::SharedTreeEdit { tree } if !self.shared_trees.is_empty() => {
