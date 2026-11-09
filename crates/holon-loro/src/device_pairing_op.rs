@@ -271,6 +271,9 @@ fn preview(ids: &[String]) -> String {
 /// from. Not `_`-prefixed: keys that are are erased on org write-back.
 pub const CONFLICT_OF_PROPERTY: &str = "pairing_conflict_of";
 
+/// The property an org ingest stores a block's `:ID:` under.
+const ORG_ID_PROPERTY: &str = "ID";
+
 /// The query that lists this store's conflict copies, so a disclosure can hand
 /// the user a way to reach the blocks it counted. Selects on the property, not
 /// on the derived id, so it keeps finding them if `conflict_copy_id` changes.
@@ -296,6 +299,9 @@ fn conflict_copy(snap: &holon_api::SnapshotBlock, id: &str) -> BlockCreateReques
     let mut block = snap.block.clone();
     block.id = holon_api::EntityUri::parse(&conflict_copy_id(id))
         .unwrap_or_else(|e| panic!("a conflict copy id derived from {id:?} is not a URI: {e}"));
+    // The org `:ID:` carrier still names the original; kept, the copy would
+    // write the original's id into its file.
+    block.properties.remove(ORG_ID_PROPERTY);
     let parent = snap.block.id.clone();
     let mut request = BlockCreateRequest::of(&block, &parent);
     request.properties.insert(
@@ -1450,7 +1456,8 @@ mod tests {
 
     #[test]
     fn a_block_the_owner_also_holds_with_different_content_is_kept_under_the_owners_node() {
-        let day = snap("block:day", "block:journals", "Sunday — groceries");
+        let mut day = snap("block:day", "block:journals", "Sunday — groceries");
+        day.1.block.set_property(ORG_ID_PROPERTY, "day");
         let owner = store_of(&[
             snap("block:journals", "block:root", "Journals"),
             snap("block:day", "block:journals", "Sunday"),
@@ -1467,6 +1474,11 @@ mod tests {
         assert_eq!(
             copy.properties.get(CONFLICT_OF_PROPERTY),
             Some(&holon_api::Value::String("block:day".to_string()))
+        );
+        assert_eq!(
+            copy.properties.get(ORG_ID_PROPERTY),
+            None,
+            "the copy must not carry the original's org id"
         );
     }
 

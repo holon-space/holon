@@ -2980,17 +2980,63 @@ async fn check_rebuilt_receiver(
         differ.len(),
         owner.len()
     );
+    assert_receiver_writes_back(&owner_caps, &handle, case).await;
 }
 
-/// The two fixed cases run first: the whole vault rebuilt after the snapshot
-/// broke (the pairing record survived), and after the whole store was deleted.
+/// Every block the receiver's store holds reaches its org files, except the
+/// blocks the owner itself keeps off disk. A refused write-back leaves the
+/// file's pre-pair text on disk, so the blocks the pair added are missing
+/// there.
+async fn assert_receiver_writes_back(
+    caps: &holon_pbt_core::composition::CapMap,
+    handle: &holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    case: &RebuiltReceiver,
+) {
+    holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
+        handle.receiver(),
+        std::time::Duration::from_secs(10),
+    )
+    .await;
+    let recv = caps.expect::<dyn SutReceiverBackend>();
+    let owner_org = recv.owner_org_block_ids().await;
+    let off_disk: BTreeSet<_> = recv
+        .owner_block_ids()
+        .await
+        .difference(&owner_org)
+        .cloned()
+        .collect();
+    let receiver_org = recv.receiver_org_block_ids().await;
+    let missing: Vec<String> = recv
+        .receiver_block_ids()
+        .await
+        .into_iter()
+        .filter(|id| !off_disk.contains(id) && !receiver_org.contains(id))
+        .map(|id| id.to_string())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "after a pair with a rebuilt receiver ({case:?}), {} block(s) of the receiver's store \
+         never reach its org files, so a write-back was refused:\n  {}",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}
+
+/// The fixed cases run first: the whole vault rebuilt after the snapshot broke
+/// (the pairing record survived), after the whole store was deleted, and with
+/// every file edited while the device was alone, so each first headline is
+/// kept as a conflict copy.
 #[test]
 fn a_rebuilt_receiver_pairs_without_a_second_node_per_id_fixed_cases() {
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    for kept_record in [true, false] {
+    for (file, kept_record) in [
+        (RebuiltFile::Same, true),
+        (RebuiltFile::Same, false),
+        (RebuiltFile::Edited, false),
+    ] {
         let case = RebuiltReceiver {
-            files: vec![RebuiltFile::Same; 8],
+            files: vec![file; 8],
             kept_record,
         };
         rt.block_on(check_rebuilt_receiver(&ref_state, &case));

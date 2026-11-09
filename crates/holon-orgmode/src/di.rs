@@ -2256,13 +2256,11 @@ async fn run_file_sync_controller(
                                     pending_full_rerender = true;
                                     idle_signal_for_task.set_bulk_pending(true);
                                 }
-                                Err(e) if holon_filesystem::already_disclosed(&e) => {}
-                                Err(e) => {
-                                    error!(
-                                        "[OrgMode] Block change error for {}: {:#}",
-                                        doc, e
-                                    );
-                                }
+                                Err(e) => assert!(
+                                    holon_filesystem::already_disclosed(&e),
+                                    "the controller returned an undisclosed write-back error \
+                                     for {doc}: {e:#}"
+                                ),
                             }
                         }
                     }

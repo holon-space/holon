@@ -23,6 +23,7 @@ mod poll_new_files_containment;
 mod prev_sibling_reads_sibling_order_once_per_parent;
 #[cfg(feature = "di")]
 mod proposal_writes_do_not_amplify;
+mod refused_writeback_is_disclosed;
 mod reingest_task_promotion_idempotent;
 mod reingest_writes_only_changed_blocks;
 mod render_refusal_is_per_file;

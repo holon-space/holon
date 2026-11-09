@@ -8465,9 +8465,34 @@ impl FileSyncController {
                     );
                 }
             }
+            let verdict = verdict.map_err(|e| self.disclose_writeback_failure(&doc, e));
             out.push((doc, verdict));
         }
         out
+    }
+
+    /// Discloses a write-back of `doc` that failed, unless something already
+    /// did, and returns the error marked disclosed. A homed document raises
+    /// its file's write-back condition, which the next faithful render lifts.
+    fn disclose_writeback_failure(&self, doc: &EntityUri, e: anyhow::Error) -> anyhow::Error {
+        if already_disclosed(&e) {
+            return e;
+        }
+        tracing::error!(
+            doc = %doc,
+            error = %format!("{e:#}"),
+            "[FileSyncController] write-back failed",
+        );
+        let home = self.doc_home.get(doc).map(|h| h.as_path_buf().clone());
+        match (&self.writeback_disclosure, &home) {
+            (Some(disclosure), Some(path)) => disclosure
+                .writeback_lossy(path, &format!("{} is not written: {e:#}", path.display())),
+            (Some(disclosure), None) => {
+                disclosure.writeback_degraded(&format!("write-back of {doc} failed: {e:#}"))
+            }
+            (None, _) => {}
+        }
+        e.context(AlreadyDisclosed(format!("write-back of {doc} failed")))
     }
 
     /// Handle a block change notification (from EventBus or Loro).
