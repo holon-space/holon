@@ -1904,7 +1904,7 @@ impl HeadlessFrontendComponent {
             .expect("[booted] read while no boot is installed — only `reboot` empties the cell")
     }
 
-    pub(crate) fn org_fs(&self) -> &Arc<holon_filesystem::InMemoryFileSystem> {
+    pub fn org_fs(&self) -> &Arc<holon_filesystem::InMemoryFileSystem> {
         &self.store.org_fs
     }
 
@@ -1919,7 +1919,7 @@ impl HeadlessFrontendComponent {
         self.store.org_root()
     }
 
-    pub(crate) fn org_paths(&self) -> &[PathBuf] {
+    pub fn org_paths(&self) -> &[PathBuf] {
         &self.store.org_paths
     }
 

@@ -359,6 +359,42 @@ fn a_template_vault_with_a_fault_armed_is_refused() {
     assert!(message.contains("a fault is armed"), "{message}");
 }
 
+/// An edit the disk refuses to write back fails the shutdown, so the template
+/// would copy a store whose files miss that edit.
+#[test]
+fn a_template_whose_shutdown_fails_is_refused() {
+    use holon_filesystem::FileSystem;
+    let state = first_restorable_sidecar_state();
+    let message = panic_message(|| {
+        BootTemplate::build_before_shutdown(&state, async |frontend| {
+            let path = frontend
+                .org_paths()
+                .first()
+                .expect("the template has an org file")
+                .clone();
+            let text = frontend
+                .org_fs()
+                .read_to_string(&path)
+                .await
+                .expect("read the template's org file");
+            let page = text
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(":ID:"))
+                .unwrap_or_else(|| panic!("{} has no :ID: line:\n{text}", path.display()))
+                .trim()
+                .to_string();
+            frontend.org_fs().arm_write_failure(&path);
+            frontend
+                .create_block("refused-edit", &page, "refused edit")
+                .await;
+        });
+    });
+    assert!(
+        message.contains("the template's shutdown failed"),
+        "{message}"
+    );
+}
+
 /// The template boot keeps the fresh boot's error check: an error logged
 /// while it boots fails the build, so every case of the key goes red.
 #[test]

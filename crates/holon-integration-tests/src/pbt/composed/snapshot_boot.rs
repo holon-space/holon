@@ -437,13 +437,30 @@ impl BootTemplate {
 
     /// A template of `ref_state`'s key that no other case shares.
     pub fn build(ref_state: &ReferenceState) -> Self {
-        Self::build_after_boot(ref_state, || {})
+        Self::build_hooked(ref_state, || {}, async |_| {})
     }
 
     /// [`Self::build`] that runs `after_boot` on the boot's runtime once the
     /// boot finished. Panics on any error the template's boot or shutdown
     /// logged: the restore's scope never sees them.
     pub fn build_after_boot(ref_state: &ReferenceState, after_boot: impl FnOnce()) -> Self {
+        Self::build_hooked(ref_state, after_boot, async |_| {})
+    }
+
+    /// [`Self::build`] that hands the template's session to `before_shutdown`
+    /// just before its shutdown.
+    pub fn build_before_shutdown(
+        ref_state: &ReferenceState,
+        before_shutdown: impl AsyncFnOnce(&HeadlessFrontendComponent),
+    ) -> Self {
+        Self::build_hooked(ref_state, || {}, before_shutdown)
+    }
+
+    fn build_hooked(
+        ref_state: &ReferenceState,
+        after_boot: impl FnOnce(),
+        before_shutdown: impl AsyncFnOnce(&HeadlessFrontendComponent),
+    ) -> Self {
         let key = BootKey::of(ref_state);
         key.assert_restorable();
         let sut = ComposedSut::<WideE2E>::init_built_by(
@@ -462,6 +479,7 @@ impl BootTemplate {
                 .expect("[snapshot boot] only a session boot has a template")
                 .clone();
             drop(handle);
+            before_shutdown(&*frontend).await;
             let loro_enabled =
                 set_for_wiring(&ref_state.harness.wiring).has_projection(Projection::EditorState);
             let snapshot = frontend.shut_down_to_snapshot().await;
