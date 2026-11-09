@@ -908,9 +908,11 @@ const MANIFEST_DIR_MACRO: &str = r#"env!("CARGO_MANIFEST_DIR")"#;
 /// Lines of `src` that use the compile-time manifest dir for anything but an
 /// `include_str!`/`include_bytes!` argument, skipping `//` comment lines.
 fn compile_time_manifest_dir_lines(src: &str) -> Vec<usize> {
-    src.match_indices(MANIFEST_DIR_MACRO)
-        .filter(|(i, _)| {
-            let before = &src[..*i];
+    src.match_indices("CARGO_MANIFEST_DIR")
+        .filter(|(i, name)| src[i + name.len()..].starts_with('"'))
+        .filter_map(|(i, _)| env_macro_start(&src[..i]))
+        .filter(|&start| {
+            let before = &src[..start];
             let line_start = before.rfind('\n').map_or(0, |n| n + 1);
             if before[line_start..].trim_start().starts_with("//") {
                 return false;
@@ -922,8 +924,28 @@ fn compile_time_manifest_dir_lines(src: &str) -> Vec<usize> {
                 .is_some_and(|b| b.ends_with("include_str!(") || b.ends_with("include_bytes!("));
             !included
         })
-        .map(|(i, _)| src[..i].matches('\n').count() + 1)
+        .map(|start| src[..start].matches('\n').count() + 1)
         .collect()
+}
+
+/// Where the macro starts when `before` ends in `[path::]env!<delimiter>"`
+/// (a raw string allowed; `option_env!` matches too), the shape of a macro
+/// whose first argument is the string that follows.
+fn env_macro_start(before: &str) -> Option<usize> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let b = before.strip_suffix('"')?.trim_end_matches('#');
+    let b = b.strip_suffix('r').unwrap_or(b);
+    let mut b = b
+        .trim_end()
+        .strip_suffix(['(', '[', '{'])?
+        .trim_end()
+        .strip_suffix('!')?
+        .trim_end()
+        .strip_suffix("env")?;
+    while let Some(path) = b.trim_end().strip_suffix("::") {
+        b = path.trim_end().trim_end_matches(is_ident);
+    }
+    Some(b.len())
 }
 
 /// `env!("CARGO_MANIFEST_DIR")` is the crate dir of the tree that BUILT the
@@ -965,7 +987,7 @@ fn files_are_located_through_the_run_time_manifest_dir() {
 
 /// Every placement of the macro the lint must tell apart: a comment line, an
 /// include argument, and a run-time path, each across the layouts rustfmt
-/// produces.
+/// produces and each spelling of the macro.
 #[test]
 fn the_manifest_dir_lint_flags_exactly_the_run_time_paths() {
     let separators = ["", " ", "\n    ", "\n\t"];
@@ -976,33 +998,57 @@ fn the_manifest_dir_lint_flags_exactly_the_run_time_paths() {
         ("include_bytes!(concat!(", r#", "/x"))"#, true),
         ("format!(\"{}/x\",", ")", false),
     ];
-    for comment in [false, true] {
-        for (open, close, included) in forms {
-            for sep in separators {
-                let stmt = format!("let _ = {open}{sep}{MANIFEST_DIR_MACRO}{close};");
-                let stmt = if comment {
-                    stmt.lines()
-                        .map(|l| format!("// {l}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else {
-                    stmt
-                };
-                let src = format!("fn f() {{}}\n{stmt}\n");
-                let flagged = compile_time_manifest_dir_lines(&src);
-                let want = if comment || included {
-                    vec![]
-                } else {
-                    vec![
-                        src[..src.find(MANIFEST_DIR_MACRO).unwrap()]
-                            .matches('\n')
-                            .count()
-                            + 1,
-                    ]
-                };
-                assert_eq!(flagged, want, "lint verdict on:\n{src}");
+    for spelling in manifest_dir_macro_spellings() {
+        for comment in [false, true] {
+            for (open, close, included) in forms {
+                for sep in separators {
+                    let stmt = format!("let _ = {open}{sep}{spelling}{close};");
+                    let stmt = if comment {
+                        stmt.lines()
+                            .map(|l| format!("// {l}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    } else {
+                        stmt
+                    };
+                    let src = format!("fn f() {{}}\n{stmt}\n");
+                    let flagged = compile_time_manifest_dir_lines(&src);
+                    let want = if comment || included {
+                        vec![]
+                    } else {
+                        vec![src[..src.find(&spelling).unwrap()].matches('\n').count() + 1]
+                    };
+                    assert_eq!(flagged, want, "lint verdict on:\n{src}");
+                }
             }
         }
+    }
+}
+
+/// Each spelling of the macro that compiles and that rustfmt keeps as written.
+fn manifest_dir_macro_spellings() -> Vec<String> {
+    let mut spellings = Vec::new();
+    for path in ["", "std::", "core::"] {
+        for (open, close) in [("(", ")"), (" {", "}"), ("[", "]")] {
+            for tail in ["", ",", r#", "set by cargo""#] {
+                spellings.push(format!(
+                    r#"{path}env!{open}"CARGO_MANIFEST_DIR"{tail}{close}"#
+                ));
+            }
+        }
+    }
+    spellings
+}
+
+#[test]
+fn every_spelling_of_the_compile_time_manifest_dir_is_flagged() {
+    for spelling in manifest_dir_macro_spellings() {
+        let src = format!("fn f() {{}}\nlet _ = PathBuf::from({spelling});\n");
+        assert_eq!(
+            compile_time_manifest_dir_lines(&src),
+            vec![2],
+            "lint verdict on:\n{src}"
+        );
     }
 }
 
