@@ -403,6 +403,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `logseq-parity-corpus-replay-load-timeout`
 - `logseq-parity-slash-menu-offers-no-delete`
 - `loro-backend-change-count`
+- `loro-compaction-convergence-test-over-cap-load`
 - `loro-compaction-peer-trimmed-below-lacked`
 - `loro-move-false-cycle-duplicate-id`
 - `metamorphic-undo-facet-unchanged`
@@ -431,7 +432,9 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `ref-diverge-parent-reparent`
 - `refused-profile-fix-clears-refusal-load-timeout`
 - `restart-render-reads-budget`
+- `shadow-clock-ahead-of-fed-height`
 - `shell-effect-stubborn-member-pid-race`
+- `shell-log-paths-plant-under-a-planted-file`
 - `shopping-mapping-cost-slo`
 - `shrinker-capmap-trigger-passed`
 - `slot-reconcile-props-before-rebuild-under-load`
