@@ -805,4 +805,137 @@ mod tests {
             .resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
             .await;
     }
+
+    /// The two production paths that build a `LoroDocumentStore` from the
+    /// container's ports.
+    #[derive(Debug, Clone, Copy)]
+    enum StoreWiring {
+        Module,
+        ReadStack,
+    }
+
+    fn undecodable_store_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path()
+                .join(holon_loro::loro_document_store::GLOBAL_SNAPSHOT_NAME),
+            b"not loro",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn set_aside_name(dir: &std::path::Path) -> String {
+        let prefix = format!(
+            "{}.undecodable-",
+            holon_loro::loro_document_store::GLOBAL_SNAPSHOT_NAME
+        );
+        let names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&prefix))
+            .collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "one set-aside snapshot in {dir:?}: {names:?}"
+        );
+        names.into_iter().next().unwrap()
+    }
+
+    /// Opens an undecodable global snapshot through `wiring` with the given
+    /// ports; returns the set-aside file name, the bus and the doc's peer id.
+    async fn open_through(
+        wiring: StoreWiring,
+        at_millis: i64,
+        peer_id: u64,
+    ) -> (String, Arc<holon_conditions::ConditionBus>, u64) {
+        let dir = undecodable_store_dir();
+        let injector = Injector::root();
+        let bus = Arc::new(holon_conditions::ConditionBus::new());
+        let provided_bus = bus.clone();
+        injector.provide::<Arc<holon_conditions::ConditionBus>>(Provider::root(move |_| {
+            Shared::new(provided_bus.clone())
+        }));
+        injector.provide::<holon_api::InjectedClock>(Provider::root(move |_| {
+            Shared::new(holon_api::InjectedClock(Arc::new(
+                holon_api::TestClock::new(at_millis),
+            )))
+        }));
+        let doc = match wiring {
+            StoreWiring::Module => {
+                let config = LoroConfig::new(dir.path().to_path_buf()).with_peer_id(Some(peer_id));
+                injector
+                    .provide::<LoroConfig>(Provider::root(move |_| Shared::new(config.clone())));
+                LoroModule.configure(&injector).unwrap();
+                injector
+                    .resolve::<LoroDocumentStore>()
+                    .get_doc(DocScope::Global)
+                    .await
+            }
+            StoreWiring::ReadStack => {
+                let store = crate::loro_block_query_source::register_loro_read_stack(
+                    &injector,
+                    dir.path().to_path_buf(),
+                )
+                .await;
+                store.read().await.get_doc(DocScope::Global).await
+            }
+        }
+        .expect("an undecodable snapshot is set aside, not an error");
+        (set_aside_name(dir.path()), bus, doc.peer_id())
+    }
+
+    /// The name a store given the clock directly stamps; holon-loro's own
+    /// property pins that name against the calendar.
+    async fn reference_set_aside_name(at_millis: i64) -> String {
+        let dir = undecodable_store_dir();
+        LoroDocumentStore::new(dir.path().to_path_buf())
+            .with_clock(Arc::new(holon_api::TestClock::new(at_millis)))
+            .get_doc(DocScope::Global)
+            .await
+            .unwrap();
+        set_aside_name(dir.path())
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 24,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// A store built by the container runs on the container's clock, bus
+        /// and peer id, not on the builder's defaults (wall clock, no bus,
+        /// random peer).
+        #[test]
+        fn the_container_store_runs_on_the_injected_ports(
+            wiring in proptest::prop_oneof![
+                proptest::strategy::Just(StoreWiring::Module),
+                proptest::strategy::Just(StoreWiring::ReadStack),
+            ],
+            at_millis in 0i64..4_102_444_800_000,
+            peer_id in 0u64..u64::MAX,
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let ((name, bus, doc_peer), expected_name) = rt.block_on(async {
+                (
+                    open_through(wiring, at_millis, peer_id).await,
+                    reference_set_aside_name(at_millis).await,
+                )
+            });
+            proptest::prop_assert_eq!(name, expected_name, "clock of {:?}", wiring);
+            let disclosed = bus.current().iter().any(|c| {
+                matches!(
+                    c.reason,
+                    holon_conditions::ConditionKind::LoroSnapshotSetAside { .. }
+                )
+            });
+            proptest::prop_assert!(disclosed, "the set-aside reaches the bus of {:?}", wiring);
+            // The read stack takes no session config, so it has no peer id port.
+            if let StoreWiring::Module = wiring {
+                proptest::prop_assert_eq!(doc_peer, peer_id);
+            }
+        }
+    }
 }

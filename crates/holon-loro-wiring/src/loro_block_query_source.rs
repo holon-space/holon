@@ -96,16 +96,17 @@ pub async fn register_loro_read_stack(
     injector: &Injector,
     storage_dir: std::path::PathBuf,
 ) -> Arc<RwLock<LoroDocumentStore>> {
-    let doc_store = LoroDocumentStore::new(storage_dir);
+    let clock = injector.resolve::<holon_api::InjectedClock>().0.clone();
+    let bus = injector.resolve::<Arc<holon_conditions::ConditionBus>>();
+    let doc_store = LoroDocumentStore::new(storage_dir)
+        .with_clock(clock.clone())
+        .with_condition_bus((*bus).clone());
     // Load/create the persistent global doc once, up front.
     let doc = doc_store
         .get_doc(DocScope::Global)
         .await
         .expect("register_loro_read_stack: get_doc(Global) failed");
-    let backend = Arc::new(LoroBackend::from_document(
-        doc,
-        injector.resolve::<holon_api::InjectedClock>().0.clone(),
-    ));
+    let backend = Arc::new(LoroBackend::from_document(doc, clock));
 
     // A `LoroDocumentStore` clone shares the global-doc `Arc`, so the registered
     // store, the read backend, and the write store below all observe one doc.
