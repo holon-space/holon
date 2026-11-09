@@ -10,9 +10,15 @@ threads print. `render` prints a run in one of four shapes:
   between its `START` and its status line;
 - `parallel`: `--no-capture` without the marker, all `START`s first.
 With `interleave` it adds what concurrent threads do to the text: foreign lines
-between lines, and a libtest panic head split before or after the thread name.
+between lines (some start or end with a verdict word, some are another run's
+`test result:` line), a libtest panic head split before or after the thread
+name or after its `' (`, a libtest verdict pushed onto a later line or glued
+to another thread's word, and another thread's text in front of a verdict word
+on its line. libtest's main thread writes the `failures:` list and the
+`test result:` line after every test has ended, so nothing interleaves there.
 While it prints, it records the owner and thread name the text still states for
-each panic; `verdict` reads only that record.
+each panic, and whether the panic's own test passed; `verdict` reads only that
+record.
 
 `python3 scripts/known_reds_logs.py write-examples <dir>` writes each of
 EXAMPLES to <dir>/<name>.log and prints `<name>\t<exit>\t<line regex>`.
@@ -51,6 +57,14 @@ FOREIGN = [
 # Text another thread prints right after `thread '` or right before the name.
 SPLIT_AFTER_QUOTE = ["", "()"]
 SPLIT_BEFORE_NAME = ["", "Applying transition 1/4: ", ": "]
+# Text another thread prints between `... ` and the verdict word.
+SPLIT_BEFORE_VERDICT = ["6: ", "Applying transition 5/6: ", "[inv-sql-budget] not judged "]
+# Another thread's text that ends or starts with a verdict word.
+VERDICT_ENDED = ["[sync] peer handshake: ok", "status=ok", "[inv-sql-budget] check FAILED", "health FAILED", "health: ignored"]
+VERDICT_LED = ["okay, retrying the handshake", "ok: ()", "ok", "FAILED to bind 127.0.0.1:0, retrying", "FAILED", "ignored"]
+# A child run's result line that a test prints.
+CHILD_RESULT = "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+FOREIGN_RESULT = [CHILD_RESULT, "[child] " + CHILD_RESULT]
 WORKER = "tokio-runtime-worker"
 
 
@@ -84,8 +98,9 @@ class Rendered:
     lines: list = field(default_factory=list)
     # (scope, thread name as the text states it, Panic); scope is ("section", run) or ("inst", run, unit).
     panics: list = field(default_factory=list)
-    # (scope, name) of each `- should panic ... ok` line.
-    expects: list = field(default_factory=list)
+    # Indexes into `panics` whose stated thread name is their own test's, in a
+    # libtest run that completed with that test passing.
+    by_name: set = field(default_factory=set)
     # (("inst", run, unit), label) of each nextest status line.
     statuses: list = field(default_factory=list)
     # Indexes into `panics` whose owner the text proves (a captured block, a
@@ -105,6 +120,7 @@ class Verdict:
     matched: int
     listed: Counter  # the NOVEL signature lines with their counts
     note: int  # panics inside passing tests
+    dropped: set = field(default_factory=set)  # the tests the NOTE line names
 
 
 def word(rng, used):
@@ -149,8 +165,8 @@ def draw_test(rng, used, shape, name=None):
 def draw(rng):
     """One log's runs: one or two runs of one to five tests.
 
-    A nextest run after a nextest run may rerun tests of it, as a rerun or a
-    second recipe in the same log does.
+    A run after a run of the same runner may rerun tests of it, as a rerun, a
+    second recipe or a second shard in the same log does.
     """
     used = set()
     runs = []
@@ -158,7 +174,11 @@ def draw(rng):
         shape = rng.choice(["libtest", "captured", "serial", "parallel"])
         binary = f"holon-{word(rng, used)}::{word(rng, used)}"
         earlier = []
-        if runs and runs[-1].shape != "libtest" and shape != "libtest" and rng.random() < 0.5:
+        again = runs and rng.random() < 0.5
+        if again and runs[-1].shape == "libtest":
+            shape = "libtest"
+        # Same-runner runs of one binary: a rerun, or a shard of a sharded recipe.
+        if again and (runs[-1].shape == "libtest") == (shape == "libtest"):
             binary = runs[-1].binary
             earlier = [t.name for t in runs[-1].tests]
         tests = []
@@ -181,10 +201,34 @@ def verdict_line(t, verdict):
     return f"test {t.name}{' - should panic' if t.should_panic else ''} ... {verdict}"
 
 
+def spliced_verdict(rng, status, interleave, tails=("",)):
+    """A verdict word as libtest writes it, with another thread's text either
+    after it, or (with `interleave`) in front of it on the same line."""
+    tail = rng.choice(tails)
+    if interleave and not tail and rng.random() < 0.3:
+        return rng.choice(SPLIT_BEFORE_VERDICT) + status
+    return status + tail
+
+
 def foreign(rng, out, indent=""):
+    """Appends another thread's lines."""
     for _ in range(rng.choice([1, 1, 2])):
-        line = rng.choice(FOREIGN)
+        line = rng.choice(FOREIGN + VERDICT_ENDED + VERDICT_LED + FOREIGN_RESULT)
         out.lines.append(indent + line if line else "")
+
+
+def add_panic(out, scope, stated, p, owner, passed):
+    """Records panic `p` of test `owner` under the thread name the text states."""
+    if stated and stated == owner and passed:
+        out.by_name.add(len(out.panics))
+    out.panics.append((scope, stated, p))
+
+
+def result_lines(passed, failing, indent=""):
+    """libtest's closing lines: the `failures:` list and the `test result:` line."""
+    lines = ["failures:", *(f"    {n}" for n in failing), ""] if failing else []
+    lines.append(f"test result: {'FAILED' if failing else 'ok'}. {passed} passed; {len(failing)} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s")
+    return [indent + line if line else "" for line in lines]
 
 
 def render_libtest(run, index, rng, interleave, out):
@@ -194,14 +238,19 @@ def render_libtest(run, index, rng, interleave, out):
     for t in run.tests:
         chunks = []
         for p in t.panics:
-            split = rng.choice(["whole", "after", "before"]) if interleave else "whole"
+            split = rng.choice(["whole", "after", "before", "paren"]) if interleave else "whole"
             if split == "whole":
-                chunks.append(("whole", p))
+                chunks.append(("whole", p, t))
             elif split == "after":
-                chunks += [("head-after", p), ("cont-after", p)]
+                chunks += [("head-after", p, t), ("cont-after", p, t)]
+            elif split == "before":
+                chunks += [("head-before", rng.choice(SPLIT_AFTER_QUOTE)), ("cont-before", p, t, rng.choice(SPLIT_BEFORE_NAME))]
             else:
-                chunks += [("head-before", rng.choice(SPLIT_AFTER_QUOTE)), ("cont-before", p, rng.choice(SPLIT_BEFORE_NAME))]
-        chunks.append(("verdict", t))
+                chunks += [("head-paren", p, rng.choice(FOREIGN)), ("cont-paren", p, t, rng.choice(SPLIT_BEFORE_NAME))]
+        if interleave and rng.random() < 0.3:
+            chunks += [("verdict-head", t), ("verdict-tail", t)]
+        else:
+            chunks.append(("verdict", t))
         queues.append(chunks)
     open_heads = 0
     tid = 100
@@ -209,49 +258,59 @@ def render_libtest(run, index, rng, interleave, out):
         chunk = rng.choice([q for q in queues if q]).pop(0)
         tid += 1
         if chunk[0] == "whole":
-            p = chunk[1]
+            p, t = chunk[1], chunk[2]
             out.lines += [panic_head(p, tid), p.msg]
-            out.panics.append((scope, p.thread, p))
+            add_panic(out, scope, p.thread, p, t.name, t.status == "ok")
         elif chunk[0] == "head-after":
             out.lines.append(f"thread '{chunk[1].thread}")
             open_heads += 1
-        elif chunk[0] == "cont-after":
-            p = chunk[1]
-            out.lines += [f"' ({tid}) panicked at {p.site}:", p.msg]
+        elif chunk[0] in ("cont-after", "cont-paren"):
+            p, t = chunk[1], chunk[2]
+            pre = chunk[3] if chunk[0] == "cont-paren" else "' ("
+            out.lines += [pre + f"{tid}) panicked at {p.site}:", p.msg]
             # Only a single open head names the continuation.
-            out.panics.append((scope, p.thread if open_heads == 1 else "", p))
+            add_panic(out, scope, p.thread if open_heads == 1 else "", p, t.name, t.status == "ok")
             if open_heads == 1:
                 open_heads = 0
+        elif chunk[0] == "head-paren":
+            out.lines.append(f"thread '{chunk[1].thread}' (" + chunk[2])
+            open_heads += 1
         elif chunk[0] == "head-before":
             out.lines.append("thread '" + chunk[1])
             open_heads += 1
         elif chunk[0] == "cont-before":
-            p = chunk[1]
-            out.lines += [chunk[2] + f"{p.thread}' ({tid}) panicked at {p.site}:", p.msg]
-            out.panics.append((scope, p.thread, p))
+            p, t = chunk[1], chunk[2]
+            out.lines += [chunk[3] + f"{p.thread}' ({tid}) panicked at {p.site}:", p.msg]
+            add_panic(out, scope, p.thread, p, t.name, t.status == "ok")
+        elif chunk[0] == "verdict-head":
+            out.lines.append(rng.choice(["", "Applying transition 4/4: "]) + verdict_line(chunk[1], rng.choice(["", "()", *VERDICT_ENDED, *VERDICT_LED])))
+        elif chunk[0] == "verdict-tail":
+            # The real word on a later line: alone, before other text, glued
+            # behind another thread's word, or behind a child run's result line.
+            word = chunk[1].status
+            out.lines += rng.choice([[word], [word + ": ()"], [f"step{rng.randint(1, 9)}{word}"], [rng.choice(FOREIGN_RESULT), word]])
         else:
-            t = chunk[1]
-            out.lines.append(verdict_line(t, t.status))
-            if t.should_panic and t.status == "ok":
-                out.expects.append((scope, t.name))
+            out.lines.append(verdict_line(chunk[1], spliced_verdict(rng, chunk[1].status, interleave)))
         if interleave and rng.random() < 0.3:
             foreign(rng, out)
-    failed = sum(t.status == "FAILED" for t in run.tests)
-    out.failed |= failed > 0
-    out.lines.append(f"test result: {'FAILED' if failed else 'ok'}. {len(run.tests) - failed} passed; {failed} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s")
+    failing = [t.name for t in run.tests if t.status == "FAILED"]
+    out.failed |= bool(failing)
+    out.lines += ["", *result_lines(len(run.tests) - len(failing), failing)]
 
 
 def body(t, cut=False):
-    """The libtest lines a nextest test prints: (line, panic or None)."""
-    lines = [("", None), ("running 1 test", None)]
+    """The libtest lines a nextest test prints: (line, panic or None, whether another thread may follow it)."""
+    lines = [("", None, True), ("running 1 test", None, True)]
     for p in t.panics:
-        lines += [(panic_head(p, 7), p), (p.msg, None)]
+        lines += [(panic_head(p, 7), p, True), (p.msg, None, True)]
     if cut:
         pass
     elif t.status in BODY_OK:
-        lines.append((verdict_line(t, "ok"), None))
+        lines.append((verdict_line(t, "ok"), None, False))
+        lines += [(line, None, False) for line in ["", *result_lines(1, [])]]
     elif t.status in BODY_FAILED:
-        lines.append((verdict_line(t, "FAILED"), None))
+        lines.append((verdict_line(t, "FAILED"), None, False))
+        lines += [(line, None, False) for line in ["", *result_lines(0, [t.name])]]
     return lines
 
 
@@ -262,14 +321,12 @@ def status_line(label, i, n, unit):
 def render_body(t, scope, rng, interleave, out, indent="", cut=False, proven=False):
     """`proven`: the text proves `t` owns its panics, so each counts by `t`'s own status."""
     first = len(out.panics)
-    for line, p in body(t, cut):
+    for line, p, open_ in body(t, cut):
         out.lines.append(indent + line if line else "")
         if p is not None:
-            out.panics.append((scope, p.thread, p))
-        elif line.endswith(" - should panic ... ok"):
-            out.expects.append((scope, t.name))
+            add_panic(out, scope, p.thread, p, t.name, not cut and t.status in BODY_OK)
         # nextest captures a test's output whole: only --no-capture output interleaves.
-        if interleave and not indent and p is None and rng.random() < 0.3:
+        if interleave and not indent and open_ and p is None and rng.random() < 0.3:
             foreign(rng, out)
     if proven and not cut and t.status in PASS_LABELS:
         out.in_passing.update(range(first, len(out.panics)))
@@ -322,18 +379,21 @@ def verdict(r):
     """The classifier's verdict on `r`, from the owners and names its text states.
 
     A panic is inside a passing test, and dropped into the note, when the text
-    proves its owner and the owner passed in that run, or when its scope holds as many
-    `- should panic ... ok` lines for its thread name as panics on that name and no panic whose name
-    the text loses. Every other panic is printed, except an injected one. A
-    failing status is a signature unless its label is FAIL / FAIL + LEAK and
-    its owner printed a panic or an injected one.
+    proves its owner and the owner passed in that run, or when the text states
+    its thread name, that name is its own test's, and that test passed in a
+    libtest run that completed. Every other panic is printed, except an
+    injected one. A failing status is a signature
+    unless its label is FAIL / FAIL + LEAK and its owner printed a panic or an
+    injected one.
     """
-    expected = Counter(r.expects)
-    count = Counter((scope, name) for scope, name, _ in r.panics)
-    unnamed = {scope for scope, name, _ in r.panics if name == ""}
-    kept = [(scope, p) for i, (scope, name, p) in enumerate(r.panics)
-            if i not in r.in_passing
-            and (scope in unnamed or not (expected[(scope, name)] and expected[(scope, name)] == count[(scope, name)]))]
+    kept, dropped = [], set()
+    for i, (scope, name, p) in enumerate(r.panics):
+        if i in r.in_passing:
+            dropped.add(scope[2])
+        elif i in r.by_name:
+            dropped.add(name)
+        else:
+            kept.append((scope, p))
     note = len(r.panics) - len(kept)
     listed = Counter(p.msg for _, p in kept if p.kind == "novel")
     matched = sum(p.kind == "known" for _, p in kept)
@@ -345,10 +405,10 @@ def verdict(r):
     novel = sum(listed.values())
     if novel + matched == 0 and r.failed:
         novel = 1  # "run failed but no panic signature was extracted"
-    return Verdict(1 if novel else 0, novel, matched, listed, note)
+    return Verdict(1 if novel else 0, novel, matched, listed, note, dropped)
 
 
-NOTE = re.compile(r"^\[known-reds\] NOTE: (\d+) panic\(s\) inside passing tests \(ignored\)$", re.M)
+NOTE = re.compile(r"^\[known-reds\] NOTE: (\d+) panic\(s\) inside passing tests \(ignored\): (.+)$", re.M)
 FINAL = re.compile(r"^\[known-reds\] (?:FAIL: (\d+) novel panic\(s\), (\d+) known-red|PASS-WITH-NOTE: (\d+) known-red|PASS: \d+ green run)", re.M)
 
 
@@ -366,7 +426,8 @@ def parse(stdout):
             listed[m.group(2)] = int(m.group(1))
     notes = NOTE.findall(stdout)
     assert len(notes) <= 1, f"want at most one NOTE line, got {notes}"
-    return Verdict(0, int(novel or 0), int(matched or note or 0), listed, int(notes[0]) if notes else 0)
+    return Verdict(0, int(novel or 0), int(matched or note or 0), listed,
+                   int(notes[0][0]) if notes else 0, set(notes[0][1].split(", ")) if notes else set())
 
 
 W123 = r'''     Running tests/main.rs (target/debug/build/holon-integration-tests/c316d237e1494d27/out/integration-c316d237e1494d27)
@@ -459,12 +520,150 @@ ALSO_CHECK_OK = "test hand_authored_regressions::also_check_after_the_last_trans
 KNOWN_FAILED = f"thread 'hand_authored_keystone_regressions' (3) panicked at {KNOWN_SITE}:\n{KNOWN_MSG}\ntest hand_authored_keystone_regressions ... FAILED\n"
 
 
+def failures_list(names):
+    return "\n".join(["", *result_lines(0, names)[:-1]]) + "\n"
+
+
 def also_check_split(verdict):
     """A passing (or failing) should_panic test whose head splits after the name, beside a listed red."""
     text = W123.replace(ALSO_CHECK, "thread 'hand_authored_regressions::also_check_after_the_last_transition_is_refused\nApplying transition 4/4: ()\n' (1382932350) panicked at")
     text = text.replace(ALSO_CHECK_OK, ALSO_CHECK_OK.replace("... ok", f"... {verdict}"))
-    return text.replace("test result: ok. 19 passed; 0 failed", KNOWN_FAILED + "test result: FAILED. 18 passed; 1 failed")
+    failing = ["hand_authored_keystone_regressions"] + (["hand_authored_regressions::also_check_after_the_last_transition_is_refused"] if verdict == "FAILED" else [])
+    return text.replace("test result: ok. 19 passed; 0 failed", KNOWN_FAILED + failures_list(failing) + f"test result: FAILED. {19 - len(failing)} passed; {len(failing)} failed")
 
+
+HA = "crates/holon-integration-tests/src/pbt/hand_authored.rs"
+SHARD_RUNNING = "     Running tests/main.rs (target/debug/build/holon-integration-tests/bf76ca5e48b900b1/out/integration-bf76ca5e48b900b1)"
+# The `just hand-authored` step: libtest shards of one binary in one log. Shard 0
+# runs the passing should_panic tests, one head spliced after its `' (`, beside
+# a listed red; shard 1 passes the test that shard 0 fails.
+HAND_AUTHORED_SHARDS = f"""== hand-authored shard 0 (exit 101): target/gate-logs/pbt-hand-authored-shard-0.log ==
+{SHARD_RUNNING}
+
+running 19 tests
+
+thread 'hand_authored_regressions::invalid_pinned_wiring_is_loud' (1934971516) panicked at {HA}:61:13:
+<inline>: initial_state carries an INVALID wiring manifest Wiring {{ storage_adapters: {{}}, sync_adapters: {{}}, actors: {{}}, editor_leg: Dispatch }}: wiring has no storage adapter
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'hand_authored_regressions::empty_locks_are_refused' (1934971514) panicked at {HA}:176:9:
+hand-authored regression "<inline>":1 case "n": `locks` is empty; a case locks one invariant at least
+
+thread 'hand_authored_regressions::mistyped_initial_state_key_is_loud' (test hand_authored_regressions::drawn_run_sweeps_after_boot_and_every_transition ... ok
+1934971519
+Applying transition 1test hand_authored_regressions::absent_initial_state_parses_as_none ... /4) panicked at {HA}:419:9:
+hand-authored regression "<inline>":1: unknown top-level key "initail_state" — a mistyped key is SILENTLY DROPPED by serde
+  line: {{"name": "n", "transitions": [], "initail_state": {{"wiring": {{"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}}}}}
+ok: ()
+
+thread 'hand_authored_regressions::malformed_also_check_after_is_refused' (1934971518) panicked at {HA}:222:17:
+hand-authored regression "<inline>":1 case "n": `also_check_after` holds "2", not a transition number
+
+
+Applying transition 2/4: ()
+
+Applying transition 3/4: ()
+Applying transition 4/4: test hand_authored_regressions::recorded_env_flag_mismatch_is_reported ... ()
+thread 'hand_authored_regressions::also_check_after_the_last_transition_is_refused' (1934971511) panicked at {HA}:226:13:
+hand-authored regression "<inline>":1 case "n": `also_check_after` names transition 4, out of range 1..3 (1-based; the last transition 4 is always checked)
+test hand_authored_regressions::replay_of_a_case_without_transitions_sweeps_once_after_boot ... 
+thread 'hand_authored_regressions::nested_unknown_wiring_field_is_loud' (1934971520) panicked at {HA}:429:5:
+assertion `left == right` failed: hand-authored regression "<inline>":1: `initial_state` does not round-trip
+ok
+test hand_authored_regressions::replay_also_sweeps_around_each_named_transition ... ok
+test hand_authored_regressions::replay_sweeps_around_the_last_transition_only ... ok
+
+thread 'hand_authored_regressions::a_case_without_locks_is_refused_by_name' (1934971508) panicked at {HA}:168:13:
+hand-authored regression "<inline>":1 case "no-locks" has no `locks` field
+
+thread 'hand_authored_regressions::a_lock_skipped_at_every_checkpoint_is_refused' (1934971509) panicked at {HA}:315:5:
+locked invariant(s) ["inv-x"] were `Skipped` at every checkpoint: the case never reaches the state they judge, so it locks nothing
+
+thread 'hand_authored_regressions::unknown_initial_state_field_is_loud' (1934971528) panicked at {HA}:411:9:
+hand-authored regression "<inline>":1 failed to parse: unknown field `seed`, expected `wiring` at line 1 column 135
+test hand_authored_regressions::empty_locks_are_refused - should panic ... ok
+test hand_authored_regressions::a_case_without_locks_is_refused_by_name - should panic ... ok
+test hand_authored_regressions::invalid_pinned_wiring_is_loud - should panic ... ok
+test hand_authored_regressions::unknown_initial_state_field_is_loud - should panic ... ok
+test hand_authored_regressions::judged_windows_start_swept_and_only_pre_sweeps_do_not ... ok
+test hand_authored_regressions::nested_unknown_wiring_field_is_loud - should panic ... ok
+test hand_authored_regressions::also_check_after_the_last_transition_is_refused - should panic ... ok
+test hand_authored_regressions::mistyped_initial_state_key_is_loud - should panic ... ok
+test hand_authored_regressions::malformed_also_check_after_is_refused - should panic ... ok
+test hand_authored_regressions::a_lock_skipped_at_every_checkpoint_is_refused - should panic ... ok
+test hand_authored_regressions::pinned_initial_state_round_trips_and_rebuilds_the_draw ... ok
+thread 'hand_authored_regressions::hand_authored_keystone_regressions' (1934971515) panicked at {KNOWN_SITE}:
+{KNOWN_MSG}
+test hand_authored_regressions::hand_authored_keystone_regressions ... FAILED
+
+failures:
+    hand_authored_regressions::hand_authored_keystone_regressions
+
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 628 filtered out; finished in 218.20s
+
+== hand-authored shard 1 (exit 0): target/gate-logs/pbt-hand-authored-shard-1.log ==
+{SHARD_RUNNING}
+
+running 1 test
+test hand_authored_regressions::hand_authored_keystone_regressions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 646 filtered out; finished in 214.25s
+"""
+# The card's evidence shard: one verdict behind another thread's text on its
+# line (`... 6: ok`), then one pushed onto a later line.
+SPLICED_VERDICTS = f"""{SHARD_RUNNING}
+
+running 2 tests
+
+thread 'hand_authored_regressions::also_check_after_the_last_transition_is_refused' (1934308419) panicked at {HA}:226:13:
+hand-authored regression "<inline>":1 case "n": `also_check_after` names transition 4, out of range 1..3 (1-based; the last transition 4 is always checked)
+
+thread 'hand_authored_regressions::a_lock_skipped_at_every_checkpoint_is_refused' (1934308417) panicked at {HA}:315:5:
+locked invariant(s) ["inv-x"] were `Skipped` at every checkpoint: the case never reaches the state they judge, so it locks nothing
+
+Applying transition 5/test hand_authored_regressions::also_check_after_the_last_transition_is_refused - should panic ... 6: ok
+()
+test hand_authored_regressions::a_lock_skipped_at_every_checkpoint_is_refused - should panic ... 2026-11-09T15:44:30.451795Z  WARN holon_profiles::type_registry: computed fields are outside the SQL-compilable subset
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 628 filtered out; finished in 206.82s
+"""
+# A passing test that catches the refusal it provokes, beside a listed red.
+CAUGHT_IN_LIBTEST = f"""     Running tests/main.rs (target/debug/deps/integration-0000000000000001)
+
+running 3 tests
+
+thread 'refusals::empty_locks_are_refused' (2) panicked at {HA}:176:9:
+hand-authored regression "<inline>":1 case "n": `locks` is empty; a case locks one invariant at least
+test refusals::empty_locks_are_refused ... ok
+thread 'refusals::empty_locks_are_refused_twice' (3) panicked at crates/y/tests/b.rs:12:5:
+REAL PRODUCT BUG: the second refusal was never raised
+test refusals::empty_locks_are_refused_twice ... FAILED
+{KNOWN_FAILED}{failures_list(["refusals::empty_locks_are_refused_twice", "hand_authored_keystone_regressions"])}test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+"""
+
+# A failing and a passing test whose verdict words other threads' text hides
+# or imitates: a line that starts with a verdict word, a verdict glued behind
+# another word, a child run's `test result:` line before the real verdict.
+HIDDEN_VERDICTS = f"""     Running tests/main.rs (target/debug/deps/x-0123)
+
+running 3 tests
+
+thread 'refusals::real_bug' (99) panicked at crates/x/src/bug.rs:1:5:
+REAL PRODUCT BUG
+thread 'refusals::refuses_twice' (98) panicked at crates/x/src/refusal.rs:2:5:
+refusal raised
+test refusals::real_bug ... 6: FAILED
+okay, retrying the handshake
+test refusals::refuses_twice - should panic ... 
+FAILED to bind 127.0.0.1:0, retrying
+[sync] peer handshake: ok
+{CHILD_RESULT}
+step6ok
+test refusals::plain_pass ... ok: ()
+
+{failures_list(["refusals::real_bug"])}test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+"""
 
 CRASH_HEAD = "thread 'tokio-runtime-worker' (11) panicked at crates/holon-filesystem/src/crash_injection.rs:43:9:"
 CRASH_MSG = "[crash-injection] the file-sync controller dies at after_write_back"
@@ -495,13 +694,38 @@ CAUGHT_HEAD = "thread 'a_controller_dies' (13) panicked at crates/holon-integrat
 CAUGHT_MSG = 'slo probe: armed while clocks were pending on ["block:slo-probe-leftover"]. They belong to an earlier stretch of this process'
 
 # Parentheses as bracket expressions: grep reads `\(` as a group.
-NOTE_ONE = r"^\[known-reds\] NOTE: 1 panic[(]s[)] inside passing tests [(]ignored[)]$"
+NOTE_ONE = r"^\[known-reds\] NOTE: 1 panic[(]s[)] inside passing tests [(]ignored[)]: "
 
 
 def examples():
     """(name, log text, want exit, a regex one output line must match), in grep's and Python's common syntax."""
     gate = GATE
     return [
+        # The hand-authored step's shards: every should_panic test passes, one
+        # head spliced after its `' (`; the listed red alone is left.
+        ("hand-authored-shards", HAND_AUTHORED_SHARDS, 0, r"^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic"),
+        ("hand-authored-shards-spliced-head-named", HAND_AUTHORED_SHARDS, 0,
+         r"^\[known-reds\] NOTE: 9 panic[(]s[)] inside passing tests [(]ignored[)]: .*hand_authored_regressions::mistyped_initial_state_key_is_loud"),
+        # A caught panic of a passing test is dropped; a test whose name only
+        # starts with that name keeps its own.
+        ("caught-panic-in-a-passing-libtest-test", CAUGHT_IN_LIBTEST, 1, r"^\[known-reds\] FAIL: 1 novel panic[(]s[)], 1 known-red"),
+        ("spliced-verdict-then-pushed-verdict", SPLICED_VERDICTS, 0,
+         r"^\[known-reds\] NOTE: 2 panic[(]s[)] inside passing tests [(]ignored[)]: hand_authored_regressions::a_lock_skipped_at_every_checkpoint_is_refused, hand_authored_regressions::also_check_after_the_last_transition_is_refused$"),
+        ("caught-panic-in-a-passing-libtest-test-named", CAUGHT_IN_LIBTEST, 1,
+         r"^\[known-reds\] NOTE: 1 panic[(]s[)] inside passing tests [(]ignored[)]: refusals::empty_locks_are_refused$"),
+        ("hidden-verdicts-failing-panic-stays", HIDDEN_VERDICTS, 1, r"^ *1 REAL PRODUCT BUG$"),
+        ("hidden-verdicts-passing-panic-dropped", HIDDEN_VERDICTS, 1, r"^\[known-reds\] NOTE: 1 panic[(]s[)] inside passing tests [(]ignored[)]: refusals::refuses_twice$"),
+        # Two binaries of one unmarked run share a test name: the failing one keeps its panic.
+        ("same-name-in-two-binaries-of-one-run", "\n".join([
+            "    Starting 2 tests across 2 binaries",
+            status_line("START", 1, 2, "holon-a::main tests::refuses"), status_line("START", 2, 2, "holon-b::main tests::refuses"),
+            "", "running 1 test", "test tests::refuses - should panic ... ok",
+            "", "running 1 test", "thread 'tests::refuses' (2) panicked at crates/y/tests/b.rs:12:5:",
+            "REAL PRODUCT BUG: the refusal was never raised", "test tests::refuses ... FAILED",
+            status_line("PASS", 1, 2, "holon-a::main tests::refuses"), status_line("FAIL", 2, 2, "holon-b::main tests::refuses"),
+            "     Summary [   1.000s] 2 tests run: 1 passed, 1 failed, 0 skipped",
+            status_line("FAIL", 2, 2, "holon-b::main tests::refuses"), "error: test run failed",
+        ]) + "\n", 1, r"^ *1 REAL PRODUCT BUG: the refusal was never raised$"),
         # A head split after the name, with one open head in its section.
         ("w123-split-after-name", W123, 0, r"^\[known-reds\] PASS: 1 green run"),
         # A second open head makes the split panic's name unknown: novel.
@@ -510,7 +734,7 @@ def examples():
         # Foreign text before the name on the head's own line, and an `ok` glued behind `thread '`.
         ("gate-overwritten-head", gate, 0, r"^\[known-reds\] PASS: 1 green run"),
         ("gate-overwritten-head-failed", gate.replace("mistyped_initial_state_key_is_loud - should panic ... ok", "mistyped_initial_state_key_is_loud - should panic ... FAILED")
-         .replace("test result: ok. 19 passed; 0 failed", "test result: FAILED. 18 passed; 1 failed"), 1,
+         .replace("test result: ok. 19 passed; 0 failed", failures_list(["hand_authored_regressions::mistyped_initial_state_key_is_loud"]) + "test result: FAILED. 18 passed; 1 failed"), 1,
          r"^ *1 hand-authored regression .*unknown top-level key .initail_state."),
         # The passing should_panic test's message beside one listed red is no novel panic.
         ("should-panic-split-beside-a-red", also_check_split("ok"), 0, r"^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic"),

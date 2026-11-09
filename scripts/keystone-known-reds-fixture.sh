@@ -321,6 +321,8 @@ expect_outcome should-panic-other-binary 1 '^PRIMARY: \[novel\] .*REAL PRODUCT B
 # leaving the name at the start of the next line. The panic is still that
 # test's: expected when it reports `- should panic ... ok`, else a failure.
 split_header_log() {
+    local listed='' failed=1
+    case $2 in *FAILED) listed="    $1"$'\n' failed=2 ;; esac
     cat <<EOF
      Running tests/main.rs (target/debug/deps/integration-0000000000000001)
 
@@ -333,7 +335,11 @@ test $1 $2
 thread 'hand_authored_keystone_regressions' (3) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  field deltas (1):\n    block:a: content: sut=\"x\" ref=\"y\"\n")]
 test hand_authored_keystone_regressions ... FAILED
-test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+failures:
+${listed}    hand_authored_keystone_regressions
+
+test result: FAILED. $((3 - failed)) passed; $failed failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 EOF
 }
 split_header_log mistyped_initial_state_key_is_loud '- should panic ... ok' >"$work/should-panic-split-header.log"
@@ -347,8 +353,11 @@ expect_outcome split-header-plain-failed 1 '^PRIMARY: \[novel\] .*unknown top-le
     "$work/split-header-plain-failed.log"
 # libtest writes a test's verdict apart from its `test <t> ... ` head, so
 # stdout of another thread can glue text after the `ok` or push the verdict
-# onto a later line. The verdict is still that test's.
+# onto a later line. The verdict is still that test's. `$2` names the failing
+# test beside the listed red, as libtest's `failures:` list does.
 split_verdict_log() {
+    local listed='' failed=1
+    [ -z "${2:-}" ] || { listed="    $2"$'\n'; failed=2; }
     cat <<EOF
      Running tests/hand_authored_regressions.rs (target/debug/deps/h-0000000000000001)
 
@@ -359,7 +368,11 @@ $1
 thread 'hand_authored_keystone_regressions' (3) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13:
 reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  field deltas (1):\n    block:a: content: sut=\"x\" ref=\"y\"\n")]
 test hand_authored_keystone_regressions ... FAILED
-test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+failures:
+${listed}    hand_authored_keystone_regressions
+
+test result: FAILED. $((2 - failed)) passed; $failed failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 EOF
 }
 split_verdict_log 'test malformed_also_check_after_is_refused - should panic ... ok[inv-sql-budget] UndoLastMutation: not judged — started from an unswept state' \
@@ -368,13 +381,13 @@ expect_outcome should-panic-ok-trailing-text 0 '^\[known-reds\] PASS-WITH-NOTE: 
     "$work/should-panic-ok-trailing-text.log"
 split_verdict_log $'Applying transition 4/6: (Checkpointstest malformed_also_check_after_is_refused ... ({7}))\nok' \
     >"$work/plain-head-after-a-word.log"
-expect_outcome plain-head-after-a-word 1 '^PRIMARY: \[novel\] .*not a transition number$' \
+expect_outcome plain-head-after-a-word 0 '^\[known-reds\] NOTE: 1 panic[(]s[)] inside passing tests [(]ignored[)]: malformed_also_check_after_is_refused$' \
     "$work/plain-head-after-a-word.log"
 split_verdict_log $'test malformed_also_check_after_is_refused - should panic ... \nApplying transition 4/6: ()\n\nok' \
     >"$work/should-panic-ok-later-line.log"
 expect_outcome should-panic-ok-later-line 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
     "$work/should-panic-ok-later-line.log"
-split_verdict_log $'test malformed_also_check_after_is_refused - should panic ... \nApplying transition 4/6: ()\nFAILED\nok' \
+split_verdict_log $'test malformed_also_check_after_is_refused - should panic ... \nApplying transition 4/6: ()\nFAILED\nok' malformed_also_check_after_is_refused \
     >"$work/should-panic-failed-later-line.log"
 expect_outcome should-panic-failed-later-line 1 '^PRIMARY: \[novel\] .*not a transition number$' \
     "$work/should-panic-failed-later-line.log"
@@ -382,7 +395,7 @@ split_verdict_log $'Applying transition 4/6: (test malformed_also_check_after_is
     >"$work/should-panic-head-mid-line.log"
 expect_outcome should-panic-head-mid-line 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
     "$work/should-panic-head-mid-line.log"
-split_verdict_log $'Applying transition 4/6: (test malformed_also_check_after_is_refused - should panic ... Checkpoints({7}))\nFAILED' \
+split_verdict_log $'Applying transition 4/6: (test malformed_also_check_after_is_refused - should panic ... Checkpoints({7}))\nFAILED' malformed_also_check_after_is_refused \
     >"$work/should-panic-head-mid-line-failed.log"
 expect_outcome should-panic-head-mid-line-failed 1 '^PRIMARY: \[novel\] .*not a transition number$' \
     "$work/should-panic-head-mid-line-failed.log"

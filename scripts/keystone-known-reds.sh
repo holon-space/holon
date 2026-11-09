@@ -42,7 +42,8 @@
 # A case that names a row and runs green prints a NOTE line, not a failure.
 #
 # A panic inside a passing test is no failure either: the
-# `NOTE: N panic(s) inside passing tests (ignored)` line counts it.
+# `NOTE: N panic(s) inside passing tests (ignored): <tests>` line counts it and
+# names each test.
 #
 # The registry is the single source of truth for the patterns; this script holds
 # none of its own. Apart from that, it knows exactly one panic: the keystone's
@@ -191,6 +192,7 @@ indeterminate=0
 unreadable=0
 : >"$work/novel"
 : >"$work/hits"
+: >"$work/dropped"
 
 for log in "$@"; do
     if [ ! -f "$log" ] || [ ! -r "$log" ]; then
@@ -215,20 +217,21 @@ for log in "$@"; do
     # time until the run's `Summary`, so START to status proves the owner as a
     # captured block does; a panic owned so by a passing test is dropped.
     #
-    # A panic on the thread of a test cargo reports as `- should panic ... ok`
-    # is that test passing. libtest writes the verdict apart from its head, so
-    # stdout of another thread may follow the `ok` or push it onto a later
-    # line. Such a panic is matched by thread name within the owning nextest
-    # instance, else within one cargo `Running` section, and is
-    # dropped only when the panic count there equals the `ok` lines there; any
-    # surplus keeps them all, because nothing tells the expected panic from the
-    # real one.
+    # A panic on the thread of a passing libtest test (a `should_panic` test,
+    # or one that catches the panic) is dropped. Its thread name must equal
+    # the full name of a test whose `test <name> ... ` head ran in the same
+    # libtest run (`running N tests` up to the next one, within the owning
+    # nextest instance, else within one cargo `Running` section), and that
+    # run's `failures:` list must not name it. The verdict words are never
+    # read: other threads' text splices into them in every way. libtest's
+    # main thread writes the list after every test has ended, so the list is
+    # whole unless the run's last `test result:` failed count disagrees with
+    # it; then, or without that line, the run drops none.
     #
     # Another thread's output can also split a head. Text before the name on
-    # the head's line is skipped. A head cut after the name continues the one
-    # head its scope has open (a line ending in `thread '<name>`); with two or
-    # more open, the name is lost, and a scope with a lost name drops none of
-    # its panics.
+    # the head's line is skipped. A head cut after the name, or after its
+    # `' (`, continues the one head its scope has open; with two or more open,
+    # the name is lost and the panic stays classified.
     #
     # A failed test whose output holds a panic has that panic as its signature.
     # Otherwise its status line is the signature, under nextest's long label
@@ -260,13 +263,17 @@ for log in "$@"; do
             open_heads[s] = 0
             return head_name[s]
         }
-        # A line that ends in `thread '"'"'<name>` opens a panic head; it stays
-        # open until a `'"'"' (id) panicked at` line continues it.
+        # A line that ends in `thread '"'"'<name>` or `thread '"'"'<name>'"'"' (…` opens a
+        # panic head; it stays open until a `… panicked at` line continues it.
         function track_head(line,    rest, i, s) {
             if (line ~ /panicked at /) return
             rest = line
             while ((i = index(rest, "thread " q)) > 0) rest = substr(rest, i + 8)
-            if (rest == line || index(rest, q)) return
+            if (rest == line) return
+            if ((i = index(rest, q))) {
+                if (substr(rest, i, 3) != q " (") return
+                rest = substr(rest, 1, i - 1)
+            }
             s = scope()
             if (!open_heads[s]++) head_name[s] = rest
         }
@@ -338,12 +345,21 @@ for log in "$@"; do
         function scope() { return OWNER != "" ? OWNER : section }
         # Whether the text proves which test the current line belongs to.
         function owner_certain() { return captured != "" || (serial && live != "") }
+        # The libtest run of the current line: its scope and the line of its
+        # `running N tests`.
+        function unit() { return scope() SUBSEP unit_of[scope()] }
+        function track_unit(line) { if (line ~ /^ *running [0-9]+ tests?\r?$/) unit_of[scope()] = FNR }
+        # Whether libtest run `u` reports the test named `name` as passing.
+        function passing_name(u, name,    k) {
+            k = u SUBSEP name
+            return name != "" && (k in ran) && !(k in listed) && (u in result_failed) && result_failed[u] == n_listed[u] + 0
+        }
         # Whether the output of test instance `inst` holds a panic that is not
-        # a passing should_panic test'"'"'s own.
+        # a passing test'"'"'s own.
         function has_real_panic(inst,    k, parts) {
             for (k in panics) {
                 split(k, parts, SUBSEP)
-                if (parts[1] == inst && ((inst in unnamed) || !((k in expected) && expected[k] == panics[k]))) return 1
+                if (parts[1] == inst && !passing_name(parts[1] SUBSEP parts[2], parts[3])) return 1
             }
             return 0
         }
@@ -364,11 +380,11 @@ for log in "$@"; do
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
-        FNR == 1 { section = ""; live = ""; captured = ""; serial = 0; marked = 0; run = 0; replay_case = ""; split("", open_heads); split("", head_name) }
+        FNR == 1 { section = ""; live = ""; captured = ""; serial = 0; marked = 0; run = 0; replay_case = ""; split("", open_heads); split("", head_name); split("", unit_of) }
         # The marker comes before the `Starting` of its run; a run cut off before
         # its `Summary` does not carry it into the next run.
         index($0, "ignoring --test-threads because --no-capture is specified") { marked = 1 }
-        /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = $0 }
+        /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = FNR ": " $0 }
         /^ +Starting [0-9]+ tests? across / { run++; serial = marked; marked = 0 }
         FNR == NR {
             if (parse_status($0)) {
@@ -383,21 +399,25 @@ for log in "$@"; do
             }
             track_line($0)
             track_head($0)
-            if (scope() in verdict_due && match($0, /^ *(ok|FAILED|ignored)/)) {
-                if ($0 ~ /^ *ok/) expected[scope() SUBSEP verdict_due[scope()]]++
-                delete verdict_due[scope()]
+            track_unit($0)
+            # The `failures:` list names one test per line, indented 4 deeper.
+            if (listing != "" && $0 ~ list_re) {
+                name = $0; sub(/^ +/, "", name); sub(/\r$/, "", name)
+                if (!((listing SUBSEP name) in listed)) { listed[listing SUBSEP name] = 1; n_listed[listing]++ }
+            } else listing = ""
+            if (match($0, /^ *failures:\r?$/)) { listing = unit(); list_re = "^" substr($0, 1, index($0, "f") - 1) "    [^ ]+\r?$" }
+            if (match($0, /^ *test result: (ok|FAILED)\. [0-9]+ passed; [0-9]+ failed/)) {
+                n = substr($0, RSTART, RLENGTH); sub(/ failed$/, "", n); sub(/^.* /, "", n)
+                result_failed[unit()] = n
             }
             # Unbuffered stderr of another thread can put any text, even part of
             # a word, before the head on its line.
-            if (match($0, /test [^ ]+ - should panic \.\.\. /)) {
-                name = substr($0, RSTART + 5, RLENGTH - 5); sub(/ - should panic \.\.\. $/, "", name)
-                if (substr($0, RSTART + RLENGTH) ~ /^ok/) expected[scope() SUBSEP name]++
-                else if (substr($0, RSTART + RLENGTH) !~ /^(FAILED|ignored)/) verdict_due[scope()] = name
-            } else if (/panicked at /) {
-                name = thread_of($0)
-                panics[scope() SUBSEP name]++
-                if (name == "") unnamed[scope()] = 1
-            } else if (OWNER != "" && /^ *Error: / && !(OWNER in error_of)) {
+            if (match($0, /test [^ ]+ (- should panic )?\.\.\. /)) {
+                name = substr($0, RSTART + 5, RLENGTH - 5); sub(/ (- should panic )?\.\.\. $/, "", name)
+                ran[unit() SUBSEP name] = 1
+            }
+            if (/panicked at /) panics[unit() SUBSEP thread_of($0)]++
+            else if (OWNER != "" && /^ *Error: / && !(OWNER in error_of)) {
                 error_of[OWNER] = $0; sub(/^ +/, "", error_of[OWNER])
             }
             next
@@ -414,7 +434,7 @@ for log in "$@"; do
             else if (!has_real_panic(inst)) emit(FAIL_LABEL ": " UNIT ((inst in error_of) ? ": " error_of[inst] : ""))
             next
         }
-        { track_line($0); track_head($0) }
+        { track_line($0); track_head($0); track_unit($0) }
         # A hand-authored replay names the case it runs and the row that case
         # is registered under; a panic between those lines is that case'"'"'s.
         /\[hand-authored regression\] running case "/ {
@@ -427,12 +447,15 @@ for log in "$@"; do
             replay_case = ""
         }
         /panicked at / {
-            s = scope(); owner = OWNER; certain = owner_certain(); key = s SUBSEP thread_of($0); at = FNR; opened = captured != ""
+            u = unit(); owner = OWNER; certain = owner_certain(); name = thread_of($0); at = FNR; opened = captured != ""
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/\r$/, "", loc); sub(/:$/, "", loc)
             if ((getline msg) <= 0) next
-            track_line(msg); track_head(msg)
+            track_line(msg); track_head(msg); track_unit(msg)
             if ((owner in passed) && !(owner in flaky_failed)) next
-            if ((certain && status_at(owner, at, opened) == "pass") || (!(s in unnamed) && (key in expected) && expected[key] == panics[key])) { in_passing++; next }
+            if (certain && status_at(owner, at, opened) == "pass") {
+                in_passing++; sub(/^[0-9]+\/(\[[0-9]+\/[0-9]+\] )?/, "", owner); print owner >>dropped_out; next
+            }
+            if (passing_name(u, name)) { in_passing++; print name >>dropped_out; next }
             sub(/^ +/, "", msg)
             if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
             if (loc == ENVIRON["INJECTED_SITE"] && msg == ENVIRON["INJECTED_PAYLOAD"]) injected++
@@ -443,7 +466,7 @@ for log in "$@"; do
             print injected + 0, in_passing + 0 >injected_out
             if (!stopped)
                 for (c in red_case) if (!(c in judged)) print "-\tthe red case printed no panic\037" c "\037" declared[c]
-        }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" "$log" "$log" >"$sigs"
+        }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" dropped_out="$work/dropped" "$log" "$log" >"$sigs"
 
     read -r log_injected log_in_passing <"$work/injected"
     in_passing=$((in_passing + log_in_passing))
@@ -743,7 +766,8 @@ fi
 
 echo ""
 if [ "$in_passing" -ne 0 ]; then
-    echo "[known-reds] NOTE: $in_passing panic(s) inside passing tests (ignored)"
+    dropped=$(sort -u "$work/dropped" | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')
+    echo "[known-reds] NOTE: $in_passing panic(s) inside passing tests (ignored): $dropped"
 fi
 if [ "$injected" -ne 0 ]; then
     echo "[known-reds] $injected injected boot-fault panic(s) excluded — see INJECTED above."

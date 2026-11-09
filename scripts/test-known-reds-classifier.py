@@ -3,13 +3,12 @@
 
 Run: `python3 scripts/test-known-reds-classifier.py` (CASES=<n> draws n logs,
 default 100; SEED=<s> replays a draw). The fixed examples run first. Properties:
-- P1: the classifier's verdict equals the model's, on the clean and the
-  interleaved rendering of each draw;
+- P1: the classifier's verdict, with the tests its NOTE line names, equals the
+  model's, on the clean and the interleaved rendering of each draw;
 - P2: LC_ALL, TMPDIR and the working directory do not change the output;
 - P3: interleaving never moves a printed panic out of the output;
 - P4: without the `--no-capture` marker no panic leaves the output.
-It fails as well when no draw reaches a panic whose thread name the text loses,
-or a `--no-capture` marker. Exits non-zero when a property fails; each failing
+It fails as well when a case of `reached` below is reached by no draw. Exits non-zero when a property fails; each failing
 log is printed as an EXAMPLES entry.
 """
 import os
@@ -23,7 +22,7 @@ from pathlib import Path
 
 import known_reds_logs as logs
 
-CLASSIFIER = Path(__file__).resolve().parent / "keystone-known-reds.sh"
+CLASSIFIER = Path(os.environ.get("CLASSIFIER", Path(__file__).resolve().parent / "keystone-known-reds.sh"))
 
 
 def classify(log, env=None, cwd=None):
@@ -50,7 +49,7 @@ def kept_within(small, big):
 
 
 def show(v):
-    return f"exit={v.exit} novel={v.novel} matched={v.matched} note={v.note} listed={dict(v.listed)}"
+    return f"exit={v.exit} novel={v.novel} matched={v.matched} note={v.note} dropped={sorted(v.dropped)} listed={dict(v.listed)}"
 
 
 def check(work, text, want, label):
@@ -59,7 +58,7 @@ def check(work, text, want, label):
     log.write_text(text)
     got = stated(log)
     failures = []
-    if (got.exit, got.novel, got.matched, got.listed, got.note) != (want.exit, want.novel, want.matched, want.listed, want.note):
+    if (got.exit, got.novel, got.matched, got.listed, got.note, got.dropped) != (want.exit, want.novel, want.matched, want.listed, want.note, want.dropped):
         failures.append(f"P1 {label}: classifier {show(got)}\n   model {show(want)}")
     env = dict(os.environ, LC_ALL="en_US.UTF-8", TMPDIR=str(work / "tmp"))
     (work / "tmp").mkdir(exist_ok=True)
@@ -100,6 +99,16 @@ def main():
             reached["a panic without its thread name"] += any(name == "" for _, name, _ in mixed.panics)
             reached["the --no-capture marker"] += logs.SERIAL_MARKER in clean.text
             reached["a panic inside a passing test whose owner the text proves"] += bool(clean.in_passing)
+            reached["a panic inside a passing test read by its thread name"] += bool(logs.verdict(clean).dropped - {s[2] for s, _, _ in clean.panics if s[0] == "inst"})
+            reached["a verdict behind another thread's text on its line"] += any(line.endswith(tuple(f"{x}{w}" for x in logs.SPLIT_BEFORE_VERDICT for w in ("ok", "FAILED"))) for line in mixed.lines)
+            reached["another thread's line that ends in a verdict word"] += any(line.endswith(tuple(logs.VERDICT_ENDED)) for line in mixed.lines)
+            reached["another thread's line that starts with a verdict word"] += any(line in logs.VERDICT_LED[:2] + logs.VERDICT_LED[3:4] for line in mixed.lines)
+            reached["a verdict glued behind another thread's word"] += any(re.fullmatch(r"step\d(ok|FAILED)", line) for line in mixed.lines)
+            reached["another run's `test result:` line inside a run"] += any(line.endswith(logs.CHILD_RESULT) for line in mixed.lines)
+            reached["a failing test's panic in a section beside a passing test's"] += any(
+                r.shape == "libtest" and {t.status for t in r.tests} == {"ok", "FAILED"} and any(t.panics for t in r.tests if t.status == "ok") for r in runs)
+            reached["a head split after its ' ("] += any(re.match(r"thread '[^']+' \((?!\d+\) panicked)", line) for line in mixed.lines)
+            reached["one binary's libtest sections twice in one log"] += sum(r.shape == "libtest" for r in runs) == 2 and runs[0].binary == runs[1].binary
             reached["a test run twice in one log"] += any(n > 1 for n in Counter(inst[2] for inst, _ in clean.statuses).values())
             reached["a serial run cut off after a panic"] += any(r.cut for r in runs)
             reached["a run without the marker after a serial run"] += any(

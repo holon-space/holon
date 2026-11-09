@@ -448,15 +448,22 @@ Which test a panic belongs to is checked on drawn logs as well:
 no-capture output with and without its marker line, with other threads'
 text between and inside panic heads, and compares the classifier's verdict to
 the model's. A panic inside a passing test is no failure: it is dropped and
-counted on one `[known-reds] NOTE: N panic(s) inside passing tests (ignored)`
-line. Inside means the text proves the owner — a captured block, or a
-no-capture run behind its marker line, where tests run one at a time — or
-the panic is on the thread of a passing `- should panic` test. Without the
+counted on one `[known-reds] NOTE: N panic(s) inside passing tests (ignored): <tests>`
+line that names each test. Inside means the text proves the owner — a captured
+block, or a no-capture run behind its marker line, where tests run one at a
+time — or the panic is on the thread whose name is the full name of a test
+whose `test <name> ... ` head ran in the same libtest run (from its
+`running N tests` line, within its nextest instance or `Running` section) and
+that the run's `failures:` list does not name. The verdict words after `... `
+are never read, since other threads' text splices into them in every way
+(`... 6: ok`, `step6FAILED`, a line `okay, retrying`). libtest's main thread
+writes the list after every test has ended; a run whose last `test result:`
+failed count differs from the list, or that has no such line, drops none. Without the
 marker, tests overlap and a `START` proves nothing. A test is one unit in one
 run (each `Starting` line opens a run): a later run of the same unit in the
 same log, which the drawn logs include, neither passes nor fails it, and a run
-cut off after a panic hands its marker to no later run. A head cut after `thread '` takes the name of the one head its scope
-has open, and a scope where a name is lost drops none of its panics. The
+cut off after a panic hands its marker to no later run. A head cut after `thread '` or after its `' (` takes the name of the one head its scope
+has open; a panic whose name is lost stays classified. The
 fixture runs the fixed examples of that check (`example/*`), cut from real gate
 logs.
 
