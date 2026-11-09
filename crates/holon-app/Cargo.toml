@@ -57,6 +57,7 @@ tracing.workspace = true
 [dev-dependencies]
 holon-api = { workspace = true, features = ["test-helpers"] }
 turso_core.workspace = true
+turso_sqlite.workspace = true
 holon = { workspace = true, features = ["test-helpers"] }
 holon-block-roundtrip-testing.workspace = true
 # `ShareCredentials::in_memory`: a share dispatched through the shipped wiring
@@ -74,6 +75,7 @@ toml.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 holon-transition-contract.workspace = true
+zstd = "0.14"
 
 [[test]]
 name = "main"

@@ -1,14 +1,18 @@
 //! The one place that opens a Holon Turso database.
 //!
-//! No open deletes a row. A file this binary cannot use as it is loses only
-//! what it computed: its materialized views, rebuilt from the tables they read,
-//! and the `block_derived` cache. That happens when the file was built with a
-//! different [`scalar_fns`] set or engine view-state layout, or when the engine
-//! could not load one of its views. A damaged file is moved aside, never
-//! deleted: the shared-WAL coordination file or the write-ahead log alone when
-//! the error points there, else every file of the database. Every engine error
-//! of the open, from the file open to the last read, is classified the same
-//! way; any failure other than damage leaves the files where they are.
+//! No open deletes a row. Before any write, the open reads the engine format
+//! the file records. A file in another or an unknown format is moved aside
+//! whole and a fresh database opened in its place; no view of it is dropped,
+//! because an engine must not drop views whose stored state it does not know.
+//! A file in this engine's format that this binary cannot use as it is loses
+//! only what it computed: its materialized views, rebuilt from the tables they
+//! read, and the `block_derived` cache. That happens when the file was built
+//! with a different [`scalar_fns`] set, or when one of its views no longer
+//! loads. A damaged file is moved aside, never deleted: the shared-WAL
+//! coordination file or the write-ahead log alone when the error points there,
+//! else every file of the database. Every engine error of the open, from the
+//! file open to the last read, is classified the same way; any failure other
+//! than damage or a foreign format leaves the files where they are.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -61,8 +65,9 @@ pub enum OpenChange {
         reason: String,
         backup: std::path::PathBuf,
     },
-    /// The engine could not use the file at all. It was renamed to `backup`,
-    /// and a fresh database was opened in its place.
+    /// The engine could not use the file at all, or the file is in an engine
+    /// format this binary does not maintain. It was renamed to `backup`, and a
+    /// fresh database was opened in its place.
     MovedAside {
         reason: String,
         backup: std::path::PathBuf,
@@ -145,9 +150,9 @@ impl From<OpenFailed> for StorageError {
 pub struct BootOpenOutcome(pub OpenOutcome);
 
 const FN_SET_TABLE: &str = "holon_db_fn_set";
-/// The layout of the engine's stored view state. The engine refuses to maintain
-/// a view whose state another layout wrote, so an open drops such views.
-const VIEW_STATE: &str = "view-state/exact-real-sum";
+/// The engine format of the stored view state, recorded after the function set
+/// in [`FN_SET_TABLE`]. A file recording another format is moved aside whole.
+pub const VIEW_FORMAT: &str = "view-state/dbsp-3-probe-key";
 /// Values computed with the functions; the derived-field reconciler refills it.
 const DERIVED_CACHE_TABLE: &str = "block_derived";
 
@@ -228,19 +233,28 @@ fn open_recording(
                 continue;
             }
         }
-        if !error.is_corrupt() {
+        let foreign_format = matches!(error, OpenError::Format(_));
+        if !foreign_format && !error.is_corrupt() {
             return Err(error.classify(path));
         }
         if let Some(db) = db {
             assert_eq!(
                 Arc::strong_count(&db),
                 1,
-                "{path} is damaged ({error}), but another holder in this process still has it open"
+                "{path} is unusable ({error}), but another holder in this process still has it open"
             );
         }
-        let reason = format!("the engine cannot use it: {error}");
         let stem: &std::path::Path = stem.get_or_insert_with(|| free_backup_stem(db_path, path));
-        changes.push(recover_damaged(leg, reason, db_path, path, stem)?);
+        changes.push(match foreign_format {
+            true => move_database_aside(error.to_string(), db_path, path, stem)?,
+            false => recover_damaged(
+                leg,
+                format!("the engine cannot use it: {error}"),
+                db_path,
+                path,
+                stem,
+            )?,
+        });
         if let Some(OpenChange::MovedAside { .. }) = changes.last() {
             return open_fresh(path, fns).map_err(|e| e.classify(path));
         }
@@ -336,7 +350,12 @@ struct Failed {
 /// classifies the errors of every leg in one place.
 #[derive(Debug)]
 enum OpenError {
-    Engine { doing: String, error: LimboError },
+    Engine {
+        doing: String,
+        error: LimboError,
+    },
+    /// The file is in an engine format this binary does not maintain.
+    Format(String),
     Other(StorageError),
 }
 
@@ -344,6 +363,7 @@ impl std::fmt::Display for OpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Engine { doing, error } => write!(f, "{doing}: {error}"),
+            Self::Format(reason) => write!(f, "{reason}"),
             Self::Other(e) => write!(f, "{e}"),
         }
     }
@@ -353,7 +373,7 @@ impl OpenError {
     fn failure(&self) -> Option<DatabaseOpenFailure> {
         match self {
             Self::Engine { error, .. } => Some(open_failure(error)),
-            Self::Other(_) => None,
+            Self::Format(_) | Self::Other(_) => None,
         }
     }
 
@@ -368,6 +388,9 @@ impl OpenError {
                 failure: open_failure(error),
                 cause: self.to_string(),
             },
+            Self::Format(reason) => {
+                StorageError::DatabaseError(format!("the database at {path}: {reason}"))
+            }
             Self::Other(e) => e,
         }
     }
@@ -422,12 +445,16 @@ fn attempt(
     }
 }
 
-/// Records this binary's function set in `db`, or drops what `db` computed
-/// with another one.
+/// Records this binary's function set in `db`, drops what `db` computed with
+/// another one, or refuses a file in another engine format.
 fn admit(db: &Arc<Database>, path: &str, fns: &[ScalarFn]) -> Step<Option<OpenChange>> {
-    let Some(reason) = unusable_reason(db, fns)? else {
-        record_signature(db, fns)?;
-        return Ok(None);
+    let reason = match verdict(db, fns)? {
+        Verdict::Usable => {
+            record_signature(db, fns)?;
+            return Ok(None);
+        }
+        Verdict::MoveAside(reason) => return Err(OpenError::Format(reason)),
+        Verdict::Recompute(reason) => reason,
     };
     let views = drop_computed(db, fns)?;
     tracing::info!(
@@ -503,6 +530,16 @@ fn recover_damaged(
         );
         return Ok(OpenChange::LogMovedAside { reason, backup });
     }
+    move_database_aside(reason, db_path, path, stem)
+}
+
+/// Moves every file of the database aside.
+fn move_database_aside(
+    reason: String,
+    db_path: &Path,
+    path: &str,
+    stem: &Path,
+) -> Result<OpenChange> {
     for file in TursoDurableState::new(db_path).durable_paths() {
         if file.exists() {
             move_aside(&file, path, stem)?;
@@ -645,10 +682,13 @@ fn move_aside(file: &Path, path: &str, _: &Path) -> Result<std::path::PathBuf> {
 /// A database created where a damaged one was moved aside.
 fn open_fresh(path: &str, fns: &[ScalarFn]) -> Step<Arc<Database>> {
     let db = open_file(path, fns)?;
-    if let Some(fresh) = unusable_reason(&db, fns)? {
-        return Err(invalid(format!(
-            "the fresh database at {path} is unusable right after it was created: {fresh}"
-        )));
+    match verdict(&db, fns)? {
+        Verdict::Usable => {}
+        Verdict::Recompute(fresh) | Verdict::MoveAside(fresh) => {
+            return Err(invalid(format!(
+                "the fresh database at {path} is unusable right after it was created: {fresh}"
+            )));
+        }
     }
     record_signature(&db, fns)?;
     Ok(db)
@@ -663,21 +703,10 @@ fn drop_computed(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Vec<String>> {
         .into_iter()
         .map(|(name, _)| name)
         .collect();
-    let mut views: Vec<(String, String)> = rows(
-        &conn,
-        "SELECT name, sql FROM sqlite_schema WHERE type = 'view' ORDER BY name",
-    )?
-    .into_iter()
-    .map(|row| match row.as_slice() {
-        [Value::Text(name), Value::Text(sql)] => {
-            Ok((name.as_str().to_string(), sql.as_str().to_string()))
-        }
-        other => Err(invalid(format!("sqlite_schema view row is {other:?}"))),
-    })
-    .collect::<Step<Vec<_>>>()?
-    .into_iter()
-    .filter(|(name, sql)| is_materialized(sql) || unloadable.contains(name))
-    .collect();
+    let mut views: Vec<(String, String)> = view_rows(&conn)?
+        .into_iter()
+        .filter(|(name, sql)| is_materialized(sql) || unloadable.contains(name))
+        .collect();
     let run = |sql: &str| conn.execute(sql).map_err(engine(sql));
     in_write_tx(&conn, || {
         let mut dropped = Vec::new();
@@ -745,11 +774,8 @@ fn names_word(sql: &str, name: &str) -> bool {
         .any(|word| word == name)
 }
 
-/// The views the engine could not load, each with why. The engine loads a
-/// materialized view whose SELECT names a column its table no longer has, and
-/// then refuses every write to that table, so such a view counts as unloadable.
-fn unloadable_views(conn: &Arc<Connection>) -> Step<Vec<(String, String)>> {
-    let views: Vec<(String, String)> = rows(
+fn view_rows(conn: &Arc<Connection>) -> Step<Vec<(String, String)>> {
+    rows(
         conn,
         "SELECT name, sql FROM sqlite_schema WHERE type = 'view' ORDER BY name",
     )?
@@ -760,19 +786,35 @@ fn unloadable_views(conn: &Arc<Connection>) -> Step<Vec<(String, String)>> {
         }
         other => Err(invalid(format!("sqlite_schema view row is {other:?}"))),
     })
-    .collect::<Step<_>>()?;
+    .collect()
+}
+
+/// The views whose stored state is in a version this engine does not maintain.
+fn incompatible_views(conn: &Arc<Connection>) -> Step<Vec<String>> {
+    let views = view_rows(conn)?;
+    conn.with_schema_mut(|schema| {
+        views
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| schema.is_incompatible_view(NamespaceId::ROOT, name))
+            .collect()
+    })
+    .map_err(engine("read the schema"))
+}
+
+/// The views the engine could not load, each with why. The engine loads a
+/// materialized view whose SELECT names a column its table no longer has, and
+/// then refuses every write to that table, so such a view counts as unloadable.
+fn unloadable_views(conn: &Arc<Connection>) -> Step<Vec<(String, String)>> {
+    let views = view_rows(conn)?;
     let flagged: Vec<(String, String, Option<&'static str>)> = conn
         .with_schema_mut(|schema| {
             views
                 .into_iter()
                 .map(|(name, sql)| {
-                    let why = if schema.is_broken_view(NamespaceId::ROOT, &name) {
-                        Some("its SQL does not parse")
-                    } else if schema.is_incompatible_view(NamespaceId::ROOT, &name) {
-                        Some("its stored state is from an incompatible engine version")
-                    } else {
-                        None
-                    };
+                    let why = schema
+                        .is_broken_view(NamespaceId::ROOT, &name)
+                        .then_some("its SQL does not parse");
                     (name, sql, why)
                 })
                 .collect()
@@ -861,23 +903,59 @@ fn open_failure(e: &LimboError) -> DatabaseOpenFailure {
     }
 }
 
-fn unusable_reason(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Option<String>> {
+/// What an open does with a file it opened.
+enum Verdict {
+    Usable,
+    /// The file is in this engine's format, but its views were computed with
+    /// other functions or no longer load: they are dropped and rebuilt.
+    Recompute(String),
+    /// The file is in another or an unknown engine format.
+    MoveAside(String),
+}
+
+/// Reads the recorded engine format first, so a file in another format is
+/// refused before any statement writes to it.
+fn verdict(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Verdict> {
     let conn = connect(db)?;
-    let wanted = scalar_fns::signature(fns);
     let stored = match stored_signature(&conn)? {
         StoredSignature::Recorded(stored) => stored,
-        StoredSignature::Absent if is_empty(&conn)? => return Ok(None),
-        // Built before databases recorded their function set: it has none.
-        StoredSignature::Absent => String::new(),
+        StoredSignature::Absent if is_empty(&conn)? => return Ok(Verdict::Usable),
+        StoredSignature::Absent => {
+            return Ok(Verdict::MoveAside(format!(
+                "it holds tables but no {FN_SET_TABLE} record, so its engine format is \
+                 unknown; this engine maintains only [{VIEW_FORMAT}]"
+            )));
+        }
         StoredSignature::Unreadable(why) => {
-            return Ok(Some(format!(
-                "its function-set record is unreadable: {why}"
+            return Ok(Verdict::MoveAside(format!(
+                "its engine format record is unreadable ({why}); this engine maintains only \
+                 [{VIEW_FORMAT}]"
             )));
         }
     };
-    let (stored_fns, stored_state) = stored.rsplit_once(';').unwrap_or((&stored, ""));
+    let Some((stored_fns, format)) = stored.rsplit_once(';') else {
+        return Ok(Verdict::MoveAside(format!(
+            "its record [{stored}] names no engine format; this engine maintains only \
+             [{VIEW_FORMAT}]"
+        )));
+    };
+    if format != VIEW_FORMAT {
+        return Ok(Verdict::MoveAside(format!(
+            "its views are stored in the engine format [{format}]; this engine maintains only \
+             [{VIEW_FORMAT}]"
+        )));
+    }
+    let incompatible = incompatible_views(&conn)?;
+    if !incompatible.is_empty() {
+        return Ok(Verdict::MoveAside(format!(
+            "it records the engine format [{format}], but the engine holds the views [{}] in a \
+             storage version it does not maintain",
+            incompatible.join(", ")
+        )));
+    }
+    let wanted = scalar_fns::signature(fns);
     if stored_fns != wanted {
-        return Ok(Some(format!(
+        return Ok(Verdict::Recompute(format!(
             "it was built with the scalar functions [{stored_fns}], this binary registers [{wanted}]"
         )));
     }
@@ -886,25 +964,18 @@ fn unusable_reason(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Option<String>>
         .map(|(name, why)| format!("{name} ({why})"))
         .collect();
     if !unusable.is_empty() {
-        return Ok(Some(format!(
+        return Ok(Verdict::Recompute(format!(
             "the engine cannot load the materialized views {}",
             unusable.join(", ")
         )));
     }
-    if stored_state != VIEW_STATE {
-        return Ok(Some(format!(
-            "its materialized views hold the engine state [{stored_state}], this engine \
-             maintains only [{VIEW_STATE}]"
-        )));
-    }
-    Ok(None)
+    Ok(Verdict::Usable)
 }
 
 enum StoredSignature {
     Absent,
     Recorded(String),
-    /// A torn or foreign record: the views are dropped and the record written
-    /// again, never refused.
+    /// A torn or foreign record: the file's engine format is unknown.
     Unreadable(String),
 }
 
@@ -938,7 +1009,7 @@ fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<()> {
 
 /// What a file built by `fns` on this engine holds in [`FN_SET_TABLE`].
 fn record(fns: &[ScalarFn]) -> String {
-    format!("{};{VIEW_STATE}", scalar_fns::signature(fns))
+    format!("{};{VIEW_FORMAT}", scalar_fns::signature(fns))
 }
 
 /// Inside the caller's transaction.
@@ -1166,25 +1237,34 @@ mod tests {
         ));
     }
 
-    /// A crash between the DELETE and the INSERT of a non-atomic record leaves
-    /// the table with no row; a table holding anything but one text row is as
-    /// unreadable. Either way the record says nothing about the tables, so they
-    /// keep their rows and the record is written again.
+    /// A record that names no engine format, another one, or that is torn or
+    /// foreign leaves the format unknown: the file moves aside whole, with its
+    /// rows and views, and the open starts a fresh database.
     #[test]
-    fn an_unreadable_signature_record_keeps_the_rows_and_is_written_again() {
-        for (case, torn) in [
+    fn a_file_in_another_or_an_unknown_engine_format_is_moved_aside_whole() {
+        for (case, record_rows) in [
             ("no row", vec![]),
-            ("two rows", vec!["'a'", "'b'"]),
-            ("a blob", vec!["X'00'"]),
+            ("two rows", vec!["'a'".to_string(), "'b'".to_string()]),
+            ("a blob", vec!["X'00'".to_string()]),
+            (
+                "no format",
+                vec![format!("'{}'", scalar_fns::signature(&[DOUBLE]))],
+            ),
+            (
+                "the previous format",
+                vec![format!(
+                    "'{};view-state/exact-real-sum'",
+                    scalar_fns::signature(&[DOUBLE])
+                )],
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("holon.db");
+            build_with_double(&path);
             {
-                let db = open(&path, &[], WhenHeld::Wait).unwrap().0;
-                exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
-                exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
+                let db = open(&path, &[DOUBLE], WhenHeld::Wait).unwrap().0;
                 exec(&db, &format!("DELETE FROM {FN_SET_TABLE}")).unwrap();
-                for value in torn {
+                for value in &record_rows {
                     exec(
                         &db,
                         &format!("INSERT INTO {FN_SET_TABLE} (signature) VALUES ({value})"),
@@ -1192,21 +1272,24 @@ mod tests {
                     .unwrap();
                 }
             }
-            let (db, _) = open(&path, &[DOUBLE], WhenHeld::Wait).unwrap_or_else(|e| {
-                panic!("{case}: an unreadable signature record must not be an open error: {e}")
-            });
-            assert_eq!(
-                count(&db, "SELECT count(*) FROM t"),
-                1,
-                "{case}: the rows must be kept"
-            );
-            let conn = connect(&db).unwrap();
+            let (db, outcome) = open(&path, &[DOUBLE], WhenHeld::Wait)
+                .unwrap_or_else(|e| panic!("{case}: the file must not stop the open: {e}"));
+            let [OpenChange::MovedAside { backup, reason }] = outcome.0.as_slice() else {
+                panic!("{case}: the open must report the move, got {outcome:?}");
+            };
             assert!(
-                matches!(
-                    stored_signature(&conn).unwrap(),
-                    StoredSignature::Recorded(s) if s == record(&[DOUBLE])
+                reason.contains(VIEW_FORMAT),
+                "{case}: the reason must name the format this engine maintains: {reason}"
+            );
+            assert!(!has(&db, "table", "t"), "{case}: the open must start fresh");
+            let moved = open_file(backup.to_str().unwrap(), &[DOUBLE]).unwrap();
+            assert_eq!(
+                (
+                    count(&moved, "SELECT count(*) FROM t"),
+                    count(&moved, "SELECT sum(d) FROM v")
                 ),
-                "{case}: the record must be written again"
+                (2, 6),
+                "{case}: the moved file must keep its rows and its view"
             );
         }
     }
@@ -1285,11 +1368,14 @@ mod tests {
         exec(&db, "INSERT INTO d (x) VALUES (1)").unwrap();
         let conn = connect(&db).unwrap();
         let run = |sql: &str| conn.execute(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let changed = format!("changed;{VIEW_FORMAT}");
         let in_tx = |end: &str| {
             run("BEGIN IMMEDIATE");
             run("DROP VIEW v");
             run("DELETE FROM d");
-            run(&format!("UPDATE {FN_SET_TABLE} SET signature = 'changed'"));
+            run(&format!(
+                "UPDATE {FN_SET_TABLE} SET signature = '{changed}'"
+            ));
             run(end);
         };
 
@@ -1309,7 +1395,7 @@ mod tests {
         assert_eq!(count(&db, "SELECT count(*) FROM d"), 0);
         assert!(matches!(
             stored_signature(&conn).unwrap(),
-            StoredSignature::Recorded(s) if s == "changed"
+            StoredSignature::Recorded(s) if s == changed
         ));
         drop(conn);
         drop(db);

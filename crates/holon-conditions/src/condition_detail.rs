@@ -288,7 +288,7 @@ impl ConditionKind {
             // path would be cut by the headline cap.
             Self::DatabaseMovedAside { reason, backup } => ConditionDetail::with_body(
                 format!(
-                    "The database could not be opened ({reason}), so Holon moved it aside and \
+                    "The database could not be used ({reason}), so Holon moved it aside and \
                      started a fresh one. The blocks came back from the vault. Anything that was \
                      only in the database is in the moved file"
                 ),

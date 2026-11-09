@@ -171,8 +171,48 @@ proptest! {
 /// A database whose SUM/TOTAL/AVG view state an engine before the exact REAL
 /// sum wrote: turso's own compatibility fixture, compressed with zstd.
 const BEFORE_EXACT_SUM: &[u8] = include_bytes!("fixtures/sum_state_before_exact_sum.db.zst");
+
 const FIXTURE_VIEW: &str =
     "SELECT g, SUM(x) AS sx, TOTAL(x) AS tx, AVG(y) AS ay, COUNT(*) AS c FROM t GROUP BY g";
+
+/// The schema and rows of the fixture's table `t`, read with the bare engine.
+fn table_t_in(path: &std::path::Path) -> (String, Vec<Vec<turso::Value>>) {
+    let io = Arc::new(turso_core::UnixIO::new().expect("file IO"));
+    let options = turso_core::OpenOptions::new(Arc::new(turso_sqlite::SqliteDialect))
+        .db_opts(turso_core::DatabaseOpts::default().with_views(true));
+    let db = turso_core::Database::open(io, path.to_str().unwrap(), options).expect("raw open");
+    let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
+    let rows = |sql: &str| {
+        conn.prepare(sql)
+            .and_then(|mut stmt| stmt.run_collect_rows())
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+    };
+    let schema = match rows("SELECT sql FROM sqlite_schema WHERE name = 't'").as_slice() {
+        [row] => match row.as_slice() {
+            [turso_core::Value::Text(sql)] => sql.as_str().to_string(),
+            other => panic!("schema of t is {other:?}"),
+        },
+        other => panic!("schema of t is {other:?}"),
+    };
+    let values = rows("SELECT g, x, y FROM t")
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|v| match v {
+                    turso_core::Value::Null => turso::Value::Null,
+                    turso_core::Value::Numeric(turso_core::Numeric::Integer(n)) => {
+                        turso::Value::Integer(n)
+                    }
+                    turso_core::Value::Numeric(turso_core::Numeric::Float(f)) => {
+                        turso::Value::Real(f.into())
+                    }
+                    other => panic!("t holds {other:?}"),
+                })
+                .collect()
+        })
+        .collect();
+    (schema, values)
+}
 
 /// Writes the function-set record that Holon on that engine kept: the record
 /// without the view-state layout.
@@ -194,7 +234,8 @@ fn record_as_the_previous_engine_did(path: &std::path::Path) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_sum_view_from_before_the_exact_sum_is_rebuilt_and_follows_a_real_write() {
+async fn a_sum_view_from_before_the_exact_sum_is_moved_aside_and_built_fresh_follows_a_real_write()
+{
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("holon.db");
     std::fs::write(
@@ -203,10 +244,33 @@ async fn a_sum_view_from_before_the_exact_sum_is_rebuilt_and_follows_a_real_writ
     )
     .unwrap();
     record_as_the_previous_engine_did(&path);
+    let bytes = std::fs::read(&path).unwrap();
 
     let (db, outcome) =
         TursoBackend::open_database_reporting_outcome(&path).expect("the old database opens");
+    let [OpenChange::MovedAside { reason, backup }] = outcome.0.as_slice() else {
+        panic!("the open must move the old file aside, got {outcome:?}");
+    };
+    assert!(reason.contains("names no engine format"), "{reason}");
+    assert_eq!(
+        std::fs::read(backup).unwrap(),
+        bytes,
+        "the backup at {} is the old file byte for byte",
+        backup.display()
+    );
+
+    let (schema, rows) = table_t_in(backup);
     let (_backend, handle) = TursoBackend::new(db, broadcast::channel(64).0).expect("backend");
+    handle
+        .execute(&schema, vec![])
+        .await
+        .unwrap_or_else(|e| panic!("{schema}: {e}"));
+    for row in rows {
+        handle
+            .execute("INSERT INTO t (g, x, y) VALUES (?, ?, ?)", row)
+            .await
+            .expect("copy a row of the backup");
+    }
     reconcile_named_view(&handle, "v", FIXTURE_VIEW)
         .await
         .expect("the schema modules build the view");
@@ -228,9 +292,4 @@ async fn a_sum_view_from_before_the_exact_sum_is_rebuilt_and_follows_a_real_writ
         .await,
         "after `{write}` the view must equal the direct query"
     );
-    let [OpenChange::ViewsDropped { reason, views }] = outcome.0.as_slice() else {
-        panic!("the open must report the dropped view, got {outcome:?}");
-    };
-    assert_eq!(views, &["v".to_string()]);
-    assert!(reason.contains("engine state"), "{reason}");
 }

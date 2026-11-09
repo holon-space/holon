@@ -574,7 +574,7 @@ const UNDO_HISTORY_CLEARED_AT_BOOT: ConditionProfile = ConditionProfile::new(
 
 const DATABASE_MOVED_ASIDE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
-    "The database could not be opened and was moved aside",
+    "The database could not be used and was moved aside",
     icons::WARN,
     ConditionPlacement::Banner,
     AllClear::UntilRestart,

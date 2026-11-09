@@ -171,7 +171,11 @@ async fn an_upgrade_rebuilds_the_views_and_refills_block_derived() {
         let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
         for sql in [
             "DELETE FROM holon_db_fn_set",
-            "INSERT INTO holon_db_fn_set (signature) VALUES ('older_fn/1/v1')",
+            format!(
+                "INSERT INTO holon_db_fn_set (signature) VALUES ('older_fn/1/v1;{}')",
+                holon_turso::db_open::VIEW_FORMAT
+            )
+            .as_str(),
         ] {
             conn.execute(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
         }

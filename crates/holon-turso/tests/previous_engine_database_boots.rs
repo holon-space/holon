@@ -1,6 +1,6 @@
-//! A database the previous IVM engine wrote opens on this one: every stored
-//! materialized view is dropped and reported, every table row stays in the
-//! same file, and the schema modules build the views again.
+//! A database the previous IVM engine wrote is moved aside whole on this one:
+//! the backup is the file byte for byte, its rows stay readable there, and the
+//! schema modules build every view in the fresh file.
 //!
 //! The fixture is a vault database that Holon on the previous engine pin wrote
 //! at boot (every schema-module view, the integration type views and the
@@ -8,7 +8,6 @@
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::os::unix::fs::MetadataExt;
 
 use holon_api::Value;
 use holon_turso::db_open::OpenChange;
@@ -34,30 +33,49 @@ async fn names(handle: &DbHandle, sql: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn block_raw_rows_in(backup: &std::path::Path) -> i64 {
+    let io = std::sync::Arc::new(turso_core::UnixIO::new().expect("file IO"));
+    let options = turso_core::OpenOptions::new(std::sync::Arc::new(turso_sqlite::SqliteDialect));
+    let db = turso_core::Database::open(io, backup.to_str().unwrap(), options).expect("raw open");
+    let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
+    let sql = "SELECT count(*) FROM block_raw";
+    match conn
+        .prepare(sql)
+        .and_then(|mut stmt| stmt.run_collect_rows())
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        .as_slice()
+    {
+        [row] => match row.as_slice() {
+            [turso_core::Value::Numeric(turso_core::Numeric::Integer(n))] => *n,
+            other => panic!("{sql} gave {other:?}"),
+        },
+        other => panic!("{sql} gave {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_previous_engine_database_keeps_its_rows_and_rebuilds_its_views() {
+async fn a_previous_engine_database_is_moved_aside_and_its_views_are_built_fresh() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("holon.db");
-    std::fs::write(
-        &path,
-        zstd::decode_all(FIXTURE).expect("decompress fixture"),
-    )
-    .unwrap();
-    let inode = std::fs::metadata(&path).unwrap().ino();
+    let bytes = zstd::decode_all(FIXTURE).expect("decompress fixture");
+    std::fs::write(&path, &bytes).unwrap();
 
     let (db, outcome) =
         TursoBackend::open_database_reporting_outcome(&path).expect("the old database opens");
-    let [OpenChange::ViewsDropped { reason, views }] = outcome.0.as_slice() else {
-        panic!("the open must report the dropped views, got {outcome:?}");
+    let [OpenChange::MovedAside { reason, backup }] = outcome.0.as_slice() else {
+        panic!("the open must move the old file aside, got {outcome:?}");
     };
     assert!(
-        views.iter().any(|v| v == "block") && views.iter().any(|v| v == "block_with_path"),
-        "the schema-module views are reported: {views:?}"
+        reason.contains(holon_turso::db_open::VIEW_FORMAT),
+        "the reason names the format this engine maintains: {reason}"
     );
-    assert!(
-        reason.contains("block"),
-        "the reason names a view: {reason}"
+    assert_eq!(
+        std::fs::read(backup).unwrap(),
+        bytes,
+        "the backup at {} is the old file byte for byte",
+        backup.display()
     );
+    assert_eq!(block_raw_rows_in(backup), FIXTURE_BLOCK_ROWS);
 
     let (_backend, handle) = TursoBackend::new(db, broadcast::channel(64).0).expect("backend");
     assert_eq!(
@@ -67,14 +85,8 @@ async fn a_previous_engine_database_keeps_its_rows_and_rebuilds_its_views() {
         )
         .await,
         BTreeSet::new(),
-        "no stored view survives the open"
+        "the fresh file holds no view yet"
     );
-    let rows = handle
-        .query("SELECT count(*) AS n FROM block_raw", HashMap::new())
-        .await
-        .expect("count block_raw");
-    assert_eq!(rows[0].get("n"), Some(&Value::Integer(FIXTURE_BLOCK_ROWS)));
-
     ensure_all(&handle).await;
     let rebuilt = names(
         &handle,
@@ -82,31 +94,6 @@ async fn a_previous_engine_database_keeps_its_rows_and_rebuilds_its_views() {
     )
     .await;
     for view in ["block", "block_with_path", "backlinks", "journal_feed"] {
-        assert!(rebuilt.contains(view), "{view} is built again: {rebuilt:?}");
+        assert!(rebuilt.contains(view), "{view} is built: {rebuilt:?}");
     }
-    let rows = handle
-        .query(
-            "SELECT (SELECT count(*) FROM block) AS view, \
-             (SELECT count(*) FROM block_raw WHERE id != 'sentinel:no_parent') AS raw",
-            HashMap::new(),
-        )
-        .await
-        .expect("read the rebuilt block view");
-    assert_eq!(
-        rows[0].get("view"),
-        rows[0].get("raw"),
-        "the rebuilt block view holds every block row"
-    );
-
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().ino(),
-        inode,
-        "the database file is the same file, not a replacement"
-    );
-    let siblings: Vec<String> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n.contains("unusable"))
-        .collect();
-    assert_eq!(siblings, Vec::<String>::new(), "nothing is moved aside");
 }

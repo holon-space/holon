@@ -486,7 +486,10 @@ fn a_damaged_log_and_dropped_views_are_both_reported() {
         exec(&db, "DELETE FROM holon_db_fn_set");
         exec(
             &db,
-            "INSERT INTO holon_db_fn_set (signature) VALUES ('older_fn/1/v1')",
+            &format!(
+                "INSERT INTO holon_db_fn_set (signature) VALUES ('older_fn/1/v1;{}')",
+                holon_turso::db_open::VIEW_FORMAT
+            ),
         );
         exec(&db, "PRAGMA wal_checkpoint(TRUNCATE)");
     }

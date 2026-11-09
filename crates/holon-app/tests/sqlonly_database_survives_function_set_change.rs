@@ -179,7 +179,11 @@ async fn sqlonly_rows_not_in_org_files_survive_a_function_set_change() {
         for sql in [
             "CREATE TABLE IF NOT EXISTS holon_db_fn_set (signature TEXT NOT NULL)",
             "DELETE FROM holon_db_fn_set",
-            "INSERT INTO holon_db_fn_set (signature) VALUES ('older_fn/1/v1')",
+            format!(
+                "INSERT INTO holon_db_fn_set (signature) VALUES ('older_fn/1/v1;{}')",
+                holon::storage::db_open::VIEW_FORMAT
+            )
+            .as_str(),
         ] {
             conn.execute(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
         }

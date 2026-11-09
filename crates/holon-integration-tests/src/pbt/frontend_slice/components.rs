@@ -407,7 +407,11 @@ fn record_foreign_function_set(db_path: &std::path::Path) {
     for sql in [
         "CREATE TABLE IF NOT EXISTS holon_db_fn_set (signature TEXT NOT NULL)",
         "DELETE FROM holon_db_fn_set",
-        "INSERT INTO holon_db_fn_set (signature) VALUES ('older_binary_fn/1/v1')",
+        format!(
+            "INSERT INTO holon_db_fn_set (signature) VALUES ('older_binary_fn/1/v1;{}')",
+            holon::storage::db_open::VIEW_FORMAT
+        )
+        .as_str(),
     ] {
         conn.execute(sql)
             .unwrap_or_else(|e| panic!("[reboot] {sql}: {e}"));
