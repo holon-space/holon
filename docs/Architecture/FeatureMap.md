@@ -397,6 +397,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `iroh-proptest-fork-child-wrapper`
 - `iroh-proptest-fork-parent-aborted-before-first-case-load`
 - `iroh-proptest-fork-parent-wrapper`
+- `iroh-roster-refusal-reads-as-early-stream-end-load`
 - `join-then-stale-second-join`
 - `journal-feed-main-panel-still-loading`
 - `lib-type-chars-home-profile-derived`
@@ -497,6 +498,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-splitblock-no-editable-surface`
 - `windowed-task-keyword-blur-promotion-pre-warm-flake`
 - `windowed-undo-blur-cmdz-repaint-pre-warm`
+- `windowed-undo-blur-end-key-not-consumed-pre-warm`
 - `windowed-undo-blur-typed-suffix-pre-warm-flake`
 - `writeback-churning-file-stall-disclosed-twice`
 - `writeorgfile-sql-reads-budget`
