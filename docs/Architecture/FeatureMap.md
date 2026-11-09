@@ -438,6 +438,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `slot-withdrawn-last-claim-no-retraction`
 - `span-trace-block-mirror-apply-unparented-under-load`
 - `split-doc-root-setup-org-sync-under-load`
+- `splitblock-caret-past-dense-projection-content`
 - `state-toggle-live-row-never-settled-load`
 - `structural-fileless-page-writeback-not-materialized-load`
 - `task-state-clear-lost-across-cut-paste`
@@ -454,6 +455,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `two-instance-one-way-share-receiver-org-missing`
 - `two-instance-receiver-outside-sanctioned-audience`
 - `two-instance-viewmodel-stale-displayed-text`
+- `typechars-no-focused-block`
 - `typechars-sql-reads-budget`
 - `typed-link-in-pasted-decision-block-file-disagrees`
 - `undo-create-sibling-order`
