@@ -9,8 +9,8 @@ Both runs pass the nextest output through to stdout. `run` writes the red list t
 (default target/lane-nextest/), one `<binary id> <test name>` line per red test, known reds included, and prints
 its path. It exits 0 when nextest passed or every red is on the known-reds list, else 1 with one `[lane-nextest]
 novel:` line per novel signature of the classifier's verdict. A nextest failure that is not only its reds (no test
-selected, a build error, a killed nextest) exits with nextest's code. A classifier error is an error of `run` too.
-`rerun` refuses an empty or missing red list.
+selected, a build error, a killed or cancelled nextest) exits with nextest's code. A classifier error is an error of
+`run` too. `rerun` refuses an empty or missing red list.
 """
 import os
 import re
@@ -27,9 +27,10 @@ STATUS = re.compile(r"^ *([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\[[0-9]+/[0-9]+\] )
 NOT_RED = re.compile(r"^(?:TRY [0-9]+ )?(?:START|SLOW|TRMNTG|TERMINATING|PASS|LEAK|TMPASS|TIMEOUT-PASS|SLOW \+ LEAK"
                      r"|SLOW\+TMPASS|SKIP|FLAKY [0-9]+/[0-9]+|SETUP|SETUP SLOW|SETUP PASS|SETUP LEAK|SETUP TMPASS)$")
 END_OF_RUN = re.compile(r"^ *(?:Summary|Cancelling|Canceling) ")
+CANCELLED = re.compile(r"^ *(?:Cancelling|Canceling) ")
 # The classifier's line of a signature that no known-reds row covers: the run's first signature, or a later one.
 NOVEL = re.compile(r"^(?:PRIMARY: |  )(\[(?:novel|cross-family:).*)")
-# nextest's exit code when its run ended and some tests failed; any other non-zero code has a cause besides the reds.
+# nextest's exit code when some tests failed; a cancelled run exits with it too, so `run` also reads the cancel line.
 TEST_RUN_FAILED = 100
 
 
@@ -51,13 +52,14 @@ def run(args):
     verdict_log.unlink(missing_ok=True)
     proc = subprocess.Popen([*CARGO, "nextest", "run", "--no-fail-fast", *args], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1)
-    reds, summary = [], False
+    reds, summary, cancelled = [], False, False
     with open(stream_log, "w") as log:
         for line in proc.stdout:
             sys.stdout.write(line)
             log.write(line)
             text = line.rstrip("\n")
             summary = summary or bool(END_OF_RUN.match(text))
+            cancelled = cancelled or bool(CANCELLED.match(text))
             red = None if summary else red_of(text)
             if red:
                 reds.append(red)
@@ -76,7 +78,7 @@ def run(args):
             if m := NOVEL.match(line):
                 print(f"[lane-nextest] novel: {m.group(1)}")
         print(f"[lane-nextest] a red outside the known-reds list: {verdict_log}", flush=True)
-    if rc != TEST_RUN_FAILED:
+    if rc != TEST_RUN_FAILED or cancelled:
         print(f"[lane-nextest] nextest exited {rc}, not only through its reds: {stream_log}", flush=True)
         return rc
     return verdict

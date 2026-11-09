@@ -69,6 +69,13 @@ def fixture(root, wording):
             std::process::Command::new("kill").args(["-9", &nextest]).status().unwrap();
             std::thread::sleep(std::time::Duration::from_secs(5));
         }}
+        "S" => {{
+            extern "C" {{ fn signal(sig: i32, handler: usize) -> usize; }}
+            unsafe {{ signal(2, 1); }}
+            let nextest = std::os::unix::process::parent_id().to_string();
+            std::process::Command::new("kill").args(["-INT", &nextest]).status().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }}
         o => unreachable!("{{o}}"),
     }}
 }}
@@ -130,6 +137,12 @@ def draw_killed_plan(rng):
     return "".join(rng.choice("PK") for _ in range(i)) + "X" + "P" * (N - i - 1)
 
 
+def draw_cancelled_plan(rng):
+    """A run that nextest cancels at test `i` (`S`, a SIGINT to nextest that the test itself survives and passes)."""
+    i = rng.randrange(0, N - 1)
+    return "".join(rng.choice("PK") for _ in range(i)) + "S" + "P" * (N - i - 1)
+
+
 def check_killed(root, out, plan):
     r, _ = nextest(root, out, "run", plan, set())
     assert r.returncode != 0, f"plan={plan}\n{r.stdout}\n{r.stderr}\nexit {r.returncode} for a run whose nextest died"
@@ -160,6 +173,9 @@ def main():
         for plan in ["KXPPPPPP"] + [draw_killed_plan(rng) for _ in range(max(cases // 4, 2))]:
             check_killed(root, out, plan)
             print(f"ok killed plan={plan}", flush=True)
+        for plan in ["KSPPPPPP"] + [draw_cancelled_plan(rng) for _ in range(max(cases // 4, 2))]:
+            check_killed(root, out, plan)
+            print(f"ok cancelled plan={plan}", flush=True)
     print("ok")
 
 
