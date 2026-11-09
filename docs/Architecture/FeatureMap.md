@@ -416,7 +416,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `org-deep-text-ratio-under-load`
 - `org-suite-backward-sync-ui-delete-load-timeout`
 - `orgmode-file-watcher-no-event`
-- `overlay-sidebar-pre-warm-timeout-unpainted`
 - `pairing-conflict-badge-conflict-copy-content-unpainted`
 - `pairing-conflict-badge-long-copy-content-unpainted`
 - `pairing-conflict-badge-long-copy-load-timeout`
@@ -475,7 +474,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `wide-e2e-shrinker-list-app-item-missing`
 - `wide-e2e-sqlonly-typed-edits-load-timeout`
 - `wide-e2e-sqlonly-typing-share-load-timeout`
-- `windowed-action-bar-grafted-row-pre-warm`
 - `windowed-banner-toast-paint-load-flake`
 - `windowed-block-focus-outline-zero-rows-under-load`
 - `windowed-breadcrumb-tab-switch-bar-pre-warm`
@@ -489,8 +487,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-live-promotion-typed-todo-pre-warm-flake`
 - `windowed-live-promotion-undo-pre-warm-flake`
 - `windowed-nested-page-no-chevron-under-load`
-- `windowed-overlay-sidebar-page-tap-dismiss-pre-warm-flake`
-- `windowed-overlay-sidebar-page-tap-navigate-pre-warm-flake`
 - `windowed-previous-run-toast-box-under-load`
 - `windowed-quick-open-fresh-slot-pre-warm-timeout`
 - `windowed-quick-open-typing-slot-pre-warm-timeout`
