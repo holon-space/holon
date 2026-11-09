@@ -286,6 +286,54 @@ LOOP = [f"holon-gpui::main gpui_composed_windowed_loop::{t}" for t in (
     "general_e2e_composed_pbt_windowed")]
 ACCEPT_URL = "https://github.com/holon-space/holon-work/issues/1049#issuecomment-6732769520"
 STATUSES = ["FAIL", "TIMEOUT", "SIGSEGV", "LEAK-FAIL", "ABORT SIG 6"]
+HAND = "hand-authored: just hand-authored"
+KEYSTONE = "hand_authored_regressions::hand_authored_keystone_regressions"
+MODULE_TEST = "hand_authored_regressions::empty_locks_are_refused"
+WBS, HM4_EDIT, CRASH_COPY, HM4_IDS = (
+    "wbs-an-empty-org-block-survives-write-back-and-a-crash-restart",
+    "hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit",
+    "crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy",
+    "hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot")
+HAND_CASES = [WBS, HM4_EDIT, CRASH_COPY, HM4_IDS, "create-block-smoke", "lane-only-case"]
+SKIPS = ["reboot-orphans-the-previous-boots-watchers", "external-rewrite-keeps-a-promoted-pages-body",
+         "split-then-two-backspaces-caret-follows-second-join"]
+# Text the shard's other output writes into the same line under --nocapture; the recipe reads the name after it.
+INTERLEAVED = ["", "Applying transition 2/6: ", "[inv-sql-budget] UndoLastMutation: not judged] "]
+
+
+def real_hand_log(tree, first_skip):
+    """The step line, header, shard, case, failing-test and HAND-AUTHORED RED lines of a real hand-authored run
+    whose cases ran red on the base too; `first_skip` is its shard 0 skip line, which the lane run interleaved."""
+    skip = ' via HOLON_HAND_AUTHORED_SKIP (known issue — see docs/Testing/BugFunnel.md)'
+    shard = "target/gate-logs/pbt-hand-authored-shard-{}.log"
+    return [
+        HAND, "BASE: d80bb20cbbabd282d19d78af6aafb5eb93d26c96", f"TREE: {tree}", "STARTED: 2026-11-09T15:44:25Z",
+        f"== hand-authored shard 0 (exit 101): {shard.format(0)} ==", first_skip,
+        f'[hand-authored regression] RED case "{WBS}"', f"test {KEYSTONE} ... FAILED",
+        f"== hand-authored shard 1 (exit 0): {shard.format(1)} ==",
+        f'[hand-authored regression] SKIPPED case "reboot-orphans-the-previous-boots-watchers"{skip}',
+        f"== hand-authored shard 2 (exit 101): {shard.format(2)} ==",
+        f'[hand-authored regression] SKIPPED case "a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch"{skip}',
+        f'[hand-authored regression] RED case "{HM4_EDIT}"', f'[hand-authored regression] RED case "{CRASH_COPY}"',
+        f"test {KEYSTONE} ... FAILED",
+        f"== hand-authored shard 3 (exit 101): {shard.format(3)} ==",
+        f'[hand-authored regression] SKIPPED case "split-then-two-backspaces-caret-follows-second-join"{skip}',
+        f'[hand-authored regression] SKIPPED case "external-rewrite-keeps-a-promoted-pages-body"{skip}',
+        f'[hand-authored regression] RED case "{HM4_IDS}"', f"test {KEYSTONE} ... FAILED",
+        f"HAND-AUTHORED RED: shard 0 exit 101, red cases: {WBS}, log: {shard.format(0)}",
+        f"HAND-AUTHORED RED: shard 2 exit 101, red cases: {HM4_EDIT},{CRASH_COPY}, log: {shard.format(2)}",
+        f"HAND-AUTHORED RED: shard 3 exit 101, red cases: {HM4_IDS}, log: {shard.format(3)}",
+        "exit: 1"]
+
+
+REAL_HAND_LANE = real_hand_log(
+    "c2828c70b3aa05f4558294c582f17069acca4edd",
+    "[hand-authored regression] SKIPPED case test hand_authored_regressions::a_case_without_locks_is_refused_by_name"
+    " - should panic ... ok")
+REAL_HAND_BASE = real_hand_log(
+    "9512c8b501b576f584b3db0ea381737116c4da52",
+    '[hand-authored regression] SKIPPED case "a-failed-create-cancels-its-keystrokes-with-one-disclosure" via '
+    'HOLON_HAND_AUTHORED_SKIP (known issue — see docs/Testing/BugFunnel.md)')
 
 
 def module(test):
@@ -304,6 +352,48 @@ CUT = "     Summary [ 905.505s] 5021/5101 tests run: 5015 passed, 6 failed, 117 
 FULL = ["     Summary [ 905.505s] 5101 tests run: 5095 passed, 6 failed, 117 skipped",
         "     Summary [ 905.505s] 5101/5101 tests run: 5095 passed, 6 failed, 117 skipped"]
 STOPPED_AT = "[fail-fast] stopped at holon-orgmode::main writeback::a: a red outside the known-reds list (target/v.log)"
+
+
+def hand_spec(rng, cases, skips, shards=None):
+    """A hand-authored run: its cases dealt round-robin in a random order to 4 shards, or one process when `shards`
+    is 1; a shard with red cases fails its keystone test, and any shard may fail a test that names no case."""
+    shards = shards or rng.choice([4, 4, 4, 1])
+    cases = rng.sample(cases, len(cases))
+    spec = [{"cases": cases[k::shards], "tests": [KEYSTONE] if cases[k::shards] else []} for k in range(shards)]
+    if rng.random() < 0.25:
+        rng.choice(spec)["tests"].append(rng.choice([MODULE_TEST, KEYSTONE]))
+    return {"shards": spec, "skip": skips}
+
+
+def hand_red(h):
+    """The reference red set: case names and failing tests, whatever shard they ran in."""
+    return {name for shard in h["shards"] for name in shard["cases"] + shard["tests"]}
+
+
+def hand_unnamed(h):
+    """A red shard of a sharded run that names no red case."""
+    return len(h["shards"]) > 1 and any(s["tests"] and not s["cases"] for s in h["shards"])
+
+
+def hand_lines(rng, h):
+    """The run-step body `just hand-authored` writes for `h`."""
+    sharded = len(h["shards"]) > 1
+    lines, reds = [], []
+    skips = [f'[hand-authored regression] SKIPPED case "{c}" via HOLON_HAND_AUTHORED_SKIP (known issue)'
+             for c in h["skip"]]
+    for k, shard in enumerate(h["shards"]):
+        red = bool(shard["cases"] or shard["tests"])
+        log = f"target/gate-logs/pbt-hand-authored-shard-{k}.log"
+        if sharded:
+            lines.append(f"== hand-authored shard {k} (exit {101 if red else 0}): {log} ==")
+        lines += skips if k == 0 else []
+        lines += [f'{rng.choice(INTERLEAVED)}[hand-authored regression] RED case "{c}"' for c in shard["cases"]]
+        lines += [f"test {t} ... FAILED" for t in shard["tests"]]
+        lines.append(f"test result: {'FAILED' if red else 'ok'}. 1 passed; 0 failed; 0 ignored; 0 measured")
+        if red:
+            reds.append(f"HAND-AUTHORED RED: shard {k} exit 101, red cases: "
+                        f"{','.join(shard['cases']) or 'none, see the log'}, log: {log}")
+    return lines + (reds if sharded else [])
 
 
 def run_tail(rng, cut):
@@ -383,9 +473,13 @@ def lane_files(rng, spec, commits):
                 want += [(evidence, "does not exist"), (evidence, "no cited existing log"), not_run]
             continue
         red = o["red"]
-        body = results(red, o.get("green", [])) + run_tail(rng, o.get("stopped", False))
-        log(path, line, body if o.get("nextest", True) else gate_lines(red, o.get("hung", ())),
-            f"exit: {rng.choice([1, 100, 101])}")
+        if "hand" in o:
+            body = hand_lines(rng, o["hand"])
+        elif o.get("nextest", True):
+            body = results(red, o.get("green", [])) + run_tail(rng, o.get("stopped", False))
+        else:
+            body = gate_lines(red, o.get("hung", ()))
+        log(path, line, body, f"exit: {rng.choice([1, 100, 101])}")
         judge = o.get("classifier")
         if judge is not None:
             log(f"target/r1/{step}-known-reds.log", f"known-reds: scripts/keystone-known-reds.sh {path}", [],
@@ -393,42 +487,58 @@ def lane_files(rng, spec, commits):
         if judge == 0:
             continue
         base_path = f"target/base/{step}.log"
-        if "base" in o:
+        if "base" in o or "base_hand" in o:
             extra.append(f"- accepted-base-red: {step} {base_path} {o.get('acceptance', ACCEPT_URL)}")
-            log(base_path, o.get("base_line", line),
-                results(o["base"]) if o.get("base_nextest", True) else gate_lines(o["base"], o.get("base_hung", ())),
-                "exit: 100",
+            if "base_hand" in o:
+                base_body = hand_lines(rng, o["base_hand"])
+            elif o.get("base_nextest", True):
+                base_body = results(o["base"])
+            else:
+                base_body = gate_lines(o["base"], o.get("base_hung", ()))
+            log(base_path, o.get("base_line", line), base_body, "exit: 100",
                 tree={"base": base, "child": child, "other": other}[o.get("tree", "child")])
-            refusal = base_refusal(o, path, base_path, red)
-            if refusal is None:
+            refusals = base_refusal(o, path, base_path, red)
+            if not refusals:
                 continue
         else:
-            refusal = None
+            refusals = []
         if judge is None:
             want.append((f"{path} runs `{step}`", "no cited classifier log"))
         else:
             want.append((f"target/r1/{step}-known-reds.log classifies {path} of step", f"`exit: {judge}`"))
-        if refusal:
-            want.append(refusal)
+        want += refusals
         want.append(not_run)
     return files, cites, extra, want
 
 
 def base_refusal(o, path, base_path, red):
-    """The needles of the accepted-base-red refusal, or None when the base log proves every lane red."""
+    """The needles of each accepted-base-red refusal; [] when the base log proves every lane red."""
     if o.get("base_line"):
-        return base_path, "the selector prints"
+        return [(base_path, "the selector prints")]
     if o.get("tree") == "other":
-        return base_path, "is not the tree of --base"
+        return [(base_path, "is not the tree of --base")]
+    if "hand" in o:
+        return hand_refusals(o["hand"], o["base_hand"], path, base_path)
     if o.get("stopped") and o.get("nextest", True):
-        return path, "stopped before all its tests ran"
+        return [(path, "stopped before all its tests ran")]
     if not red:
-        return path, "no nextest failing-test line"
+        return [(path, "no nextest failing-test line")]
     if by_module(o):
         only = sorted({module(t) for t in red} - {module(t) for t in o["base"]})
     else:
         only = sorted(set(red) - set(o["base"]))
-    return (path, "red only in the lane", base_path, *only) if only else None
+    return [(path, "red only in the lane", base_path, *only)] if only else []
+
+
+def hand_refusals(lane, base, path, base_path):
+    if not any(s["cases"] for s in lane["shards"]) and not hand_unnamed(lane):
+        return [(path, "no nextest failing-test line", "no hand-authored")]
+    want = [(path, "names no red case", base_path)] if hand_unnamed(lane) else []
+    if skipped := sorted(set(lane["skip"]) - set(base["skip"])):
+        want.append((path, "skipped only in the lane", base_path, *skipped))
+    if only := sorted(hand_red(lane) - hand_red(base)):
+        want.append((path, "red only in the lane", base_path, *only))
+    return want
 
 
 def by_module(o):
@@ -438,7 +548,7 @@ def by_module(o):
 def module_notes(spec):
     """How many accepted-base-red compares run at module level."""
     return sum(1 for o in spec.values() if o["kind"] == "red" and o.get("classifier") != 0 and "base" in o
-               and not o.get("base_line") and o.get("tree") != "other" and o["red"] and by_module(o)
+               and not o.get("base_line") and o.get("tree") != "other" and o["red"] and by_module(o) and "hand" not in o
                and not (o.get("stopped") and o.get("nextest", True)))
 
 
@@ -501,6 +611,36 @@ STATIC = {
         "clippy: --workspace": {"kind": "red", "red": [], "nextest": False, "base": LOOP}},
     "a red step with no failing-test line": {
         "nextest: --workspace": {"kind": "red", "red": [], "base": LOOP}},
+    "four hand-authored red cases in shards 0, 2 and 3, red on the base in the same shards": {
+        HAND: {"kind": "red", "red": [], "classifier": 1, "tree": "child",
+               "hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE]}, {"cases": [], "tests": []},
+                                   {"cases": [HM4_EDIT, CRASH_COPY], "tests": [KEYSTONE]},
+                                   {"cases": [HM4_IDS], "tests": [KEYSTONE]}], "skip": SKIPS},
+               "base_hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE]}, {"cases": [], "tests": []},
+                                        {"cases": [HM4_EDIT, CRASH_COPY], "tests": [KEYSTONE]},
+                                        {"cases": [HM4_IDS], "tests": [KEYSTONE]}], "skip": SKIPS}}},
+    "a hand-authored red case only in the lane, hidden among base reds": {
+        HAND: {"kind": "red", "red": [],
+               "hand": {"shards": [{"cases": [WBS, "lane-only-case"], "tests": [KEYSTONE]},
+                                   {"cases": [HM4_IDS], "tests": [KEYSTONE]}, {"cases": [], "tests": []},
+                                   {"cases": [], "tests": []}], "skip": []},
+               "base_hand": {"shards": [{"cases": [WBS, HM4_EDIT], "tests": [KEYSTONE]},
+                                        {"cases": [HM4_IDS], "tests": [KEYSTONE]}, {"cases": [], "tests": []},
+                                        {"cases": [], "tests": []}], "skip": []}}},
+    "the same hand-authored red cases in other shards": {
+        HAND: {"kind": "red", "red": [],
+               "hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE]}, {"cases": [HM4_IDS], "tests": [KEYSTONE]},
+                                   {"cases": [], "tests": []}, {"cases": [], "tests": []}], "skip": []},
+               "base_hand": {"shards": [{"cases": [], "tests": []}, {"cases": [], "tests": []},
+                                        {"cases": [HM4_IDS, WBS], "tests": [KEYSTONE]}, {"cases": [], "tests": []}],
+                             "skip": []}}},
+    "a red hand-authored shard that names no case": {
+        HAND: {"kind": "red", "red": [],
+               "hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE]}, {"cases": [], "tests": [MODULE_TEST]},
+                                   {"cases": [], "tests": []}, {"cases": [], "tests": []}], "skip": []},
+               "base_hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE, MODULE_TEST]},
+                                        {"cases": [], "tests": []}, {"cases": [], "tests": []},
+                                        {"cases": [], "tests": []}], "skip": []}}},
     "the route of a ruling": {
         "nextest: --workspace -E 'package(holon)'": {"kind": "route", "red": LOOP}},
     "two missing steps and a missing log": {
@@ -513,6 +653,8 @@ def outcome(rng):
     kind = rng.choice(["green", "red", "red", "red", "route", "route-missing", "missing", "malformed"])
     if kind != "red":
         return {"kind": kind, "red": rng.sample(LOOP, rng.randint(0, 2))}
+    if rng.random() < 0.3:
+        return hand_outcome(rng)
     pool = ACTION_BAR + LOOP + ["holon api::t::lane_only", "holon-tui::main a::b"]
     red = rng.sample(pool, rng.randint(0, 4))
     o = {"kind": "red", "red": red, "green": rng.sample(pool, rng.randint(0, 2))}
@@ -538,11 +680,34 @@ def outcome(rng):
     return o
 
 
+def hand_outcome(rng):
+    """A red hand-authored step whose base run deals its cases to shards independently of the lane run."""
+    lane = rng.sample(HAND_CASES, rng.randint(0, 4))
+    base = set(lane) | set(rng.sample(HAND_CASES, rng.randint(0, 2)))
+    if lane and rng.random() < 0.3:
+        base.discard(rng.choice(lane))
+    skip = rng.sample(SKIPS, rng.randint(0, 3))
+    base_skip = set(skip) | set(rng.sample(SKIPS, rng.randint(0, 1)))
+    if skip and rng.random() < 0.2:
+        base_skip.discard(rng.choice(skip))
+    o = {"kind": "red", "hand": hand_spec(rng, lane, skip)}
+    o["red"] = sorted(hand_red(o["hand"]))
+    if (c := rng.choice([None, 0, 1, 3])) is not None:
+        o["classifier"] = c
+    if rng.random() < 0.8:
+        o["base_hand"] = hand_spec(rng, sorted(base), sorted(base_skip))
+        o["base"] = sorted(hand_red(o["base_hand"]))
+        o["tree"] = rng.choice(["base", "child", "child", "other"])
+        if rng.random() < 0.1:
+            o["base_line"] = "hand-authored: just hand-authored x"
+    return o
+
+
 def outcomes(cases):
     """Every selected step draws one outcome; the checker's problem lines equal the reference problems."""
     rng = random.Random(2)
     lines = ["clippy: --workspace", "nextest: --workspace -E 'package(holon)'", "windowed: just windowed-gate",
-             "a: just a", "b-2: just b"]
+             "a: just a", "b-2: just b", HAND]
     with tempfile.TemporaryDirectory() as repo:
         repo = Path(repo)
         commits = git_repo(repo)
@@ -568,6 +733,23 @@ def result_pattern():
     modules = load_checker().gate_red_modules(REAL_RESULTS + REAL_PASSES + WINDOWED_GATE_RED)
     assert modules == {"holon-gpui::main action_bar_windowed"}, modules
     print("[tests-cover-diff] real result lines: PASS")
+
+
+def real_hand_lines():
+    """The lane and base hand-authored runs of one diff, whose four cases ran red on both: the checker reads the
+    recipe's case names, interleaved skip line included, and accepts the lane red."""
+    checker = load_checker()
+    lane, unnamed, skipped = checker.hand_authored(REAL_HAND_LANE)
+    assert lane == {WBS, HM4_EDIT, CRASH_COPY, HM4_IDS, KEYSTONE} and not unnamed, (lane, unnamed)
+    assert checker.hand_authored(REAL_HAND_BASE)[0] == lane
+    assert len(skipped) == 4, skipped
+    summary = ("How tested:\n- target/r1/hand-authored.log\n- target/base/hand-authored.log\n"
+               f"- accepted-base-red: hand-authored target/base/hand-authored.log {ACCEPT_URL}\n")
+    logs = {"target/r1/hand-authored.log": "\n".join(REAL_HAND_LANE),
+            "target/base/hand-authored.log": "\n".join(REAL_HAND_BASE)}
+    bad = checker.check(HAND + "\n", summary, logs, set(), "b", tree_of=lambda c: "t")
+    assert bad == [], bad
+    print("[tests-cover-diff] real hand-authored lines: PASS")
 
 
 def windowed_verdicts(cases):
@@ -656,3 +838,4 @@ if __name__ == "__main__":
     complete_runs(cases)
     windowed_verdicts(cases)
     outcomes(cases // 3)
+    real_hand_lines()

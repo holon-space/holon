@@ -19,9 +19,13 @@ A step ran when a cited log has the selected line as line 1, and one of these ho
     `TREE:` commit has the source tree of `--base`; every test that fails in the step log fails in the base log too.
     Failing tests are the nextest result lines (`FAIL [ 1.2s] <binary> <test>`, any status but a pass). When either
     log has none, both compare at module level: the windowed gate's `FAIL: RED|HUNG <binary> <module>` lines, or the
-    module of each failing test; stdout notes each such compare. A red log with neither line is refused, so a red of
-    another step kind cannot be compared. A lane log whose nextest summary says `k/n tests run` with k < n stopped
-    before all its tests ran and is refused too: its reds prove nothing about the tests it never ran.
+    module of each failing test; stdout notes each such compare. A lane log with neither line that `just hand-authored`
+    wrote (a `] RED case "<name>"` or `HAND-AUTHORED RED:` line) compares its red case names and libtest
+    `test <name> ... FAILED` tests, whatever shard ran them; it is refused when a red shard names no case, or when it
+    skipped a case (`] SKIPPED case "<name>" via HOLON_HAND_AUTHORED_SKIP`) the base log did not skip. A red log with
+    none of these lines is refused, so a red of another step kind cannot be compared. A lane log whose nextest summary
+    says `k/n tests run` with k < n stopped before all its tests ran and is refused too: its reds prove nothing about
+    the tests it never ran.
 A step also ran by a ruled route: the How-tested block has a line `ruled-route: <step> <ruling> <evidence log>` and the
 evidence log is cited and exists. The check does not read the ruling ledger; the verifier checks the ruling id.
 An `<acceptance>` or `<ruling>` is a ruling id (a letter or digit, then letters, digits and `_./-`, with a digit) or an
@@ -74,6 +78,12 @@ PASSING = re.compile(r"(?:TRY \d+ )?(?:PASS|LEAK|START)")
 # The failing verdicts of scripts/windowed-gate.py.
 # shortcut: the windowed gate names its reds per module only; compare test names once it prints them.
 GATE_FAIL = re.compile(r"\s*FAIL: (?:RED|HUNG) (\S+) (\S+)(?: .*)?")
+# The grammar of the hand-authored recipe's `sed` that lists a shard's red cases (justfile).
+HAND_CASE = re.compile(r'\] RED case "([^"]*)"')
+HAND_SKIP = re.compile(r'\] SKIPPED case "([^"]*)" via HOLON_HAND_AUTHORED_SKIP')
+HAND_SHARD = re.compile(r"HAND-AUTHORED RED: shard \d+ exit \d+, red cases: (.*), log: ")
+HAND_UNNAMED = "none, see the log"
+LIBTEST_FAIL = re.compile(r"test (\S+) \.\.\. FAILED\s*$")
 # nextest's summary of a run cut short; `[fail-fast] stopped at` of scripts/lane-nextest.py also follows a full run.
 CUT_SUMMARY = re.compile(r"\s*Summary \[.*\] (\d+)/(\d+) tests run.*")
 
@@ -153,6 +163,29 @@ def gate_red_modules(lines):
     return {f"{m.group(1)} {m.group(2)}" for line in lines if (m := GATE_FAIL.fullmatch(line))}
 
 
+def hand_authored(lines):
+    """The red case names and failing libtest tests, the red shard lines that name no case, and the skipped cases
+    of a `just hand-authored` log; None for the red set when the log has no RED case and no HAND-AUTHORED RED line."""
+    cases = {m.group(1) for line in lines if (m := HAND_CASE.search(line))}
+    shards = [(line.strip(), m.group(1)) for line in lines if (m := HAND_SHARD.search(line))]
+    red = cases | {m.group(1) for line in lines if (m := LIBTEST_FAIL.search(line))}
+    return (red if cases or shards else None, [line for line, names in shards if names == HAND_UNNAMED],
+            {m.group(1) for line in lines if (m := HAND_SKIP.search(line))})
+
+
+def hand_problems(step, lane_path, lane_red, unnamed, skipped, base_path, base_lines):
+    """Why the hand-authored `base_lines` do not prove every red of the lane red on the base; [] when they do."""
+    base_red, _, base_skipped = hand_authored(base_lines)
+    bad = [f"{lane_path} of step `{step}`: a red shard names no red case ({'; '.join(unnamed)}), so {ACCEPTED} "
+           f"cannot compare it with {base_path}"] if unnamed else []
+    if only := sorted(skipped - base_skipped):
+        bad.append(f"{lane_path} of step `{step}`: {', '.join(only)} skipped only in the lane, not in base log "
+                   f"{base_path}")
+    if only := sorted(lane_red - (base_red or set())):
+        bad.append(f"{lane_path} of step `{step}`: {', '.join(only)} red only in the lane, not in base log {base_path}")
+    return bad
+
+
 def stop_line(lines):
     """The nextest summary line that shows the run stopped before all its tests ran, or None."""
     return next((line.strip() for line in lines if (m := CUT_SUMMARY.fullmatch(line))
@@ -212,9 +245,12 @@ def base_red_problems(step, lane_path, lane_lines, base_path, logs, selected_lin
         return [f"{lane_path} of step `{step}` stopped before all its tests ran (`{stop}`), so its reds prove "
                 f"nothing about the tests it never ran; {ACCEPTED} needs a full run"]
     lane_red, base_red, by_module = red_names(lane_lines, base)
+    hand_red, unnamed, skipped = hand_authored(lane_lines)
+    if not lane_red and hand_red is not None:
+        return hand_problems(step, lane_path, hand_red, unnamed, skipped, base_path, base)
     if not lane_red:
-        return [f"{lane_path} of step `{step}` has no nextest failing-test line and no windowed gate `FAIL:` verdict "
-                f"line, so {ACCEPTED} cannot compare it with {base_path}"]
+        return [f"{lane_path} of step `{step}` has no nextest failing-test line, no windowed gate `FAIL:` verdict "
+                f"line and no hand-authored `RED case` line, so {ACCEPTED} cannot compare it with {base_path}"]
     if by_module:
         notes.append(f"{lane_path} of step `{step}` and base log {base_path} compared at module level")
     if only := sorted(lane_red - base_red):
