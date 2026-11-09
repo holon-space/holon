@@ -493,7 +493,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-quick-open-fresh-slot-pre-warm-timeout`
 - `windowed-quick-open-typing-slot-pre-warm-timeout`
 - `windowed-reboot-misses-observability-caps`
-- `windowed-settle-perpetual-notify-settles-ok`
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
 - `windowed-task-keyword-blur-promotion-pre-warm-flake`

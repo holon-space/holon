@@ -407,17 +407,19 @@ pathfinder_simd = { git = "https://github.com/pbdeuchler/pathfinder.git", branch
 # upstream Zed base rev, bcf6582ce3; each fork has a `holon` branch and
 # Holon pins its head by `rev`, so older Holon lockfiles stay buildable.
 # The zed fork carries the iOS Rc<AppCell> leak, the offscreen wgpu readback,
-# the Android-emulator wgpu DEBUG-flag strip, the list height estimate and
-# `gpui_platform::current_text_system()` for headless tests off the main thread.
+# the Android-emulator wgpu DEBUG-flag strip, the list height estimate,
+# `gpui_platform::current_text_system()` for headless tests off the main thread
+# and `Window::pending_dirty_views()`, the views a notify during a draw left
+# undrawn (a view's first draw included), which the window test settle reads.
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e", version = "=0.2.2" }
-gpui_wgpu = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
-gpui_macos = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
-gpui_linux = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
-gpui_windows = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
-gpui_web = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
-gpui_platform = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
-gpui_macros = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
+gpui = { git = "https://github.com/holon-space/zed.git", rev = "722d9f3e696abc9356ef1488ecac68239dfd4ac1", version = "=0.2.2" }
+gpui_wgpu = { git = "https://github.com/holon-space/zed.git", rev = "722d9f3e696abc9356ef1488ecac68239dfd4ac1" }
+gpui_macos = { git = "https://github.com/holon-space/zed.git", rev = "722d9f3e696abc9356ef1488ecac68239dfd4ac1" }
+gpui_linux = { git = "https://github.com/holon-space/zed.git", rev = "722d9f3e696abc9356ef1488ecac68239dfd4ac1" }
+gpui_windows = { git = "https://github.com/holon-space/zed.git", rev = "722d9f3e696abc9356ef1488ecac68239dfd4ac1" }
+gpui_web = { git = "https://github.com/holon-space/zed.git", rev = "722d9f3e696abc9356ef1488ecac68239dfd4ac1" }
+gpui_platform = { git = "https://github.com/holon-space/zed.git", rev = "722d9f3e696abc9356ef1488ecac68239dfd4ac1" }
+gpui_macros = { git = "https://github.com/holon-space/zed.git", rev = "722d9f3e696abc9356ef1488ecac68239dfd4ac1" }
 
 # The gpui-mobile fork wires a real display handle into wgpu's
 # `InstanceDescriptor` on iOS (without it the Metal layer shows only its clear

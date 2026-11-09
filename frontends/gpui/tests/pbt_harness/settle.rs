@@ -1,9 +1,13 @@
 //! The one window settle of the GPUI tests: pump the window until a committed
 //! frame reflects every change the engine emitted, and the window is at rest.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 use std::time::Instant;
 
+use gpui::App;
+use gpui::AppContext as _;
+use gpui::EntityId;
 use gpui::HeadlessAppContext;
 use gpui::TestAppContext;
 use holon_api::EntityUri;
@@ -24,8 +28,11 @@ pub struct SettleTimeout {
     pub deadline: Duration,
     pub epoch: RenderEpoch,
     pub target: EngineSeq,
-    /// The last pump committed a new frame: something keeps the window dirty.
+    /// The last pump committed a new frame, or a frame forced for the pending
+    /// views changed the screen: something keeps the window dirty.
     pub dirty: bool,
+    /// The views a notify during a draw marked dirty that no frame has drawn.
+    pub pending_views: Vec<EntityId>,
     /// The UI subscriptions that hold the watermark, with why.
     pub owed: Vec<String>,
     /// The engine's admitted operations that have not finished.
@@ -49,12 +56,14 @@ impl std::fmt::Display for SettleError {
             SettleError::Timeout(t) => write!(
                 f,
                 "window did not settle within {:?}: frame {:?} reflects {:?}, target {:?}, \
-                 dirty {}, owed {:?}, operations in flight {}, held bridges {:?}",
+                 dirty {}, pending views {:?}, owed {:?}, operations in flight {}, \
+                 held bridges {:?}",
                 t.deadline,
                 t.epoch.frame,
                 t.epoch.reflects,
                 t.target,
                 t.dirty,
+                t.pending_views,
                 t.owed,
                 t.operations_in_flight,
                 t.held_bridges
@@ -81,10 +90,24 @@ impl std::error::Error for SettleError {}
 /// The app context a window test pumps.
 pub trait Pump {
     fn run_until_parked(&self);
+    /// Every view of every window that a notify marked dirty and that no frame
+    /// has drawn since.
+    fn pending_views(&self) -> Vec<EntityId>;
+    /// Draw every window once more, dirty or not.
+    fn force_frame(&self);
 }
 
 impl Pump for HeadlessAppContext {
     fn run_until_parked(&self) {
+        HeadlessAppContext::run_until_parked(self)
+    }
+
+    fn pending_views(&self) -> Vec<EntityId> {
+        pending_views_of(&mut self.app.borrow_mut())
+    }
+
+    fn force_frame(&self) {
+        refresh_windows(&mut self.app.borrow_mut());
         HeadlessAppContext::run_until_parked(self)
     }
 }
@@ -93,13 +116,55 @@ impl Pump for TestAppContext {
     fn run_until_parked(&self) {
         TestAppContext::run_until_parked(self)
     }
+
+    fn pending_views(&self) -> Vec<EntityId> {
+        self.update(pending_views_of)
+    }
+
+    fn force_frame(&self) {
+        self.update(refresh_windows);
+        TestAppContext::run_until_parked(self)
+    }
+}
+
+fn pending_views_of(app: &mut App) -> Vec<EntityId> {
+    app.windows()
+        .into_iter()
+        .flat_map(|handle| {
+            app.update_window(handle, |_, window, _| window.pending_dirty_views())
+                .unwrap_or_else(|e| panic!("window {handle:?} closed during a settle: {e:#}"))
+        })
+        .collect()
+}
+
+/// A test app draws a dirty window when the update that dirtied it ends.
+fn refresh_windows(app: &mut App) {
+    for handle in app.windows() {
+        app.update_window(handle, |_, window, _| window.refresh())
+            .unwrap_or_else(|e| panic!("window {handle:?} closed during a settle: {e:#}"));
+    }
+}
+
+/// What the tests read off the screen: every element of the committed frame.
+/// `ElementInfo` has no `PartialEq`, so its `Debug` form stands in for it.
+fn screen(bounds: &BoundsRegistry) -> BTreeMap<String, String> {
+    bounds
+        .all_elements()
+        .into_iter()
+        .map(|(id, info)| (id, format!("{info:?}")))
+        .collect()
 }
 
 /// Settle the engine with `settle_engine`, then pump the window until a frame
 /// reflects the engine's emitted seq, every UI subscription applied its first
 /// snapshot, no admitted operation is unfinished, one more pump commits no
-/// frame, and the emitted seq did not move. No sleep and no clock advance: a
-/// gpui timer that must fire is the caller's to advance.
+/// frame, and the emitted seq did not move. A notify during a draw marks its
+/// view pending without dirtying the window, and a test app draws only a dirty
+/// window, so while a view is pending the settle forces two frames: the window
+/// is settled only when the second shows what the first showed. A change that
+/// comes only after two unchanged renders is not seen. No sleep and no clock
+/// advance: a gpui timer that must fire is the caller's to advance.
+#[allow(clippy::result_large_err)]
 pub fn settle_window(
     app: &impl Pump,
     bounds: &BoundsRegistry,
@@ -113,6 +178,7 @@ pub fn settle_window(
     );
     let start = Instant::now();
     loop {
+        let mut forced_frame_changed_screen = false;
         settle_engine();
         watermark.poke();
         let before = bounds.epoch();
@@ -129,14 +195,26 @@ pub fn settle_window(
             let emitted = watermark.emitted().map_err(SettleError::Engine)?;
             if bounds.epoch() == epoch && emitted == target && watermark.operations_in_flight() == 0
             {
-                let loading = bounds
-                    .all_elements()
-                    .iter()
-                    .any(|(_, info)| info.widget_type.as_ref() == "loading");
-                return match loading {
-                    true => Err(SettleError::Loading(epoch)),
-                    false => Ok(epoch),
-                };
+                if !app.pending_views().is_empty() {
+                    // The first forced frame may itself change what the next one shows.
+                    app.force_frame();
+                    bounds.flush();
+                    let shown = screen(bounds);
+                    app.force_frame();
+                    bounds.flush();
+                    forced_frame_changed_screen = screen(bounds) != shown;
+                }
+                if !forced_frame_changed_screen {
+                    let epoch = bounds.epoch();
+                    let loading = bounds
+                        .all_elements()
+                        .iter()
+                        .any(|(_, info)| info.widget_type.as_ref() == "loading");
+                    return match loading {
+                        true => Err(SettleError::Loading(epoch)),
+                        false => Ok(epoch),
+                    };
+                }
             }
         }
         if start.elapsed() >= deadline {
@@ -144,7 +222,8 @@ pub fn settle_window(
                 deadline,
                 epoch,
                 target,
-                dirty: epoch.frame != before.frame,
+                dirty: epoch.frame != before.frame || forced_frame_changed_screen,
+                pending_views: app.pending_views(),
                 owed: watermark.owed(),
                 operations_in_flight: watermark.operations_in_flight(),
                 held_bridges: holon_gpui::bridge_hold::engaged_rows(),
@@ -155,6 +234,7 @@ pub fn settle_window(
 
 /// [`settle_window`] until `delivered` holds: for a change that reaches the
 /// window over a hop the watermark does not count, such as a tokio task.
+#[allow(clippy::result_large_err)]
 pub fn settle_window_until(
     app: &impl Pump,
     bounds: &BoundsRegistry,
