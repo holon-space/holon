@@ -462,8 +462,8 @@ impl BootTemplate {
                 .expect("[snapshot boot] only a session boot has a template")
                 .clone();
             drop(handle);
-            let loro_enabled = set_for_wiring(&ref_state.harness.wiring)
-                .has_projection(Projection::EditorState);
+            let loro_enabled =
+                set_for_wiring(&ref_state.harness.wiring).has_projection(Projection::EditorState);
             let snapshot = frontend.shut_down_to_snapshot().await;
             snapshot
                 .assert_file_hashes_match(if loro_enabled {

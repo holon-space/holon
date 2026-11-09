@@ -81,6 +81,7 @@ use holon_integration_tests::pbt::composed::span_metrics::ComposedSpanMetrics;
 use holon_integration_tests::pbt::composed::span_metrics::SutMetricsLifecycle;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
+use holon_integration_tests::pbt::hand_authored::Boot;
 use holon_integration_tests::pbt::hand_authored::CapturedInitialState;
 use holon_integration_tests::pbt::hand_authored::CheckScope;
 use holon_integration_tests::pbt::hand_authored::Checkpoints;
@@ -88,7 +89,6 @@ use holon_integration_tests::pbt::hand_authored::HandAuthoredCase;
 use holon_integration_tests::pbt::hand_authored::LockedReplay;
 use holon_integration_tests::pbt::hand_authored::Locks;
 use holon_integration_tests::pbt::hand_authored::ReplayCase;
-use holon_integration_tests::pbt::hand_authored::Boot;
 use holon_integration_tests::pbt::hand_authored::load_replay_cases;
 use holon_integration_tests::pbt::hand_authored::parse_case;
 use holon_integration_tests::pbt::hand_authored::parse_replay_case;
@@ -133,8 +133,9 @@ fn hand_authored_keystone_regressions() {
         );
         // The panic hook has already printed this case's panic block; catching it
         // lets every later case be judged too.
-        match std::panic::catch_unwind(AssertUnwindSafe(|| replay_case(case, &checkpoints, &locks, boot)))
-        {
+        match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            replay_case(case, &checkpoints, &locks, boot)
+        })) {
             Ok(()) => eprintln!("[hand-authored regression] PASSED case {name:?}"),
             Err(_) => {
                 eprintln!("[hand-authored regression] RED case {name:?}");
@@ -377,7 +378,13 @@ fn sweeps_of_replay(line: &str) -> Vec<usize> {
         ..
     } = parse_replay_case(std::path::Path::new("<inline>"), 1, line);
     SWEPT.with(|swept| swept.borrow_mut().clear());
-    replay::<CountingSut>(0, vec![(); case.transitions.len()], &checkpoints, &locks, Boot::Fresh);
+    replay::<CountingSut>(
+        0,
+        vec![(); case.transitions.len()],
+        &checkpoints,
+        &locks,
+        Boot::Fresh,
+    );
     SWEPT.with(|swept| swept.take())
 }
 

@@ -233,7 +233,6 @@ impl OrgModeSyncProvider {
                     file_id.clone(),
                     file_name.clone(),
                     parent_id.clone(),
-                    content_hash.clone(),
                     document.as_ref(),
                 )
                 .map_err(|e| format!("{}: {e:#}", path.display()))?;

@@ -2,6 +2,10 @@ CREATE TABLE IF NOT EXISTS file (
     id TEXT PRIMARY KEY NOT NULL,
     name TEXT NOT NULL,
     parent_id TEXT NOT NULL,
+    -- Hash of the bytes the file-sync controller last ingested or wrote; a
+    -- boot skips the file while its bytes hash to this. Written and read by
+    -- raw SQL only, like `base_hash`: a second writer with another hash
+    -- makes every boot re-ingest the file.
     content_hash TEXT NOT NULL DEFAULT '',
     document_id TEXT,
     -- JSON array of the block ids a read-only-format file declared at the

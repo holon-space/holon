@@ -5,15 +5,15 @@
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::snapshot_boot::BootKey;
 use holon_integration_tests::pbt::composed::snapshot_boot::BootTemplate;
-use holon_integration_tests::pbt::composed::snapshot_boot::why_not_restorable;
-use holon_integration_tests::pbt::frontend_slice::components::StoreSnapshot;
 use holon_integration_tests::pbt::composed::snapshot_boot::assert_obs_eq;
 use holon_integration_tests::pbt::composed::snapshot_boot::observe;
 use holon_integration_tests::pbt::composed::snapshot_boot::template_for;
+use holon_integration_tests::pbt::composed::snapshot_boot::why_not_restorable;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_init_state;
+use holon_integration_tests::pbt::frontend_slice::components::StoreSnapshot;
 use holon_integration_tests::pbt::hand_authored::HandAuthoredCase;
 use holon_integration_tests::pbt::hand_authored::load_cases;
 use holon_integration_tests::pbt::reference_state::ReferenceState;
@@ -58,11 +58,18 @@ fn sidecar_states() -> Vec<ReferenceState> {
         .collect()
 }
 
-fn runner() -> TestRunner {
+/// A lane run keeps each test under half the 120 s nextest cap; a run with
+/// `PROPTEST_CASES` set takes every hand-authored key and that many cases.
+fn full_run() -> bool {
+    std::env::var_os("PROPTEST_CASES").is_some()
+}
+
+fn runner(lane_cases: u32) -> TestRunner {
+    let config = Config::default();
     TestRunner::new(Config {
-        cases: 8,
+        cases: if full_run() { config.cases } else { lane_cases },
         failure_persistence: None,
-        ..Config::default()
+        ..config
     })
 }
 
@@ -81,10 +88,12 @@ fn restore_matches_fresh(state: &ReferenceState) {
 
 #[test]
 fn a_restored_boot_observes_what_a_fresh_boot_observes() {
-    for state in sidecar_states().iter().filter(|s| restorable(s)) {
+    let states: Vec<_> = sidecar_states().into_iter().filter(restorable).collect();
+    let keys = if full_run() { states.len() } else { 5 };
+    for state in &states[..keys.min(states.len())] {
         restore_matches_fresh(state);
     }
-    runner()
+    runner(2)
         .run(&restorable_init_state(), |state| {
             restore_matches_fresh(&state);
             Ok(())
@@ -130,7 +139,7 @@ fn a_restore_does_not_see_the_cases_before_it() {
     ] {
         restore_after(&sidecar_initial_state(&case), &case.transitions);
     }
-    runner()
+    runner(2)
         .run(
             &WideE2EMachine::sequential_strategy(1..6)
                 .prop_filter("a session boot", |(init, _, _)| restorable(init)),
@@ -177,7 +186,7 @@ fn a_template_of_another_key_is_refused() {
     // SAFETY: as above.
     unsafe { std::env::remove_var("HOLON_SOAK_SEED_BLOCKS") };
 
-    runner()
+    runner(8)
         .run(
             &(restorable_init_state(), restorable_init_state())
                 .prop_filter("two keys", |(a, b)| BootKey::of(a) != BootKey::of(b)),
@@ -207,15 +216,31 @@ fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-fn flip_loro_byte(snapshot: &StoreSnapshot) {
+/// A change the restored boot decodes, so the boot succeeds and only the
+/// `Obs` check can see it.
+fn change_loro_doc(snapshot: &StoreSnapshot) {
     let path = files_under(snapshot.dir())
         .into_iter()
         .find(|p| p.file_name().is_some_and(|n| n == "holon_tree.loro"))
         .expect("the store holds the Global Loro snapshot");
-    let mut bytes = std::fs::read(&path).expect("read the Loro snapshot");
-    let ix = bytes.len() / 2;
-    bytes[ix] ^= 0xff;
+    let (doc, _) =
+        holon_loro::update_log::read_persisted(&path).expect("read the persisted Loro doc");
+    // A new peer would fail the boot's peer check before the `Obs` check runs.
+    let peers: Vec<u64> = doc.oplog_vv().keys().copied().collect();
+    let [peer] = peers[..] else {
+        panic!("the template's Loro doc holds ops of one peer, not {peers:?}");
+    };
+    doc.set_peer_id(peer).expect("write as the template's peer");
+    doc.get_map("changed")
+        .insert("key", "value")
+        .expect("change the Loro doc");
+    doc.commit();
+    let bytes = doc
+        .export(loro::ExportMode::Snapshot)
+        .expect("export the Loro doc");
     std::fs::write(&path, bytes).expect("write the Loro snapshot");
+    holon_loro::update_log::reset(&holon_loro::update_log::log_path(&path))
+        .expect("reset the Loro update log");
 }
 
 fn change_org_line(snapshot: &StoreSnapshot) {
@@ -225,7 +250,11 @@ fn change_org_line(snapshot: &StoreSnapshot) {
         .expect("a runtime");
     rt.block_on(async {
         use holon_filesystem::FileSystem;
-        for path in files_under_fs(fs, snapshot.org_root()).await {
+        let vault_files = files_under_fs(fs, snapshot.org_root())
+            .await
+            .into_iter()
+            .filter(|p| !p.components().any(|c| c.as_os_str() == ".holon"));
+        for path in vault_files {
             let text = fs.read_to_string(&path).await.expect("read a vault file");
             if let Some(at) = text.find("\n* ") {
                 let line_end = text[at + 1..].find('\n').map_or(text.len(), |n| at + 1 + n);
@@ -251,29 +280,40 @@ async fn files_under_fs(
         .files
 }
 
-fn change_block_row(snapshot: &StoreSnapshot) {
+/// A navigation row, not a block row: the cold boot rebuilds every block row
+/// from the Loro doc or the vault, so a changed one never reaches the `Obs`.
+fn change_navigation_row(snapshot: &StoreSnapshot) {
     let db = holon_turso::turso::TursoBackend::open_database(snapshot.dir().join("test.db"))
         .expect("open the store's database");
     let conn = db
         .connect(holon_turso::turso::ConnectOpts::new())
         .expect("connect to the store's database");
     conn.execute(
-        "UPDATE block SET content = content || ' changed' \
-         WHERE id = (SELECT id FROM block WHERE content <> '' ORDER BY id LIMIT 1)",
+        "INSERT INTO navigation_history (region, block_id) \
+         SELECT 'changed', id FROM block_raw ORDER BY id LIMIT 1",
     )
-    .expect("change one block row");
+    .expect("add one navigation row");
 }
 
-/// A template store changed in one Loro byte, one vault line or one block
-/// row restores to an `Obs` that differs from the template's, and the check
-/// names the field.
+/// A template store changed in its Loro doc, one vault line or one
+/// navigation row fails the restore. A changed Loro doc or row fails the `Obs`
+/// check, which names the field; a changed vault file is ingested again at the
+/// restore, which the ingest check refuses before the `Obs` check runs.
 #[test]
 fn a_changed_template_store_fails_the_obs_check() {
     let state = first_restorable_sidecar_state();
-    for (change, field) in [
-        (flip_loro_byte as fn(&StoreSnapshot), "loro_tree"),
-        (change_org_line, "vault_file"),
-        (change_block_row, "block_row"),
+    for (change, store, expected) in [
+        (
+            change_loro_doc as fn(&StoreSnapshot),
+            "Loro",
+            ["item(s) differ", "\nloro_tree["],
+        ),
+        (change_org_line, "vault", ["the restore ingested", ""]),
+        (
+            change_navigation_row,
+            "navigation",
+            ["item(s) differ", "\nnav["],
+        ),
     ] {
         let template = BootTemplate::build(&state);
         change(template.snapshot());
@@ -281,8 +321,8 @@ fn a_changed_template_store_fails_the_obs_check() {
             ComposedSut::<WideE2E>::init_restored(&template, &state);
         });
         assert!(
-            message.contains("item(s) differ") && message.contains(&format!("\n{field}[")),
-            "a changed {field} store: {message}"
+            expected.iter().all(|part| message.contains(part)),
+            "a changed {store} store: {message}"
         );
     }
 }

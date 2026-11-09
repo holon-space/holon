@@ -1763,6 +1763,21 @@ async fn run_file_sync_controller(
         }
     }
 
+    // Build the org filter bridge over the change-source port without arming
+    // it yet — the slow recursive watch registration (9+s on macOS for the
+    // notify adapter) is deferred until after signal_ready so the factory can
+    // return immediately. The bridge subscribes before `initialize`, whose base
+    // sweep writes the vault: a change it missed would stay unprocessed.
+    let mut file_rx = tracing::info_span!("vault.startup.file_watcher_new_unarmed")
+        .in_scope(|| {
+            VaultFileWatcher::new(change_source.as_ref(), &root_directory, formats.clone())
+        })
+        .into_receiver();
+    info!(
+        "[OrgMode] File watcher built (unarmed) for: {}",
+        root_directory.display()
+    );
+
     let disclose_sync_not_started = controller.sync_not_started_disclosure();
     let init_result = async { controller.initialize().await }
         .instrument(tracing::info_span!("org.startup.controller_initialize"))
@@ -1783,20 +1798,6 @@ async fn run_file_sync_controller(
         ready_sender.signal_error(msg);
         return;
     }
-
-    // Build the org filter bridge over the change-source port without arming
-    // it yet — the slow recursive watch registration (9+s on macOS for the
-    // notify adapter) is deferred until after signal_ready so the factory can
-    // return immediately. The bridge subscribes here, so no event is missed.
-    let mut file_rx = tracing::info_span!("vault.startup.file_watcher_new_unarmed")
-        .in_scope(|| {
-            VaultFileWatcher::new(change_source.as_ref(), &root_directory, formats.clone())
-        })
-        .into_receiver();
-    info!(
-        "[OrgMode] File watcher built (unarmed) for: {}",
-        root_directory.display()
-    );
 
     // Initial scan ingests pre-existing files BEFORE
     // signal_ready so prime_seed_count's expected

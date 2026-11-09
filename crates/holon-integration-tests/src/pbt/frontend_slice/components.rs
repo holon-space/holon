@@ -239,55 +239,81 @@ impl StoreSnapshot {
     }
 
     /// Panics naming every vault file whose `file` row hash is not the hash
-    /// of its bytes, and every row with no vault file: a restore of such a
-    /// store re-ingests that file.
-    pub async fn assert_file_hashes_match(&self, consolidator: holon_api::capability::Consolidator) {
-        use holon_filesystem::FileSystem;
-        let db_path = self.dir.path().join("test.db");
-        let db = holon::storage::turso::TursoBackend::open_database(&db_path)
-            .unwrap_or_else(|e| panic!("[snapshot boot] open {}: {e}", db_path.display()));
-        let conn = db
-            .connect(holon::storage::turso::ConnectOpts::new())
-            .unwrap_or_else(|e| panic!("[snapshot boot] connect to {}: {e}", db_path.display()));
-        let sql = "SELECT id, content_hash FROM file";
-        let mut rows: std::collections::BTreeMap<String, String> = conn
-            .prepare(sql)
-            .and_then(|mut stmt| stmt.run_collect_rows())
-            .unwrap_or_else(|e| panic!("[snapshot boot] {sql}: {e}"))
-            .into_iter()
-            .map(|row| match row.as_slice() {
-                [id, hash] => (id.to_string(), hash.to_string()),
-                other => panic!("[snapshot boot] {sql} gave {other:?}"),
-            })
-            .collect();
-        let scanned = FileSystem::scan_directory(&self.org_fs, &self.org_root)
-            .await
-            .expect("[snapshot boot] scan the template vault");
-        let mut stale = Vec::new();
-        for path in scanned.files {
-            let rel = path
-                .strip_prefix(&self.org_root)
-                .expect("a scanned file lies under the org root");
-            let id = EntityUri::file(&rel.to_string_lossy()).to_string();
-            let bytes = FileSystem::read_to_string(&self.org_fs, &path)
-                .await
-                .unwrap_or_else(|e| panic!("[snapshot boot] read {}: {e}", path.display()));
-            let disk = holon_filesystem::base_sidecar::BaseSidecars::hash(&format!(
-                "{}\0{consolidator:?}\0{bytes}",
-                holon_filesystem::RENDERER_VERSION
-            ));
-            match rows.remove(&id) {
-                Some(row) if row == disk => {}
-                row => stale.push(format!("{}: row {row:?}, bytes {disk}", path.display())),
-            }
-        }
-        stale.extend(rows.keys().map(|id| format!("{id}: a row with no vault file")));
-        assert!(
-            stale.is_empty(),
-            "[snapshot boot] after the template's quits, file rows disagree with their bytes:\n{}",
-            stale.join("\n")
-        );
+    /// of its bytes: a restore of such a store re-ingests that file.
+    pub async fn assert_file_hashes_match(
+        &self,
+        consolidator: holon_api::capability::Consolidator,
+    ) {
+        assert_file_rows_hash_their_bytes(
+            &self.dir.path().join("test.db"),
+            &self.org_fs,
+            &self.org_root,
+            consolidator,
+            "the template's quit",
+        )
+        .await;
     }
+}
+
+/// Panics naming every vault file whose `file` row hash is not the hash of its
+/// bytes. A row with no vault file is left alone: the next boot's sync deletes
+/// it. Holds after a clean shutdown: the
+/// stamp at quit records the bytes of every write-back, so the next boot skips
+/// every file no one changed. Exempt: the empty hash and a missing row, which
+/// arm no skip (a file holding a copy keeps it on purpose; a file naming no
+/// document never gets a projection row), and a row naming an ingest refusal,
+/// whose file every boot reads again to disclose it.
+pub(crate) async fn assert_file_rows_hash_their_bytes(
+    db_path: &Path,
+    org_fs: &holon_filesystem::InMemoryFileSystem,
+    org_root: &Path,
+    consolidator: holon_api::capability::Consolidator,
+    after: &str,
+) {
+    use holon_filesystem::FileSystem;
+    let db = holon::storage::turso::TursoBackend::open_database(db_path)
+        .unwrap_or_else(|e| panic!("[file rows] open {}: {e}", db_path.display()));
+    let conn = db
+        .connect(holon::storage::turso::ConnectOpts::new())
+        .unwrap_or_else(|e| panic!("[file rows] connect to {}: {e}", db_path.display()));
+    let sql = "SELECT id, content_hash FROM file WHERE ingest_refusal IS NULL";
+    let rows: std::collections::BTreeMap<String, String> = conn
+        .prepare(sql)
+        .and_then(|mut stmt| stmt.run_collect_rows())
+        .unwrap_or_else(|e| panic!("[file rows] {sql}: {e}"))
+        .into_iter()
+        .map(|row| match row.as_slice() {
+            [id, hash] => (id.to_string(), hash.to_string()),
+            other => panic!("[file rows] {sql} gave {other:?}"),
+        })
+        .collect();
+    let scanned = FileSystem::scan_directory(org_fs, org_root)
+        .await
+        .expect("[file rows] scan the vault");
+    let mut stale = Vec::new();
+    for path in scanned.files {
+        let rel = path
+            .strip_prefix(org_root)
+            .expect("a scanned file lies under the org root");
+        let id = EntityUri::file(&rel.to_string_lossy()).to_string();
+        let bytes = FileSystem::read_to_string(org_fs, &path)
+            .await
+            .unwrap_or_else(|e| panic!("[file rows] read {}: {e}", path.display()));
+        let disk = holon_filesystem::base_sidecar::BaseSidecars::hash(&format!(
+            "{}\0{consolidator:?}\0{bytes}",
+            holon_filesystem::RENDERER_VERSION
+        ));
+        match rows.get(&id) {
+            Some(row) if *row == disk || row.is_empty() => {}
+            None => {}
+            row => stale.push(format!("{}: row {row:?}, bytes {disk}", path.display())),
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "[file rows] after {after}, file rows disagree with their bytes:\n{}",
+        stale.join("\n")
+    );
 }
 
 /// Clones every file of `from` into the existing directory `to` as APFS
@@ -1106,10 +1132,15 @@ impl HeadlessFrontendComponent {
         let store = &component.store;
         holon_app::vault_lock::VaultLock::acquire(store.temp.path())
             .and_then(|lock| lock.release())
-            .unwrap_or_else(|e| panic!("[snapshot boot] the vault lock is held after the shutdown: {e:#}"));
+            .unwrap_or_else(|e| {
+                panic!("[snapshot boot] the vault lock is held after the shutdown: {e:#}")
+            });
         let db_held = holon_turso::db_open::is_held(&store.db_path())
             .unwrap_or_else(|e| panic!("[snapshot boot] probe the database lock: {e}"));
-        assert!(!db_held, "[snapshot boot] the database is held after the shutdown");
+        assert!(
+            !db_held,
+            "[snapshot boot] the database is held after the shutdown"
+        );
 
         let dir = TempDir::new().expect("snapshot temp dir");
         clone_dir(store.temp.path(), dir.path());
@@ -1149,7 +1180,11 @@ impl HeadlessFrontendComponent {
             temp,
             org_emitted: crate::pbt::convergence::EmittedChanges::watch(&org_fs),
             org_fs,
-            org_paths: snapshot.org_paths.iter().map(|p| org_root.join(p)).collect(),
+            org_paths: snapshot
+                .org_paths
+                .iter()
+                .map(|p| org_root.join(p))
+                .collect(),
             org_root,
         });
         let boot_params = BootParams {
@@ -1531,6 +1566,13 @@ impl HeadlessFrontendComponent {
     pub(crate) async fn reboot_through(&self, between: RebootGap) {
         let before = self.store_block_ids().await;
         let loro_enabled = self.loro_doc_store().is_some();
+        // A session booted while the database was held runs on memory and
+        // records no file row.
+        let on_memory = self
+            .database_hold
+            .lock()
+            .expect("database_hold poisoned")
+            .is_some();
         // Resolved while the session is up: the file and the store are only
         // readable through it.
         let headline_cut = match &between {
@@ -1610,6 +1652,20 @@ impl HeadlessFrontendComponent {
             holon_app::shutdown_session(&old.injector)
                 .await
                 .unwrap_or_else(|e| panic!("[reboot] session shutdown failed: {e:#}"));
+            if !on_memory {
+                assert_file_rows_hash_their_bytes(
+                    &self.store.db_path(),
+                    &self.store.org_fs,
+                    &self.store.org_root,
+                    if loro_enabled {
+                        holon_api::capability::Consolidator::Upstream
+                    } else {
+                        holon_api::capability::Consolidator::Store
+                    },
+                    "a clean shutdown",
+                )
+                .await;
+            }
         }
         let dead = Arc::downgrade(&old);
         drop(old);

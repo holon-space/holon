@@ -33,9 +33,6 @@ pub struct File {
     #[indexed]
     pub parent_id: String,
 
-    /// SHA256 for change detection
-    pub content_hash: String,
-
     /// The document this file was recorded against, as
     /// [`File::document_id_text`] writes it; `None` until one is recorded.
     #[indexed]
@@ -59,14 +56,12 @@ impl File {
         id: String,
         name: String,
         parent_id: String,
-        content_hash: String,
         document: Option<&EntityUri>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             id,
             name,
             parent_id,
-            content_hash,
             document_id: document.map(Self::document_id_text).transpose()?,
             properties: None,
             property_kinds: None,

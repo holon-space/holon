@@ -2428,9 +2428,7 @@ pub fn wide_init_state(
             "HOLON_PBT_PIN_WIRING and HOLON_PBT_FORCE_FULL are mutually exclusive"
         );
         let wiring = holon_pbt_core::wiring_from_exact_spec(&spec);
-        ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(wide_e2e_ref_for(
-            &wiring,
-        )))
+        ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(wide_e2e_ref_for(&wiring)))
     } else if std::env::var("HOLON_PBT_FORCE_FULL").is_ok() {
         ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(wide_e2e_ref()))
     } else {
@@ -2449,13 +2447,12 @@ pub fn wide_init_state(
             state.loro.peer_ids = peer_ids;
             // A boot fault is disclosed on the session's bus, so only a
             // wiring that boots a session can draw one.
-            let fault = if set_for_wiring(&state.harness.wiring)
-                .has_projection(Projection::ViewModel)
-            {
-                fault
-            } else {
-                holon_pbt_core::BootFault::None
-            };
+            let fault =
+                if set_for_wiring(&state.harness.wiring).has_projection(Projection::ViewModel) {
+                    fault
+                } else {
+                    holon_pbt_core::BootFault::None
+                };
             crate::pbt::composed::boot_fault::model_boot_fault(&mut state, fault);
             state
         })

@@ -999,9 +999,13 @@ impl<S: ComposedSlice> ComposedSut<S> {
     where
         F: std::future::Future<Output = T>,
     {
-        let Self { caps, handle, rt, .. } = self;
+        let Self {
+            caps, handle, rt, ..
+        } = self;
         drop(caps);
-        rt.0.as_ref().expect("the runtime lives until drop").block_on(finish(handle))
+        rt.0.as_ref()
+            .expect("the runtime lives until drop")
+            .block_on(finish(handle))
     }
 
     /// [`StateMachineTest::apply`] with `settle` in place of the slice's
