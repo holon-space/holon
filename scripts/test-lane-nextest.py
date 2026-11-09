@@ -64,6 +64,11 @@ def fixture(root, wording):
         "P" => {{}}
         "K" => panic!("{wording}"),
         "U" => panic!("{UNLISTED}"),
+        "X" => {{
+            let nextest = std::os::unix::process::parent_id().to_string();
+            std::process::Command::new("kill").args(["-9", &nextest]).status().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }}
         o => unreachable!("{{o}}"),
     }}
 }}
@@ -119,6 +124,17 @@ def draw_excluded(rng):
     return set(rng.sample(TESTS, rng.choice([0, 0, 1, 2, N])))
 
 
+def draw_killed_plan(rng):
+    """A run whose nextest dies at test `i` (`X`, a SIGKILL of nextest) after passes and known reds only."""
+    i = rng.randrange(1, N)
+    return "".join(rng.choice("PK") for _ in range(i)) + "X" + "P" * (N - i - 1)
+
+
+def check_killed(root, out, plan):
+    r, _ = nextest(root, out, "run", plan, set())
+    assert r.returncode != 0, f"plan={plan}\n{r.stdout}\n{r.stderr}\nexit {r.returncode} for a run whose nextest died"
+
+
 def main():
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 24
     rng = random.Random(int(os.environ.get("SEED", random.randrange(1 << 30))))
@@ -141,6 +157,9 @@ def main():
         for k, (plan, excluded) in enumerate(EXAMPLES + generated):
             check(root, out, plan, excluded, k < len(EXAMPLES))
             print(f"ok plan={plan} excluded={sorted(excluded)}", flush=True)
+        for plan in ["KXPPPPPP"] + [draw_killed_plan(rng) for _ in range(max(cases // 4, 2))]:
+            check_killed(root, out, plan)
+            print(f"ok killed plan={plan}", flush=True)
     print("ok")
 
 

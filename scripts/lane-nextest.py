@@ -8,8 +8,8 @@
 Both runs pass the nextest output through to stdout. `run` writes the red list to $LANE_NEXTEST_DIR/reds.txt
 (default target/lane-nextest/), one `<binary id> <test name>` line per red test, known reds included, and prints
 its path. It exits 0 when nextest passed or every red is on the known-reds list, else 1 with one `[lane-nextest]
-novel:` line per novel signature of the classifier's verdict. A nextest failure without a red test (no test
-selected, a build error) exits with nextest's code. A classifier error is an error of `run` too.
+novel:` line per novel signature of the classifier's verdict. A nextest failure that is not only its reds (no test
+selected, a build error, a killed nextest) exits with nextest's code. A classifier error is an error of `run` too.
 `rerun` refuses an empty or missing red list.
 """
 import os
@@ -29,6 +29,8 @@ NOT_RED = re.compile(r"^(?:TRY [0-9]+ )?(?:START|SLOW|TRMNTG|TERMINATING|PASS|LE
 END_OF_RUN = re.compile(r"^ *(?:Summary|Cancelling|Canceling) ")
 # The classifier's line of a signature that no known-reds row covers: the run's first signature, or a later one.
 NOVEL = re.compile(r"^(?:PRIMARY: |  )(\[(?:novel|cross-family:).*)")
+# nextest's exit code when its run ended and some tests failed; any other non-zero code has a cause besides the reds.
+TEST_RUN_FAILED = 100
 
 
 def out_dir():
@@ -74,6 +76,9 @@ def run(args):
             if m := NOVEL.match(line):
                 print(f"[lane-nextest] novel: {m.group(1)}")
         print(f"[lane-nextest] a red outside the known-reds list: {verdict_log}", flush=True)
+    if rc != TEST_RUN_FAILED:
+        print(f"[lane-nextest] nextest exited {rc}, not only through its reds: {stream_log}", flush=True)
+        return rc
     return verdict
 
 
