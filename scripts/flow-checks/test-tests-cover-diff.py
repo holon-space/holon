@@ -4,9 +4,11 @@
 Run: `python3 scripts/flow-checks/test-tests-cover-diff.py [cases]`. Exits non-zero on the first violation.
 Each fixture is a lane root in a temp dir whose `scripts/select-tests.py` prints a fixed selection.
 fixtures/run-step-clippy.txt is a log scripts/flow-checks/run-step.sh wrote for a real lane.
+`outcomes` lane roots sit in one git repo, so a base log's `TREE:` commit resolves to a real source tree.
 """
 import importlib.util
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -139,6 +141,9 @@ def fixtures():
            1, "step `nextest` 2 times")
     expect("selector fails", run(SELECTED, {"target/r1/select.log": SELECTED}, selector_exit=3),
            1, "exited 3", "selector failed")
+    r = run(SELECTED, {}, ran={k: v for k, v in ran.items() if "nextest" not in k},
+            cites=[*[k for k in ran if "nextest" not in k], "target/r1/gone.log"])
+    expect("a missing log and an unselected step in one run", r, 1, "target/r1/gone.log does not exist", "`nextest`")
 
 
 def load_checker():
@@ -249,16 +254,396 @@ def citations(cases):
         outside = citation(rng)[0]
         summary = (f"# s\nClaim: see {outside}\n## How tested:\n" + "\n".join(body)
                    + f"\n\nConfidence (1-5) that the verifier will confirm: 4\n{outside}\n")
-        if placeholder:
-            try:
-                cited_logs(summary)
-                raise AssertionError(f"case {case}: {placeholder} read as a path")
-            except SystemExit as e:
-                assert f"`{placeholder}`" in str(e), f"case {case}: {e}"
-            continue
-        got = cited_logs(summary)
+        got, bad = cited_logs(summary)
         assert got == sorted(want), f"case {case}: read {got}, cited {sorted(want)} in:\n{summary}"
+        assert [placeholder] * len(bad) == [p for p in [placeholder] if p and any(f"`{p}`" in b for b in bad)], \
+            f"case {case}: placeholder {placeholder}, problems {bad}"
     print(f"[tests-cover-diff] citations: {cases} cases PASS")
+
+
+# Result lines copied from real nextest logs: a lane nextest run, an integrate gate job log (UTC prefix) and a
+# windowed paired run.
+REAL_RESULTS = [
+    "        FAIL [   5.383s] (3689/8378) holon-integration-tests::integration advice_live_mcp_gate::advice_live_mcp_gate",
+    "     TIMEOUT [ 120.011s] (3384/8380) holon-architecture-tests::architecture_rules archlint_all_passes",
+    "2026-11-09T08:41:07Z         FAIL [   1.704s] (1/1) holon-gpui::main "
+    "breadcrumb_resolves_from_view_root_windowed::the_breadcrumb_follows_the_view_root_and_then_the_focus",
+    "        FAIL [   5.039s] ( 5/18) holon-gpui::main action_bar_windowed::tapping_a_global_op_button_dispatches_it",
+]
+REAL_PASSES = [
+    "        PASS [   0.054s] (   1/8378) holon api::accepted_rules::tests::a_refusal_is_published_as_a_source_and_a_delete_forgets_it",
+    "        LEAK [   0.241s] (  46/8379) holon api::history_store::tests::batch_shares_one_op_group_and_groups_are_distinct",
+    "     Summary [1263.904s] 8378 tests run: 8371 passed (29 slow), 7 failed, 156 skipped",
+]
+WINDOWED_GATE_RED = ["RED       holon-gpui::main action_bar_windowed  tests=9  wall=173.7s",
+                     "  FAIL: RED holon-gpui::main action_bar_windowed (log target/gate-logs/windowed/a.rerun.log)",
+                     "windowed-gate: wall=2333.6s serial-sum=3379.3s PASS=107 KNOWN-RED=7 FLAKY=2 RED=4 HUNG=0"]
+ACTION_BAR = [f"holon-gpui::main action_bar_windowed::{t}" for t in (
+    "tapping_a_global_op_button_dispatches_it", "the_dock_stays_one_row_below_the_main_panel",
+    "with_the_keyboard_down_the_bar_is_not_painted", "entity_ops_come_before_global_ops_in_the_bar")]
+LOOP = [f"holon-gpui::main gpui_composed_windowed_loop::{t}" for t in (
+    "benchmark_windowed_per_case_boot_cost", "focused_task_block_shows_its_keyword_surface",
+    "general_e2e_composed_pbt_windowed")]
+ACCEPT_URL = "https://github.com/holon-space/holon-work/issues/1049#issuecomment-6732769520"
+STATUSES = ["FAIL", "TIMEOUT", "SIGSEGV", "LEAK-FAIL", "ABORT SIG 6"]
+
+
+def module(test):
+    binary, name = test.split(" ")
+    return f"{binary} {name.split('::')[0]}"
+
+
+def gate_lines(red, hung=()):
+    """A windowed gate run-step body whose failing verdicts name the modules of `red`; a module of `hung` is HUNG."""
+    return [WINDOWED_GATE_RED[0], *(f"  FAIL: {'HUNG' if m in hung else 'RED'} {m} (log target/gate-logs/windowed/m.log)"
+                                    for m in sorted({module(t) for t in red})), WINDOWED_GATE_RED[-1]]
+
+
+CANCEL = "  Cancelling due to signal: 3 tests still running"
+CUT = "     Summary [ 905.505s] 5021/5101 tests run: 5015 passed, 6 failed, 117 skipped"
+FULL = ["     Summary [ 905.505s] 5101 tests run: 5095 passed, 6 failed, 117 skipped",
+        "     Summary [ 905.505s] 5101/5101 tests run: 5095 passed, 6 failed, 117 skipped"]
+STOPPED_AT = "[fail-fast] stopped at holon-orgmode::main writeback::a: a red outside the known-reds list (target/v.log)"
+
+
+def run_tail(rng, cut):
+    """The end of a lane-nextest.py run: only a `k/n` summary with k < n shows a cut run; the Cancelling and
+    `[fail-fast] stopped at` lines may come with a cut run and with a full one."""
+    summary = CUT if cut else rng.choice(FULL)
+    return [*[CANCEL] * (rng.random() < 0.5), summary, *[STOPPED_AT] * (rng.random() < 0.5)]
+
+
+def result_line(rng, test, status):
+    binary, name = test.split(" ")
+    stamp = rng.choice(["", "2026-11-09T08:41:07Z "])
+    counter = rng.choice(["", f"({rng.randint(1, 99):>4}/8378) "])
+    return f"{stamp}{' ' * rng.randint(1, 8)}{status} [{rng.uniform(0, 300):>8.3f}s] {counter}{binary} {name}"
+
+
+def git_repo(root):
+    """Three commits: the base, an empty child with the base's tree, and a commit with another tree."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout.strip()
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    (root / "f").write_text("a\n")
+    git("add", "f")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    git("commit", "-q", "--allow-empty", "-m", "child")
+    child = git("rev-parse", "HEAD")
+    (root / "f").write_text("b\n")
+    git("commit", "-qam", "other")
+    return base, child, git("rev-parse", "HEAD")
+
+
+def lane_files(rng, spec, commits):
+    """The cited files, the How-tested lines and the reference problems of one lane spec.
+
+    `spec` maps each selected step line to its outcome. A reference problem is the tuple of needles its stderr line
+    holds; it is derived from the outcome alone, not from the checker's reading of the logs."""
+    base, child, other = commits
+    files, cites, extra, want = {}, [], [], []
+
+    def log(path, line, body, tail, tree=base):
+        files[path] = f"{line}\nBASE: {base}\nTREE: {tree}\nSTARTED: 2026-11-09T05:15:49Z\n" + "".join(
+            b + "\n" for b in body) + f"\n{tail}\n"
+        cites.append(path)
+
+    def results(red, green=()):
+        lines = [result_line(rng, t, rng.choice(STATUSES)) for t in red] + [
+            result_line(rng, t, "PASS") for t in green] + rng.sample(REAL_PASSES, rng.randint(0, 3))
+        rng.shuffle(lines)
+        return lines
+
+    for line, o in spec.items():
+        step = line.split(":")[0]
+        path = f"target/r1/{step}.log"
+        kind = o["kind"]
+        not_run = (f"`{step}`", "no cited run-step log")
+        if kind == "green":
+            log(path, line, results([], o.get("green", ["b t::ok"])), "exit: 0")
+            continue
+        if kind == "missing":
+            cites.append(path)
+            want += [(path, "does not exist"), not_run]
+            continue
+        if kind == "malformed":
+            log(path, line, results(o.get("red", [])), rng.choice(["", "killed", "exit: 100 (signal)"]))
+            want += [(path, "not `exit: <code>`"), not_run]
+            continue
+        if kind in ("route", "route-missing"):
+            evidence = f"target/r1/{step}-excl.log"
+            extra.append(f"- `ruled-route: {step} {o.get('ruling', '1011/ROUTE-C')} {evidence}`")
+            if kind == "route":
+                log(evidence, line + " -E '!test(=t::slow)'", results(o.get("red", [])), "exit: 100")
+            else:
+                cites.append(evidence)
+                want += [(evidence, "does not exist"), (evidence, "no cited existing log"), not_run]
+            continue
+        red = o["red"]
+        body = results(red, o.get("green", [])) + run_tail(rng, o.get("stopped", False))
+        log(path, line, body if o.get("nextest", True) else gate_lines(red, o.get("hung", ())),
+            f"exit: {rng.choice([1, 100, 101])}")
+        judge = o.get("classifier")
+        if judge is not None:
+            log(f"target/r1/{step}-known-reds.log", f"known-reds: scripts/keystone-known-reds.sh {path}", [],
+                f"exit: {judge}")
+        if judge == 0:
+            continue
+        base_path = f"target/base/{step}.log"
+        if "base" in o:
+            extra.append(f"- accepted-base-red: {step} {base_path} {o.get('acceptance', ACCEPT_URL)}")
+            log(base_path, o.get("base_line", line),
+                results(o["base"]) if o.get("base_nextest", True) else gate_lines(o["base"], o.get("base_hung", ())),
+                "exit: 100",
+                tree={"base": base, "child": child, "other": other}[o.get("tree", "child")])
+            refusal = base_refusal(o, path, base_path, red)
+            if refusal is None:
+                continue
+        else:
+            refusal = None
+        if judge is None:
+            want.append((f"{path} runs `{step}`", "no cited classifier log"))
+        else:
+            want.append((f"target/r1/{step}-known-reds.log classifies {path} of step", f"`exit: {judge}`"))
+        if refusal:
+            want.append(refusal)
+        want.append(not_run)
+    return files, cites, extra, want
+
+
+def base_refusal(o, path, base_path, red):
+    """The needles of the accepted-base-red refusal, or None when the base log proves every lane red."""
+    if o.get("base_line"):
+        return base_path, "the selector prints"
+    if o.get("tree") == "other":
+        return base_path, "is not the tree of --base"
+    if o.get("stopped") and o.get("nextest", True):
+        return path, "stopped before all its tests ran"
+    if not red:
+        return path, "no nextest failing-test line"
+    if by_module(o):
+        only = sorted({module(t) for t in red} - {module(t) for t in o["base"]})
+    else:
+        only = sorted(set(red) - set(o["base"]))
+    return (path, "red only in the lane", base_path, *only) if only else None
+
+
+def by_module(o):
+    return not (o.get("nextest", True) and o.get("base_nextest", True) and o["base"])
+
+
+def module_notes(spec):
+    """How many accepted-base-red compares run at module level."""
+    return sum(1 for o in spec.values() if o["kind"] == "red" and o.get("classifier") != 0 and "base" in o
+               and not o.get("base_line") and o.get("tree") != "other" and o["red"] and by_module(o)
+               and not (o.get("stopped") and o.get("nextest", True)))
+
+
+def run_lane(root, spec, rng, commits):
+    files, cites, extra, want = lane_files(rng, spec, commits)
+    (root / "scripts").mkdir(parents=True)
+    out = "".join(line + "\n" for line in spec)
+    (root / "scripts/select-tests.py").write_text(f"import sys\nsys.stdout.write({out!r})\n")
+    for path, text in files.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(text)
+    summary = root / "summary.md"
+    prose = "- The `accepted-base-red:` line names a log and a ruling; ruled-route: with an id and a log.\n"
+    summary.write_text("# s\n\nHow tested:\n" + prose + "".join(f"- log: {p} (`x`)\n" for p in cites)
+                       + "\n".join(extra)
+                       + "\n\nConfidence (1-5) that the verifier will confirm: 4\n")
+    r = subprocess.run([sys.executable, str(CHECKER), "--base", commits[0], "--summary", str(summary)],
+                       cwd=root, capture_output=True, text=True)
+    return r, want
+
+
+def judge(name, r, want):
+    """Property 1: each stderr line is one reference problem. Property 2: exit 0 iff none.
+    Property 3: as many lines as reference problems."""
+    lines = [line for line in r.stderr.splitlines() if line.startswith("tests-cover-diff: ")]
+    assert (r.returncode == 0) == (not want), f"{name}: exit {r.returncode}, want {want}, stderr:\n{r.stderr}"
+    assert len(lines) == len(want), f"{name}: {len(lines)} lines for {len(want)} problems {want}:\n{r.stderr}"
+    rest = list(lines)
+    for needles in want:
+        hit = next((line for line in rest if all(n in line for n in needles)), None)
+        assert hit, f"{name}: no line holds {needles}:\n{r.stderr}"
+        rest.remove(hit)
+
+
+STATIC = {
+    "six windowed reds, all red on the base (gate verdicts against a paired nextest base leg)": {
+        "windowed: just windowed-gate": {"kind": "red", "red": ACTION_BAR[:3] + LOOP, "nextest": False,
+                                         "base": ACTION_BAR + LOOP, "classifier": 1, "tree": "child"}},
+    "one windowed red module, red on the base": {
+        "windowed: just windowed-gate": {"kind": "red", "red": ACTION_BAR[:1], "nextest": False, "tree": "base",
+                                         "base": ACTION_BAR[:1], "base_nextest": False, "classifier": 1}},
+    "a windowed red module only in the lane": {
+        "windowed: just windowed-gate": {"kind": "red", "red": ACTION_BAR[:1] + LOOP[:1], "nextest": False,
+                                         "base": ACTION_BAR, "base_nextest": False}},
+    "six nextest reds, all red on the base": {
+        "nextest: --workspace -E 'package(holon)'": {"kind": "red", "red": ACTION_BAR[:3] + LOOP,
+                                                     "base": ACTION_BAR + LOOP, "classifier": 1}},
+    "one red, red on the base": {
+        "nextest: --workspace -E 'package(holon)'": {"kind": "red", "red": ACTION_BAR[:1], "base": ACTION_BAR[:1],
+                                                     "acceptance": "w142/IROH"}},
+    "a lane-only red hidden among base reds": {
+        "nextest: --workspace -E 'package(holon)'": {"kind": "red", "red": [*ACTION_BAR, "holon api::t::lane_only"],
+                                                     "base": ACTION_BAR + LOOP}},
+    "a base log run on another tree": {
+        "nextest: --workspace -E 'package(holon)'": {"kind": "red", "red": LOOP, "base": LOOP, "tree": "other"}},
+    "a base log of another step line": {
+        "nextest: --workspace -E 'package(holon)'": {"kind": "red", "red": LOOP, "base": LOOP,
+                                                     "base_line": "nextest: --workspace -E 'package(x)'"}},
+    "a red log of another step kind cannot be compared": {
+        "clippy: --workspace": {"kind": "red", "red": [], "nextest": False, "base": LOOP}},
+    "a red step with no failing-test line": {
+        "nextest: --workspace": {"kind": "red", "red": [], "base": LOOP}},
+    "the route of a ruling": {
+        "nextest: --workspace -E 'package(holon)'": {"kind": "route", "red": LOOP}},
+    "two missing steps and a missing log": {
+        "clippy: --workspace": {"kind": "missing"}, "nextest: --workspace": {"kind": "missing"},
+        "windowed: just windowed-gate": {"kind": "route-missing"}},
+}
+
+
+def outcome(rng):
+    kind = rng.choice(["green", "red", "red", "red", "route", "route-missing", "missing", "malformed"])
+    if kind != "red":
+        return {"kind": kind, "red": rng.sample(LOOP, rng.randint(0, 2))}
+    pool = ACTION_BAR + LOOP + ["holon api::t::lane_only", "holon-tui::main a::b"]
+    red = rng.sample(pool, rng.randint(0, 4))
+    o = {"kind": "red", "red": red, "green": rng.sample(pool, rng.randint(0, 2))}
+    if (c := rng.choice([None, 0, 1, 3])) is not None:
+        o["classifier"] = c
+    if rng.random() < 0.7:
+        base = set(red) | set(rng.sample(pool, rng.randint(0, 3)))
+        if red and rng.random() < 0.3:
+            base.discard(rng.choice(red))
+        o["base"] = sorted(base)
+        o["tree"] = rng.choice(["base", "child", "child", "other"])
+        if rng.random() < 0.15:
+            o["base_line"] = "nextest: --workspace -E 'package(other)'"
+        if rng.random() < 0.3:
+            o["nextest"] = False
+        if rng.random() < 0.3:
+            o["base_nextest"] = False
+        modules = sorted({module(t) for t in pool})
+        o["hung"] = rng.sample(modules, rng.randint(0, 2))
+        o["base_hung"] = rng.sample(modules, rng.randint(0, 2))
+    if rng.random() < 0.2:
+        o["stopped"] = True
+    return o
+
+
+def outcomes(cases):
+    """Every selected step draws one outcome; the checker's problem lines equal the reference problems."""
+    rng = random.Random(2)
+    lines = ["clippy: --workspace", "nextest: --workspace -E 'package(holon)'", "windowed: just windowed-gate",
+             "a: just a", "b-2: just b"]
+    with tempfile.TemporaryDirectory() as repo:
+        repo = Path(repo)
+        commits = git_repo(repo)
+        drawn = [(name, spec) for name, spec in STATIC.items()]
+        drawn += [(f"case {i}", {line: outcome(rng) for line in rng.sample(lines, rng.randint(1, len(lines)))})
+                  for i in range(cases)]
+        for i, (name, spec) in enumerate(drawn):
+            r, want = run_lane(repo / f"lane{i}", spec, rng, commits)
+            judge(name, r, want)
+            notes = r.stdout.count("compared at module level")
+            assert notes == module_notes(spec), f"{name}: {notes} module notes, want {module_notes(spec)}:\n{r.stdout}"
+            if name in STATIC:
+                print(f"[tests-cover-diff] {name}: {'PASS' if not want else 'FAIL'} as expected")
+    print(f"[tests-cover-diff] outcomes: {cases} cases PASS")
+
+
+def result_pattern():
+    """Every real result line reads as its test; no pass and no summary line reads as a failing test; only the
+    windowed gate's verdict line reads as a red module."""
+    failing = load_checker().failing_tests
+    got = failing(REAL_RESULTS + REAL_PASSES + WINDOWED_GATE_RED)
+    assert got == {" ".join(re.split(r"\s+", line.strip())[-2:]) for line in REAL_RESULTS}, got
+    modules = load_checker().gate_red_modules(REAL_RESULTS + REAL_PASSES + WINDOWED_GATE_RED)
+    assert modules == {"holon-gpui::main action_bar_windowed"}, modules
+    print("[tests-cover-diff] real result lines: PASS")
+
+
+def windowed_verdicts(cases):
+    """Lane and base windowed gate logs whose final verdict lines carry any failing verdict of
+    scripts/windowed-gate.py (RED, HUNG): a lane failing module the base log does not fail is never accepted."""
+    checker = load_checker()
+    rng = random.Random(3)
+    modules = sorted({module(t) for t in ACTION_BAR + LOOP} | {"holon-gpui::main undo_survives_blur_windowed"})
+    for case in range(cases):
+        lane = {m: rng.choice(["RED", "HUNG"]) for m in rng.sample(modules, rng.randint(1, len(modules)))}
+        base = {m: rng.choice(["RED", "HUNG"]) for m in rng.sample(modules, rng.randint(0, len(modules)))}
+        def gate_log(verdicts):
+            return "\n".join([WINDOWED, *HEADER.splitlines(), WINDOWED_GATE_RED[0],
+                              *(f"  FAIL: {v} {m} (log target/gate-logs/windowed/m.rerun.log)"
+                                for m, v in sorted(verdicts.items())), WINDOWED_GATE_RED[-1], "", "exit: 1"])
+        logs = {"target/r1/windowed.log": gate_log(lane), "target/base/windowed.log": gate_log(base)}
+        summary = ("How tested:\n- target/r1/windowed.log\n- target/base/windowed.log\n"
+                   f"- accepted-base-red: windowed target/base/windowed.log {ACCEPT_URL}\n")
+        bad = checker.check(WINDOWED + "\n", summary, logs, set(), "b", tree_of=lambda c: "t")
+        if only := sorted(set(lane) - set(base)):
+            assert bad, f"case {case}: lane modules {only} fail only in the lane ({lane}), base {base}: accepted"
+    print(f"[tests-cover-diff] windowed verdicts: {cases} cases PASS")
+
+
+def stopped_runs(cases):
+    """A lane nextest log that scripts/lane-nextest.py stopped at its first unlisted red ran only part of its
+    tests: its red set says nothing about the tests it never ran, so a base red set never makes it a run."""
+    checker = load_checker()
+    rng = random.Random(4)
+    for case in range(cases):
+        red = rng.sample(ACTION_BAR + LOOP, rng.randint(1, 4))
+        base = sorted(set(red) | set(rng.sample(ACTION_BAR + LOOP, rng.randint(0, 3))))
+        total = rng.randint(100, 9000)
+        ran = rng.randint(len(red), total - 1)
+        def nextest_log(tests, stop):
+            lines = [result_line(rng, t, rng.choice(STATUSES)) for t in tests]
+            if stop:
+                lines += [f"  Cancelling due to signal: {rng.randint(1, 8)} tests still running",
+                          f"     Summary [ 905.505s] {ran}/{total} tests run: {ran - len(tests)} passed, "
+                          f"{len(tests)} failed, 117 skipped",
+                          f"[fail-fast] stopped at {tests[-1]}: a red outside the known-reds list "
+                          "(target/lane-nextest/verdict.log)"]
+            return "\n".join([NARROW, *HEADER.splitlines(), *lines, "", "exit: 1"])
+        logs = {"target/r1/nextest.log": nextest_log(red, True),
+                "target/base/nextest.log": nextest_log(base, rng.random() < 0.5)}
+        summary = ("How tested:\n- target/r1/nextest.log\n- target/base/nextest.log\n"
+                   f"- accepted-base-red: nextest target/base/nextest.log {ACCEPT_URL}\n")
+        bad = checker.check(NARROW + "\n", summary, logs, set(), "b", tree_of=lambda c: "t")
+        assert bad, f"case {case}: a lane run stopped after {ran}/{total} tests is accepted as run"
+    print(f"[tests-cover-diff] stopped runs: {cases} cases PASS")
+
+
+def complete_runs(cases):
+    """scripts/lane-nextest.py prints `[fail-fast] stopped at <red>` also after a run in which every test ran, when
+    its last unlisted red reports just before the summary: that log is a full run, so a base log that fails every
+    lane red makes the step a run."""
+    checker = load_checker()
+    rng = random.Random(5)
+    for case in range(cases):
+        red = rng.sample(ACTION_BAR + LOOP, rng.randint(1, 4))
+        base = sorted(set(red) | set(rng.sample(ACTION_BAR + LOOP, rng.randint(0, 3))))
+        passed = rng.randint(0, 5000)
+        lines = [result_line(rng, t, rng.choice(STATUSES)) for t in red]
+        lines += [f"     Summary [ 905.505s] {passed + len(red)} tests run: {passed} passed, {len(red)} failed, "
+                  "117 skipped",
+                  f"[fail-fast] stopped at {red[-1]}: a red outside the known-reds list "
+                  "(target/lane-nextest/verdict.log)",
+                  f"[fail-fast] red list: target/lane-nextest/reds.txt ({len(red)} tests)"]
+        logs = {"target/r1/nextest.log": "\n".join([NARROW, *HEADER.splitlines(), *lines, "", "exit: 1"]),
+                "target/base/nextest.log": "\n".join([NARROW, *HEADER.splitlines(),
+                                                      *(result_line(rng, t, "FAIL") for t in base), "", "exit: 100"])}
+        summary = ("How tested:\n- target/r1/nextest.log\n- target/base/nextest.log\n"
+                   f"- accepted-base-red: nextest target/base/nextest.log {ACCEPT_URL}\n")
+        bad = checker.check(NARROW + "\n", summary, logs, set(), "b", tree_of=lambda c: "t")
+        assert not bad, f"case {case}: a complete lane run of {passed + len(red)} tests, every red also red on the base, is refused: {bad}"
+    print(f"[tests-cover-diff] complete runs: {cases} cases PASS")
 
 
 if __name__ == "__main__":
@@ -266,3 +651,8 @@ if __name__ == "__main__":
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 300
     generated(cases)
     citations(cases)
+    result_pattern()
+    stopped_runs(cases)
+    complete_runs(cases)
+    windowed_verdicts(cases)
+    outcomes(cases // 3)
