@@ -1,4 +1,7 @@
 mod advice_live_mcp_gate;
+mod attestation_counter_reader;
+mod attestation_oracle;
+mod attestation_zero_draw_refusal;
 mod authority_name_chain_under_lag;
 mod authority_owning_page_latency;
 mod authority_owning_page_parity;

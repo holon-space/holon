@@ -256,13 +256,23 @@ pub fn note_drawn(name: &'static str) {
 /// outside, so this call is where the claim lives or dies.
 pub fn attest_drew(kind: &str) {
     let drawn = counters().get(kind).map_or(0, |counts| counts.drawn);
-    assert!(
-        drawn > 0,
+    if let Err(refusal) = attested(drawn, kind) {
+        panic!("{refusal}");
+    }
+    eprintln!("[alphabet coverage] attested: this suite drew {kind} {drawn}x");
+}
+
+/// The verdict on a suite's claim to cover `kind`, given how often its run
+/// drew it.
+pub fn attested(drawn: u64, kind: &str) -> Result<(), String> {
+    if drawn > 0 {
+        return Ok(());
+    }
+    Err(format!(
         "{kind}: this suite vouches for itself as the kind's coverage \
          (`CoveredBy::SelfAttestingSuite` in `EXPECTED_ABSENT`), but its run drew it 0 times — \
          draw the kind here, or move the claim to the suite that does"
-    );
-    eprintln!("[alphabet coverage] attested: this suite drew {kind} {drawn}x");
+    ))
 }
 
 /// The kind's generator declined one state; its reasons say whether the state
@@ -691,12 +701,12 @@ mod tests {
             .expect("the hand-authored recipe runs the cases that draw it");
     }
 
-    /// The attestation's teeth: the suite's claim is the COUNTER, so vouching
-    /// for a kind the run never drew reds in the suite's own process.
+    /// The attestation's teeth: vouching for a kind the run never drew reds.
     #[test]
-    #[should_panic(expected = "its run drew it 0 times")]
     fn a_suite_attesting_a_kind_it_never_drew_reds() {
-        attest_drew("StructuralKeyBurst");
+        let refusal = attested(0, "StructuralKeyBurst")
+            .expect_err("a run that drew the kind 0 times must not attest it");
+        assert!(refusal.contains("its run drew it 0 times"), "{refusal}");
     }
 
     /// holon-work#441: the vouching suite applies its transitions on a worker
