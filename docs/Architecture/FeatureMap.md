@@ -466,8 +466,12 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `wide-e2e-shrinker-list-app-item-missing`
 - `wide-e2e-sqlonly-typed-edits-load-timeout`
 - `wide-e2e-sqlonly-typing-share-load-timeout`
+- `windowed-action-bar-grafted-row-pre-warm`
 - `windowed-banner-toast-paint-load-flake`
 - `windowed-block-focus-outline-zero-rows-under-load`
+- `windowed-breadcrumb-tab-switch-bar-pre-warm`
+- `windowed-breadcrumb-tap-caret-pre-warm`
+- `windowed-breadcrumb-zoom-bar-pre-warm`
 - `windowed-clickblock-bounds-under-load`
 - `windowed-entity-not-in-bounds-under-load`
 - `windowed-focus-not-in-bounds-under-load`
@@ -485,6 +489,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
 - `windowed-task-keyword-blur-promotion-pre-warm-flake`
+- `windowed-undo-blur-cmdz-repaint-pre-warm`
 - `windowed-undo-blur-typed-suffix-pre-warm-flake`
 - `writeback-churning-file-stall-disclosed-twice`
 - `writeorgfile-sql-reads-budget`
