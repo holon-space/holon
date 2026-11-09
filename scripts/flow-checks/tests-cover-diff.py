@@ -20,12 +20,13 @@ A step ran when a cited log has the selected line as line 1, and one of these ho
     Failing tests are the nextest result lines (`FAIL [ 1.2s] <binary> <test>`, any status but a pass). When either
     log has none, both compare at module level: the windowed gate's `FAIL: RED|HUNG <binary> <module>` lines, or the
     module of each failing test; stdout notes each such compare. A lane log with neither line that `just hand-authored`
-    wrote (a `] RED case "<name>"` or `HAND-AUTHORED RED:` line) compares its red case names and libtest
-    `test <name> ... FAILED` tests, whatever shard ran them; it is refused when a red shard names no case, or when it
-    skipped a case (`] SKIPPED case "<name>" via HOLON_HAND_AUTHORED_SKIP`) the base log did not skip. A red log with
-    none of these lines is refused, so a red of another step kind cannot be compared. A lane log whose nextest summary
-    says `k/n tests run` with k < n stopped before all its tests ran and is refused too: its reds prove nothing about
-    the tests it never ran.
+    wrote (a `] RED case "<name>"` or `HAND-AUTHORED RED:` line) compares its red case names and failing tests (the
+    indented names of each libtest `failures:` list, and each `test <name> ... FAILED` result line, also of a shard
+    that died before its list), whatever shard ran them; it is refused when a red shard names no
+    case, or when it skipped a case (`] SKIPPED case "<name>" via HOLON_HAND_AUTHORED_SKIP`) the base log did not
+    skip. A red log with none of these lines is refused, so a red of another step kind cannot be compared. A lane log
+    whose nextest summary says `k/n tests run` with k < n stopped before all its tests ran and is refused too: its reds
+    prove nothing about the tests it never ran.
 A step also ran by a ruled route: the How-tested block has a line `ruled-route: <step> <ruling> <evidence log>` and the
 evidence log is cited and exists. The check does not read the ruling ledger; the verifier checks the ruling id.
 An `<acceptance>` or `<ruling>` is a ruling id (a letter or digit, then letters, digits and `_./-`, with a digit) or an
@@ -83,7 +84,10 @@ HAND_CASE = re.compile(r'\] RED case "([^"]*)"')
 HAND_SKIP = re.compile(r'\] SKIPPED case "([^"]*)" via HOLON_HAND_AUTHORED_SKIP')
 HAND_SHARD = re.compile(r"HAND-AUTHORED RED: shard \d+ exit \d+, red cases: (.*), log: ")
 HAND_UNNAMED = "none, see the log"
-LIBTEST_FAIL = re.compile(r"test (\S+) \.\.\. FAILED\s*$")
+# Other threads' output under --nocapture can surround a libtest result line or split FAILED off it; the
+# `failures:` list that ends the run names each failing test on a line of its own.
+LIBTEST_LISTED = re.compile(r" {4}(\S+)")
+LIBTEST_FAILED = re.compile(r"test (\S+)(?: - should panic)? \.\.\. FAILED")
 # nextest's summary of a run cut short; `[fail-fast] stopped at` of scripts/lane-nextest.py also follows a full run.
 CUT_SUMMARY = re.compile(r"\s*Summary \[.*\] (\d+)/(\d+) tests run.*")
 
@@ -163,12 +167,26 @@ def gate_red_modules(lines):
     return {f"{m.group(1)} {m.group(2)}" for line in lines if (m := GATE_FAIL.fullmatch(line))}
 
 
+def libtest_failures(lines):
+    """The test names of every libtest `failures:` list (the indented lines right after a `failures:` line) and of
+    every intact result line, which a shard that died before its list leaves."""
+    found = {m.group(1) for line in lines if (m := LIBTEST_FAILED.search(line))}
+    listing = False
+    for line in lines:
+        m = LIBTEST_LISTED.fullmatch(line)
+        if listing and m:
+            found.add(m.group(1))
+        else:
+            listing = line == "failures:"
+    return found
+
+
 def hand_authored(lines):
     """The red case names and failing libtest tests, the red shard lines that name no case, and the skipped cases
     of a `just hand-authored` log; None for the red set when the log has no RED case and no HAND-AUTHORED RED line."""
     cases = {m.group(1) for line in lines if (m := HAND_CASE.search(line))}
     shards = [(line.strip(), m.group(1)) for line in lines if (m := HAND_SHARD.search(line))]
-    red = cases | {m.group(1) for line in lines if (m := LIBTEST_FAIL.search(line))}
+    red = cases | libtest_failures(lines)
     return (red if cases or shards else None, [line for line, names in shards if names == HAND_UNNAMED],
             {m.group(1) for line in lines if (m := HAND_SKIP.search(line))})
 

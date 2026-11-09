@@ -303,23 +303,25 @@ INTERLEAVED = ["", "Applying transition 2/6: ", "[inv-sql-budget] UndoLastMutati
 
 def real_hand_log(tree, first_skip):
     """The step line, header, shard, case, failing-test and HAND-AUTHORED RED lines of a real hand-authored run
-    whose cases ran red on the base too; `first_skip` is its shard 0 skip line, which the lane run interleaved."""
+    whose cases ran red on the base too, with each red shard's libtest `failures:` list; `first_skip` is its shard 0
+    skip line, which the lane run interleaved."""
     skip = ' via HOLON_HAND_AUTHORED_SKIP (known issue — see docs/Testing/BugFunnel.md)'
     shard = "target/gate-logs/pbt-hand-authored-shard-{}.log"
+    keystone_failed = [f"test {KEYSTONE} ... FAILED", "", "failures:", "", "failures:", f"    {KEYSTONE}", ""]
     return [
         HAND, "BASE: d80bb20cbbabd282d19d78af6aafb5eb93d26c96", f"TREE: {tree}", "STARTED: 2026-11-09T15:44:25Z",
         f"== hand-authored shard 0 (exit 101): {shard.format(0)} ==", first_skip,
-        f'[hand-authored regression] RED case "{WBS}"', f"test {KEYSTONE} ... FAILED",
+        f'[hand-authored regression] RED case "{WBS}"', *keystone_failed,
         f"== hand-authored shard 1 (exit 0): {shard.format(1)} ==",
         f'[hand-authored regression] SKIPPED case "reboot-orphans-the-previous-boots-watchers"{skip}',
         f"== hand-authored shard 2 (exit 101): {shard.format(2)} ==",
         f'[hand-authored regression] SKIPPED case "a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch"{skip}',
         f'[hand-authored regression] RED case "{HM4_EDIT}"', f'[hand-authored regression] RED case "{CRASH_COPY}"',
-        f"test {KEYSTONE} ... FAILED",
+        *keystone_failed,
         f"== hand-authored shard 3 (exit 101): {shard.format(3)} ==",
         f'[hand-authored regression] SKIPPED case "split-then-two-backspaces-caret-follows-second-join"{skip}',
         f'[hand-authored regression] SKIPPED case "external-rewrite-keeps-a-promoted-pages-body"{skip}',
-        f'[hand-authored regression] RED case "{HM4_IDS}"', f"test {KEYSTONE} ... FAILED",
+        f'[hand-authored regression] RED case "{HM4_IDS}"', *keystone_failed,
         f"HAND-AUTHORED RED: shard 0 exit 101, red cases: {WBS}, log: {shard.format(0)}",
         f"HAND-AUTHORED RED: shard 2 exit 101, red cases: {HM4_EDIT},{CRASH_COPY}, log: {shard.format(2)}",
         f"HAND-AUTHORED RED: shard 3 exit 101, red cases: {HM4_IDS}, log: {shard.format(3)}",
@@ -388,8 +390,18 @@ def hand_lines(rng, h):
             lines.append(f"== hand-authored shard {k} (exit {101 if red else 0}): {log} ==")
         lines += skips if k == 0 else []
         lines += [f'{rng.choice(INTERLEAVED)}[hand-authored regression] RED case "{c}"' for c in shard["cases"]]
-        lines += [f"test {t} ... FAILED" for t in shard["tests"]]
-        lines.append(f"test result: {'FAILED' if red else 'ok'}. 1 passed; 0 failed; 0 ignored; 0 measured")
+        # A shard process that dies (an abort) leaves only the intact result lines of the tests that failed before.
+        died = bool(shard["tests"]) and rng.random() < 0.2
+        for t in shard["tests"]:
+            should_panic = t != KEYSTONE and rng.random() < 0.5
+            lines += ([f"test {t}{' - should panic' if should_panic else ''} ... FAILED"] if died
+                      else libtest_failure_lines(rng, t, should_panic)[:-4])
+        if died:
+            lines.append("error: test failed (signal: 6, SIGABRT: process abort signal)")
+        elif shard["tests"]:
+            lines += ["", "failures:", "", "failures:", *(f"    {t}" for t in shard["tests"]), ""]
+        if not died:
+            lines.append(f"test result: {'FAILED' if red else 'ok'}. 1 passed; 0 failed; 0 ignored; 0 measured")
         if red:
             reds.append(f"HAND-AUTHORED RED: shard {k} exit 101, red cases: "
                         f"{','.join(shard['cases']) or 'none, see the log'}, log: {log}")
@@ -752,6 +764,35 @@ def real_hand_lines():
     print("[tests-cover-diff] real hand-authored lines: PASS")
 
 
+def libtest_failure_lines(rng, test, should_panic):
+    """The lines a failing libtest test writes into a --nocapture shard log: its result line, which other threads'
+    output may split or extend, and the `failures:` list that ends the run."""
+    head = f"test {test}{' - should panic' if should_panic else ''} ... "
+    result = rng.choice([[head + "FAILED"], [head + "FAILED[inv-sql-budget] x: not judged"],
+                         [head + "\x1b[2m WARN\x1b[0m holon_profiles::type_registry: computed fields", "FAILED"],
+                         ["Applying transition 5/" + head + "6: FAILED"]])
+    return result + ["", "failures:", f"    {test}", ""]
+
+
+def hand_lane_only_tests(cases):
+    """A module test that fails only in the lane, among case reds that the base shares, is never accepted, whatever
+    form its libtest result line takes."""
+    checker = load_checker()
+    rng = random.Random(7)
+    summary = ("How tested:\n- target/r1/hand-authored.log\n- target/base/hand-authored.log\n"
+               f"- accepted-base-red: hand-authored target/base/hand-authored.log {ACCEPT_URL}\n")
+    shard0 = REAL_HAND_LANE.index(f"test {KEYSTONE} ... FAILED")
+    for case in range(cases):
+        test = rng.choice([MODULE_TEST, "hand_authored_regressions::a_lane_only_module_test"])
+        extra = libtest_failure_lines(rng, test, should_panic=case == 0 or rng.random() < 0.5)
+        lane = REAL_HAND_LANE[:shard0] + extra + REAL_HAND_LANE[shard0:]
+        logs = {"target/r1/hand-authored.log": "\n".join(lane),
+                "target/base/hand-authored.log": "\n".join(REAL_HAND_BASE)}
+        bad = checker.check(HAND + "\n", summary, logs, set(), "b", tree_of=lambda c: "t")
+        assert any("red only in the lane" in b and test in b for b in bad), (case, extra, bad)
+    print(f"[tests-cover-diff] hand-authored lane-only module tests: {cases} cases PASS")
+
+
 def windowed_verdicts(cases):
     """Lane and base windowed gate logs whose final verdict lines carry any failing verdict of
     scripts/windowed-gate.py (RED, HUNG): a lane failing module the base log does not fail is never accepted."""
@@ -839,3 +880,4 @@ if __name__ == "__main__":
     windowed_verdicts(cases)
     outcomes(cases // 3)
     real_hand_lines()
+    hand_lane_only_tests(cases // 3)
