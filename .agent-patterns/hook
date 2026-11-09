@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# hook <op> ... : holon's answers to the agent-patterns kit (interface: the agent-patterns kit's hook-interface.md).
+# A unit is a cargo package. Every op runs in the workspace it concerns.
+set -euo pipefail
+here=$(cd "${0%/*}" && pwd)
+op=${1:?op}; shift
+case $op in
+  prompt-facts)
+    pkgs=$(for c in "$@"; do printf -- '-p %s ' "$c"; done)
+    tests=""
+    for c in "$@"; do lay=$("$0" layout "$c"); tests+="\`$(sed -n 's/^tests: //p' <<<"$lay")/\`, "; done
+    sed -e "s#@PKGS@#${pkgs% }#g" -e "s#@HOOK_DIR@#$here#g" -e "s#@TESTS_DIRS@#${tests%, }#g" "$here/prompt-facts.md" ;;
+  dependents)
+    for c in "$@"; do cargo tree --locked -i "$c" --workspace -e normal,build,dev --prefix none --depth 1 | awk '{print $1}'; done ;;
+  layout)
+    # A package's directory is not always crates/<name> (frontends/gpui holds holon-gpui).
+    dir=$(cargo metadata --no-deps --format-version 1 --offline | jq -r --arg n "$1" --arg w "$(pwd -P)/" '.packages[] | select(.name == $n) | .manifest_path | ltrimstr($w) | rtrimstr("/Cargo.toml")')
+    [ -n "$dir" ] || { echo "no package $1 in $PWD" >&2; exit 1; }
+    printf 'dir: %s\ncode: %s/src\ntests: %s/tests\nmanifest: %s/Cargo.toml\n' "$dir" "$dir" "$dir" "$dir" ;;
+  build-dir) echo target ;;
+  code-hash) find crates/*/src frontends/*/src -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 ;;
+  register-tests) "$here/add-mods.sh" "$(dirname "$1")" "$PWD" "$2" ;;
+  merge-manifest) "$here/merge-devdeps.py" "$1" "$2" ;;
+  test-command)
+    echo "CARGO_TARGET_DIR=$1/target"; shift
+    printf '%s\n' cargo nextest run; for c in "$@"; do printf -- '-p\n%s\n' "$c"; done; echo --no-fail-fast ;;
+  report)
+    grep -m1 -E '^ *Summary' "$1" | sed 's/^ *//' || echo
+    grep -E '^\s*(FAIL|TIMEOUT|SIGSEGV|PASS) |Summary' "$1" | tail -40 || : ;;
+  build-procs) echo 'bin/cargo( |-nextest)' ;;
+  *) echo "hook: unknown op $op" >&2; exit 2 ;;
+esac
