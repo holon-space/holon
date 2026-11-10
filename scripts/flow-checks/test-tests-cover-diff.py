@@ -350,9 +350,6 @@ def gate_lines(red, hung=()):
 
 
 CANCEL = "  Cancelling due to signal: 3 tests still running"
-CUT = "     Summary [ 905.505s] 5021/5101 tests run: 5015 passed, 6 failed, 117 skipped"
-FULL = ["     Summary [ 905.505s] 5101 tests run: 5095 passed, 6 failed, 117 skipped",
-        "     Summary [ 905.505s] 5101/5101 tests run: 5095 passed, 6 failed, 117 skipped"]
 STOPPED_AT = "[fail-fast] stopped at holon-orgmode::main writeback::a: a red outside the known-reds list (target/v.log)"
 
 
@@ -418,7 +415,7 @@ def hand_exit(h):
 def hand_lines(rng, h):
     """The run-step body `just hand-authored` writes for `h`."""
     sharded = len(h["shards"]) > 1
-    lines, reds = [], []
+    lines, reds, head_stamp = [], [], stamp(rng)
     skips = [f'[hand-authored regression] SKIPPED case "{c}" via HOLON_HAND_AUTHORED_SKIP (known issue)'
              for c in h["skip"]]
     for k, shard in enumerate(hand_shown(h)):
@@ -426,7 +423,7 @@ def hand_lines(rng, h):
         rc = shard["died"][0] if "died" in shard else 101 if red else 0
         log = f"target/gate-logs/pbt-hand-authored-shard-{k}.log"
         if sharded:
-            lines.append(f"== hand-authored shard {k} (exit {rc}): {log} ==")
+            lines.append(f"{head_stamp}== hand-authored shard {k} (exit {rc}): {log} ==")
         lines += skips if k == 0 else []
         lines += [f'{rng.choice(INTERLEAVED)}[hand-authored regression] RED case "{c}"' for c in shard["cases"]]
         # A shard process that dies leaves only the intact result lines of the tests that failed before; the test that
@@ -450,10 +447,30 @@ def hand_lines(rng, h):
     return lines + (reds if sharded and hand_shown(h) == h["shards"] else [])
 
 
+def stamp(rng):
+    """A gate job's time stamp in front of a log line, or none."""
+    return rng.choice(["", "2026-11-09T22:44:13Z "])
+
+
+def nextest_end_line(rng, passed, failed, total=None):
+    """A nextest `Summary` line in each shape real logs carry: an optional gate-job time stamp, `1 test run` or
+    `N tests run`, `k/n tests run` for a run cut at k of n (`total`), passes with `(N slow)` or `(N slow, N leaky)`,
+    and the failed and timed-out counts only when not 0."""
+    ran = passed + failed
+    timed_out = rng.choice([0, 0, rng.randint(0, failed)])
+    count = f"{ran}/{total} test{'s' * (total != 1)}" if total else f"{ran} test{'s' * (ran != 1)}"
+    slow = rng.choice(["", f" ({rng.randint(1, 30)} slow)", f" ({rng.randint(1, 30)} slow, {rng.randint(1, 9)} leaky)"])
+    rest = f", {failed - timed_out} failed" * (failed > timed_out) + f", {timed_out} timed out" * (timed_out > 0)
+    return (f"{stamp(rng)}{' ' * rng.randint(1, 6)}Summary [{rng.uniform(0, 2000):>8.3f}s] {count} run: {passed} passed"
+            f"{slow}{rest}, {rng.randint(0, 9000)} skipped")
+
+
 def run_tail(rng, cut):
     """The end of a lane-nextest.py run: only a `k/n` summary with k < n shows a cut run; the Cancelling and
     `[fail-fast] stopped at` lines may come with a cut run and with a full one."""
-    summary = CUT if cut else rng.choice(FULL)
+    passed, failed = rng.randint(0, 5000), rng.randint(1, 9)
+    total = passed + failed + rng.randint(1, 900) if cut else rng.choice([None, passed + failed])
+    summary = nextest_end_line(rng, passed, failed, total)
     return [*[CANCEL] * (rng.random() < 0.5), summary, *[STOPPED_AT] * (rng.random() < 0.5)]
 
 
@@ -928,7 +945,8 @@ def hand_killed_steps(cases):
 def windowed_verdicts(cases):
     """Lane and base windowed gate logs whose final verdict lines carry any failing verdict of
     scripts/windowed-gate.py (RED, HUNG): a lane failing module the base log does not fail is never accepted, nor
-    a lane gate killed before its `windowed-gate: wall=` end line, whose remaining units have no verdict."""
+    a lane gate killed before its `windowed-gate: wall=` end line, whose remaining units have no verdict; a
+    complete lane gate whose failing modules all fail on the base is accepted."""
     checker = load_checker()
     rng = random.Random(3)
     modules = sorted({module(t) for t in ACTION_BAR + LOOP} | {"holon-gpui::main undo_survives_blur_windowed"})
@@ -939,7 +957,7 @@ def windowed_verdicts(cases):
         def gate_log(verdicts, killed=False):
             return "\n".join([WINDOWED, *HEADER.splitlines(), WINDOWED_GATE_RED[0],
                               *(f"  FAIL: {v} {m} (log target/gate-logs/windowed/m.rerun.log)"
-                                for m, v in sorted(verdicts.items())), *WINDOWED_GATE_RED[-1:] * (not killed), "",
+                                for m, v in sorted(verdicts.items())), *[stamp(rng) + WINDOWED_GATE_RED[-1]] * (not killed), "",
                               f"exit: {rng.choice([137, 143]) if killed else 1}"])
         logs = {"target/r1/windowed.log": gate_log(lane, killed), "target/base/windowed.log": gate_log(base)}
         summary = ("How tested:\n- target/r1/windowed.log\n- target/base/windowed.log\n"
@@ -948,6 +966,8 @@ def windowed_verdicts(cases):
         if only := sorted(set(lane) - set(base)):
             assert bad, f"case {case}: lane modules {only} fail only in the lane ({lane}), base {base}: accepted"
         assert bad or not killed, f"case {case}: a gate killed before its end line is accepted ({lane}, {base})"
+        assert not bad or only or killed, (f"case {case}: a complete gate run, every lane module red on the base, "
+                                           f"is refused: {bad}")
     print(f"[tests-cover-diff] windowed verdicts: {cases} cases PASS")
 
 
@@ -969,8 +989,7 @@ def stopped_runs(cases):
                 lines += [f"  Cancelling due to signal: {rng.randint(1, 8)} tests still running"] * (rng.random() < 0.5)
             elif stop:
                 lines += [f"  Cancelling due to signal: {rng.randint(1, 8)} tests still running",
-                          f"     Summary [ 905.505s] {ran}/{total} tests run: {ran - len(tests)} passed, "
-                          f"{len(tests)} failed, 117 skipped",
+                          nextest_end_line(rng, ran - len(tests), len(tests), total),
                           f"[fail-fast] stopped at {tests[-1]}: a red outside the known-reds list "
                           "(target/lane-nextest/verdict.log)"]
             return "\n".join([NARROW, *HEADER.splitlines(), *lines, "", "exit: 1"])
@@ -994,8 +1013,7 @@ def complete_runs(cases):
         base = sorted(set(red) | set(rng.sample(ACTION_BAR + LOOP, rng.randint(0, 3))))
         passed = rng.randint(0, 5000)
         lines = [result_line(rng, t, rng.choice(STATUSES)) for t in red]
-        lines += [f"     Summary [ 905.505s] {passed + len(red)} tests run: {passed} passed, {len(red)} failed, "
-                  "117 skipped",
+        lines += [nextest_end_line(rng, passed, len(red)),
                   f"[fail-fast] stopped at {red[-1]}: a red outside the known-reds list "
                   "(target/lane-nextest/verdict.log)",
                   f"[fail-fast] red list: target/lane-nextest/reds.txt ({len(red)} tests)"]
@@ -1007,6 +1025,32 @@ def complete_runs(cases):
         bad = checker.check(NARROW + "\n", summary, logs, set(), "b", tree_of=lambda c: "t")
         assert not bad, f"case {case}: a complete lane run of {passed + len(red)} tests, every red also red on the base, is refused: {bad}"
     print(f"[tests-cover-diff] complete runs: {cases} cases PASS")
+
+
+def nextest_summary_line(rng, passed, failed):
+    """nextest's end-of-run line in its own grammar: `1 test run` for one test, `N tests run` otherwise."""
+    ran = passed + failed
+    return (f"{' ' * rng.randint(1, 8)}Summary [{rng.uniform(0, 2000):>8.3f}s] {ran} test{'s' * (ran != 1)} run: "
+            f"{passed} passed, {failed} failed, {rng.randint(0, 9000)} skipped")
+
+
+def complete_runs_of_any_size(cases):
+    """A complete lane nextest run of any size, every red also red on the base, is accepted: the end line counts
+    one test as nextest prints it."""
+    checker = load_checker()
+    rng = random.Random(14)
+    summary = ("How tested:\n- target/r1/nextest.log\n- target/base/nextest.log\n"
+               f"- accepted-base-red: nextest target/base/nextest.log {ACCEPT_URL}\n")
+    for case in range(cases):
+        red = rng.sample(ACTION_BAR + LOOP, rng.randint(1, 3))
+        passed = rng.choice([0, 0, 1, rng.randint(2, 5000)])
+        def log(tests, ok):
+            return "\n".join([NARROW, *HEADER.splitlines(), *(result_line(rng, t, "FAIL") for t in tests),
+                              nextest_summary_line(rng, ok, len(tests)), "", "exit: 100"])
+        logs = {"target/r1/nextest.log": log(red, passed), "target/base/nextest.log": log(red, passed)}
+        bad = checker.check(NARROW + "\n", summary, logs, set(), "b", tree_of=lambda c: "t")
+        assert not bad, (case, len(red), passed, bad)
+    print(f"[tests-cover-diff] complete runs of any size: {cases} cases PASS")
 
 
 if __name__ == "__main__":
@@ -1023,3 +1067,4 @@ if __name__ == "__main__":
     hand_lane_only_tests(cases // 3)
     hand_died_shards(cases // 3)
     hand_killed_steps(cases // 3)
+    complete_runs_of_any_size(cases // 3)

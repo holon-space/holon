@@ -100,7 +100,7 @@ LIBTEST_LISTED = re.compile(r" {4}(\S+)")
 LIBTEST_FAILED = re.compile(r"test (\S+)(?: - should panic)? \.\.\. FAILED")
 # nextest's end of run: `k/n tests run` with k < n is a run cut short; `[fail-fast] stopped at` of
 # scripts/lane-nextest.py also follows a full run.
-NEXTEST_SUMMARY = re.compile(r"\s*Summary \[.*\] (?:(\d+)/)?(\d+) tests run.*")
+NEXTEST_SUMMARY = re.compile(r"Summary \[[^]]*\] (?:(\d+)/)?(\d+) tests? run: ")
 # The windowed gate prints this line once every unit has its verdict.
 GATE_END = "windowed-gate: wall="
 
@@ -217,7 +217,7 @@ def hand_authored(lines):
     and no HAND-AUTHORED RED line."""
     cases = {m.group(1) for line in lines if (m := HAND_CASE.search(line))}
     shards = [(m.group(1), m.group(2), m.group(3), line.strip()) for line in lines if (m := HAND_SHARD.search(line))]
-    heads = {m.group(1): m.group(2) for line in lines if (m := HAND_SHARD_HEAD.match(line))}
+    heads = {m.group(1): m.group(2) for line in lines if (m := HAND_SHARD_HEAD.search(line))}
     red = cases | libtest_failures(lines)
     return (red if cases or shards else None, [line for _, _, names, line in shards if names == HAND_UNNAMED],
             incomplete(lines, heads, shards), {m.group(1) for line in lines if (m := HAND_SKIP.search(line))})
@@ -242,12 +242,12 @@ def hand_problems(step, lane_path, lane_red, unnamed, cut, skipped, base_path, b
 def stop_line(lines):
     """Why a nextest or windowed gate log does not show the end of a complete run, or None when it does: a nextest
     log needs a `Summary [...] N tests run` line, not `k/n` with k < n; a gate log needs its end line."""
-    ends = [(line.strip(), m) for line in lines if (m := NEXTEST_SUMMARY.fullmatch(line))]
+    ends = [(line.strip(), m) for line in lines if (m := NEXTEST_SUMMARY.search(line))]
     if cut := next((line for line, m in ends if m.group(1) and int(m.group(1)) < int(m.group(2))), None):
         return f"`{cut}`"
     if failing_tests(lines) and not ends:
         return "no nextest `Summary [...] N tests run` line"
-    if gate_red_modules(lines) and not any(line.startswith(GATE_END) for line in lines):
+    if gate_red_modules(lines) and not any(GATE_END in line for line in lines):
         return f"no `{GATE_END}...` end line"
     return None
 
