@@ -2836,11 +2836,14 @@ enum RebuiltFile {
 
 /// A device that rebuilt its Loro store from its org files. `kept_record` is a
 /// store whose snapshot was undecodable: only the snapshot and its log were
-/// replaced, so the pairing record beside them survived.
+/// replaced, so the pairing record beside them survived. `drawer_ids`: before
+/// the pair, a sync write puts each edited headline's drawer, its org id
+/// included, into the `org_properties` carrier as well.
 #[derive(Debug, Clone)]
 struct RebuiltReceiver {
     files: Vec<RebuiltFile>,
     kept_record: bool,
+    drawer_ids: bool,
 }
 
 fn rebuilt_receiver() -> impl Strategy<Value = RebuiltReceiver> {
@@ -2854,8 +2857,13 @@ fn rebuilt_receiver() -> impl Strategy<Value = RebuiltReceiver> {
             8,
         ),
         any::<bool>(),
+        any::<bool>(),
     )
-        .prop_map(|(files, kept_record)| RebuiltReceiver { files, kept_record })
+        .prop_map(|(files, kept_record, drawer_ids)| RebuiltReceiver {
+            files,
+            kept_record,
+            drawer_ids,
+        })
 }
 
 /// `body` with its first headline's text changed: a block the owner holds under
@@ -2867,6 +2875,68 @@ fn edited_org(body: &str) -> String {
         Some(i) => format!("{}rebuilt alone {}", &body[..i + 3], &body[i + 3..]),
         None => body.to_string(),
     }
+}
+
+/// The `:PROPERTIES:` drawer of `body`'s first headline, if it has one.
+fn first_headline_drawer(body: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let rest = &body[body.find("\n* ")? + 1..];
+    let mut lines = rest.lines().skip(1);
+    if lines.next()? != ":PROPERTIES:" {
+        return None;
+    }
+    Some(
+        lines
+            .take_while(|l| *l != ":END:")
+            .map(|l| {
+                let (key, value) = l[1..]
+                    .split_once(": ")
+                    .unwrap_or_else(|| panic!("a drawer line is `:key: value`: {l:?}"));
+                (
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Writes `drawer` into the `org_properties` carrier of the receiver's block it
+/// names, as a write that arrives by sync.
+async fn name_org_id_in_drawer(
+    handle: &holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
+    drawer: serde_json::Map<String, serde_json::Value>,
+) {
+    let org_id = drawer["ID"]
+        .as_str()
+        .expect("the drawer names an ID")
+        .to_string();
+    let mut params = holon_api::StorageEntity::new();
+    params.insert(
+        "id".into(),
+        holon_api::Value::String(holon_api::EntityUri::block(&org_id).to_string()),
+    );
+    params.insert(
+        "field".into(),
+        holon_api::Value::String("org_properties".into()),
+    );
+    params.insert(
+        "value".into(),
+        holon_api::Value::String(serde_json::Value::Object(drawer).to_string()),
+    );
+    handle
+        .receiver()
+        .engine()
+        .expect("the receiver instance has a backend engine")
+        .get_dispatcher()
+        .execute_operation_with_provenance(
+            &"block".to_string().into(),
+            "set_field",
+            params,
+            holon::api::operation_dispatcher::AuthoredInput::Verbatim,
+            holon_api::OpOrigin::Sync,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("the receiver refused the drawer carrier of {org_id}: {e:#}"));
 }
 
 /// Every id that names more than one live Loro node on one side.
@@ -2912,6 +2982,13 @@ async fn check_rebuilt_receiver(
         )
         .await;
     let two = caps_two(&owner_caps);
+    if case.drawer_ids {
+        for (&(_, body), file) in owner_files.iter().zip(&case.files) {
+            if let (RebuiltFile::Edited, Some(drawer)) = (file, first_headline_drawer(body)) {
+                name_org_id_in_drawer(&handle, drawer).await;
+            }
+        }
+    }
     let owner_before = handle.loro_tree_state(true, &BTreeSet::new()).await;
     if case.kept_record {
         holon_loro::pairing_swap::write_record(
@@ -3025,19 +3102,21 @@ async fn assert_receiver_writes_back(
 /// The fixed cases run first: the whole vault rebuilt after the snapshot broke
 /// (the pairing record survived), after the whole store was deleted, and with
 /// every file edited while the device was alone, so each first headline is
-/// kept as a conflict copy.
+/// kept as a conflict copy, once with its org id also in the drawer carrier.
 #[test]
 fn a_rebuilt_receiver_pairs_without_a_second_node_per_id_fixed_cases() {
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    for (file, kept_record) in [
-        (RebuiltFile::Same, true),
-        (RebuiltFile::Same, false),
-        (RebuiltFile::Edited, false),
+    for (file, kept_record, drawer_ids) in [
+        (RebuiltFile::Same, true, false),
+        (RebuiltFile::Same, false, false),
+        (RebuiltFile::Edited, false, false),
+        (RebuiltFile::Edited, false, true),
     ] {
         let case = RebuiltReceiver {
             files: vec![file; 8],
             kept_record,
+            drawer_ids,
         };
         rt.block_on(check_rebuilt_receiver(&ref_state, &case));
     }

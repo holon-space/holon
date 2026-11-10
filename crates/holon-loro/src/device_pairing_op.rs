@@ -273,6 +273,7 @@ pub const CONFLICT_OF_PROPERTY: &str = "pairing_conflict_of";
 
 /// The property an org ingest stores a block's `:ID:` under.
 const ORG_ID_PROPERTY: &str = "ID";
+const ORG_PROPERTIES: &str = "org_properties";
 
 /// The query that lists this store's conflict copies, so a disclosure can hand
 /// the user a way to reach the blocks it counted. Selects on the property, not
@@ -299,9 +300,20 @@ fn conflict_copy(snap: &holon_api::SnapshotBlock, id: &str) -> BlockCreateReques
     let mut block = snap.block.clone();
     block.id = holon_api::EntityUri::parse(&conflict_copy_id(id))
         .unwrap_or_else(|e| panic!("a conflict copy id derived from {id:?} is not a URI: {e}"));
-    // The org `:ID:` carrier still names the original; kept, the copy would
+    // The org `:ID:` carriers still name the original; kept, the copy would
     // write the original's id into its file.
     block.properties.remove(ORG_ID_PROPERTY);
+    if let Some(drawer) = block.properties.get_mut(ORG_PROPERTIES) {
+        let text = drawer.as_string().unwrap_or_else(|| {
+            panic!("{id}: the {ORG_PROPERTIES} carrier is not text: {drawer:?}")
+        });
+        let mut json: serde_json::Map<String, serde_json::Value> = serde_json::from_str(text)
+            .unwrap_or_else(|e| {
+                panic!("{id}: the {ORG_PROPERTIES} carrier is not a JSON object: {e}")
+            });
+        json.remove(ORG_ID_PROPERTY);
+        *drawer = holon_api::Value::String(serde_json::Value::Object(json).to_string());
+    }
     let parent = snap.block.id.clone();
     let mut request = BlockCreateRequest::of(&block, &parent);
     request.properties.insert(
@@ -1480,6 +1492,100 @@ mod tests {
             None,
             "the copy must not carry the original's org id"
         );
+    }
+
+    /// Every carrier through which a stored block names its org `:ID:`: the
+    /// flat property an org ingest writes, and the drawer JSON a `set_field`
+    /// of `org_properties` stores.
+    #[derive(Debug, Clone)]
+    enum OrgIdCarrier {
+        Flat,
+        DrawerJson { other_keys: Vec<String> },
+    }
+
+    fn org_id_carrier() -> impl proptest::strategy::Strategy<Value = OrgIdCarrier> {
+        use proptest::prelude::*;
+        prop_oneof![
+            Just(OrgIdCarrier::Flat),
+            proptest::collection::vec("[a-z]{1,6}", 0..3)
+                .prop_map(|other_keys| OrgIdCarrier::DrawerJson { other_keys }),
+        ]
+    }
+
+    fn org_ids_named(props: &std::collections::HashMap<String, holon_api::Value>) -> Vec<String> {
+        let mut ids = Vec::new();
+        if let Some(v) = props.get(ORG_ID_PROPERTY) {
+            ids.push(v.as_string().expect("an org id is text").to_string());
+        }
+        if let Some(v) = props.get("org_properties") {
+            let json: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(v.as_string().expect("the drawer carrier is text"))
+                    .expect("the drawer carrier is a JSON object");
+            if let Some(id) = json.get("ID") {
+                ids.push(id.as_str().expect("an org id is text").to_string());
+            }
+        }
+        ids
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_conflict_copy_names_the_original_org_id_in_no_carrier(carrier in org_id_carrier()) {
+            let mut day = snap("block:day", "block:journals", "Sunday — groceries");
+            match &carrier {
+                OrgIdCarrier::Flat => day.1.block.set_property(ORG_ID_PROPERTY, "day"),
+                OrgIdCarrier::DrawerJson { other_keys } => {
+                    let mut json = serde_json::Map::new();
+                    json.insert("ID".into(), serde_json::Value::String("day".into()));
+                    for k in other_keys {
+                        json.insert(k.clone(), serde_json::Value::String("v".into()));
+                    }
+                    day.1.block.set_property(
+                        "org_properties",
+                        serde_json::Value::Object(json).to_string(),
+                    );
+                }
+            }
+            let owner = store_of(&[
+                snap("block:journals", "block:root", "Journals"),
+                snap("block:day", "block:journals", "Sunday"),
+            ]);
+            let plan = plan_reimport(std::slice::from_ref(&day), &owner);
+            let copy = plan
+                .requests
+                .iter()
+                .find(|r| r.id.as_str() == "block:day-before-pairing")
+                .expect("the phone's version is kept as its own block");
+            let named = org_ids_named(&copy.properties);
+            proptest::prop_assert!(
+                !named.iter().any(|id| id == "day"),
+                "the copy still names the original's org id via {carrier:?}: {named:?}"
+            );
+        }
+    }
+
+    fn plan_a_copy_with_drawer(drawer: holon_api::Value) {
+        let mut day = snap("block:day", "block:journals", "Sunday — groceries");
+        day.1.block.set_property("org_properties", drawer);
+        let owner = store_of(&[
+            snap("block:journals", "block:root", "Journals"),
+            snap("block:day", "block:journals", "Sunday"),
+        ]);
+        plan_reimport(std::slice::from_ref(&day), &owner);
+    }
+
+    // Examples, not a property: a malformed drawer carrier has exactly these two
+    // shapes.
+    #[test]
+    #[should_panic(expected = "the org_properties carrier is not text")]
+    fn a_conflict_copy_of_a_drawer_carrier_that_is_not_text_fails_loud() {
+        plan_a_copy_with_drawer(7_i64.into());
+    }
+
+    #[test]
+    #[should_panic(expected = "the org_properties carrier is not a JSON object")]
+    fn a_conflict_copy_of_a_drawer_carrier_that_is_no_json_object_fails_loud() {
+        plan_a_copy_with_drawer("[\"ID\", \"day\"]".into());
     }
 
     #[test]
