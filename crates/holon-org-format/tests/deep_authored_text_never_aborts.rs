@@ -201,9 +201,13 @@ fn a_marker_line_costs_time_linear_in_its_length() {
         "*", "/", "+", "_", "[", "[[", "{", "(", "((", "~", "=", "*a* ", "*/a/* ", "[[a]] ",
     ] {
         let short = cost(&unit.repeat(1_000));
-        let long = cost(&unit.repeat(4_000));
-        if long > short * 8 {
-            superlinear.push(format!("{unit:?}: 1k {short:?}, 4k {long:?}"));
+        if let Err(e) = holon_api::duration_budget::DurationBudget::small(
+            format!("read and write of 4k {unit:?}"),
+            short * 8,
+        )
+        .check(cost(&unit.repeat(4_000)))
+        {
+            superlinear.push(format!("{e} (1k took {short:?})"));
         }
     }
     assert!(
@@ -240,9 +244,13 @@ fn a_marked_line_renders_in_time_linear_in_its_length() {
     let mut superlinear = Vec::new();
     for unit in ["*a* ", "*/a/* ", "=a= ", "[[a]] "] {
         let short = render_cost(&unit.repeat(16_000 / unit.len()));
-        let long = render_cost(&unit.repeat(64_000 / unit.len()));
-        if long > short * 8 {
-            superlinear.push(format!("{unit:?}: 16k {short:?}, 64k {long:?}"));
+        if let Err(e) = holon_api::duration_budget::DurationBudget::small(
+            format!("render of 64k {unit:?}"),
+            short * 8,
+        )
+        .check(render_cost(&unit.repeat(64_000 / unit.len())))
+        {
+            superlinear.push(format!("{e} (16k took {short:?})"));
         }
     }
     assert!(

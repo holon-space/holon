@@ -430,10 +430,12 @@ fn soak_reseed_reproduction() {
     );
 
     if let Some(budget) = assert_p95 {
-        assert!(
-            p95_ms < budget as u128,
-            "[soak-reseed] p95 action latency {p95_ms}ms ≥ HOLON_SOAK_ASSERT_P95_MS={budget}ms"
-        );
+        holon_api::duration_budget::DurationBudget::small(
+            "soak-reseed p95 action latency",
+            std::time::Duration::from_millis(budget),
+        )
+        .check(std::time::Duration::from_millis(p95_ms as u64))
+        .expect("[soak-reseed] p95 action latency is over HOLON_SOAK_ASSERT_P95_MS");
     }
 
     match expect {
@@ -742,12 +744,17 @@ fn soak_nav_latency() {
     // (nav→visible) must clear the budget. This is the SLO guard; RED whenever a
     // navigation breaches, GREEN otherwise.
     if hard_assert {
-        assert!(
-            content_p95 < budget as u128,
-            "[soak-nav] HOLON_SOAK_NAV_ASSERT: p95 nav→content-visible latency {content_p95}ms ≥ \
-             budget {budget}ms at {blocks} blocks (descendant-matview p95={watch_p95}ms). A \
-             navigation breaches the SLO."
-        );
+        holon_api::duration_budget::DurationBudget::small(
+            "soak-nav p95 nav to content visible",
+            std::time::Duration::from_millis(budget as u64),
+        )
+        .check(std::time::Duration::from_millis(content_p95 as u64))
+        .unwrap_or_else(|e| {
+            panic!(
+                "[soak-nav] HOLON_SOAK_NAV_ASSERT: {e} at {blocks} blocks (descendant-matview \
+                 p95={watch_p95}ms). A navigation breaches the SLO."
+            )
+        });
     }
 
     match expect {
@@ -781,13 +788,19 @@ fn soak_nav_latency() {
             );
         }
         SoakNavExpect::Zero => {
-            assert!(
-                content_p95 < budget as u128,
-                "[soak-nav] EXPECTED FAST NAV (post-fix guard) but nav→content-visible \
-                 p95={content_p95}ms ≥ budget {budget}ms at {blocks} blocks (descendant-matview \
-                 p95={watch_p95}ms, max={watch_max}ms). A first-visit navigation regressed into \
-                 O(vault) materialization. (content_ms_per_root={cold_ms:?})"
-            );
+            holon_api::duration_budget::DurationBudget::small(
+                "soak-nav p95 nav to content visible",
+                std::time::Duration::from_millis(budget as u64),
+            )
+            .check(std::time::Duration::from_millis(content_p95 as u64))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[soak-nav] EXPECTED FAST NAV (post-fix guard): {e} at {blocks} blocks \
+                     (descendant-matview p95={watch_p95}ms, max={watch_max}ms). A first-visit \
+                     navigation regressed into O(vault) materialization. \
+                     (content_ms_per_root={cold_ms:?})"
+                )
+            });
             eprintln!(
                 "[soak-nav] GUARD GREEN: nav→content-visible p95={content_p95}ms < budget \
                  {budget}ms — navigation (incl. focus-descendant materialization) stays under SLO."

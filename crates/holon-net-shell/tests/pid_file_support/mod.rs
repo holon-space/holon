@@ -250,6 +250,9 @@ pub struct Pending<T> {
     answer: mpsc::Receiver<T>,
 }
 
+/// In-time answers that a caller took with their elapsed time, for a judge.
+pub static TIMED_IN_TIME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub enum Answer<T> {
     InTime(T),
     Late(Pending<T>),
@@ -258,13 +261,29 @@ pub enum Answer<T> {
 impl<T> Pending<T> {
     /// The answer, if it comes within `bound` of the call.
     pub fn within(self, bound: Duration) -> Answer<T> {
-        match self
+        let before = TIMED_IN_TIME.load(std::sync::atomic::Ordering::SeqCst);
+        let answer = self.timed_within(bound);
+        TIMED_IN_TIME.store(before, std::sync::atomic::Ordering::SeqCst);
+        match answer {
+            Ok((value, _)) => Answer::InTime(value),
+            Err(pending) => Answer::Late(pending),
+        }
+    }
+
+    /// The answer and how long after the call it came, if it comes within
+    /// `bound` of the call.
+    pub fn timed_within(self, bound: Duration) -> Result<(T, Duration), Self> {
+        let answer = match self
             .answer
             .recv_timeout(bound.saturating_sub(self.started.elapsed()))
         {
-            Ok(value) => Answer::InTime(value),
-            Err(_) => Answer::Late(self),
+            Ok(value) => Ok((value, self.started.elapsed())),
+            Err(_) => Err(self),
+        };
+        if answer.is_ok() {
+            TIMED_IN_TIME.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+        answer
     }
 
     /// The late answer and how long after the call it came.

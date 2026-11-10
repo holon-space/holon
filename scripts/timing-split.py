@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 """The timing / load-tolerant test split.
 
-`docs/Testing/TimingCritical.md` is the source of truth. This script generates
-the `.config/nextest.toml` blocks from it, checks the committed file against the
-generated one, records per-test durations from nextest's JUnit output, and
-checks the enforced rung's coverage of the budgeted transition-kind alphabet.
+The code holds the timing class: a test is timing-critical when it calls
+`DurationBudget::small`, and `TIMING_OWNERS` below names each such test with the
+recipe that runs it (`check` holds the two to each other). The caps and the
+load-sensitive groups are tables in `docs/Testing/TimingCritical.md`. This
+script generates the `.config/nextest.toml` blocks from both, checks the
+committed file against the generated one, records per-test durations from
+nextest's JUnit output, and checks the latency rung's coverage of the budgeted
+transition-kind alphabet.
 
   timing-split.py generate            # rewrite the generated nextest blocks
   timing-split.py check               # gate: generated blocks, caps, rows
   timing-split.py record <junit.xml> <load_start> <load_max>   # -> the ledger
   timing-split.py seed <results.csv>  # an A/B run's per-test seconds -> the ledger
   timing-split.py resolve             # ask nextest what each filter selects
-  timing-split.py coverage <log...>   # the enforced rung's kind coverage
+  timing-split.py coverage <log...>   # the latency rung's kind coverage
   timing-split.py p95 <test>          # what the ledger says about one test
 
 nextest has no reusable named filter set, so the timing filter string appears in
 three places (the test group, `[profile.timing]`, `[profile.load-tolerant]`).
-Generating all three from one table is what stops them drifting.
+Generating all three from `TIMING_OWNERS` is what stops them drifting.
 """
 
 import ast
+import bisect
 import datetime
 import importlib.util
+import itertools
 import json
 import math
 import pathlib
@@ -56,12 +62,14 @@ OWN_RECIPE_OWNERS = {
 }
 OWN_RECIPE_BINARIES = " | ".join(OWN_RECIPE_OWNERS)
 
-# Every term the load-tolerant filter excludes, keyed as that filter writes it,
-# with the recipe that runs it. Tools read it by parsing this file, so it stays
-# a dict of literals: a `**` of an earlier literal dict is the one non-literal.
-# A timing row's owner is `just timing-gate` unless its own recipe runs it.
-OWNER_RECIPES = {
-    **OWN_RECIPE_OWNERS,
+TIMING_RECIPE = "just timing-gate"
+
+# Every test whose `DurationBudget::small` check says its duration is SMALL,
+# keyed as the nextest filters write it, with the recipe that runs it inside
+# the gate's quiet hold. `--profile timing` runs the `TIMING_RECIPE` ones; the
+# others have a recipe of their own in `just timing-gate`.
+TIMING_OWNERS = {
+    "binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/)": "just latency-slo-gate",
     "binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)": "just org-deep-text-timing",
     "binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)": "just org-deep-text-timing",
     "test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)": "just timing-gate",
@@ -80,6 +88,20 @@ OWNER_RECIPES = {
     "package(holon-net-shell) & test(=in_flight_abandon_and_the_runtime_answer_within_the_bound_while_a_pid_file_write_is_held)": "just timing-gate",
     "package(holon-netd) & test(=a_task_on_the_runtime_runs_within_the_bound_while_netd_start_waits_for_a_held_pid_file_write)": "just timing-gate",
     "binary_id(holon-integration-tests::integration) & test(=hop_step_cost::one_hop_cost_in_the_production_composition)": "just timing-gate",
+    "binary_id(holon-integration-tests::integration) & test(=enabledness_query_production_cost::one_data_firing_with_the_holder_take_stays_under_a_millisecond)": "just timing-gate",
+    "binary_id(holon-integration-tests::integration) & test(=single_large_document_scale::single_large_document_leaves_the_actor_responsive)": "just timing-gate",
+    "binary_id(holon-integration-tests) & test(=pbt::convergence::tests::a_stalled_ingest_fails_at_the_stall_bound)": "just timing-gate",
+    "binary_id(holon-kitchen::shopping_mapping_cost) & test(=a_ten_thousand_item_list_maps_inside_the_slo)": "just timing-gate",
+    "package(holon-plugin-host) & test(=vault_scan_latency::parsing_a_recipe_stays_within_the_scan_budget_in_every_build_profile)": "just timing-gate",
+    "package(holon) & test(=stress_tests::test_high_frequency_updates)": "just timing-gate",
+}
+
+# Every term the load-tolerant filter excludes, keyed as that filter writes it,
+# with the recipe that runs it. Tools read it by parsing this file, so it stays
+# a dict of literals: a `**` of an earlier literal dict is the one non-literal.
+OWNER_RECIPES = {
+    **OWN_RECIPE_OWNERS,
+    **TIMING_OWNERS,
 }
 
 # Changed-path prefix -> the recipe that checks it: for workspace code, the
@@ -108,7 +130,7 @@ QUIET_LOAD = 16.0
 MIN_RUNS_FOR_P95 = 5
 LEDGER_WINDOW_DAYS = 30
 
-# How much of the budgeted kind alphabet the enforced rung must cover before
+# How much of the budgeted kind alphabet the latency rung must cover before
 # `coverage` reds, and over how many runs that coverage accumulates. A random
 # keystone draw does not touch all 129 kinds in ONE run; a deterministic tour
 # does, and then the window goes back to 1.
@@ -137,9 +159,9 @@ def _rows(table_heading, header):
     """The rows of the ONE table under `table_heading` whose first header cell
     is `header`.
 
-    A section may hold more than one table — the `Runs` legend sits beside the
-    timing table — so the header cell, not the heading, picks the table, and
-    collection stops at the first line that is not a row.
+    A section may hold more than one table — the groups table sits beside the
+    load-sensitive rows — so the header cell, not the heading, picks the table,
+    and collection stops at the first line that is not a row.
     """
     text = SOURCE.read_text()
     after = text.split(table_heading, 1)
@@ -168,33 +190,6 @@ def _rows(table_heading, header):
 def _unbacktick(cell):
     m = re.match(r"^`(.+)`$", cell)
     return m.group(1) if m else cell
-
-
-# What a row's `Runs` cell does. All three are timing-critical, so all three
-# join the `timing-critical` test group and leave the load-tolerant complement;
-# they differ in what runs them inside the gate's one quiet-hold step.
-#   timing-step   `cargo nextest run --profile timing` selects it
-#   own-recipe    a recipe of its own inside `just timing-gate` runs it, so the
-#                 timing profile must NOT select it a second time
-#   release-bench an `#[ignore]`d release bench; a debug gate step never runs it
-RUNS_VALUES = ("timing-step", "own-recipe", "release-bench")
-IN_GROUP = ("timing-step", "own-recipe")
-
-
-def timing_rows():
-    """(selector, runs, file, line) per timing-critical row."""
-    rows = []
-    for cells in _rows("## Timing-critical tests", "Selector"):
-        selector = _unbacktick(cells[0])
-        runs = cells[1]
-        if runs not in RUNS_VALUES:
-            die(f"row '{selector}' has Runs {runs!r}, not one of {RUNS_VALUES}")
-        site = _unbacktick(cells[2])
-        if ":" not in site:
-            die(f"row '{selector}' names no file:line assertion site")
-        path, _, line = site.rpartition(":")
-        rows.append((selector, runs, path, int(line)))
-    return rows
 
 
 def cap_rows():
@@ -240,23 +235,6 @@ def group_filter(group):
     return " + ".join(f"({s})" for s, g, _ in group_rows() if g == group)
 
 
-def _selectors(wanted):
-    seen = []
-    for selector, runs, _, _ in timing_rows():
-        if runs in wanted and selector not in seen:
-            seen.append(selector)
-    return seen
-
-
-def _filter(wanted):
-    return " + ".join(f"({s})" for s in _selectors(wanted))
-
-
-def load_tolerant_excluded():
-    """Every term the load-tolerant `default-filter` excludes, as it writes it."""
-    return _selectors(IN_GROUP) + list(OWN_RECIPE_OWNERS)
-
-
 def parsed_owner_recipes():
     """`OWNER_RECIPES` as a tool that executes nothing reads it from this file."""
     tables = {}
@@ -299,13 +277,13 @@ def inventory_gaps(groups, inventories, outside):
 def timing_filter():
     """The whole timing group: what gets a core to itself, and what the
     load-tolerant profile is the complement of."""
-    return _filter(IN_GROUP)
+    return " + ".join(f"({s})" for s in TIMING_OWNERS)
 
 
 def profile_filter():
-    """What `--profile timing` runs: the group minus the rows a recipe of their
+    """What `--profile timing` runs: the group minus the tests a recipe of their
     own already runs inside the same quiet-hold step."""
-    return _filter(("timing-step",))
+    return " + ".join(f"({s})" for s, r in TIMING_OWNERS.items() if r == TIMING_RECIPE)
 
 
 # ── the cap rule ─────────────────────────────────────────────────────
@@ -329,8 +307,9 @@ def generated_block():
     lines = [
         BEGIN,
         "#",
-        "# Source: docs/Testing/TimingCritical.md. Run `scripts/timing-split.py",
-        "# generate` after editing that file; `check` fails when the two differ.",
+        "# Source: TIMING_OWNERS in scripts/timing-split.py and the tables of",
+        "# docs/Testing/TimingCritical.md. Run `scripts/timing-split.py generate`",
+        "# after editing either; `check` fails when the two differ.",
         "",
         "[test-groups]",
         "# A timing test never contends with another: a quiet host is the point.",
@@ -351,9 +330,9 @@ def generated_block():
             "",
         ]
     lines += [
-        "# The quiet-hold step runs this profile, plus the `own-recipe` rows'",
-        "# own recipes (`just latency-slo-gate`, `just org-deep-text-timing`),",
-        "# which is why those rows are not selected here as well.",
+        "# The quiet-hold step runs this profile, plus the timing tests that have",
+        "# a recipe of their own (`just latency-slo-gate`, `just org-deep-text-timing`),",
+        "# which is why those tests are not selected here as well.",
         "[profile.timing]",
         f'default-filter = "{p}"',
         "",
@@ -553,29 +532,25 @@ def cmd_resolve(cargo_args):
     def selects(*select_args):
         return len(listed(*select_args))
 
-    # `--run-ignored all`: an `#[ignore]`d row (the `own-recipe` deep-text
-    # benches) is selected by its filter; nextest would otherwise mark it a
-    # mismatch for being ignored.
+    # `--run-ignored all`: an `#[ignore]`d timing test (the deep-text benches
+    # their own recipe runs) is selected by its filter; nextest would otherwise
+    # mark it a mismatch for being ignored.
     def by_filter(expr):
         return selects("--ignore-default-filter", "--run-ignored", "all", "-E", expr)
 
-    # Per row, never only over the union: a row that selects nothing hides in
+    # Per key, never only over the union: a key that selects nothing hides in
     # a non-empty union, and the load-tolerant complement keeps its test.
     fail = 0
     step_tests = 0
-    seen = set()
-    for selector, runs, _path, _line in timing_rows():
-        if runs not in IN_GROUP or selector in seen:
-            continue
-        seen.add(selector)
+    for selector, recipe in TIMING_OWNERS.items():
         n = by_filter(selector)
-        print(f"{'ok' if n else 'FAIL'}: {runs} row `{selector}` selects {n} test(s)")
+        print(f"{'ok' if n else 'FAIL'}: `{recipe}` key `{selector}` selects {n} test(s)")
         fail |= n == 0
-        if runs == "timing-step":
+        if recipe == TIMING_RECIPE:
             step_tests += n
     n = selects("--profile", "timing")
     print(f"{'ok' if n == step_tests else 'FAIL'}: `--profile timing` selects {n} "
-          f"test(s), its timing-step rows {step_tests}")
+          f"test(s), its `{TIMING_RECIPE}` keys {step_tests}")
     fail |= n != step_tests
     for test, _p95, _cap, _ev in cap_rows():
         n = by_filter(f"test(={test})")
@@ -729,7 +704,7 @@ def corpus_kinds():
 
 
 def cmd_coverage(logs):
-    """Did the enforced rung touch enough of the kind alphabet?
+    """Did the latency rung touch enough of the kind alphabet?
 
     The observed kinds come from the rung's own log: `inv-sql-budget` prints one
     summary per transition keyed by `transition_key()`. No harness recorder and
@@ -754,7 +729,7 @@ def cmd_coverage(logs):
     if fraction + 1e-9 >= KIND_COVERAGE_MIN:
         return 0
     head = "FAIL" if judging else "WARN"
-    print(f"{head}: {len(missing)} budgeted kind(s) the enforced rung never "
+    print(f"{head}: {len(missing)} budgeted kind(s) the latency rung never "
           f"judged, so the latency SLO is unmeasured for them:")
     for k in missing:
         print(f"  {k}")
@@ -773,53 +748,100 @@ def cmd_coverage(logs):
 # ── the gate check ───────────────────────────────────────────────────
 
 
-# What tells a reader that a span judges a duration. `wall-clock budget` is the
-# established `#[ignore]` marker (#337) and counts: a test whose durations live
-# in local bindings (`if long > short * 8`) shows no `Duration` on the comparing
-# line, and the attribute is the author's explicit declaration.
-DURATION_SIGNALS = re.compile(
-    r"\belapsed\b|duration_since|Duration::from_|Instant::now|wall-clock budget"
-    r"|_DEADLINE\b|_PATIENCE\b|_BUDGET\b|\bhard_budget\(\)|\bSLO\b"
-)
+RUST_LITERAL = re.compile(r'\bb?r(#*)"[\s\S]*?"\1|b?"(?:\\[\s\S]|[^"\\])*"'
+                          r"|//[^\n]*|/\*[\s\S]*?\*/|'(?:\\.|[^'\\])'")
 
 
-def enclosing_fn_span(lines, line):
-    """The 0-based [start, end) of the test enclosing 1-based `line`, or None.
+def code_lines(text):
+    """`text`'s lines with every string, char literal and comment blanked, so
+    a brace or a `fn` inside one counts for nothing."""
+    return RUST_LITERAL.sub(blank, text).split("\n")
 
-    The span starts at the `fn`'s attributes, so `#[ignore = "wall-clock
-    budget: …"]` is inside it, and ends at the function's closing brace.
 
-    None when no `fn` encloses the line. Widening to the whole file instead
-    would make the duration check vacuous — any line of a file that asserts a
-    duration anywhere would pass, which is exactly the park rule 3 forbids.
-    """
-    i = line - 1
-    fn = None
-    while i >= 0:
-        if re.match(r"\s*(pub\s+)?(async\s+)?(unsafe\s+)?fn\s", lines[i]):
-            fn = i
-            break
-        i -= 1
-    if fn is None:
-        return None
+def blank(m):
+    lit = m.group(0)
+    return re.sub(r"[^\n]", " ", lit) if "\n" in lit else " " * len(lit)
+
+
+def fn_span(lines, code, fn):
+    """The 0-based [start, end) of the `fn` on 0-based line `fn`: from its
+    attributes to the brace that closes its body (a signature may span lines).
+    `code` is `code_lines` of the same text."""
     start = fn
     while start > 0 and re.match(r"\s*(#\[|//[/!]?|$)", lines[start - 1]):
         start -= 1
-    depth, end = 0, len(lines)
-    for j in range(fn, len(lines)):
-        depth += lines[j].count("{") - lines[j].count("}")
-        if depth <= 0 and j > fn:
-            end = j + 1
-            break
-    return start, end
+    depth, opened = 0, False
+    for j in range(fn, len(code)):
+        depth += code[j].count("{") - code[j].count("}")
+        opened |= "{" in code[j]
+        if opened and depth <= 0:
+            return start, j + 1
+    return start, len(lines)
 
 
-def asserts_a_duration(lines, line):
-    span = enclosing_fn_span(lines, line)
-    if span is None:
+SMALL_CALL = re.compile(r"\bDurationBudget::small\(")
+FN_LINE = re.compile(r"\s*(pub(\([\w:]+\))?\s+)?(async\s+)?(unsafe\s+)?fn\s+(\w+)")
+TEST_ATTR = re.compile(r"#\[(\w+::)*test\b")
+
+
+def crate_name(rel):
+    """The package of the crate the repo-relative file `rel` lives in."""
+    manifest = REPO.joinpath(*pathlib.Path(rel).parts[:2], "Cargo.toml")
+    m = re.search(r'^\[package\]\n(?:[^\[].*\n)*?name\s*=\s*"([^"]+)"',
+                  manifest.read_text(), re.M)
+    if not m:
+        die(f"{manifest} names no package")
+    return m.group(1)
+
+
+def small_tests():
+    """(crate, relpath, fn name, ignored, direct) per test fn that calls
+    `DurationBudget::small` in its own body (`direct`) or through fns of the
+    same file. A helper in shared code is no test."""
+    out = []
+    for f in scanned_files():
+        text = f.read_text(errors="replace")
+        if not SMALL_CALL.search(text):
+            continue
+        lines, code = text.split("\n"), code_lines(text)
+        fns = []
+        for i, line in enumerate(code):
+            m = FN_LINE.match(line)
+            if m:
+                start, end = fn_span(lines, code, i)
+                fns.append((m.group(5), start, i, "\n".join(code[i:end])))
+        direct = {name for name, _s, _i, body in fns if SMALL_CALL.search(body)}
+        calling = set(direct)
+        grew = True
+        while grew:
+            reached = {name for name, _s, _i, body in fns
+                       if any(re.search(rf"\b{c}\(", body) for c in calling)}
+            grew = not reached <= calling
+            calling |= reached
+        rel = str(f.relative_to(REPO))
+        for name, start, i, _body in fns:
+            attrs = "\n".join(lines[start:i])
+            if name in calling and TEST_ATTR.search(attrs):
+                out.append((crate_name(rel), rel, name, "#[ignore" in attrs,
+                            name in direct))
+    return out
+
+
+def names_test(selector, crate, rel, name):
+    """Whether the nextest filter `selector` selects test fn `name` of `crate`
+    in file `rel`, judged on the filter forms the owner dicts use."""
+    pkg = re.search(r"(?:package|binary_id)\(([\w-]+)", selector)
+    if pkg and pkg.group(1) != crate:
         return False
-    start, end = span
-    return bool(DURATION_SIGNALS.search("\n".join(lines[start:end])))
+    exact = re.search(r"test\(=([\w:]+)\)", selector)
+    if exact:
+        return exact.group(1).split("::")[-1] == name
+    module = re.search(r"test\(/\^(\w+)::/\)", selector)
+    if module:
+        return module.group(1) == pathlib.Path(rel).stem
+    if "test(" in selector:
+        die(f"owner key `{selector}` has a test() form `check` cannot read")
+    return pkg is not None
 
 
 # ── lane-run recipes for gate-owned machinery ────────────────────────
@@ -880,60 +902,41 @@ def cmd_check():
         fail = 1
     elif splice(current, want) != current:
         print(f"FAIL: {NEXTEST}'s generated block is not what "
-              f"{SOURCE.name} generates. Run `scripts/timing-split.py generate`.")
+              "scripts/timing-split.py generates. Run `scripts/timing-split.py generate`.")
         fail = 1
     else:
-        print(f"ok: {NEXTEST} matches {SOURCE.name}")
+        print(f"ok: {NEXTEST} matches what scripts/timing-split.py generates")
 
-    # Every timing row must name a real duration assertion. A content flake has
-    # none, which is what keeps a bug-under-load out of the timing group.
-    for selector, _runs, path, line in timing_rows():
-        f = REPO / path
-        if not f.is_file():
-            print(f"FAIL: row '{selector}' names {path}, which does not exist")
-            fail = 1
-            continue
-        lines = f.read_text(errors="replace").splitlines()
-        if not 1 <= line <= len(lines):
-            print(f"FAIL: row '{selector}' names {path}:{line}, past the file's "
-                  f"{len(lines)} lines")
-            fail = 1
-            continue
-        if not asserts_a_duration(lines, line):
-            print(f"FAIL: row '{selector}' names {path}:{line}, where no duration "
-                  "assertion is visible. A timing-group member must assert a "
-                  "DURATION; a content assertion that only reds under load is a "
-                  "RACE and stays load-tolerant (see the four classes).")
-            fail = 1
-    if not fail:
-        print(f"ok: {len(timing_rows())} timing row(s) each name a duration assertion")
-
-    # Every test the load-tolerant sweep skips names the recipe that runs it, so
-    # a lane that drops the sweep for a test knows what to run instead.
-    excluded = load_tolerant_excluded()
-    missing = [t for t in excluded if t not in OWNER_RECIPES]
-    stale = sorted(set(OWNER_RECIPES) - set(excluded))
-    if missing:
-        print("FAIL: the load-tolerant profile excludes term(s) that OWNER_RECIPES "
-              "names no recipe for. Add to OWNER_RECIPES in scripts/timing-split.py:")
-        for t in missing:
-            print(f'    "{t}": "just timing-gate",')
-        fail = 1
-    if stale:
-        print("FAIL: OWNER_RECIPES names term(s) the load-tolerant profile no longer "
-              "excludes. Remove them from scripts/timing-split.py:")
-        for t in stale:
-            print(f'    "{t}"')
-        fail = 1
-    parsed_equal = parsed_owner_recipes() == OWNER_RECIPES
-    if not parsed_equal:
+    # The timing class lives in the code: every test that judges a duration
+    # SMALL is owned, and every timing key still names such a test. A content
+    # flake has no `small` call, which keeps a bug-under-load out of the group.
+    # Owned: each test whose own body calls `small`. A test that reaches it
+    # only through a helper may pass the helper a made-up value or a flag that
+    # skips the check, so only the key side counts helpers.
+    tests = small_tests()
+    unowned = [(crate, rel, name) for crate, rel, name, ignored, direct in tests
+               if direct and not ignored
+               and not any(names_test(s, crate, rel, name) for s in OWNER_RECIPES)]
+    for crate, rel, name in unowned:
+        print(f"FAIL: {crate} test `{name}` ({rel}) calls DurationBudget::small, "
+              "and no OWNER_RECIPES key selects it. Add its filter to TIMING_OWNERS "
+              "in scripts/timing-split.py, or make the check `liveness` or "
+              "`lower_bound` when its point is not that the duration is small.")
+    idle = [s for s in TIMING_OWNERS
+            if not any(names_test(s, crate, rel, name) for crate, rel, name, _i, _d in tests)]
+    for s in idle:
+        print(f"FAIL: TIMING_OWNERS key `{s}` selects no test that calls "
+              "DurationBudget::small. Remove the key, or route the test's "
+              "duration check through `DurationBudget::small`.")
+    fail |= bool(unowned or idle)
+    if not unowned and not idle:
+        print(f"ok: the {len(tests)} test(s) that call DurationBudget::small and the "
+              f"{len(TIMING_OWNERS)} TIMING_OWNERS key(s) name each other")
+    if parsed_owner_recipes() != OWNER_RECIPES:
         print("FAIL: OWNER_RECIPES read by parsing scripts/timing-split.py differs "
               "from the executed one. Keep it a dict of literals and `**` merges "
               "of earlier literal dicts.")
         fail = 1
-    if not missing and not stale and parsed_equal:
-        print(f"ok: each of the {len(set(excluded))} load-tolerant exclusion(s) names "
-              "its recipe in OWNER_RECIPES")
 
     # A change to the code of a test only the landing gate runs still gets a lane step that runs it.
     st = select_tests()
@@ -991,28 +994,66 @@ BASELINE = REPO / "scripts/timing-assertions-baseline.txt"
 CLASSES = ("timing", "liveness", "lower-bound", "harness", "virtual-clock")
 SCAN_GLOBS = ("crates/*/src/**/*.rs", "crates/*/tests/**/*.rs",
               "frontends/*/src/**/*.rs", "frontends/*/tests/**/*.rs")
-ASSERT_SITE = re.compile(r"\b(assert|assert_eq|assert_ne|prop_assert|prop_assert_eq)!|"
-                         r"InvariantResult::Fail")
-COMPARISON = re.compile(r"[<>]=?")
+# What tells a reader that a line compares a duration: a `Duration` source, a
+# duration-named constant, or a percentile. The scan reads code only: string
+# literals and comments are blanked.
+DURATION_SIGNALS = re.compile(
+    r"\belapsed\b|duration_since|Duration::from_|Instant::now"
+    r"|_DEADLINE\b|_PATIENCE\b|_BUDGET\b|\bhard_budget\(\)|\bSLO\b"
+    r"|\bas_(millis|micros|nanos|secs)|(\b|_)p(50|90|95|99)\b"
+    r"|\w_(ms|us|ns|secs|millis|micros|nanos|MS|US|NS|SECS|MILLIS|MICROS|NANOS)\b"
+)
+ASSERT_SITE = re.compile(r"\b(debug_|prop_)?assert(_eq|_ne)?!|InvariantResult::Fail")
+LET_NAME = re.compile(r"\blet\s+(?:mut\s+)?(\w+)\b")
+COMPARISON = re.compile(r"\s[<>]=?\s")
+# Every site line holds a `small` call or a COMPARISON's `<`/`>`; a plain search
+# for those is much faster than DURATION_SIGNALS on every line.
+CANDIDATE = re.compile(f"[<>]|{SMALL_CALL.pattern}")
+
+
+def scanned_files():
+    return [f for glob in SCAN_GLOBS for f in sorted(REPO.glob(glob))
+            if "/target/" not in str(f)]
+
+
+def in_assertion_position(lines, i):
+    """Whether line `i` sits in an assertion macro opened up to 3 code lines
+    above, in an `if` that panics or returns `InvariantResult::Fail` within the
+    next 3 code lines, or binds a `let` that an assertion macro takes within the
+    next 3 code lines. `lines` are `code_lines`, so a blank line is no code."""
+    above = [j for j in range(i - 1, -1, -1) if lines[j].strip()][:3]
+    below = [j for j in range(i + 1, len(lines)) if lines[j].strip()][:3]
+    head = "\n".join(lines[j] for j in sorted(above) + [i])
+    tail = "\n".join(lines[j] for j in [i] + below)
+    if ASSERT_SITE.search(head):
+        return True
+    if re.search(r"\bif\b", head) and re.search(r"panic!|InvariantResult::Fail", tail):
+        return True
+    lets = list(LET_NAME.finditer(head))
+    # The comparison must sit in the nearest `let`'s statement: no `;` closes
+    # it before line `i`.
+    if not lets or ";" in head[lets[-1].end():len(head) - len(lines[i])]:
+        return False
+    return bool(re.search(
+        rf"\b(debug_|prop_)?assert(_eq|_ne)?!\s*\(\s*!?\s*{lets[-1].group(1)}\s*[,)]", tail))
 
 
 def assertion_sites():
-    """Duration comparisons in ASSERTION position: (relpath, trimmed line)."""
+    """(relpath, trimmed line, is a `small` call) per `DurationBudget::small`
+    call and per duration comparison in ASSERTION position."""
     out = []
-    for glob in SCAN_GLOBS:
-        for f in sorted(REPO.glob(glob)):
-            if "/target/" in str(f):
-                continue
-            lines = f.read_text(errors="replace").splitlines()
-            for i, line in enumerate(lines):
-                if not DURATION_SIGNALS.search(line) or not COMPARISON.search(line):
-                    continue
-                # The assertion macro may open up to 3 lines above the
-                # comparison (`assert!(` then the expression).
-                head = "\n".join(lines[max(0, i - 3):i + 1])
-                if not ASSERT_SITE.search(head):
-                    continue
-                out.append((str(f.relative_to(REPO)), line.strip()))
+    for f in scanned_files():
+        text = f.read_text(errors="replace")
+        lines, code = text.split("\n"), code_lines(text)
+        ends = list(itertools.accumulate(len(line) + 1 for line in code))
+        hits = {bisect.bisect_right(ends, m.start())
+                for m in CANDIDATE.finditer("\n".join(code))}
+        for i in sorted(hits):
+            line = code[i]
+            small = bool(SMALL_CALL.search(line))
+            if small or (DURATION_SIGNALS.search(line) and COMPARISON.search(line)
+                         and in_assertion_position(code, i)):
+                out.append((str(f.relative_to(REPO)), lines[i].strip(), small))
     return out
 
 
@@ -1034,16 +1075,18 @@ def read_baseline():
 
 
 def cmd_assertions(update=False):
-    sites = assertion_sites()
+    found = assertion_sites()
+    smalls = {(path, text) for path, text, small in found if small}
+    sites = [(path, text) for path, text, _small in found]
     if update:
         known = read_baseline()
         BASELINE.parent.mkdir(parents=True, exist_ok=True)
         with open(BASELINE, "w") as fh:
             fh.write("# Every duration comparison in assertion position, with the "
                      "class its author assigned.\n")
-            fh.write("# Classes: timing (the point is that the duration is SMALL; "
-                     "must be in the\n")
-            fh.write("#   timing group), liveness (the message reads 'it never "
+            fh.write("# Classes: timing (a `DurationBudget::small` call: the point "
+                     "is that the duration\n")
+            fh.write("#   is SMALL), liveness (the message reads 'it never "
                      "happened'), lower-bound\n")
             fh.write("#   (load can only make it pass), harness (plumbing: a wait "
                      "helper's own bound),\n")
@@ -1052,7 +1095,8 @@ def cmd_assertions(update=False):
             fh.write("# See docs/Testing/TimingCritical.md. Regenerate with "
                      "`scripts/timing-split.py assertions --update`.\n")
             for path, text in sites:
-                fh.write(f"{path}\t{known.get((path, text), 'UNCLASSIFIED')}\t{text}\n")
+                fresh = "timing" if (path, text) in smalls else "UNCLASSIFIED"
+                fh.write(f"{path}\t{known.get((path, text), fresh)}\t{text}\n")
         n_new = sum(1 for s in sites if s not in known)
         print(f"timing-split: baseline written: {len(sites)} site(s), "
               f"{n_new} newly added as UNCLASSIFIED")
@@ -1069,8 +1113,8 @@ def cmd_assertions(update=False):
             print(f"  {path}\n    {text}")
         print("\nClassify each one (docs/Testing/TimingCritical.md, 'The four "
               "classes'):")
-        print("  timing       the point is that the duration is SMALL -> add a row to")
-        print("               docs/Testing/TimingCritical.md and regenerate")
+        print("  timing       the point is that the duration is SMALL -> route it")
+        print("               through DurationBudget::small, owned in TIMING_OWNERS")
         print("  liveness     the message reads 'it never happened' -> load-tolerant")
         print("  lower-bound  load can only make it pass -> load-tolerant")
         print("  harness      a wait helper's own bound, not a judgement")
@@ -1083,30 +1127,21 @@ def cmd_assertions(update=False):
         for path, text in sorted(unclassified):
             print(f"  {path}\n    {text}")
 
-    # The baseline and the timing table must agree in BOTH directions, or one
-    # of them quietly decides alone.
-    timing_files = {path for _s, _r, path, _l in timing_rows()}
-    classed_timing = {path for (path, _t), cls in known.items() if cls == "timing"}
+    # A raw comparison never judges SMALL; only the budget type does, where the
+    # mode decides whether a breach reds.
+    present = set(sites)
     for (path, text), cls in sorted(known.items()):
-        if cls == "timing" and path not in timing_files:
-            print(f"FAIL: {path} is classed `timing` but no row of "
-                  f"{SOURCE.name} names it, so the timing profile never selects "
-                  f"it:\n    {text}")
+        if (path, text) not in present:
+            continue
+        is_small = (path, text) in smalls
+        if cls == "timing" and not is_small:
+            print(f"FAIL: {path} judges a duration SMALL by a raw comparison:\n"
+                  f"    {text}\n  Route it through DurationBudget::small, or class "
+                  "it liveness, lower-bound, harness or virtual-clock.")
             fail = 1
-    # The other direction, and only where the scanner can see: a timing row
-    # whose file HAS classified sites must have at least one classed `timing`,
-    # or the table and the baseline contradict each other about the same lines.
-    # Where the scanner sees nothing there is nothing to contradict — a
-    # judgement may route through a verdict type or a ratio between two
-    # `Duration`s, neither of which is a comparison in assertion position. Such
-    # a row is held to `asserts_a_duration` at its named site instead.
-    scanned = {path for path, _t in known}
-    for selector, _runs, path, _line in timing_rows():
-        if path in scanned and path not in classed_timing:
-            print(f"FAIL: row '{selector}' names {path}, whose assertion sites "
-                  f"this baseline all class as something OTHER than `timing`. "
-                  f"The table says the duration is judged there and the baseline "
-                  f"says it is not; one of the two is wrong.")
+        if is_small and cls != "timing":
+            print(f"FAIL: {path} calls DurationBudget::small, but its baseline row "
+                  f"says {cls}:\n    {text}")
             fail = 1
 
     print()

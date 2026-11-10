@@ -12,6 +12,7 @@
 #   in more than one compile shape, or no record of them;
 # 10 = the timing binaries were not built yet, so the hold would time a compile;
 # otherwise `just timing-gate`'s exit (3 = no verdict on a busy host).
+# At its end it prints the gate's block of scripts/timing-breaches.py.
 set -euo pipefail
 
 STEPS="timing-gate-build timing-gate"
@@ -34,7 +35,8 @@ source ~/.claude/skills/orchestrator/scripts/gate-step.sh
 # shellcheck disable=SC2086
 gate_steps $STEPS
 GATE_STEP_TMP=$(mktemp -d)
-trap 'rm -rf "$GATE_STEP_TMP"' EXIT
+# The breach summary only reports: the EXIT trap keeps the gate's exit code.
+trap 'rm -rf "$GATE_STEP_TMP"; /usr/bin/python3 "$(dirname "$0")/timing-breaches.py" "$GATE" || echo "TIMING BREACHES NOT SUMMARIZED (exit $?)"' EXIT
 # A step sees neither the record file of gate-step.sh's runner nor its temp folder.
 gate_step() {
   step "$1" "$2" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED TMPDIR="$GATE_STEP_TMP" "${@:3}"

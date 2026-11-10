@@ -33,14 +33,16 @@ pub fn wire() -> Box<dyn CapInvariant> {
 mod tests {
     use std::time::Duration;
 
+    use holon_api::timing_mode;
+    use holon_api::timing_mode::TimingMode;
+
     use crate::pbt::composed::fixtures::*;
     use crate::pbt::invariants::bodies::settle_budget::SLO;
-    use crate::pbt::timing_mode;
-    use crate::pbt::timing_mode::TimingMode;
 
     /// Positive: a fast transition ⇒ selected and passing.
     #[tokio::test]
     async fn settle_budget_passes_under_slo() {
+        crate::pbt::use_scratch_timing_ledger();
         let sut = settle_map(Some(Duration::from_millis(20)));
         let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
 
@@ -90,6 +92,7 @@ mod tests {
     /// are asserted, so neither mode can pass by saying nothing.
     #[tokio::test]
     async fn settle_budget_catches_vault_scale_regime_in_enforce_and_reports_it_in_measure() {
+        crate::pbt::use_scratch_timing_ledger();
         let sut = settle_map(Some(Duration::from_secs(9)));
         let report = run_selected(&composed_invariant_catalog(), &sut, &CapMap::new()).await;
 
@@ -100,7 +103,7 @@ mod tests {
             report.ran_ids(),
         );
         let failures = report.failures();
-        match timing_mode::mode() {
+        match timing_mode::mode().expect("HOLON_PBT_TIMING must parse") {
             TimingMode::Enforce => assert!(
                 failures
                     .iter()

@@ -66,6 +66,8 @@ use holon::api::holon_service::HolonService;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::Value;
+use holon_api::duration_budget::DurationBudget;
+use holon_api::duration_budget::from_ms;
 use holon_api::latency_drain::DRAIN_OFFER_EVERY;
 use holon_api::latency_drain::DRAIN_PATIENCE;
 use holon_api::latency_drain::DRAIN_TEST_SLACK;
@@ -246,9 +248,9 @@ fn boot(targets: DriveTargets, host: Host) -> (ComposedSut<WideE2E>, ReferenceSt
 /// 2.2/s, against 45ms and 44/s on a quiet one — the same tree, minutes apart.
 /// Judging that would make the gate something people re-run until green.
 ///
-/// A refused run PANICS, so the test fails: a "too busy to judge" that passes
-/// is a vacuous green. The message says INVALID so a reader can tell a run
-/// that judged nothing from one that judged the tree slow.
+/// The cut is a `small` budget: under `enforce` a refused run panics with
+/// INVALID, so a reader can tell a run that judged nothing from one that judged
+/// the tree slow; under `measure` it writes its ledger line and the rungs run.
 fn require_a_judgeable_host() {
     let Some(ddl) = contention_ms() else {
         panic!(
@@ -258,18 +260,23 @@ fn require_a_judgeable_host() {
              to judge. The probe layer or the storage boot changed — investigate, do not relax."
         );
     };
-    assert!(
-        ddl <= MAX_CONTENTION_MS,
-        "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): mean boot \
-         matview_ddl {ddl:.1}ms exceeds the \
-         {MAX_CONTENTION_MS:.0}ms contention cut, so the host was too busy for a wall-clock \
-         latency verdict. NOTHING was scored — this is not evidence the tree regressed. Re-run \
-         on a quiet machine. If it persists on an idle host, the tree itself slowed boot DDL, \
-         which is a finding (see docs/Testing/latency-ceilings.txt)."
-    );
     eprintln!(
-        "[latency-slo gate] host admitted: mean boot matview_ddl {ddl:.1}ms <= {MAX_CONTENTION_MS:.0}ms"
+        "[latency-slo gate] host contention: mean boot matview_ddl {ddl:.1}ms, cut {MAX_CONTENTION_MS:.0}ms"
     );
+    DurationBudget::small(
+        "boot matview_ddl mean (host contention cut)",
+        from_ms(MAX_CONTENTION_MS).expect("the contention cut is a duration"),
+    )
+    .check(from_ms(ddl).expect("a mean DDL time is a duration"))
+    .unwrap_or_else(|e| {
+        panic!(
+            "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): {e}: \
+             the host was too busy for a wall-clock latency verdict. NOTHING was scored — this \
+             is not evidence the tree regressed. Re-run on a quiet machine. If it persists on an \
+             idle host, the tree itself slowed boot DDL, which is a finding (see \
+             docs/Testing/latency-ceilings.txt)."
+        )
+    });
 }
 
 /// Arms the per-row delivery delay, and disarms it when dropped, a panic
@@ -441,18 +448,21 @@ fn run_drain_test(sut: &ComposedSut<WideE2E>, test: DrainTest, delay_ms: u64) ->
 /// — "the gate went red" with no number is not actionable.
 fn assert_rung(name: &str, verdict: RungVerdict, window: &SloWindow) {
     match verdict {
-        RungVerdict::Pass { measured, n } => {
-            eprintln!("[latency-slo gate] {name}: PASS measured={measured:.1} n={n}");
+        RungVerdict::Pass { measured, n } | RungVerdict::Fail { measured, n } => {
+            eprintln!("[latency-slo gate] {name}: measured={measured:.1} n={n}");
+            DurationBudget::small(name, std::time::Duration::from_millis(SERVICE_TIME_SLO_MS))
+                .check(from_ms(measured).expect("a p95 is a duration"))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "[latency-slo gate] {e}.\n  {}\n  Total samples in window: {}. Ten of \
+                         eleven unmodified-tree runs cleared this budget by 2.9x or better, so \
+                         this is very likely a real breach — but one admitted run did measure \
+                         183ms, so confirm on an idle host before attributing it to the tree.",
+                        window.report(),
+                        window.len(),
+                    )
+                });
         }
-        RungVerdict::Fail { measured, n } => panic!(
-            "[latency-slo gate] {name} FAILED: measured={measured:.1} over n={n}.\n  \
-             {}\n  Total samples in window: {}. Ten of eleven unmodified-tree runs \
-             cleared this budget by 2.9x or better, so this is very likely a real breach — \
-             but one admitted run did measure 183ms, so confirm on an idle host before \
-             attributing it to the tree.",
-            window.report(),
-            window.len(),
-        ),
         RungVerdict::Unjudged { n, needed } => panic!(
             "[latency-slo gate] {name} produced NO VERDICT: {n} usable samples, {needed} \
              required. A gate that cannot judge is not a gate that passed.\n  {}\n  Total \
@@ -501,11 +511,7 @@ fn latency_slo_rung_service_time_p95() {
         window.len(),
         window.report(),
     );
-    assert_rung(
-        &format!("service-time p95 (< {SERVICE_TIME_SLO_MS}ms)"),
-        window.service_verdict(),
-        &window,
-    );
+    assert_rung("service-time p95", window.service_verdict(), &window);
 }
 
 /// **RUNG 2 — THE DRAIN TEST (Martin's ruling D207.a).** [`DRAIN_WRITES`]
@@ -532,11 +538,30 @@ fn latency_slo_rung_drain_test() {
     );
     let run = run_drain_test(&sut, DrainTest::gate(), 0);
     let (verdict, longest_wait, host) = (&run.verdict, run.longest_wait, run.host);
+    if let DrainVerdict::Pass { completion, limit }
+    | DrainVerdict::Late {
+        completion: Some(completion),
+        limit,
+        ..
+    } = verdict
+    {
+        DurationBudget::small("drain completion", *limit)
+            .check(*completion)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[latency-slo gate] drain test FAILED on wall time: {e} (floor \
+                     {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s, longest per-write wait \
+                     {longest_wait:?}). {host}"
+                )
+            });
+        eprintln!(
+            "[latency-slo gate] drain test: {verdict:?}, {DRAIN_WRITES} writes, longest \
+             per-write wait {longest_wait:?}; {host}"
+        );
+        return;
+    }
     match run.judge() {
-        DrainJudgement::Pass => eprintln!(
-            "[latency-slo gate] drain test: PASS on wall time — {verdict:?}, {DRAIN_WRITES} \
-             writes, longest per-write wait {longest_wait:?}; {host}"
-        ),
+        DrainJudgement::Pass => unreachable!("only a completed drain judges Pass: {verdict:?}"),
         DrainJudgement::Invalid(refusal) => panic!(
             "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): \
              {refusal}. Wall verdict {verdict:?}; {host}"

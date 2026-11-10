@@ -1211,11 +1211,13 @@ fn play(case: &Case) -> Vec<String> {
             std::thread::sleep(WINDOW / 2);
             let to = Instant::now();
             let gap = largest_gap(from, to, &beats.lock().unwrap());
-            if gap > BOUND {
-                failures.push(format!(
-                    "a task on the runtime waited {gap:?} (bound {BOUND:?}) while netd start held a pid-file {:?}",
-                    plan.point
-                ));
+            if let Err(e) = holon_api::duration_budget::DurationBudget::small(
+                "runtime task wait while netd start holds a pid file",
+                BOUND,
+            )
+            .check(gap)
+            {
+                failures.push(format!("{e}: netd start held a pid-file {:?}", plan.point));
             }
             if first.task.is_finished() {
                 failures.push(format!(

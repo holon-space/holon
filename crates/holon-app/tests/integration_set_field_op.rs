@@ -399,11 +399,12 @@ fn dispatching_begin_oauth_returns_before_the_flow_finishes() {
             .expect("dispatching integration.begin_oauth must succeed");
         let elapsed = started.elapsed();
 
-        assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "begin_oauth must return once the flow is STARTED, not once it finishes; it took \
-             {elapsed:?}"
-        );
+        holon_api::duration_budget::DurationBudget::small(
+            "begin_oauth return",
+            std::time::Duration::from_secs(1),
+        )
+        .check(elapsed)
+        .expect("begin_oauth must return once the flow is STARTED, not once it finishes");
 
         // The flow it started is the one the mirror observes: the DI-registered
         // view model, not a second one built over the same files.

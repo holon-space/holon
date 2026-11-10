@@ -29,6 +29,7 @@ holon-api.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+holon-api = { workspace = true, features = ["test-helpers"] }
 anyhow.workspace = true
 chrono.workspace = true
 # Test-only BY DESIGN: the profile is an independent statement ABOUT this

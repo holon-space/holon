@@ -344,18 +344,17 @@ fn measure(shape: Shape, entities: usize, samples: usize, budgets: bool) -> anyh
     report("write -> changed (type, id)", &write);
 
     if budgets {
-        assert!(
-            guard.p95 < Duration::from_millis(200),
-            "{}: the guard's p95 {:?} breaks the 200 ms interaction budget ({PROFILE})",
-            shape.label(),
-            guard.p95
-        );
-        assert!(
-            write.p95 < Duration::from_millis(5),
-            "{}: write -> changed-id p95 {:?} breaks the 5 ms falsifier ({PROFILE})",
-            shape.label(),
-            write.p95
-        );
+        holon_api::duration_budget::DurationBudget::small("guard p95", Duration::from_millis(200))
+            .check(guard.p95)
+            .unwrap_or_else(|e| {
+                panic!("{}: {e}: the interaction budget ({PROFILE})", shape.label())
+            });
+        holon_api::duration_budget::DurationBudget::small(
+            "write to changed id p95",
+            Duration::from_millis(5),
+        )
+        .check(write.p95)
+        .unwrap_or_else(|e| panic!("{}: {e}: the falsifier ({PROFILE})", shape.label()));
     }
     Ok(())
 }

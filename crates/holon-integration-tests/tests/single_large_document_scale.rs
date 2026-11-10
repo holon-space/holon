@@ -277,15 +277,21 @@ fn single_large_document_leaves_the_actor_responsive() {
         // slower than the flat scan measured alongside — a ceiling generous
         // enough that only a change of complexity class breaks it.
         let read_budget_ms = (expected as f64 * 0.5).max(500.0);
-        assert!(
-            prod_ms <= read_budget_ms,
-            "the document-read recursive CTE took {prod_ms:.0}ms for {expected} blocks (budget \
-             {read_budget_ms:.0}ms). It is QUADRATIC: EXPLAIN shows `SCAN block_raw` for the \
-             recursive arm's `b.parent_id = d.id` instead of SEARCH via \
-             idx_block_raw_parent_id, so every descendant costs a full table scan. Compare the \
-             `flat-scan` line above — same rows, linear. This query is what pins the Turso \
-             actor at 100% forever on Martin's 15,763-block Projects/Holon.org."
-        );
+        holon_api::duration_budget::DurationBudget::small(
+            "document-read recursive CTE",
+            holon_api::duration_budget::from_ms(read_budget_ms)
+                .expect("the read budget is a duration"),
+        )
+        .check(holon_api::duration_budget::from_ms(prod_ms).expect("a measured read is a duration"))
+        .unwrap_or_else(|e| {
+            panic!(
+                "{e} for {expected} blocks. It is QUADRATIC: EXPLAIN shows `SCAN block_raw` for \
+                 the recursive arm's `b.parent_id = d.id` instead of SEARCH via \
+                 idx_block_raw_parent_id, so every descendant costs a full table scan. Compare the \
+                 `flat-scan` line above — same rows, linear. This query is what pins the Turso \
+                 actor at 100% forever on Martin's 15,763-block Projects/Holon.org."
+            )
+        });
         let _ = doc_id;
     });
 }

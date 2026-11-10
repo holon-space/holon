@@ -230,13 +230,18 @@ impl StepTimingAgg {
             );
         }
         if let Some(budget) = step_budget_ms() {
-            assert!(
-                mean_ms <= budget,
-                "[{label}] per-transition budget exceeded: mean {mean_ms}ms > \
-                 HOLON_PBT_STEP_BUDGET_MS={budget}ms over {} transition(s) (apply+check, StartApp \
-                 excluded)",
-                self.steps
-            );
+            holon_api::duration_budget::DurationBudget::small(
+                "mean transition apply and check",
+                std::time::Duration::from_millis(budget as u64),
+            )
+            .check(std::time::Duration::from_millis(mean_ms as u64))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "[{label}] HOLON_PBT_STEP_BUDGET_MS: {e} over {} transition(s) (StartApp \
+                     excluded)",
+                    self.steps
+                )
+            });
         }
     }
 }

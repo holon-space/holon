@@ -56,6 +56,7 @@ xcap = { git = "https://github.com/nightscape/xcap", branch = "feat/macos-offscr
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+holon-api = { workspace = true, features = ["test-helpers"] }
 holon-loro-wiring.workspace = true
 tempfile = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

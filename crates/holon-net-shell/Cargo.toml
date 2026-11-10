@@ -17,6 +17,7 @@ tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "s
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+holon-api = { workspace = true, features = ["test-helpers"] }
 holon-pattern.workspace = true
 libc = "0.2"
 tempfile.workspace = true

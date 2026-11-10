@@ -55,6 +55,7 @@ tokio-stream.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+holon-api = { workspace = true, features = ["test-helpers"] }
 turso_core.workspace = true
 holon = { workspace = true, features = ["test-helpers"] }
 holon-block-roundtrip-testing.workspace = true

@@ -79,10 +79,14 @@ fn a_ten_thousand_item_list_maps_inside_the_slo() {
     assert_eq!(snapshot.len(), 10_000, "every item survived the mapping");
     println!("compile {compile_ms} ms · map {map_ms} ms · snapshot {build_ms} ms (10 000 items)");
 
-    assert!(
-        compile_ms < SLO_MS,
-        "compiling the filter took {compile_ms} ms; it is paid once per connection, so anything \
-         near the {SLO_MS} ms interaction budget means it is being paid per call"
+    holon_api::duration_budget::DurationBudget::small(
+        "filter compile",
+        std::time::Duration::from_millis(SLO_MS as u64),
+    )
+    .check(std::time::Duration::from_millis(compile_ms as u64))
+    .expect(
+        "the filter compile is paid once per connection, so anything near the interaction \
+             budget means it is being paid per call",
     );
 
     // MEASURED 2026-09-03, release, M-series: compile 1 ms, map 1266 ms,
@@ -99,9 +103,12 @@ fn a_ten_thousand_item_list_maps_inside_the_slo() {
     } else {
         SLO_MS * 20
     };
-    assert!(
-        map_ms + build_ms < budget,
-        "mapping 10 000 items took {map_ms} ms plus {build_ms} ms to build the snapshot, past the \
-         {budget} ms regression floor"
-    );
+    holon_api::duration_budget::DurationBudget::small(
+        "map and snapshot of 10 000 items",
+        std::time::Duration::from_millis(budget as u64),
+    )
+    .check(std::time::Duration::from_millis((map_ms + build_ms) as u64))
+    .unwrap_or_else(|e| {
+        panic!("{e}: mapping took {map_ms} ms plus {build_ms} ms to build the snapshot")
+    });
 }

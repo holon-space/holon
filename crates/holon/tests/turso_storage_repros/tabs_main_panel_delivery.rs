@@ -180,10 +180,14 @@ async fn cursor_filtered_main_panel_delivers_at_vault_scale() {
         panel.len()
     );
 
-    assert!(
-        elapsed < Duration::from_secs(5),
+    holon_api::duration_budget::DurationBudget::small(
+        "main panel create and first read",
+        Duration::from_secs(5),
+    )
+    .check(elapsed)
+    .expect(
         "cursor-filtered main panel must deliver within a couple of seconds at ~70-page vault \
-         scale; took {elapsed:?} (unguarded landmine form hung 60-90s)"
+             scale (unguarded landmine form hung 60-90s)",
     );
 
     let got = ids(&panel, "id");

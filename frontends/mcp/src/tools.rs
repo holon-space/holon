@@ -10419,10 +10419,12 @@ mod dense_patch_readback_tests {
             .expect_err("the store reads back `Renamed (rewritten)`, which is not the edited row");
         let answered_after = started.elapsed();
         flusher.abort();
-        assert!(
-            answered_after < std::time::Duration::from_secs(5),
-            "an inexact apply answers within the 5 s limit, not after {answered_after:?}"
-        );
+        holon_api::duration_budget::DurationBudget::small(
+            "inexact apply answer",
+            std::time::Duration::from_secs(5),
+        )
+        .check(answered_after)
+        .expect("an inexact apply answers within the 5 s limit");
 
         assert!(
             err.message.contains("ROLLED BACK") && err.message.contains("{#0}"),

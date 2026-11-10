@@ -84,9 +84,11 @@ async fn history_record_batch_overhead() {
             "history overhead {label}: p50={p50}us p95={p95}us max={max}us over {ITERS} iters \
              (file-backed Turso)"
         );
-        assert!(
-            p95 < 5_000,
-            "{label}: p95 {p95}us breaches the 5ms INC1 acceptance bound"
-        );
+        holon_api::duration_budget::DurationBudget::small(
+            "history record_batch p95",
+            std::time::Duration::from_millis(5),
+        )
+        .check(std::time::Duration::from_micros(p95 as u64))
+        .unwrap_or_else(|e| panic!("{label}: {e}: the acceptance bound"));
     }
 }

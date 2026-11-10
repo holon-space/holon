@@ -319,10 +319,12 @@ fn fan_out_expansion_is_bounded_and_exhaustion_is_disclosed() {
             calls, 64,
             "the resolver must be called exactly the budgeted number of times, not {calls}"
         );
-        assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "a bounded pass must finish promptly; took {elapsed:?}"
-        );
+        holon_api::duration_budget::DurationBudget::small(
+            "bounded describe_ui pass",
+            std::time::Duration::from_secs(5),
+        )
+        .check(elapsed)
+        .expect("a bounded pass must finish promptly");
 
         let rendered = vm.pretty_print(0);
         assert!(

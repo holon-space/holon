@@ -334,12 +334,15 @@ fn a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_wo
     const CEILING: std::time::Duration = std::time::Duration::from_secs(2);
     let started = std::time::Instant::now();
     let refused = mapper.map(&json!({ "p": "9".repeat(500_000) }));
+    let took = started.elapsed();
     assert!(
-        refused.is_err() && started.elapsed() < CEILING,
-        "500 000 digits must be refused in under {CEILING:?}; it took {:?} and gave {:?}",
-        started.elapsed(),
+        refused.is_err(),
+        "500 000 digits must be refused; it gave {:?}",
         refused.map(|v| v.len())
     );
+    holon_api::duration_budget::DurationBudget::small("refusal of 500 000 digits", CEILING)
+        .check(took)
+        .expect("500 000 digits must be refused promptly");
 }
 
 #[test]

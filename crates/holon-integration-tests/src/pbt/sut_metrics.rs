@@ -22,8 +22,6 @@ use std::time::Duration;
 #[cfg(feature = "otel-testing")]
 use super::reference_state::ReferenceState;
 #[cfg(feature = "otel-testing")]
-use crate::pbt::invariants::bodies::sql_budget::InvSqlBudget;
-#[cfg(feature = "otel-testing")]
 use crate::pbt::invariants::bodies::sql_budget::SqlBudgetReport;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transitions::E2ETransition;
@@ -307,13 +305,18 @@ impl MetricsSut {
             cum = memory.cumulative_growth_mb(),
         );
 
-        let violations = transition_budgets::check_budget(
+        // A refused timing environment or an unwritable ledger fails the run
+        // like a pinned breach: there is no verdict to fall back to.
+        let (violations, timing_error) = match transition_budgets::check_budget(
             last_transition,
             ref_state,
             &metrics,
             wall_time,
             Some(&memory),
-        );
+        ) {
+            Ok(violations) => (violations, None),
+            Err(e) => (Vec::new(), Some(format!("[inv-sql-budget] {key}: {e}"))),
+        };
         let enforce = std::env::var("HOLON_PERF_BUDGET")
             .map(|v| v != "0")
             .unwrap_or(false);
@@ -338,8 +341,8 @@ impl MetricsSut {
         // A pinned breach fails the run on its own, so the report must declare
         // itself enforced even when `HOLON_PERF_BUDGET` is off — otherwise
         // `InvSqlBudget` would downgrade it to `Skipped`.
-        let mut errors = Vec::new();
-        let mut pinned_breach = false;
+        let mut pinned_breach = timing_error.is_some();
+        let mut errors: Vec<String> = timing_error.into_iter().collect();
         for v in &violations {
             match v {
                 transition_budgets::Violation::Warning(msg) => {
@@ -357,24 +360,8 @@ impl MetricsSut {
                     pinned_breach = true;
                     errors.push(msg.clone());
                 }
-                transition_budgets::Violation::Measured {
-                    metric,
-                    actual,
-                    limit,
-                    message,
-                } => {
-                    // Measured, disclosed and kept as a trend line, not failed:
-                    // `HOLON_PBT_TIMING=measure` and the metric is one load
-                    // moves (#475). The message still goes out verbatim so the
-                    // existing `[inv-sql-budget …]` greps keep seeing it.
+                transition_budgets::Violation::Measured { message, .. } => {
                     eprintln!("[inv-sql-budget MEASURED] {message}");
-                    crate::pbt::timing_mode::disclose(&crate::pbt::timing_mode::Breach::new(
-                        &format!("{}/{}", InvSqlBudget::ID.0, metric.key()),
-                        &key,
-                        *actual,
-                        *limit,
-                        metric.unit(),
-                    ));
                 }
             }
         }

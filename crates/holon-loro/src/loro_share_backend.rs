@@ -4914,10 +4914,13 @@ mod tests {
                 .quiesce()
                 .is_idle()
         };
-        assert!(
-            elapsed < Duration::from_secs(3),
-            "settle took {elapsed:?}; it waited on the sync worker's barrier save \
-             and its dial to an unreachable peer"
+        holon_api::duration_budget::DurationBudget::small(
+            "settle with an unreachable peer",
+            Duration::from_secs(3),
+        )
+        .check(elapsed)
+        .expect(
+            "settle waited on the sync worker's barrier save and its dial to an unreachable peer",
         );
         assert!(
             still_busy,

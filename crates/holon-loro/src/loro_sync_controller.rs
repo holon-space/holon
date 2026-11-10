@@ -2528,6 +2528,8 @@ mod boot_gate_tests {
     /// Short stand-ins for the `Timings` boot-gate durations.
     const WARN: Duration = Duration::from_millis(20);
     const WATCHDOG: Duration = Duration::from_millis(200);
+    /// A watchdog only a hang reaches, so a busy host cannot pick the outcome.
+    const LIVENESS_WATCHDOG: Duration = Duration::from_secs(30);
 
     #[tokio::test]
     async fn opens_immediately_when_the_scan_is_already_done() {
@@ -2544,7 +2546,7 @@ mod boot_gate_tests {
             tokio::time::sleep(Duration::from_millis(30)).await;
             g.open();
         });
-        let out = wait_for_boot_gate(gate.watcher(), WARN, WATCHDOG).await;
+        let out = wait_for_boot_gate(gate.watcher(), WARN, LIVENESS_WATCHDOG).await;
         assert_eq!(out, BootGateOutcome::Opened);
     }
 
@@ -2575,12 +2577,14 @@ mod boot_gate_tests {
             tokio::time::sleep(Duration::from_millis(30)).await;
             drop(gate);
         });
-        let out = wait_for_boot_gate(watcher, WARN, WATCHDOG).await;
+        let out = wait_for_boot_gate(watcher, WARN, LIVENESS_WATCHDOG).await;
         assert_eq!(out, BootGateOutcome::Closed);
-        assert!(
-            started.elapsed() < WATCHDOG,
-            "fell through to the watchdog instead of observing the drop"
-        );
+        holon_api::duration_budget::DurationBudget::small(
+            "boot gate close after its drop",
+            WATCHDOG,
+        )
+        .check(started.elapsed())
+        .expect("fell through to the watchdog instead of observing the drop");
     }
 }
 

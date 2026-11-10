@@ -61,9 +61,15 @@ fn a_create_costs_the_same_in_a_large_tree_as_in_a_small_one() {
     }
     let early = buckets[0];
     let late = *buckets.last().unwrap();
-    assert!(
-        late <= early * 3 + Duration::from_micros(50),
-        "[{profile}] a create in a tree of {CREATES} nodes takes {late:?}, in a tree of \
-         {BUCKET} nodes {early:?}: the per-create cost grows with the tree"
-    );
+    holon_api::duration_budget::DurationBudget::small(
+        "create in a large tree",
+        early * 3 + Duration::from_micros(50),
+    )
+    .check(late)
+    .unwrap_or_else(|e| {
+        panic!(
+            "[{profile}] {e}; a create in a tree of {BUCKET} nodes takes {early:?}: the \
+                 per-create cost grows with the tree"
+        )
+    });
 }

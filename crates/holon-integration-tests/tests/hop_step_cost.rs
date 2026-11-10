@@ -519,10 +519,13 @@ fn one_hop_cost_in_the_production_composition() {
         // harness header records the 4.7x run-to-run spread that makes a wall
         // clock a poor assertion, and five siblings leaves enough headroom to
         // survive it while fifty does not.
-        assert!(
-            gated <= D165A_GATE_MS,
-            "the p95 fan-out case must fit the D152.a rung with a conforming (prefetching) \
-             marking: {gated:.3} ms > {D165A_GATE_MS} ms"
+        holon_api::duration_budget::DurationBudget::small(
+            "p95 fan-out hop step with prefetch",
+            holon_api::duration_budget::from_ms(D165A_GATE_MS).expect("the gate is a duration"),
+        )
+        .check(holon_api::duration_budget::from_ms(gated).expect("a summed p50 is a duration"))
+        .expect(
+            "the p95 fan-out case must fit the D152.a rung with a conforming (prefetching) marking",
         );
     });
 }

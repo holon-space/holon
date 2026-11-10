@@ -31,6 +31,8 @@ pub mod computed;
 pub mod content_canonical;
 pub mod decision;
 pub mod decision_block;
+#[cfg(feature = "test-helpers")]
+pub mod duration_budget;
 pub mod edge_field;
 pub mod effect_id;
 pub mod entity;
@@ -84,6 +86,8 @@ pub mod streaming;
 pub mod template;
 pub mod template_instantiation;
 pub mod theme_token;
+#[cfg(feature = "test-helpers")]
+pub mod timing_mode;
 pub mod type_services;
 pub mod types;
 pub mod ui_watcher;

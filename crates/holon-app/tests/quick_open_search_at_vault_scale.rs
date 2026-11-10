@@ -164,12 +164,17 @@ fn quick_open_search_at_vault_scale() {
                 hits.pages.len(),
                 hits.content.len()
             );
-            assert!(
-                elapsed < JOIN_REGRESSION_BOUND,
-                "quick_open_search({q:?}) took {elapsed:?}, over the {JOIN_REGRESSION_BOUND:?} \
-                 join-regression bound — a search this slow is overtaken by the next keystroke and \
-                 the overlay renders 'No matches' forever"
-            );
+            holon_api::duration_budget::DurationBudget::small(
+                "quick_open_search per keystroke",
+                JOIN_REGRESSION_BOUND,
+            )
+            .check(elapsed)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "quick_open_search({q:?}): {e} — a search this slow is overtaken by the \
+                         next keystroke and the overlay renders 'No matches' forever"
+                )
+            });
         }
 
         // Substring match over block content, and over page names.

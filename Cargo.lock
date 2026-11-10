@@ -5966,6 +5966,7 @@ dependencies = [
 name = "holon-net-shell"
 version = "0.1.0"
 dependencies = [
+ "holon-api",
  "holon-net",
  "holon-pattern",
  "libc",
@@ -5983,6 +5984,7 @@ version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
  "clap",
+ "holon-api",
  "holon-loopback-guard",
  "holon-net",
  "holon-net-shell",

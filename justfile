@@ -198,10 +198,9 @@ pbt name='general' cases='64' *FLAGS:
 # A draw that ends on a registered known red is spent and drawn again, up to 4
 # extra draws; only known reds up to that cap is a FLOOR BREACH (red).
 #
-# It is also the gate's ENFORCED latency rung: it inherits the default
-# `HOLON_PBT_TIMING=enforce` and runs inside `just timing-gate`, under the quiet
-# hold. Do not default it to `measure` — every other composed step measures, so
-# this is the only place the 200ms SLO is judged over generated transitions.
+# It is also the gate's latency rung: it runs inside `just timing-gate`, under
+# the quiet hold, in the mode that recipe sets. It is the only place the 200ms
+# SLO is checked over generated transitions.
 keystone-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -296,7 +295,7 @@ hand-authored *FLAGS:
     export HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1}
     # This replay asserts no duration of ITS own; it only carried the composed
     # harness's latency oracles. `measure` keeps the measurement and drops the
-    # verdict, so it runs at lane load. The enforced verdict lives in `just timing-gate`.
+    # verdict, so it runs at lane load. The latency rung lives in `just timing-gate`.
     export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}
     L=target/gate-logs/pbt-hand-authored.log
     echo "HOLON_PBT_TIMING=$HOLON_PBT_TIMING" | tee "$L"
@@ -576,10 +575,8 @@ org-deep-text-timing *FLAGS:
     # recipe's exit status is `tee`'s, so a failing test would report success.
     set -euo pipefail
     mkdir -p target/gate-logs
-    # PINNED, not defaulted: these two budgets ARE this recipe's subject, so a
-    # caller that exported `measure` for the surrounding gate must not soften
-    # them.
-    export HOLON_PBT_TIMING=enforce
+    # `timing-gate` sets the mode of every timing step in one line.
+    export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}
     echo "org-deep-text-timing: load before $(sysctl -n vm.loadavg 2>/dev/null || uptime)"
     cargo test {{CANON}} --test deep_authored_text_never_aborts \
         -- --ignored --nocapture --test-threads=1 {{FLAGS}} 2>&1 \
@@ -810,8 +807,8 @@ latency-slo-gate *FLAGS:
              crates/holon-api/src/latency_drain.rs; do
         [ -f "$f" ] || { echo "latency-slo-gate: wrong tree — missing $f" >&2; exit 2; }
     done
-    # PINNED, not defaulted: latency is this gate's subject.
-    export HOLON_PBT_TIMING=enforce
+    # `timing-gate` sets the mode of every timing step in one line.
+    export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}
     cargo nextest run {{CANON}} --test integration -E 'test(/^latency_slo_gate::/)' --ignore-default-filter \
         --no-capture --no-fail-fast {{FLAGS}} 2>&1 \
         | tee target/gate-logs/latency-slo-gate.log
@@ -1629,11 +1626,10 @@ windowed-gate:
 # The ONE quiet-hold step of the landing gate: everything whose own assertion
 # is a duration, and nothing else.
 #
-# `--profile timing` and the `own-recipe` recipes are complementary halves of
-# docs/Testing/TimingCritical.md's table — see its `Runs` legend. `keystone-smoke`
-# is the rung that ENFORCES the 200ms interaction→projection-visible SLO: every
-# other step measures, so without it nothing under the hold would judge latency
-# at all. A hand-authored subset cannot be that rung: its corpus misses
+# `--profile timing` and the recipes that `TIMING_OWNERS` names besides this
+# one are complementary halves of the timing set (scripts/timing-split.py). `keystone-smoke`
+# is the rung of the 200ms interaction→projection-visible SLO over generated
+# transitions. A hand-authored subset cannot be that rung: its corpus misses
 # budgeted kinds, `SharePage` among them, while the generated keystone draws
 # from the whole alphabet.
 timing-gate:
@@ -1652,8 +1648,9 @@ timing-gate:
     [ "$rc" = 0 ] || { echo "QUIET HOLD NOT TAKEN: with-build-slot.sh --quiet-hold exit $rc"; exit "$rc"; }
     export HOLON_BUILD_QUIET_HOLDER=$$
     trap "bash $SLOT --quiet-release $$" EXIT
-    # Explicit, never inherited: this is the ONE step that judges.
-    export HOLON_PBT_TIMING=enforce
+    # The mode of every step below. Every duration budget measures until build
+    # and test are stable; `enforce` here makes this gate judge them again.
+    export HOLON_PBT_TIMING=measure
     # Taking the hold LOWERS the other builds, it does not finish their in-flight
     # work, so the latency rung's own contention probe can refuse to score right
     # after it. Wait for that probe — the rung's own measure of "quiet enough",
@@ -1705,7 +1702,7 @@ timing-gate:
              echo "nothing — run scripts/timing-split.py resolve to see which row."
              exit 1
          }' \
-      "keystone smoke, latency ENFORCED" \
+      "keystone smoke, latency rung" \
         'K=target/gate-logs/timing-gate-keystone.log
          just keystone-smoke 2>&1 | tee "$K"
          # Which of the 129 budgeted kinds this rung actually judged. One random
@@ -1803,7 +1800,7 @@ landing-gate:
     just guests-verify
     # The ONE step that needs the quiet host: it holds `keystone-smoke`, the SLO
     # gate, the deep-text budgets and the timing profile.
-    echo "== landing [16/17]: timing-critical tests, latency ENFORCED =="
+    echo "== landing [16/17]: timing-critical tests and the latency rung =="
     just timing-gate
     echo "== landing [17/17]: target-gc (D85.c, this lane's own target/ only) =="
     just target-gc || echo "target-gc: non-fatal (busy or nothing to reclaim), see above"

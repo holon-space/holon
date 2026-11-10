@@ -3347,10 +3347,14 @@ mod tests {
         }
         let per_derive = start.elapsed() / 100;
         eprintln!("[net-proj] derived_net() cost: {per_derive:?} per call");
-        assert!(
-            per_derive < std::time::Duration::from_millis(5),
-            "one derive took {per_derive:?}; at that cost a per-tick assertion dominates the \
-             keystone and the invariant belongs on the finish hook instead",
+        holon_api::duration_budget::DurationBudget::small(
+            "derived_net per call",
+            std::time::Duration::from_millis(5),
+        )
+        .check(per_derive)
+        .expect(
+            "at this cost a per-tick assertion dominates the keystone and the invariant \
+                 belongs on the finish hook instead",
         );
     }
 

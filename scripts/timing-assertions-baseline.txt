@@ -1,26 +1,30 @@
 # Every duration comparison in assertion position, with the class its author assigned.
-# Classes: timing (the point is that the duration is SMALL; must be in the
-#   timing group), liveness (the message reads 'it never happened'), lower-bound
+# Classes: timing (a `DurationBudget::small` call: the point is that the duration
+#   is SMALL), liveness (the message reads 'it never happened'), lower-bound
 #   (load can only make it pass), harness (plumbing: a wait helper's own bound),
 #   virtual-clock (a PAUSED tokio clock: load cannot move it at all).
 # See docs/Testing/TimingCritical.md. Regenerate with `scripts/timing-split.py assertions --update`.
 crates/holon/src/api/action_watcher.rs	liveness	std::time::Instant::now() < deadline,
-crates/holon/src/api/backend_engine.rs	timing	per_derive < std::time::Duration::from_millis(5),
+crates/holon/src/api/backend_engine.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon/src/api/holon_rule_watcher.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon/src/sync/clock_scheduler.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon/src/sync/clock_scheduler.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon/src/sync/clock_scheduler.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon/src/testing/database_stuck_guard.rs	liveness	std::time::Instant::now() < deadline,
-crates/holon-api/src/clock/tests.rs	lower-bound	.timeout(Duration::from_millis(10), futures::future::pending::<()>())
+crates/holon-api/src/clock/tests.rs	lower-bound	assert!(SystemClock.now_millis() > 0);
+crates/holon-api/src/latency_drain.rs	harness	window as f64 > floor_per_sec * slack.as_secs_f64() + 1.0,
+crates/holon-api/src/latency_drain.rs	harness	offer_every.as_secs_f64() < 1.0 / floor_per_sec,
+crates/holon-api/src/latency_slo/tests.rs	lower-bound	raw_p95 > SERVICE_TIME_SLO_MS,
 crates/holon-api/src/latency_slo.rs	lower-bound	drain.elapsed > Duration::ZERO,
 crates/holon-frontend/src/reactive_view.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-frontend/src/reactive_view.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt/composed/invariants/settle_budget.rs	harness	assert!(SLO < Duration::from_secs(9));
+crates/holon-integration-tests/src/pbt/composed/live_mcp.rs	liveness	if poll_start.elapsed() > budget {
 crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs	liveness	started.elapsed() < cap,
 crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs	liveness	tokio::time::Instant::now() < start_deadline,
-crates/holon-integration-tests/src/pbt/convergence.rs	liveness	matches!(gave_up.why, GaveUpWhy::Stalled { .. }) && started.elapsed() < ceiling / 10,
+crates/holon-integration-tests/src/pbt/convergence.rs	timing	holon_api::duration_budget::DurationBudget::small("give-up on a stall", ceiling / 10)
 crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt/frontend_slice/components.rs	liveness	tokio::time::Instant::now() < deadline,
@@ -40,31 +44,49 @@ crates/holon-integration-tests/src/pbt/frontend_slice/structural_pbt.rs	liveness
 crates/holon-integration-tests/src/pbt/frontend_slice/structural_pbt.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt/frontend_slice/structural_pbt.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt/frontend_slice/structural_pbt.rs	liveness	tokio::time::Instant::now() < deadline,
+crates/holon-integration-tests/src/pbt/invariants/bodies/embedded_page_collapsed_lazy.rs	liveness	if Instant::now() >= deadline {
+crates/holon-integration-tests/src/pbt/invariants/bodies/engine_views_match_reference.rs	liveness	if Instant::now() >= deadline {
+crates/holon-integration-tests/src/pbt/invariants/bodies/integration_op_routable_or_refused.rs	liveness	if Instant::now() >= deadline {
+crates/holon-integration-tests/src/pbt/invariants/bodies/matview_recompute_matches.rs	liveness	if Instant::now() >= deadline {
+crates/holon-integration-tests/src/pbt/invariants/bodies/org_render_fixed_point.rs	liveness	if Instant::now() >= deadline {
+crates/holon-integration-tests/src/pbt/invariants/bodies/settle_budget.rs	timing	match DurationBudget::small(quantity, budget).check_in(env, sample.elapsed) {
 crates/holon-integration-tests/src/pbt/invariants/bodies/settle_budget.rs	harness	assert!(hard_budget() > SLO, "default slack must exceed 1");
+crates/holon-integration-tests/src/pbt/invariants/bodies/typed_matview_matches_ref.rs	liveness	if Instant::now() >= deadline {
+crates/holon-integration-tests/src/pbt/invariants/bodies/view_model_matches_store.rs	liveness	if Instant::now() >= deadline {
+crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs	liveness	if tokio::time::Instant::now() >= deadline {
+crates/holon-integration-tests/src/pbt/op_write_cap.rs	liveness	if tokio::time::Instant::now() >= deadline {
+crates/holon-integration-tests/src/pbt/stepper.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-integration-tests/src/pbt/transitions/split_block.rs	liveness	if tokio::time::Instant::now() >= click_deadline {
+crates/holon-integration-tests/src/pbt/transitions/split_block.rs	liveness	if tokio::time::Instant::now() >= click_deadline {
 crates/holon-integration-tests/src/pbt/ui_harness.rs	liveness	Instant::now() < deadline,
 crates/holon-integration-tests/src/pbt_mcp_fake.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/src/polling.rs	lower-bound	assert!(hung.waited >= Duration::from_millis(50), "{message}");
 crates/holon-integration-tests/src/test_environment.rs	liveness	start.elapsed() < timeout,
 crates/holon-loro/src/loro_backend.rs	lower-bound	waited >= Duration::from_millis(WIDENED_BIRTH_MS / 4),
 crates/holon-loro/src/loro_backend.rs	lower-bound	guarded_waited >= Duration::from_millis(WIDENED_BIRTH_MS / 4),
-crates/holon-loro/src/loro_share_backend.rs	timing	elapsed < Duration::from_secs(3),
+crates/holon-loro/src/loro_share_backend.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-loro/src/loro_share_backend.rs	liveness	if std::time::Instant::now() >= deadline {
 crates/holon-loro/src/loro_share_backend.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-loro/src/loro_share_backend.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-loro/src/loro_share_backend.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-loro/src/loro_share_backend.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-loro/src/loro_sync_controller.rs	lower-bound	started.elapsed() >= WATCHDOG,
-crates/holon-loro/src/loro_sync_controller.rs	timing	started.elapsed() < WATCHDOG,
+crates/holon-loro/src/loro_sync_controller.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon-loro-wiring/src/loro_ui_watcher.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-loro-wiring/src/loro_ui_watcher.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-mcp-client/src/mcp_call_surface.rs	virtual-clock	assert!(started.elapsed() <= REQUEST_TIMEOUT + std::time::Duration::from_secs(1));
 crates/holon-mcp-client/src/mcp_http_client.rs	lower-bound	first_error.is_none() && started.elapsed() >= GAP * GAPS,
+crates/holon-sharing/src/lease.rs	lower-bound	ttl_millis > 0,
 crates/holon-turso/src/actor_watch.rs	liveness	Instant::now() < deadline,
-crates/holon/tests/block_live_data_catch_up.rs	timing	elapsed < Duration::from_secs(2),
+crates/holon/tests/block_live_data_catch_up.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon/tests/block_live_data_catch_up.rs	lower-bound	elapsed >= Duration::from_millis(300),
+crates/holon/tests/history_overhead_bench.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon/tests/stress_tests.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon/tests/stuck_actor_reaches_condition_bus.rs	liveness	Instant::now() < deadline,
 crates/holon/tests/sync_import_read_only_adoption.rs	liveness	tokio::time::Instant::now() < deadline,
-crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs	timing	elapsed < Duration::from_secs(5),
-crates/holon/tests/watch_context_membership_leak.rs	timing	waited < Duration::from_secs(20),
+crates/holon/tests/sync_suite/sync_pbt.rs	liveness	if std::time::Instant::now() >= deadline {
+crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon/tests/watch_context_membership_leak.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon-app/tests/database_open_disclosure.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-app/tests/database_open_disclosure.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-app/tests/deleted_vault_profile_releases_its_claim.rs	liveness	assert!(start.elapsed() < DEADLINE, "the profile never loaded");
@@ -74,12 +96,15 @@ crates/holon-app/tests/deleted_vault_profile_releases_its_claim.rs	liveness	star
 crates/holon-app/tests/deleted_vault_profile_releases_its_claim.rs	liveness	assert!(start.elapsed() < DEADLINE, "the edit was never refused");
 crates/holon-app/tests/deleted_vault_profile_releases_its_claim.rs	liveness	start.elapsed() < DEADLINE,
 crates/holon-app/tests/deleted_vault_profile_releases_its_claim.rs	liveness	start.elapsed() < DEADLINE,
-crates/holon-app/tests/integration_set_field_op.rs	timing	elapsed < std::time::Duration::from_secs(1),
+crates/holon-app/tests/home_profile_lookup_latency.rs	timing	holon_api::duration_budget::DurationBudget::small("derived home lookup p95", SLO_P95)
+crates/holon-app/tests/integration_set_field_op.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon-app/tests/integrations_settings_vm.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-app/tests/page_slot_completes_a_placeholder.rs	liveness	tokio::time::Instant::now() < deadline,
-crates/holon-app/tests/quick_open_search_at_vault_scale.rs	timing	elapsed < JOIN_REGRESSION_BOUND,
+crates/holon-app/tests/quick_open_search_at_vault_scale.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon-app/tests/refused_profile_boots_degraded.rs	liveness	start.elapsed() < DEADLINE,
 crates/holon-app/tests/refused_profile_boots_degraded.rs	liveness	start.elapsed() < DEADLINE,
+crates/holon-app/tests/settings_ics_calendar_url_credential.rs	lower-bound	call.ics_window.back.duration().as_secs() > 0,
+crates/holon-app/tests/settings_ics_calendar_url_credential.rs	lower-bound	call.ics_window.forward.duration().as_secs() > 0,
 crates/holon-app/tests/stale_type_table_boots.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-app/tests/vault_file_delete_after_ingest.rs	liveness	assert!(start.elapsed() < DEADLINE, "the file was never ingested");
 crates/holon-frontend/tests/authored_builder_input_draws_error.rs	liveness	std::time::Instant::now() < deadline,
@@ -90,6 +115,7 @@ crates/holon-integration-tests/tests/boot_suite/junction_survives_reboot_repro.r
 crates/holon-integration-tests/tests/boot_suite/junction_survives_reboot_repro.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/catalog_suite/pn_catalog_truthfulness_probe.rs	liveness	Instant::now() < deadline,
 crates/holon-integration-tests/tests/catalog_suite/task_vocabulary_reaches_the_store.rs	liveness	std::time::Instant::now() < deadline,
+crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	if std::time::Instant::now() >= deadline {
 crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::Instant::now() < deadline,
@@ -98,6 +124,8 @@ crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::In
 crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/cook_vault_ingest.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/dense_patch_engine_exact.rs	liveness	started.elapsed() < WRITEBACK_WAIT,
+crates/holon-integration-tests/tests/duration_budget_pbt.rs	timing	Class::Small => DurationBudget::small(quantity, budget),
+crates/holon-integration-tests/tests/duration_budget_pbt.rs	harness	(got_ns - want_ns).abs() <= 1.0 + want_ns * 1e-12,
 crates/holon-integration-tests/tests/editing_suite/cycle_task_state_cold_boot_reingest.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/editing_suite/drawer_id_write_boundary.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/editing_suite/drawer_key_write_boundary.rs	liveness	std::time::Instant::now() < deadline,
@@ -107,6 +135,7 @@ crates/holon-integration-tests/tests/editing_suite/merge_blocks_pbt.rs	liveness	
 crates/holon-integration-tests/tests/editing_suite/multiline_property_write_boundary.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/editing_suite/schedule_boundary_observables.rs	liveness	started.elapsed() < wedge_budget(),
 crates/holon-integration-tests/tests/editing_suite/schedule_boundary_observables.rs	liveness	assert!(started.elapsed() < wedge_budget());
+crates/holon-integration-tests/tests/enabledness_query_production_cost.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon-integration-tests/tests/frontend_suite/fire_and_forget_dispatch_disclosure.rs	liveness	Instant::now() < deadline,
 crates/holon-integration-tests/tests/frontend_suite/fire_and_forget_dispatch_disclosure.rs	liveness	assert!(Instant::now() < deadline, "the chain never finished");
 crates/holon-integration-tests/tests/frontend_suite/integration_connect_stall_blocks_boot.rs	liveness	Instant::now() < deadline,
@@ -119,8 +148,17 @@ crates/holon-integration-tests/tests/frontend_suite/page_title_survives_a_never_
 crates/holon-integration-tests/tests/frontend_suite/perspective_slot_resolution.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/frontend_suite/perspective_slot_resolution.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/frontend_suite/sidebar_modifier_click_open_tab_probe.rs	liveness	Instant::now() < deadline,
-crates/holon-integration-tests/tests/latency_slo_gate.rs	timing	started.elapsed() < TEETH_WRITE_DEADLINE,
-crates/holon-integration-tests/tests/latency_slo_gate.rs	timing	started.elapsed() < FENCE_ROUND_PATIENCE,
+crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs	lower-bound	let reproduced = watch_p95 >= CLIFF_FLOOR_MS;
+crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-integration-tests/tests/hop_step_cost.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-integration-tests/tests/latency_slo_gate.rs	timing	DurationBudget::small(
+crates/holon-integration-tests/tests/latency_slo_gate.rs	timing	DurationBudget::small(name, std::time::Duration::from_millis(SERVICE_TIME_SLO_MS))
+crates/holon-integration-tests/tests/latency_slo_gate.rs	timing	DurationBudget::small("drain completion", *limit)
+crates/holon-integration-tests/tests/latency_slo_gate.rs	liveness	started.elapsed() < TEETH_WRITE_DEADLINE,
+crates/holon-integration-tests/tests/latency_slo_gate.rs	lower-bound	p50 >= TEETH_MIN_SLOWED_P50_MS,
+crates/holon-integration-tests/tests/latency_slo_gate.rs	liveness	started.elapsed() < FENCE_ROUND_PATIENCE,
 crates/holon-integration-tests/tests/loro_suite/loro_delete_races_file_edit.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/loro_suite/loro_delete_races_file_edit.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/loro_suite/loro_delete_races_file_edit.rs	liveness	std::time::Instant::now() < deadline,
@@ -144,8 +182,16 @@ crates/holon-integration-tests/tests/loro_suite/loro_unseeded_vault_split.rs	liv
 crates/holon-integration-tests/tests/loro_suite/loro_unseeded_vault_split.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/loro_suite/loro_writes_on_unheld_blocks.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/org_suite/bidirectional_sync.rs	harness	if tokio::time::Instant::now() > deadline {
+crates/holon-integration-tests/tests/org_suite/bidirectional_sync.rs	harness	if tokio::time::Instant::now() > deadline {
+crates/holon-integration-tests/tests/org_suite/bidirectional_sync.rs	harness	if tokio::time::Instant::now() > deadline {
+crates/holon-integration-tests/tests/org_suite/bidirectional_sync.rs	harness	if tokio::time::Instant::now() > deadline {
+crates/holon-integration-tests/tests/org_suite/bidirectional_sync.rs	harness	if tokio::time::Instant::now() > deadline {
+crates/holon-integration-tests/tests/org_suite/bidirectional_sync.rs	harness	if tokio::time::Instant::now() > deadline {
+crates/holon-integration-tests/tests/org_suite/bidirectional_sync.rs	harness	if tokio::time::Instant::now() > deadline {
 crates/holon-integration-tests/tests/org_suite/conflict_copy_on_adoption.rs	liveness	assert!(std::time::Instant::now() < deadline, "{id} never landed");
 crates/holon-integration-tests/tests/org_suite/conflict_copy_on_adoption.rs	liveness	std::time::Instant::now() < deadline,
+crates/holon-integration-tests/tests/org_suite/doc_id_writeback_stability.rs	liveness	if tokio::time::Instant::now() > deadline {
+crates/holon-integration-tests/tests/org_suite/idless_external_reedit_dup.rs	liveness	if tokio::time::Instant::now() > deadline {
 crates/holon-integration-tests/tests/org_suite/journals_seed_file_collision.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/org_suite/reparent_clears_removed_values.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/org_suite/reparent_clears_removed_values.rs	liveness	std::time::Instant::now() < deadline,
@@ -160,6 +206,7 @@ crates/holon-integration-tests/tests/org_suite/writeback_stale_cross_doc_prune.r
 crates/holon-integration-tests/tests/org_suite/writeback_stale_cross_doc_prune.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/org_suite/writeback_stale_cross_doc_prune.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/sidebar_bind_latency_probe.rs	liveness	Instant::now() < deadline,
+crates/holon-integration-tests/tests/single_large_document_scale.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon-integration-tests/tests/span_capture_suite/interaction_trace_connectivity.rs	liveness	Instant::now() < deadline,
 crates/holon-integration-tests/tests/span_capture_suite/periodic_reads_outside_budget.rs	liveness	Instant::now() < deadline,
 crates/holon-integration-tests/tests/store_suite/chat_view_message_join.rs	liveness	Instant::now() < deadline,
@@ -168,25 +215,32 @@ crates/holon-integration-tests/tests/store_suite/matview_reboot_duplicate_repro.
 crates/holon-integration-tests/tests/store_suite/watch_recovers_when_table_appears.rs	liveness	Instant::now() < deadline,
 crates/holon-integration-tests/tests/store_suite/watch_refusal_is_final.rs	liveness	Instant::now() < deadline,
 crates/holon-integration-tests/tests/vault_scale_interaction_latency.rs	liveness	t0.elapsed() < Duration::from_secs(60),
-crates/holon-loro/tests/stable_id_index_create_cost.rs	timing	late <= early * 3 + Duration::from_micros(50),
-crates/holon-loro/tests/typed_entity_scale.rs	timing	guard.p95 < Duration::from_millis(200),
-crates/holon-loro/tests/typed_entity_scale.rs	timing	write.p95 < Duration::from_millis(5),
+crates/holon-kitchen/tests/shopping_mapping_cost.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-kitchen/tests/shopping_mapping_cost.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-loro/tests/stable_id_index_create_cost.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-loro/tests/typed_entity_scale.rs	timing	holon_api::duration_budget::DurationBudget::small("guard p95", Duration::from_millis(200))
+crates/holon-loro/tests/typed_entity_scale.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon-mcp-client/tests/http_bounds.rs	virtual-clock	waited <= REQUEST_TIMEOUT + std::time::Duration::from_secs(1),
 crates/holon-mcp-client/tests/http_bounds.rs	virtual-clock	waited <= REQUEST_TIMEOUT + std::time::Duration::from_secs(1),
-crates/holon-mcp-client/tests/oauth_bootstrap_flow.rs	timing	started.elapsed() < Duration::from_secs(5),
+crates/holon-mcp-client/tests/oauth_bootstrap_flow.rs	timing	holon_api::duration_budget::DurationBudget::small(
 crates/holon-mcp-client/tests/subscribe_bounds.rs	virtual-clock	started.elapsed() <= REQUEST_TIMEOUT + Duration::from_secs(1),
 crates/holon-mcp-mock/tests/mcp_mock_e2e.rs	liveness	Instant::now() < deadline,
 crates/holon-mcp-mock/tests/mcp_mock_e2e.rs	lower-bound	start.elapsed() >= Duration::from_millis(250),
 crates/holon-net-shell/tests/probe_run.rs	liveness	std::time::Instant::now() < deadline,
 crates/holon-net-shell/tests/shell_effect.rs	liveness	assert!(Instant::now() < deadline, "the child never {what}");
 crates/holon-net-shell/tests/shell_log_paths.rs	liveness	tokio::time::Instant::now() < deadline,
-crates/holon-rows/tests/mapper_bounds.rs	timing	refused.is_err() && started.elapsed() < CEILING,
+crates/holon-net-shell/tests/shell_pid_file_held_write.rs	timing	holon_api::duration_budget::DurationBudget::small("pid-file caller answer", BOUND)
+crates/holon-netd/tests/netd_start_pid_file.rs	timing	if let Err(e) = holon_api::duration_budget::DurationBudget::small(
+crates/holon-org-format/tests/deep_authored_text_never_aborts.rs	timing	if let Err(e) = holon_api::duration_budget::DurationBudget::small(
+crates/holon-org-format/tests/deep_authored_text_never_aborts.rs	timing	if let Err(e) = holon_api::duration_budget::DurationBudget::small(
+crates/holon-plugin-host/tests/vault_scan_latency.rs	timing	holon_api::duration_budget::DurationBudget::small(
+crates/holon-rows/tests/mapper_bounds.rs	timing	holon_api::duration_budget::DurationBudget::small("refusal of 500 000 digits", CEILING)
 crates/holon-turso/tests/stuck_actor_watch.rs	liveness	Instant::now() < deadline,
 crates/holon-turso/tests/stuck_actor_watch.rs	liveness	Instant::now() < deadline,
 crates/holon-turso/tests/stuck_actor_watch.rs	lower-bound	waited >= Duration::from_millis(500),
 frontends/mcp/src/standalone.rs	liveness	Instant::now() < deadline,
 frontends/mcp/src/tools.rs	liveness	std::time::Instant::now() < deadline,
-frontends/mcp/src/tools.rs	timing	answered_after < std::time::Duration::from_secs(5),
+frontends/mcp/src/tools.rs	timing	holon_api::duration_budget::DurationBudget::small(
 frontends/gpui/tests/condition_bus_container.rs	liveness	Instant::now() < deadline,
 frontends/gpui/tests/integrations_sidebar_rows_windowed.rs	liveness	std::time::Instant::now() < deadline,
 frontends/gpui/tests/mcp_write_repaints_windowed.rs	liveness	Instant::now() < deadline,
@@ -199,11 +253,14 @@ frontends/gpui/tests/reactive_vm_realwindow_test.rs	liveness	Instant::now() < de
 frontends/gpui/tests/screenshot_readback_windowed.rs	liveness	Instant::now() < boot_deadline,
 frontends/gpui/tests/screenshot_readback_windowed.rs	liveness	Instant::now() < response_deadline,
 frontends/gpui/tests/stop_signals_quit_through_the_session_shutdown.rs	liveness	Instant::now() < deadline,
+frontends/gpui/tests/stop_signals_quit_through_the_session_shutdown.rs	liveness	if Instant::now() >= deadline {
 frontends/gpui/tests/vault_loading_placeholder_windowed.rs	liveness	start.elapsed() < timeout,
-frontends/mcp/tests/describe_ui_deferred.rs	timing	elapsed < std::time::Duration::from_secs(5),
+frontends/mcp/tests/describe_ui_deferred.rs	timing	holon_api::duration_budget::DurationBudget::small(
 frontends/mcp/tests/sigterm_shuts_the_session_down.rs	liveness	Instant::now() < deadline,
 frontends/mcp/tests/sigterm_shuts_the_session_down.rs	liveness	Instant::now() < deadline,
 frontends/tui/tests/stop_signals_quit_through_the_session_shutdown.rs	liveness	Instant::now() < deadline,
 frontends/tui/tests/tui_module_panic_bus.rs	liveness	Instant::now() < deadline,
+frontends/tui/tests/tui_process/isolation.rs	harness	while (is_alive(&tui) || is_alive(&script) || serves(port)) && Instant::now() < deadline {
 frontends/tui/tests/tui_process/mod.rs	liveness	Instant::now() < deadline,
+frontends/tui/tests/tui_process/mod.rs	liveness	if Instant::now() >= deadline {
 frontends/tui/tests/tui_process/mod.rs	liveness	Instant::now() < deadline,

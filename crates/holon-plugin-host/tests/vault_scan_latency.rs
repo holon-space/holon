@@ -302,12 +302,17 @@ fn parsing_a_recipe_stays_within_the_scan_budget_in_every_build_profile() {
         started.elapsed() / files
     );
 
-    assert!(
-        per_recipe < PARSE_BUDGET_PER_RECIPE,
-        "parsing one recipe took {per_recipe:?} of CPU, over the {PARSE_BUDGET_PER_RECIPE:?} \
-         budget; a vault of 4352 recipes would hold the boot scan for {:?}",
-        per_recipe * 4352
-    );
+    holon_api::duration_budget::DurationBudget::small(
+        "parse CPU per recipe",
+        PARSE_BUDGET_PER_RECIPE,
+    )
+    .check(per_recipe)
+    .unwrap_or_else(|e| {
+        panic!(
+            "{e}; a vault of 4352 recipes would hold the boot scan for {:?}",
+            per_recipe * 4352
+        )
+    });
     let parses = holon_plugin_host::guest_parses() - parses_before;
     assert_eq!(parses, files as u64, "the guest must run once per recipe");
     assert!(

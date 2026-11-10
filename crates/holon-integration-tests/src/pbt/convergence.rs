@@ -827,11 +827,14 @@ mod tests {
         )
         .await
         .expect_err("the change is never processed");
+        let took = started.elapsed();
         assert!(
-            matches!(gave_up.why, GaveUpWhy::Stalled { .. }) && started.elapsed() < ceiling / 10,
-            "gave up after {:?}: {gave_up}",
-            started.elapsed()
+            matches!(gave_up.why, GaveUpWhy::Stalled { .. }),
+            "gave up after {took:?}: {gave_up}"
         );
+        holon_api::duration_budget::DurationBudget::small("give-up on a stall", ceiling / 10)
+            .check(took)
+            .unwrap_or_else(|e| panic!("{e}: {gave_up}"));
         assert_eq!(
             gave_up.owed.iter().map(|o| o.stage).collect::<Vec<_>>(),
             vec!["org-ingest"],

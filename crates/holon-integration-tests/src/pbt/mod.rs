@@ -76,7 +76,6 @@ pub mod stepper;
 pub use holon_loro_testing::sut_loro;
 mod sut_metrics;
 mod sut_row_parsing;
-pub mod timing_mode;
 #[cfg(feature = "otel-testing")]
 pub mod transition_budgets;
 pub mod transition_dispatch;
@@ -130,3 +129,33 @@ pub use ui_harness::try_start_embedded_mcp;
 pub use ui_harness::wait_for_geometry_ready;
 pub use ui_harness::wait_for_mcp_listener;
 pub use ui_interaction::UiInteraction;
+
+/// A timing environment for unit tests of a budget verdict: the mode the test
+/// pins, and a ledger in the temp dir, so the shared ledger never holds a
+/// test's made-up samples.
+#[cfg(test)]
+pub(crate) fn scratch_timing_env(
+    mode: holon_api::timing_mode::TimingMode,
+) -> holon_api::timing_mode::TimingEnv {
+    holon_api::timing_mode::TimingEnv {
+        mode,
+        ledger: scratch_ledger(),
+        gate: holon_api::timing_mode::GateId::local(),
+        test: holon_api::timing_mode::TestName::current()
+            .expect("a unit test runs on its own named thread"),
+    }
+}
+
+/// Points the process ledger at [`scratch_timing_env`]'s, for a unit test
+/// whose made-up samples reach a verdict through `TimingEnv::from_env`.
+#[cfg(test)]
+pub(crate) fn use_scratch_timing_ledger() {
+    // SAFETY: nextest runs every test in its own process, so nothing else
+    // reads the environment while this write happens.
+    unsafe { std::env::set_var(holon_api::timing_mode::LEDGER_ENV, scratch_ledger()) };
+}
+
+#[cfg(test)]
+fn scratch_ledger() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("holon-timing-scratch-{}.jsonl", std::process::id()))
+}

@@ -120,10 +120,12 @@ async fn wakes_when_blocks_arrive_via_cdc() {
     let elapsed = start.elapsed();
 
     assert!(caught_up, "two blocks arrived; wait_until must return true");
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "wait_until should wake on CDC arrival, not poll-spin; took {elapsed:?}"
-    );
+    holon_api::duration_budget::DurationBudget::small(
+        "wait_until wake on CDC arrival",
+        Duration::from_secs(2),
+    )
+    .check(elapsed)
+    .expect("wait_until should wake on CDC arrival, not poll-spin");
     assert_eq!(live.read().len(), 2);
 }
 

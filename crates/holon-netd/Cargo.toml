@@ -31,6 +31,7 @@ tracing-subscriber.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+holon-api = { workspace = true, features = ["test-helpers"] }
 libc = "0.2"
 proptest.workspace = true
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["client", "transport-streamable-http-client-reqwest"] }

@@ -216,10 +216,12 @@ async fn a_failed_watch_setup_leaves_no_membership_row() -> Result<()> {
         "a watch whose view cannot be created must return an error, not a stream: waited {waited:?}"
     );
     println!("[failed-setup] error returned after {waited:?}");
-    assert!(
-        waited < Duration::from_secs(20),
-        "the failure path must return promptly, not park in a dependency wait: {waited:?}"
-    );
+    holon_api::duration_budget::DurationBudget::small(
+        "failed watch setup return",
+        Duration::from_secs(20),
+    )
+    .check(waited)
+    .expect("the failure path must return promptly, not park in a dependency wait");
 
     // The guard's `Drop` cannot await, so it hands the delete to the actor;
     // the property is that the row does not SURVIVE the failure, bounded.

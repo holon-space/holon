@@ -895,11 +895,12 @@ async fn a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout() {
     .expect_err("a silent peer must not yield a code");
 
     drop(silent);
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "the wait must be bounded by its own timeout, took {:?}",
-        started.elapsed()
-    );
+    holon_api::duration_budget::DurationBudget::small(
+        "wait_for_code on a silent peer",
+        Duration::from_secs(5),
+    )
+    .check(started.elapsed())
+    .expect("the wait must be bounded by its own timeout");
     assert!(
         format!("{err:#}").to_lowercase().contains("time"),
         "the failure must read as a timeout, got: {err:#}"

@@ -13,6 +13,11 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use holon_api::timing_mode::TimingEnv;
+use holon_api::timing_mode::TimingError;
+use holon_api::timing_mode::TimingMode;
+use holon_api::timing_mode::Unit;
+use holon_api::timing_mode::{self};
 // Budget formulas + inputs live in holon-pbt-core (Phase 1a Step 1); re-exported
 // so existing `crate::pbt::transition_budgets::…` import sites keep resolving.
 pub use holon_pbt_core::budget::{
@@ -25,7 +30,6 @@ pub use holon_pbt_core::budget::{
 use holon_pbt_core::types::Mutation;
 
 use super::reference_state::ReferenceState;
-use crate::pbt::timing_mode::TimingMode;
 use crate::test_tracing::TransitionMetrics;
 
 // ── SQL count model ───────────────────────────────────────────────
@@ -280,13 +284,10 @@ pub fn transition_key(transition: &crate::pbt::transitions::E2ETransition) -> St
 pub enum Violation {
     Warning(String),
     Error(String),
-    /// A breach of a NON-DETERMINISTIC ceiling (wall, query, settle, RSS)
-    /// observed under `HOLON_PBT_TIMING=measure`: measured, disclosed and
-    /// appended to the trend ledger, but not failed (#475). A deterministic
-    /// metric never becomes one of these — load does not move a SQL count.
-    ///
-    /// Carries the numbers, not only the message: the trend ledger must not
-    /// have to parse a log line back into a value.
+    /// A breach of a NON-DETERMINISTIC ceiling (wall, query, RSS) observed
+    /// under `HOLON_PBT_TIMING=measure`: its ledger line is written and it is
+    /// not failed. A deterministic metric never becomes one of these — load
+    /// does not move a SQL count.
     Measured {
         metric: Metric,
         actual: f64,
@@ -341,12 +342,13 @@ impl Metric {
         }
     }
 
-    /// The unit the trend ledger records this metric's value in.
-    pub fn unit(self) -> &'static str {
+    /// The unit the timing ledger records this metric's value in; a count has
+    /// none.
+    pub fn unit(self) -> Option<Unit> {
         match self {
-            Metric::SqlReads | Metric::SqlReadRepeat | Metric::SqlWrites | Metric::SqlDdl => "",
-            Metric::MaxQueryMs | Metric::WallMs | Metric::SettleMs => "ms",
-            Metric::RssDeltaBytes | Metric::RssCumulativeBytes => "B",
+            Metric::SqlReads | Metric::SqlReadRepeat | Metric::SqlWrites | Metric::SqlDdl => None,
+            Metric::MaxQueryMs | Metric::WallMs | Metric::SettleMs => Some(Unit::Ms),
+            Metric::RssDeltaBytes | Metric::RssCumulativeBytes => Some(Unit::Bytes),
         }
     }
 
@@ -628,24 +630,33 @@ pub fn build_samples(
     samples
 }
 
-/// Single comparator at the mode `HOLON_PBT_TIMING` selects.
-pub fn evaluate(samples: &[MetricSample]) -> Vec<Violation> {
-    evaluate_in(crate::pbt::timing_mode::mode(), samples)
-}
-
 /// Single comparator: a sample violates iff `actual > limit`.
 ///
-/// Under [`TimingMode::Measure`] an `Error` breach of a NON-deterministic
-/// metric becomes [`Violation::Measured`]. Everything else is unchanged in both
-/// modes: warnings stay warnings, a pinned ceiling stays fatal, and a breach of
-/// a deterministic metric stays an `Error` however loaded the host is.
-pub fn evaluate_in(mode: TimingMode, samples: &[MetricSample]) -> Vec<Violation> {
-    samples
-        .iter()
-        .filter(|s| s.actual > s.limit)
-        .map(|s| match s.severity {
+/// An `Error` ceiling of a NON-deterministic metric is a load-perturbed
+/// budget: every check of it writes one ledger line, quantity
+/// `inv-sql-budget/<metric>/<transition key>`, and under
+/// [`TimingMode::Measure`] its breach is [`Violation::Measured`]. Everything
+/// else is the same in both modes: warnings stay warnings, a pinned ceiling
+/// stays fatal, and a breach of a deterministic metric stays an `Error`
+/// however loaded the host is.
+pub fn evaluate_in(
+    env: &TimingEnv,
+    key: &str,
+    samples: &[MetricSample],
+) -> Result<Vec<Violation>, TimingError> {
+    let mut violations = Vec::new();
+    for s in samples {
+        let over = s.actual > s.limit;
+        if let (Severity::Error, Some(unit)) = (s.severity, s.metric.unit()) {
+            let quantity = format!("inv-sql-budget/{}/{key}", s.metric.key());
+            timing_mode::record(env, &quantity, s.actual, s.limit, unit, over)?;
+        }
+        if !over {
+            continue;
+        }
+        violations.push(match s.severity {
             Severity::Warn => Violation::Warning(s.message.clone()),
-            Severity::Error if mode == TimingMode::Measure && !s.metric.deterministic() => {
+            Severity::Error if env.mode == TimingMode::Measure && !s.metric.deterministic() => {
                 Violation::Measured {
                     metric: s.metric,
                     actual: s.actual,
@@ -667,8 +678,9 @@ pub fn evaluate_in(mode: TimingMode, samples: &[MetricSample]) -> Vec<Violation>
                 );
                 Violation::PinnedError(s.message.clone())
             }
-        })
-        .collect()
+        });
+    }
+    Ok(violations)
 }
 
 /// Check observed metrics against computed expected SQL counts + timing +
@@ -681,13 +693,13 @@ pub fn check_budget(
     metrics: &TransitionMetrics,
     wall_time: Duration,
     memory: Option<&MemoryMetrics>,
-) -> Vec<Violation> {
+) -> Result<Vec<Violation>, TimingError> {
     let key = transition_key(transition);
     let samples = build_samples(transition, ref_state, metrics, wall_time, memory);
     record_for_baseline(&key, &samples);
-    let mut violations = evaluate(&samples);
+    let mut violations = evaluate_in(&TimingEnv::from_env()?, &key, &samples)?;
     violations.extend(baseline_regressions(&key, &samples));
-    violations
+    Ok(violations)
 }
 
 // ── Baseline-relative regression (C3) ─────────────────────────────
@@ -1004,6 +1016,11 @@ pub fn diagnose_memory(key: &str) {
 mod tests {
     use super::*;
 
+    fn eval(mode: TimingMode, samples: &[MetricSample]) -> Vec<Violation> {
+        evaluate_in(&crate::pbt::scratch_timing_env(mode), "Probe", samples)
+            .expect("the scratch ledger takes the line")
+    }
+
     fn sample(metric: Metric, actual: f64, limit: f64, severity: Severity) -> MetricSample {
         MetricSample {
             metric,
@@ -1023,7 +1040,7 @@ mod tests {
             sample(Metric::WallMs, 31_000.0, 30_000.0, Severity::Error),
             sample(Metric::SqlReads, 90.0, 40.0, Severity::Error),
         ];
-        let enforced = evaluate_in(TimingMode::Enforce, &samples);
+        let enforced = eval(TimingMode::Enforce, &samples);
         assert_eq!(
             enforced
                 .iter()
@@ -1033,7 +1050,7 @@ mod tests {
             "enforce fails both: {enforced:?}"
         );
 
-        let measured = evaluate_in(TimingMode::Measure, &samples);
+        let measured = eval(TimingMode::Measure, &samples);
         let errors: Vec<_> = measured
             .iter()
             .filter_map(|v| match v {
@@ -1062,7 +1079,7 @@ mod tests {
     /// The trend ledger must not parse a log line back into a number.
     #[test]
     fn a_measured_violation_carries_its_value_and_limit() {
-        let measured = evaluate_in(
+        let measured = eval(
             TimingMode::Measure,
             &[sample(Metric::WallMs, 31_000.0, 30_000.0, Severity::Error)],
         );
@@ -1078,7 +1095,7 @@ mod tests {
             panic!("one Measured violation expected, got {measured:?}");
         };
         assert_eq!((*actual, *limit), (31_000.0, 30_000.0));
-        assert_eq!(metric.unit(), "ms");
+        assert_eq!(metric.unit(), Some(Unit::Ms));
     }
 
     /// A warning stays a warning and a pinned ceiling stays fatal in both
@@ -1090,7 +1107,7 @@ mod tests {
             sample(Metric::SqlReads, 90.0, 40.0, Severity::Pinned),
         ];
         for mode in [TimingMode::Enforce, TimingMode::Measure] {
-            let out = evaluate_in(mode, &samples);
+            let out = eval(mode, &samples);
             assert!(
                 out.iter().any(|v| matches!(v, Violation::Warning(_)))
                     && out.iter().any(|v| matches!(v, Violation::PinnedError(_))),
@@ -1111,7 +1128,7 @@ mod tests {
             Metric::SqlDdl,
         ] {
             assert!(m.deterministic(), "{} is a count", m.key());
-            assert_eq!(m.unit(), "", "a count is unitless: {}", m.key());
+            assert_eq!(m.unit(), None, "a count is unitless: {}", m.key());
         }
         for m in [
             Metric::MaxQueryMs,
@@ -1121,7 +1138,7 @@ mod tests {
             Metric::RssCumulativeBytes,
         ] {
             assert!(!m.deterministic(), "{} is load-perturbed", m.key());
-            assert!(!m.unit().is_empty(), "{} carries a unit", m.key());
+            assert!(m.unit().is_some(), "{} carries a unit", m.key());
         }
     }
 
@@ -1150,7 +1167,7 @@ mod tests {
             sample(Metric::SqlWrites, 13.0, 12.0, Severity::Error), // over → Error
             sample(Metric::WallMs, 99.0, 30.0, Severity::Warn),     // over → Warning
         ];
-        let v = evaluate(&samples);
+        let v = eval(TimingMode::Enforce, &samples);
         assert_eq!(v.len(), 2, "only the two over-cap samples should fire");
         assert!(matches!(v[0], Violation::Error(_)));
         assert!(matches!(v[1], Violation::Warning(_)));

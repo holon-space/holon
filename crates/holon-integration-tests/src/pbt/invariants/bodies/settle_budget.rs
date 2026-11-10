@@ -36,12 +36,11 @@
 use std::time::Duration;
 
 use holon::api::operation_dispatcher::OpClass;
+use holon_api::duration_budget::BudgetError;
+use holon_api::duration_budget::DurationBudget;
+use holon_api::timing_mode::TimingEnv;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
-
-use crate::pbt::timing_mode;
-use crate::pbt::timing_mode::Breach;
-use crate::pbt::timing_mode::TimingMode;
 
 /// Canonical id home. The dispatched body is
 /// [`crate::pbt::composed::settle_latency::InvComposedSettleBudget`].
@@ -158,24 +157,33 @@ pub fn settle_class(dispatched: &std::collections::BTreeSet<(String, String)>) -
     }
 }
 
-/// Disclose a breach and pass. The `Ok` carries no message, so the engagement
-/// ledger still counts the tick as exercised; the breach itself goes to stderr
-/// and to the trend ledger.
-fn measured(quantity: &str, sample: &SettleSample, budget: Duration) -> InvariantResult {
-    timing_mode::disclose(&Breach::ms(
-        &format!("{}/{quantity}", InvSettleBudget::ID.0),
-        &sample.action,
-        sample.elapsed,
-        budget,
-    ));
-    InvariantResult::Ok
+/// `small(budget)` judges the settle under `env`; over it fails with `fail`.
+/// Under `measure` the breach is disclosed and the tick still counts as
+/// exercised, since the `Ok` carries no message.
+fn judge(
+    env: &TimingEnv,
+    kind: &str,
+    sample: &SettleSample,
+    budget: Duration,
+    fail: impl FnOnce() -> String,
+) -> InvariantResult {
+    let quantity = format!("{}/{kind}/{}", InvSettleBudget::ID.0, sample.action);
+    match DurationBudget::small(quantity, budget).check_in(env, sample.elapsed) {
+        Ok(()) => InvariantResult::Ok,
+        Err(e @ BudgetError::Over { .. }) => InvariantResult::Fail(format!("{} ({e})", fail())),
+        Err(e) => InvariantResult::Fail(format!("[inv-settle-budget] {e}")),
+    }
 }
 
-/// The verdict at the mode [`HOLON_PBT_TIMING`] selects.
-///
-/// [`HOLON_PBT_TIMING`]: crate::pbt::timing_mode
+/// The verdict under [`TimingEnv::from_env`]; an environment it refuses fails.
 pub fn verdict(sample: Option<&SettleSample>) -> InvariantResult {
-    verdict_in(timing_mode::mode(), sample)
+    if sample.is_none() {
+        return InvariantResult::Ok;
+    }
+    match TimingEnv::from_env() {
+        Ok(timing) => verdict_in(&timing, sample),
+        Err(e) => InvariantResult::Fail(format!("[inv-settle-budget] {e}")),
+    }
 }
 
 /// The verdict. Over the hard threshold ⇒ `Fail` with the RAW duration; under
@@ -183,10 +191,10 @@ pub fn verdict(sample: Option<&SettleSample>) -> InvariantResult {
 /// fairness allowance, not a redefinition of the SLO). No sample yet (the
 /// pre-first-transition check) ⇒ `Ok`.
 ///
-/// In [`TimingMode::Measure`] every one of the three budgets above reports
-/// instead of failing. The measurement is identical in both modes; the
-/// WEDGE is not a budget and is armed in both (see [`DEFAULT_WEDGE_MS`]).
-pub fn verdict_in(mode: TimingMode, sample: Option<&SettleSample>) -> InvariantResult {
+/// Each of the three budgets is a `small` [`DurationBudget`], so under
+/// `measure` it reports instead of failing. The WEDGE is not a budget and is
+/// armed in both modes (see [`DEFAULT_WEDGE_MS`]).
+pub fn verdict_in(env: &TimingEnv, sample: Option<&SettleSample>) -> InvariantResult {
     let Some(sample) = sample else {
         return InvariantResult::Ok;
     };
@@ -200,18 +208,14 @@ pub fn verdict_in(mode: TimingMode, sample: Option<&SettleSample>) -> InvariantR
             budget_ms = BOOT_BUDGET.as_millis() as u64,
             "boot, judged by the boot budget",
         );
-        if sample.elapsed > BOOT_BUDGET {
-            if mode == TimingMode::Measure {
-                return measured("boot", sample, BOOT_BUDGET);
-            }
-            return InvariantResult::Fail(format!(
+        return judge(env, "boot", sample, BOOT_BUDGET, || {
+            format!(
                 "[inv-settle-budget] boot '{}' took {}ms, past the boot budget {}ms.",
                 sample.action,
                 ms,
                 BOOT_BUDGET.as_millis(),
-            ));
-        }
-        return InvariantResult::Ok;
+            )
+        });
     }
     if sample.class == SettleClass::Op(OpClass::Maintenance) {
         tracing::warn!(
@@ -222,26 +226,19 @@ pub fn verdict_in(mode: TimingMode, sample: Option<&SettleSample>) -> InvariantR
             budget_ms = MAINTENANCE_BUDGET.as_millis() as u64,
             "maintenance op, judged by the maintenance budget",
         );
-        if sample.elapsed > MAINTENANCE_BUDGET {
-            if mode == TimingMode::Measure {
-                return measured("maintenance", sample, MAINTENANCE_BUDGET);
-            }
-            return InvariantResult::Fail(format!(
+        return judge(env, "maintenance", sample, MAINTENANCE_BUDGET, || {
+            format!(
                 "[inv-settle-budget] maintenance '{}' took {}ms, past the maintenance budget \
                  {}ms.",
                 sample.action,
                 ms,
                 MAINTENANCE_BUDGET.as_millis(),
-            ));
-        }
-        return InvariantResult::Ok;
+            )
+        });
     }
     let budget = hard_budget();
-    if sample.elapsed > budget {
-        if mode == TimingMode::Measure {
-            return measured("interaction", sample, budget);
-        }
-        return InvariantResult::Fail(format!(
+    let verdict = judge(env, "interaction", sample, budget, || {
+        format!(
             "[inv-settle-budget] '{}' took {}ms — interaction→projection-visible past the \
              hard threshold {}ms (p95 SLO {}ms × slack {}{}). This is the latency SLO \
              failing, not a flake: the measurement covers dispatch + the 3-projection \
@@ -256,9 +253,9 @@ pub fn verdict_in(mode: TimingMode, sample: Option<&SettleSample>) -> InvariantR
             } else {
                 ""
             },
-        ));
-    }
-    if sample.elapsed > SLO {
+        )
+    });
+    if matches!(verdict, InvariantResult::Ok) && sample.elapsed > SLO {
         tracing::warn!(
             target: "holon_latency",
             stage = "settle_budget",
@@ -268,12 +265,20 @@ pub fn verdict_in(mode: TimingMode, sample: Option<&SettleSample>) -> InvariantR
             "over the p95 SLO but within the machine-load slack",
         );
     }
-    InvariantResult::Ok
+    verdict
 }
 
 #[cfg(test)]
 mod tests {
+    use holon_api::timing_mode::Check;
+    use holon_api::timing_mode::TimingMode;
+    use holon_api::timing_mode::Unit;
+
     use super::*;
+
+    fn env(mode: TimingMode) -> TimingEnv {
+        crate::pbt::scratch_timing_env(mode)
+    }
 
     fn sample(ms: u64) -> SettleSample {
         SettleSample {
@@ -286,7 +291,7 @@ mod tests {
     #[test]
     fn no_sample_is_ok() {
         assert!(matches!(
-            verdict_in(TimingMode::Enforce, None),
+            verdict_in(&env(TimingMode::Enforce), None),
             InvariantResult::Ok
         ));
     }
@@ -304,12 +309,13 @@ mod tests {
         };
         assert!(
             matches!(
-                verdict_in(TimingMode::Measure, Some(&breach)),
+                verdict_in(&env(TimingMode::Measure), Some(&breach)),
                 InvariantResult::Ok
             ),
             "measure must not fail a load-perturbed settle"
         );
-        let InvariantResult::Fail(msg) = verdict_in(TimingMode::Enforce, Some(&breach)) else {
+        let InvariantResult::Fail(msg) = verdict_in(&env(TimingMode::Enforce), Some(&breach))
+        else {
             panic!("enforce must still fail 7292ms against the 5000ms threshold");
         };
         assert!(msg.contains("7292ms"), "{msg}");
@@ -319,12 +325,15 @@ mod tests {
     /// carries the raw duration and the budget it missed.
     #[test]
     fn a_measured_breach_is_disclosed_with_its_raw_duration() {
-        let line = Breach::ms(
-            "inv-settle-budget/interaction",
-            "SharePage",
-            Duration::from_millis(7_292),
-            hard_budget(),
-        )
+        let line = Check {
+            test: "settle".to_string(),
+            quantity: "inv-settle-budget/interaction/SharePage".to_string(),
+            value: 7_292.0,
+            budget: hard_budget().as_millis() as f64,
+            unit: Unit::Ms,
+            load: 0.0,
+            over: true,
+        }
         .to_string();
         assert!(line.contains("MEASURE-ONLY"), "{line}");
         assert!(line.contains("7292ms"), "{line}");
@@ -347,7 +356,7 @@ mod tests {
         for sample in [&boot, &maintenance] {
             assert!(
                 matches!(
-                    verdict_in(TimingMode::Measure, Some(sample)),
+                    verdict_in(&env(TimingMode::Measure), Some(sample)),
                     InvariantResult::Ok
                 ),
                 "measure must soften '{}'",
@@ -355,7 +364,7 @@ mod tests {
             );
             assert!(
                 matches!(
-                    verdict_in(TimingMode::Enforce, Some(sample)),
+                    verdict_in(&env(TimingMode::Enforce), Some(sample)),
                     InvariantResult::Fail(_)
                 ),
                 "enforce must still fail '{}'",
@@ -367,7 +376,7 @@ mod tests {
     #[test]
     fn under_slo_is_ok() {
         assert!(matches!(
-            verdict_in(TimingMode::Enforce, Some(&sample(20))),
+            verdict_in(&env(TimingMode::Enforce), Some(&sample(20))),
             InvariantResult::Ok
         ));
     }
@@ -377,7 +386,8 @@ mod tests {
     /// duration.
     #[test]
     fn vault_scale_regime_fails_with_its_measured_duration() {
-        let InvariantResult::Fail(msg) = verdict_in(TimingMode::Enforce, Some(&sample(9_000)))
+        let InvariantResult::Fail(msg) =
+            verdict_in(&env(TimingMode::Enforce), Some(&sample(9_000)))
         else {
             panic!("9s per interaction must FAIL the settle budget");
         };
@@ -396,7 +406,7 @@ mod tests {
         let just_over = SLO + Duration::from_millis(1);
         assert!(matches!(
             verdict_in(
-                TimingMode::Enforce,
+                &env(TimingMode::Enforce),
                 Some(&SettleSample {
                     action: "Edit".to_string(),
                     elapsed: just_over,
@@ -441,11 +451,11 @@ mod tests {
             class: SettleClass::Op(OpClass::Maintenance),
         };
         assert!(matches!(
-            verdict_in(TimingMode::Enforce, Some(&maintenance(9_000))),
+            verdict_in(&env(TimingMode::Enforce), Some(&maintenance(9_000))),
             InvariantResult::Ok
         ));
         let InvariantResult::Fail(msg) =
-            verdict_in(TimingMode::Enforce, Some(&maintenance(13_000)))
+            verdict_in(&env(TimingMode::Enforce), Some(&maintenance(13_000)))
         else {
             panic!("13s must fail the 12s maintenance budget");
         };
@@ -460,10 +470,10 @@ mod tests {
             class: SettleClass::Boot,
         };
         assert!(matches!(
-            verdict_in(TimingMode::Enforce, Some(&boot(9_500))),
+            verdict_in(&env(TimingMode::Enforce), Some(&boot(9_500))),
             InvariantResult::Ok
         ));
-        let InvariantResult::Fail(msg) = verdict_in(TimingMode::Enforce, Some(&boot(31_000)))
+        let InvariantResult::Fail(msg) = verdict_in(&env(TimingMode::Enforce), Some(&boot(31_000)))
         else {
             panic!("31s must fail the 30s boot budget");
         };

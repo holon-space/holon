@@ -356,19 +356,51 @@ enum Halt {
     Wrong(String),
 }
 
+/// The failure a late call leaves once the hold is gone: its answer time
+/// is held to the caller budget, and no answer at all always fails.
+fn late_answer(l: Late, lab: &Lab, model: &mut Model, when: &str) -> Option<String> {
+    let answered = match l.pending {
+        LatePending::InFlight(p) => p.late().map(|(groups, took)| {
+            lab.note_seen(&groups);
+            took
+        }),
+        LatePending::Abandon(a, p) => p.late().map(|(got, took)| {
+            mark_abandoned(model, a, got);
+            took
+        }),
+        LatePending::Tick(p) => p.late().map(|((), took)| took),
+    };
+    match answered {
+        Some(took) => answer_budget(took).map(|e| format!("{} {when}: {e}", l.what)),
+        None => Some(format!("{} never answered", l.what)),
+    }
+}
+
+/// Every judged call's answer time, in time or late, goes through the caller
+/// budget, so a clean run leaves its ledger lines too.
+fn answer_budget(took: Duration) -> Option<String> {
+    holon_api::duration_budget::DurationBudget::small("pid-file caller answer", BOUND)
+        .check(took)
+        .err()
+        .map(|e| e.to_string())
+}
+
 /// Polls `in_flight` until it matches the model; every poll answers within
 /// the bound and names only recorded groups.
 fn settle(lab: &Lab, model: &Model, when: &str) -> Result<(), Halt> {
     let deadline = Instant::now() + SETTLE;
     loop {
-        match lab.in_flight(Caller::Thread).within(BOUND) {
-            Answer::Late(pending) => {
+        match lab.in_flight(Caller::Thread).timed_within(BOUND) {
+            Err(pending) => {
                 return Err(Halt::Late(Late {
                     what: format!("in_flight {when}"),
                     pending: LatePending::InFlight(pending),
                 }));
             }
-            Answer::InTime(groups) => {
+            Ok((groups, took)) => {
+                if let Some(e) = answer_budget(took) {
+                    return Err(Halt::Wrong(format!("in_flight {when}: {e}")));
+                }
                 lab.note_seen(&groups);
                 listed_are_recorded(lab, model, &groups)
                     .map_err(|e| Halt::Wrong(format!("in_flight {when}: {e}")))?;
@@ -468,7 +500,7 @@ fn play(s: &Scenario) -> Vec<String> {
         Ok(()) => {}
         Err(Halt::Wrong(e)) => failures.push(e),
         Err(Halt::Late(late)) => {
-            failures.push(format!("{} did not answer within {BOUND:?}", late.what));
+            failures.extend(late_answer(late, &lab, &mut model, "with no write held"));
         }
     }
     if let Err(e) = durable(&lab, &model, "before the hold") {
@@ -562,16 +594,20 @@ fn play(s: &Scenario) -> Vec<String> {
                     failures.push(format!("the drop while {what_held} is held: {e}"));
                 }
             }
-            Step::Ask(caller, Ask::InFlight) => match lab.in_flight(*caller).within(BOUND) {
-                Answer::InTime(groups) => {
+            Step::Ask(caller, Ask::InFlight) => match lab.in_flight(*caller).timed_within(BOUND) {
+                Ok((groups, took)) => {
                     lab.note_seen(&groups);
                     if let Err(e) = listed_are_recorded(&lab, &model, &groups)
                         .and_then(|()| model.check_listing(&groups))
                     {
                         failures.push(format!("in_flight while {what_held} is held: {e}"));
                     }
+                    failures.extend(
+                        answer_budget(took)
+                            .map(|e| format!("in_flight while {what_held} is held: {e}")),
+                    );
                 }
-                Answer::Late(pending) => late.push(Late {
+                Err(pending) => late.push(Late {
                     what: format!("in_flight from a {caller:?}"),
                     pending: LatePending::InFlight(pending),
                 }),
@@ -579,8 +615,12 @@ fn play(s: &Scenario) -> Vec<String> {
             Step::Ask(caller, Ask::Abandon(t)) => {
                 let a = t.attempt(model.runs[stalled].attempt);
                 let want = model.listed_attempt(a);
-                match lab.abandon(*caller, a).within(BOUND) {
-                    Answer::InTime(got) => {
+                match lab.abandon(*caller, a).timed_within(BOUND) {
+                    Ok((got, took)) => {
+                        failures.extend(
+                            answer_budget(took)
+                                .map(|e| format!("abandon({a}) while {what_held} is held: {e}")),
+                        );
                         if !model.shared(a) && got != want {
                             failures.push(format!(
                                 "abandon({a}) while {what_held} is held answered {got}, expected {want}"
@@ -588,15 +628,18 @@ fn play(s: &Scenario) -> Vec<String> {
                         }
                         mark_abandoned(&mut model, a, got);
                     }
-                    Answer::Late(pending) => late.push(Late {
+                    Err(pending) => late.push(Late {
                         what: format!("abandon({a}) from a {caller:?}"),
                         pending: LatePending::Abandon(a, pending),
                     }),
                 }
             }
-            Step::Ask(_, Ask::Tick) => match lab.tick().within(BOUND) {
-                Answer::InTime(()) => {}
-                Answer::Late(pending) => late.push(Late {
+            Step::Ask(_, Ask::Tick) => match lab.tick().timed_within(BOUND) {
+                Ok(((), took)) => failures.extend(
+                    answer_budget(took)
+                        .map(|e| format!("a 1 ms timer while {what_held} is held: {e}")),
+                ),
+                Err(pending) => late.push(Late {
                     what: "a 1 ms timer on the runner's runtime".to_owned(),
                     pending: LatePending::Tick(pending),
                 }),
@@ -623,24 +666,12 @@ fn play(s: &Scenario) -> Vec<String> {
     };
     model.holding = false;
     for l in late {
-        let answered = match l.pending {
-            LatePending::InFlight(p) => p.late().map(|(groups, took)| {
-                lab.note_seen(&groups);
-                took
-            }),
-            LatePending::Abandon(a, p) => p.late().map(|(got, took)| {
-                mark_abandoned(&mut model, a, got);
-                took
-            }),
-            LatePending::Tick(p) => p.late().map(|((), took)| took),
-        };
-        failures.push(match answered {
-            Some(took) => format!(
-                "{} answered after {took:?} (bound {BOUND:?}) while {what_held} was held",
-                l.what
-            ),
-            None => format!("{} never answered", l.what),
-        });
+        failures.extend(late_answer(
+            l,
+            &lab,
+            &mut model,
+            &format!("while {what_held} was held"),
+        ));
     }
 
     if let Some(blocked) = blocked {
@@ -693,8 +724,11 @@ fn play(s: &Scenario) -> Vec<String> {
     for t in &s.after {
         let a = t.attempt(model.runs[stalled].attempt);
         let want = model.listed_attempt(a);
-        match lab.abandon(Caller::Thread, a).within(BOUND) {
-            Answer::InTime(got) => {
+        match lab.abandon(Caller::Thread, a).timed_within(BOUND) {
+            Ok((got, took)) => {
+                failures.extend(
+                    answer_budget(took).map(|e| format!("abandon({a}) after the release: {e}")),
+                );
                 if !model.shared(a) && got != want {
                     failures.push(format!(
                         "abandon({a}) after the release answered {got}, expected {want}"
@@ -702,11 +736,15 @@ fn play(s: &Scenario) -> Vec<String> {
                 }
                 mark_abandoned(&mut model, a, got);
             }
-            Answer::Late(_) => {
-                failures.push(format!(
-                    "abandon({a}) after the release did not answer within {BOUND:?}"
-                ));
-            }
+            Err(pending) => failures.extend(late_answer(
+                Late {
+                    what: format!("abandon({a})"),
+                    pending: LatePending::Abandon(a, pending),
+                },
+                &lab,
+                &mut model,
+                "after the release",
+            )),
         }
         if let Err(Halt::Wrong(e)) = settle(&lab, &model, &format!("after abandon({a})")) {
             failures.push(e);
@@ -793,5 +831,57 @@ proptest! {
     ) {
         let failures = play(&s);
         prop_assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+proptest! {
+    #![proptest_config(Config {
+        cases: 8,
+        failure_persistence: None,
+        ..Config::default()
+    })]
+
+    #[test]
+    fn every_played_scenario_leaves_a_ledger_line_of_its_answer_budget(s in scenario()) {
+        let ledger = std::env::temp_dir()
+            .join(format!("held-write-ledger-{}.jsonl", std::process::id()));
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var(holon_api::timing_mode::LEDGER_ENV, &ledger) };
+        let lines = || std::fs::read_to_string(&ledger).map_or(0, |t| t.lines().count());
+        let before = lines();
+        let failures = play(&s);
+        prop_assert!(failures.is_empty(), "{}", failures.join("\n"));
+        prop_assert!(
+            lines() > before,
+            "a played scenario judged its caller answers against BOUND but left no ledger line"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(Config {
+        cases: 16,
+        failure_persistence: None,
+        ..Config::default()
+    })]
+
+    #[test]
+    fn every_in_time_answer_a_caller_takes_leaves_its_own_ledger_line(s in scenario()) {
+        use std::sync::atomic::Ordering;
+        let ledger = std::env::temp_dir()
+            .join(format!("held-write-per-answer-ledger-{}.jsonl", std::process::id()));
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var(holon_api::timing_mode::LEDGER_ENV, &ledger) };
+        let lines = || std::fs::read_to_string(&ledger).map_or(0, |t| t.lines().count());
+        let before = lines();
+        let taken = pid_file_support::TIMED_IN_TIME.load(Ordering::SeqCst);
+        let failures = play(&s);
+        prop_assert!(failures.is_empty(), "{}", failures.join("\n"));
+        let judged = pid_file_support::TIMED_IN_TIME.load(Ordering::SeqCst) - taken;
+        let written = lines() - before;
+        prop_assert!(
+            written >= judged,
+            "{judged} in-time answers were taken with their elapsed time but only {written} ledger lines were written"
+        );
     }
 }

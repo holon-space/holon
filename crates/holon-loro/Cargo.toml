@@ -56,6 +56,7 @@ uuid.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+holon-api = { workspace = true, features = ["test-helpers"] }
 proptest.workspace = true
 proptest-state-machine.workspace = true
 serial_test.workspace = true

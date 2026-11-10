@@ -24,10 +24,12 @@ async fn test_high_frequency_updates() -> Result<()> {
     let duration = start.elapsed();
 
     println!("Applied 1000 updates in {:?}", duration);
-    assert!(
-        duration.as_secs() < 10,
-        "Should apply 1000 updates in under 10 seconds"
-    );
+    holon_api::duration_budget::DurationBudget::small(
+        "apply 1000 updates",
+        Duration::from_secs(10),
+    )
+    .check(duration)
+    .expect("Should apply 1000 updates in under 10 seconds");
 
     let text1 = doc1.get_text("editor")?;
     let text2 = doc2.get_text("editor")?;

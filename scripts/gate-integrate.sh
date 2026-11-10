@@ -179,6 +179,8 @@ for entry in "${STEPS[@]}"; do
   if [ "$name" = extra-nextest ]; then extra_red=$rc; echo "EXTRA NEXTEST NOVEL RED"
   else red=${red:-$rc}; fi
 done
+# A red half ends the gate here, so it prints the breach summary gate-timing.sh would print.
+[ -z "$red$extra_red" ] || /usr/bin/python3 "$(dirname "$0")/timing-breaches.py" "$GATE" || echo "TIMING BREACHES NOT SUMMARIZED (exit $?)"
 [ -z "$red" ] || exit "$red"
 [ -z "$extra_red" ] || exit "$extra_red"
 echo "INTEGRATE GREEN"

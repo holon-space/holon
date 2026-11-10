@@ -300,13 +300,14 @@ async fn the_derived_home_profile_lookup_fits_the_interaction_budget() {
                 ms(p_max),
             ));
 
-            assert!(
-                w_p95 < SLO_P95,
-                "the derived lookup's p95 ({:.3} ms) reached the {} ms interaction budget at \
-                 depth {depth}, scale {scale} — that number IS the argument for a stored column",
-                ms(w_p95),
-                SLO_P95.as_millis(),
-            );
+            holon_api::duration_budget::DurationBudget::small("derived home lookup p95", SLO_P95)
+                .check(w_p95)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{e} at depth {depth}, scale {scale}: that number IS the argument for \
+                         a stored column"
+                    )
+                });
         }
     }
 

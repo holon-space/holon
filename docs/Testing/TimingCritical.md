@@ -12,11 +12,15 @@ batch's selection names one of them: they judge no duration, yet their caps
 and paint waits go red on a heavily loaded host. Both scripts run only the
 steps a batch can reach; the timing steps run when a changed crate is in
 their dependency closure (DEVELOPMENT.md, "Which landing steps a batch
-runs"). This file is the source of truth for the split: which tests really
-do judge a duration, and what cap the others get.
+runs"). This file explains the split: which tests really judge a duration,
+and what cap the others get.
 
-`scripts/timing-split.py` reads the two tables below and generates the
-`.config/nextest.toml` blocks from them. Nothing in that file is hand-edited;
+The code holds the class of a test, not this file. A test is timing-critical
+when it calls `DurationBudget::small` (`crates/holon-api/src/duration_budget.rs`),
+and `TIMING_OWNERS` in `scripts/timing-split.py` names each such test with the
+recipe that runs it. `scripts/timing-split.py` generates the
+`.config/nextest.toml` blocks from `TIMING_OWNERS` and from the cap and
+load-sensitive tables below. Nothing in that file is hand-edited;
 `scripts/timing-split.py check` fails when the committed blocks and the
 generated ones differ.
 
@@ -25,34 +29,37 @@ generated ones differ.
 A test's class follows from what its assertion compares, not from how long it
 takes.
 
-| Class | Rule | Where it runs |
-| --- | --- | --- |
-| **timing-critical** | The assertion compares a duration AND the point is that the duration is SMALL. Its failure reads "too slow". | the `timing` profile, under the gate's quiet hold |
-| **load-tolerant** | Everything else, including a test that only TIMES OUT under load. | the `load-tolerant` profile, at any load, with `HOLON_PBT_TIMING=measure` |
-| **liveness bound** | An upper-bound duration whose message reads "it never happened". It proves progress, not speed. Load-tolerant. | as above |
-| **bug-under-load** | A CONTENT assertion whose value changes under load. This is a RACE. It stays load-tolerant and stays RED until it is fixed. | as above |
+A **timing-critical** test compares a duration, and the point of the
+comparison is that the duration is SMALL: its failure reads "too slow". It
+makes that comparison through `DurationBudget::small`, and it runs under the
+gate's quiet hold, in the `timing` profile or in a recipe of its own.
 
-Three consequences worth stating:
+A **liveness bound** is an upper bound whose message reads "it never
+happened". It proves progress, not speed, so it runs at any load. It is a
+`DurationBudget::liveness` check, or a plain deadline in a wait loop.
 
-- **A lower-bound duration assertion is load-insensitive.** Load can only make
-  it pass. `assert!(start.elapsed() >= Duration::from_millis(250))` — a debounce
-  — needs no quiet host.
-- **A duration measured on a PAUSED tokio clock is load-insensitive too**, and
-  more strongly: under `#[tokio::test(start_paused = true)]` the clock advances
-  only when the runtime idles to the next timer, so `tokio::time::Instant`
-  measures the timer schedule, not the host. The assertion ratchet classes such
-  a site `virtual-clock`, and it stays out of the timing group. Four sites are
-  `virtual-clock` today, all in `holon-mcp-client`'s timeout bars
-  (`http_bounds.rs`, `subscribe_bounds.rs`, `mcp_call_surface.rs`); the one
-  mcp-client bar that does keep a real `std::time::Instant`
-  (`oauth_bootstrap_flow.rs:899`) is in the table below.
-- **A bug-under-load may never be parked in the timing group.** Every row of
-  the timing table must name the `file:line` of its duration assertion, and the
-  check REJECTS a row whose named site holds no duration assertion. A content
-  flake has no duration to point at, so the mechanism refuses it rather than
-  relying on a reviewer to notice. Open examples: an edited quantity that reads
-  200 instead of 250, a real 120 s hang in the default layout seed, and the
-  `inv-two-instance-convergence` divergence that a latency red was concealing.
+A **bug-under-load** is a CONTENT assertion whose value changes under load: a
+race. It has no duration to compare, so it cannot call `DurationBudget::small`
+and cannot enter the timing group. It stays red until it is fixed.
+
+Every other test is **load-tolerant**, also a test that only TIMES OUT under
+load. It runs in the `load-tolerant` profile at any load.
+
+Two more kinds of duration comparison need no quiet host. A **lower bound**
+(`DurationBudget::lower_bound`, a debounce such as "at least 250 ms passed")
+can only pass more easily under load. A duration on a **paused tokio clock**
+(`#[tokio::test(start_paused = true)]`) measures the timer schedule, not the
+host, because the clock advances only when the runtime idles to its next
+timer.
+
+`scripts/check-timing-assertions.sh` (`timing-split.py assertions`) keeps the
+classes honest. It finds every duration comparison in assertion position and
+every `DurationBudget::small` call in `crates/` and `frontends/`, and
+`scripts/timing-assertions-baseline.txt` gives each one its class: `timing`,
+`liveness`, `lower-bound`, `virtual-clock` or `harness`. A `timing` row must
+be a `DurationBudget::small` call; a raw comparison, or a site that reaches
+around the type, fails the check unless its row names one of the other
+classes.
 
 ## Tests wait for the target of their write, not for a quiet period
 
@@ -86,74 +93,49 @@ yet moved onto the port.
 
 ## Timing-critical tests
 
-`Runs` says WHAT runs a row inside the gate's one quiet-hold step
-(`just timing-gate`). All three values are timing-critical, so all three join
-the `timing-critical` test group — a core to themselves — and all three leave
-the load-tolerant complement.
+There is no hand list of timing-critical tests. `scripts/timing-split.py
+check` ties `TIMING_OWNERS` to the code in both directions:
 
-| `Runs` | Run by | Why not the other |
-| --- | --- | --- |
-| `timing-step` | `cargo nextest run --profile timing` | — |
-| `own-recipe` | its own recipe in `just timing-gate` (`just latency-slo-gate`, `just org-deep-text-timing`) | the recipe adds what nextest cannot: a wrong-tree assertion, `--no-capture`, `--ignored` |
-| `release-bench` | nothing in a debug gate | an `#[ignore]`d release bench; it is listed so the class rules and the assertion ratchet still cover it |
+- Every test whose own body calls `DurationBudget::small` must be selected by
+  a `TIMING_OWNERS` key. A new timing check without its key fails.
+- Every `TIMING_OWNERS` key must select at least one such test. A key whose
+  test was renamed, deleted or moved to a liveness bound fails.
 
-So `[profile.timing]`'s filter is the `timing-step` rows and the test group's
-is all of them. Selecting an `own-recipe` row in both would run the 600-write
-drain twice in one hold.
+A key's recipe says what runs the test inside the gate's one quiet-hold step,
+`just timing-gate`. A key with the recipe `just timing-gate` is in
+`[profile.timing]`'s filter, so `cargo nextest run --profile timing` runs it.
+A key with another recipe (`just latency-slo-gate`, `just org-deep-text-timing`)
+has that recipe because it adds what nextest cannot, such as running without output capture or
+`--ignored`; `just timing-gate` calls the recipe. Every key joins the
+`timing-critical` test group, which is a core to itself, and leaves the
+load-tolerant complement. So a test never runs twice in one hold.
 
-| Selector | Runs | Assertion | Asserts | Headroom |
-| --- | --- | --- | --- | --- |
-| `binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/)` | own-recipe | `crates/holon-integration-tests/tests/latency_slo_gate.rs:1076` | `TEETH_WRITE_DEADLINE` over the 600-write drain | thin by design |
-| `binary_id(holon-integration-tests::integration) & test(/^latency_slo_gate::/)` | own-recipe | `crates/holon-integration-tests/tests/latency_slo_gate.rs:1211` | `FENCE_ROUND_PATIENCE` per fence round | thin by design |
-| `binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marker_line_costs_time_linear_in_its_length)` | own-recipe | `crates/holon-org-format/tests/deep_authored_text_never_aborts.rs:205` | marker-line parse cost linear in length | thin; `#[ignore]`d, run by `just org-deep-text-timing` |
-| `binary_id(holon-org-format::deep_authored_text_never_aborts) & test(=a_marked_line_renders_in_time_linear_in_its_length)` | own-recipe | `crates/holon-org-format/tests/deep_authored_text_never_aborts.rs:244` | marked-line render cost linear in length | thin; `#[ignore]`d, run by `just org-deep-text-timing` |
-| `test(=turso_storage_repros::tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale)` | timing-step | `crates/holon/tests/turso_storage_repros/tabs_main_panel_delivery.rs:184` | cold matview create + first read < 5 s at ~70 pages | thin: 853 ms alone, 4.74 s at load 46, 7.52 s in an 885-test run |
-| `package(holon-rows) & test(=a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work)` | timing-step | `crates/holon-rows/tests/mapper_bounds.rs:338` | 500 000 digits refused in < 2 s — a superlinear-parse DoS bound | thin |
-| `package(holon-loro) & test(=loro_sync_controller::boot_gate_tests::dropped_gate_is_observed_before_the_watchdog)` | timing-step | `crates/holon-loro/src/loro_sync_controller.rs:2566` | a dropped gate is observed before `WATCHDOG` = 200 ms, after a 30 ms sleep | **very thin: 170 ms** |
-| `package(holon-loro) & test(=loro_share_backend::tests::settle_stays_bounded_while_the_sync_worker_dials_an_unreachable_peer)` | timing-step | `crates/holon-loro/src/loro_share_backend.rs:4921` | settle stays under 3 s while the worker dials an unreachable peer | moderate |
-| `package(holon) & test(=api::backend_engine::tests::deriving_the_net_is_cheap_enough_for_the_tick_path)` | timing-step | `crates/holon/src/api/backend_engine.rs:3339` | one net derive costs < 5 ms on the tick path | thin |
-| `package(holon) & test(=block_live_data_catch_up::wakes_when_blocks_arrive_via_cdc)` | timing-step | `crates/holon/tests/block_live_data_catch_up.rs:124` | the wait wakes on CDC arrival in < 2 s rather than poll-spinning | moderate |
-| `package(holon) & test(=watch_context_membership_leak::a_failed_watch_setup_leaves_no_membership_row)` | timing-step | `crates/holon/tests/watch_context_membership_leak.rs:218` | the failure path returns in < 20 s rather than parking in a dependency wait | generous |
-| `package(holon-app) & test(=integration_set_field_op::dispatching_begin_oauth_returns_before_the_flow_finishes)` | timing-step | `crates/holon-app/tests/integration_set_field_op.rs:401` | `begin_oauth` returns in < 1 s, once STARTED rather than once finished | moderate |
-| `package(holon-app) & test(=quick_open_search_at_vault_scale::quick_open_search_at_vault_scale)` | timing-step | `crates/holon-app/tests/quick_open_search_at_vault_scale.rs:165` | each keystroke's search returns in < 6 s, the join-regression bound | thin: 0.8-5.3 s across quiet and loaded runs |
-| `package(holon-loro) & test(=stable_id_index_create_cost::a_create_costs_the_same_in_a_large_tree_as_in_a_small_one)` | timing-step | `crates/holon-loro/tests/stable_id_index_create_cost.rs:64` | a create in a large tree costs at most 3x one in a small tree | thin |
-| `package(holon-mcp) & test(=tools::dense_patch_readback_tests::a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name)` | timing-step | `frontends/mcp/src/tools.rs:10382` | an inexact apply answers within its 5 s limit | generous |
-| `package(holon-mcp) & test(=describe_ui_deferred::fan_out_expansion_is_bounded_and_exhaustion_is_disclosed)` | timing-step | `frontends/mcp/tests/describe_ui_deferred.rs:320` | a bounded fan-out pass finishes in < 5 s | generous |
-| `package(holon-mcp-client) & test(=oauth_bootstrap_flow::a_connected_but_silent_peer_cannot_pin_the_flow_past_its_timeout)` | timing-step | `crates/holon-mcp-client/tests/oauth_bootstrap_flow.rs:899` | a 400 ms timeout returns within 5 s | generous |
-| `package(holon-net-shell) & test(=in_flight_abandon_and_the_runtime_answer_within_the_bound_while_a_pid_file_write_is_held)` | timing-step | `crates/holon-net-shell/tests/pid_file_support/mod.rs:263` | `in_flight`, `abandon` and a runtime tick each answer within `BOUND` = 200 ms while a pid-file write is held — the SLO itself | thin: red on the base at 207 ms |
-| `package(holon-netd) & test(=a_task_on_the_runtime_runs_within_the_bound_while_netd_start_waits_for_a_held_pid_file_write)` | timing-step | `crates/holon-netd/tests/netd_start_pid_file.rs:1214` | a runtime heartbeat never waits more than `BOUND` = 200 ms while netd start waits for a held pid-file read or write — the SLO itself | red on the base at the whole 400 ms window |
-| `binary_id(holon-integration-tests::integration) & test(=hop_step_cost::one_hop_cost_in_the_production_composition)` | timing-step | `crates/holon-integration-tests/tests/hop_step_cost.rs:522` | the p95 fan-out hop with a prefetching marking costs ≤ 5 ms, the D152.a rung | thin |
-| `package(holon-loro) & test(=typed_entity_scale::shape_cost_at_ten_thousand_entities)` | release-bench | `crates/holon-loro/tests/typed_entity_scale.rs:348` | read p95 < 200 ms at 10 000 entities — the SLO itself | thin |
-| `package(holon-loro) & test(=typed_entity_scale::shape_cost_at_ten_thousand_entities)` | release-bench | `crates/holon-loro/tests/typed_entity_scale.rs:354` | write p95 < 5 ms at 10 000 entities | thin |
+A generous budget costs the hold some seconds. The test stays in the group
+anyway, because the rule must stay mechanical.
 
-The generous-headroom rows cost the hold seconds. They stay in the group
-anyway: the rule must not acquire a "but the headroom is big" exception, or it
-stops being mechanical.
+The latency gate's teeth and fence deadlines (`TEETH_WRITE_DEADLINE`,
+`FENCE_ROUND_PATIENCE`) are liveness bounds: their messages read "produced no
+e2e sample" and "still not visible". The gate's timing checks are its service
+p95 and its drain completion, both `DurationBudget::small`, and its host
+contention cut: a boot DDL mean over the cut makes the host too busy for a
+latency verdict. Under `enforce` that cut fails WITHOUT a verdict; under
+`measure` it writes its ledger line and the rungs run. A late sample with no
+measured value, a window held full and an undelivered drain have no duration
+to judge; they stay red as liveness failures.
 
-The latency gate's two sites are `timing`, not `liveness`, although both
-messages read "produced no e2e sample" / "still not visible". `TEETH_WRITE_DEADLINE`
-and `FENCE_ROUND_PATIENCE` bound a *teeth* rung whose whole purpose is that the
-wait is short, so the deadline IS the judgement.
-The p95 the gate reports is judged one layer down, in
-`crates/holon-api/src/latency_slo.rs:487`, through a `RungVerdict` — not a
-comparison in assertion position, so the ratchet's line scanner does not see
-it, and the row is held to its own named site instead.
+The drain gate's sweep test
+(`latency_drain::tests::the_drain_gate_passes_every_healthy_pipeline_and_fails_every_slow_one`)
+is not timing-critical. It sweeps synthetic pipelines whose per-row times its
+own RNG draws, and asserts a content result over that simulation, so load
+cannot move its verdict. It is merely slow, which is why it has a cap of its
+own. A MEASURED drain is judged in `just latency-slo-gate`.
 
-**The drain gate is not in this table.**
-`latency_drain::tests::the_drain_gate_passes_every_healthy_pipeline_and_fails_every_slow_one`
-sweeps 1500 SYNTHETIC pipelines whose per-row microseconds are drawn by its own
-RNG, and asserts `wrong.is_empty()` — a content assertion over a deterministic
-simulation. `SERVICE_TIME_SLO_MS` bounds the simulated rows, never a measured
-wall clock, so load cannot move the verdict. The sweep is merely SLOW
-(~27 s idle, past 120 s on a loaded host), which is class load-tolerant-slow
-and is why it already has a cap of its own. `just timing-gate` still runs
-`just latency-slo-gate`, which is where a MEASURED drain is judged.
-
-**The latency ORACLES are not in this table.** `inv-settle-budget` and
-`inv-sql-budget`'s wall / query / RSS ceilings fire inside every composed run,
-so they cannot be selected by a test filter. `HOLON_PBT_TIMING` governs them
-instead (`crates/holon-integration-tests/src/pbt/timing_mode.rs`): `enforce` in
-the hold, `measure` everywhere else. They are why the hold was 2 h 51 m.
+The latency ORACLES of the composed harness (`inv-settle-budget` and
+`inv-sql-budget`'s wall, query and RSS ceilings) fire inside every composed
+run, so no test filter selects them. They write the same `MEASURE-ONLY` line
+and ledger line through `timing_mode::record`
+(`crates/holon-api/src/timing_mode.rs`), and `HOLON_PBT_TIMING` sets their
+mode with every other check: see "The recipes" below.
 
 ## Caps of the load-tolerant tests
 
@@ -284,11 +266,13 @@ or when one of its tests is in no group.
 | `binary_id(holon-integration-tests::integration) & (test(/^projector_lag_lock::/) + test(/^[a-z0-9_]+_under_lag::/))` | `cost-sensitive` | the lag locks the gate's quiet-hold step runs (`just projector-lag-lock`); `convert_block_to_page_survives_a_lagging_projection` measures p95_low 108 s (Current caps) |
 | `binary_id(holon-integration-tests::integration) & test(/^loro_suite::loro_block_type_invalid_values::/)` | `cost-sensitive` | a 20 s wait for the edit to reach the file; red "the edit never reached the file" at load ~90 in a land leg |
 
-## The enforced latency rung and its kind coverage
+## The latency rung and its kind coverage
 
 The p95 < 200 ms interaction→projection-visible SLO is a project rule, so
-something under the hold must still ENFORCE it. With every other step in
-`measure`, that is the rung's whole job.
+one step under the hold judges it over generated transitions: the rung. While
+`just timing-gate` runs in `measure`, the rung reports each breach as a
+`MEASURE-ONLY` line and a ledger line; when the recipe goes back to `enforce`,
+a breach is red.
 
 **A hand-authored subset cannot be that rung.** The budgeted kind universe is
 `transition_key()` (`crates/holon-integration-tests/src/pbt/transition_budgets.rs:255`)
@@ -322,21 +306,18 @@ and the check becomes exact.
 
 ## The recipes, and which of them the hold covers
 
-| Recipe | `HOLON_PBT_TIMING` | Under the quiet hold |
-| --- | --- | --- |
-| `just timing-gate` | `enforce`, pinned | **yes — the one hold step** |
-| `just latency-slo-gate` | `enforce`, pinned (its subject) | inside `timing-gate` |
-| `just org-deep-text-timing` | `enforce`, pinned (its subject) | inside `timing-gate` |
-| `just keystone-smoke` | the default, `enforce` | inside `timing-gate` |
-| `just hand-authored` | `measure` by default | no |
-| `just windowed-gate` | `measure` by default | no |
-| `just load-tolerant-nextest` | `measure` by default | no |
+Every recipe runs in `measure`, so no lane or gate goes red because a
+duration is over its budget: a breach is a `MEASURE-ONLY` line and a ledger
+line. An unset `HOLON_PBT_TIMING` means `measure`
+(`crates/holon-api/src/timing_mode.rs`). `just timing-gate` is the one step
+under the quiet hold. It sets `export HOLON_PBT_TIMING=measure` for itself and
+for the recipes it calls (`just latency-slo-gate`, `just org-deep-text-timing`,
+`just keystone-smoke`). Making the gate judge durations again is that one line
+set to `enforce`. The other recipes (`just hand-authored`, `just windowed-gate`,
+`just load-tolerant-nextest`) keep a caller's value and default to `measure`.
 
-`enforce` is the DEFAULT of the variable, so a recipe that pins it is guarding
-against a caller that exported `measure` for the surrounding gate, not against
-omission (`crates/holon-integration-tests/src/pbt/timing_mode.rs`).
-
-Each measure-mode recipe ends in `scripts/assert-measure-mode.sh`, which
+`just hand-authored`, `just windowed-gate` and `just load-tolerant-nextest` end
+in `scripts/assert-measure-mode.sh` when they ran in `measure`, which
 asserts two things its log can actually prove: that the step really ran in
 `measure` (the recipe echoes `HOLON_PBT_TIMING=` into the log first), and that
 no ENFORCE-shaped timing verdict appears — in `measure` a breach can only
@@ -386,16 +367,39 @@ call to the gate's record, so step 17 checks it and the
 
 ## Measure mode is never silent
 
-Every budget breach in `measure` is printed as
+Every `DurationBudget::small` check and every error-level sample of a latency
+oracle appends one line to the ledger, in both modes and whether or not it is over budget:
+`~/.cache/holon-build/timing-checks.jsonl`, or the file that
+`HOLON_TIMING_MEASURE_LOG` names. A line is one JSON object with exactly the
+keys `gate`, `test`, `quantity`, `value`, `budget`, `unit` (`ms` or `B`),
+`load` and `over`. `HOLON_GATE_ID` stamps the gate; a lane run stamps `local`.
+`test` is `NEXTEST_TEST_NAME` when nextest runs the test.
+
+In `measure`, an over-budget check also prints
 
 ```
-[<quantity> MEASURE-ONLY] '<subject>' <value><unit> over the <budget><unit> budget — measured, not judged (HOLON_PBT_TIMING=measure)
+[MEASURE-ONLY] <test> <quantity> <value><unit> over the <budget><unit> budget (load <load>) — measured, not judged (HOLON_PBT_TIMING=measure)
 ```
-
-and appended to `~/.cache/holon-build/timing-measure.jsonl` as
-`{"gate","quantity","subject","value","budget","unit"}`, so a trend can show a
-regression the enforced rung missed. `HOLON_GATE_ID` stamps the gate; a lane run
-stamps `local`.
 
 `MEASURE-ONLY` is the grep handle `scripts/assert-measure-mode.sh` counts in
 each measure-mode step's log.
+
+`scripts/timing-breaches.py` reads the ledger and prints one block per gate;
+`scripts/gate-timing.sh` prints its gate's block at its end, and
+`scripts/gate-integrate.sh` prints it when the gate is red. Fields are
+separated by tabs:
+
+```
+== timing gate<N>: <k> over of <n> checks ==
+over	<test>	<quantity>	<value>	<budget>	<unit>	<load>	<values of the last 5 gates>
+TREND	<test>	<quantity>	<value>	<median>	<unit>	gate<A>,gate<B>,gate<N>
+== end gate<N> ==
+```
+
+There is one `over` line per over-budget check of the gate. A `TREND` line
+names a (test, quantity) that is over budget in each of its last 3 gates and
+whose value in this gate is at least 1.5 times the median of up to 10 earlier
+gates: a real slowdown, from which the steward cuts a card without reading a
+log. The exit code reports only bad input: a malformed line, a missing or
+unreadable ledger or a bad GATE argument exits 2, a malformed line with
+`<path>:<line>: <reason>`, a ledger it cannot read with `<path>: <reason>`.

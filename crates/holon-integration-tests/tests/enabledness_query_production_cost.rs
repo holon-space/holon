@@ -350,8 +350,10 @@ fn one_data_firing_with_the_holder_take_stays_under_a_millisecond() {
     );
 
     let p95 = report("data firing + holder take", fire);
-    assert!(
-        p95 < 1.0,
-        "the executor costs {p95:.3} ms per data firing with the holder take, over the 1 ms budget"
-    );
+    holon_api::duration_budget::DurationBudget::small(
+        "data firing with holder take p95",
+        Duration::from_millis(1),
+    )
+    .check(holon_api::duration_budget::from_ms(p95).expect("a p95 is a duration"))
+    .expect("the executor's cost per data firing with the holder take");
 }
