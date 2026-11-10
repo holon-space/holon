@@ -5,6 +5,7 @@ Run: `python3 scripts/flow-checks/test-run-step-header.py`. Exits non-zero on th
 The header is read with the lane check's own functions (`header`, `started`, `same_time`).
 fixtures/run-step-header.txt is a run-step log with the three header lines, `echo` as the step.
 Generators: none — the input is one fixed header shape, so a fixed log and one live run assure it.
+The `keystone-smoke` step's timing mode has two inputs (caller sets it or not), so two live runs cover it.
 """
 import importlib.util
 import os
@@ -40,7 +41,16 @@ def live_log():
     return out
 
 
+def keystone_smoke_timing(caller):
+    env = {k: v for k, v in os.environ.items() if k != "HOLON_PBT_TIMING"}
+    out = subprocess.run([str(RUN_STEP), "keystone-smoke: printenv HOLON_PBT_TIMING"], cwd=HERE,
+                         capture_output=True, text=True, env={**env, **caller, "BASE": BASE}).stdout
+    return out.splitlines()[-3]
+
+
 def main():
+    assert keystone_smoke_timing({}) == "measure", "a keystone-smoke step runs in measure mode by default"
+    assert keystone_smoke_timing({"HOLON_PBT_TIMING": "enforce"}) == "enforce", "the caller's mode wins"
     assert_l1_header(FIXTURE.read_text(), "fixture")
     text = live_log()
     start = assert_l1_header(text, "live log")

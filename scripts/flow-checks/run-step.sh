@@ -23,6 +23,7 @@ case $step in
     # shellcheck disable=SC2086
     cargo clippy "$@" --all-targets -- $lints 2>&1 ;;
   nextest) HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure} "$(dirname "$0")/../lane-nextest.py" run "$@" 2>&1 ;;
+  keystone-smoke) HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure} "$@" 2>&1 ;;
   *) "$@" 2>&1 ;;
 esac
 code=$?

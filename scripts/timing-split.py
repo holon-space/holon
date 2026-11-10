@@ -21,6 +21,7 @@ Generating all three from one table is what stops them drifting.
 
 import ast
 import datetime
+import importlib.util
 import json
 import math
 import pathlib
@@ -86,7 +87,8 @@ OWNER_RECIPES = {
 # resolves the lockfile. The lane package selector reads it by parsing this file.
 # No recipe builds waterui; `deny` resolves its lockfile under `--locked`.
 PATH_RECIPES = {
-    "crates/holon-integration-tests/src/pbt/": "keystone-smoke",
+    "crates/holon-integration-tests/src/": "keystone-smoke",
+    "crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs": "keystone-smoke",
     "crates/holon-integration-tests/tests/hand_authored_regressions.rs": "keystone-smoke",
     "crates/holon-integration-tests/src/pbt/convergence.rs": "keystone-tour",
     "crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs": "keystone-tour",
@@ -820,6 +822,53 @@ def asserts_a_duration(lines, line):
     return bool(DURATION_SIGNALS.search("\n".join(lines[start:end])))
 
 
+# ── lane-run recipes for gate-owned machinery ────────────────────────
+
+SELECT_TESTS = REPO / "scripts/select-tests.py"
+MODULE_BINARY = re.compile(r"\bbinary_id\(([\w-]+)::\w+\)")
+MODULE_TEST = re.compile(r"\btest\(/\^(\w+)::/\)")
+
+
+def select_tests():
+    spec = importlib.util.spec_from_file_location("select_tests", SELECT_TESTS)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def step_of(recipe, st):
+    return st.recipe_line(recipe).split(": ", 1)[0]
+
+
+def gate_owned_machinery_gaps(root, owners, path_owners, st):
+    """(rows, files, problems) for each owner row whose recipe only the landing gate runs and whose term
+    names one top-level test module `m` of a package: `crates/<package>/tests/<m>.rs` and every file under
+    `crates/<package>/src/` must select, through `path_owners`, a recipe that a lane runs."""
+    rows, files, problems = [], 0, []
+    for term, recipe in owners.items():
+        binary, module = MODULE_BINARY.search(term), MODULE_TEST.search(term)
+        if (step_of(recipe, st) not in st.NOT_RUN_STEPS or not (binary and module)
+                or module[1] in st.NEVER_OWNER_MODULES):
+            continue
+        rows.append(term)
+        crate = pathlib.Path("crates") / binary[1]
+        entry = crate / "tests" / f"{module[1]}.rs"
+        if not (root / entry).is_file():
+            problems.append(f"{term} is owned by {recipe}, and its module file {entry} does not exist")
+            continue
+        src = sorted(p.relative_to(root) for p in (root / crate / "src").rglob("*") if p.is_file())
+        if not src:
+            problems.append(f"{term} is owned by {recipe}, and {crate / 'src'} holds no file")
+            continue
+        for path in [entry, *src]:
+            files += 1
+            if all(step_of(f"just {r}", st) in st.NOT_RUN_STEPS
+                   for r in st.covering_recipes(path.as_posix(), path_owners)):
+                problems.append(f"{term} is owned by {recipe}, which lanes do not run, and {path.as_posix()} "
+                                "selects no lane-run recipe")
+    return rows, files, problems
+
+
 def cmd_check():
     fail = 0
 
@@ -885,6 +934,21 @@ def cmd_check():
     if not missing and not stale and parsed_equal:
         print(f"ok: each of the {len(set(excluded))} load-tolerant exclusion(s) names "
               "its recipe in OWNER_RECIPES")
+
+    # A change to the code of a test only the landing gate runs still gets a lane step that runs it.
+    st = select_tests()
+    owners, path_owners = st.owner_recipes(REPO), st.path_recipes(REPO)
+    if not owners or not path_owners:
+        print(f"FAIL: {st.OWNER_TABLE_FILE} reads as an empty OWNER_RECIPES or PATH_RECIPES to the selector")
+        fail = 1
+    else:
+        rows, files, gaps = gate_owned_machinery_gaps(REPO, owners, path_owners, st)
+        for gap in gaps:
+            print(f"FAIL: {gap}")
+        if gaps:
+            fail = 1
+        else:
+            print(f"ok: {files} machinery file(s) of {len(rows)} gate-owned row(s) each select a lane-run recipe")
 
     # Caps: within the clamp, and consistent with what the ledger now says.
     for test, p95, cap, _ in cap_rows():
