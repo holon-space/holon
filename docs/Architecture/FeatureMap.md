@@ -369,6 +369,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `dense-patch-cross-document-session-temp-dir-gone`
 - `dense-patch-cross-document-write-back-late-load`
 - `dense-patch-org-file-misses-agent-text`
+- `dense-patch-readback-rolls-back-valid-patch-load`
 - `dense-patch-tags-content-property-missing-load`
 - `dogfood-replay-load-timeout`
 - `edited-copy-cut-paste-raises-unedited-two-files`
@@ -439,6 +440,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `shrinker-capmap-trigger-passed`
 - `slot-reconcile-props-before-rebuild-under-load`
 - `slot-withdrawn-last-claim-no-retraction`
+- `span-probe-budget-count-off-by-one-load`
 - `span-trace-block-mirror-apply-unparented-under-load`
 - `split-doc-root-setup-org-sync-under-load`
 - `splitblock-caret-past-dense-projection-content`
@@ -449,6 +451,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `toggle-state-sql-read-repeat-budget`
 - `tour-spike-advance-cursor-not-visible`
 - `tour-spike-create-op-not-observable-load`
+- `tui-dead-terminal-shutdown-over-60s-load`
 - `tui-inline-row-mount-unsettled-frame`
 - `tui-refused-write-back-missing-from-log`
 - `tui-stderr-write-missing-from-log-load`
@@ -478,6 +481,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-breadcrumb-tab-switch-bar-pre-warm`
 - `windowed-breadcrumb-tap-caret-pre-warm`
 - `windowed-breadcrumb-zoom-bar-pre-warm`
+- `windowed-chrome-one-row-timeout-load`
 - `windowed-clickblock-bounds-under-load`
 - `windowed-entity-not-in-bounds-under-load`
 - `windowed-focus-not-in-bounds-under-load`
