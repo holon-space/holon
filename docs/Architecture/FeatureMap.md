@@ -474,6 +474,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `wide-e2e-shrinker-list-app-item-missing`
 - `wide-e2e-sqlonly-typed-edits-load-timeout`
 - `wide-e2e-sqlonly-typing-share-load-timeout`
+- `windowed-action-bar-grafted-row-pre-warm`
 - `windowed-banner-toast-paint-load-flake`
 - `windowed-block-focus-outline-zero-rows-under-load`
 - `windowed-breadcrumb-tab-switch-bar-pre-warm`
