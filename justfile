@@ -195,6 +195,9 @@ pbt name='general' cases='64' *FLAGS:
 # One drawn case may carry no decision, so the smoke also replays one
 # hand-authored case in which the shape gate refuses one edit and admits one.
 #
+# A draw that ends on a registered known red is spent and drawn again, up to 4
+# extra draws; only known reds up to that cap is a FLOOR BREACH (red).
+#
 # It is also the gate's ENFORCED latency rung: it inherits the default
 # `HOLON_PBT_TIMING=enforce` and runs inside `just timing-gate`, under the quiet
 # hold. Do not default it to `measure` — every other composed step measures, so
