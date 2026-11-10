@@ -1532,6 +1532,7 @@ cargo-free-checks:
         2>&1 | tee target/gate-logs/gate-arch-red-logs.log
     ./scripts/test-check-compile-shape.py 2>&1 | tee target/gate-logs/gate-arch-compile-shape.log
     ./scripts/test-count-hash-folders.py 2>&1 | tee target/gate-logs/gate-arch-count-hash-folders.log
+    ./scripts/test-integrate-track-walls.py 2>&1 | tee target/gate-logs/gate-arch-integrate-track-walls.log
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
 
 # Architecture rules (archlint + the Rust-side structural tests). Its own
