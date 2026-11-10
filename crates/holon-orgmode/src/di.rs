@@ -433,6 +433,22 @@ impl OrgSyncIdleSignal {
     /// change handed to it. The upstream legs (the Loro projection, CDC) are
     /// the caller's to check.
     pub fn writeback_unsettled(&self) -> Vec<&'static str> {
+        self.writeback_busy(
+            self.writeback_net
+                .read(holon_filesystem::writeback_net::unsettled),
+        )
+    }
+
+    /// What a shutdown still waits for: [`Self::writeback_unsettled`] without
+    /// the files whose ingest run already failed.
+    pub fn writeback_stop_waits_for(&self) -> Vec<&'static str> {
+        self.writeback_busy(
+            self.writeback_net
+                .read(holon_filesystem::writeback_net::stop_waits_for),
+        )
+    }
+
+    fn writeback_busy(&self, behind: Vec<String>) -> Vec<&'static str> {
         let mut busy = Vec::new();
         if self.in_pass.load(std::sync::atomic::Ordering::Acquire) > 0 {
             busy.push("a write-back pass is running");
@@ -446,11 +462,7 @@ impl OrgSyncIdleSignal {
         if !self.queued_renders.documents().is_empty() {
             busy.push("document re-renders are queued");
         }
-        if !self
-            .writeback_net
-            .read(holon_filesystem::writeback_net::unsettled)
-            .is_empty()
-        {
+        if !behind.is_empty() {
             busy.push("a file is behind its store");
         }
         busy

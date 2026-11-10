@@ -38,8 +38,6 @@ MARGINS = {
         (319, "319 s reported standalone 2026-10-17; it reds before its last scenario on 2026-10-27"),
     "cook_vault_ingest::the_default_layout_seed_does_not_wait_for_the_recipe_backlog":
         (169, "122 s at load 16-24 and 169 s at load 45-78, 2026-10-27"),
-    "boot_suite::failed_ingest_disclosed_across_restarts::a_failed_ingest_stays_disclosed_until_the_file_ingests":
-        (110, "110 s standalone at lane load with the armed-skip cases, 2026-11-08"),
 }
 
 HEADER = re.compile(r"^\[\[profile\.([\w-]+)\.overrides\]\]\s*$")

@@ -107,12 +107,6 @@ slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 filter = "package(holon-api) & test(=latency_drain::tests::the_drain_gate_passes_every_healthy_pipeline_and_fails_every_slow_one)"
 slow-timeout = { period = "60s", terminate-after = 6 }
 
-# Each stop that holds back a refused file waits out the 20 s write-back settle
-# budget, so the restart PBT takes over a minute alone.
-[[profile.default.overrides]]
-filter = "binary_id(holon-integration-tests::integration) & test(=boot_suite::failed_ingest_disclosed_across_restarts::a_failed_ingest_stays_disclosed_until_the_file_ingests)"
-slow-timeout = { period = "60s", terminate-after = 4 }  # 4 min hard cap
-
 # The vault-scale main-panel guard asserts a 5s wall-clock budget on a cold
 # matview create + first read (~70 pages). It measures the machine as much as
 # the query, so it needs a core to itself: 853ms alone on a quiet machine,

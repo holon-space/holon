@@ -162,7 +162,17 @@ impl Run {
                 // A refused file is held back from write-back, so a stop that
                 // still has its store edits to write reports that file; the
                 // session is down either way.
-                if let Err(e) = self.env.stop_app().await {
+                let started = std::time::Instant::now();
+                let stopped = self.env.stop_app().await;
+                // Every write of this test lands, so only a failed ingest can
+                // be owed, and a failed ingest holds no stop.
+                assert!(
+                    started.elapsed() < holon_app::session::WRITEBACK_SETTLE_BUDGET,
+                    "the write-back never settled: a stop with only a failed ingest owed \
+                     waited out the budget, {:?} ({stopped:?})",
+                    started.elapsed()
+                );
+                if let Err(e) = stopped {
                     let message = format!("{e:#}");
                     assert!(
                         (0..FILES.len()).any(|f| self.model[f].refused

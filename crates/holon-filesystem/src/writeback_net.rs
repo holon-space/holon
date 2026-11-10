@@ -257,23 +257,67 @@ pub fn unsettled(exec: &Executor) -> Vec<String> {
         .tokens()
         .subjects(BASE)
         .into_iter()
-        .filter(|doc| {
-            exec.tokens().token(DISK_CHANGED, doc).is_some()
-                || why_not(exec, READ_DISK, doc).is_none()
-                || CATCH_UP.iter().any(|t| {
-                    matches!(
-                        why_not(exec, t, doc),
-                        None | Some(
-                            holon_net::exec::WhyNot::InFlight
-                                | holon_net::exec::WhyNot::RetryPending { .. }
-                        )
-                    )
-                })
-        })
+        .filter(|doc| reading_disk(exec, doc) || CATCH_UP.iter().any(|t| catching_up(exec, t, doc)))
         .map(|doc| doc.to_string())
         .collect();
     docs.sort();
     docs
+}
+
+/// The documents a shutdown waits for: the [`unsettled`] ones, except where
+/// the only catch-up that can still land is an ingest whose run already
+/// failed. An ingest writes no file, so the file keeps the text the next boot
+/// ingests, and [`failed_writebacks`] names the document.
+pub fn stop_waits_for(exec: &Executor) -> Vec<String> {
+    unsettled(exec)
+        .into_iter()
+        .filter(|doc| {
+            let ingest_failed = exec
+                .retrying()
+                .any(|(t, d, _)| t == CATCH_UP_INGEST && d.as_str() == doc)
+                || matches!(
+                    why_not(exec, CATCH_UP_INGEST, doc),
+                    Some(
+                        holon_net::exec::WhyNot::RetryPending { .. }
+                            | holon_net::exec::WhyNot::FailedOnThisInput(_)
+                    )
+                );
+            !ingest_failed || reading_disk(exec, doc) || write_may_land(exec, doc)
+        })
+        .collect()
+}
+
+fn reading_disk(exec: &Executor, doc: &str) -> bool {
+    exec.tokens().token(DISK_CHANGED, doc).is_some() || why_not(exec, READ_DISK, doc).is_none()
+}
+
+fn catching_up(exec: &Executor, transition: &str, doc: &str) -> bool {
+    matches!(
+        why_not(exec, transition, doc),
+        None | Some(
+            holon_net::exec::WhyNot::InFlight | holon_net::exec::WhyNot::RetryPending { .. }
+        )
+    )
+}
+
+/// A pending write retry fires only over a file at its base.
+fn write_may_land(exec: &Executor, doc: &str) -> bool {
+    use holon_net::exec::WhyNot;
+    match why_not(exec, CATCH_UP_WRITE, doc) {
+        None | Some(WhyNot::InFlight) => true,
+        Some(WhyNot::RetryPending { .. }) => {
+            token_field(exec, ON_DISK, doc, "hash") == token_field(exec, BASE, doc, "hash")
+        }
+        Some(
+            WhyNot::Needs { .. }
+            | WhyNot::Inhibited(_)
+            | WhyNot::Guard
+            | WhyNot::FailedOnThisInput(_)
+            | WhyNot::ReadsUndeclared(_)
+            | WhyNot::DerivedCycle(_)
+            | WhyNot::BindsAnswerInput,
+        ) => false,
+    }
 }
 
 /// Each document whose last catch-up failed on a disk that did not take it,
@@ -793,5 +837,375 @@ mod tests {
             Some("agent"),
             "the base holds the agent's text"
         );
+    }
+
+    mod stop {
+        use std::collections::BTreeMap;
+
+        use holon_net::exec::Cause;
+        use proptest::prelude::*;
+
+        use super::*;
+
+        const DOCS: [&str; 2] = ["doc:a", "doc:b"];
+
+        #[derive(Debug, Clone, Copy)]
+        enum Outcome {
+            Done,
+            Retryable,
+            Definite,
+        }
+
+        #[derive(Debug, Clone)]
+        enum Step {
+            StoreMoves(usize),
+            DiskMoves(usize),
+            /// The file goes back to the text of its base.
+            DiskReverts(usize),
+            /// Completes the outstanding effect at this index modulo their
+            /// count.
+            Complete(usize, Outcome),
+            Advance(u64),
+            /// The store goes back to the authority of its base.
+            StoreReverts(usize),
+        }
+
+        fn step() -> impl Strategy<Value = Step> {
+            let outcome = prop_oneof![
+                Just(Outcome::Done),
+                Just(Outcome::Retryable),
+                Just(Outcome::Definite)
+            ];
+            prop_oneof![
+                1 => (0..DOCS.len()).prop_map(Step::StoreMoves),
+                1 => (0..DOCS.len()).prop_map(Step::DiskMoves),
+                1 => (0..DOCS.len()).prop_map(Step::DiskReverts),
+                3 => (any::<usize>(), outcome).prop_map(|(i, o)| Step::Complete(i, o)),
+                2 => (1u64..250).prop_map(Step::Advance),
+                1 => (0..DOCS.len()).prop_map(Step::StoreReverts),
+            ]
+        }
+
+        /// What the test itself saw of each document's catch-up, apart from
+        /// the net's own reads.
+        #[derive(Debug, Default)]
+        struct Seen {
+            /// An ingest attempt failed and no ingest landed since.
+            ingest_failed: bool,
+            /// The last write attempt failed retryably and no write ran since.
+            write_retry_pending: bool,
+        }
+
+        struct Model {
+            net: Net,
+            outstanding: Vec<EffectRequest>,
+            seen: BTreeMap<&'static str, Seen>,
+            counter: u32,
+        }
+
+        impl Model {
+            fn new() -> Self {
+                let mut net = Net {
+                    exec: Executor::new(net()).expect("the write-back net loads"),
+                    pending: Vec::new(),
+                    now: Duration::ZERO,
+                };
+                for doc in DOCS {
+                    net.write(ON_DISK, doc, content([("hash", "h0")]));
+                    net.write(BASE, doc, content([("hash", "h0"), ("authority", "a0")]));
+                    net.write(AUTHORITY, doc, content([("hash", "a0")]));
+                }
+                Self {
+                    net,
+                    outstanding: Vec::new(),
+                    seen: DOCS.iter().map(|d| (*d, Seen::default())).collect(),
+                    counter: 0,
+                }
+            }
+
+            fn fresh(&mut self, prefix: &str) -> String {
+                self.counter += 1;
+                format!("{prefix}{}", self.counter)
+            }
+
+            fn collect(&mut self, requests: Vec<EffectRequest>) {
+                self.outstanding.extend(requests);
+            }
+
+            fn running(&self, transition: &str, doc: &str) -> bool {
+                self.outstanding
+                    .iter()
+                    .any(|r| &*r.transition == transition && r.subject.as_str() == doc)
+            }
+
+            fn apply(&mut self, step: &Step) {
+                let at = self.net.now.as_millis() as u64;
+                match *step {
+                    Step::StoreMoves(d) => {
+                        let hash = self.fresh("a");
+                        self.net
+                            .write(AUTHORITY, DOCS[d], content([("hash", &hash)]));
+                    }
+                    Step::DiskReverts(d) => {
+                        let base = token_field(&self.net, BASE, DOCS[d], "hash")
+                            .expect("every document has a base");
+                        self.net.write(ON_DISK, DOCS[d], content([("hash", &base)]));
+                    }
+                    Step::DiskMoves(d) => {
+                        let hash = self.fresh("h");
+                        self.net.write(ON_DISK, DOCS[d], content([("hash", &hash)]));
+                    }
+                    Step::StoreReverts(d) => {
+                        let base = token_field(&self.net, BASE, DOCS[d], "authority")
+                            .expect("every document has a base");
+                        self.net
+                            .write(AUTHORITY, DOCS[d], content([("hash", &base)]));
+                    }
+                    Step::Complete(i, outcome) => {
+                        if self.outstanding.is_empty() {
+                            return;
+                        }
+                        let req = self.outstanding.remove(i % self.outstanding.len());
+                        let doc = DOCS[doc_index(&req)];
+                        let subject = Subject::new(doc);
+                        let seen = self.seen.get_mut(doc).unwrap();
+                        let result = match (outcome, &*req.transition) {
+                            (Outcome::Done, CATCH_UP_INGEST) => {
+                                seen.ingest_failed = false;
+                                let disk = field(&req.input, "disk");
+                                EffectResult::Done(vec![
+                                    output(
+                                        BASE,
+                                        &subject,
+                                        [("hash", disk), ("authority", INGESTED)],
+                                    ),
+                                    output(ON_DISK, &subject, [("hash", disk)]),
+                                ])
+                            }
+                            (Outcome::Done, CATCH_UP_WRITE) => {
+                                seen.write_retry_pending = false;
+                                let hash = format!("w-{}", field(&req.input, "authority"));
+                                EffectResult::Done(vec![
+                                    output(
+                                        BASE,
+                                        &subject,
+                                        [
+                                            ("hash", &hash),
+                                            ("authority", field(&req.input, "authority")),
+                                        ],
+                                    ),
+                                    output(ON_DISK, &subject, [("hash", &hash)]),
+                                ])
+                            }
+                            (Outcome::Retryable | Outcome::Definite, t) => {
+                                if t == CATCH_UP_INGEST {
+                                    seen.ingest_failed = true;
+                                } else if t == CATCH_UP_WRITE {
+                                    seen.write_retry_pending =
+                                        matches!(outcome, Outcome::Retryable);
+                                }
+                                EffectResult::Failed(match outcome {
+                                    Outcome::Retryable => Cause::retryable("disk busy"),
+                                    _ => Cause::definite("no such document"),
+                                })
+                            }
+                            (_, other) => panic!("the generator fires no {other}"),
+                        };
+                        self.net
+                            .complete(req.attempt, result, Duration::from_millis(at + 1))
+                            .expect("the attempt is outstanding");
+                    }
+                    Step::Advance(ms) => {
+                        let requests = one(&mut self.net, at + ms);
+                        self.collect(requests);
+                        return;
+                    }
+                }
+                let now = self.net.now.as_millis() as u64;
+                let requests = one(&mut self.net, now);
+                self.collect(requests);
+            }
+
+            fn check(&self) -> Result<(), TestCaseError> {
+                let unsettled = unsettled(&self.net);
+                let stop = stop_waits_for(&self.net);
+                let failed = failed_writebacks(&self.net);
+                for doc in DOCS {
+                    let seen = &self.seen[doc];
+                    let ingest_failed = seen.ingest_failed;
+                    let ingest_running = self.running(CATCH_UP_INGEST, doc);
+                    let write_running = self.running(CATCH_UP_WRITE, doc);
+                    // A write retry re-checks its guard when it comes due: the disk
+                    // at its base and the store away from the base's authority.
+                    let read = |place, field| token_field(&self.net, place, doc, field);
+                    let write_can_land = write_running
+                        || (seen.write_retry_pending
+                            && read(ON_DISK, "hash") == read(BASE, "hash")
+                            && read(AUTHORITY, "hash") != read(BASE, "authority"));
+                    let owed = unsettled.iter().any(|d| d == doc);
+                    let waited = stop.iter().any(|d| d == doc);
+                    prop_assert!(!waited || owed, "{doc}: the stop waits only for owed work");
+                    if owed && (write_can_land || !ingest_failed) {
+                        prop_assert!(
+                            waited,
+                            "{doc}: a catch-up that can still land holds the stop ({seen:?}, \
+                             net: {})",
+                            self.net_state(doc)
+                        );
+                    }
+                    if owed && !waited {
+                        prop_assert!(
+                            failed.iter().any(|f| f.starts_with(&format!("{doc} ("))),
+                            "{doc}: a document the stop leaves behind is named failed: {failed:?}"
+                        );
+                    }
+                    // A running attempt may still land, so the stop may wait one attempt;
+                    // a pending write retry may hold it until the retry comes due.
+                    if ingest_failed
+                        && !write_running
+                        && !seen.write_retry_pending
+                        && !ingest_running
+                    {
+                        prop_assert!(
+                            !waited,
+                            "{doc}: between attempts, a failed ingest holds no stop ({})",
+                            self.net_state(doc)
+                        );
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        impl Model {
+            fn net_state(&self, doc: &str) -> String {
+                let retrying: Vec<_> = self
+                    .net
+                    .retrying()
+                    .filter(|(_, d, _)| d.as_str() == doc)
+                    .map(|(t, _, c)| format!("{t}: {}", c.text))
+                    .collect();
+                format!(
+                    "ingest {:?}, write {:?}, retrying {retrying:?}",
+                    why_not(&self.net, CATCH_UP_INGEST, doc),
+                    why_not(&self.net, CATCH_UP_WRITE, doc)
+                )
+            }
+        }
+
+        fn doc_index(req: &EffectRequest) -> usize {
+            DOCS.iter()
+                .position(|d| *d == req.subject.as_str())
+                .unwrap_or_else(|| panic!("the generator owns no {}", req.subject.as_str()))
+        }
+
+        fn run(steps: &[Step]) -> Result<(), TestCaseError> {
+            let mut model = Model::new();
+            model.check()?;
+            for step in steps {
+                model.apply(step);
+                model.check()?;
+            }
+            Ok(())
+        }
+
+        /// The stop waits for every write that can still land and for every
+        /// ingest with no failure on record; between attempts it waits for
+        /// no failed ingest, and what it leaves behind is named failed.
+        #[test]
+        fn the_stop_waits_for_what_can_still_land() {
+            use Outcome::*;
+            use Step::*;
+            let fixed = [
+                // A write retry is due over a file back at its base after its ingest failed.
+                vec![
+                    StoreMoves(0),
+                    DiskMoves(0),
+                    Complete(1, Retryable),
+                    DiskReverts(0),
+                    Complete(0, Retryable),
+                ],
+                // A store edit after a failed ingest starts a fresh attempt.
+                vec![DiskMoves(0), Complete(0, Retryable), StoreMoves(0)],
+                // A store edit while the retry runs keeps the failed run.
+                vec![
+                    DiskMoves(0),
+                    Complete(0, Retryable),
+                    StoreMoves(1),
+                    Advance(99),
+                    Complete(0, Done),
+                    StoreMoves(0),
+                    StoreMoves(0),
+                ],
+                // A write and an ingest that run side by side both fail.
+                vec![
+                    StoreMoves(0),
+                    DiskMoves(0),
+                    Complete(0, Retryable),
+                    Advance(99),
+                    Complete(0, Retryable),
+                ],
+                // A write retry is due over a file whose ingest failed.
+                vec![
+                    DiskMoves(0),
+                    Complete(0, Done),
+                    Complete(0, Retryable),
+                    DiskMoves(0),
+                    Complete(0, Retryable),
+                ],
+                // A write retry is due over a file whose ingest failed for good.
+                vec![
+                    StoreMoves(0),
+                    StoreMoves(0),
+                    StoreMoves(1),
+                    DiskMoves(0),
+                    Complete(18388249744759922208, Retryable),
+                    Complete(3439441474208776445, Definite),
+                ],
+                // New file content while a failed ingest's retry runs.
+                vec![
+                    DiskMoves(1),
+                    StoreMoves(0),
+                    Complete(1, Done),
+                    DiskMoves(0),
+                    Complete(1, Retryable),
+                    Advance(100),
+                    DiskMoves(0),
+                ],
+                // A write retry is due after the store went back to the base's authority.
+                vec![
+                    DiskMoves(0),
+                    DiskReverts(0),
+                    Complete(0, Done),
+                    DiskReverts(0),
+                    StoreReverts(0),
+                    Complete(8462056904535353347, Retryable),
+                    Advance(99),
+                    Complete(0, Retryable),
+                ],
+                // A write retry is pending over a file at its base, and the store went
+                // back to the base's authority.
+                vec![
+                    StoreMoves(0),
+                    StoreReverts(0),
+                    Complete(0, Retryable),
+                    DiskMoves(0),
+                    DiskReverts(0),
+                    Complete(0, Retryable),
+                ],
+            ];
+            for steps in &fixed {
+                if let Err(e) = run(steps) {
+                    panic!("{steps:?}: {e}");
+                }
+            }
+            proptest::test_runner::TestRunner::new(ProptestConfig {
+                cases: 512,
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })
+            .run(&prop::collection::vec(step(), 1..40), |steps| run(&steps))
+            .unwrap_or_else(|e| panic!("{e}"));
+        }
     }
 }

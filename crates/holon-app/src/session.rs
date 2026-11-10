@@ -325,7 +325,7 @@ async fn wait_for_writeback(
         let engine = engine.clone();
         async move {
             let mut busy: Vec<String> = idle
-                .writeback_unsettled()
+                .writeback_stop_waits_for()
                 .into_iter()
                 .map(str::to_string)
                 .collect();
