@@ -1012,9 +1012,7 @@ boot_site=crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs
 boot_payload() {
     printf 'the composed boot did not finish within 60s with the `fake-mcp` integration peer drawn to answer %s: the session resolves only after every enabled integration connected' "$1"
 }
-hand_authored_log boot-instant "$boot_site:1431:9" "$(boot_payload Instant)"
-expect_outcome boot-timeout/instant 0 '^PRIMARY: \[known-red:composed-boot-timeout-under-load\]' "$work/boot-instant.log"
-for timing in AfterSessionResolve Never; do
+for timing in Instant AfterSessionResolve Never; do
     hand_authored_log "boot-$timing" "$boot_site:1431:9" "$(boot_payload "$timing")"
     expect_outcome "boot-timeout/$timing" 1 "$novel_only" "$work/boot-$timing.log"
 done

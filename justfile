@@ -1540,6 +1540,7 @@ cargo-free-checks:
     ./scripts/test-count-hash-folders.py 2>&1 | tee target/gate-logs/gate-arch-count-hash-folders.log
     ./scripts/test-integrate-track-walls.py 2>&1 | tee target/gate-logs/gate-arch-integrate-track-walls.log
     ./scripts/test-known-red-evidence-row-key.py 2>&1 | tee target/gate-logs/gate-arch-known-red-evidence-row-key.log
+    ./scripts/test-known-red-gate-load.py 2>&1 | tee target/gate-logs/gate-arch-known-red-gate-load.log
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
     # Keeps the deny.toml ignore of RUSTSEC-2026-0514 true.
     { ./scripts/check-hickory-dnssec-off.py . {{DENY_OWN_LOCKS}} && ./scripts/check-hickory-dnssec-off.py --self-check; } \
