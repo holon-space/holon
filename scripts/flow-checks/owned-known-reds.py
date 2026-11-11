@@ -9,7 +9,8 @@ The lane's cards are the summary's `Cards: #N[, #N]...` line, else the N of a la
 The summary accounts for its rows in one `## Known-red rows` section, one table row per owned row:
     | <key> | deleted | <log> |
     | <key> | kept | <cause> | <log> | <load at start> | <seconds> |
-with a cause of wait, lock, cpu, race or other:<word>, and a log under target/ that exists from the lane root.
+with a cause of wait, lock, cpu, race or other:<word>, and a log under target/ that exists from the lane root, bare or
+as one code span.
 PASS (exit 0) when every owned row is named exactly once, `deleted` exactly when the key is gone from the working tree,
 and the section names no other key. Every problem is one stderr line (exit 1); an input it cannot read exits 2.
 """
@@ -127,7 +128,7 @@ def outcome_problem(key, cells, is_log):
         logs = cells[2:3]
     else:
         return f"row {key} has the outcome `{outcome}`, neither deleted nor kept"
-    log = logs[0]
+    log = re.sub(r"\A`([^`]+)`\Z", r"\1", logs[0])
     if not log_path.fullmatch(log) or re.search(brace, log) or not is_log(log):
         return f"row {key} cites `{log}`, which is no existing log under target/ from the lane root"
     return None

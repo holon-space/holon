@@ -442,6 +442,10 @@ def static_examples():
     doubled = {REGISTRY: HEADER.replace("| Companions |", "| Companions | Companions |", 1) + row("ok-row", owner="#5")}
     got = check.problems(doubled, doubled, summary_for({"ok-row": "kept"}, {5}), {5}, is_log)
     assert got and not any("another order" in p for p in got), f"a header with a doubled column, in the registry order: {got}"
+    spanned = {REGISTRY: HEADER + row("span-row", owner="#5")}
+    expect("a log cell written as a code span",
+           check.problems(spanned, {REGISTRY: HEADER}, summary_for(
+               {}, {5}, extra=["| `span-row` | deleted | `target/lane/span-row.log` |\n"]), {5}, is_log), [])
     expect("Cards line", check.lane_cards("x\nCards: #3, #40\n", "lane-7-slug"), {3, 40})
     expect("lane folder", check.lane_cards("x\n", "lane-7-slug"), {7})
     expect("neither", check.lane_cards("x\n", "_sw_integ"), None)

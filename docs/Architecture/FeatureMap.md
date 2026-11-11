@@ -377,11 +377,9 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `failed-slot-create-loro-dispatch-keystrokes-run-anyway`
 - `failed-slot-create-sqlonly-keystrokes-run-anyway`
 - `folder-companion-subdir-fileless-page-not-homed-load`
-- `fs-watcher-arm-no-event-agent-session`
 - `fs-watcher-move-out-lost-remove`
-- `fs-watcher-no-events-agent-session`
 - `fs-watcher-rename-no-pair-in-seen-list`
-- `fs-watcher-rename-unpaired-agent-session`
+- `fs-watcher-stall`
 - `fts-query-block-watch-view-create-fails`
 - `hand-authored-hm4-reboot-settle-load-timeout`
 - `hand-authored-renamed-recipe-refusal-not-disclosed-load`
@@ -416,7 +414,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `open-tab-panel-keeps-empty-cursor-subtree`
 - `org-deep-text-ratio-under-load`
 - `org-suite-backward-sync-ui-delete-load-timeout`
-- `orgmode-file-watcher-no-event`
 - `pairing-conflict-badge-conflict-copy-content-unpainted`
 - `pairing-conflict-badge-long-copy-content-unpainted`
 - `pairing-conflict-badge-long-copy-load-timeout`

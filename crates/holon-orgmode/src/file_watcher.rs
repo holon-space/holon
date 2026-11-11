@@ -196,101 +196,232 @@ impl VaultFileWatcher {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::sync::Arc;
+    use std::future::Future;
 
     use holon_filesystem::NotifyWatcher;
+    use proptest::prelude::*;
     use tempfile::TempDir;
+    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
     use tokio::time::Duration;
-    use tokio::time::sleep;
+    use tokio::time::Instant;
 
     use super::*;
 
-    /// These tests drive the REAL `NotifyWatcher` (fsevents on macOS) end to
-    /// end through the vault filter bridge — the dedicated real-watcher
-    /// coverage ADR 0011 requires once the PBT harness runs on the in-memory
-    /// adapter.
-    fn armed_watcher(dir: &Path) -> VaultFileWatcher {
-        let source = Arc::new(NotifyWatcher::new_unarmed().unwrap());
-        let watcher = VaultFileWatcher::new(
-            source.as_ref(),
-            dir,
+    /// How long a live test waits for FSEvents; a loaded machine delays
+    /// delivery by seconds.
+    const LIVE_BUDGET: Duration = Duration::from_secs(30);
+
+    /// A quiet spell after which [`collect_until`] rewrites its nudge file.
+    const QUIET: Duration = Duration::from_millis(500);
+
+    /// The REAL `NotifyWatcher` (fsevents on macOS), with every change handed
+    /// on `delay` late and in order: the shape of a loaded `fseventsd`.
+    struct DelayedRelay {
+        watcher: NotifyWatcher,
+        tx: broadcast::Sender<FileChange>,
+    }
+
+    impl DelayedRelay {
+        fn new(delay: Duration) -> Self {
+            let watcher = NotifyWatcher::new_unarmed().unwrap();
+            let mut raw = watcher.subscribe();
+            let (tx, _) = broadcast::channel(4096);
+            let (due_tx, mut due_rx) = mpsc::unbounded_channel();
+            // Stamps each change on arrival, so a burst is not delayed once per
+            // change.
+            tokio::spawn(async move {
+                loop {
+                    match raw.recv().await {
+                        Ok(change) => {
+                            if due_tx.send((Instant::now() + delay, change)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            panic!("the delayed relay lagged {n} changes behind the watcher")
+                        }
+                    }
+                }
+            });
+            let relay_tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some((due, change)) = due_rx.recv().await {
+                    tokio::time::sleep_until(due).await;
+                    let _ = relay_tx.send(change);
+                }
+            });
+            Self { watcher, tx }
+        }
+    }
+
+    impl FileChangeSource for DelayedRelay {
+        fn subscribe(&self) -> broadcast::Receiver<FileChange> {
+            self.tx.subscribe()
+        }
+
+        fn arm(&self, root: &Path) -> std::io::Result<()> {
+            self.watcher.arm(root)
+        }
+    }
+
+    /// The paths of the forwarded (`Some`) events, in arrival order.
+    type Seen = Vec<PathBuf>;
+
+    /// Collects forwarded paths until `done` holds or [`LIVE_BUDGET`] passes,
+    /// rewriting `nudge` after each [`QUIET`] spell. Panics when no nudge came
+    /// back, so a stalled `fseventsd` is not reported as a lost event.
+    async fn collect_until(
+        watcher: &mut VaultFileWatcher,
+        nudge: &Path,
+        done: impl Fn(&Seen) -> bool,
+    ) -> Seen {
+        let deadline = Instant::now() + LIVE_BUDGET;
+        let mut seen = Seen::new();
+        while !done(&seen) && Instant::now() < deadline {
+            match tokio::time::timeout(QUIET, watcher.receiver().recv()).await {
+                Ok(msg) => match msg.expect("watcher channel closed").0 {
+                    Some(FileEvent::Changed(path)) | Some(FileEvent::Renamed { to: path, .. }) => {
+                        seen.push(path)
+                    }
+                    None => {}
+                },
+                Err(_) => std::fs::write(nudge, b"* nudge").unwrap(),
+            }
+        }
+        let nudge_name = nudge.file_name().unwrap().to_string_lossy();
+        assert!(
+            done(&seen) || seen.iter().any(|p| p == nudge),
+            "the watch stalled: no event for {nudge_name} within {LIVE_BUDGET:?}: {seen:?}"
+        );
+        seen
+    }
+
+    /// Arms a delayed real watcher on `root` (canonical) and returns once the
+    /// watch delivers: FSEvents drops what happens before the stream starts.
+    /// The relay must outlive the test: dropping it stops delivery.
+    async fn armed_watcher(root: &Path, delay: Duration) -> (DelayedRelay, VaultFileWatcher) {
+        let source = DelayedRelay::new(delay);
+        let mut watcher = VaultFileWatcher::new(
+            &source,
+            root,
             crate::file_sync_controller::org_only_format_registry(),
         );
-        source.arm(dir).unwrap();
-        // Leak the source so the notify watcher outlives this helper —
-        // dropping it stops event delivery. Test-scoped only.
-        std::mem::forget(source);
-        watcher
+        source.arm(root).unwrap();
+        let live = root.join("live.org");
+        collect_until(&mut watcher, &live, |s| s.contains(&live)).await;
+        (source, watcher)
     }
 
-    #[tokio::test]
-    async fn test_file_watcher_detects_changes() {
-        let temp_dir = TempDir::new().unwrap();
-        let test_file = temp_dir.path().join("test.org");
-
-        let watcher = armed_watcher(temp_dir.path());
-
-        sleep(Duration::from_millis(100)).await;
-
-        tokio::fs::write(&test_file, "* Test").await.unwrap();
-        sleep(Duration::from_millis(500)).await;
-
-        let mut receiver = watcher.into_receiver();
-        let mut saw_org_change = false;
-        while let Ok((msg, _seq)) = receiver.try_recv() {
-            saw_org_change |= msg.is_some();
-        }
-        assert!(saw_org_change, "Should receive file change event");
+    fn canonical_tempdir() -> (TempDir, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        (temp, root)
     }
 
-    #[tokio::test]
-    async fn test_file_watcher_ignores_git_dir() {
-        let temp_dir = TempDir::new().unwrap();
-        let git_dir = temp_dir.path().join(".git");
-        std::fs::create_dir_all(&git_dir).unwrap();
-        let git_file = git_dir.join("test.org");
+    /// Runs `case` on a runtime of its own for the static example delay, then
+    /// for generated delays. Each case drives the real `fseventsd`, so there
+    /// are few.
+    fn for_every_delay<F: Future<Output = ()>>(case: impl Fn(Duration) -> F) {
+        let run = |delay: Duration| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(case(delay))
+        };
+        run(Duration::from_secs(1));
+        let config = ProptestConfig {
+            cases: 3,
+            max_shrink_iters: 0,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        };
+        proptest!(config, |(delay_ms in 0u64..=3000)| run(Duration::from_millis(delay_ms)));
+    }
 
-        let mut watcher = armed_watcher(temp_dir.path());
-        sleep(Duration::from_millis(100)).await;
+    /// Writes `forbidden`, then a vault file `control.org`, then a marker.
+    /// FSEvents delivers in order, so once the marker arrived any event for
+    /// `forbidden` has arrived too, and `control.org` shows that the check sees
+    /// a late vault event.
+    async fn assert_never_forwarded(
+        watcher: &mut VaultFileWatcher,
+        root: &Path,
+        forbidden: &Path,
+        message: &str,
+    ) {
+        std::fs::write(forbidden, "* Hidden").unwrap();
+        let control = root.join("control.org");
+        std::fs::write(&control, "* Control").unwrap();
+        let marker = root.join("marker.org");
+        std::fs::write(&marker, "* Marker").unwrap();
+        let seen = collect_until(watcher, &marker, |s| s.contains(&marker)).await;
+        assert!(
+            seen.contains(&control),
+            "control.org did not arrive before the marker, so the check cannot see a late event: {seen:?}"
+        );
+        assert!(
+            !seen.contains(&forbidden.to_path_buf()),
+            "{message}: {seen:?}"
+        );
+    }
 
-        tokio::fs::write(&git_file, "* Hidden").await.unwrap();
-        sleep(Duration::from_millis(500)).await;
+    #[test]
+    fn test_file_watcher_detects_changes() {
+        for_every_delay(|delay| async move {
+            let (_temp, root) = canonical_tempdir();
+            let (_source, mut watcher) = armed_watcher(&root, delay).await;
 
-        while let Ok((msg, _seq)) = watcher.receiver().try_recv() {
+            let page = root.join("test.org");
+            std::fs::write(&page, "* Test").unwrap();
+
+            let seen =
+                collect_until(&mut watcher, &root.join("nudge.org"), |s| s.contains(&page)).await;
             assert!(
-                msg.is_none(),
-                "Should NOT receive events from .git/: {msg:?}"
+                seen.contains(&page),
+                "the watch delivered nudges but no event for test.org: {seen:?}"
             );
-        }
+        });
+    }
+
+    #[test]
+    fn test_file_watcher_ignores_git_dir() {
+        for_every_delay(|delay| async move {
+            let (_temp, root) = canonical_tempdir();
+            std::fs::create_dir_all(root.join(".git")).unwrap();
+            let (_source, mut watcher) = armed_watcher(&root, delay).await;
+
+            assert_never_forwarded(
+                &mut watcher,
+                &root,
+                &root.join(".git/test.org"),
+                "Should NOT receive events from .git/",
+            )
+            .await;
+        });
     }
 
     /// The live vault keeps agent jj-workspaces under `.claude/worktrees/`,
     /// each a full copy of the vault whose `Projects/Holon/Now.org` declares
     /// the same `#+ID:` and headline slugs as the live file. Those workspaces
-    /// are written constantly, so every touch used to deliver an event the
-    /// watcher forwarded into ingest.
-    #[tokio::test]
-    async fn a_hidden_nested_vault_copy_is_never_ingested() {
-        let temp_dir = TempDir::new().unwrap();
-        let copy = temp_dir
-            .path()
-            .join(".claude/worktrees/agent-x/Projects/Holon");
-        std::fs::create_dir_all(&copy).unwrap();
+    /// are written constantly.
+    #[test]
+    fn a_hidden_nested_vault_copy_is_never_ingested() {
+        for_every_delay(|delay| async move {
+            let (_temp, root) = canonical_tempdir();
+            let copy = root.join(".claude/worktrees/agent-x/Projects/Holon");
+            std::fs::create_dir_all(&copy).unwrap();
+            let (_source, mut watcher) = armed_watcher(&root, delay).await;
 
-        let mut watcher = armed_watcher(temp_dir.path());
-        sleep(Duration::from_millis(100)).await;
-
-        tokio::fs::write(copy.join("Now.org"), "* Stale copy")
-            .await
-            .unwrap();
-        sleep(Duration::from_millis(500)).await;
-
-        while let Ok((msg, _seq)) = watcher.receiver().try_recv() {
-            assert!(
-                msg.is_none(),
-                "a stale vault copy under .claude/worktrees/ reached ingest: {msg:?}"
-            );
-        }
+            assert_never_forwarded(
+                &mut watcher,
+                &root,
+                &copy.join("Now.org"),
+                "a stale vault copy under .claude/worktrees/ reached ingest",
+            )
+            .await;
+        });
     }
 
     /// The boot scan and the live watcher answer the same question — "may this
@@ -447,33 +578,21 @@ mod tests {
         assert_legs_agree(legs);
     }
 
-    #[tokio::test]
-    async fn test_file_watcher_respects_gitignore() {
-        let (_temp, root) = vault_repo();
-        let temp_dir = root;
+    #[test]
+    fn test_file_watcher_respects_gitignore() {
+        for_every_delay(|delay| async move {
+            let (_temp, root) = vault_repo();
+            std::fs::write(root.join(".gitignore"), "vendor/\n").unwrap();
+            std::fs::create_dir_all(root.join("vendor")).unwrap();
+            let (_source, mut watcher) = armed_watcher(&root, delay).await;
 
-        // Create .gitignore that ignores "vendor/" directory
-        tokio::fs::write(temp_dir.join(".gitignore"), "vendor/\n")
-            .await
-            .unwrap();
-
-        let vendor_dir = temp_dir.join("vendor");
-        std::fs::create_dir_all(&vendor_dir).unwrap();
-
-        let mut watcher = armed_watcher(&temp_dir);
-        sleep(Duration::from_millis(100)).await;
-
-        // Write to ignored path
-        tokio::fs::write(vendor_dir.join("dep.org"), "* Vendor dep")
-            .await
-            .unwrap();
-        sleep(Duration::from_millis(500)).await;
-
-        while let Ok((msg, _seq)) = watcher.receiver().try_recv() {
-            assert!(
-                msg.is_none(),
-                "Should NOT receive events from gitignored paths: {msg:?}"
-            );
-        }
+            assert_never_forwarded(
+                &mut watcher,
+                &root,
+                &root.join("vendor/dep.org"),
+                "Should NOT receive events from gitignored paths",
+            )
+            .await;
+        });
     }
 }

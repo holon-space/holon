@@ -181,7 +181,15 @@ fn notify_event_to_signals(
             .cloned()
             .map(RawFsSignal::Remove)
             .collect(),
-        _ => Vec::new(),
+        EK::Other if event.need_rescan() => {
+            tracing::warn!(
+                info = event.info().unwrap_or("no reason given"),
+                "[NotifyWatcher] the backend dropped events (Rescan); the poll backstops \
+                 repair what was lost"
+            );
+            Vec::new()
+        }
+        EK::Access(_) | EK::Any | EK::Other => Vec::new(),
     }
 }
 
@@ -451,11 +459,15 @@ impl FileChangeSource for NotifyWatcher {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use notify::EventKind;
+    use notify::event::AccessKind;
+    use notify::event::Flag;
     use notify::event::ModifyKind;
     use notify::event::RenameMode;
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -546,6 +558,64 @@ mod tests {
                 }
             )]
         );
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn an_event_without_a_vault_signal_maps_to_nothing_and_only_a_rescan_warns(
+            kind in prop::sample::select(vec![
+                EventKind::Any,
+                EventKind::Other,
+                EventKind::Access(AccessKind::Any),
+                EventKind::Access(AccessKind::Read),
+            ]),
+            rescan in any::<bool>(),
+            info in prop::option::of(prop::sample::select(vec![
+                "rescan: user dropped",
+                "rescan: kernel dropped",
+            ])),
+            paths in prop::collection::vec("/vault/[a-z]{1,4}\\.org", 0..3),
+        ) {
+            let mut event = ev(kind, &paths.iter().map(String::as_str).collect::<Vec<_>>());
+            if rescan {
+                event = event.set_flag(Flag::Rescan);
+            }
+            if let Some(info) = info {
+                event = event.set_info(info);
+            }
+            let log = CapturedLog::default();
+            let writer = log.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .finish();
+            let signals = tracing::subscriber::with_default(subscriber, || {
+                notify_event_to_signals(&event, &|_| true)
+            });
+            prop_assert_eq!(signals, Vec::<RawFsSignal>::new());
+            let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+            if kind == EventKind::Other && rescan {
+                prop_assert!(log.contains("WARN") && log.contains("Rescan"), "{}", log);
+                prop_assert!(log.contains(info.unwrap_or("no reason given")), "{}", log);
+            } else {
+                prop_assert_eq!(log, "");
+            }
+        }
     }
 
     #[test]
@@ -890,40 +960,6 @@ mod tests {
         assert!(
             seen.iter().any(is_pair),
             "the in-vault rename lost its pairing: {seen:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn notify_watcher_delivers_events_after_arm() {
-        let dir = tempfile::tempdir().unwrap();
-        let watcher = NotifyWatcher::new_unarmed().unwrap();
-        let mut rx = watcher.subscribe();
-        watcher.arm(dir.path()).unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        tokio::fs::write(dir.path().join("a.org"), "* x")
-            .await
-            .unwrap();
-
-        // Arming a watch on a fresh directory also delivers events for the
-        // directory itself, and fsevents does not order them against the write,
-        // so the arrival to assert on is the first one FOR `a.org` — not the
-        // first one at all.
-        let mut seen = Vec::new();
-        let arrived = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let change = rx.recv().await.expect("channel closed");
-                let is_target = change.path.ends_with("a.org");
-                seen.push(change.path);
-                if is_target {
-                    return;
-                }
-            }
-        })
-        .await;
-        assert!(
-            arrived.is_ok(),
-            "no fs event for a.org within the budget; seen: {seen:?}"
         );
     }
 }
