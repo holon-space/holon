@@ -475,3 +475,7 @@ loro_fractional_index = { git = "https://github.com/nightscape/loro.git", rev = 
 # directions are unsatisfiable while ^0.61 and ^0.62 consumers coexist.
 # Drop this patch once a released wmi pins the pair itself.
 wmi = { git = "https://github.com/holon-space/wmi-rs.git", branch = "holon" }
+
+# hickory-proto 0.25.2 plus the upstream fixes for RUSTSEC-2026-0487/0489/0490/0491, which
+# upstream ships only in 0.26.2; iroh 0.96 pins hickory-resolver ^0.25. Drop it with the iroh upgrade.
+hickory-proto = { git = "https://github.com/nightscape/hickory-dns.git", rev = "58b95492d877a86ebbfa92e5dfa99480f72a459e" }
