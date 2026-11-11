@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
 """Check that the test logs a lane summary cites ran exactly the test steps its diff selects.
 
-    scripts/flow-checks/tests-cover-diff.py --base <commit> --summary <path>
+    scripts/flow-checks/tests-cover-diff.py --base <commit> --summary <path> [--tree <commit>]
 
 Run from the lane root. It runs `scripts/select-tests.py --base <commit>` and reads its `<step>: <args>` lines.
 The cited logs are the `target/...` `.log` and `.txt` paths between the summary's `How tested` and `Confidence` lines;
 a brace list (`target/x/{a,b}.log`) cites each of its paths, as the shell expands it.
 Of a cited log it reads line 1 and the last line: a log written by scripts/flow-checks/run-step.sh has the step line
-as line 1 and `exit: <code>` as its last line, and the lines between are the step's own output. Only for an
-`accepted-base-red:` line does it read the `TREE:` line and the nextest result lines between.
+as line 1 and `exit: <code>` as its last line, and the lines between are the step's own output. It reads a
+classifier log's `TREE:` line, a red `windowed:` step log's gate lines and the unit logs they name, and, for an
+`accepted-base-red:` line, the `TREE:` line and the nextest result lines between.
 A step ran when a cited log has the selected line as line 1, and one of these holds:
   - its last line is `exit: 0`;
   - its last line is `exit: <non-zero>` AND the same log is cited together with a classifier log:
-    `scripts/keystone-known-reds.sh <step log>` run on the final tree, whose last line is `exit: 0` (every signature
+    `scripts/keystone-known-reds.sh <step log>` run on the checked tree, whose last line is `exit: 0` (every signature
     matched a known-red row, every keystone sample verdict=OK);
+  - a `windowed:` step log whose last line is `exit: <non-zero>` and whose failing units are all known reds in their
+    own unit logs: the gate's end line counts RED and HUNG units, as many as its `FAIL: RED|HUNG <unit> (log <path>)`
+    lines and at least one; no unit is HUNG; every log of every RED unit (the two of its rerun line, else the one of
+    its FAIL line) exists, has the sha256 its `unit-log: <unit> <path> sha256=<hex>` line records, and is cited
+    together with a classifier log of it that ends `exit: 0` on the checked tree;
   - its last line is `exit: <non-zero>`, its classifier log is missing or red, AND the How-tested block has a line
     `accepted-base-red: <step> <base log> <acceptance>`: the base log is cited, has the selected line as line 1, and its
     `TREE:` commit has the source tree of `--base`; every test that fails in the step log fails in the base log too.
     Failing tests are the nextest result lines (`FAIL [ 1.2s] <binary> <test>`, any status but a pass). When either
-    log has none, both compare at module level: the windowed gate's `FAIL: RED|HUNG <binary> <module>` lines, or the
+    log has none, both compare at module level: the units of the windowed gate's `FAIL:` lines, or the
     module of each failing test; stdout notes each such compare. A lane log with neither line that `just hand-authored`
     wrote (a `] RED case "<name>"` or `HAND-AUTHORED RED:` line) compares its red case names and failing tests (the
     indented names of each libtest `failures:` list, and each intact `test <name> ... FAILED` result line), whatever
@@ -39,8 +45,9 @@ Every other outcome of the classifier (exit 1 regression, exit 3 indeterminate) 
 names the step and the classifier exit.
 The check never runs the classifier itself and never reads the registry: one copy of each rule (the registry and the
 classifier own the matching).
-A classifier log is a cited run-step log of the line `known-reds: scripts/keystone-known-reds.sh <step log>`; it
-classifies the step log whose path resolves, from the lane root, to the same file as a cited path.
+A classifier log is a cited run-step log of the line `known-reds: scripts/keystone-known-reds.sh <log>`; it
+classifies the log whose path resolves, from the lane root, to the same file. It counts only when its `TREE:` commit
+has the source tree of the checked commit: `--tree`, else jj's `@`.
 The selector's disclosure steps (NOT_RUN_STEPS of select-tests.py) need no log.
 PASS (exit 0) when every selected step ran, every cited log exists, every cited log whose line 1 names a selected step
 has the selected line as line 1, every backticked `<step>: <args>` span of the summary equals the selected line, and
@@ -49,6 +56,7 @@ Every problem is one stderr line and the check prints them all; only a failing s
 Lines compare with runs of whitespace collapsed. It never runs tests.
 """
 import argparse
+import hashlib
 import importlib.util
 import re
 import shlex
@@ -79,9 +87,15 @@ RESULT = re.compile(r"(?:\d{4}-\d\d-\d\dT[\d:]+Z)?\s+([A-Z][A-Z0-9 -]*?) \[\s*[\
                     r"(?:\(\s*\d+/\d+\) )?(\S+) (\S+)\s*")
 # shortcut: a retried test that later passes still counts as failing; read retries when a lane needs it.
 PASSING = re.compile(r"(?:TRY \d+ )?(?:PASS|LEAK|START)")
-# The failing verdicts of scripts/windowed-gate.py.
-# shortcut: the windowed gate names its reds per module only; compare test names once it prints them.
-GATE_FAIL = re.compile(r"\s*FAIL: (?:RED|HUNG) (\S+) (\S+)(?: .*)?")
+# The lines of scripts/windowed-gate.py `main` that name a unit's verdict and logs: the FAIL line of each RED or HUNG
+# unit, the rerun line of each re-run unit, the `unit-log:` line of each log of a RED or HUNG unit, and the end line.
+# A unit is a binary id, or a binary id and a module of the `main` binary.
+# shortcut: the windowed gate names its reds per unit only; compare test names once it prints them.
+GATE_FAIL = re.compile(r"\s*FAIL: (RED|HUNG) (.+?) \(log ([^)]+)\)(?: .*)?")
+GATE_RERUN = re.compile(r"[A-Z-]+ +(.+?)  rerun wall=\S+  logs=(\S+) (\S+)\s*")
+GATE_UNIT_LOG = re.compile(r"\s*unit-log: (.+) (\S+) sha256=([0-9a-f]{64})\s*")
+GATE_COUNTS = re.compile(r"windowed-gate: wall=.* RED=(\d+) HUNG=(\d+)\s*")
+WINDOWED = "windowed"
 # The grammar of the hand-authored recipe's `sed` that lists a shard's red cases (justfile).
 HAND_CASE = re.compile(r'\] RED case "([^"]*)"')
 HAND_SKIP = re.compile(r'\] SKIPPED case "([^"]*)" via HOLON_HAND_AUTHORED_SKIP')
@@ -175,9 +189,71 @@ def failing_tests(lines):
             if (m := RESULT.fullmatch(line)) and not PASSING.fullmatch(m.group(1))}
 
 
+def gate_failures(lines):
+    """(verdict, unit, final log) of every failing verdict line (RED, HUNG) of the windowed gate."""
+    return [m.groups() for line in lines if (m := GATE_FAIL.fullmatch(line))]
+
+
 def gate_red_modules(lines):
-    """`<binary> <module>` of every failing verdict line (RED, HUNG) of the windowed gate."""
-    return {f"{m.group(1)} {m.group(2)}" for line in lines if (m := GATE_FAIL.fullmatch(line))}
+    return {unit for _, unit, _ in gate_failures(lines)}
+
+
+def gate_reruns(lines):
+    """{unit: (first log, rerun log)} of the windowed gate's rerun lines."""
+    return {m.group(1): (m.group(2), m.group(3)) for line in lines if (m := GATE_RERUN.fullmatch(line))}
+
+
+def gate_counts(lines):
+    """(RED, HUNG) of the windowed gate's end line, or None when the log has none."""
+    return next(((int(m.group(1)), int(m.group(2))) for line in lines if (m := GATE_COUNTS.search(line))), None)
+
+
+def unit_problems(step, path, lines, classifiers, split, on_tree):
+    """Why the windowed gate log does not show every failing unit a known red in its own unit logs; [] when it does.
+    Every log of every RED unit (its first run and its rerun) must still hold what the gate hashed into its
+    `unit-log:` line, and each classifier log of it must end `exit: 0` on the checked tree."""
+    head = f"{path} of step `{step}`"
+    if (counts := gate_counts(lines)) is None:
+        return [f"{head}: no `{GATE_END}...` end line, so its units have no verdict"]
+    fails = gate_failures(lines)
+    if not fails or len(fails) != sum(counts):
+        return [f"{head}: {len(fails)} FAIL lines but the end line says RED={counts[0]} HUNG={counts[1]}"]
+    reruns = gate_reruns(lines)
+    hashes = [(m.group(2), m.group(3)) for line in lines if (m := GATE_UNIT_LOG.fullmatch(line))]
+    bad = []
+    for verdict, unit, final in sorted(fails):
+        if verdict == "HUNG":
+            bad.append(f"{head}: unit {unit} is HUNG; a hang has no classifier verdict")
+            continue
+        logs = list(reruns.get(unit, ()))
+        logs += [] if any(same_file(final, log) for log in logs) else [final]
+        for log in logs:
+            f = Path(log).expanduser()
+            if not f.is_file():
+                bad.append(f"{head}: unit log {log} does not exist")
+                continue
+            now = hashlib.sha256(f.read_bytes()).hexdigest()
+            recorded = next((h for p, h in hashes if same_file(p, log)), None)
+            if recorded is None:
+                bad.append(f"unit log {log} has no unit-log line in {path}")
+            elif recorded != now:
+                bad.append(f"unit log {log} changed after the gate ran (sha256 {now} != {recorded})")
+            judges = [c for c, target in sorted(classifiers.items()) if same_file(target, log)]
+            if not judges:
+                bad.append(f"{head}: unit {unit} log {log} has no cited classifier log; cite a run-step log of "
+                           f"`{CLASSIFIER} {log}`")
+            bad += [problem for c in judges for problem in judged(c, split[c], f"{log} of unit {unit}", on_tree)]
+    return bad
+
+
+def judged(classifier, lines, subject, on_tree):
+    """Why the classifier log does not show `subject` all known reds on the checked tree; [] when it does."""
+    if lines[-1] != EXIT_OK:
+        return [f"{classifier} classifies {subject}; its last line is `{lines[-1]}`, not `{EXIT_OK}`"]
+    if not on_tree(lines):
+        return [f"{classifier} classifies {subject} on TREE {tree_line(lines)}, whose source tree is not the checked "
+                f"tree"]
+    return []
 
 
 def libtest_failures(lines):
@@ -318,10 +394,15 @@ def base_red_problems(step, lane_path, lane_lines, base_path, logs, selected_lin
     return []
 
 
-def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tree, notes=None):
+def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tree, notes=None, head=None):
     """`logs` maps each cited existing path to its text; `not_run` names the steps no log runs; `tree_of` maps a
-    commit to its source tree id; `notes` collects the module-level compares. Returns the problems."""
+    commit to its source tree id; `notes` collects the module-level compares; `head` is the source tree id of the
+    checked tree, which every classifier log must have run on. Returns the problems."""
     notes = [] if notes is None else notes
+
+    def on_tree(lines):
+        return head is not None and (tree := tree_line(lines)) is not None and tree_of(tree) == head
+
     counts = Counter(m.group(1) for line in selected_text.splitlines() if (m := STEP_LINE.match(line)))
     bad = [f"the selector prints step `{step}` {n} times" for step, n in sorted(counts.items()) if n > 1]
     selected = step_lines(selected_text)
@@ -364,8 +445,8 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
             bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `exit: <code>`")
             continue
         judges = [c for c, target in sorted(classifiers.items()) if same_file(target, path)]
-        judged_red = [c for c in judges if split[c][-1] != EXIT_OK]
-        if judges and not judged_red:
+        verdicts = [problem for c in judges for problem in judged(c, split[c], f"{path} of step `{first}`", on_tree)]
+        if judges and not verdicts:
             ran.add(first)
             continue
         line = next(iter(selected[first]))
@@ -374,13 +455,15 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
         if [] in refusals:
             ran.add(first)
             continue
-        if not judges:
+        units = unit_problems(first, path, lines, classifiers, split, on_tree) if first == WINDOWED else None
+        if units == []:
+            ran.add(first)
+            continue
+        if not judges and units is None:
             others = "".join(f"; {c} classifies {t}" for c, t in sorted(classifiers.items()))
             bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `{EXIT_OK}`, and no cited "
                        f"classifier log has line 1 `{CLASSIFIER} {path}`{others}")
-        for c in judged_red:
-            bad.append(f"{c} classifies {path} of step `{first}`; its last line is `{split[c][-1]}`, not `{EXIT_OK}`")
-        bad += [problem for r in refusals for problem in r]
+        bad += verdicts + [problem for r in refusals for problem in r] + (units or [])
     bad += [f"no cited run-step log ran the selected step `{step}`" for step in sorted(set(selected) - not_run - ran)]
     for span in SPAN.findall(summary_text):
         if (m := STEP_LINE.match(span)) and m.group(1) in selected and {norm(span)} != selected[m.group(1)]:
@@ -388,10 +471,19 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
     return bad
 
 
+def jj_head():
+    done = subprocess.run(["jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"], capture_output=True, text=True)
+    if done.returncode:
+        sys.exit(f"tests-cover-diff: `jj log -r @` exited {done.returncode}: {done.stderr.strip()}")
+    return done.stdout.strip()
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--base", required=True)
     p.add_argument("--summary", required=True, type=Path)
+    p.add_argument("--tree", help="the commit whose source tree every classifier log must have run on (default: "
+                                  "jj's @)")
     a = p.parse_args()
     summary_text = a.summary.read_text()
     done = subprocess.run([sys.executable, SELECTOR, "--base", a.base], capture_output=True, text=True)
@@ -406,8 +498,11 @@ def main():
             logs[path] = f.read_text(errors="replace")
         else:
             bad.append(f"cited log {path} does not exist")
+    commit = a.tree or jj_head()
+    if (head := git_tree(commit)) is None:
+        sys.exit(f"tests-cover-diff: git cannot resolve the source tree of the checked commit {commit}")
     notes = []
-    bad += check(done.stdout, summary_text, logs, not_run_steps(), a.base, notes=notes)
+    bad += check(done.stdout, summary_text, logs, not_run_steps(), a.base, notes=notes, head=head)
     for note in notes:
         print(f"tests-cover-diff: note: {note}")
     for problem in bad:

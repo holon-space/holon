@@ -1,0 +1,161 @@
+windowed: just windowed-gate
+BASE: d80bb20cbbabd282d19d78af6aafb5eb93d26c96
+TREE: 89e16237ecb66c37ad044cbfd30eedf9ee01d8f6
+STARTED: 2026-11-09T23:05:06Z
+shape env: RUST_FONTCONFIG_DLOPEN=on
+shape env: HOLON_BUILD_SHA unset
+shape env: HOLON_BUILD_TIME unset
+shape env: RUSTFLAGS unset
+shape env: CARGO_* set: CARGO_BUILD_JOBS CARGO_HOME 
+HOLON_PBT_TIMING=measure
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+windowed-gate: 120 units, 484 tests, jobs=4, per-unit timeout=900s
+PASS      holon-gpui  tests=141  wall=3.7s  log=target/gate-logs/windowed/holon-gpui.log
+PASS      holon-gpui::executor_bridge_test  tests=1  wall=2.3s  log=target/gate-logs/windowed/holon-gpui__executor_bridge_test.log
+PASS      holon-gpui::gpui_capture_replay  tests=1  wall=0.5s  log=target/gate-logs/windowed/holon-gpui__gpui_capture_replay.log
+PASS      holon-gpui::gpui_gherkin_replay  tests=1  wall=6.4s  log=target/gate-logs/windowed/holon-gpui__gpui_gherkin_replay.log
+KNOWN-RED holon-gpui::gpui_sim_replay_capture  tests=1  wall=5.3s  log=target/gate-logs/windowed/holon-gpui__gpui_sim_replay_capture.log
+PASS      holon-gpui::gpui_windowed_minimize  tests=1  wall=0.4s  log=target/gate-logs/windowed/holon-gpui__gpui_windowed_minimize.log
+PASS      holon-gpui::main accordion_bounded_pbt  tests=4  wall=7.0s  log=target/gate-logs/windowed/holon-gpui__main__accordion_bounded_pbt.log
+PASS      holon-gpui::main accordion_hides_when_empty_windowed  tests=4  wall=0.6s  log=target/gate-logs/windowed/holon-gpui__main__accordion_hides_when_empty_windowed.log
+PASS      holon-gpui::main accordion_layout_spike  tests=3  wall=0.5s  log=target/gate-logs/windowed/holon-gpui__main__accordion_layout_spike.log
+PASS      holon-gpui::main accordion_real_mount_windowed  tests=3  wall=7.4s  log=target/gate-logs/windowed/holon-gpui__main__accordion_real_mount_windowed.log
+PASS      holon-gpui::main accordion_sizes_to_content_windowed  tests=5  wall=0.6s  log=target/gate-logs/windowed/holon-gpui__main__accordion_sizes_to_content_windowed.log
+KNOWN-RED holon-gpui::main action_bar_windowed  tests=9  wall=28.8s  log=target/gate-logs/windowed/holon-gpui__main__action_bar_windowed.log
+PASS      holon-gpui::main android_soft_return_contract  tests=3  wall=0.6s  log=target/gate-logs/windowed/holon-gpui__main__android_soft_return_contract.log
+PASS      holon-gpui::main answer_form_windowed  tests=2  wall=0.4s  log=target/gate-logs/windowed/holon-gpui__main__answer_form_windowed.log
+PASS      holon-gpui::main arrow_nav_windowed  tests=1  wall=2.7s  log=target/gate-logs/windowed/holon-gpui__main__arrow_nav_windowed.log
+PASS      holon-gpui::main arrow_nav_windowed_pbt  tests=1  wall=15.9s  log=target/gate-logs/windowed/holon-gpui__main__arrow_nav_windowed_pbt.log
+PASS      holon-gpui::main banner_conditions_draw_as_toasts_windowed  tests=1  wall=3.0s  log=target/gate-logs/windowed/holon-gpui__main__banner_conditions_draw_as_toasts_windowed.log
+KNOWN-RED holon-gpui::main block_focus_keeps_outline_windowed  tests=2  wall=7.2s  log=target/gate-logs/windowed/holon-gpui__main__block_focus_keeps_outline_windowed.log
+KNOWN-RED holon-gpui::main breadcrumb_resolves_from_view_root_windowed  tests=1  wall=3.5s  log=target/gate-logs/windowed/holon-gpui__main__breadcrumb_resolves_from_view_root_windowed.log
+PASS      holon-gpui::main builder_panic_paints_error_node_windowed  tests=1  wall=0.9s  log=target/gate-logs/windowed/holon-gpui__main__builder_panic_paints_error_node_windowed.log
+RED       holon-gpui::main chrome_one_row_windowed  tests=8  wall=35.0s  log=target/gate-logs/windowed/holon-gpui__main__chrome_one_row_windowed.log
+PASS      holon-gpui::main cmd_enter_chord_dispatch  tests=1  wall=5.7s  log=target/gate-logs/windowed/holon-gpui__main__cmd_enter_chord_dispatch.log
+PASS      holon-gpui::main collection_gap_windowed  tests=2  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__collection_gap_windowed.log
+PASS      holon-gpui::main condition_bus_container  tests=5  wall=2.5s  log=target/gate-logs/windowed/holon-gpui__main__condition_bus_container.log
+PASS      holon-gpui::main degraded_bus_bridge_windowed  tests=1  wall=3.6s  log=target/gate-logs/windowed/holon-gpui__main__degraded_bus_bridge_windowed.log
+PASS      holon-gpui::main deliver_block_content_windowed_pbt  tests=1  wall=0.6s  log=target/gate-logs/windowed/holon-gpui__main__deliver_block_content_windowed_pbt.log
+PASS      holon-gpui::main editor_ime_commit_sequence  tests=3  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__editor_ime_commit_sequence.log
+PASS      holon-gpui::main editor_ime_deferred_replay  tests=2  wall=0.6s  log=target/gate-logs/windowed/holon-gpui__main__editor_ime_deferred_replay.log
+PASS      holon-gpui::main editor_task_keyword_promotion  tests=8  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__editor_task_keyword_promotion.log
+PASS      holon-gpui::main editor_trailing_space_echo  tests=3  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__editor_trailing_space_echo.log
+PASS      holon-gpui::main element_builder_panic_paints_error_windowed  tests=1  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__element_builder_panic_paints_error_windowed.log
+PASS      holon-gpui::main empty_block_hint_windowed  tests=2  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__empty_block_hint_windowed.log
+PASS      holon-gpui::main foreground_wake_order  tests=3  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__foreground_wake_order.log
+KNOWN-RED holon-gpui::main gpui_compose_sut_windowed  tests=6  wall=40.0s  log=target/gate-logs/windowed/holon-gpui__main__gpui_compose_sut_windowed.log
+KNOWN-RED holon-gpui::main gpui_composed_windowed_loop  tests=3  wall=117.9s  log=target/gate-logs/windowed/holon-gpui__main__gpui_composed_windowed_loop.log
+PASS      holon-gpui::main gpui_journals_logseq_look  tests=1  wall=7.0s  log=target/gate-logs/windowed/holon-gpui__main__gpui_journals_logseq_look.log
+PASS      holon-gpui::main gpui_rebind_reset_smoke  tests=1  wall=8.5s  log=target/gate-logs/windowed/holon-gpui__main__gpui_rebind_reset_smoke.log
+PASS      holon-gpui::main inert_integration_disclosure_windowed  tests=3  wall=2.0s  log=target/gate-logs/windowed/holon-gpui__main__inert_integration_disclosure_windowed.log
+PASS      holon-gpui::main input_box_windowed  tests=16  wall=1.4s  log=target/gate-logs/windowed/holon-gpui__main__input_box_windowed.log
+PASS      holon-gpui::main integration_sync_failing_row_windowed  tests=1  wall=3.9s  log=target/gate-logs/windowed/holon-gpui__main__integration_sync_failing_row_windowed.log
+PASS      holon-gpui::main integrations_row_narrow_window_windowed  tests=1  wall=4.5s  log=target/gate-logs/windowed/holon-gpui__main__integrations_row_narrow_window_windowed.log
+PASS      holon-gpui::main integrations_sidebar_rows_windowed  tests=1  wall=5.6s  log=target/gate-logs/windowed/holon-gpui__main__integrations_sidebar_rows_windowed.log
+PASS      holon-gpui::main layout_editor  tests=7  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__layout_editor.log
+PASS      holon-gpui::main layout_insta  tests=4  wall=1.0s  log=target/gate-logs/windowed/holon-gpui__main__layout_insta.log
+PASS      holon-gpui::main layout_matrix  tests=3  wall=3.0s  log=target/gate-logs/windowed/holon-gpui__main__layout_matrix.log
+PASS      holon-gpui::main layout_scroll  tests=9  wall=1.1s  log=target/gate-logs/windowed/holon-gpui__main__layout_scroll.log
+PASS      holon-gpui::main layout_smoke  tests=11  wall=1.0s  log=target/gate-logs/windowed/holon-gpui__main__layout_smoke.log
+PASS      holon-gpui::main left_sidebar_scroll  tests=2  wall=1.0s  log=target/gate-logs/windowed/holon-gpui__main__left_sidebar_scroll.log
+PASS      holon-gpui::main list_max_scroll_reaches_tail  tests=2  wall=1.0s  log=target/gate-logs/windowed/holon-gpui__main__list_max_scroll_reaches_tail.log
+PASS      holon-gpui::main list_scroll_spike  tests=3  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__list_scroll_spike.log
+PASS      holon-gpui::main live_block_id_windowed  tests=2  wall=0.6s  log=target/gate-logs/windowed/holon-gpui__main__live_block_id_windowed.log
+PASS      holon-gpui::main live_promotion_windowed  tests=1  wall=5.7s  log=target/gate-logs/windowed/holon-gpui__main__live_promotion_windowed.log
+PASS      holon-gpui::main live_query_context_id_windowed  tests=1  wall=0.6s  log=target/gate-logs/windowed/holon-gpui__main__live_query_context_id_windowed.log
+PASS      holon-gpui::main main_outline_virtualized_pbt  tests=2  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__main_outline_virtualized_pbt.log
+PASS      holon-gpui::main main_panel_scroll  tests=1  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__main_panel_scroll.log
+PASS      holon-gpui::main mcp_debug_services_wiring  tests=1  wall=1.6s  log=target/gate-logs/windowed/holon-gpui__main__mcp_debug_services_wiring.log
+PASS      holon-gpui::main mcp_scroll_fail_loud  tests=1  wall=1.0s  log=target/gate-logs/windowed/holon-gpui__main__mcp_scroll_fail_loud.log
+PASS      holon-gpui::main mcp_scroll_wheel_accordion  tests=1  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__mcp_scroll_wheel_accordion.log
+PASS      holon-gpui::main mcp_scroll_wheel_eager_panel  tests=1  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__mcp_scroll_wheel_eager_panel.log
+PASS      holon-gpui::main mcp_write_repaints_windowed  tests=3  wall=18.2s  log=target/gate-logs/windowed/holon-gpui__main__mcp_write_repaints_windowed.log
+PASS      holon-gpui::main named_source_rows_windowed  tests=1  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__named_source_rows_windowed.log
+PASS      holon-gpui::main nested_band_height_spike  tests=2  wall=1.0s  log=target/gate-logs/windowed/holon-gpui__main__nested_band_height_spike.log
+PASS      holon-gpui::main nested_page_chevron_gate  tests=6  wall=0.9s  log=target/gate-logs/windowed/holon-gpui__main__nested_page_chevron_gate.log
+KNOWN-RED holon-gpui::main nested_page_real_engine  tests=1  wall=4.1s  log=target/gate-logs/windowed/holon-gpui__main__nested_page_real_engine.log
+KNOWN-RED holon-gpui::main overlay_sidebar_dismisses_windowed  tests=4  wall=23.4s  log=target/gate-logs/windowed/holon-gpui__main__overlay_sidebar_dismisses_windowed.log
+KNOWN-RED holon-gpui::main pairing_conflict_badge_windowed  tests=3  wall=9.6s  log=target/gate-logs/windowed/holon-gpui__main__pairing_conflict_badge_windowed.log
+PASS      holon-gpui::main pairing_deferred_reimport_windowed  tests=1  wall=4.3s  log=target/gate-logs/windowed/holon-gpui__main__pairing_deferred_reimport_windowed.log
+PASS      holon-gpui::main pairing_toast_fits_the_window_windowed  tests=1  wall=4.4s  log=target/gate-logs/windowed/holon-gpui__main__pairing_toast_fits_the_window_windowed.log
+PASS      holon-gpui::main panel_scroll_spike  tests=7  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__panel_scroll_spike.log
+PASS      holon-gpui::main panic_records_seen_after_a_drawn_frame_windowed  tests=12  wall=42.4s  log=target/gate-logs/windowed/holon-gpui__main__panic_records_seen_after_a_drawn_frame_windowed.log
+PASS      holon-gpui::main plain_path_scroll  tests=7  wall=1.0s  log=target/gate-logs/windowed/holon-gpui__main__plain_path_scroll.log
+PASS      holon-gpui::main popup_row_click_windowed  tests=1  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__popup_row_click_windowed.log
+PASS      holon-gpui::main quick_open_returns_focus_windowed  tests=7  wall=48.6s  log=target/gate-logs/windowed/holon-gpui__main__quick_open_returns_focus_windowed.log
+PASS      holon-gpui::main quick_open_selected_row_contrast_windowed  tests=2  wall=13.9s  log=target/gate-logs/windowed/holon-gpui__main__quick_open_selected_row_contrast_windowed.log
+PASS      holon-gpui::main refusal_toasts_reach_the_user_windowed  tests=1  wall=16.6s  log=target/gate-logs/windowed/holon-gpui__main__refusal_toasts_reach_the_user_windowed.log
+PASS      holon-gpui::main render_spec_row_id_windowed  tests=2  wall=0.9s  log=target/gate-logs/windowed/holon-gpui__main__render_spec_row_id_windowed.log
+PASS      holon-gpui::main row_id_boundary_windowed  tests=4  wall=0.9s  log=target/gate-logs/windowed/holon-gpui__main__row_id_boundary_windowed.log
+PASS      holon-gpui::main screenshot_readback_windowed  tests=1  wall=4.2s  log=target/gate-logs/windowed/holon-gpui__main__screenshot_readback_windowed.log
+PASS      holon-gpui::main secrets_in_memory_banner_windowed  tests=1  wall=4.9s  log=target/gate-logs/windowed/holon-gpui__main__secrets_in_memory_banner_windowed.log
+PASS      holon-gpui::main seeded_accordion_panel_smoke  tests=1  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__seeded_accordion_panel_smoke.log
+PASS      holon-gpui::main seeded_sidebar_live_query_height  tests=1  wall=1.1s  log=target/gate-logs/windowed/holon-gpui__main__seeded_sidebar_live_query_height.log
+PASS      holon-gpui::main settings_integration_toggle_latency_windowed  tests=1  wall=5.4s  log=target/gate-logs/windowed/holon-gpui__main__settings_integration_toggle_latency_windowed.log
+PASS      holon-gpui::main settings_integrations_last_row_toggle_windowed  tests=1  wall=5.5s  log=target/gate-logs/windowed/holon-gpui__main__settings_integrations_last_row_toggle_windowed.log
+PASS      holon-gpui::main settings_integrations_ops_windowed  tests=1  wall=5.1s  log=target/gate-logs/windowed/holon-gpui__main__settings_integrations_ops_windowed.log
+PASS      holon-gpui::main settings_integrations_row_op_alignment_windowed  tests=1  wall=5.4s  log=target/gate-logs/windowed/holon-gpui__main__settings_integrations_row_op_alignment_windowed.log
+PASS      holon-gpui::main settings_integrations_setfield_popup_windowed  tests=4  wall=18.0s  log=target/gate-logs/windowed/holon-gpui__main__settings_integrations_setfield_popup_windowed.log
+PASS      holon-gpui::main settings_integrations_table_fits_windowed  tests=1  wall=8.8s  log=target/gate-logs/windowed/holon-gpui__main__settings_integrations_table_fits_windowed.log
+PASS      holon-gpui::main settings_integrations_table_windowed  tests=1  wall=4.9s  log=target/gate-logs/windowed/holon-gpui__main__settings_integrations_table_windowed.log
+PASS      holon-gpui::main settings_introduced_connection_disclosure_windowed  tests=1  wall=5.3s  log=target/gate-logs/windowed/holon-gpui__main__settings_introduced_connection_disclosure_windowed.log
+PASS      holon-gpui::main settings_introduced_row_fits_windowed  tests=1  wall=8.9s  log=target/gate-logs/windowed/holon-gpui__main__settings_introduced_row_fits_windowed.log
+PASS      holon-gpui::main settings_seeded_secret_windowed  tests=1  wall=4.7s  log=target/gate-logs/windowed/holon-gpui__main__settings_seeded_secret_windowed.log
+PASS      holon-gpui::main settings_setup_column_wraps_windowed  tests=1  wall=4.5s  log=target/gate-logs/windowed/holon-gpui__main__settings_setup_column_wraps_windowed.log
+PASS      holon-gpui::main settings_stored_secret_windowed  tests=1  wall=4.7s  log=target/gate-logs/windowed/holon-gpui__main__settings_stored_secret_windowed.log
+PASS      holon-gpui::main settle_waits_for_late_row_bridge  tests=1  wall=57.4s  log=target/gate-logs/windowed/holon-gpui__main__settle_waits_for_late_row_bridge.log
+KNOWN-RED holon-gpui::main settle_window_fixed_point  tests=4  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__settle_window_fixed_point.log
+PASS      holon-gpui::main sidebar_disclosure_affordance  tests=7  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__sidebar_disclosure_affordance.log
+PASS      holon-gpui::main sidebar_scroll_reaches_bottom  tests=1  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__sidebar_scroll_reaches_bottom.log
+PASS      holon-gpui::main slash_command_text_hidden_windowed  tests=14  wall=1.1s  log=target/gate-logs/windowed/holon-gpui__main__slash_command_text_hidden_windowed.log
+PASS      holon-gpui::main soft_keyboard_survives_spurious_blur  tests=1  wall=5.2s  log=target/gate-logs/windowed/holon-gpui__main__soft_keyboard_survives_spurious_blur.log
+PASS      holon-gpui::main state_toggle_switch_windowed  tests=6  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__state_toggle_switch_windowed.log
+PASS      holon-gpui::main sticky_accordion_pbt  tests=3  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__sticky_accordion_pbt.log
+PASS      holon-gpui::main sticky_footer_spike  tests=12  wall=1.0s  log=target/gate-logs/windowed/holon-gpui__main__sticky_footer_spike.log
+PASS      holon-gpui::main stop_signals_quit_through_the_session_shutdown  tests=5  wall=16.3s  log=target/gate-logs/windowed/holon-gpui__main__stop_signals_quit_through_the_session_shutdown.log
+PASS      holon-gpui::main structural_chord_stale_flush_windowed  tests=2  wall=14.1s  log=target/gate-logs/windowed/holon-gpui__main__structural_chord_stale_flush_windowed.log
+PASS      holon-gpui::main tab_strip_resolves_at_boot_windowed  tests=1  wall=5.2s  log=target/gate-logs/windowed/holon-gpui__main__tab_strip_resolves_at_boot_windowed.log
+KNOWN-RED holon-gpui::main task_keyword_blur_windowed  tests=2  wall=11.6s  log=target/gate-logs/windowed/holon-gpui__main__task_keyword_blur_windowed.log
+PASS      holon-gpui::main test_platform_blur  tests=1  wall=3.5s  log=target/gate-logs/windowed/holon-gpui__main__test_platform_blur.log
+PASS      holon-gpui::main test_platform_geometry_determinism  tests=1  wall=8.7s  log=target/gate-logs/windowed/holon-gpui__main__test_platform_geometry_determinism.log
+PASS      holon-gpui::main test_platform_smoke  tests=1  wall=3.0s  log=target/gate-logs/windowed/holon-gpui__main__test_platform_smoke.log
+PASS      holon-gpui::main text_colour_windowed  tests=3  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__text_colour_windowed.log
+PASS      holon-gpui::main toast_stack_order_windowed  tests=1  wall=4.1s  log=target/gate-logs/windowed/holon-gpui__main__toast_stack_order_windowed.log
+PASS      holon-gpui::main tracked_layout_neutrality  tests=1  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__tracked_layout_neutrality.log
+PASS      holon-gpui::main tree_row_first_line_alignment  tests=3  wall=0.9s  log=target/gate-logs/windowed/holon-gpui__main__tree_row_first_line_alignment.log
+PASS      holon-gpui::main undo_redo_keybinding  tests=1  wall=4.3s  log=target/gate-logs/windowed/holon-gpui__main__undo_redo_keybinding.log
+RED       holon-gpui::main undo_survives_blur_windowed  tests=3  wall=11.7s  log=target/gate-logs/windowed/holon-gpui__main__undo_survives_blur_windowed.log
+PASS      holon-gpui::main vault_loading_placeholder_windowed  tests=3  wall=7.2s  log=target/gate-logs/windowed/holon-gpui__main__vault_loading_placeholder_windowed.log
+PASS      holon-gpui::main window_chord_reentrant_dispatch  tests=1  wall=3.8s  log=target/gate-logs/windowed/holon-gpui__main__window_chord_reentrant_dispatch.log
+PASS      holon-gpui::main window_key_bindings  tests=4  wall=0.7s  log=target/gate-logs/windowed/holon-gpui__main__window_key_bindings.log
+PASS      holon-gpui::main windowed_log_capture  tests=5  wall=0.6s  log=target/gate-logs/windowed/holon-gpui__main__windowed_log_capture.log
+PASS      holon-gpui::main windowed_resize_takes_effect  tests=2  wall=0.8s  log=target/gate-logs/windowed/holon-gpui__main__windowed_resize_takes_effect.log
+windowed-gate: re-running 2 red/hung binaries alone, once
+FLAKY     holon-gpui::main chrome_one_row_windowed  rerun wall=46.1s  logs=target/gate-logs/windowed/holon-gpui__main__chrome_one_row_windowed.log target/gate-logs/windowed/holon-gpui__main__chrome_one_row_windowed.rerun.log
+RED       holon-gpui::main undo_survives_blur_windowed  rerun wall=15.3s  logs=target/gate-logs/windowed/holon-gpui__main__undo_survives_blur_windowed.log target/gate-logs/windowed/holon-gpui__main__undo_survives_blur_windowed.rerun.log
+  FAIL: RED holon-gpui::main undo_survives_blur_windowed (log target/gate-logs/windowed/holon-gpui__main__undo_survives_blur_windowed.rerun.log)
+windowed-gate: wall=281.0s serial-sum=829.6s PASS=107 KNOWN-RED=11 FLAKY=1 RED=1 HUNG=0
+  note: holon-gpui::gpui_sim_replay_capture is a registered known red (see target/gate-logs/windowed/holon-gpui__gpui_sim_replay_capture.classified)
+  note: holon-gpui::main action_bar_windowed is a registered known red (see target/gate-logs/windowed/holon-gpui__main__action_bar_windowed.classified)
+  note: holon-gpui::main block_focus_keeps_outline_windowed is a registered known red (see target/gate-logs/windowed/holon-gpui__main__block_focus_keeps_outline_windowed.classified)
+  note: holon-gpui::main breadcrumb_resolves_from_view_root_windowed is a registered known red (see target/gate-logs/windowed/holon-gpui__main__breadcrumb_resolves_from_view_root_windowed.classified)
+  note: holon-gpui::main chrome_one_row_windowed FLAKY: failed (RED, target/gate-logs/windowed/holon-gpui__main__chrome_one_row_windowed.log), passed alone on re-run (target/gate-logs/windowed/holon-gpui__main__chrome_one_row_windowed.rerun.log)
+  note: holon-gpui::main gpui_compose_sut_windowed is a registered known red (see target/gate-logs/windowed/holon-gpui__main__gpui_compose_sut_windowed.classified)
+  note: holon-gpui::main gpui_composed_windowed_loop is a registered known red (see target/gate-logs/windowed/holon-gpui__main__gpui_composed_windowed_loop.classified)
+  note: holon-gpui::main nested_page_real_engine is a registered known red (see target/gate-logs/windowed/holon-gpui__main__nested_page_real_engine.classified)
+  note: holon-gpui::main overlay_sidebar_dismisses_windowed is a registered known red (see target/gate-logs/windowed/holon-gpui__main__overlay_sidebar_dismisses_windowed.classified)
+  note: holon-gpui::main pairing_conflict_badge_windowed is a registered known red (see target/gate-logs/windowed/holon-gpui__main__pairing_conflict_badge_windowed.classified)
+  note: holon-gpui::main settle_window_fixed_point is a registered known red (see target/gate-logs/windowed/holon-gpui__main__settle_window_fixed_point.classified)
+  note: holon-gpui::main task_keyword_blur_windowed is a registered known red (see target/gate-logs/windowed/holon-gpui__main__task_keyword_blur_windowed.classified)
+windowed-gate: top FLAKY binaries, last 30 days (~/.holon-gate/windowed-ledger.tsv):
+   22x holon-gpui::pairing_conflict_badge_windowed
+   16x holon-gpui::main mcp_write_repaints_windowed
+   12x holon-gpui::panic_records_seen_after_a_drawn_frame_windowed
+   10x holon-gpui::main pairing_conflict_badge_windowed
+   10x holon-gpui::main quick_open_returns_focus_windowed
+error: recipe `windowed-gate` failed with exit code 1
+
+exit: 1

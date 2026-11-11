@@ -17,8 +17,11 @@ against docs/Testing/KeystoneKnownReds.md (see docs/Testing/WindowedKnownReds.md
 all signatures registered -> KNOWN-RED (pass with note); anything else -> RED.
 
 Exit 0: every binary PASS or KNOWN-RED. Exit 1: any RED or HUNG.
+After the FAIL line of each RED or HUNG unit, one `unit-log: <unit> <log> sha256=<hex>` line per log of that unit
+(first run and rerun) records the log's hash when the gate ends; scripts/flow-checks/tests-cover-diff.py reads it.
 """
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -260,6 +263,9 @@ def main() -> int:
     record_and_report(results)
     for r in bad:
         print(f"  FAIL: {r['verdict']} {r['binary']} (log {r['log']})", file=sys.stderr)
+    for r in bad:
+        for log in [r["first"]["log"]] * ("first" in r) + [r["log"]]:
+            print(f"  unit-log: {r['binary']} {log} sha256={hashlib.sha256(log.read_bytes()).hexdigest()}")
     return 1 if bad else 0
 
 

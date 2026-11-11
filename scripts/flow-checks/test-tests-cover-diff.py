@@ -4,8 +4,11 @@
 Run: `python3 scripts/flow-checks/test-tests-cover-diff.py [cases]`. Exits non-zero on the first violation.
 Each fixture is a lane root in a temp dir whose `scripts/select-tests.py` prints a fixed selection.
 fixtures/run-step-clippy.txt is a log scripts/flow-checks/run-step.sh wrote for a real lane.
-`outcomes` lane roots sit in one git repo, so a base log's `TREE:` commit resolves to a real source tree.
+Every lane root sits in a git repo, so a log's `TREE:` commit resolves to a real source tree; the checked tree is
+`--tree` of the repo's child commit, whose tree is the base's.
+fixtures/windowed-*.txt are red windowed gate step logs of real lanes (the ledger path's home folder shortened to ~).
 """
+import hashlib
 import importlib.util
 import random
 import re
@@ -16,7 +19,9 @@ from pathlib import Path
 
 CHECKER = Path(__file__).resolve().parent / "tests-cover-diff.py"
 REAL_LOG = Path(__file__).resolve().parent / "fixtures/run-step-clippy.txt"
-HEADER = "BASE: 3936d83aba008d69cc09e73d1c5db883ed6b5ae4\nTREE: e5d2c227aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+# run() writes the repo's base commit for TREE_ID and its commit of another tree for OTHER_TREE_ID.
+TREE_ID, OTHER_TREE_ID = "e5d2c227" + "a" * 32, "0bad" + "f" * 36
+HEADER = f"BASE: 3936d83aba008d69cc09e73d1c5db883ed6b5ae4\nTREE: {TREE_ID}\n"
 CLIPPY = "clippy: --workspace --features pbt"
 NEXTEST = "nextest: --workspace --features pbt -E 'package(holon) | package(holon-api)' --profile load-tolerant"
 NARROW = "nextest: --workspace --features pbt -E 'package(holon)' --profile load-tolerant"
@@ -30,8 +35,8 @@ def step_log(line, code=0):
     return f"{line}\n{HEADER}STARTED: 2026-10-31T17:00:00Z\nrunning\nSummary [ 1s]\n\nexit: {code}\n"
 
 
-def classifier_log(step_log_path, code=0):
-    return step_log(f"known-reds: scripts/keystone-known-reds.sh {step_log_path}", code)
+def classifier_log(step_log_path, code=0, tree=TREE_ID):
+    return step_log(f"known-reds: scripts/keystone-known-reds.sh {step_log_path}", code).replace(TREE_ID, tree)
 
 
 def run(selected, logs, spans=(), selector_exit=0, ran={}, cites=None):
@@ -40,6 +45,7 @@ def run(selected, logs, spans=(), selector_exit=0, ran={}, cites=None):
     `cites` replaces the cited paths of the summary; `<root>` in it is the lane root."""
     with tempfile.TemporaryDirectory() as root:
         root = Path(root)
+        base, child, other = git_repo(root)
         (root / "scripts").mkdir()
         out = HEADER + "".join(line + "\n" for line in selected)
         (root / "scripts/select-tests.py").write_text(
@@ -50,7 +56,7 @@ def run(selected, logs, spans=(), selector_exit=0, ran={}, cites=None):
             (root / path).write_text(HEADER + "running\n" + "".join(line + "\n" for line in lines) + "Summary [ 1s]\n")
         for path, text in ran.items():
             (root / path).parent.mkdir(parents=True, exist_ok=True)
-            (root / path).write_text(text)
+            (root / path).write_text(text.replace(TREE_ID, base).replace(OTHER_TREE_ID, other))
         summary = root / "target/summary.md"
         summary.parent.mkdir(exist_ok=True)
         summary.write_text("# lane change summary\n\nHow tested:\n"
@@ -58,8 +64,8 @@ def run(selected, logs, spans=(), selector_exit=0, ran={}, cites=None):
                                      for p in (cites if cites is not None else [*logs, *ran]))
                            + "".join(f"- selector line `{s}`\n" for s in spans)
                            + "\nConfidence (1-5) that the verifier will confirm: 4\n")
-        return subprocess.run([sys.executable, str(CHECKER), "--base", "3936d83", "--summary", str(summary)],
-                              cwd=root, capture_output=True, text=True)
+        return subprocess.run([sys.executable, str(CHECKER), "--base", "3936d83", "--summary", str(summary),
+                               "--tree", child], cwd=root, capture_output=True, text=True)
 
 
 def expect(name, r, code, *needles):
@@ -125,6 +131,18 @@ def fixtures():
                                   "target/r1/nextest-known-reds.log": classifier_log("target/r0/nextest.log")},
                cites=[*red, "target/r1/nextest-known-reds.log"]),
            1, "target/r1/nextest.log", "target/r1/nextest-known-reds.log classifies target/r0/nextest.log")
+    expect("red step judged known reds on another tree",
+           run(SELECTED, {}, ran={**red, "target/r1/nextest-known-reds.log":
+                                  classifier_log("target/r1/nextest.log", tree=OTHER_TREE_ID)}),
+           1, "target/r1/nextest-known-reds.log classifies target/r1/nextest.log", "not the checked tree", "`nextest`")
+    unit_logs = {p: f"{p}: the oracle output of one run\n" for p in UNDO_LOGS}
+    sha = {p: hashlib.sha256(t.encode()).hexdigest() for p, t in unit_logs.items()}
+    gate = step_log(WINDOWED, 1).replace("running\n", "".join(line + "\n" for line in windowed_red_lines(sha)))
+    judged_units = {f"target/r1/windowed-unit-{i}-known-reds.log": classifier_log(p) for i, p in enumerate(UNDO_LOGS)}
+    windowed_red = {**ran, "target/r1/windowed.log": gate,
+                    "target/r1/windowed-known-reds.log": classifier_log("target/r1/windowed.log", 1), **judged_units}
+    expect("windowed red unit whose two logs are known reds",
+           run(SELECTED, {}, ran={**windowed_red, **unit_logs}, cites=[*windowed_red]), 0)
     expect("step log without exit trailer judged known reds only",
            run(SELECTED, {}, ran={**ran, "target/r1/nextest.log": step_log(NEXTEST, 100).rsplit("exit: 100", 1)[0],
                                   "target/r1/nextest-known-reds.log": classifier_log("target/r1/nextest.log")}),
@@ -156,7 +174,10 @@ def load_checker():
 def generated(cases):
     """Random selections with one run-step log per run step: the exact set passes, each single mutation fails."""
     checker = load_checker()
-    check, not_run = checker.check, checker.not_run_steps()
+    not_run = checker.not_run_steps()
+
+    def check(*args):
+        return checker.check(*args, tree_of=lambda c: "t", head="t")
     rng = random.Random(0)
     names = ["clippy", "nextest", "windowed", "keystone-smoke", "timing", "unowned", "a", "b-2"]
     tokens = ["--workspace", "--features", "pbt", "-E", "'package(x)'", "just", "gate", "binary(y)",
@@ -278,6 +299,21 @@ REAL_PASSES = [
 WINDOWED_GATE_RED = ["RED       holon-gpui::main action_bar_windowed  tests=9  wall=173.7s",
                      "  FAIL: RED holon-gpui::main action_bar_windowed (log target/gate-logs/windowed/a.rerun.log)",
                      "windowed-gate: wall=2333.6s serial-sum=3379.3s PASS=107 KNOWN-RED=7 FLAKY=2 RED=4 HUNG=0"]
+UNDO = "holon-gpui::main undo_survives_blur_windowed"
+UNDO_LOGS = ("target/gate-logs/windowed/undo.log", "target/gate-logs/windowed/undo.rerun.log")
+
+
+def windowed_red_lines(sha):
+    """The rerun, FAIL and end lines of a real red windowed gate run with its paths shortened, and the `unit-log:` line
+    of each log of its red unit that `sha` maps to its hash."""
+    return ["FLAKY     holon-gpui::main chrome_one_row_windowed  rerun wall=46.1s  "
+            "logs=target/gate-logs/windowed/chrome.log target/gate-logs/windowed/chrome.rerun.log",
+            f"RED       {UNDO}  rerun wall=15.3s  logs={UNDO_LOGS[0]} {UNDO_LOGS[1]}",
+            f"  FAIL: RED {UNDO} (log {UNDO_LOGS[1]})",
+            "windowed-gate: wall=281.0s serial-sum=829.6s PASS=107 KNOWN-RED=11 FLAKY=1 RED=1 HUNG=0",
+            *(f"  unit-log: {UNDO} {p} sha256={h}" for p, h in sha.items())]
+
+
 ACTION_BAR = [f"holon-gpui::main action_bar_windowed::{t}" for t in (
     "tapping_a_global_op_button_dispatches_it", "the_dock_stays_one_row_below_the_main_panel",
     "with_the_keyboard_down_the_bar_is_not_painted", "entity_ops_come_before_global_ops_in_the_bar")]
@@ -343,10 +379,111 @@ def module(test):
     return f"{binary} {name.split('::')[0]}"
 
 
-def gate_lines(red, hung=()):
-    """A windowed gate run-step body whose failing verdicts name the modules of `red`; a module of `hung` is HUNG."""
-    return [WINDOWED_GATE_RED[0], *(f"  FAIL: {'HUNG' if m in hung else 'RED'} {m} (log target/gate-logs/windowed/m.log)"
-                                    for m in sorted({module(t) for t in red})), WINDOWED_GATE_RED[-1]]
+def unit_logs(unit, spec):
+    """The logs scripts/windowed-gate.py writes for a unit: a second one when the unit was re-run."""
+    stem = "target/gate-logs/windowed/" + unit.replace("::", "__").replace(" ", "__")
+    v = spec["verdict"]
+    rerun = v in ("FLAKY", "HUNG") or (v in ("RED", "KNOWN-RED") and spec.get("rerun", True))
+    return [f"{stem}.log", f"{stem}.rerun.log"] if rerun else [f"{stem}.log"]
+
+
+def log_states(unit, spec):
+    """{log: (file state, citation state)} of a RED unit; a unit drawn without states left its logs unwritten."""
+    return spec.get("logs") or {log: ("missing", "none") for log in unit_logs(unit, spec)}
+
+
+def gate_lines(units, off=0, sha={}):
+    """The run-step body scripts/windowed-gate.py writes for `units` ({unit: {"verdict": <final verdict>, "rerun":
+    <bool>}}): a first verdict line per unit, a rerun line per re-run unit, the end line (its RED count off by `off`),
+    a FAIL line per RED or HUNG unit and a `unit-log:` line per log of those units that `sha` maps to its hash."""
+    lines = [f"windowed-gate: {len(units)} units, {3 * len(units)} tests, jobs=4, per-unit timeout=900s"]
+    for u, s in sorted(units.items()):
+        logs = unit_logs(u, s)
+        lines.append(f"{s['verdict'] if len(logs) == 1 else 'RED':<9} {u}  tests=3  wall=1.0s  log={logs[0]}")
+    lines.append("windowed-gate: re-running the red/hung binaries alone, once")
+    lines += [f"{s['verdict']:<9} {u}  rerun wall=2.0s  logs={' '.join(unit_logs(u, s))}"
+              for u, s in sorted(units.items()) if len(unit_logs(u, s)) == 2]
+    n = {v: sum(s["verdict"] == v for s in units.values()) for v in ("PASS", "KNOWN-RED", "FLAKY", "RED", "HUNG")}
+    n["RED"] += off
+    lines.append("windowed-gate: wall=9.0s serial-sum=9.0s " + " ".join(f"{k}={v}" for k, v in n.items()))
+    bad = [(u, s) for u, s in sorted(units.items()) if s["verdict"] in ("RED", "HUNG")]
+    lines += [f"  FAIL: {s['verdict']} {u} (log {unit_logs(u, s)[-1]})" for u, s in bad]
+    return lines + [f"  unit-log: {u} {log} sha256={sha[log]}" for u, s in bad for log in unit_logs(u, s) if log in sha]
+
+
+def failing_units(red, hung=()):
+    """The units of a gate run whose failing verdicts name the modules of `red`; a module of `hung` is HUNG."""
+    return {m: {"verdict": "HUNG" if m in hung else "RED"} for m in {module(t) for t in red}}
+
+
+UNIT_FILES = ["present"] * 5 + ["missing", "changed", "unlisted"]
+UNIT_CITES = ["ok"] * 5 + ["red", "none", "stale"]
+# Failing units of every binary shape: a module of the `main` binary, a `harness = false` binary, the lib.
+UNIT_POOL = [UNDO, "holon-gpui::main chrome_one_row_windowed", "holon-gpui::gpui_gherkin_replay", "holon-gpui"]
+
+
+def gate_units(rng, failing, hung=()):
+    """A windowed gate run: each unit of `failing` RED (HUNG when in `hung`), beside up to 3 units that pass, are
+    known reds or are flaky. Each log of a RED unit draws its file state (present, missing, changed after the gate
+    hashed it, or without its `unit-log:` line) and its citation (a classifier log exit 0, exit 1, on another tree, or
+    none); a unit drawn all good has every log present and classified exit 0."""
+    units = {}
+    for m in failing:
+        if m in hung:
+            units[m] = {"verdict": "HUNG"}
+            continue
+        s = {"verdict": "RED", "rerun": rng.random() < 0.8}
+        good = rng.random() < 0.6
+        s["logs"] = {log: ("present", "ok") if good else (rng.choice(UNIT_FILES), rng.choice(UNIT_CITES))
+                     for log in unit_logs(m, s)}
+        units[m] = s
+    for i in range(rng.randint(0, 3)):
+        name = rng.choice(["holon-gpui::main other_{}_windowed", "holon-gpui::other_{}_replay"]).format(i)
+        units[name] = {"verdict": rng.choice(["PASS", "KNOWN-RED", "FLAKY"]), "rerun": rng.random() < 0.5}
+    return units
+
+
+def unit_judge(log):
+    return f"target/r1/unit-{Path(log).name}-known-reds.log"
+
+
+def unit_refusals(units, off, path):
+    """The needles of each refusal of the windowed red path, from the drawn state; [] when the step counts as run.
+    `units` None is a step log without gate verdicts."""
+    if units is None:
+        return [(path, "no `windowed-gate: wall=...` end line")]
+    bad = sorted(u for u, s in units.items() if s["verdict"] in ("RED", "HUNG"))
+    hung = sum(units[u]["verdict"] == "HUNG" for u in bad)
+    red = len(bad) - hung + off
+    if not bad or len(bad) != red + hung:
+        return [(path, f"{len(bad)} FAIL lines", f"RED={red} HUNG={hung}")]
+    want = []
+    for u in bad:
+        if units[u]["verdict"] == "HUNG":
+            want.append((path, f"unit {u} is HUNG"))
+            continue
+        for log, (file, cite) in log_states(u, units[u]).items():
+            if file == "missing":
+                want.append((path, f"unit log {log} does not exist"))
+                continue
+            if file == "changed":
+                want.append((f"unit log {log} changed after the gate ran",))
+            if file == "unlisted":
+                want.append((f"unit log {log} has no unit-log line in {path}",))
+            if cite == "none":
+                want.append((path, f"unit {u} log {log} has no cited classifier log"))
+            if cite == "red":
+                want.append((unit_judge(log), f"classifies {log} of unit {u}", "`exit: 1`"))
+            if cite == "stale":
+                want.append((unit_judge(log), f"classifies {log} of unit {u}", "not the checked tree"))
+    return want
+
+
+def gate_spec(o):
+    """The units of a red outcome's gate step log; None when its log carries nextest lines instead."""
+    if o.get("nextest", True) and "units" not in o:
+        return None
+    return o["units"] if "units" in o else failing_units(o["red"], o.get("hung", ()))
 
 
 CANCEL = "  Cancelling due to signal: 3 tests still running"
@@ -544,18 +681,22 @@ def lane_files(rng, spec, commits):
                 want += [(evidence, "does not exist"), (evidence, "no cited existing log"), not_run]
             continue
         red = o["red"]
+        units = gate_spec(o)
         if "hand" in o:
             body = hand_lines(rng, o["hand"])
-        elif o.get("nextest", True):
+        elif units is None:
             body = results(red, o.get("green", [])) + run_tail(rng, o.get("stopped", False))
+        elif step == "windowed":
+            body = gate_lines(units, o.get("off", 0), unit_files(units, log, files, {"base": base, "other": other}))
         else:
-            body = gate_lines(red, o.get("hung", ()))
+            body = gate_lines(units)
         log(path, line, body, f"exit: {hand_exit(o['hand']) if 'hand' in o else rng.choice([1, 100, 101])}")
         judge = o.get("classifier")
+        stale = judge == 0 and not judged_on_tree(o)
         if judge is not None:
             log(f"target/r1/{step}-known-reds.log", f"known-reds: scripts/keystone-known-reds.sh {path}", [],
-                f"exit: {judge}")
-        if judge == 0:
+                f"exit: {judge}", tree=other if stale else base)
+        if judge == 0 and not stale:
             continue
         base_path = f"target/base/{step}.log"
         if "base" in o or "base_hand" in o:
@@ -565,7 +706,7 @@ def lane_files(rng, spec, commits):
             elif o.get("base_nextest", True):
                 base_body = results(o["base"])
             else:
-                base_body = gate_lines(o["base"], o.get("base_hung", ()))
+                base_body = gate_lines(failing_units(o["base"], o.get("base_hung", ())))
             log(base_path, o.get("base_line", line), base_body, "exit: 100",
                 tree={"base": base, "child": child, "other": other}[o.get("tree", "child")])
             refusals = base_refusal(o, path, base_path, red)
@@ -573,13 +714,38 @@ def lane_files(rng, spec, commits):
                 continue
         else:
             refusals = []
-        if judge is None:
-            want.append((f"{path} runs `{step}`", "no cited classifier log"))
-        else:
+        windowed = unit_refusals(units, o.get("off", 0), path) if step == "windowed" else None
+        if windowed == []:
+            continue
+        if stale:
+            want.append((f"target/r1/{step}-known-reds.log classifies {path} of step", "not the checked tree"))
+        elif judge is not None:
             want.append((f"target/r1/{step}-known-reds.log classifies {path} of step", f"`exit: {judge}`"))
-        want += refusals
+        elif windowed is None:
+            want.append((f"{path} runs `{step}`", "no cited classifier log"))
+        want += refusals + (windowed or [])
         want.append(not_run)
     return files, cites, extra, want
+
+
+def unit_files(units, log, files, trees):
+    """Writes each log of the RED and HUNG `units` in its drawn file state and the classifier log of its drawn
+    citation (`trees` maps "base" and "other" to their commits); returns the hash each `unit-log:` line records."""
+    sha = {}
+    for u, s in units.items():
+        if s["verdict"] not in ("RED", "HUNG"):
+            continue
+        states = log_states(u, s) if s["verdict"] == "RED" else {p: ("present", "none") for p in unit_logs(u, s)}
+        for path, (file, cite) in states.items():
+            text = f"{path}: the oracle output of one run\n"
+            if file != "missing":
+                files[path] = text
+            if file != "unlisted":
+                sha[path] = hashlib.sha256((text + "an earlier run\n" if file == "changed" else text).encode()).hexdigest()
+            if cite != "none":
+                log(unit_judge(path), f"known-reds: scripts/keystone-known-reds.sh {path}", [],
+                    f"exit: {1 if cite == 'red' else 0}", tree=trees["other" if cite == "stale" else "base"])
+    return sha
 
 
 def base_refusal(o, path, base_path, red):
@@ -618,9 +784,13 @@ def by_module(o):
     return not (o.get("nextest", True) and o.get("base_nextest", True) and o["base"])
 
 
+def judged_on_tree(o):
+    return o.get("classifier") == 0 and o.get("classifier_tree") != "other"
+
+
 def module_notes(spec):
     """How many accepted-base-red compares run at module level."""
-    return sum(1 for o in spec.values() if o["kind"] == "red" and o.get("classifier") != 0 and "base" in o
+    return sum(1 for o in spec.values() if o["kind"] == "red" and not judged_on_tree(o) and "base" in o
                and not o.get("base_line") and o.get("tree") != "other" and o["red"] and by_module(o) and "hand" not in o
                and not (o.get("stopped") and o.get("nextest", True)))
 
@@ -638,8 +808,8 @@ def run_lane(root, spec, rng, commits):
     summary.write_text("# s\n\nHow tested:\n" + prose + "".join(f"- log: {p} (`x`)\n" for p in cites)
                        + "\n".join(extra)
                        + "\n\nConfidence (1-5) that the verifier will confirm: 4\n")
-    r = subprocess.run([sys.executable, str(CHECKER), "--base", commits[0], "--summary", str(summary)],
-                       cwd=root, capture_output=True, text=True)
+    r = subprocess.run([sys.executable, str(CHECKER), "--base", commits[0], "--summary", str(summary),
+                        "--tree", commits[1]], cwd=root, capture_output=True, text=True)
     return r, want
 
 
@@ -746,6 +916,7 @@ def outcome(rng):
     o = {"kind": "red", "red": red, "green": rng.sample(pool, rng.randint(0, 2))}
     if (c := rng.choice([None, 0, 1, 3])) is not None:
         o["classifier"] = c
+        o["classifier_tree"] = rng.choice(["base", "other"])
     if rng.random() < 0.7:
         base = set(red) | set(rng.sample(pool, rng.randint(0, 3)))
         if red and rng.random() < 0.3:
@@ -763,6 +934,9 @@ def outcome(rng):
         o["base_hung"] = rng.sample(modules, rng.randint(0, 2))
     if rng.random() < 0.2:
         o["stopped"] = True
+    if not o.get("nextest", True):
+        o["units"] = gate_units(rng, sorted({module(t) for t in red}), o.get("hung", ()))
+        o["off"] = rng.choice([0] * 8 + [1] + [-1] * any(s["verdict"] == "RED" for s in o["units"].values()))
     return o
 
 
@@ -1053,6 +1227,104 @@ def complete_runs_of_any_size(cases):
     print(f"[tests-cover-diff] complete runs of any size: {cases} cases PASS")
 
 
+CHROME = "holon-gpui::main chrome_one_row_windowed"
+GHERKIN = "holon-gpui::gpui_gherkin_replay"
+
+
+def red_unit(unit, first=("present", "ok"), rerun=("present", "ok")):
+    logs = unit_logs(unit, {"verdict": "RED"})
+    return {"verdict": "RED", "logs": {logs[0]: first, logs[1]: rerun}}
+
+
+def windowed_step(units, off=0, classifier=1):
+    """A red windowed step whose step-log classifier finds no panic in it (exit 1), as for every real gate log."""
+    o = {"kind": "red", "red": [], "nextest": False, "units": units, "off": off}
+    return {**o, "classifier": classifier} if classifier is not None else o
+
+
+WINDOWED_FIXED = {
+    "one red unit with a rerun, both logs known reds": windowed_step(
+        {UNDO: red_unit(UNDO), CHROME: {"verdict": "FLAKY"}}),
+    "one red unit with a rerun, its first-run log not classified": windowed_step(
+        {UNDO: red_unit(UNDO, first=("present", "none"))}),
+    "a hung unit beside a red unit that is a known red": windowed_step(
+        {UNDO: red_unit(UNDO), CHROME: {"verdict": "HUNG"}}),
+    "a novel red: the rerun log classified exit 1": windowed_step({UNDO: red_unit(UNDO, rerun=("present", "red"))}),
+    "a missing unit log": windowed_step({UNDO: red_unit(UNDO, first=("missing", "ok"))}),
+    "a red unit of a binary that is no main module": windowed_step({GHERKIN: red_unit(GHERKIN)}, classifier=None),
+    "a red step with an end line but no FAIL line": windowed_step({CHROME: {"verdict": "FLAKY"}}),
+    "a red module unit only, no flaky one": windowed_step({CHROME: red_unit(CHROME)}),
+    "a classifier log of another unit only": windowed_step(
+        {UNDO: red_unit(UNDO), CHROME: red_unit(CHROME, first=("present", "none"), rerun=("present", "none"))}),
+    "a unit log changed after the gate hashed it": windowed_step({UNDO: red_unit(UNDO, rerun=("changed", "ok"))}),
+    "a unit log without its unit-log line": windowed_step({UNDO: red_unit(UNDO, first=("unlisted", "ok"))}),
+    "a unit classifier log run on another tree": windowed_step({UNDO: red_unit(UNDO, rerun=("present", "stale"))}),
+    "an end line that counts one red unit more": windowed_step({UNDO: red_unit(UNDO)}, off=1),
+    "a red unit without a rerun line, its one log a known red": windowed_step(
+        {UNDO: {"verdict": "RED", "rerun": False, "logs": {unit_logs(UNDO, {"verdict": "RED", "rerun": False})[0]:
+                                                             ("present", "ok")}}}),
+}
+# The words of each refusal of the windowed red path; a case with no refusal is accepted.
+VERDICT_CLASSES = {("FAIL lines",): "count", ("is HUNG",): "hung", ("does not exist",): "missing",
+                   ("changed after",): "changed", ("no unit-log line",): "unlisted",
+                   ("no cited classifier",): "uncited",
+                   ("of unit", "`exit: 1`"): "novel", ("of unit", "checked tree"): "stale"}
+
+
+def windowed_outcome(rng):
+    failing = rng.sample(UNIT_POOL, rng.randint(0, 3))
+    hung = set(rng.sample(failing, rng.randint(0, len(failing)))) if rng.random() < 0.2 else ()
+    units = gate_units(rng, failing, hung)
+    if not units:
+        units = {CHROME: {"verdict": "PASS"}}
+    red = any(s["verdict"] == "RED" for s in units.values())
+    return windowed_step(units, rng.choice([0] * 8 + [1] + [-1] * red), rng.choice([None, 1, 1, 3]))
+
+
+def windowed_units(cases):
+    """A red windowed step counts as run iff the end line's RED and HUNG counts equal its FAIL lines (at least one),
+    no unit is HUNG, and every log of every RED unit exists, matches its `unit-log:` hash and is classified exit 0 on
+    the checked tree; the reference refusals come from the drawn state."""
+    rng = random.Random(15)
+    classes = {name: 0 for name in ["accept", *VERDICT_CLASSES.values()]}
+    with tempfile.TemporaryDirectory() as repo:
+        repo = Path(repo)
+        commits = git_repo(repo)
+        drawn = list(WINDOWED_FIXED.items()) + [(f"windowed case {i}", windowed_outcome(rng)) for i in range(cases)]
+        for i, (name, o) in enumerate(drawn):
+            r, want = run_lane(repo / f"lane{i}", {WINDOWED: o}, rng, commits)
+            try:
+                judge(name, r, want)
+            except AssertionError:
+                print(f"[tests-cover-diff] {name}: drawn state {o}", file=sys.stderr)
+                raise
+            hit = {c for words, c in VERDICT_CLASSES.items() for needles in want
+                   if all(w in " ".join(needles) for w in words)}
+            for c in hit or {"accept"}:
+                classes[c] += 1
+            if name in WINDOWED_FIXED:
+                print(f"[tests-cover-diff] {name}: {'PASS' if not want else 'FAIL'} as expected")
+    assert all(classes.values()), f"a verdict class no case reached: {classes}"
+    print(f"[tests-cover-diff] windowed units: {cases} cases PASS; cases per verdict class {classes}")
+
+
+REAL_WINDOWED = sorted(Path(__file__).resolve().parent.glob("fixtures/windowed-*.txt"))
+
+
+def real_windowed_logs():
+    """The red windowed gate step logs of real lanes: the FAIL lines read as many units as the end line's RED and
+    HUNG counts, and each red unit's rerun line names its two logs, the second the one its FAIL line names."""
+    checker = load_checker()
+    assert len(REAL_WINDOWED) == 3, REAL_WINDOWED
+    for f in REAL_WINDOWED:
+        lines = f.read_text().splitlines()
+        fails, (red, hung) = checker.gate_failures(lines), checker.gate_counts(lines)
+        assert len(fails) == red + hung and fails, (f.name, fails, red, hung)
+        reruns = checker.gate_reruns(lines)
+        assert all(reruns[unit][1] == final for _, unit, final in fails), (f.name, fails, reruns)
+        print(f"[tests-cover-diff] real windowed log {f.name}: {len(fails)} FAIL lines = RED={red} HUNG={hung}")
+
+
 if __name__ == "__main__":
     fixtures()
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 300
@@ -1062,6 +1334,8 @@ if __name__ == "__main__":
     stopped_runs(cases)
     complete_runs(cases)
     windowed_verdicts(cases)
+    real_windowed_logs()
+    windowed_units(60)
     outcomes(cases // 3)
     real_hand_lines()
     hand_lane_only_tests(cases // 3)
