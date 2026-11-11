@@ -29,7 +29,7 @@
 # its exit code; 9 = the checkout is not <tip>, 8 = free disk below the floor.
 # After gate-compile every step runs to its end, each red step is named, and
 # the run exits with the code of the first red one in TRACKS order; a red extra
-# nextest alone exits 12 or 13.
+# nextest alone exits 12 or 13, or 2 when its filter set is unparsable.
 set -euo pipefail
 
 # Balanced by step time; the first track runs in the
@@ -176,7 +176,7 @@ for entry in "${STEPS[@]}"; do
   rc=$(cat "$(step_file "$n" rc)" 2>/dev/null) || { echo "RED STEP [$n] $name: its track ended before it"; red=${red:-1}; continue; }
   [ "$rc" = 0 ] && continue
   echo "RED STEP [$n] $name: exit $rc, log $(step_file "$n" log)"
-  if [ "$name" = extra-nextest ]; then extra_red=$rc; echo "EXTRA NEXTEST NOVEL RED"
+  if [ "$name" = extra-nextest ]; then extra_red=$rc; [ "$rc" != 12 ] || echo "EXTRA NEXTEST NOVEL RED"
   else red=${red:-$rc}; fi
 done
 # A red half ends the gate here, so it prints the breach summary gate-timing.sh would print.

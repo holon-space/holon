@@ -3,7 +3,8 @@
 # command, so each runs as `gate-integrate-steps.sh <name>`.
 #
 # Needs GATE and PBT_FEATURES (the justfile's CANON_FEATURES). With GATE_STEP_ARGS set (a selected gate),
-# extra-nextest runs only the tests that nextest filter set names. `rerun <filterset>`
+# extra-nextest runs only the tests that nextest filter set names; a filter set nextest
+# cannot parse ends the step with exit 2 before any test runs. `rerun <filterset>`
 # runs the extra nextest step on those tests alone.
 set -euo pipefail
 
@@ -31,9 +32,16 @@ extra_nextest() {
   local log=target/gate-logs/$GATE-extra.log classified=target/gate-logs/$GATE-extra-classify.txt
   local rc=0 filter=()
   # A selected crate may hold no test of this profile: that is a pass, not a wrong filter.
-  [ -z "${GATE_STEP_ARGS:-}" ] || filter=(-E "$GATE_STEP_ARGS" --no-tests=warn)
+  # The joined form keeps args that start with `-` from reading as nextest options.
+  [ -z "${GATE_STEP_ARGS:-}" ] || filter=(--filterset="$GATE_STEP_ARGS" --no-tests=warn)
   mark=$(mktemp); trap 'rm -f "$mark"' EXIT
-  if ! gate_nextest ${filter[@]+"${filter[@]}"} 2>&1 | tee "$log"; then
+  if gate_nextest ${filter[@]+"${filter[@]}"} 2>&1 | tee "$log"; then :; else
+    local status=("${PIPESTATUS[@]}")
+    # nextest exits 94 on a command-line filter set it cannot parse, before it builds.
+    if [ -n "${GATE_STEP_ARGS:-}" ] && [ "${status[0]}" = 94 ]; then
+      echo "extra-nextest: GATE_STEP_ARGS is no valid filterset: $GATE_STEP_ARGS"
+      return 2
+    fi
     bash scripts/keystone-known-reds.sh "$log" | tee "$classified" || true
     grep -q 'PASS-WITH-NOTE' "$classified" || rc=12
     [ $rc -ne 0 ] || echo "extra nextest: pass-with-note (known reds only)"

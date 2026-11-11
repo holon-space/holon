@@ -9,9 +9,9 @@ for plant in "--exclude=holon-integration-tests" "--filterset='not test(/^org_su
   cp -R "$here" "$copy/scripts" && cp "$here/../justfile" "$copy/justfile"
   /usr/bin/python3 - "$copy/scripts/gate-integrate-steps.sh" "$plant" <<'PY'
 import sys; p, plant = sys.argv[1:]; s = open(p).read()
-old = '--workspace --features "$PBT_FEATURES" 2>&1'
+old = 'gate_nextest ${filter[@]+"${filter[@]}"} 2>&1'
 assert s.count(old) == 1
-open(p, 'w').write(s.replace(old, '--workspace --features "$PBT_FEATURES" ' + plant + ' 2>&1'))
+open(p, 'w').write(s.replace(old, 'gate_nextest ${filter[@]+"${filter[@]}"} ' + plant + ' 2>&1'))
 PY
   if bash "$copy/scripts/check-gate-scripts.sh" >/dev/null 2>&1; then echo "FAIL: stays green with $plant"; fails=$((fails + 1)); else echo "ok:   red with $plant"; fi
   rm -rf "$copy"

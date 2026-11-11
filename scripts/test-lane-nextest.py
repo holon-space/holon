@@ -23,64 +23,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+from nextest_fixture import N, REPO, STATUS, TESTS, UNLISTED, fixture, known_red_wording, ran_tests
+
 SCRIPT = REPO / "scripts" / "lane-nextest.py"
-N = 8
-TESTS = [f"t{i:02}" for i in range(N)]
 EXAMPLES = [("PPPUPPPP", set()), ("PKPPPKPP", set()), ("PPPPPPPP", set()), ("UPPPPPPP", {"t00"}),
             ("KPKPUPPP", {"t02"}), ("PKKPKUPP", {"t01", "t02"}), ("KKKPPPPP", set()),
             ("PKUUPUPU", {"t07"}), ("PKPKPPPU", set()), ("PPPPPPPU", set()), ("PPUPKPPP", set()),
             ("PPPPPPPP", set(TESTS))]
-UNLISTED = "planted red outside the known-reds list"
-STATUS = re.compile(r"^ *([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\([^)]*\) )?\S+ (t\d\d)$")
 SUMMARY = re.compile(r"^ *Summary \[.*\] (\d+) tests? run: ")
-
-
-def known_red_wording():
-    rows = subprocess.run([sys.executable, str(REPO / "scripts/check-known-red-evidence.py"), "--rows",
-                           str(REPO / "docs/Testing/KeystoneKnownReds.md")], capture_output=True, text=True,
-                          check=True).stdout
-    for row in rows.splitlines():
-        key, pattern, site, _ = row.split("\x1f")
-        if not site and re.fullmatch(r"[A-Za-z0-9 _'-]+", pattern) and not pattern.startswith("not classifier"):
-            return pattern
-    raise AssertionError("no unpinned known-red row with a literal pattern to plant")
-
-
-def fixture(root, wording):
-    (root / "tests").mkdir()
-    (root / "Cargo.toml").write_text('[package]\nname = "fixture"\nversion = "0.0.0"\nedition = "2021"\n\n'
-                                     '[workspace]\n')
-    (root / "src").mkdir()
-    (root / "src/lib.rs").write_text("")
-    tests = "".join(f"#[test]\nfn {t}() {{\n    act({i});\n}}\n\n" for i, t in enumerate(TESTS))
-    (root / "tests/main.rs").write_text(f"""fn act(i: usize) {{
-    let plan = std::env::var("PLAN").unwrap();
-    if plan[..i].contains('U') {{
-        let secs = std::env::var("SLEEP_AFTER_U").map_or(0, |s| s.parse().unwrap());
-        std::thread::sleep(std::time::Duration::from_secs(secs));
-    }}
-    match &plan[i..=i] {{
-        "P" => {{}}
-        "K" => panic!("{wording}"),
-        "U" => panic!("{UNLISTED}"),
-        "X" => {{
-            let nextest = std::os::unix::process::parent_id().to_string();
-            std::process::Command::new("kill").args(["-9", &nextest]).status().unwrap();
-            std::thread::sleep(std::time::Duration::from_secs(5));
-        }}
-        "S" => {{
-            extern "C" {{ fn signal(sig: i32, handler: usize) -> usize; }}
-            unsafe {{ signal(2, 1); }}
-            let nextest = std::os::unix::process::parent_id().to_string();
-            std::process::Command::new("kill").args(["-INT", &nextest]).status().unwrap();
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }}
-        o => unreachable!("{{o}}"),
-    }}
-}}
-
-{tests}""")
 
 
 def nextest(root, out, mode, plan, excluded):
@@ -88,11 +38,7 @@ def nextest(root, out, mode, plan, excluded):
     args = ["--test-threads", "1", "-E", f"not ({expr})" if expr else "all()"]
     env = {**os.environ, "PLAN": plan, "LANE_NEXTEST_DIR": str(out)}
     r = subprocess.run([sys.executable, str(SCRIPT), mode, *args], cwd=root, env=env, capture_output=True, text=True)
-    lines = r.stdout.splitlines()
-    # nextest repeats the red status lines in its closing summary.
-    end = next((i for i, l in enumerate(lines) if re.match(r"^ *(Summary|Cancelling|Canceling) ", l)), len(lines))
-    ran = [(t, s) for t, s in (m.groups()[::-1] for m in map(STATUS.match, lines[:end]) if m)]
-    return r, ran
+    return r, ran_tests(r.stdout)
 
 
 def check(root, out, plan, excluded, show):

@@ -65,7 +65,8 @@ expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 # the build-script env the gate pins and the quiet marker's content to $GATE_PROBE; `just latency-slo-gate` prints $SETTLE_OUT (default: a contention line
 # and an admission), `just timing-gate-build` prints $BUILD_OUT
 # `just $STUB_RED` exits 1 and `just $STUB_SLEEP` sleeps 2 s; with STUB_RED_NEXTEST set, every nextest run
-# fails one org_suite test no known-red row lists. HOME is a scratch dir, so the hold's marker,
+# fails one org_suite test no known-red row lists; with STUB_BAD_FILTERSET set, it fails as nextest does on a filterset
+# it cannot parse. HOME is a scratch dir, so the hold's marker,
 # lock, log and slot walk are scratch files and no real build is lowered.
 home="$scratch/home" stubs="$scratch/stubs" probe="$scratch/probe.log"
 orch="$home/.claude/skills/orchestrator/scripts"
@@ -92,6 +93,7 @@ case " $* " in *" --evaluate "*) exec "$REAL_JUST" "$@" ;; esac
 [ "$*" != "${STUB_RED:-}" ] || exit 1
 [ "$*" != "${STUB_SLEEP:-}" ] || sleep 2
 [ -z "${STUB_RED_NEXTEST:-}" ] || [ "${1:-} ${2:-}" != "nextest run" ] || { echo "        FAIL [   1.000s] holon-integration-tests::integration org_suite::stub_red"; exit 100; }
+[ -z "${STUB_BAD_FILTERSET:-}" ] || [ "${1:-} ${2:-}" != "nextest run" ] || { echo "error: failed to parse filterset"; exit 94; }
 EOF
 done
 cat > "$stubs/df" <<'EOF'
@@ -229,6 +231,23 @@ expect "runs only the selected steps (got: $(cut -d'|' -f1 <<<"$step_calls" | tr
   [ "$(cut -d'|' -f1 <<<"$step_calls" | tr '\n' ',')" = "cargo fmt --all -- --check ,just keystone-tour ," ]
 expect "no step sees the runner's record file" [ -z "$(grep -v ' | record=unset | ' <<<"$step_calls")" ]
 expect "writes a skipped row for every other step" [ "$(rows_of g7 | grep -c ' skipped$')" = $(($(wc -w <<<"$steps") - 2)) ]
+
+echo "== the integrate run of a batch whose extra-nextest args are no filterset"
+printf 'extra-nextest r two three\n' > "$selected"
+: > "$probe"
+rc=0; in_stubs GATE_SELECT=1 GATE_SELECTED="$selected" STUB_BAD_FILTERSET=1 "$orch/gate-step.sh" run "$integrate" g8 "1 2" "$tip" >"$scratch/integrate-bad-filter.out" 2>&1 || rc=$?
+expect "exits non-zero (got $rc)" [ "$rc" != 0 ]
+expect "names the args" grep -qx 'extra-nextest: GATE_STEP_ARGS is no valid filterset: two three' "$scratch/integrate-bad-filter.out"
+expect "names the step red with exit 2" grep -qx 'gate-step.sh: run red: \[19\] extra-nextest (exit 2)' "$scratch/integrate-bad-filter.out"
+expect "names no novel red and runs no classifier" [ -z "$(grep -e 'NOVEL' -e '^\[known-reds\]' "$scratch/integrate-bad-filter.out")" ]
+expect "makes one cargo nextest call" [ "$(grep -c '^cargo nextest ' "$probe")" = 1 ]
+
+echo "== the integrate run whose extra nextest ends with a usage error"
+rc=0; in_stubs GATE_STEP_ARGS="two three" STUB_BAD_FILTERSET=1 "$integrate" g8 "1 2" "$tip" >"$scratch/integrate-usage.out" 2>&1 || rc=$?
+expect "exits 2 (got $rc)" [ "$rc" = 2 ]
+expect "names the red step with exit 2" grep -qx 'RED STEP \[19\] extra-nextest: exit 2, log target/gate-logs/g8-step-19.log' "$scratch/integrate-usage.out"
+expect "names no novel red" [ -z "$(grep 'NOVEL' "$scratch/integrate-usage.out")" ]
+expect "names no candidate tip" [ -z "$(grep '^candidate tip' "$scratch/integrate-usage.out")" ]
 
 echo "== the timing gate of a batch that selects no timing step"
 : > "$selected"; : > "$probe"
