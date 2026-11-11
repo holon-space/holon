@@ -27,6 +27,9 @@ stderr: why each crate is in the list.
 A crate whose changed paths all sit under its own `tests/` is listed alone, without its reverse deps.
 A changed path under `assets/` adds every crate whose `.rs` sources hold that path or one of its parent directories
 as a complete string literal.
+A diff whose every path is registry data (REGISTRY_DATA) and that holds the known-reds registry prints only the
+registry's own checks: clippy, a nextest of the registry reader's lib tests and `known-reds-fixture`. Its readers'
+reverse deps and their owner lines stay out, since a row edit changes no code they build.
 A changed path under a Cargo.toml that no workspace member owns (excluded crate) is an error, unless a
 `PATH_RECIPES` prefix covers it: that row's owner line then states its check.
 """
@@ -57,6 +60,11 @@ NOT_RUN_STEPS = ("timing", "unowned")
 MOD_DECL = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.M)
 # Integration modules whose owner recipe only the landing gate runs: a lane gets no owner line for them.
 NEVER_OWNER_MODULES = frozenset({"latency_slo_gate"})
+KNOWN_REDS_REGISTRY = "docs/Testing/KeystoneKnownReds.md"
+# A path equal to or under an entry is registry data.
+REGISTRY_DATA = frozenset({KNOWN_REDS_REGISTRY, "docs/Testing/known-red-evidence", "docs/Architecture/FeatureMap.md"})
+REGISTRY_TESTS = f"package({INTEGRATION}) & kind(lib) & test(/^pbt::known_reds::/)"
+REGISTRY_FIXTURE_LINE = "known-reds-fixture: just known-reds-fixture"
 
 
 def workspace_graph(meta):
@@ -389,6 +397,20 @@ def filterset(pkgs, bins):
     return " | ".join(terms)
 
 
+def canon_args(features):
+    return "--workspace --features " + ",".join(features)
+
+
+def run_args(canon, profile):
+    return canon + " --no-tests=fail" + (f" --profile {profile}" if profile else "")
+
+
+def registry_data_only(changed, registry_data):
+    data = [PurePosixPath(d) for d in registry_data]
+    return KNOWN_REDS_REGISTRY in changed and all(
+        any(p == d or d in p.parents for d in data) for p in map(PurePosixPath, changed))
+
+
 def arg_lines(pkgs, bins, features, profile=None, owners=(), path_owners=()):
     """The canonical compile shape for clippy, and the same shape plus the run filter for nextest.
 
@@ -397,9 +419,9 @@ def arg_lines(pkgs, bins, features, profile=None, owners=(), path_owners=()):
     The owner lines belong to the nextest run, so nothing runs without it and they stay unprinted;
     the path owner lines print either way.
     """
-    canon = "--workspace --features " + ",".join(features)
+    canon = canon_args(features)
     lines = [f"clippy: {canon}"]
-    run = canon + " --no-tests=fail" + (f" --profile {profile}" if profile else "")
+    run = run_args(canon, profile)
     sel = filterset(pkgs, bins)
     if sel:
         lines.append(f"nextest: {run} -E '{sel}'")
@@ -424,8 +446,9 @@ def checked(lines):
     return lines
 
 
-def selection(root, meta, changed, never_owner=NEVER_OWNER_MODULES):
-    """The step lines for the `changed` paths of the workspace at `root`."""
+def selection(root, meta, changed, never_owner=NEVER_OWNER_MODULES, registry_data=REGISTRY_DATA):
+    """The step lines for the `changed` paths of the workspace at `root`; an empty `registry_data` turns the
+    registry-data rule off."""
     dirs, _ = workspace_graph(meta)
     cfg = nextest_config(root)
     path_owners = path_recipes(root)
@@ -433,6 +456,14 @@ def selection(root, meta, changed, never_owner=NEVER_OWNER_MODULES):
         meta, changed, lambda d: (root / d / "Cargo.toml").exists(),
         lambda path: asset_readers(root, dirs, path),
         lambda: integration_units(meta, cfg), path_owners)
+    excluding = profile_default_filter(cfg, LOAD_TOLERANT)
+    profile = LOAD_TOLERANT if excluding else None
+    paths = path_owner_lines(changed, path_owners)
+    if registry_data_only(changed, registry_data):
+        print(f"registry data only: {len(changed)} paths; the registry's own checks", file=sys.stderr)
+        canon = canon_args(canon_features(root))
+        return checked([f"clippy: {canon}", f"nextest: {run_args(canon, profile)} -E '{REGISTRY_TESTS}'",
+                        *sorted({REGISTRY_FIXTURE_LINE, *paths})])
     if pkgs is None:
         print(f"ALL CRATES: {reasons['*']}", file=sys.stderr)
     else:
@@ -442,11 +473,9 @@ def selection(root, meta, changed, never_owner=NEVER_OWNER_MODULES):
             print(f"  {n}: {reasons[n]}", file=sys.stderr)
         if bins:
             print(f"  {INTEGRATION}: reverse dep, named by binary()", file=sys.stderr)
-    excluding = profile_default_filter(cfg, LOAD_TOLERANT)
     owners = (owner_lines(excluding, pkgs, bins, test_binary_packages(meta), owner_recipes(root), never_owner)
               if excluding else [])
-    paths = path_owner_lines(changed, path_owners)
-    return checked(arg_lines(pkgs, bins, canon_features(root), LOAD_TOLERANT if excluding else None, owners, paths))
+    return checked(arg_lines(pkgs, bins, canon_features(root), profile, owners, paths))
 
 
 # ── landing gate ─────────────────────────────────────────────────────

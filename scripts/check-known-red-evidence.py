@@ -28,12 +28,18 @@ cite sites, not evidence, and are not checked here. Per citation:
                      line spec without `quotes` fails: a range proves nothing
                      unless it says what it holds.
 
+The default run also fails each hand-authored case (a JSON line of
+crates/holon-integration-tests/hand-authored-regressions/*.jsonl) whose
+`known_red` key names no `known-red` row of the default registry: the
+classifier accepts that case's panic only against the named row.
+
 A registry table whose header ends in `Companions` gives each row a last cell
 of `—` or a code span of comma-separated invariant ids, `inv-x/*` naming every
 view of `inv-x`. A `known-red` row must sit in such a table.
 """
 
 import functools
+import json
 import os
 import re
 import subprocess
@@ -46,6 +52,7 @@ import known_reds_table  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRIES = [REPO / "docs/Testing/KeystoneKnownReds.md"]
+DEFAULT_CASE_FILES = sorted((REPO / "crates/holon-integration-tests/hand-authored-regressions").glob("*.jsonl"))
 
 EVIDENCE_SUFFIXES = (".log", ".zst", ".txt", ".jsonl", ".json", ".md")
 SCRATCH_ROOTS = ("/Users/", "/tmp/", "/private/", "/var/", "~/", ".claude/", "target/")
@@ -202,6 +209,37 @@ def lint(registry):
     return failures
 
 
+def row_key_failures(registry, case_files):
+    """One line per hand-authored case of `case_files` whose `known_red` value is not the key of a `known-red` row
+    of `registry`. A line that is not blank, a `#` comment or a JSON object raises."""
+    keys = {row[1] for row in registry_rows(registry) if len(row) == 6 and row[2] == "known-red"}
+    failures = []
+    for file in case_files:
+        where = file.relative_to(REPO) if file.is_relative_to(REPO) else file
+        for lineno, line in enumerate(file.read_text().splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                case = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{where}:{lineno}: a hand-authored case is not JSON: {e}") from e
+            if not isinstance(case, dict):
+                raise ValueError(f"{where}:{lineno}: a hand-authored case is not a JSON object: {line}")
+            if "known_red" not in case:
+                continue
+            if "name" not in case:
+                raise ValueError(f"{where}:{lineno}: a hand-authored case has no name: {line}")
+            key = case["known_red"]
+            if not isinstance(key, str) or not key:
+                failures.append(f"{where}:{lineno}: case {case['name']} has known_red {json.dumps(key)},"
+                                f" which is not a row key")
+            elif key not in keys:
+                failures.append(f"{where}:{lineno}: case {case['name']} names row {key},"
+                                f" which the registry has no known-red row for")
+    return failures
+
+
 def self_check():
     companions_header = f"| {' | '.join(known_reds_table.HEADER)} |\n|{' --- |' * len(known_reds_table.HEADER)}\n"
     known_red = "| `k` | known-red | `p` | — | sig | ev | — | — |"
@@ -263,12 +301,16 @@ def main(argv):
     failures = []
     for registry in [Path(a) for a in argv] or DEFAULT_REGISTRIES:
         failures += lint(registry)
+    if not argv:
+        failures += row_key_failures(DEFAULT_REGISTRIES[0], DEFAULT_CASE_FILES)
     for failure in failures:
         print(f"[known-red-evidence] {failure}", file=sys.stderr)
     if failures:
-        print("[known-red-evidence] FAIL: commit the evidence, or mark it lost:`path`", file=sys.stderr)
+        print("[known-red-evidence] FAIL: commit the evidence or mark it lost:`path`; point each case's known_red"
+              " at a known-red row", file=sys.stderr)
         return 1
-    print("[known-red-evidence] PASS: every cited evidence path resolves")
+    print("[known-red-evidence] PASS: every cited evidence path resolves; every hand-authored known_red key names a"
+          " known-red row")
     return 0
 
 

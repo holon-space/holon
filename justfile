@@ -1530,6 +1530,7 @@ cargo-free-checks:
     ./scripts/test-check-compile-shape.py 2>&1 | tee target/gate-logs/gate-arch-compile-shape.log
     ./scripts/test-count-hash-folders.py 2>&1 | tee target/gate-logs/gate-arch-count-hash-folders.log
     ./scripts/test-integrate-track-walls.py 2>&1 | tee target/gate-logs/gate-arch-integrate-track-walls.log
+    ./scripts/test-known-red-evidence-row-key.py 2>&1 | tee target/gate-logs/gate-arch-known-red-evidence-row-key.log
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
 
 # Architecture rules (archlint + the Rust-side structural tests). Its own
@@ -1543,6 +1544,8 @@ gate-arch:
     set -euo pipefail
     mkdir -p target/gate-logs
     just cargo-free-checks
+    # Reads `cargo metadata`, so it cannot sit among the cargo-free checks.
+    ./scripts/test-select-tests-registry-data.py 2>&1 | tee target/gate-logs/gate-arch-select-tests-registry-data.log
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
 
 # Tier 1 pre-commit gate: gate-integrity lints, defensive-code ratchet, typecheck.
