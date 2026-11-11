@@ -101,8 +101,8 @@ check` ties `TIMING_OWNERS` to the code in both directions:
 - Every `TIMING_OWNERS` key must select at least one such test. A key whose
   test was renamed, deleted or moved to a liveness bound fails.
 
-A key's recipe says what runs the test inside the gate's one quiet-hold step,
-`just timing-gate`. A key with the recipe `just timing-gate` is in
+A key's recipe says what runs the test inside the gate's timing step under the
+quiet hold, `just timing-gate`. A key with the recipe `just timing-gate` is in
 `[profile.timing]`'s filter, so `cargo nextest run --profile timing` runs it.
 A key with another recipe (`just latency-slo-gate`, `just org-deep-text-timing`)
 has that recipe because it adds what nextest cannot, such as running without output capture or
@@ -309,8 +309,9 @@ and the check becomes exact.
 Every recipe runs in `measure`, so no lane or gate goes red because a
 duration is over its budget: a breach is a `MEASURE-ONLY` line and a ledger
 line. An unset `HOLON_PBT_TIMING` means `measure`
-(`crates/holon-api/src/timing_mode.rs`). `just timing-gate` is the one step
-under the quiet hold. It sets `export HOLON_PBT_TIMING=measure` for itself and
+(`crates/holon-api/src/timing_mode.rs`). `just timing-gate` is the gate's timing
+step; it runs under the quiet hold, as do the steps of `QUIET_TRACK` in
+`scripts/gate-integrate.sh`. It sets `export HOLON_PBT_TIMING=measure` for itself and
 for the recipes it calls (`just latency-slo-gate`, `just org-deep-text-timing`,
 `just keystone-smoke`). Making the gate judge durations again is that one line
 set to `enforce`. The other recipes (`just hand-authored`, `just windowed-gate`,

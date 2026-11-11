@@ -46,16 +46,9 @@ if [ "${1:-}" = --steps ]; then step_names; exit; fi
 step_file() { echo "target/gate-logs/$GATE-step-$1.$2"; }
 SLOT=~/.claude/skills/orchestrator/scripts/with-build-slot.sh
 # The hold names the gate's own pid, and every track names it as its holder
-# (HOLON_BUILD_QUIET_HOLDER), so no track of this gate is lowered. Exit
-# 75 is a hold of another job (a timing gate or probe): wait for its release.
+# (HOLON_BUILD_QUIET_HOLDER), so no track of this gate is lowered.
 quiet_hold() {
-  local rc
-  while :; do
-    rc=0; "$SLOT" --quiet-hold "$GATE_PID" || rc=$?
-    [ "$rc" = 75 ] || break
-    sleep "${GATE_STEP_POLL_S:-5}"
-  done
-  [ "$rc" = 0 ] || { echo "QUIET HOLD NOT TAKEN: with-build-slot.sh --quiet-hold exit $rc"; exit "$rc"; }
+  "$(dirname "$0")/quiet-wait.sh" "$SLOT" "$GATE_PID" || exit
   quiet_age_watch & watch=$!
   trap '"$SLOT" --quiet-release "$GATE_PID"; ! kill -0 "$watch" 2>/dev/null || kill "$watch"; [ -z "${TRACK_TMP:-}" ] || rm -rf "$TRACK_TMP"' EXIT
 }
@@ -84,6 +77,10 @@ gate_step() {
 }
 track() {
   local entry n name rc
+  if [ "$1" != 0 ] && track_selected "$1"; then
+    : "${GATE_SEAT_ASKED_AT:?track $1 runs in a build seat of its own: its launcher must set GATE_SEAT_ASKED_AT}"
+    echo "track $1: build seat after $(($(date +%s) - GATE_SEAT_ASKED_AT)) s"
+  fi
   [ -n "${GATE_STEP_TMP:-}" ] || { GATE_STEP_TMP=$(mktemp -d); TRACK_TMP=$GATE_STEP_TMP; trap 'rm -rf "$TRACK_TMP"' EXIT; }
   [ "$1" != "$QUIET_TRACK" ] || ! track_selected "$1" || quiet_hold
   for entry in ${TRACKS[$1]}; do
@@ -161,7 +158,7 @@ pids=()
 for t in $(seq 1 $((${#TRACKS[@]} - 1))); do
   track_selected "$t" || { "$0" --track "$t" & pids+=($!); continue; }
   # A track of its own takes a slot of its own and writes its own job record.
-  env -u HOLON_BUILD_SLOT_HOLDER -u FLOW_JOB_STATUS -u FLOW_JOB_LOG FLOW_JOB_ID="${FLOW_JOB_ID:-$GATE}.track$t" \
+  env -u HOLON_BUILD_SLOT_HOLDER -u FLOW_JOB_STATUS -u FLOW_JOB_LOG FLOW_JOB_ID="${FLOW_JOB_ID:-$GATE}.track$t" GATE_SEAT_ASKED_AT="$(date +%s)" \
     ~/.claude/skills/orchestrator/scripts/with-build-slot.sh "$0" --track "$t" & pids+=($!)
 done
 red="" extra_red=""

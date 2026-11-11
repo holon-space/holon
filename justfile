@@ -1623,8 +1623,9 @@ windowed-gate:
         ./scripts/assert-measure-mode.sh "$L"
     fi
 
-# The ONE quiet-hold step of the landing gate: everything whose own assertion
-# is a duration, and nothing else.
+# The timing half of the landing gate: everything whose own assertion is a
+# duration, and nothing else. It runs under the quiet hold, as do the steps of
+# `QUIET_TRACK` in scripts/gate-integrate.sh.
 #
 # `--profile timing` and the recipes that `TIMING_OWNERS` names besides this
 # one are complementary halves of the timing set (scripts/timing-split.py). `keystone-smoke`
@@ -1643,9 +1644,7 @@ timing-gate:
     # empty hold and lowering this tree. Taking it here makes every caller
     # clean: the land gate, a lane and a bare `just timing-gate`.
     SLOT=~/.claude/skills/orchestrator/scripts/with-build-slot.sh
-    # Exit 75 is a hold of another job (an integrate run): wait for its release.
-    until rc=0; bash "$SLOT" --quiet-hold $$ || rc=$?; [ "$rc" != 75 ]; do sleep "${GATE_STEP_POLL_S:-5}"; done
-    [ "$rc" = 0 ] || { echo "QUIET HOLD NOT TAKEN: with-build-slot.sh --quiet-hold exit $rc"; exit "$rc"; }
+    "{{justfile_directory()}}/scripts/quiet-wait.sh" "$SLOT" $$
     export HOLON_BUILD_QUIET_HOLDER=$$
     trap "bash $SLOT --quiet-release $$" EXIT
     # The mode of every step below. Every duration budget measures until build
@@ -1798,8 +1797,9 @@ landing-gate:
     just windowed-gate
     echo "== landing [15/17]: guest wasm artifacts match their source =="
     just guests-verify
-    # The ONE step that needs the quiet host: it holds `keystone-smoke`, the SLO
-    # gate, the deep-text budgets and the timing profile.
+    # Runs under the quiet hold, as do the steps of `QUIET_TRACK` in
+    # scripts/gate-integrate.sh: it holds `keystone-smoke`, the SLO gate, the
+    # deep-text budgets and the timing profile.
     echo "== landing [16/17]: timing-critical tests and the latency rung =="
     just timing-gate
     echo "== landing [17/17]: target-gc (D85.c, this lane's own target/ only) =="

@@ -72,13 +72,23 @@ home="$scratch/home" stubs="$scratch/stubs" probe="$scratch/probe.log"
 orch="$home/.claude/skills/orchestrator/scripts"
 mkdir -p "$orch" "$home/.cache/holon-build" "$stubs"
 ln -s "$HOME"/.claude/skills/orchestrator/scripts/* "$orch/"
-# A track runs in this test's slot, or with GATE_HOLD_FIRST set in the real one; the quiet hold is
-# the real one.
+# A track runs in this test's slot after STUB_SEAT_S seconds, or with GATE_HOLD_FIRST set in the real
+# one; the quiet hold is the real one. Each refused take appends "<pid> <epoch s>" to $refusals, and
+# STUB_QUIET_RC makes every take fail with that exit.
+refusals="$scratch/refusals"
 rm "$orch/with-build-slot.sh"
 cat > "$orch/with-build-slot.sh" <<EOF
 #!/usr/bin/env bash
-case "\$1" in --quiet-*) exec "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" "\$@" ;; esac
+case "\$1" in
+  --quiet-hold)
+    [ -z "\${STUB_QUIET_RC:-}" ] || { echo "stub: quiet hold refused" >&2; exit "\$STUB_QUIET_RC"; }
+    rc=0; "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" "\$@" || rc=\$?
+    [ "\$rc" != 75 ] || echo "\$2 \$(date +%s)" >> "$refusals"
+    exit "\$rc" ;;
+  --quiet-*) exec "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" "\$@" ;;
+esac
 [ -z "\${GATE_HOLD_FIRST:-}" ] || exec "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" "\$@"
+sleep "\${STUB_SEAT_S:-0}"
 HOLON_BUILD_SLOT_HOLDER=\$\$ exec "\$@"
 EOF
 chmod +x "$orch/with-build-slot.sh"
@@ -125,11 +135,13 @@ held_by_none_other() { ! grep -vE "$loaded_red" "$probe" | grep -qv ' | quiet=$'
 # Runs every track alone, in order, as gate g4 whose pid is this shell's.
 tracks_alone() {
   local t
-  for t in 0 1 2; do in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ "$integrate" --track $t >>"$scratch/tracks.out" 2>&1 || return; done
+  for t in 0 1 2; do in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ GATE_SEAT_ASKED_AT="$(date +%s)" "$integrate" --track $t >>"$scratch/tracks.out" 2>&1 || return; done
 }
 
-echo "== the integrate run"
-rc=0; in_stubs "$integrate" g1 "1 2" "$tip" >"$scratch/integrate.out" 2>&1 || rc=$?
+SEED=${SEED:-$RANDOM}; RANDOM=$SEED; echo "drawn cases: SEED=$SEED"
+seat=$((RANDOM % 3))
+echo "== the integrate run, its tracks granted a seat after $seat s"
+rc=0; in_stubs STUB_SEAT_S=$seat "$integrate" g1 "1 2" "$tip" >"$scratch/integrate.out" 2>&1 || rc=$?
 expect "exits 0 with every step green (got $rc)" [ "$rc" = 0 ]
 [ "$rc" = 0 ] || tail -n 20 "$scratch/integrate.out"
 expect "its last line names the candidate tip" [ "$(tail -n1 "$scratch/integrate.out")" = "candidate tip: $tip" ]
@@ -140,6 +152,12 @@ expect "never calls timing-gate" [ "$(grep -c '^just timing-gate |' "$probe")" =
 gate_pid=$(sed -n 's/^gate-integrate.sh: g1 (pid \([0-9]*\)).*/\1/p' "$scratch/integrate.out")
 expect "runs the loaded-red steps under the gate's own hold" held_by "$gate_pid"
 expect "releases the hold at its end" [ ! -e "$marker" ]
+seat_lines=$(grep '^track [0-9]*: build seat after ' "$scratch/integrate.out" | sort || true)
+expect "each track of its own slot names its seat wait, track 0 none (got: $seat_lines)" \
+  [ "$(sed 's/ after [0-9]* s$//' <<<"$seat_lines" | tr '\n' ,)" = "track 1: build seat,track 2: build seat," ]
+for n in $(sed 's/.* after \([0-9]*\) s$/\1/' <<<"$seat_lines"); do
+  expect "a seat wait of $n s is the stub's $seat s" [ "$((n >= seat && n <= seat + 1))" = 1 ]
+done
 # The integrate run judges no duration, so every cargo call that runs tests
 # measures; fmt runs none.
 expect "runs cargo test arms" grep -qE '^cargo (test|nextest) ' "$probe"
@@ -204,7 +222,7 @@ expect "the hold is released" [ ! -e "$marker" ]
 expect "warns of no expired hold" [ -z "$(grep 'quiet hold may have expired' "$scratch/tracks.out")" ]
 
 echo "== the quiet track whose step outlives the hold's age limit"
-rc=0; in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ GATE_QUIET_MAX_AGE_S=1 STUB_SLEEP=windowed-gate "$integrate" --track 1 >"$scratch/track-expired.out" 2>&1 || rc=$?
+rc=0; in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ GATE_SEAT_ASKED_AT="$(date +%s)" GATE_QUIET_MAX_AGE_S=1 STUB_SLEEP=windowed-gate "$integrate" --track 1 >"$scratch/track-expired.out" 2>&1 || rc=$?
 expect "exits 0 (got $rc)" [ "$rc" = 0 ]
 expect "names the time after which reds may be load reds" grep -qE '^quiet hold may have expired; reds after [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z may be load reds$' "$scratch/track-expired.out"
 
@@ -213,7 +231,7 @@ sleep 60 & other=$!
 HOME="$home" "$orch/with-build-slot.sh" --quiet-hold "$other" 2>/dev/null
 (sleep 1; HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$other" 2>/dev/null) &
 : > "$probe"
-rc=0; in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ "$integrate" --track 1 >"$scratch/track-wait.out" 2>&1 || rc=$?
+rc=0; in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ GATE_SEAT_ASKED_AT="$(date +%s)" "$integrate" --track 1 >"$scratch/track-wait.out" 2>&1 || rc=$?
 kill "$other"; wait
 expect "waits for the release and exits 0 (got $rc)" [ "$rc" = 0 ]
 expect "then runs its steps under its own hold" held_by $$
@@ -273,6 +291,100 @@ expect "then runs its steps under its own hold" grep -qE "^timing-gate-steps \| 
 expect "not under the other job's hold" [ -z "$(grep "^timing-gate-steps | quiet=$other\$" "$probe")" ]
 expect "releases the hold" [ ! -e "$marker" ]
 
+echo "== a quiet-hold wait behind foreign holds, of the quiet track and of the timing-gate recipe"
+hold_log="$home/.cache/holon-build/holds.jsonl" dummies="$scratch/dummies"
+# Takes the foreign holds in order, each "<seconds>:<release|die>", each for a fresh pid; stops at the
+# first take refused (the waiter took the hold in a gap). Every pid goes to $dummies.
+foreign_holds() {
+  local h p
+  for h in "$@"; do
+    sleep 300 & p=$!
+    echo "$p" >> "$dummies"
+    HOME="$home" "$orch/with-build-slot.sh" --quiet-hold "$p" 2>/dev/null || { kill "$p"; wait "$p" 2>/dev/null || true; return 0; }
+    sleep "${h%%:*}"
+    [ "${h#*:}" = die ] || HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$p" 2>/dev/null
+    kill "$p"; wait "$p" 2>/dev/null || true
+  done
+}
+# Checks a wait's output $1 against the hold log and the stub's refusals; prints "<invariant> <0|1> <detail>".
+check_wait() {
+  /usr/bin/python3 - "$1" "$hold_log" "$refusals" "$dummies" <<'PY'
+import calendar, collections, json, re, sys, time
+out, log, refusals, dummies = sys.argv[1:]
+dummy = set(open(dummies).read().split())
+takes = [json.loads(l) for l in open(log) if '"event":"quiet-take"' in l]
+own_i = next(i for i, t in enumerate(takes) if str(t["holder"]) not in dummy)
+own = takes[own_i]
+foreign = [str(t["holder"]) for t in takes[:own_i]]
+text = open(out).read()
+printed = re.findall(r"^quiet wait at \S+: with-build-slot: quiet hold: held by pid (\d+)", text, re.M)
+any_held = collections.Counter(re.findall(r"quiet hold: held by pid (\d+)", text))
+ends = re.findall(r"^quiet wait: ended after (\d+) s; took the quiet hold at (\S+)$", text, re.M)
+refused = [int(l.split()[1]) for l in open(refusals) if l.split()[0] == str(own["holder"])]
+iso = lambda s: calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
+print("I1", int(printed == foreign), f"holder lines {printed}, foreign takes of the hold log {foreign}")
+print("I2", int(len(ends) == (1 if refused else 0) and all(abs(iso(e[1]) - own["ts"]) <= 1 for e in ends)),
+      f"end lines {ends}, refusals {len(refused)}, own take ts {own['ts']}")
+print("I3", int(all(abs(int(e[0]) - (own["ts"] - refused[0])) <= 1 for e in ends)),
+      f"end lines {ends}, first refusal {refused[:1]}, own take ts {own['ts']}")
+print("I4", int(all(n == 1 for n in any_held.values())), f"held-by lines per pid {dict(any_held)}")
+PY
+}
+# One wait of caller $1 (track | recipe) behind the foreign holds $2...
+wait_case() {
+  local caller=$1 rc=0 driver="" inv ok detail; shift
+  local what="$caller behind [$*]"
+  : > "$hold_log"; : > "$refusals"; : > "$dummies"
+  if [ "$#" -gt 0 ]; then
+    foreign_holds "$@" & driver=$!
+    until [ -e "$marker" ]; do sleep 0.05; done
+  fi
+  if [ "$caller" = track ]; then
+    in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ GATE_SEAT_ASKED_AT="$(date +%s)" "$integrate" --track 1 >"$scratch/wait.out" 2>&1 || rc=$?
+  else
+    in_stubs "$real_just" --justfile "$here/../justfile" --working-directory "$recipe" timing-gate >"$scratch/wait.out" 2>&1 || rc=$?
+  fi
+  [ -z "$driver" ] || wait "$driver"
+  [ ! -e "$marker" ] || HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$(cat "$marker")" 2>/dev/null
+  expect "$what: exits 0 (got $rc)" [ "$rc" = 0 ]
+  while read -r inv ok detail; do expect "$what: $inv ($detail)" [ "$ok" = 1 ]; done < <(check_wait "$scratch/wait.out")
+}
+for caller in track recipe; do
+  wait_case "$caller"
+  wait_case "$caller" 1:release
+  wait_case "$caller" 0.7:die 1:release
+done
+ends=(release die) callers=(track recipe)
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  holds=() n=$((RANDOM % 4))
+  # From 0.5 s: a shorter hold can fall between two polls of the waiter, which then never sees it.
+  for ((i = 0; i < n; i++)); do t=$((5 + RANDOM % 15)); holds+=("$((t / 10)).$((t % 10)):${ends[RANDOM % 2]}"); done
+  wait_case "${callers[RANDOM % 2]}" ${holds[@]+"${holds[@]}"}
+done
+for caller in track recipe; do
+  rc=0
+  if [ "$caller" = track ]; then
+    in_stubs STUB_QUIET_RC=3 GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ GATE_SEAT_ASKED_AT="$(date +%s)" "$integrate" --track 1 >"$scratch/wait.out" 2>&1 || rc=$?
+  else
+    in_stubs STUB_QUIET_RC=3 "$real_just" --justfile "$here/../justfile" --working-directory "$recipe" timing-gate >"$scratch/wait.out" 2>&1 || rc=$?
+  fi
+  expect "$caller, a take that fails with exit 3: exits 3 (got $rc)" [ "$rc" = 3 ]
+  expect "$caller, a take that fails with exit 3: keeps the slot script's stderr" grep -qx 'stub: quiet hold refused' "$scratch/wait.out"
+  expect "$caller, a take that fails with exit 3: names it" grep -qx 'QUIET HOLD NOT TAKEN: with-build-slot.sh --quiet-hold exit 3' "$scratch/wait.out"
+done
+
+echo "== a track of its own seat started without its launch time"
+# The gate launches every selected track other than 0 through the slot script with
+# GATE_SEAT_ASKED_AT set; such a track that lacks it cannot print its seat wait.
+seat_track_without_launch_time() {
+  local t=$1 rc=0
+  in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ "$integrate" --track "$t" >"$scratch/no-seat-time.out" 2>&1 || rc=$?
+  [ ! -e "$marker" ] || HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$(cat "$marker")" 2>/dev/null
+  expect "track $t of its own seat without GATE_SEAT_ASKED_AT: exits non-zero (got $rc)" [ "$rc" != 0 ]
+  expect "track $t of its own seat without GATE_SEAT_ASKED_AT: says so" grep -q 'GATE_SEAT_ASKED_AT' "$scratch/no-seat-time.out"
+}
+for t in 1 2; do seat_track_without_launch_time "$t"; done
+
 echo "== the timing-gate recipe on a settle probe without a contention line"
 for case in "host admitted\n|probe line absent — judging" "|the probe round printed neither an admission nor a contention value"; do
   rc=0; in_stubs SETTLE_OUT="${case%%|*}" "$real_just" --justfile "$here/../justfile" --working-directory "$recipe" timing-gate >"$scratch/recipe-noprobe.out" 2>&1 || rc=$?
@@ -312,7 +424,6 @@ rerun_case() {
   expect "$what: in the gate's shape" [ "$(shape_of <"$probe")" = "$gate_shape" ]
   expect "$what: appends its call to the gate's record" [ "$(($(wc -l <"$record")))" = $((calls + 1)) ]
 }
-SEED=${SEED:-$RANDOM}; RANDOM=$SEED; echo "rerun cases: SEED=$SEED"
 # The bare caller of a hand-written rerun script, a shell left from another tip, a release shell.
 rerun_case unset unset unset "${filters[0]}"
 rerun_case off 0123456789ab unset "${filters[1]}"
