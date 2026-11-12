@@ -3,6 +3,9 @@
 # throwaway jj repos, with `just` and `cargo` stubbed; nothing is built. Exit 0 = every case
 # behaves as specified.
 set -euo pipefail
+# Run as a flow job, the job's variables would reach the real slot script of a nested track, whose
+# end then removes the job's TMPDIR and writes into the real job registry.
+unset $(compgen -e | grep '^FLOW_')
 export GATE_DISK_FLOOR_GIB=0  # the disk guard is the host's, not under test
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,6 +19,9 @@ PATH=$(tr ':' '\n' <<<"$PATH" | grep -vxF "$here/cargo-shape" | paste -sd: -)
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 fails=0
+live_jobs="$HOME/.cache/holon-flow/runtime/holon-space-holon-work-2/jobs.jsonl"
+live_start=$( [ -e "$live_jobs" ] && wc -c < "$live_jobs" || echo 0)
+export FLOW_RUNTIME_DIR="$scratch/flow-runtime"
 
 expect() {
   local what=$1; shift
@@ -99,9 +105,9 @@ for tool in just cargo; do
 echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | record=${GATE_RECORD-unset} | shape=font:${RUST_FONTCONFIG_DLOPEN-unset} sha:${HOLON_BUILD_SHA-unset} time:${HOLON_BUILD_TIME-unset} rustflags:${RUSTFLAGS-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 case " $* " in *" --evaluate "*) exec "$REAL_JUST" "$@" ;; esac
 [ "${STUB_KILL:-}" != "$(basename "$0"):${1:-}" ] || { kill -TERM "$(ps -o ppid= -p "$PPID" | tr -d ' ')"; sleep 1; exit 1; }
-for kv in ${STUB_EXIT:-}; do [ "${kv%=*}" != "$(basename "$0"):${1:-}" ] || exit "${kv#*=}"; done
 [ "$*" != timing-gate-build ] || [ -z "${STUB_HOLDER_DIES:-}" ] || kill "$HOLON_BUILD_SLOT_HOLDER"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
+for kv in ${STUB_EXIT:-}; do [ "${kv%=*}" != "$(basename "$0"):${1:-}" ] || exit "${kv#*=}"; done
 [ "$*" != gate-compile ] || [ -z "${GATE_HOLD_FIRST:-}" ] || "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" --quiet-hold "$GATE_PID"
 [ "${1:-}" != latency-slo-gate ] || printf '%b' "${SETTLE_OUT-mean boot matview_ddl 1.0ms\nhost admitted\n}"
 [ "$*" != "${STUB_RED:-}" ] || exit 1
@@ -128,7 +134,10 @@ steps="1 20 23 2 13 17 7 14 5 6 8 9 18 19 15 11 3 4 12 10 22"
 sorted_steps=$(tr ' ' '\n' <<<"$steps" | sort -n | tr '\n' ' ')
 # Without the caller's HOLON_PBT_TIMING, only the gate scripts can set it.
 # The real wrapper asks rustup for rustc; under the scratch HOME rustup would install a toolchain.
-in_stubs() { env -u HOLON_PBT_TIMING REAL_JUST="$real_just" HOME="$home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 "$@"; }
+# Every call gets a job id of its own (a case may pass its own after it): a track's slot run records
+# "<id>.track<n>", and no two runs may record one id twice.
+job_prefix="check-gate-scripts.${scratch##*/}" draws=0
+in_stubs() { env -u HOLON_PBT_TIMING REAL_JUST="$real_just" HOME="$home" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" PATH="$stubs:$PATH" GATE_PROBE="$probe" HOLON_BUILD_SLOT_HOLDER=$$ GATE_STEP_POLL_S=0.1 FLOW_JOB_ID="$job_prefix.$BASHPID.$((++draws))" "$@"; }
 marker="$home/.cache/holon-build/quiet"
 # The probe lines of the steps that go red on a loaded host: the extra nextest
 # and the windowed gate.
@@ -236,8 +245,19 @@ from flow.model import Refused
 
 sel = os.environ.get("JUDGE_SELECTED")
 on = (lambda name: True) if sel is None else (lambda name: name in sel.split())
+timing = os.environ.get("JUDGE_GATE") == "timing"
+
+def expected_timing():
+    # The build compiles and the holder dies only in a run of timing-gate-build; step 16 then returns
+    # without running even when unselected, since `step` checks the holder first.
+    red = {n for n in (r.split(":")[0] for r in reds.split()) if on(n)}
+    if early in ("tree", "usage", "shape") or (early in ("compiled", "holder") and on("timing-gate-build")) or "timing-gate-build" in red:
+        return "refused", None
+    return ("accepted", ["timing-gate"]) if "timing-gate" in red else ("green", None)
 
 def expected():
+    if timing:
+        return expected_timing()
     # A quiet hold is taken only for a selected quiet-track step; the holder dies only when timing-gate-build runs.
     early_on = early and {"quiet": on("extra-nextest") or on("windowed-gate"), "holder": on("timing-gate-build")}.get(early, True)
     if (pre and on(pre.split(":")[0])) or (kill and on(kill)) or early_on:
@@ -267,13 +287,18 @@ if int(rc) == 0:
 end = [e for e in ends if e.get("job") == job]
 if want == "refused":
     print("own-exit", int(all(e["own"] != 0 for e in end)), f"end rows {end}")
-printed_green = bool(re.search(r"^INTEGRATE GREEN$", text, re.M)) or bool(re.search(r"^candidate tip: ", text, re.M))
-print("green-lines", int(printed_green == (want == "green")), f"INTEGRATE GREEN or candidate tip printed: {printed_green}")
+if timing:
+    # A red run keeps its build dirs; target-gc prints one of these whenever it runs.
+    gc = bool(re.search(r"^(below the floor: |TARGET-GC NOT RUN)", text, re.M))
+    print("no-gc-after-red", int(gc == (want == "green")), f"target-gc ran: {gc}")
+else:
+    printed_green = bool(re.search(r"^INTEGRATE GREEN$", text, re.M)) or bool(re.search(r"^candidate tip: ", text, re.M))
+    print("green-lines", int(printed_green == (want == "green")), f"INTEGRATE GREEN or candidate tip printed: {printed_green}")
 if want == "accepted":
     red = [r for r in mine if not r.get("skipped") and r["exit"] != 0]
     unnamed = [f"[{r['step']}] {r['name']} {r['exit']}" for r in red
                if not re.search(rf"^step \[{r['step']}\] {re.escape(r['name'])}: exit {r['exit']}$", text, re.M)
-               or not re.search(rf"^RED STEP \[{r['step']}\] {re.escape(r['name'])}: exit {r['exit']}, log ", text, re.M)]
+               or not re.search(rf"^RED STEP \[{r['step']}\] {re.escape(r['name'])}: exit {r['exit']}(, log |$)", text, re.M)]
     print("true-codes", int(not unnamed), f"red rows whose code the log does not name: {unnamed}")
 if want in ("accepted", "green"):
     bad = [f"[{r['step']}] {r['name']} job={r.get('job')} tip={str(r.get('tip'))[:7]} cont={r.get('cont')}" for r in mine
@@ -289,10 +314,8 @@ PY
 # failure before the steps $6 (tree, disk, usage, tip, quiet, holder: the build slot holder dies at timing-gate-build).
 flow_case() {
   local gate=$1 launch=$2 reds=$3 pre=$4 kill=$5 early=$6 rc=0 nv stub="" env=() args prop ok detail
-  local job="$gate.integrate.20261112T000000Z" holder="" kept=""
+  local job="$gate.integrate.20261112T000000Z" holder=""
   if [ "$early" = holder ]; then
-    # The stub exits a red call before it kills the holder.
-    for nv in $reds; do [ "${nv%%:*}" = timing-gate-build ] || kept+="$nv "; done; reds=${kept% }
     holder=$(sleep 600 >/dev/null 2>&1 & echo $!); env+=(HOLON_BUILD_SLOT_HOLDER="$holder" STUB_HOLDER_DIES=1)
   fi
   for nv in $reds $pre; do stub+="$(stub_key "${nv%%:*}")=${nv#*:} "; done
@@ -330,6 +353,7 @@ part_sel="fmt gate-arch windowed-gate"; flow_case f31 part "gate-arch:1 keystone
 flow_case f32 select "gate-arch:1" "" "" holder
 part_sel="timing-gate-build keystone-tour"; flow_case f33 part "keystone-tour:1" "" "" holder
 part_sel="gate-arch"; flow_case f34 part "gate-arch:1" "" "" holder
+flow_case f35 runner "timing-gate-build:1 gate-arch:1" "" "" holder
 k=4
 for code in 1 2 11 12 13 14 100 101; do flow_case "f$k" bare "${killable[k % ${#killable[@]}]}:$code" "" "" ""; k=$((k + 1)); done
 flow_case f12 bare "" "" "" ""
@@ -363,6 +387,69 @@ for k in 20 21 22 23 24 25 26 27 28 29; do
   ((RANDOM % 6)) || early=${earlies[RANDOM % ${#earlies[@]}]}
   part_sel=""; for name in "${names[@]}"; do ((RANDOM % 2)) || part_sel+="$name "; done; part_sel=${part_sel% }
   flow_case "f$k" "${launches[RANDOM % 4]}" "${reds% }" "$pre" "$kill" "$early"
+done
+
+echo "== timing runs that flow's own judge reads from their rows"
+# One timing run of gate $1 (a gate id no other run uses, so its rows are this run's), launched $2 as in flow_case,
+# with the step reds $3 ("<step>:<code> ...") and the failure $4 (tree, usage, shape: the shape env refuses;
+# compiled: the build step compiles; holder: the build slot holder dies at timing-gate-build).
+timing_case() {
+  local gate=$1 launch=$2 reds=$3 early=$4 rc=0 nv stub="" env=() args prop ok detail holder="" names
+  local job="$gate.timing.20261112T000000Z" launcher=("$timing")
+  local -x JUDGE_GATE=timing
+  # judge reads the declared step names from $names.
+  read -ra names <<<"$("$timing" --steps)"
+  cp target/gate-logs/g1-cargo-calls.jsonl "target/gate-logs/$gate-cargo-calls.jsonl"
+  for nv in $reds; do stub+="just:${nv%%:*}=${nv#*:} "; done
+  args=("$gate" "1 2" "$tip")
+  case $early in
+    tree) args[2]=$(cid main) ;;
+    usage) args=("$gate" "1 2") ;;
+    shape) env+=(HOLON_BUILD_TIME=1) ;;
+    compiled) env+=(BUILD_OUT="   Compiling holon v0.1.0") ;;
+    holder) holder=$(sleep 600 >/dev/null 2>&1 & echo $!); env+=(HOLON_BUILD_SLOT_HOLDER="$holder" STUB_HOLDER_DIES=1) ;;
+  esac
+  case $launch in
+    runner) launcher=("$orch/gate-step.sh" run "$timing"); env+=(GATE_FULL=1) ;;
+    select) printf '* every-step\n' >"$scratch/select-all"; env+=(GATE_SELECT=1 GATE_SELECTED="$scratch/select-all") ;;
+    part)
+      : >"$scratch/select-part"; for nv in $part_sel; do echo "$nv drawn" >>"$scratch/select-part"; done
+      env+=(GATE_SELECT=1 GATE_SELECTED="$scratch/select-part"); local -x JUDGE_SELECTED="$part_sel" ;;
+  esac
+  in_stubs FLOW_JOB_ID="$job" STUB_EXIT="$stub" ${env[@]+"${env[@]}"} "${launcher[@]}" "${args[@]}" >"$scratch/flow.out" 2>&1 || rc=$?
+  [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null || kill "$holder"
+  [ "$launch" != part ] || launch="part[$part_sel]"
+  local what="$gate $launch reds=[$reds] early=[$early]" verdict jrc=0
+  verdict=$(judge "$job" "$rc" "$scratch/flow.out" "$reds" "" "" "$early") || jrc=$?
+  expect "$what: the judge ran (exit $jrc)" [ "$jrc" = 0 ]
+  while read -r prop ok detail; do expect "$what: $prop ($detail)" [ "$ok" = 1 ]; done <<<"$verdict"
+}
+timing_case t1 bare "timing-gate:1" ""
+timing_case t2 bare "timing-gate:3" ""
+k=0 part_sel="timing-gate-build timing-gate"
+for code in 1 2 3 10 11 12 13 14 100 101; do timing_case "t3c$code" "${launches[k % 4]}" "timing-gate:$code" ""; k=$((k + 1)); done
+timing_case t4 bare "timing-gate-build:101" ""
+timing_case t5 runner "timing-gate-build:101" compiled
+timing_case t6 bare "" compiled
+timing_case t7 bare "" holder
+timing_case t8 runner "" holder
+timing_case t9 bare "timing-gate:1" tree
+timing_case t10 bare "" usage
+timing_case t11 bare "timing-gate:1" shape
+part_sel="timing-gate"; timing_case t12 part "timing-gate:1" holder
+part_sel="timing-gate-build"; timing_case t13 part "timing-gate-build:1" ""
+part_sel=""; timing_case t14 part "" ""
+timing_case t15 runner "timing-gate-build:1" holder
+timing_case t16 select "timing-gate:1" ""
+timing_case t17 bare "" ""
+codes+=(3 10) earlies=(tree usage shape compiled holder)
+read -ra timing_names <<<"$("$timing" --steps)"
+for k in 20 21 22 23 24 25 26 27 28 29; do
+  reds="" early=""
+  for name in "${timing_names[@]}"; do ((RANDOM % 3)) || { draw_code; reds+="$name:$code "; }; done
+  ((RANDOM % 4)) || early=${earlies[RANDOM % ${#earlies[@]}]}
+  part_sel=""; for name in "${timing_names[@]}"; do ((RANDOM % 2)) || part_sel+="$name "; done; part_sel=${part_sel% }
+  timing_case "t$k" "${launches[RANDOM % 4]}" "${reds% }" "$early"
 done
 
 echo "== each track alone"
@@ -652,6 +739,13 @@ expect "exits 3 (got $rc)" [ "$rc" = 3 ]
 expect "leaves every commit as before" [ "$(all_commits)" = "$before" ]
 expect "leaves the integration @ where it was" [ "$(cd "$integ" && cid @)" = "$integ_before" ]
 expect "writes no target/gate-tip" [ ! -e "$integ/target/gate-tip" ]
+
+echo "== the live flow registry"
+# Every id this harness hands out or derives; another job's lines in the same window are no finding.
+expect "holds no job line of this run" [ -z "$( [ -e "$live_jobs" ] && tail -c +$((live_start + 1)) "$live_jobs" | grep -E "$job_prefix|20261112T000000Z|\"id\":\"g[0-9]+\\." )" ]
+
+starts=$(cat "$FLOW_RUNTIME_DIR/jobs.jsonl" 2>/dev/null | grep -c '"event":"job.start"' || true)
+expect "this run's registry ($starts job starts) starts no job id twice" [ -z "$( [ -e "$FLOW_RUNTIME_DIR/jobs.jsonl" ] && grep '"event":"job.start"' "$FLOW_RUNTIME_DIR/jobs.jsonl" | grep -oE '"id":"[^"]*"' | sort | uniq -d)" ]
 
 echo "check-gate-scripts: $fails failure(s)"
 [ "$fails" = 0 ]
