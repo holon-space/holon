@@ -732,8 +732,8 @@ Notes:
 
 The landing gate runs only the steps a batch can reach. flow lists the
 batch's changed paths (its `changed` command) and runs
-`scripts/select-tests.py --gate integrate` (or `--gate timing`) on them; the
-gate starts as `gate-step.sh run scripts/gate-integrate.sh ...`, and a step
+`scripts/select-tests.py --gate integrate` (or `--gate timing`) on them;
+`scripts/gate-integrate.sh` starts itself under `gate-step.sh run`, and a step
 the selection does not name writes a `"skipped": true` row and returns 0.
 Each gate script declares its step names with `gate_steps` and prints them
 with `--steps`.
@@ -758,7 +758,15 @@ step, when a path is a root build file (`Cargo.toml`, `Cargo.lock`,
 under `.cargo/`, `.config/` or `workspace-hack/`, a gate script or
 `select-tests.py`, or a path under no crate and no known root. A release or
 the daily run on main sets `GATE_FULL=1`, which runs every step whatever the
-selection says.
+selection says. Without a selection, `scripts/gate-integrate.sh` sets
+`GATE_FULL=1` itself.
+
+Every full run of `scripts/gate-integrate.sh` writes the gate-ends row of its
+job, and every step row carries the job, the tip and `cont`. A run that is red
+only in steps after gate-compile ends with exit 1 from the runner and exit 0
+of its own (`own`), so flow accepts `batch integrate green --ruling` for it.
+A red before gate-compile, a track that ended early, a wrong tree, low disk
+or a usage error ends with a non-zero `own`, and flow refuses a ruling.
 
 The selection's self-check is `scripts/select-tests.py --self-check`.
 

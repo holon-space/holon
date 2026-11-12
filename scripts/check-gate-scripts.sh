@@ -66,7 +66,8 @@ expect "is refused with exit 1 (got $rc)" [ "$rc" = 1 ]
 # and an admission), `just timing-gate-build` prints $BUILD_OUT
 # `just $STUB_RED` exits 1 and `just $STUB_SLEEP` sleeps 2 s; with STUB_RED_NEXTEST set, every nextest run
 # fails one org_suite test no known-red row lists; with STUB_BAD_FILTERSET set, it fails as nextest does on a filterset
-# it cannot parse. HOME is a scratch dir, so the hold's marker,
+# it cannot parse. STUB_EXIT="<tool>:<first arg>=<code> ..." makes those calls exit with that code; the call
+# STUB_KILL="<tool>:<first arg>" kills the track that runs it. HOME is a scratch dir, so the hold's marker,
 # lock, log and slot walk are scratch files and no real build is lowered.
 home="$scratch/home" stubs="$scratch/stubs" probe="$scratch/probe.log"
 orch="$home/.claude/skills/orchestrator/scripts"
@@ -97,6 +98,9 @@ for tool in just cargo; do
 #!/usr/bin/env bash
 echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | record=${GATE_RECORD-unset} | shape=font:${RUST_FONTCONFIG_DLOPEN-unset} sha:${HOLON_BUILD_SHA-unset} time:${HOLON_BUILD_TIME-unset} rustflags:${RUSTFLAGS-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 case " $* " in *" --evaluate "*) exec "$REAL_JUST" "$@" ;; esac
+[ "${STUB_KILL:-}" != "$(basename "$0"):${1:-}" ] || { kill -TERM "$(ps -o ppid= -p "$PPID" | tr -d ' ')"; sleep 1; exit 1; }
+for kv in ${STUB_EXIT:-}; do [ "${kv%=*}" != "$(basename "$0"):${1:-}" ] || exit "${kv#*=}"; done
+[ "$*" != timing-gate-build ] || [ -z "${STUB_HOLDER_DIES:-}" ] || kill "$HOLON_BUILD_SLOT_HOLDER"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
 [ "$*" != gate-compile ] || [ -z "${GATE_HOLD_FIRST:-}" ] || "$HOME/.claude/skills/orchestrator/scripts/with-build-slot.sh" --quiet-hold "$GATE_PID"
 [ "${1:-}" != latency-slo-gate ] || printf '%b' "${SETTLE_OUT-mean boot matview_ddl 1.0ms\nhost admitted\n}"
@@ -182,7 +186,8 @@ expect "narrows that run by no filter or package (got: $extra_argv)" grep -qxE '
 
 echo "== the integrate run with a red org_suite test"
 rc=0; in_stubs STUB_RED_NEXTEST=1 "$integrate" g3 "1 2" "$tip" >"$scratch/integrate-org.out" 2>&1 || rc=$?
-expect "exits 12 (got $rc)" [ "$rc" = 12 ]
+expect "exits 1 under its runner (got $rc)" [ "$rc" = 1 ]
+expect "names the step red with the classifier's exit 12" grep -qx 'RED STEP \[19\] extra-nextest: exit 12, log target/gate-logs/g3-step-19.log' "$scratch/integrate-org.out"
 expect "names the novel red" grep -qx 'EXTRA NEXTEST NOVEL RED' "$scratch/integrate-org.out"
 expect "names no candidate tip" [ -z "$(grep '^candidate tip' "$scratch/integrate-org.out")" ]
 
@@ -211,6 +216,154 @@ rc=0; in_stubs GATE_HOLD_FIRST=1 "$integrate" g6 "1 2" "$tip" >"$scratch/integra
 expect "exits 0 (got $rc)" [ "$rc" = 0 ]
 expect "lowers no track of its own" [ -z "$(grep 'this build runs in the background class' "$scratch/integrate-own-hold.out")" ]
 expect "releases the hold" [ ! -e "$marker" ]
+
+echo "== integrate runs that flow's own judge reads from their rows"
+read -ra names <<<"$("$integrate" --steps)"
+pre_steps=("${names[@]:0:4}") post=("${names[@]:4}") killable=()
+for name in "${post[@]}"; do
+  case $name in hand-authored | keystone-smoke | extra-nextest) ;; *) killable+=("$name") ;; esac
+done
+stub_key() { case $1 in fmt) echo cargo:fmt ;; extra-nextest) echo cargo:nextest ;; featuremap) echo just:cargo-free-checks ;; *) echo "just:$1" ;; esac; }
+# Prints "<property> <0|1> <detail>" for the run of job $1 that ended with $2 and printed $3, drawn as
+# reds $4, pre-compile red $5, killed step $6, failure before the steps $7.
+judge() {
+  /opt/homebrew/bin/python3 - "$@" "$tip" "${names[*]}" "$home/.cache/holon-build" "$HOME/.claude/skills/gh-kanban" <<'PY'
+import json, os, re, sys
+job, rc, out, reds, pre, kill, early, tip, declared, logs, flow = sys.argv[1:]
+sys.path.insert(0, flow)
+from flow.gate_rerun import ruled_red
+from flow.model import Refused
+
+sel = os.environ.get("JUDGE_SELECTED")
+on = (lambda name: True) if sel is None else (lambda name: name in sel.split())
+
+def expected():
+    # A quiet hold is taken only for a selected quiet-track step; the holder dies only when timing-gate-build runs.
+    early_on = early and {"quiet": on("extra-nextest") or on("windowed-gate"), "holder": on("timing-gate-build")}.get(early, True)
+    if (pre and on(pre.split(":")[0])) or (kill and on(kill)) or early_on:
+        return "refused", None
+    red = sorted(n for n in (r.split(":")[0] for r in reds.split()) if on(n))
+    return ("accepted", red) if red else ("green", None)
+
+def read(name):
+    path = os.path.join(logs, name)
+    return [json.loads(l) for l in open(path)] if os.path.exists(path) else []
+
+rows, ends, text = read("gate-steps.jsonl"), read("gate-ends.jsonl"), open(out).read()
+mine = [r for r in rows if r["gate"] == job.split(".")[0]]
+want, want_red = expected()
+if int(rc) == 0:
+    got, got_red = "green", None
+else:
+    try:
+        # (1,): flow's red_exits for a stage that declares none, as this repo's integrate stage does.
+        got, got_red = "accepted", sorted(ruled_red({"jobId": job, "exit": int(rc), "signal": None}, rows, ends, tip, (1,)))
+    except Refused as e:
+        got, got_red = "refused", str(e)
+print("judged", int((got, got_red if got == "accepted" else None) == (want, want_red)), f"want {want} {want_red}, got {got} {got_red} (exit {rc})")
+if int(rc) == 0:
+    ran = {r["name"] for r in mine if r.get("job") == job}
+    print("ran-all", int(set(declared.split()) <= ran), f"exit 0 while declared steps have no row: {sorted(set(declared.split()) - ran)}")
+end = [e for e in ends if e.get("job") == job]
+if want == "refused":
+    print("own-exit", int(all(e["own"] != 0 for e in end)), f"end rows {end}")
+printed_green = bool(re.search(r"^INTEGRATE GREEN$", text, re.M)) or bool(re.search(r"^candidate tip: ", text, re.M))
+print("green-lines", int(printed_green == (want == "green")), f"INTEGRATE GREEN or candidate tip printed: {printed_green}")
+if want == "accepted":
+    red = [r for r in mine if not r.get("skipped") and r["exit"] != 0]
+    unnamed = [f"[{r['step']}] {r['name']} {r['exit']}" for r in red
+               if not re.search(rf"^step \[{r['step']}\] {re.escape(r['name'])}: exit {r['exit']}$", text, re.M)
+               or not re.search(rf"^RED STEP \[{r['step']}\] {re.escape(r['name'])}: exit {r['exit']}, log ", text, re.M)]
+    print("true-codes", int(not unnamed), f"red rows whose code the log does not name: {unnamed}")
+if want in ("accepted", "green"):
+    bad = [f"[{r['step']}] {r['name']} job={r.get('job')} tip={str(r.get('tip'))[:7]} cont={r.get('cont')}" for r in mine
+           if not r.get("skipped") and (r.get("job") != job or r.get("tip") != tip or r.get("cont") is not True)]
+    print("row-identity", int(not bad), f"rows without the gate's job, tip or cont: {bad[:4]}")
+    ok = len(end) == 1 and set(end[0]["declared"]) == set(declared.split()) and (want != "green" or (end[0]["exit"], end[0]["own"]) == (0, 0))
+    print("end-row", int(ok), f"end rows {end}")
+PY
+}
+# One integrate run of gate $1, launched $2 (bare: as the script; runner: under gate-step.sh with GATE_FULL=1;
+# select: as the script, for a batch whose selection runs every step; part: the same, selecting the steps $part_sel),
+# with the post-compile reds $3 ("<step>:<code> ..."), the pre-compile red $4, the step $5 whose track dies, and the
+# failure before the steps $6 (tree, disk, usage, tip, quiet, holder: the build slot holder dies at timing-gate-build).
+flow_case() {
+  local gate=$1 launch=$2 reds=$3 pre=$4 kill=$5 early=$6 rc=0 nv stub="" env=() args prop ok detail
+  local job="$gate.integrate.20261112T000000Z" holder="" kept=""
+  if [ "$early" = holder ]; then
+    # The stub exits a red call before it kills the holder.
+    for nv in $reds; do [ "${nv%%:*}" = timing-gate-build ] || kept+="$nv "; done; reds=${kept% }
+    holder=$(sleep 600 >/dev/null 2>&1 & echo $!); env+=(HOLON_BUILD_SLOT_HOLDER="$holder" STUB_HOLDER_DIES=1)
+  fi
+  for nv in $reds $pre; do stub+="$(stub_key "${nv%%:*}")=${nv#*:} "; done
+  args=("$gate" "1 2" "$tip")
+  case $early in
+    tree) args[2]=$(cid main) ;;
+    disk) env+=(GATE_DISK_FLOOR_GIB=1 STUB_DF_FREE=0) ;;
+    usage) args=("$gate" "1 2") ;;
+    tip) args[2]=${tip:0:12} ;;
+    quiet) env+=(STUB_QUIET_RC=3) ;;
+  esac
+  [ -z "$kill" ] || env+=(STUB_KILL="$(stub_key "$kill")")
+  local launcher=("$integrate")
+  case $launch in
+    runner) launcher=("$orch/gate-step.sh" run "$integrate"); env+=(GATE_FULL=1) ;;
+    select) printf '* every-step\n' >"$scratch/select-all"; env+=(GATE_SELECT=1 GATE_SELECTED="$scratch/select-all") ;;
+    part)
+      : >"$scratch/select-part"; for nv in $part_sel; do echo "$nv drawn" >>"$scratch/select-part"; done
+      env+=(GATE_SELECT=1 GATE_SELECTED="$scratch/select-part"); local -x JUDGE_SELECTED="$part_sel" ;;
+  esac
+  in_stubs FLOW_JOB_ID="$job" STUB_EXIT="$stub" ${env[@]+"${env[@]}"} "${launcher[@]}" "${args[@]}" >"$scratch/flow.out" 2>&1 || rc=$?
+  [ ! -e "$marker" ] || HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$(cat "$marker")" 2>/dev/null
+  [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null || kill "$holder"
+  [ "$launch" != part ] || launch="part[$part_sel]"
+  local what="$gate $launch reds=[$reds] pre=[$pre] kill=[$kill] early=[$early]" verdict jrc=0
+  verdict=$(judge "$job" "$rc" "$scratch/flow.out" "$reds" "$pre" "$kill" "$early") || jrc=$?
+  expect "$what: the judge ran (exit $jrc)" [ "$jrc" = 0 ]
+  while read -r prop ok detail; do expect "$what: $prop ($detail)" [ "$ok" = 1 ]; done <<<"$verdict"
+}
+flow_case f1 bare "hand-authored:1" "" "" ""
+flow_case f2 runner "gate-arch:1" "" "" ""
+flow_case f3 bare "hand-authored:1 extra-nextest:100" "" "" ""
+flow_case f30 select "keystone-smoke:1" "" "" ""
+part_sel="fmt gate-arch windowed-gate"; flow_case f31 part "gate-arch:1 keystone-tour:1" "" "" ""
+flow_case f32 select "gate-arch:1" "" "" holder
+part_sel="timing-gate-build keystone-tour"; flow_case f33 part "keystone-tour:1" "" "" holder
+part_sel="gate-arch"; flow_case f34 part "gate-arch:1" "" "" holder
+k=4
+for code in 1 2 11 12 13 14 100 101; do flow_case "f$k" bare "${killable[k % ${#killable[@]}]}:$code" "" "" ""; k=$((k + 1)); done
+flow_case f12 bare "" "" "" ""
+flow_case f13 bare "gate-arch:1" "fmt:1" "" ""
+flow_case f14 bare "keystone-tour:1" "" "gate-arch" ""
+flow_case f15 runner "gate-arch:1" "" "" quiet
+flow_case f16 bare "gate-arch:1" "" "" tree
+flow_case f17 bare "gate-arch:1" "" "" disk
+flow_case f18 bare "" "" "" usage
+flow_case f19 bare "gate-arch:1" "" "" tip
+# A gate whose build slot holder dies after gate-compile: the later steps return without running.
+holder_dies_case() {
+  local gate=$1 launch=$2 rc=0 h prop ok detail job="$1.integrate.20261112T000000Z" launcher=("$integrate") env=()
+  h=$(sleep 600 >/dev/null 2>&1 & echo $!)
+  case $launch in runner) launcher=("$orch/gate-step.sh" run "$integrate"); env+=(GATE_FULL=1) ;; esac
+  in_stubs FLOW_JOB_ID="$job" HOLON_BUILD_SLOT_HOLDER="$h" STUB_HOLDER_DIES=1 ${env[@]+"${env[@]}"} "${launcher[@]}" "$gate" "1 2" "$tip" >"$scratch/flow.out" 2>&1 || rc=$?
+  ! kill -0 "$h" 2>/dev/null || kill "$h"
+  expect "$gate $launch holder dies: a gate whose steps did not all run does not exit 0 (got $rc)" [ "$rc" != 0 ]
+  while read -r prop ok detail; do expect "$gate $launch holder dies: $prop ($detail)" [ "$ok" = 1 ]; done <<<"$(judge "$job" "$rc" "$scratch/flow.out" "" "" "" holder)"
+  grep -E '^(step \[|RED |INTEGRATE|candidate|gate-step)' "$scratch/flow.out" || true
+}
+for launch in bare runner; do holder_dies_case "f4${#launch}" "$launch"; done
+codes=(1 2 11 12 13 14 100 101) earlies=(tree disk usage tip quiet holder) launches=(bare runner select part)
+# Sets $code; a command substitution would draw in a subshell, which bash reseeds, so SEED would not replay it.
+draw_code() { if ((RANDOM % 3)); then code=${codes[RANDOM % ${#codes[@]}]}; else code=$((1 + RANDOM % 255)); fi; }
+for k in 20 21 22 23 24 25 26 27 28 29; do
+  reds="" pre="" kill="" early=""
+  for name in "${post[@]}"; do ((RANDOM % 5)) || { draw_code; reds+="$name:$code "; }; done
+  ((RANDOM % 7)) || { draw_code; pre="${pre_steps[RANDOM % 4]}:$code"; }
+  ((RANDOM % 7)) || kill=${killable[RANDOM % ${#killable[@]}]}
+  ((RANDOM % 6)) || early=${earlies[RANDOM % ${#earlies[@]}]}
+  part_sel=""; for name in "${names[@]}"; do ((RANDOM % 2)) || part_sel+="$name "; done; part_sel=${part_sel% }
+  flow_case "f$k" "${launches[RANDOM % 4]}" "${reds% }" "$pre" "$kill" "$early"
+done
 
 echo "== each track alone"
 : > "$probe"
@@ -262,7 +415,7 @@ expect "makes one cargo nextest call" [ "$(grep -c '^cargo nextest ' "$probe")" 
 
 echo "== the integrate run whose extra nextest ends with a usage error"
 rc=0; in_stubs GATE_STEP_ARGS="two three" STUB_BAD_FILTERSET=1 "$integrate" g8 "1 2" "$tip" >"$scratch/integrate-usage.out" 2>&1 || rc=$?
-expect "exits 2 (got $rc)" [ "$rc" = 2 ]
+expect "exits 1 under its runner (got $rc)" [ "$rc" = 1 ]
 expect "names the red step with exit 2" grep -qx 'RED STEP \[19\] extra-nextest: exit 2, log target/gate-logs/g8-step-19.log' "$scratch/integrate-usage.out"
 expect "names no novel red" [ -z "$(grep 'NOVEL' "$scratch/integrate-usage.out")" ]
 expect "names no candidate tip" [ -z "$(grep '^candidate tip' "$scratch/integrate-usage.out")" ]

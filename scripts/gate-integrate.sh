@@ -25,11 +25,17 @@
 #
 # Last stdout line on green: `candidate tip: <tip>`, the argument for
 # scripts/gate-timing.sh.
+# A full run starts itself under gate-step.sh's runner (GATE_FULL=1 unless
+# GATE_SELECT=1), which writes the gate-ends row that flow reads.
 # Exit 0: every step green. A red step before gate-compile stops the run with
-# its exit code; 9 = the checkout is not <tip>, 8 = free disk below the floor.
-# After gate-compile every step runs to its end, each red step is named, and
-# the run exits with the code of the first red one in TRACKS order; a red extra
-# nextest alone exits 12 or 13, or 2 when its filter set is unparsable.
+# its exit code; 9 = the checkout is not <tip>, 8 = free disk below the floor,
+# 2 = usage or a <tip> that is no full commit id.
+# After gate-compile every step runs to its end and each red step is named. A
+# track that ended early, or a step that returned without running, exits with
+# its code. Under the runner a run red in
+# these steps only exits 0, and the runner ends it with exit 1. Without the
+# runner it exits with the code of the first red step in TRACKS order; a red
+# extra nextest alone exits 12 or 13, or 2 when its filter set is unparsable.
 set -euo pipefail
 
 # Balanced by step time; the first track runs in the
@@ -43,6 +49,10 @@ QUIET_TRACK=1
 read -ra STEPS <<<"${TRACKS[*]}"
 step_names() { echo fmt deny machete gate-compile "${STEPS[@]#*:}"; }
 if [ "${1:-}" = --steps ]; then step_names; exit; fi
+if [ -z "${GATE_RECORD:-}" ] && [ "${1:-}" != --track ] && [ "${1:-}" != rerun ]; then
+  [ "${GATE_SELECT:-}" = 1 ] || export GATE_FULL=1
+  exec bash ~/.claude/skills/orchestrator/scripts/gate-step.sh run "$0" "$@"
+fi
 step_file() { echo "target/gate-logs/$GATE-step-$1.$2"; }
 SLOT=~/.claude/skills/orchestrator/scripts/with-build-slot.sh
 # The hold names the gate's own pid, and every track names it as its holder
@@ -72,8 +82,11 @@ track_selected() {
   return 1
 }
 # A step sees neither the record file of gate-step.sh's runner nor its temp folder.
+# Its row names the gate's job, also in a track that holds a slot under a job id of its own.
+# Returns the step's exit, which `step` under the runner only writes to the record.
 gate_step() {
-  step "$1" "$2" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED TMPDIR="$GATE_STEP_TMP" "${@:3}"
+  FLOW_JOB_ID=${GATE_JOB_ID:-${FLOW_JOB_ID:-}} step "$1" "$2" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED TMPDIR="$GATE_STEP_TMP" "${@:3}" || return
+  [ -z "${GATE_RECORD:-}" ] || return "$(awk -v l="red [$1] $2 (exit " 'index($0, l) == 1 { rc = substr($0, length(l) + 1) + 0 } END { print rc + 0 }' "$GATE_RECORD")"
 }
 track() {
   local entry n name rc
@@ -135,7 +148,8 @@ if [ "${1:-}" = rerun ]; then
 fi
 
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
-export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$ HOLON_BUILD_QUIET_HOLDER=$$
+[[ $3 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { echo "usage: <tip> is a full commit id, as flow's --tip names it, not '$3'" >&2; exit 2; }
+export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$ HOLON_BUILD_QUIET_HOLDER=$$ GATE_TIP=$3 GATE_JOB_ID=${FLOW_JOB_ID:-}
 tip=$3
 
 gate_env
@@ -161,24 +175,31 @@ for t in $(seq 1 $((${#TRACKS[@]} - 1))); do
   env -u HOLON_BUILD_SLOT_HOLDER -u FLOW_JOB_STATUS -u FLOW_JOB_LOG FLOW_JOB_ID="${FLOW_JOB_ID:-$GATE}.track$t" GATE_SEAT_ASKED_AT="$(date +%s)" \
     ~/.claude/skills/orchestrator/scripts/with-build-slot.sh "$0" --track "$t" & pids+=($!)
 done
-red="" extra_red=""
+fail="" red="" extra_red=""
 for t in "${!pids[@]}"; do
   rc=0; wait "${pids[$t]}" || rc=$?
-  [ "$rc" = 0 ] || { echo "RED TRACK $t: exit $rc"; red=${red:-$rc}; }
+  [ "$rc" = 0 ] || { echo "RED TRACK $t: exit $rc"; fail=${fail:-$rc}; }
 done
 
 for entry in "${STEPS[@]}"; do
   n=${entry%%:*} name=${entry#*:}
   [ ! -f "$(step_file "$n" log)" ] || cat "$(step_file "$n" log)"
-  rc=$(cat "$(step_file "$n" rc)" 2>/dev/null) || { echo "RED STEP [$n] $name: its track ended before it"; red=${red:-1}; continue; }
+  rc=$(cat "$(step_file "$n" rc)" 2>/dev/null) || { echo "RED STEP [$n] $name: its track ended before it"; fail=${fail:-1}; continue; }
   [ "$rc" = 0 ] && continue
+  # Under the runner a step red is one the record names; any other exit (78: no build slot) means the step did not run.
+  if { [ "${GATE_FULL:-}" = 1 ] || [ "${GATE_SELECT:-}" = 1 ]; } && ! grep -qxF "red [$n] $name (exit $rc)" "$GATE_RECORD"; then
+    echo "RED STEP [$n] $name: exit $rc without running, log $(step_file "$n" log)"; fail=${fail:-$rc}; continue
+  fi
   echo "RED STEP [$n] $name: exit $rc, log $(step_file "$n" log)"
   if [ "$name" = extra-nextest ]; then extra_red=$rc; [ "$rc" != 12 ] || echo "EXTRA NEXTEST NOVEL RED"
   else red=${red:-$rc}; fi
 done
 # A red half ends the gate here, so it prints the breach summary gate-timing.sh would print.
-[ -z "$red$extra_red" ] || /usr/bin/python3 "$(dirname "$0")/timing-breaches.py" "$GATE" || echo "TIMING BREACHES NOT SUMMARIZED (exit $?)"
-[ -z "$red" ] || exit "$red"
-[ -z "$extra_red" ] || exit "$extra_red"
+[ -z "$fail$red$extra_red" ] || /usr/bin/python3 "$(dirname "$0")/timing-breaches.py" "$GATE" || echo "TIMING BREACHES NOT SUMMARIZED (exit $?)"
+[ -z "$fail" ] || exit "$fail"
+if [ -n "$red$extra_red" ]; then
+  [ "${GATE_FULL:-}" != 1 ] && [ "${GATE_SELECT:-}" != 1 ] || exit 0
+  exit "${red:-$extra_red}"
+fi
 echo "INTEGRATE GREEN"
 echo "candidate tip: $tip"
