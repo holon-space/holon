@@ -254,9 +254,12 @@ for log in "$@"; do
             sub(/^ +/, "", line)
             t = substr(line, 9)
             if (index(line, "thread " q) == 1 && index(t, q)) return substr(t, 1, index(t, q) - 1)
-            # Text written before the name on its line.
-            if (match(line, "[^ " q "]*" q " [(][0-9]+[)] panicked at |[^ " q "]*" q " panicked at ") && substr(line, RSTART, 1) != q)
-                return substr(line, RSTART, index(substr(line, RSTART), q) - 1)
+            # Text written before the name on its line; `"`, `(`, `[` and `=` glued to it are not part of it.
+            if (match(line, "[^ " q "]*" q " [(][0-9]+[)] panicked at |[^ " q "]*" q " panicked at ") && substr(line, RSTART, 1) != q) {
+                t = substr(line, RSTART, index(substr(line, RSTART), q) - 1)
+                sub(/^[="([]+/, "", t)
+                return t
+            }
             # Text written after the name: the head continues an open one.
             s = scope()
             if (open_heads[s] != 1) return ""
