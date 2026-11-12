@@ -249,7 +249,8 @@ for log in "$@"; do
     # The injected boot-fault panic is counted into `injected`, not printed.
     sigs="$work/sigs"
     awk_verdict '
-        # The thread name of panic head `line`, or "" when the text lost it.
+        # The thread name of panic head `line`, or "" when the text lost it,
+        # or the open head'"'"'s text behind `open_mark` when the line continues one.
         function thread_of(line,    t, s) {
             sub(/^ +/, "", line)
             t = substr(line, 9)
@@ -258,26 +259,52 @@ for log in "$@"; do
             if (match(line, "[^ " q "]*" q " [(][0-9]+[)] panicked at |[^ " q "]*" q " panicked at ") && substr(line, RSTART, 1) != q) {
                 t = substr(line, RSTART, index(substr(line, RSTART), q) - 1)
                 sub(/^[="([]+/, "", t)
+                s = scope()
+                if (substr(line, RSTART - 8, 8) != "thread " q && open_heads[s] == 1) open_heads[s] = 0
                 return t
             }
             # Text written after the name: the head continues an open one.
             s = scope()
             if (open_heads[s] != 1) return ""
             open_heads[s] = 0
-            return head_name[s]
+            return open_mark head_name[s]
+        }
+        # The name `thread_of` read in libtest run `u`: an open head names the
+        # one test of `u` whose full name ends its text behind a character no
+        # name holds, optionally with a verdict word glued behind it.
+        function named(u, t,    i, n, w, found) {
+            if (substr(t, 1, 1) != open_mark) return t
+            t = substr(t, 2); found = ""
+            for (i = 1; i <= n_ran[u]; i++) {
+                n = ran_name[u, i]
+                for (w = 1; w <= 3; w++)
+                    if (ends_name(t, n glued[w])) {
+                        if (found != "" && found != n) return ""
+                        found = n
+                    }
+            }
+            return found
+        }
+        function ends_name(t, n,    p) {
+            p = length(t) - length(n)
+            return p >= 0 && substr(t, p + 1) == n && (p == 0 || substr(t, p, 1) !~ /[A-Za-z0-9_:-]/)
         }
         # A line that ends in `thread '"'"'<name>` or `thread '"'"'<name>'"'"' (…` opens a
         # panic head; it stays open until a `… panicked at` line continues it.
+        # A later `<name>'"'"' (` line names the one open head.
         function track_head(line,    rest, i, s) {
             if (line ~ /panicked at /) return
             rest = line
             while ((i = index(rest, "thread " q)) > 0) rest = substr(rest, i + 8)
-            if (rest == line) return
+            s = scope()
+            if (rest == line) {
+                if (open_heads[s] == 1 && match(line, "[^ " q "]+" q " [(]")) head_name[s] = substr(line, RSTART, RLENGTH - 3)
+                return
+            }
             if ((i = index(rest, q))) {
                 if (substr(rest, i, 3) != q " (") return
                 rest = substr(rest, 1, i - 1)
             }
-            s = scope()
             if (!open_heads[s]++) head_name[s] = rest
         }
         # Sets LABEL, STRESS and UNIT from a nextest status line, whose label
@@ -362,7 +389,7 @@ for log in "$@"; do
         function has_real_panic(inst,    k, parts) {
             for (k in panics) {
                 split(k, parts, SUBSEP)
-                if (parts[1] == inst && !passing_name(parts[1] SUBSEP parts[2], parts[3])) return 1
+                if (parts[1] == inst && !passing_name(parts[1] SUBSEP parts[2], named(parts[1] SUBSEP parts[2], parts[3]))) return 1
             }
             return 0
         }
@@ -383,6 +410,7 @@ for log in "$@"; do
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
+        BEGIN { split("|ok|FAILED", glued, "|") }
         FNR == 1 { section = ""; live = ""; captured = ""; serial = 0; marked = 0; run = 0; replay_case = ""; split("", open_heads); split("", head_name); split("", unit_of) }
         # The marker comes before the `Starting` of its run; a run cut off before
         # its `Summary` does not carry it into the next run.
@@ -417,6 +445,7 @@ for log in "$@"; do
             # a word, before the head on its line.
             if (match($0, /test [^ ]+ (- should panic )?\.\.\. /)) {
                 name = substr($0, RSTART + 5, RLENGTH - 5); sub(/ (- should panic )?\.\.\. $/, "", name)
+                if (!((unit() SUBSEP name) in ran)) ran_name[unit(), ++n_ran[unit()]] = name
                 ran[unit() SUBSEP name] = 1
             }
             if (/panicked at /) panics[unit() SUBSEP thread_of($0)]++
@@ -450,7 +479,7 @@ for log in "$@"; do
             replay_case = ""
         }
         /panicked at / {
-            u = unit(); owner = OWNER; certain = owner_certain(); name = thread_of($0); at = FNR; opened = captured != ""
+            u = unit(); owner = OWNER; certain = owner_certain(); name = named(u, thread_of($0)); at = FNR; opened = captured != ""
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/\r$/, "", loc); sub(/:$/, "", loc)
             if ((getline msg) <= 0) next
             track_line(msg); track_head(msg); track_unit(msg)
@@ -469,7 +498,7 @@ for log in "$@"; do
             print injected + 0, in_passing + 0 >injected_out
             if (!stopped)
                 for (c in red_case) if (!(c in judged)) print "-\tthe red case printed no panic\037" c "\037" declared[c]
-        }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" dropped_out="$work/dropped" "$log" "$log" >"$sigs"
+        }' q="'" open_mark="$(printf '\001')" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" dropped_out="$work/dropped" "$log" "$log" >"$sigs"
 
     read -r log_injected log_in_passing <"$work/injected"
     in_passing=$((in_passing + log_in_passing))
