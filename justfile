@@ -1139,12 +1139,13 @@ fmt-check:
 # and wasm guests with their own lockfile get the same license check (the
 # cooklang guest's `.wasm` ships inside holon-plugin-host). `--locked` fails on
 # a stale lockfile instead of rewriting it unseen.
+DENY_OWN_LOCKS := "frontends/holon-worker frontends/dioxus-web frontends/waterui guests/cooklang guests/testkit"
 deny:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
     cargo deny --locked check 2>&1 | tee target/gate-logs/holon-deny.log
-    for manifest in frontends/holon-worker frontends/dioxus-web frontends/waterui guests/cooklang guests/testkit; do
+    for manifest in {{DENY_OWN_LOCKS}}; do
         cargo deny --locked --manifest-path $manifest/Cargo.toml --config deny.toml check licenses 2>&1 | tee target/gate-logs/holon-deny-${manifest##*/}.log
     done
 
@@ -1532,6 +1533,9 @@ cargo-free-checks:
     ./scripts/test-integrate-track-walls.py 2>&1 | tee target/gate-logs/gate-arch-integrate-track-walls.log
     ./scripts/test-known-red-evidence-row-key.py 2>&1 | tee target/gate-logs/gate-arch-known-red-evidence-row-key.log
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
+    # Keeps the deny.toml ignore of RUSTSEC-2026-0514 true.
+    { ./scripts/check-hickory-dnssec-off.py . {{DENY_OWN_LOCKS}} && ./scripts/check-hickory-dnssec-off.py --self-check; } \
+        2>&1 | tee target/gate-logs/gate-arch-hickory-dnssec-off.log
 
 # Architecture rules (archlint + the Rust-side structural tests). Its own
 # package, so `cargo nextest run --workspace` was the only thing that ran it and

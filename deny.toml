@@ -21,6 +21,10 @@ ignore = [
     # We don't enable DNSSEC validation through iroh, so the vulnerable paths are unreachable.
     "RUSTSEC-2026-0118",
     "RUSTSEC-2026-0119",
+    # hickory-resolver 0.25 returns DNSSEC-bogus records as Ok, only with a dnssec
+    # feature on. No hickory dnssec feature is compiled into Holon
+    # (scripts/check-hickory-dnssec-off.py); remove this with the iroh upgrade.
+    "RUSTSEC-2026-0514",
     # proc-macro-error2 unmaintained, pulled in via gpui -> stacksafe-macro ->
     # stacksafe. No fix available upstream (author confirmed unmaintained,
     # recommends manyhow/proc-macro2-diagnostics as replacements — that's an
