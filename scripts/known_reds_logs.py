@@ -56,6 +56,7 @@ FOREIGN = [
     "[wide-e2e wiring] drawn: storage={Loro, Org}",
     "  left: Object {}",
     "Applying transition 1486:5:",
+    "[sync] retry 3",
 ]
 # Foreign lines that never end the way a cut location ends.
 BETWEEN = [line for line in FOREIGN if not re.search(r"[0-9]:$", line)]
@@ -206,7 +207,7 @@ def draw(rng):
             again = [n for n in earlier if n not in {t.name for t in tests}]
             tests.append(draw_test(rng, used, shape, rng.choice(again) if again and rng.random() < 0.6 else None))
         # A name that is another's with a verdict word glued behind it.
-        if shape == "libtest" and len(tests) > 1 and rng.random() < 0.5:
+        if shape == "libtest" and len(tests) > 1 and rng.random() < 0.7:
             tests[1] = draw_test(rng, used, shape, tests[0].name + rng.choice(GLUED_WORD[1:]))
             for t in tests[:2]:
                 t.panics.append(draw_panic(rng, used, t.name))
@@ -251,6 +252,7 @@ def add_panic(out, scope, stated, p, owner, passed, as_stated=None):
 DRAWN = [
     "a location cut after its file and colon", "a location cut inside its line number", "a location cut after its line number",
     "a location cut before its closing colon", "a location cut right after its file", "a location cut with a verdict line before its rest",
+    "a location with text glued behind it",
     "a verdict word glued behind an open head's name", "a name on a line of its own", "two test names that end an open head",
     "punctuation glued before a closed name",
 ]
@@ -280,19 +282,21 @@ def located(rng, out, cut, before, p):
 
     With `cut` another thread's text may cut the location before its last colon;
     the classifier completes it from the first later line that ends in the rest.
-    A cut right after the file, or one whose rest follows a verdict line, it
-    keeps as written, with the next line as message.
+    A location with text glued behind it, or whose rest follows a verdict line,
+    it keeps as written, with the next line as message.
     """
     if not cut or rng.random() < 0.6:
         return [f"{before}panicked at {p.site}:", p.msg], p
-    where = rng.choice(DRAWN[:6])
+    where = rng.choice(DRAWN[:7])
     out.drawn[where] += 1
     path, line, col = p.site.rsplit(":", 2)
+    if where == DRAWN[6]:
+        glued = f"{p.site}:" + rng.choice(["()", "ok"])
+        # A later line that ends like a location tail does not complete a location that is not cut.
+        return [f"{before}panicked at {glued}", p.msg, *rng.choice([[], ["   at src/peer.rs:12:3:"]])], restated(p, glued, p.msg)
     head = [f"{path}:", f"{path}:{line[:-1]}" if len(line) > 1 else f"{path}:", f"{path}:{line}:", p.site, path, f"{path}:"][DRAWN.index(where)]
     tail = rng.choice(LOC_LEAD) + f"{p.site}:"[len(head):]
     first = f"{before}panicked at {head}"
-    if where == DRAWN[4]:
-        return [first, tail, p.msg], restated(p, head, tail)
     if where == DRAWN[5]:
         bound = rng.choice(FOREIGN_RESULT)
         return [first, bound, tail, p.msg], restated(p, path, bound)
@@ -314,9 +318,13 @@ def render_libtest(run, index, rng, interleave, out):
     queues = []
     for t in run.tests:
         chunks = []
+        # The verdict word that, glued behind this name, spells another test's.
+        twin = next((w for w in GLUED_WORD[1:] if t.name + w in names), "")
         for p in t.panics:
-            split = rng.choice(["whole", "after", "before", "paren", "chain"]) if interleave else "whole"
-            if split == "whole":
+            split = rng.choice(["whole", "after", "before", "paren", "chain"] + ["twin"] * 2 * bool(twin)) if interleave else "whole"
+            if split == "twin":
+                chunks += [("head-after", p, rng.choice(OPEN_LEAD), twin), ("cont-after", p, t)]
+            elif split == "whole":
                 chunks.append(("whole", p, t))
             elif split == "after":
                 chunks += [("head-after", p, rng.choice(OPEN_LEAD), rng.choice(GLUED_WORD)), ("cont-after", p, t)]
@@ -917,7 +925,7 @@ def examples():
         # A passing should_panic test's head over four lines, its location cut after the file.
         ("w183-split-location", W183, 0, NOTE_ONE.replace("1 panic", "4 panic") + r".*" + nested),
         ("w183-split-location-failed", failed_instead(W183, W183_OK, nested, 19), 1, W183_MSG),
-        ("w183-split-location-failed-site", failed_instead(W183, W183_OK, nested, 19), 1, r"^PRIMARY: [[]novel[]] \S+ @ " + HA + r":1486:5: assertion"),
+        ("w183-split-location-failed-site", failed_instead(W183, W183_OK, nested, 19), 1, r"^PRIMARY: [[]novel[]] [^ ]* @ " + HA + r":1486:5: assertion"),
         # Without its ok line nothing proves the test passed.
         ("w183-split-location-unpaired", W183.replace(W183_OK, ""), 1, W183_MSG),
         # The glued `ok` makes the head's text end in two test names.

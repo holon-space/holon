@@ -231,7 +231,9 @@ for log in "$@"; do
     # Another thread's output can also split a head. Text before the name on
     # the head's line is skipped. A head cut after the name, or after its
     # `' (`, continues the one head its scope has open; with two or more open,
-    # the name is lost and the panic stays classified.
+    # the name is lost and the panic stays classified. A location cut before
+    # its `<line>:<col>:` is completed by a later line, and the message is the
+    # line after that one.
     #
     # A failed test whose output holds a panic has that panic as its signature.
     # Otherwise its status line is the signature, under nextest's long label
@@ -298,7 +300,7 @@ for log in "$@"; do
             while ((i = index(rest, "thread " q)) > 0) rest = substr(rest, i + 8)
             s = scope()
             if (rest == line) {
-                if (open_heads[s] == 1 && match(line, "[^ " q "]+" q " [(]")) head_name[s] = substr(line, RSTART, RLENGTH - 3)
+                if (match(line, "[^ " q "]+" q " [(]")) head_name[s] = substr(line, RSTART, RLENGTH - 3)
                 return
             }
             if ((i = index(rest, q))) {
@@ -407,6 +409,29 @@ for log in "$@"; do
             n = label; sub(/^TRY /, "", n); sub(/ .*$/, "", n)
             return n
         }
+        # Judges the panic whose message is the next line, by the head that the
+        # globals u, owner, certain, name, at, opened and loc hold.
+        function judge(    msg) {
+            if ((getline msg) <= 0) return
+            track_line(msg); track_head(msg); track_unit(msg)
+            if ((owner in passed) && !(owner in flaky_failed)) return
+            if (certain && status_at(owner, at, opened) == "pass") {
+                in_passing++; sub(/^[0-9]+\/(\[[0-9]+\/[0-9]+\] )?/, "", owner); print owner >>dropped_out; return
+            }
+            if (passing_name(u, name)) { in_passing++; print name >>dropped_out; return }
+            sub(/^ +/, "", msg)
+            if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
+            if (loc == ENVIRON["INJECTED_SITE"] && msg == ENVIRON["INJECTED_PAYLOAD"]) injected++
+            else print loc "\t" msg
+        }
+        # Location `head`, cut before its last colon, completed by the digits
+        # and colons that end `line`; "" when they do not complete it.
+        function completed(head, line) {
+            sub(/\r$/, "", line)
+            if (!match(line, /[0-9:]+$/)) return ""
+            head = head substr(line, RSTART)
+            return head ~ /:[0-9]+:[0-9]+:$/ ? substr(head, 1, length(head) - 1) : ""
+        }
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
@@ -417,6 +442,12 @@ for log in "$@"; do
         index($0, "ignoring --test-threads because --no-capture is specified") { marked = 1 }
         /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = FNR ": " $0 }
         /^ +Starting [0-9]+ tests? across / { run++; serial = marked; marked = 0 }
+        # A location cut before its `<line>:<col>:` continues on the first later
+        # line that completes it, before the next head, verdict line or run.
+        FNR == NR && cut_at != "" {
+            if (index($0, "thread " q) || /panicked at |test [^ ]+ |running [0-9]+ tests?|^ +(Running|Doc-tests|Starting) / || parse_status($0)) cut_at = ""
+            else if ((loc = completed(cut_head, $0)) != "") { tail_at[cut_at] = FNR; tail_loc[cut_at] = loc; cut_at = "" }
+        }
         FNR == NR {
             if (parse_status($0)) {
                 inst = run "/" STRESS UNIT
@@ -448,7 +479,11 @@ for log in "$@"; do
                 if (!((unit() SUBSEP name) in ran)) ran_name[unit(), ++n_ran[unit()]] = name
                 ran[unit() SUBSEP name] = 1
             }
-            if (/panicked at /) panics[unit() SUBSEP thread_of($0)]++
+            if (/panicked at /) {
+                panics[unit() SUBSEP thread_of($0)]++
+                cut_head = $0; sub(/^.*panicked at /, "", cut_head); sub(/\r$/, "", cut_head)
+                cut_at = cut_head !~ /:[0-9]+:[0-9]+:$/ && cut_head ~ /(\.rs|:|:[0-9]+|:[0-9]+:[0-9]*)$/ ? FNR : ""
+            }
             else if (OWNER != "" && /^ *Error: / && !(OWNER in error_of)) {
                 error_of[OWNER] = $0; sub(/^ +/, "", error_of[OWNER])
             }
@@ -480,20 +515,12 @@ for log in "$@"; do
         }
         /panicked at / {
             u = unit(); owner = OWNER; certain = owner_certain(); name = named(u, thread_of($0)); at = FNR; opened = captured != ""
+            if (FNR in tail_at) { pending = FNR; next }
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/\r$/, "", loc); sub(/:$/, "", loc)
-            if ((getline msg) <= 0) next
-            track_line(msg); track_head(msg); track_unit(msg)
-            if ((owner in passed) && !(owner in flaky_failed)) next
-            if (certain && status_at(owner, at, opened) == "pass") {
-                in_passing++; sub(/^[0-9]+\/(\[[0-9]+\/[0-9]+\] )?/, "", owner); print owner >>dropped_out; next
-            }
-            if (passing_name(u, name)) { in_passing++; print name >>dropped_out; next }
-            sub(/^ +/, "", msg)
-            if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
-            if (loc == ENVIRON["INJECTED_SITE"] && msg == ENVIRON["INJECTED_PAYLOAD"]) injected++
-            else print loc "\t" msg
+            judge()
             next
         }
+        FNR == tail_at[pending] { loc = tail_loc[pending]; pending = ""; judge(); next }
         END {
             print injected + 0, in_passing + 0 >injected_out
             if (!stopped)
