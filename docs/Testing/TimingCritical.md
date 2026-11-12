@@ -360,11 +360,15 @@ every rerun builds ONE shape:
   out-of-workspace manifests, the release shape) are its `EXCEPTIONS` list,
   the one place that names them.
 
-Rerun gate reds in the integration checkout with `scripts/gate-integrate.sh
-rerun <gate-id> <tip> '<filterset>'`: it sources the helper in `gate` mode,
-runs the gate's extra nextest step on those tests alone, and appends its cargo
-call to the gate's record, so step 17 checks it and the
-`just timing-gate-build` after it compiles nothing.
+Rerun the red test steps of a gate job in the integration checkout with
+`scripts/gate-integrate.sh rerun <gate-id> <tip> <red gate job id>`: it
+sources the helper in `gate` mode, reruns each red step on exactly the failed
+test ids its gate-steps row names, through the same known-reds classifier, and
+appends its cargo calls to the gate's record, so step 17 checks them and the
+`just timing-gate-build` after it compiles nothing. A red step without failed
+ids (a red it cannot name as tests, or a step that is no test step) refuses
+the rerun before any test runs. A proptest reruns on fresh cases. The rerun
+job's rows are what `flow batch integrate green --rerun <job>` checks.
 
 ## Measure mode is never silent
 

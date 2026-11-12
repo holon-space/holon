@@ -1,0 +1,24 @@
+== landing [22]: keystone-tour ==
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-integration-tests` (test "integration") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.59s
+     Running tests/main.rs (target/debug/build/holon-integration-tests/c316d237e1494d27/out/integration-c316d237e1494d27)
+
+thread 'keystone_tour::keystone_tour' (1374266679) panicked at crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs:298:9:
+[converge_projections] projections did not reach a combined fixed point within 30s; stage cdc-applied at applied seq 0, target sent seq 620 to view watch_view_d754af05c2d07c6f: the Loro->SQL sort_key projection / Turso CDC / org re-render are still churning. Reading invariants now would race a half-projected sink (the org-render sibling-order class). This is a real non-convergence, not a flaky timeout to swallow.
+test keystone_tour::keystone_tour ... FAILED
+
+failures:
+
+failures:
+    keystone_tour::keystone_tour
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 633 filtered out; finished in 497.97s
+
+error: test failed, to rerun pass `-p holon-integration-tests --test integration`

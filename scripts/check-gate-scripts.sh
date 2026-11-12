@@ -230,7 +230,7 @@ echo "== integrate runs that flow's own judge reads from their rows"
 read -ra names <<<"$("$integrate" --steps)"
 pre_steps=("${names[@]:0:4}") post=("${names[@]:4}") killable=()
 for name in "${post[@]}"; do
-  case $name in hand-authored | keystone-smoke | extra-nextest) ;; *) killable+=("$name") ;; esac
+  case $name in hand-authored | keystone-smoke | extra-nextest | keystone-tour) ;; *) killable+=("$name") ;; esac
 done
 stub_key() { case $1 in fmt) echo cargo:fmt ;; extra-nextest) echo cargo:nextest ;; featuremap) echo just:cargo-free-checks ;; *) echo "just:$1" ;; esac; }
 # Prints "<property> <0|1> <detail>" for the run of job $1 that ended with $2 and printed $3, drawn as
@@ -452,6 +452,378 @@ for k in 20 21 22 23 24 25 26 27 28 29; do
   timing_case "t$k" "${launches[RANDOM % 4]}" "${reds% }" "$early"
 done
 
+echo "== reruns of a red gate's failed tests, judged by flow's own accept"
+fixtures="$here/gate-rerun-fixtures" rstubs="$scratch/rerun-stubs" rprobe="$scratch/rerun-probe.log"
+mkdir -p "$rstubs"
+# Wrappers in front of the stubs above; each call also goes to $RERUN_PROBE with the rerun's narrowing variables.
+# A red test step prints the output of its tool:
+#   STUB_FAIL_TESTS="<binary-id> <test>;..."  nextest writes the junit file of those failures and exits 100
+#   STUB_JUNIT=<file>                         nextest leaves that junit file and exits 100
+#   STUB_HAND="<case>,...|none|crash:<case>,...|..."  hand-authored: one shard each, `none` names no case, `crash:` dies by a signal
+#   STUB_SMOKE="pbt:<test>,...|shape|reach"   keystone-smoke: a red PBT, a red shape case, or a shape case short of its reach
+#   STUB_TOUR="<test>,...|crash"              keystone-tour: red tests, or a binary killed after one red test, before its result
+#   STUB_WINDOWED="red|hung:<unit>;..."       windowed-gate.py's settled verdicts; its ids follow its own rule
+#   STUB_<HAND|SMOKE|TOUR>_LOG=<file>         the step prints that real log and fails
+# STUB_RERUN_RED makes every test call fail; it is set only for a rerun.
+cat > "$rstubs/cargo" <<'EOF'
+#!/usr/bin/env bash
+"$RSTUB_BASE/cargo" "$@" || exit
+echo "cargo $*" >> "$RERUN_PROBE"
+[ "${1:-} ${2:-}" = "nextest run" ] || exit 0
+junit=target/nextest/load-tolerant/junit.xml
+mkdir -p "${junit%/*}"
+if [ -n "${STUB_JUNIT:-}" ]; then cp "$STUB_JUNIT" "$junit"; exit 100; fi
+fails=${STUB_FAIL_TESTS:-}
+[ -z "${STUB_RERUN_RED:-}" ] || fails="holon-integration-tests::integration org_suite::red_again"
+[ -n "$fails" ] || exit 0
+/usr/bin/python3 - "$junit" "$fails" <<'PY'
+import sys
+junit, fails = sys.argv[1], sys.argv[2].split(";")
+cases = "".join(f'<testcase name="{t}" classname="{b}"><failure message="stub" type="test failure with exit code 101"/></testcase>'
+                for b, t in (f.split(" ") for f in fails))
+open(junit, "w").write(f'<?xml version="1.0" encoding="UTF-8"?><testsuites name="nextest-run" tests="9" failures="{len(fails)}" errors="0">'
+                       f'<testsuite name="stub" tests="9" failures="{len(fails)}" errors="0">{cases}</testsuite></testsuites>')
+for f in fails:
+    print(f"        FAIL [   1.000s] {f}")
+PY
+exit 100
+EOF
+cat > "$rstubs/just" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in *" --evaluate "*) exec "$RSTUB_BASE/just" "$@" ;; esac
+"$RSTUB_BASE/just" "$@" || exit
+echo "just $* | case=${HOLON_HAND_AUTHORED_CASE-unset} | units=$(paste -sd, - <<<"${WINDOWED_GATE_UNITS-}")" >> "$RERUN_PROBE"
+[ -z "${STUB_RERUN_RED:-}" ] || { echo "stub: red again"; exit 101; }
+# libtest's output of one test binary whose failed tests are the comma list $1.
+libtest() {
+  local t n=0
+  echo "     Running tests/main.rs (target/debug/deps/integration-0)"
+  for t in ${1//,/ }; do echo "test $t ... FAILED"; n=$((n + 1)); done
+  if [ "$n" = 0 ]; then echo "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 1.00s"; return; fi
+  printf '\nfailures:\n\nfailures:\n'
+  for t in ${1//,/ }; do echo "    $t"; done
+  echo; echo "test result: FAILED. 3 passed; $n failed; 0 ignored; 0 measured; 9 filtered out; finished in 1.00s"
+}
+case ${1:-} in
+  hand-authored)
+    [ -z "${STUB_HAND_LOG:-}" ] || { cat "$STUB_HAND_LOG"; exit 1; }
+    [ -n "${STUB_HAND:-}" ] || exit 0
+    k=0; IFS='|' read -ra shards <<<"$STUB_HAND"
+    for s in "${shards[@]}"; do
+      echo "== hand-authored shard $k (exit 101): target/gate-logs/pbt-hand-authored-shard-$k.log =="
+      c=${s#crash:}
+      [ "$c" = none ] || for c in ${c//,/ }; do echo "[hand-authored regression] RED case \"$c\""; done
+      # crash:<cases>: the replay process dies by a signal in a later case, after naming these, before its result.
+      [ "${s#crash:}" = "$s" ] || echo "  process didn't exit successfully: \`integration-0\` (signal: 6, SIGABRT: process abort signal)"
+      [ "${s#crash:}" != "$s" ] || [ "$s" = none ] || libtest hand_authored_regressions::hand_authored_keystone_regressions
+      s=${s#crash:}
+      echo "HAND-AUTHORED RED: shard $k exit 101, red cases: ${s/#none/none, see the log}, log: target/gate-logs/pbt-hand-authored-shard-$k.log"
+      k=$((k + 1))
+    done
+    exit 1 ;;
+  keystone-smoke)
+    [ -z "${STUB_SMOKE_LOG:-}" ] || { cat "$STUB_SMOKE_LOG"; exit 1; }
+    case ${STUB_SMOKE:-} in
+      "") exit 0 ;;
+      pbt:*) libtest "${STUB_SMOKE#pbt:}"; exit 101 ;;
+      shape) libtest ""; echo "[hand-authored regression] RED case \"$STUB_SHAPE_CASE\""; libtest hand_authored_regressions::hand_authored_keystone_regressions; exit 101 ;;
+      reach) libtest ""; libtest ""; echo "FAIL: the shape case did not reach both shape invariants (see target/gate-logs/keystone-smoke-shape.log)."; exit 1 ;;
+    esac ;;
+  keystone-tour)
+    [ -z "${STUB_TOUR_LOG:-}" ] || { cat "$STUB_TOUR_LOG"; exit 101; }
+    case ${STUB_TOUR:-} in
+      "") exit 0 ;;
+      crash) echo "     Running tests/main.rs (target/debug/deps/integration-0)"; echo "test keystone_tour::tour_a ... FAILED"
+             echo "error: test failed, to rerun pass \`--test integration\`"
+             echo "  process didn't exit successfully: \`integration-0\` (signal: 9, SIGKILL: kill)"; exit 101 ;;
+      *) libtest "$STUB_TOUR"; exit 101 ;;
+    esac ;;
+  windowed-gate)
+    [ -n "${STUB_WINDOWED:-}" ] || exit 0
+    IFS=';' read -ra verdicts <<<"$STUB_WINDOWED"
+    for v in "${verdicts[@]}"; do echo "  FAIL: ${v%%:*} ${v#*:}"; done
+    [ -z "${GATE_IDS_FILE:-}" ] || [[ ";$STUB_WINDOWED" == *";hung:"* ]] || for v in "${verdicts[@]}"; do echo "failed ${v#*:}" >> "$GATE_IDS_FILE"; done
+    exit 1 ;;
+esac
+EOF
+chmod +x "$rstubs"/*
+in_rstubs() { in_stubs env RSTUB_BASE="$stubs" RERUN_PROBE="$rprobe" STUB_SHAPE_CASE="$shape_case" PATH="$rstubs:$stubs:$PATH" "$@"; }
+shape_case=$("$real_just" --justfile "$here/../justfile" --evaluate SHAPE_CASE)
+# The red steps run on a tip whose known-reds classifier says PASS-WITH-NOTE under STUB_CLASSIFY=note and whose
+# target check fails under STUB_LEFTOVERS; the gate scripts call both from the checkout.
+jj new --quiet "$tip"
+printf '#!/bin/sh\n[ "${STUB_CLASSIFY:-}" != note ] || echo "PASS-WITH-NOTE (stub classifier)"\n' > scripts/keystone-known-reds.sh
+printf '#!/bin/sh\n[ -z "${STUB_LEFTOVERS:-}" ]\n' > scripts/check-target-leftovers.sh
+chmod +x scripts/keystone-known-reds.sh scripts/check-target-leftovers.sh
+jj commit --quiet -m 'stub classifier'
+tip2=$(cid @-)
+jj new --quiet "$tip2" -m other; printf 'other\n' > other; jj commit --quiet -m other
+tip3=$(cid @-)
+jj new --quiet "$tip2"
+# Prints "<property> <0|1> <detail>" for the gate job $1 (exit $2) and the rerun job $3 (exit $4) of rerun log $5, with the
+# hold $6 (cover | none | open), the rerun started $7 (after | before) the hold returned, the rerun's tests $8 (pass | note |
+# novel: red again, then classified), and the mutation $9 of the rerun's input; the gate ran with the STUB_* knobs in the env.
+judge_rerun() {
+  /opt/homebrew/bin/python3 - "$@" "$tip2" "$home/.cache/holon-build" "$HOME/.claude/skills/gh-kanban" "$rprobe" "$shape_case" <<'PY'
+import json, os, re, sys
+from datetime import datetime, timedelta, timezone
+job, rc, rjob, rrc, out, hold, when, again, mutation, tip, logs, flow, probe, shape = sys.argv[1:]
+sys.path.insert(0, flow)
+from flow.gate_rerun import accept
+from flow.model import Refused
+
+FIXTURE_IDS = {
+    "hand-authored-three-red-shards.txt": [
+        "crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy",
+        "hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit",
+        "hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot",
+        "wbs-an-empty-org-block-survives-write-back-and-a-crash-restart"],
+    "extra-nextest-seven-failures.junit.xml": [f"holon-integration-tests::integration {t}" for t in (
+        "advice_live_mcp_gate::advice_live_mcp_gate",
+        "boot_suite::mcp_mirrored_entity_write_authority::mirrored_entity_keeps_the_connector_as_its_only_write_authority",
+        "catalog_suite::advice_dismiss_prod_session_wiring::prod_session_dispatches_dismiss_advice",
+        "catalog_suite::advice_step4_red::advice_step6_synthesis_weave_and_dismiss_green",
+        "catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay",
+        "frontend_suite::tour_spike::tour_spike_parses_advances_and_gates_on_real_engine",
+        "two_instance_composed_pbt::two_instance_composed_pbt")],
+    "keystone-tour-one-failed.txt": ["holon-integration-tests::integration keystone_tour::keystone_tour"],
+    "keystone-smoke-pbt-failed.txt": ["test general_e2e_composed_pbt::general_e2e_composed_pbt", f"case {shape}"],
+}
+CLASSIFIED = {"extra-nextest", "hand-authored", "keystone-smoke"}
+env = os.environ.get
+fixture = lambda var: FIXTURE_IDS[os.path.basename(env(var))]
+
+
+def model():
+    """{red step: its failed ids, or None when its red names no complete list}, from the knobs alone."""
+    want, exits = {}, dict(kv.split("=") for kv in env("STUB_EXIT", "").split())
+    if env("STUB_JUNIT"):
+        want["extra-nextest"] = fixture("STUB_JUNIT")
+    elif "cargo:nextest" in exits:
+        want["extra-nextest"] = None
+    elif env("STUB_FAIL_TESTS"):
+        want["extra-nextest"] = None if env("STUB_LEFTOVERS") else sorted(env("STUB_FAIL_TESTS").split(";"))
+    elif env("STUB_LEFTOVERS"):
+        want["extra-nextest"] = None
+    if env("STUB_HAND_LOG"):
+        want["hand-authored"] = fixture("STUB_HAND_LOG")
+    elif env("STUB_HAND"):
+        shards = env("STUB_HAND").split("|")
+        want["hand-authored"] = None if any(s == "none" or s.startswith("crash:") for s in shards) else sorted({c for s in shards for c in s.split(",")})
+    if env("STUB_SMOKE_LOG"):
+        want["keystone-smoke"] = fixture("STUB_SMOKE_LOG")
+    elif smoke := env("STUB_SMOKE"):
+        want["keystone-smoke"] = (None if smoke == "reach" else [f"case {shape}"] if smoke == "shape"
+                                  else [f"test {t}" for t in smoke[4:].split(",")] + [f"case {shape}"])
+    if env("STUB_TOUR_LOG"):
+        want["keystone-tour"] = fixture("STUB_TOUR_LOG")
+    elif tour := env("STUB_TOUR"):
+        want["keystone-tour"] = None if tour == "crash" else [f"holon-integration-tests::integration {t}" for t in tour.split(",")]
+    if win := env("STUB_WINDOWED"):
+        verdicts = [v.split(":", 1) for v in win.split(";")]
+        want["windowed-gate"] = None if any(k == "hung" for k, _ in verdicts) else [u for _, u in verdicts]
+    for key in exits:
+        if key.startswith("just:"):
+            want[key[5:]] = None
+    return {k: (sorted(v) if v is not None else None) for k, v in want.items()}
+
+
+def read(name):
+    path = os.path.join(logs, name)
+    return [json.loads(l) for l in open(path)] if os.path.exists(path) else []
+
+
+rows, ends = read("gate-steps.jsonl"), read("gate-ends.jsonl")
+want = model()
+red = [r for r in rows if r.get("job") == job and not r.get("skipped") and r["exit"] != 0]
+print("gate-red", int(int(rc) == 1 and sorted(r["name"] for r in red) == sorted(want)),
+      f"gate exit {rc}, red steps {sorted(r['name'] for r in red)}, drawn {sorted(want)}")
+got_ids = {r["name"]: sorted(r["failed"]) if "failed" in r else None for r in red}
+print("failed-ids", int(got_ids == want), f"rows {got_ids}, drawn {want}")
+
+at = lambda s: datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
+t1 = min((at(r["start"]) for r in red), default=at("2020-01-01T00:00:00Z")) - timedelta(seconds=60)
+t2 = max((at(r["end"]) for r in red), default=at("2020-01-01T00:00:00Z")) + timedelta(seconds=60)
+span = {"cover": f"{iso(t1)} to {iso(t2)}", "none": "2020-01-01T00:00:00Z to 2020-01-01T00:10:00Z", "open": f"{iso(t1)} to open"}[hold]
+gate = {"jobId": job, "exit": int(rc), "signal": None, "reason": f"overlapped quiet hold by pid 4242 ({span})"}
+complete = all(v is not None for v in want.values())
+ok_again = again == "pass" or (again == "note" and set(want) <= CLASSIFIED)
+expected = "accepted" if complete and hold == "cover" and when == "after" and mutation == "none" and ok_again else "refused"
+
+
+def verdict(rerun):
+    try:
+        accept(gate, rerun, rows, ends, [], tip, False, (1,))
+        return "accepted", None
+    except Refused as e:
+        return "refused", str(e)
+
+
+got, why = verdict({"jobId": rjob, "exit": int(rrc), "signal": None, "reason": None})
+print("accept", int(got == expected), f"want {expected}, got {got} {why or ''} (rerun exit {rrc})")
+if not complete:
+    _, why = verdict({"jobId": rjob, "exit": 0, "signal": None, "reason": None})
+    print("no-ids-refused", int(int(rrc) == 2 and "lists no failed test ids" in (why or "")),
+          f"rerun exit {rrc} (want 2); a green rerun is refused with: {why}")
+if complete and mutation == "none":
+    again_rows = {r["name"]: (r.get("tip"), sorted(r.get("only", []))) for r in rows if r.get("job") == rjob}
+    print("rerun-rows", int(again_rows == {k: (tip, v) for k, v in want.items()}), f"rows {again_rows}, want {want}")
+    kinds, bad = set(), []
+    for line in open(probe).read().splitlines():
+        # A cargo line holds the filter set's own ` | `; only a just line carries fields.
+        call, *rest = [line] if line.startswith("cargo ") else line.split(" | ")
+        fields = dict(f.split("=", 1) for f in rest)
+        if call.startswith("cargo nextest run "):
+            kinds.add("extra-nextest")
+            terms = set(re.search(r" -E (.*) --no-tests=fail ", call)[1].split(" | "))
+            ok = terms == {f"(binary_id(={i.split(' ')[0]}) & test(={i.split(' ')[1]}))" for i in want["extra-nextest"]}
+        elif call.startswith("just hand-authored"):
+            kinds.add("hand-authored")
+            ok = call == "just hand-authored" and sorted(fields["case"].split(",")) == want["hand-authored"]
+        elif call.startswith("just pbt general 1 --exact ") or call == "just keystone-smoke-shape":
+            kinds.add("keystone-smoke")
+            ids = want["keystone-smoke"]
+            ok = (call == "just keystone-smoke-shape" and f"case {shape}" in ids) or \
+                 sorted(f"test {t}" for t in call.split()[5:]) == [i for i in ids if i.startswith("test ")]
+        elif call.startswith("just keystone-tour"):
+            kinds.add("keystone-tour")
+            ok = call.split()[2] == "--exact" and sorted(call.split()[3:]) == [i.split(" ")[1] for i in want["keystone-tour"]]
+        elif call == "just windowed-gate":
+            kinds.add("windowed-gate")
+            ok = sorted(fields["units"].split(",")) == want["windowed-gate"]
+        else:
+            ok = call.startswith("cargo ") and " nextest " not in call
+        if not ok:
+            bad.append(line)
+    print("narrowed", int(not bad and kinds == set(want)), f"calls not narrowed to the ids: {bad}; steps rerun {sorted(kinds)}, red {sorted(want)}")
+    text = open(out).read()
+    print("disclosed", int(bool(re.search(r"^gate-integrate.sh rerun: .*; rerun draws fresh cases$", text, re.M))), "the rerun log line")
+PY
+}
+# A shuffled draw of 1..$1 distinct members of the other arguments into $picked; no subshell, so SEED replays it.
+pick() {
+  local max=$1 i j t; shift; picked=("$@")
+  for ((i = ${#picked[@]} - 1; i > 0; i--)); do j=$((RANDOM % (i + 1))); t=${picked[i]}; picked[i]=${picked[j]}; picked[j]=$t; done
+  picked=("${picked[@]:0:$((1 + RANDOM % max))}")
+}
+join_by() { local IFS=$1; shift; echo "$*"; }
+pool_tests=("holon-integration-tests::integration org_suite::a" "holon-integration-tests::integration org_suite::a_b" "holon-loro iroh_advertiser::tests::a_b"
+  "holon::bin/holon cli::parses" "holon-integration-tests::integration two_instance_composed_pbt::two_instance_composed_pbt")
+# Turns one drawn shard into a replay that died by a signal after naming its cases, now and then.
+draw_hand_crash() { local i=$((RANDOM % ${#shards[@]})); ((RANDOM % 3)) || [ "${shards[i]}" = none ] || shards[i]="crash:${shards[i]}"; }
+pool_cases=(a-b a-b-c hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot wbs-an-empty-org-block)
+pool_tour=(keystone_tour::keystone_tour keystone_tour::tour_a keystone_tour::tour_ab)
+pool_units=("holon-gpui" "holon-gpui::main quick_open" "holon-gpui::main quick_open_returns_focus_windowed")
+pool_smoke=(general_e2e_composed_pbt::general_e2e_composed_pbt general_e2e_composed_pbt::general_e2e_composed_pbt_live_mcp)
+junit_now="$integ/target/nextest/load-tolerant/junit.xml"
+# Leaves a junit file of an earlier run, older than any step's start.
+old_junit() { mkdir -p "${junit_now%/*}"; cp "$fixtures/extra-nextest-seven-failures.junit.xml" "$junit_now"; touch -t 202001010000 "$junit_now"; }
+# One gate run of gate $1 under its runner with the knobs in $knobs, then a rerun of it (mutation $5: none, or a rerun
+# of the sibling run with the knobs in $mknobs, on another tip, ...) with hold $2, start $3 and tests $4 (see judge_rerun).
+rerun_flow_case() {
+  local gate=$1 hold=$2 when=$3 again=$4 mutation=$5 rc=0 rrc=0 ts prop ok detail renv=() verdict
+  local job="$1.integrate.20261112T000000Z" target rgate=$1 rtip=$tip2
+  local what="$gate rerun knobs=[${knobs[*]}] hold=$hold $when again=$again mutation=$mutation${mknobs[*]:+ [${mknobs[*]}]}"
+  in_rstubs FLOW_JOB_ID="$job" GATE_FULL=1 ${knobs[@]+"${knobs[@]}"} "$orch/gate-step.sh" run "$integrate" "$gate" "1 2" "$tip2" >"$scratch/rerun-gate.out" 2>&1 || rc=$?
+  target=$job
+  if [ "${#mknobs[@]}" -gt 0 ]; then
+    rgate=${gate}m target="${gate}m.integrate.20261112T000000Z"
+    in_rstubs FLOW_JOB_ID="$target" GATE_FULL=1 "${mknobs[@]}" "$orch/gate-step.sh" run "$integrate" "$rgate" "1 2" "$tip2" >/dev/null 2>&1 || true
+  fi
+  [ "$mutation" != tip ] || { rtip=$tip3; jj new --quiet "$tip3"; }
+  if [ "$when" = after ]; then ts=$(date -u -v+2H +%Y%m%dT%H%M%SZ); else ts=$(date -u -v-1H +%Y%m%dT%H%M%SZ); fi
+  [ "$again" = pass ] || renv+=(STUB_RERUN_RED=1)
+  [ "$again" != note ] || renv+=(STUB_CLASSIFY=note)
+  : > "$rprobe"
+  in_rstubs FLOW_JOB_ID="$gate.rerun.$ts" ${renv[@]+"${renv[@]}"} "$integrate" rerun "$rgate" "$rtip" "$target" >"$scratch/rerun.out" 2>&1 || rrc=$?
+  [ "$mutation" != tip ] || jj new --quiet "$tip2"
+  local jrc=0
+  verdict=$( (export ${knobs[@]+"${knobs[@]}"}; judge_rerun "$job" "$rc" "$gate.rerun.$ts" "$rrc" "$scratch/rerun.out" "$hold" "$when" "$again" "$mutation") ) || jrc=$?
+  expect "$what: the judge ran (exit $jrc)" [ "$jrc" = 0 ]
+  while read -r prop ok detail; do expect "$what: $prop ($detail)" [ "$ok" = 1 ]; done <<<"$verdict"
+  [ "$jrc" = 0 ] && ! awk '$2 == 0 { f = 1 } END { exit !f }' <<<"$verdict" || { tail -n 15 "$scratch/rerun-gate.out"; cat "$scratch/rerun.out"; }
+}
+r1="${pool_tests[0]}" r2="${pool_tests[2]}"
+knobs=(STUB_HAND_LOG="$fixtures/hand-authored-three-red-shards.txt") mknobs=(); rerun_flow_case r1 cover after pass none
+knobs=(STUB_JUNIT="$fixtures/extra-nextest-seven-failures.junit.xml"); rerun_flow_case r2 cover after pass none
+knobs=(STUB_TOUR_LOG="$fixtures/keystone-tour-one-failed.txt"); rerun_flow_case r3 cover after pass none
+knobs=(STUB_SMOKE_LOG="$fixtures/keystone-smoke-pbt-failed.txt"); rerun_flow_case r4 cover after pass none
+knobs=(STUB_FAIL_TESTS="$r1;$r2" STUB_LEFTOVERS=1); rerun_flow_case r5 cover after pass none
+old_junit; knobs=(STUB_EXIT=cargo:nextest=101); rerun_flow_case r6 cover after pass none
+knobs=(STUB_HAND="a-b|none"); rerun_flow_case r7 cover after pass none
+knobs=(STUB_SMOKE=reach); rerun_flow_case r8 cover after pass none
+knobs=(STUB_TOUR=crash); rerun_flow_case r9 cover after pass none
+knobs=(STUB_WINDOWED="red:holon-gpui;hung:holon-gpui::main quick_open"); rerun_flow_case r10 cover after pass none
+knobs=(STUB_WINDOWED="red:holon-gpui::main quick_open;red:holon-gpui"); rerun_flow_case r11 cover after pass none
+knobs=(STUB_HAND="a-b,a-b-c|wbs-an-empty-org-block" STUB_FAIL_TESTS="$r1"); rerun_flow_case r12 cover after pass none
+knobs=(STUB_EXIT=just:gate-arch=1 STUB_FAIL_TESTS="$r1"); rerun_flow_case r13 cover after pass none
+knobs=(STUB_FAIL_TESTS="$r1;$r2") mknobs=(STUB_FAIL_TESTS="$r1"); rerun_flow_case r14 cover after pass fewer
+knobs=(STUB_FAIL_TESTS="$r1") mknobs=(); rerun_flow_case r15 cover after pass tip
+knobs=(STUB_SMOKE=shape STUB_FAIL_TESTS="$r2"); rerun_flow_case r16 cover after note none
+knobs=(STUB_TOUR=keystone_tour::tour_a); rerun_flow_case r17 cover after note none
+knobs=(STUB_HAND="a-b|crash:a-b-c"); rerun_flow_case r18 cover after pass none
+knobs=(STUB_FAIL_TESTS="$r1;$r2") mknobs=(STUB_FAIL_TESTS="$r1;${r2}_near"); rerun_flow_case r40 cover after pass other
+mknobs=(STUB_FAIL_TESTS="$r1;$r2;holon-loro sync::one_more"); rerun_flow_case r41 cover after pass extra
+knobs=(STUB_FAIL_TESTS="$r1" STUB_HAND=a-b) mknobs=(STUB_FAIL_TESTS="$r1"); rerun_flow_case r42 cover after pass missing-step
+knobs=(STUB_FAIL_TESTS="$r1") mknobs=(STUB_FAIL_TESTS="$r1" STUB_TOUR=keystone_tour::tour_a); rerun_flow_case r43 cover after pass extra-step
+mknobs=(); rerun_flow_case r44 cover before pass none
+rerun_flow_case r45 open after pass none
+mutations=(none none none fewer other extra missing-step extra-step tip)
+for k in 20 21 22 23 24 25 26 27; do
+  knobs=() mknobs=() stub_exit=""
+  mutation=${mutations[RANDOM % ${#mutations[@]}]}
+  case $mutation in none | tip) ;; missing-step) pick 2 "${pool_tests[@]}"; knobs+=(STUB_FAIL_TESTS="$(join_by ';' "${picked[@]}")" STUB_HAND=a-b) ;;
+    *) pick 3 "${pool_tests[@]}"; [ "${#picked[@]}" -ge 2 ] || picked+=("holon-loro sync::second"); knobs+=(STUB_FAIL_TESTS="$(join_by ';' "${picked[@]}")") ;;
+  esac
+  if [ "$mutation" = none ] || [ "$mutation" = tip ]; then
+    if ! ((RANDOM % 2)); then
+      pick 3 "${pool_tests[@]}"; knobs+=(STUB_FAIL_TESTS="$(join_by ';' "${picked[@]}")")
+      case $((RANDOM % 4)) in 0) knobs+=(STUB_LEFTOVERS=1) ;; 1) old_junit; knobs=("${knobs[@]:0:${#knobs[@]}-1}"); stub_exit+="cargo:nextest=101 " ;; esac
+    fi
+    if ! ((RANDOM % 3)); then
+      shards=() n=$((1 + RANDOM % 3))
+      for ((i = 0; i < n; i++)); do pick 2 "${pool_cases[@]}"; shards+=("$(join_by , "${picked[@]}")"); done
+      ((RANDOM % 4)) || shards+=(none)
+      draw_hand_crash
+      knobs+=(STUB_HAND="$(join_by '|' "${shards[@]}")")
+    fi
+    if ! ((RANDOM % 4)); then
+      case $((RANDOM % 3)) in 0) pick 2 "${pool_smoke[@]}"; knobs+=(STUB_SMOKE="pbt:$(join_by , "${picked[@]}")") ;; 1) knobs+=(STUB_SMOKE=shape) ;; 2) knobs+=(STUB_SMOKE=reach) ;; esac
+    fi
+    if ! ((RANDOM % 4)); then
+      if ((RANDOM % 4)); then pick 2 "${pool_tour[@]}"; knobs+=(STUB_TOUR="$(join_by , "${picked[@]}")"); else knobs+=(STUB_TOUR=crash); fi
+    fi
+    if ! ((RANDOM % 4)); then
+      pick 2 "${pool_units[@]}"; verdicts=()
+      for u in "${picked[@]}"; do if ((RANDOM % 4)); then verdicts+=("red:$u"); else verdicts+=("hung:$u"); fi; done
+      knobs+=(STUB_WINDOWED="$(join_by ';' "${verdicts[@]}")")
+    fi
+    ((RANDOM % 8)) || stub_exit+="just:gate-arch=1 "
+    [ -n "$stub_exit" ] || [ "${#knobs[@]}" -gt 0 ] || knobs+=(STUB_FAIL_TESTS="${pool_tests[RANDOM % ${#pool_tests[@]}]}")
+    [ -z "$stub_exit" ] || knobs+=(STUB_EXIT="${stub_exit% }")
+  fi
+  failing=${knobs[0]#STUB_FAIL_TESTS=}
+  case $mutation in
+    fewer) mknobs=(STUB_FAIL_TESTS="${failing%;*}") ;;
+    other) mknobs=(STUB_FAIL_TESTS="${failing}_near") ;;
+    extra) mknobs=(STUB_FAIL_TESTS="$failing;holon-loro sync::one_more") ;;
+    missing-step) mknobs=(STUB_FAIL_TESTS="$failing") ;;
+    extra-step) mknobs=(STUB_FAIL_TESTS="$failing" STUB_TOUR=keystone_tour::tour_a) ;;
+  esac
+  holds=(cover cover cover none open) whens=(after after after before) agains=(pass pass note novel)
+  hold=${holds[RANDOM % 5]} when=${whens[RANDOM % 4]} again=${agains[RANDOM % 4]}
+  [ "$mutation" = none ] || { hold=cover when=after again=pass; }
+  rerun_flow_case "r$k" "$hold" "$when" "$again" "$mutation"
+done
+echo "== the rerun's usage errors"
+for args in "r1" "r1 $tip2" "r1 ${tip2:0:12} r1.integrate.20261112T000000Z" "r1 $tip2 no.such.job"; do
+  rc=0; read -ra a <<<"$args"; in_rstubs "$integrate" rerun "${a[@]}" >"$scratch/rerun-usage.out" 2>&1 || rc=$?
+  expect "rerun $args: exits 2 (got $rc)" [ "$rc" = 2 ]
+done
+expect "a job without red steps is refused by name" grep -q '^RERUN REFUSED: no red step of the gate job no.such.job' "$scratch/rerun-usage.out"
+jj new --quiet "$tip"
+
 echo "== each track alone"
 : > "$probe"
 rc=0; tracks_alone || rc=$?
@@ -632,7 +1004,7 @@ for case in "host admitted\n|probe line absent — judging" "|the probe round pr
   expect "settle output '${case%%|*}': names the state '${case#*|}'" grep -q "${case#*|}" "$scratch/recipe-noprobe.out"
 done
 
-echo "== a rerun of one gate test, from any caller env"
+echo "== a rerun of a red gate job's failed tests, from any caller env"
 # The caller's own values of the variables the gate pins, drawn unset or stale: the rerun's
 # nextest call sees the gate's values anyway, and lands in the gate's record.
 shape_of() { sed -n 's/^cargo nextest run .* | \(shape=[^|]*\) | quiet=.*/\1/p'; }
@@ -643,41 +1015,47 @@ in_stubs env -u RUST_FONTCONFIG_DLOPEN -u HOLON_BUILD_SHA -u HOLON_BUILD_TIME \
   cargo nextest run --profile load-tolerant --no-fail-fast --no-tests=fail --workspace --features "$pbt" -E 'test(=x)' >/dev/null
 expect "a bare cargo rerun builds another shape than the gate ($(shape_of <"$probe"))" [ "$(shape_of <"$probe")" != "$gate_shape" ]
 record=target/gate-logs/g1-cargo-calls.jsonl
-filters=('test(=x)' 'package(holon-loro) & test(=iroh_advertiser::tests::a_b)' 'binary(integration) | test(/^org_suite::/)')
+# Red gate jobs of g1's tip, each with the extra nextest tests $red_sets[k] failed.
+red_sets=("${pool_tests[0]}" "${pool_tests[2]};${pool_tests[3]}" "${pool_tests[0]};${pool_tests[1]};${pool_tests[4]}")
+for k in "${!red_sets[@]}"; do
+  in_rstubs FLOW_JOB_ID="g1.integrate.2026111${k}T000000Z" GATE_FULL=1 STUB_FAIL_TESTS="${red_sets[k]}" "$orch/gate-step.sh" run "$integrate" "g1r$k" "1 2" "$tip" >/dev/null 2>&1 || true
+done
 draw() { if ((RANDOM % 2)); then printf -v "$1" '%04x%04x' $RANDOM $RANDOM; else printf -v "$1" unset; fi; }
 rerun_case() {
-  local font=$1 sha=$2 time=$3 filter=$4 unsets=() sets=() kv rc=0 calls
-  local what="rerun from font=$font sha=$sha time=$time, -E '$filter'"
+  local font=$1 sha=$2 time=$3 k=$4 unsets=() sets=() kv rc=0 calls id filter=""
+  local what="rerun from font=$font sha=$sha time=$time, of the tests [${red_sets[k]}]"
   for kv in RUST_FONTCONFIG_DLOPEN=$font HOLON_BUILD_SHA=$sha HOLON_BUILD_TIME=$time; do
     if [ "${kv#*=}" = unset ]; then unsets+=(-u "${kv%%=*}"); else sets+=("$kv"); fi
   done
+  IFS=';' read -ra ids <<<"${red_sets[k]}"
+  for id in "${ids[@]}"; do filter+="${filter:+ | }(binary_id(=${id% *}) & test(=${id#* }))"; done
   : > "$probe"; calls=$(($(wc -l <"$record")))
-  in_stubs env "${unsets[@]}" "${sets[@]}" "$integrate" rerun g1 "$tip" "$filter" >"$scratch/rerun.out" 2>&1 || rc=$?
+  in_rstubs env "${unsets[@]}" "${sets[@]}" "$integrate" rerun g1 "$tip" "g1.integrate.2026111${k}T000000Z" >"$scratch/rerun.out" 2>&1 || rc=$?
   if [ "$time" != unset ]; then
     expect "$what: refused (got $rc)" [ "$rc" != 0 ]
     expect "$what: before any nextest call" [ -z "$(grep '^cargo nextest' "$probe")" ]
     return
   fi
   expect "$what: exits 0 (got $rc)" [ "$rc" = 0 ]
-  expect "$what: runs the gate's nextest arm, narrowed by the filter" \
+  expect "$what: runs the gate's nextest arm, narrowed to exactly those tests" \
     [ "$(sed -n 's/^\(cargo nextest .*\) | timing=.*/\1/p' "$probe")" = "cargo nextest run --profile load-tolerant --no-fail-fast -E $filter --no-tests=fail --workspace --features $pbt" ]
   expect "$what: in the gate's shape" [ "$(shape_of <"$probe")" = "$gate_shape" ]
   expect "$what: appends its call to the gate's record" [ "$(($(wc -l <"$record")))" = $((calls + 1)) ]
 }
 # The bare caller of a hand-written rerun script, a shell left from another tip, a release shell.
-rerun_case unset unset unset "${filters[0]}"
-rerun_case off 0123456789ab unset "${filters[1]}"
-rerun_case unset unset 1 "${filters[0]}"
+rerun_case unset unset unset 0
+rerun_case off 0123456789ab unset 1
+rerun_case unset unset 1 0
 for _ in 1 2 3 4 5 6 7 8; do
   draw font; draw sha; draw time
-  rerun_case "$font" "$sha" "$time" "${filters[RANDOM % ${#filters[@]}]}"
+  rerun_case "$font" "$sha" "$time" $((RANDOM % ${#red_sets[@]}))
 done
-rc=0; in_stubs "$integrate" rerun g0 "$tip" 'test(=x)' >/dev/null 2>&1 || rc=$?
+rc=0; in_rstubs "$integrate" rerun g0 "$tip" g1.integrate.20261110T000000Z >/dev/null 2>&1 || rc=$?
 expect "a rerun of a gate with no record on this checkout exits 2 (got $rc)" [ "$rc" = 2 ]
 
 echo "== a rerun under another RUSTFLAGS than its gate"
 cp "$record" target/gate-logs/g9-cargo-calls.jsonl
-in_stubs RUSTFLAGS=-Cdebuginfo=0 "$integrate" rerun g9 "$tip" 'test(=x)' >/dev/null 2>&1 || true
+in_rstubs RUSTFLAGS=-Cdebuginfo=0 "$integrate" rerun g9 "$tip" g1.integrate.20261110T000000Z >/dev/null 2>&1 || true
 rc=0; /usr/bin/python3 "$here/check-compile-shape.py" target/gate-logs/g9-cargo-calls.jsonl >"$scratch/shape-g9.out" 2>&1 || rc=$?
 expect "fails the timing gate's shape check (got $rc)" [ "$rc" = 1 ]
 expect "which names RUSTFLAGS" grep -q '^ENV DIFFERS: RUSTFLAGS ' "$scratch/shape-g9.out"
@@ -719,7 +1097,7 @@ for script in "$integrate" "$timing"; do
   expect "$(basename "$script"): before any cargo or just call" [ ! -s "$probe" ]
 done
 : > "$probe"
-rc=0; in_stubs "$integrate" rerun g1 "$(cid main)" 'test(=x)' >/dev/null 2>&1 || rc=$?
+rc=0; in_rstubs "$integrate" rerun g1 "$(cid main)" g1.integrate.20261110T000000Z >/dev/null 2>&1 || rc=$?
 expect "gate-integrate.sh rerun: a tip other than @- exits 9 (got $rc)" [ "$rc" = 9 ]
 expect "gate-integrate.sh rerun: before any cargo or just call" [ ! -s "$probe" ]
 jj new --quiet main

@@ -9,12 +9,14 @@
 #   GATE_DISK_FLOOR_GIB  free disk the gate needs (default: the justfile's).
 #
 #   scripts/gate-integrate.sh --steps   prints the step names, for the selection
-#   scripts/gate-integrate.sh rerun <gate-id> <tip> <filterset>
-#     reruns the gate tests that nextest filterset names, with the gate's nextest
-#     step in the gate's shape env, and appends its cargo call to the gate's
-#     record, so gate-timing.sh after it compiles nothing. Log:
-#     target/gate-logs/rerun-<UTC>.log. Exit: nextest's; 9 = the checkout is not
-#     <tip>, 2 = no record of that gate here; an empty selection is red.
+#   scripts/gate-integrate.sh rerun <gate-id> <tip> <red gate job id>
+#     reruns every red step of that gate job on exactly the failed test ids its
+#     row names, as a `step` of this job, in the gate's shape env, and appends
+#     its cargo calls to the gate's record, so gate-timing.sh after it compiles
+#     nothing. Log: target/gate-logs/rerun-<UTC>.log. Exit: 0 when every rerun
+#     step is green, else the first red step's; 9 = the checkout is not <tip>;
+#     2 = usage, no record of that gate here, no red step, or a red step without
+#     failed ids or a rerun of its own (before any test runs).
 #
 # After gate-compile the steps run at once in TRACKS, one build slot per track:
 # no step reads another step's output. The steps of QUIET_TRACK go red on a
@@ -100,7 +102,7 @@ track() {
     n=${entry%%:*} name=${entry#*:}
     case $name in
       featuremap) set -- just cargo-free-checks ;;
-      keystone-smoke | hand-authored | extra-nextest) set -- bash "$(dirname "$0")/gate-integrate-steps.sh" "$name" ;;
+      keystone-smoke | hand-authored | extra-nextest | keystone-tour) set -- bash "$(dirname "$0")/gate-integrate-steps.sh" "$name" ;;
       loro-suite | projector-lag-lock) set -- env HOLON_PBT_TIMING=measure just "$name" ;;
       *) set -- just "$name" ;;
     esac
@@ -130,19 +132,44 @@ gate_env() {
 }
 
 if [ "${1:-}" = rerun ]; then
-  [ "$#" -eq 4 ] || { echo "usage: $0 rerun <gate-id> <tip> <filterset>" >&2; exit 2; }
-  export GATE=$2 HOLON_GATE_ID=$2
-  tip=$3
+  [ "$#" -eq 4 ] || { echo "usage: $0 rerun <gate-id> <tip> <red gate job id>" >&2; exit 2; }
+  [[ $3 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { echo "usage: <tip> is a full commit id, not '$3'" >&2; exit 2; }
+  unset GATE_SELECT GATE_FULL
+  export GATE=$2 HOLON_GATE_ID=$2 GATE_TIP=$3 GATE_CARDS=${GATE_CARDS:-${FLOW_CARD:-none}}
+  tip=$3 red_job=$4
   [ -s "target/gate-logs/$GATE-cargo-calls.jsonl" ] || { echo "NO GATE RECORD: target/gate-logs/$GATE-cargo-calls.jsonl"; exit 2; }
   gate_env
+  rows="$(dirname "${HOLON_BUILD_HOLD_LOG:-$HOME/.cache/holon-build/holds.jsonl}")/gate-steps.jsonl"
+  read -ra red <<<"$(/usr/bin/python3 -c 'import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+red = sorted((r["step"], r["name"]) for r in rows if r.get("job") == sys.argv[2] and not r.get("skipped") and r["exit"] != 0)
+print(" ".join(f"{n}:{name}" for n, name in red))' "$rows" "$red_job")"
+  [ "${#red[@]}" -gt 0 ] || { echo "RERUN REFUSED: no red step of the gate job $red_job in $rows"; exit 2; }
+  declare -A ids
+  for entry in "${red[@]}"; do
+    name=${entry#*:}
+    case $name in keystone-smoke | hand-authored | extra-nextest | keystone-tour | windowed-gate) ;;
+      *) echo "RERUN REFUSED: step $name cannot be rerun"; exit 2 ;;
+    esac
+    ids[$name]=$(/usr/bin/python3 ~/.claude/skills/orchestrator/scripts/gate-rerun.py "$rows" "$red_job" "$name") && [ -n "${ids[$name]}" ] \
+      || { echo "RERUN REFUSED: red step $name of $red_job recorded no failed test ids"; exit 2; }
+  done
   log=target/gate-logs/rerun-$(date -u +%Y%m%dT%H%M%SZ).log
   {
     echo "BASE: $(jj log -r main --no-graph -T commit_id)"
     echo "TREE: $tip"
     echo "STARTED: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "gate-integrate.sh rerun: $GATE, -E '$4'"
+    echo "gate-integrate.sh rerun: $GATE, the failed tests of $red_job; rerun draws fresh cases"
     shape_env_header
-    bash "$(dirname "$0")/gate-integrate-steps.sh" rerun "$4"
+    first=0
+    for entry in "${red[@]}"; do
+      n=${entry%%:*} name=${entry#*:} rc=0
+      if [ "$name" = windowed-gate ]; then set -- env WINDOWED_GATE_UNITS="${ids[$name]}" just windowed-gate
+      else set -- bash "$(dirname "$0")/gate-integrate-steps.sh" "$name"; fi
+      GATE_ONLY_IDS=${ids[$name]} step "$n" "$name" "$@" || rc=$?
+      [ "$first" != 0 ] || first=$rc
+    done
+    exit "$first"
   } 2>&1 | tee "$log"
   exit
 fi

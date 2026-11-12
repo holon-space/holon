@@ -1,0 +1,106 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuites name="nextest-run" tests="8416" skipped="0" failures="7" errors="0" uuid="76be0b79-44e5-4149-8196-7a9a3a476923" timestamp="2026-11-12T08:17:28.881+01:00" time="707.562">
+    <testsuite name="holon-integration-tests::integration" tests="590" skipped="0" errors="0" failures="7">
+        <testcase name="attestation_counter_reader::attest_drew_accepts_exactly_the_kinds_this_process_drew" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:20:03.674+01:00" time="0.139" />
+        <testcase name="attestation_zero_draw_refusal::a_zero_draw_attestation_is_refused_whatever_the_process_tally_says" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:20:03.813+01:00" time="0.017" />
+        <testcase name="attestation_zero_draw_refusal::an_attestation_holds_exactly_when_its_run_drew_the_kind" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:20:03.830+01:00" time="0.061" />
+        <testcase name="advice_live_mcp_gate::advice_live_mcp_gate" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:20:03.661+01:00" time="2.789">
+            <failure message="thread 'advice_live_mcp_gate::advice_live_mcp_gate' (83371417) panicked at crates/holon-integration-tests/tests/advice_live_mcp_gate.rs:325:5" type="test failure with exit code 101">thread 'advice_live_mcp_gate::advice_live_mcp_gate' (83371417) panicked at crates/holon-integration-tests/tests/advice_live_mcp_gate.rs:325:5:
+describe_ui: top lesson block:lesson-b must be woven under the anchor (it lives on a separate page, so a rendered row with this id is the weave). rendered id</failure>
+            <system-out>
+running 1 test
+test advice_live_mcp_gate::advice_live_mcp_gate ... FAILED
+
+failures:
+
+failures:
+    advice_live_mcp_gate::advice_live_mcp_gate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 m</system-out>
+            <system-err>[wide-e2e wiring] drawn: storage={Loro, Org, Markdown, Turso} sync={Todoist} actors={MCPServer, ActionEngine} -&gt; booted storage={Loro, Org, Markdown, Turso} projections={ViewModel, EditorState} editor</system-err>
+        </testcase>
+        <testcase name="boot_suite::mcp_mirrored_entity_write_authority::mirrored_entity_keeps_the_connector_as_its_only_write_authority" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:20:12.143+01:00" time="1.449">
+            <failure message="thread 'boot_suite::mcp_mirrored_entity_write_authority::mirrored_entity_keeps_the_connector_as_its_only_write_authority' (83377259) panicked at crates/holon-integration-tests/tests/boot_suite/mcp_mirrored_entity_write_authority.rs:103:9" type="test failure with exit code 101">thread 'boot_suite::mcp_mirrored_entity_write_authority::mirrored_entity_keeps_the_connector_as_its_only_write_authority' (83377259) panicked at crates/holon-integration-tests/tests/boot_suite/mcp_mirrored_entity_write_authority.rs:103:9:
+[boot-1] the connector does not write 'fk_fake_shadow', so th</failure>
+            <system-out>
+running 1 test
+test boot_suite::mcp_mirrored_entity_write_authority::mirrored_entity_keeps_the_connector_as_its_only_write_authority ... FAILED
+
+failures:
+
+failures:
+    boot_suite::mcp_mirrored_enti</system-out>
+            <system-err>
+thread 'boot_suite::mcp_mirrored_entity_write_authority::mirrored_entity_keeps_the_connector_as_its_only_write_authority' (83377259) panicked at crates/holon-integration-tests/tests/boot_suite/mcp_mi</system-err>
+        </testcase>
+        <testcase name="catalog_suite::advice_dismiss_prod_session_wiring::prod_session_dispatches_dismiss_advice" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:20:15.637+01:00" time="0.865">
+            <failure message="thread 'catalog_suite::advice_dismiss_prod_session_wiring::prod_session_dispatches_dismiss_advice' (83379473) panicked at crates/holon-integration-tests/tests/catalog_suite/advice_dismiss_prod_session_wiring.rs:133:9" type="test failure with exit code 101">thread 'catalog_suite::advice_dismiss_prod_session_wiring::prod_session_dispatches_dismiss_advice' (83379473) panicked at crates/holon-integration-tests/tests/catalog_suite/advice_dismiss_prod_session_wiring.rs:133:9:
+dismiss_advice must append exactly one (anchor, lesson) row to advice_suppressed; </failure>
+            <system-out>
+running 1 test
+test catalog_suite::advice_dismiss_prod_session_wiring::prod_session_dispatches_dismiss_advice ... FAILED
+
+failures:
+
+failures:
+    catalog_suite::advice_dismiss_prod_session_wiring::p</system-out>
+            <system-err>
+thread 'catalog_suite::advice_dismiss_prod_session_wiring::prod_session_dispatches_dismiss_advice' (83379473) panicked at crates/holon-integration-tests/tests/catalog_suite/advice_dismiss_prod_sessio</system-err>
+        </testcase>
+        <testcase name="catalog_suite::advice_step4_red::advice_step6_synthesis_weave_and_dismiss_green" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:20:15.846+01:00" time="5.176">
+            <failure message="thread 'catalog_suite::advice_step4_red::advice_step6_synthesis_weave_and_dismiss_green' (83379704) panicked at crates/holon-integration-tests/tests/catalog_suite/advice_step4_red.rs:141:5" type="test failure with exit code 101">thread 'catalog_suite::advice_step4_red::advice_step6_synthesis_weave_and_dismiss_green' (83379704) panicked at crates/holon-integration-tests/tests/catalog_suite/advice_step4_red.rs:141:5:
+[post-dismiss] composed catalog must be GREEN post step-6; failures: [("inv-advice-rows-woven", "[inv-advice-r</failure>
+            <system-out>
+running 1 test
+test catalog_suite::advice_step4_red::advice_step6_synthesis_weave_and_dismiss_green ... FAILED
+
+failures:
+
+failures:
+    catalog_suite::advice_step4_red::advice_step6_synthesis_weave_</system-out>
+            <system-err>[wide-e2e wiring] drawn: storage={Loro, Org, Markdown, Turso} sync={Todoist} actors={MCPServer, ActionEngine} -&gt; booted storage={Loro, Org, Markdown, Turso} projections={ViewModel, EditorState} editor</system-err>
+        </testcase>
+        <testcase name="catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:20:22.027+01:00" time="74.200">
+            <failure message="thread 'catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay' (83384256) panicked at crates/holon-integration-tests/src/pbt/fixtures/mod.rs:312:21" type="test failure with exit code 101">thread 'catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay' (83384256) panicked at crates/holon-integration-tests/src/pbt/fixtures/mod.rs:312:21:
+[fixtures:gherkin "The slash menu's vocabulary is derived from the operation registry   # log:8"] step 5: [slash-menu] expected block "block</failure>
+            <system-out>
+running 1 test
+test catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay has been running for over 60 seconds
+test catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay ... FAI</system-out>
+            <system-err>[fixtures:gherkin] SKIP @wip: "Export a page or graph"
+[fixtures:gherkin] SKIP @wip: "Publish"
+[fixtures:gherkin] 0 replayed, 2 skipped (@wip) from /Users/martin/Workspaces/pkm/holon/.claude/worktrees</system-err>
+        </testcase>
+        <testcase name="frontend_suite::tour_spike::tour_spike_parses_advances_and_gates_on_real_engine" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:22:24.668+01:00" time="1.679">
+            <failure message="thread 'frontend_suite::tour_spike::tour_spike_parses_advances_and_gates_on_real_engine' (83419055) panicked at crates/holon-integration-tests/tests/frontend_suite/tour_spike.rs:212:9" type="test failure with exit code 101">thread 'frontend_suite::tour_spike::tour_spike_parses_advances_and_gates_on_real_engine' (83419055) panicked at crates/holon-integration-tests/tests/frontend_suite/tour_spike.rs:212:9:
+assertion `left == right` failed: the create op is observable in engine state
+  left: 0
+ right: 1
+note: run with `R</failure>
+            <system-out>
+running 1 test
+test frontend_suite::tour_spike::tour_spike_parses_advances_and_gates_on_real_engine ... FAILED
+
+failures:
+
+failures:
+    frontend_suite::tour_spike::tour_spike_parses_advances_and_gat</system-out>
+            <system-err>
+thread 'frontend_suite::tour_spike::tour_spike_parses_advances_and_gates_on_real_engine' (83419055) panicked at crates/holon-integration-tests/tests/frontend_suite/tour_spike.rs:212:9:
+assertion `lef</system-err>
+        </testcase>
+        <testcase name="two_instance_composed_pbt::two_instance_composed_pbt" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:24:56.071+01:00" time="78.790">
+            <failure message="thread 'two_instance_composed_pbt::two_instance_composed_pbt' (83478424) panicked at crates/holon-integration-tests/tests/two_instance_composed_pbt.rs:46:1" type="test failure with exit code 101">thread 'two_instance_composed_pbt::two_instance_composed_pbt' (83478424) panicked at crates/holon-integration-tests/tests/two_instance_composed_pbt.rs:46:1:
+Test failed: reconciled composed sequence diverged from the oracle: [("inv-two-instance-convergence", "[inv-two-instance-convergence] the two i</failure>
+            <system-out>
+running 1 test
+test two_instance_composed_pbt::two_instance_composed_pbt has been running for over 60 seconds
+test two_instance_composed_pbt::two_instance_composed_pbt ... FAILED
+
+failures:
+
+failures</system-out>
+            <system-err>[wide-e2e wiring] drawn: storage={Loro, Org, Markdown, Turso} sync={Todoist} actors={MCPServer, ActionEngine} -&gt; booted storage={Loro, Org, Markdown, Turso} projections={ViewModel, EditorState} editor</system-err>
+        </testcase>
+        </testsuite>
+    </testsuites>

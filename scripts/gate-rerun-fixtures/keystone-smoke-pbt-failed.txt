@@ -1,0 +1,29 @@
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+    Blocking waiting for file lock on build directory
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-integration-tests` (test "integration") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8m 14s
+     Running tests/main.rs (target/debug/build/holon-integration-tests/1041f683271fc968/out/integration-1041f683271fc968)
+
+running 4 tests
+[soak-reseed] SKIP soak_reseed_reproduction: set HOLON_SOAK_RESEED_EXPECT=reproduce (or =zero) AND HOLON_SOAK_SEED_BLOCKS=4000 to reproduce/guard the full-reseed leak (BugFunnel row 71) at vault scale. Unset ⇒ this is not part of the default run.
+[soak-nav] SKIP soak_nav_latency: set HOLON_SOAK_NAV=reproduce (or =zero) AND HOLON_SOAK_SEED_BLOCKS=2000 to reproduce/guard the cold focus-descendant matview navigation cliff (BugFunnel row 78) at vault scale. Unset ⇒ not part of the default run. RELEASE profile only (wall-clock).
+thread 'general_e2e_composed_pbt::general_e2e_composed_pbt' (1881576288) panicked at crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs:155:17:
+[keystone-sample] FLOOR BREACH: only 0 of 1 configured draws completed (floor 1); 1 draw(s) ended on a registered known red {"editor-text-mirror": 1}. A sample this small is not a pass — fix or re-register the known red, or lower PROPTEST_CASES deliberately.
+test general_e2e_composed_pbt::general_e2e_composed_pbt ... FAILED
+
+failures:
+
+failures:
+    general_e2e_composed_pbt::general_e2e_composed_pbt
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 640 filtered out; finished in 23.99s
+
+error: test failed, to rerun pass `-p holon-integration-tests --test integration`
+error: recipe `pbt` failed with exit code 101
+error: recipe `keystone-smoke` failed with exit code 101

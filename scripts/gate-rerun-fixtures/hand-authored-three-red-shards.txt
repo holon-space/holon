@@ -1,0 +1,31 @@
+== hand-authored shard 0 (exit 101): target/gate-logs/pbt-hand-authored-shard-0.log ==
+[hand-authored regression] RED case "wbs-an-empty-org-block-survives-write-back-and-a-crash-restart"
+hand-authored replay: 1 red case(s): ["wbs-an-empty-org-block-survives-write-back-and-a-crash-restart"]
+test hand_authored_regressions::hand_authored_keystone_regressions ... FAILED
+failures:
+failures:
+    hand_authored_regressions::hand_authored_keystone_regressions
+test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 644 filtered out; finished in 223.14s
+== hand-authored shard 1 (exit 0): target/gate-logs/pbt-hand-authored-shard-1.log ==
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 662 filtered out; finished in 210.32s
+== hand-authored shard 2 (exit 101): target/gate-logs/pbt-hand-authored-shard-2.log ==
+[hand-authored regression] RED case "hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit"
+[hand-authored regression] RED case "crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy"
+hand-authored replay: 2 red case(s): ["hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit", "crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy"]
+test hand_authored_regressions::hand_authored_keystone_regressions ... FAILED
+failures:
+failures:
+    hand_authored_regressions::hand_authored_keystone_regressions
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 662 filtered out; finished in 212.38s
+== hand-authored shard 3 (exit 101): target/gate-logs/pbt-hand-authored-shard-3.log ==
+[hand-authored regression] RED case "hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot"
+hand-authored replay: 1 red case(s): ["hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot"]
+test hand_authored_regressions::hand_authored_keystone_regressions ... FAILED
+failures:
+failures:
+    hand_authored_regressions::hand_authored_keystone_regressions
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 662 filtered out; finished in 206.71s
+HAND-AUTHORED RED: shard 0 exit 101, red cases: wbs-an-empty-org-block-survives-write-back-and-a-crash-restart, log: target/gate-logs/pbt-hand-authored-shard-0.log
+HAND-AUTHORED RED: shard 2 exit 101, red cases: hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit,crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy, log: target/gate-logs/pbt-hand-authored-shard-2.log
+HAND-AUTHORED RED: shard 3 exit 101, red cases: hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot, log: target/gate-logs/pbt-hand-authored-shard-3.log
+error: recipe `hand-authored` failed with exit code 1

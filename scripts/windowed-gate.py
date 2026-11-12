@@ -2,7 +2,10 @@
 """Windowed GPUI gate: every holon-gpui test binary as its own process.
 
 Usage: scripts/windowed-gate.py --features <cargo features> --log-dir <dir>
-       [--jobs N] [--timeout SECONDS]
+       [--jobs N] [--timeout SECONDS] [--unit UNIT ...]
+
+--unit (repeatable; default: the lines of $WINDOWED_GATE_UNITS) runs only those units; an
+unknown unit exits 2.
 
 The windowed suite is every test binary of the holon-gpui package (the lib,
 the one `main` binary of `frontends/gpui/tests/*.rs` and the `harness = false`
@@ -17,6 +20,8 @@ against docs/Testing/KeystoneKnownReds.md (see docs/Testing/WindowedKnownReds.md
 all signatures registered -> KNOWN-RED (pass with note); anything else -> RED.
 
 Exit 0: every binary PASS or KNOWN-RED. Exit 1: any RED or HUNG.
+With $GATE_IDS_FILE set, a run whose bad units are all RED writes `failed <unit>` per RED unit
+there; a HUNG unit names no test, so a run with one writes none.
 After the FAIL line of each RED or HUNG unit, one `unit-log: <unit> <log> sha256=<hex>` line per log of that unit
 (first run and rerun) records the log's hash when the gate ends; scripts/flow-checks/tests-cover-diff.py reads it.
 """
@@ -208,7 +213,9 @@ def main() -> int:
     ap.add_argument("--log-dir", required=True, type=Path)
     ap.add_argument("--jobs", type=int, default=int(os.environ.get("WINDOWED_GATE_JOBS", default_jobs())))
     ap.add_argument("--timeout", type=int, default=int(os.environ.get("WINDOWED_GATE_TIMEOUT", 900)))
+    ap.add_argument("--unit", action="append")
     args = ap.parse_args()
+    wanted = args.unit or [u for u in os.environ.get("WINDOWED_GATE_UNITS", "").splitlines() if u]
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
     reuse = build(args.features, args.log_dir)
@@ -216,6 +223,11 @@ def main() -> int:
     if not binaries:
         print("windowed-gate: the holon-gpui inventory is empty — the filter is wrong", file=sys.stderr)
         return 1
+    if wanted:
+        if unknown := sorted(set(wanted) - {b for b, *_ in binaries}):
+            print(f"windowed-gate: no such unit: {', '.join(unknown)}", file=sys.stderr)
+            return 2
+        binaries = [u for u in binaries if u[0] in wanted]
     print(f"windowed-gate: {len(binaries)} units, {sum(n for *_, n in binaries)} tests, "
           f"jobs={args.jobs}, per-unit timeout={args.timeout}s", flush=True)
 
@@ -266,6 +278,9 @@ def main() -> int:
     for r in bad:
         for log in [r["first"]["log"]] * ("first" in r) + [r["log"]]:
             print(f"  unit-log: {r['binary']} {log} sha256={hashlib.sha256(log.read_bytes()).hexdigest()}")
+    if bad and os.environ.get("GATE_IDS_FILE") and all(r["verdict"] == "RED" for r in bad):
+        with open(os.environ["GATE_IDS_FILE"], "a") as fh:
+            fh.writelines(f"failed {r['binary']}\n" for r in bad)
     return 1 if bad else 0
 
 

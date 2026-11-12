@@ -205,8 +205,16 @@ keystone-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
     just pbt general 1
+    just keystone-smoke-shape
+
+SHAPE_CASE := "shape-gate-refuses-then-admits-in-one-case"
+
+# The shape half of `keystone-smoke`: its one hand-authored case must reach both shape invariants.
+keystone-smoke-shape:
+    #!/usr/bin/env bash
+    set -euo pipefail
     L=target/gate-logs/keystone-smoke-shape.log
-    HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1} HOLON_HAND_AUTHORED_CASE=shape-gate-refuses-then-admits-in-one-case \
+    HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1} HOLON_HAND_AUTHORED_CASE={{SHAPE_CASE}} \
         cargo test {{CANON}} --test integration hand_authored_regressions::hand_authored_keystone_regressions \
         -- --nocapture 2>&1 | tee "$L"
     grep -qE '^\[shape reach\] tagged-subtree edits admitted=[1-9][0-9]* refused=[1-9][0-9]* simulator comparisons=[1-9]' "$L" || {
@@ -216,9 +224,9 @@ keystone-smoke:
 
 # Land-gate battery member: one fixed replay through the transition alphabet
 # (crates/holon-integration-tests/tests/keystone_tour.rs).
-keystone-tour:
+keystone-tour *FLAGS:
     HOLON_PBT_TIMING=measure HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1} cargo test {{CANON}} \
-        --test integration keystone_tour:: -- --include-ignored --nocapture
+        --test integration keystone_tour:: -- --include-ignored --nocapture {{FLAGS}}
 
 # Land-gate battery member: the Loro consolidator suite (projection atomicity,
 # kind fidelity, unseeded-vault split, consolidator-epoch restart). It was in no
