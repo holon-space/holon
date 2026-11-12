@@ -1767,7 +1767,7 @@ mod tests {
         let ticket = || {
             Ticket::new(
                 "tree".into(),
-                iroh::EndpointAddr::new(iroh::SecretKey::generate(&mut rand::rng()).public()),
+                iroh::EndpointAddr::new(iroh::SecretKey::generate().public()),
                 "loro-sync/tree".into(),
                 CapabilitySecret::generate(),
                 ExpiryTime(1_000_000),

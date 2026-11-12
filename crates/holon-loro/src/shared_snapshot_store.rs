@@ -512,7 +512,7 @@ mod tests {
         let (store, _bus) = store_in(dir.path());
         let store = Arc::new(store);
 
-        let addr = EndpointAddr::new(iroh::SecretKey::generate(&mut rand::rng()).public());
+        let addr = EndpointAddr::new(iroh::SecretKey::generate().public());
         store
             .save_peers("share", std::slice::from_ref(&addr))
             .unwrap();

@@ -4881,7 +4881,7 @@ mod tests {
         // TEST-NET-1 (RFC 5737). Never routed, so the dial either sits
         // until CONNECT_TIMEOUT or fails fast depending on the network;
         // the publish stall keeps the work call slow either way.
-        let peer_key = iroh::SecretKey::generate(&mut rand::rng());
+        let peer_key = iroh::SecretKey::generate();
         let unreachable = EndpointAddr::from_parts(
             peer_key.public(),
             [iroh::TransportAddr::Ip("192.0.2.1:9".parse().unwrap())],
@@ -5267,7 +5267,7 @@ mod tests {
 
     /// Build a peer addr plus the fingerprint the roster pins it under.
     fn synthetic_peer() -> (EndpointAddr, crate::share_enrollment::PeerFingerprint) {
-        let addr = EndpointAddr::new(iroh::SecretKey::generate(&mut rand::rng()).public());
+        let addr = EndpointAddr::new(iroh::SecretKey::generate().public());
         let fp = crate::share_enrollment::PeerFingerprint::from_bytes(*addr.id.as_bytes());
         (addr, fp)
     }

@@ -133,6 +133,12 @@ pub mod share_peer_id;
 pub mod shared_snapshot_store;
 pub mod shared_tree;
 mod stable_id_index;
+#[cfg(all(
+    test,
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+mod stored_iroh_formats;
 /// The transport seam every true-sharing backend implements. Not iroh-gated and
 /// pure-Rust: Android builds it.
 pub mod sync_transport;

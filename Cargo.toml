@@ -186,7 +186,7 @@ rustls = { version = "0.23", default-features = false, features = [
   "std",
   "tls12",
 ] }
-iroh = { version = "0.96.0", default-features = false }
+iroh = { version = "1.4.1", default-features = false }
 
 # === WASM plugin host ===
 # `validate` gates `Module::new` — without it the crate cannot load a module at
@@ -427,10 +427,7 @@ gpui_macros = { git = "https://github.com/holon-space/zed.git", rev = "722d9f3e6
 [patch."https://github.com/itsbalamurali/gpui-mobile"]
 gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", rev = "49f07d280d5295cc0d546062eb245e670c631b2f" }
 
-# Pre-existing ed25519-dalek 3.0.0-pre.1 incompatible with pkcs8 0.11: locally
-# patched to pass KeyError::Invalid to KeyMalformed (matching 3.0.0-rc.0 fix).
 [patch.crates-io]
-ed25519-dalek = { path = ".cargo/patches/ed25519-dalek" }
 # core-graphics 0.24.0 unchanged EXCEPT the never-called `set_font_smoothing_style`
 # wrapper + its `CGContextSetFontSmoothingStyle` extern are `#[cfg(not(target_os =
 # "ios"))]`. That method is dead code (no caller in the tree) but font-kit /

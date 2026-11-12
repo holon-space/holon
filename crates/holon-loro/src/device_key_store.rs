@@ -34,7 +34,7 @@ pub fn load_or_create_device_key(storage_dir: &Path) -> Result<SecretKey> {
         })?;
         Ok(SecretKey::from_bytes(&arr))
     } else {
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         write_key_atomic(storage_dir, &path, &key.to_bytes())?;
         Ok(key)
     }

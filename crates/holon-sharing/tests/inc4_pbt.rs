@@ -124,8 +124,8 @@ fn merged_divergent_pair(
     text_a: &str,
     text_b: &str,
 ) -> (CrossingLog, CrossingLog, Crossing, Crossing) {
-    let sk_a = SecretKey::generate(&mut rand::rng());
-    let sk_b = SecretKey::generate(&mut rand::rng());
+    let sk_a = SecretKey::generate();
+    let sk_b = SecretKey::generate();
     let a = new_log(&sk_a);
     let b = new_log(&sk_b);
     for i in 0..warmup_a {
@@ -297,7 +297,7 @@ fn loser_begin_key(
 /// remain accounted (winner of its own block); R must be rejected as malformed.
 #[test]
 fn wrong_block_witness_must_not_drop_another_blocks_crossing() {
-    let sk = SecretKey::generate(&mut rand::rng());
+    let sk = SecretKey::generate();
     let log = new_log(&sk);
     let p = crossing("P", "block1", "c-src", "c-x", false, "p");
     let q = crossing("Q", "block2", "c-src", "c-y", false, "q");
@@ -332,7 +332,7 @@ fn wrong_block_witness_must_not_drop_another_blocks_crossing() {
 /// the latest crossing is live, and there is no loser.
 #[test]
 fn sequential_re_move_is_not_a_rejected_loser() {
-    let sk = SecretKey::generate(&mut rand::rng());
+    let sk = SecretKey::generate();
     let log = new_log(&sk);
     let first = crossing("m1", "blk", "c-src", "c-x", false, "hi");
     commit_crossing(&log, &first);
@@ -413,8 +413,8 @@ proptest! {
     ) {
         let crossings = build_mixed(&specs);
         let n = crossings.len();
-        let a = new_log(&SecretKey::generate(&mut rand::rng()));
-        let b = new_log(&SecretKey::generate(&mut rand::rng()));
+        let a = new_log(&SecretKey::generate());
+        let b = new_log(&SecretKey::generate());
         for c in &crossings {
             // Raw appends: authored on A, replicated to B via merge, so both see
             // identical stamped entries (real cross-device determinism).
@@ -456,7 +456,7 @@ proptest! {
 /// silent total loss.
 #[test]
 fn supersedes_cycle_is_rejected_malformed_not_dropped() {
-    let log = new_log(&SecretKey::generate(&mut rand::rng()));
+    let log = new_log(&SecretKey::generate());
     let mut a = crossing("A", "blk", "src", "x", false, "aa");
     let mut b = crossing("B", "blk", "src", "y", false, "bb");
     a.supersedes = Some(CrossingId("B".into()));
@@ -483,7 +483,7 @@ fn supersedes_cycle_is_rejected_malformed_not_dropped() {
 /// silently dropped.
 #[test]
 fn unknown_supersedes_is_rejected_malformed() {
-    let log = new_log(&SecretKey::generate(&mut rand::rng()));
+    let log = new_log(&SecretKey::generate());
     let mut c = crossing("C", "blk", "src", "x", false, "cc");
     c.supersedes = Some(CrossingId("nope".into()));
     log.append_entry(LogEntryBody::CrossingBegin(c));
@@ -498,7 +498,7 @@ fn unknown_supersedes_is_rejected_malformed() {
 /// and never lets it into the log.
 #[test]
 fn append_crossing_rejects_wrong_block_at_source() {
-    let log = new_log(&SecretKey::generate(&mut rand::rng()));
+    let log = new_log(&SecretKey::generate());
     let q = crossing("Q", "block2", "src", "y", false, "q");
     log.append_crossing(q).unwrap();
     let mut r = crossing("R", "block1", "src", "z", false, "r");
@@ -519,7 +519,7 @@ fn append_crossing_rejects_wrong_block_at_source() {
 /// SOURCE-side guard: `append_crossing` rejects an unknown witness loudly.
 #[test]
 fn append_crossing_rejects_unknown_at_source() {
-    let log = new_log(&SecretKey::generate(&mut rand::rng()));
+    let log = new_log(&SecretKey::generate());
     let mut c = crossing("C", "blk", "src", "x", false, "c");
     c.supersedes = Some(CrossingId("ghost".into()));
     let err = log.append_crossing(c).unwrap_err();
@@ -534,7 +534,7 @@ fn append_crossing_rejects_unknown_at_source() {
 /// winner.
 #[test]
 fn append_crossing_accepts_valid_same_block_witness() {
-    let log = new_log(&SecretKey::generate(&mut rand::rng()));
+    let log = new_log(&SecretKey::generate());
     let first = crossing("m1", "blk", "src", "x", false, "hi");
     log.append_crossing(first).unwrap();
     let mut second = crossing("m2", "blk", "x", "y", false, "hi");

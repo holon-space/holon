@@ -22,11 +22,11 @@
 //! Each shared tree is synced on its own ALPN channel:
 //! `{prefix}/{shared_tree_id}`.
 //!
-//! ## Iroh 0.96 gotchas
+//! ## Iroh gotchas
 //!
 //! - **Both endpoints must register ALPNs** via
-//!   `Endpoint::builder().alpns(...)`. Without this, the QUIC handshake fails
-//!   ("peer doesn't support any known protocol").
+//!   `Endpoint::builder(preset).alpns(...)`. Without this, the QUIC handshake
+//!   fails ("peer doesn't support any known protocol").
 //! - **Close is initiator-driven.** `sync_doc_initiate` returns the still-open
 //!   `Connection` after issuing `conn.close(...)`. The caller can drop the
 //!   returned handle immediately — the QUIC CONNECTION_CLOSE frame has already
@@ -241,7 +241,8 @@ mod adapter {
     /// Uses a fresh ephemeral secret key — the endpoint identity is
     /// NOT stable across calls.
     pub async fn create_endpoint(alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
-        let builder = Endpoint::builder().relay_mode(iroh::RelayMode::Disabled);
+        let builder =
+            Endpoint::builder(iroh::endpoint::presets::N0).relay_mode(iroh::RelayMode::Disabled);
         let ep = if alpns.is_empty() {
             builder.bind().await?
         } else {
@@ -267,7 +268,7 @@ mod adapter {
         preferred_port: Option<u16>,
     ) -> Result<Endpoint> {
         let build = |port: Option<u16>| -> Result<iroh::endpoint::Builder> {
-            let mut builder = Endpoint::builder()
+            let mut builder = Endpoint::builder(iroh::endpoint::presets::N0)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .secret_key(secret_key.clone());
             if !alpns.is_empty() {
@@ -479,15 +480,13 @@ mod adapter {
 
     /// Extract an addressable `EndpointAddr` for the peer of an active
     /// `Connection`. Combines the peer's cryptographic identity
-    /// (`remote_id`) with the current network paths (`paths().get()`).
+    /// (`remote_id`) with the currently open network paths (`paths()`).
     /// The resulting addr is dialable from this process — callers
     /// persist it so that a second launch can reconnect without needing
     /// a fresh ticket.
     pub fn connection_remote_addr(conn: &iroh::endpoint::Connection) -> EndpointAddr {
-        use iroh::Watcher as _;
         let id = conn.remote_id();
-        let mut watcher = conn.paths();
-        let paths = watcher.get();
+        let paths = conn.paths();
         let transport_addrs = paths.iter().map(|p| p.remote_addr().clone());
         EndpointAddr::from_parts(id, transport_addrs)
     }

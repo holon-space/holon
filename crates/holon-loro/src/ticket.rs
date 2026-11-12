@@ -92,7 +92,7 @@ mod tests {
     use super::*;
 
     fn sample_addr() -> EndpointAddr {
-        let sk = SecretKey::generate(&mut rand::rng());
+        let sk = SecretKey::generate();
         EndpointAddr::new(sk.public())
     }
 

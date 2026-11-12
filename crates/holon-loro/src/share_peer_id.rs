@@ -48,20 +48,20 @@ mod tests {
 
     #[test]
     fn deterministic_per_device_and_share() {
-        let sk = SecretKey::generate(&mut rand::rng());
+        let sk = SecretKey::generate();
         assert_eq!(stable_peer_id(&sk, "abc", 0), stable_peer_id(&sk, "abc", 0));
     }
 
     #[test]
     fn differs_across_shares() {
-        let sk = SecretKey::generate(&mut rand::rng());
+        let sk = SecretKey::generate();
         assert_ne!(stable_peer_id(&sk, "abc", 0), stable_peer_id(&sk, "def", 0));
     }
 
     #[test]
     fn differs_across_devices() {
-        let sk1 = SecretKey::generate(&mut rand::rng());
-        let sk2 = SecretKey::generate(&mut rand::rng());
+        let sk1 = SecretKey::generate();
+        let sk2 = SecretKey::generate();
         assert_ne!(
             stable_peer_id(&sk1, "abc", 0),
             stable_peer_id(&sk2, "abc", 0)
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn differs_across_generations() {
-        let sk = SecretKey::generate(&mut rand::rng());
+        let sk = SecretKey::generate();
         assert_ne!(stable_peer_id(&sk, "abc", 0), stable_peer_id(&sk, "abc", 1));
     }
 }
