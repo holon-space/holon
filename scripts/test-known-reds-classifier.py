@@ -3,10 +3,12 @@
 
 Run: `python3 scripts/test-known-reds-classifier.py` (CASES=<n> draws n logs,
 default 100; SEED=<s> replays a draw). The fixed examples run first. Properties:
-- P1: the classifier's verdict, with the tests its NOTE line names, equals the
-  model's, on the clean and the interleaved rendering of each draw;
+- P1: the classifier's verdict, with the tests its NOTE line names and the
+  location of each signature it prints, equals the model's, on the clean and
+  the interleaved rendering of each draw;
 - P2: LC_ALL, TMPDIR and the working directory do not change the output;
-- P3: interleaving never moves a printed panic out of the output;
+- P3: interleaving never moves a printed panic out of the output, except under
+  the message a cut location leaves it;
 - P4: without the `--no-capture` marker no panic leaves the output.
 It fails as well when a case of `reached` below is reached by no draw. Exits non-zero when a property fails; each failing
 log is printed as an EXAMPLES entry.
@@ -39,17 +41,19 @@ def stated(log, **kw):
     return v
 
 
-def kept_within(small, big):
-    """True when `big` prints every panic `small` prints.
+def kept_within(small, big, restated=()):
+    """True when `big` prints every panic `small` prints, each of `restated` under any message.
 
     Exit codes are not compared: a printed known red masks the "no panic
     signature" exit of a failed run, which is no panic.
     """
-    return all(big.listed[k] >= n for k, n in small.listed.items()) and big.matched >= small.matched
+    moved = Counter(p.msg for p in restated if p.kind == "novel")
+    return (all(big.listed[k] + moved[k] >= n for k, n in small.listed.items())
+            and big.matched + sum(p.kind == "known" for p in restated) >= small.matched)
 
 
 def show(v):
-    return f"exit={v.exit} novel={v.novel} matched={v.matched} note={v.note} dropped={sorted(v.dropped)} listed={dict(v.listed)}"
+    return f"exit={v.exit} novel={v.novel} matched={v.matched} note={v.note} dropped={sorted(v.dropped)} listed={dict(v.listed)} sites={dict(v.sites)}"
 
 
 def check(work, text, want, label):
@@ -58,7 +62,7 @@ def check(work, text, want, label):
     log.write_text(text)
     got = stated(log)
     failures = []
-    if (got.exit, got.novel, got.matched, got.listed, got.note, got.dropped) != (want.exit, want.novel, want.matched, want.listed, want.note, want.dropped):
+    if (got.exit, got.novel, got.matched, got.listed, got.note, got.dropped, got.sites) != (want.exit, want.novel, want.matched, want.listed, want.note, want.dropped, want.sites):
         failures.append(f"P1 {label}: classifier {show(got)}\n   model {show(want)}")
     env = dict(os.environ, LC_ALL="en_US.UTF-8", TMPDIR=str(work / "tmp"))
     (work / "tmp").mkdir(exist_ok=True)
@@ -108,12 +112,14 @@ def main():
             reached["a failing test's panic in a section beside a passing test's"] += any(
                 r.shape == "libtest" and {t.status for t in r.tests} == {"ok", "FAILED"} and any(t.panics for t in r.tests if t.status == "ok") for r in runs)
             reached["a head split after its ' ("] += any(re.match(r"thread '[^']+' \((?!\d+\) panicked)", line) for line in mixed.lines)
+            for what in logs.DRAWN:
+                reached[what] += mixed.drawn[what]
             reached["one binary's libtest sections twice in one log"] += sum(r.shape == "libtest" for r in runs) == 2 and runs[0].binary == runs[1].binary
             reached["a test run twice in one log"] += any(n > 1 for n in Counter(inst[2] for inst, _ in clean.statuses).values())
             reached["a serial run cut off after a panic"] += any(r.cut for r in runs)
             reached["a run without the marker after a serial run"] += any(
                 a.shape == "serial" and b.shape == "parallel" for a, b in zip(runs, runs[1:]))
-            if not kept_within(got_clean, got_mixed):
+            if not kept_within(got_clean, got_mixed, mixed.restated):
                 failures.append(f"P3: interleaving dropped a panic: clean {show(got_clean)}\n   interleaved {show(got_mixed)}")
             if logs.SERIAL_MARKER in clean.text:
                 unmarked = work / "unmarked.log"
