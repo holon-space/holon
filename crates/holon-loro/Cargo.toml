@@ -24,9 +24,8 @@ base64 = { version = "0.22", optional = true }
 blake3.workspace = true
 chrono.workspace = true
 crc32fast = "1"
-# Owner-identity key (ADR 0028 D1/OQ4). ed25519-dalek is already resolved
-# (=3.0.0-pre.1, patched at the workspace root) via iroh, so this direct dep
-# adds no lock churn. Available unconditionally — the owner key must sign
+# Owner-identity key (ADR 0028 D1/OQ4). Same ed25519-dalek line as iroh's, so
+# this direct dep adds no lock churn. Available unconditionally — the owner key must sign
 # rosters even on builds without the `iroh-sync` transport.
 ed25519-dalek = "3.0.0"
 futures.workspace = true

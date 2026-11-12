@@ -723,7 +723,8 @@ not new rot.
 **Build environment fixes (this workspace, disclosed):** tip `f92ca119`'s wholesale lock
 re-resolution broke `ed25519-dalek 3.0.0-pre.1` (iroh-base pins `=3.0.0-pre.1`; resolver drifted
 `ed25519` to stable 3.0.0). Fixed by supervisor lock restore + rc-era pins (`ed25519 3.0.0-rc.4`,
-`pkcs8 0.11.0-rc.11`, `spki 0.8.0-rc.4`, `signature 3.0.0-rc.10`). Do NOT `cargo update`. The
+`pkcs8 0.11.0-rc.11`, `spki 0.8.0-rc.4`, `signature 3.0.0-rc.10`). Those pins are gone: iroh 1.x
+resolves the stable ed25519-dalek 3.0.0 line. The
 `gql-transform` pin stays at `0c5a6dd` (a newer `023bbf4` adds `MappedNodeResolver.extension_column`/
 `multi_value_properties`; if that pin ever moves forward, `holon-turso/src/graph_schema.rs` needs
 the two fields added — `None`/`HashMap::new()` is the behavior-preserving form).
