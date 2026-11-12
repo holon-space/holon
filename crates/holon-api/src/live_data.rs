@@ -784,6 +784,86 @@ impl DeliveryCursor {
     }
 }
 
+/// The engine batches a row set has applied, routed on to the consumers that
+/// turn its rows into what the UI shows: each consumer owes the batch until it
+/// reports it applied.
+pub struct RowDelivery {
+    label: String,
+    state: futures_signals::signal::Mutable<Delivered>,
+    consumers: Mutex<Vec<std::sync::Weak<DeliveryCursor>>>,
+}
+
+/// How many batches a row set applied, and the highest seq among them. A
+/// snapshot batch can carry seq 0, so only the count tells two batches apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Delivered {
+    pub batches: u64,
+    pub seq: u64,
+}
+
+impl RowDelivery {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            state: futures_signals::signal::Mutable::new(Delivered::default()),
+            consumers: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The highest seq the row set applied. Every row diff of that batch was
+    /// emitted before this reads it.
+    pub fn seq(&self) -> u64 {
+        self.state.get().seq
+    }
+
+    /// Every row diff of the batches counted here was emitted before this
+    /// reads it.
+    pub fn delivered_so_far(&self) -> Delivered {
+        self.state.get()
+    }
+
+    /// Changes after each [`Self::delivered`], also for a batch that changed
+    /// no row or carried no new seq.
+    pub fn delivered_signal(&self) -> futures_signals::signal::MutableSignal<Delivered> {
+        self.state.signal()
+    }
+
+    /// The seq after each [`Self::delivered`], repeated for a batch with no
+    /// new seq.
+    pub fn seq_signal(&self) -> impl futures_signals::signal::Signal<Item = u64> + Send {
+        self.state.signal_ref(|state| state.seq)
+    }
+
+    /// Route the row set's batches to `cursor`: it owes the current batch and
+    /// every later one until its consumer applies through them.
+    pub fn attach(&self, cursor: &Arc<DeliveryCursor>) {
+        let mut consumers = self.consumers.lock().expect("consumers mutex");
+        cursor.taken.store(true, Ordering::Release);
+        cursor.routed(self.seq());
+        consumers.push(Arc::downgrade(cursor));
+    }
+
+    /// The row set applied batch `seq`: call after its row diffs are emitted,
+    /// before the watcher reports `seq` applied.
+    pub fn delivered(&self, seq: u64) {
+        let mut consumers = self.consumers.lock().expect("consumers mutex");
+        consumers.retain(|weak| match weak.upgrade() {
+            Some(cursor) => {
+                cursor.routed(seq);
+                true
+            }
+            None => false,
+        });
+        let mut state = self.state.lock_mut();
+        state.batches += 1;
+        state.seq = state.seq.max(seq);
+    }
+}
+
 tokio::task_local! {
     static REPORTING_CURSOR: Arc<DeliveryCursor>;
 }

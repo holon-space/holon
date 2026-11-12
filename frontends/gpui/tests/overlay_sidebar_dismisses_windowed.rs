@@ -13,8 +13,6 @@
 //! main overlay_sidebar_dismisses_windowed:: --features holon-gpui/pbt`
 
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -35,6 +33,8 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::settle_window;
 
 const LEFT_SIDEBAR: &str = "block:default-left-sidebar";
 const RIGHT_SIDEBAR: &str = "block:default-right-sidebar";
@@ -84,42 +84,24 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Cross-runtime fixed-point settle (the shared windowed pattern): pump until
-/// the element count is stable and no `"loading"` placeholders remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len(),
-    );
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        HANG_DEADLINE,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 /// Navigate through the production chokepoint the sidebar's page rows,
@@ -196,17 +178,13 @@ fn boot(title: &'static str, window_size: &str) -> Harness {
             )
         })
         .expect("window opened");
-    // 60s, not the 30s the neighbouring windowed tests use: a pump-free build
-    // of this binary was measured at 31.4s to first fixed point on a loaded
-    // machine, so 30 is inside the noise.
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(60));
+    settle_frame(&app, &bounds, &runtime, &env);
 
     // Give the main region a page with rows to navigate onto and tap.
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft a page and navigate Main onto it");
-    runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env);
 
     let interaction_tx = debug_services
         .interaction_tx
@@ -251,12 +229,7 @@ impl Harness {
     }
 
     fn settle(&mut self) {
-        settle_to_fixed_point(
-            &mut self.app,
-            &self.bounds,
-            &self.runtime,
-            Duration::from_secs(120),
-        );
+        settle_frame(&self.app, &self.bounds, &self.runtime, &self.env);
     }
 
     fn navigate_to(&mut self, target: &EntityUri) {

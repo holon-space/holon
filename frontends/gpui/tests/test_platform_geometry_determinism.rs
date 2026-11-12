@@ -26,22 +26,24 @@
 //! (the slim-residue fallback).
 //!
 //! Reuses the production launcher (`launch_holon_window_rebindable`) and the
-//! proven cross-runtime fixed-point settle — the exact path E4's component will
-//! stand up.
+//! shared window settle — the exact path E4's component will stand up.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
+use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
-use gpui::TestApp;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
+
+use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::hold_tokio_workers;
+use crate::pbt_harness::settle::settle_window;
 
 /// Independent boots to compare. ≥2 proves determinism; 3 guards against a
 /// lucky pair. Each boot is a full backend + window stand-up + settle, so this
@@ -54,50 +56,32 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Cross-runtime fixed-point settle (copied from `test_platform_smoke.rs`):
-/// runs real tokio time between gpui pump cycles so backend→frontend signals
-/// deliver through the channel bridge, advances the fake clock for timer-driven
-/// code, and promotes staged bounds. Returns once the element count is stable
-/// and no `"loading"` placeholders remain. Panics loudly if it never settles.
-fn settle_to_fixed_point(
-    app: &mut TestApp,
+/// Longer than a settle of an idle window.
+const TOKIO_HOLD: Duration = Duration::from_millis(200);
+
+/// Settle the engine, then keep every tokio worker busy for `TOKIO_HOLD`, so a
+/// view that a tokio task builds after the engine settled reaches the window
+/// later than a settle that does not wait for it.
+fn settle_frame_with_tokio_held(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    let elements = bounds.all_elements();
-    panic!(
-        "geometry never reached a fixed point within {timeout:?}: {} elements, loading={}",
-        elements.len(),
-        elements
-            .iter()
-            .filter(|(_, info)| info.widget_type.as_ref() == "loading")
-            .count()
-    );
+    runtime.block_on(env.settle());
+    hold_tokio_workers(runtime, TOKIO_HOLD);
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || {},
+        HANG_DEADLINE,
+    )
+    .unwrap_or_else(|e| panic!("window settle with the tokio workers held: {e}"));
 }
 
 /// One element's geometry as a canonical tuple: (widget_type, x, y, w, h),
@@ -148,13 +132,13 @@ fn snapshot(bounds: &BoundsRegistry) -> Snap {
 
 /// Boot a fresh backend + TestPlatform window, settle to a fixed point, and
 /// return the canonical geometry snapshot. Each call is fully independent (own
-/// backend, own window). The `TestApp` is intentionally leaked at the end:
+/// backend, own window). The app is intentionally leaked at the end:
 /// shutdown clears windows but detached pump tasks still hold entity handles
 /// and gpui's leak detector runs before the dispatcher drops them.
 fn boot_and_snapshot(runtime: &Arc<tokio::runtime::Runtime>) -> Snap {
     let text_system = real_text_system();
     let assets: Arc<dyn AssetSource> = Arc::new(());
-    let mut app = TestApp::with_text_system_and_assets(text_system, assets);
+    let mut app = HeadlessAppContext::with_asset_source(text_system, assets);
 
     let env = runtime
         .block_on(async { TestEnvironment::new(runtime.clone()) })
@@ -188,7 +172,7 @@ fn boot_and_snapshot(runtime: &Arc<tokio::runtime::Runtime>) -> Snap {
         })
         .expect("window opened");
 
-    settle_to_fixed_point(&mut app, &bounds, runtime, Duration::from_secs(30));
+    settle_frame_with_tokio_held(&app, &bounds, runtime, &env);
 
     let snap = snapshot(&bounds);
 
@@ -242,9 +226,9 @@ fn test_platform_geometry_is_real_and_deterministic() {
     // cache) and the real advance width only once warm, and a content-width
     // `text` label is never remeasured within a boot — so the very first boot
     // records cold 1px labels while every later boot (warm cache) records the
-    // real widths. The settle loop watches element COUNT, not bounds, so it
-    // cannot wait this out. This is orthogonal to the layout-determinism the
-    // test asserts; discard one boot so all *measured* boots share a warm cache.
+    // real widths. No settle can wait this out: the frame is at rest. This is
+    // orthogonal to the layout-determinism the test asserts; discard one boot so
+    // all *measured* boots share a warm cache.
     let _ = boot_and_snapshot(&runtime);
 
     let snaps: Vec<Snap> = (0..BOOTS).map(|_| boot_and_snapshot(&runtime)).collect();

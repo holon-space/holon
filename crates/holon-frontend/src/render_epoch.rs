@@ -32,6 +32,9 @@ struct Entry {
     primed: bool,
 }
 
+type Pending = Arc<dyn Fn() -> bool + Send + Sync>;
+type Checks = (u64, BTreeMap<u64, (String, Pending)>);
+
 /// The engine seq the UI subscriptions of one session have applied.
 ///
 /// A subscription holds the watermark until it applied its first event, and
@@ -39,6 +42,7 @@ struct Entry {
 pub struct UiWatermark {
     engine: Option<Arc<dyn holon_api::QueryEngine>>,
     subscriptions: Mutex<(u64, BTreeMap<u64, Entry>)>,
+    checks: Mutex<Checks>,
     published: AtomicU64,
     changed: tokio::sync::watch::Sender<u64>,
 }
@@ -50,6 +54,7 @@ impl UiWatermark {
         Arc::new(Self {
             engine,
             subscriptions: Mutex::new((0, BTreeMap::new())),
+            checks: Mutex::new((0, BTreeMap::new())),
             published: AtomicU64::new(0),
             changed: tokio::sync::watch::channel(0).0,
         })
@@ -76,6 +81,25 @@ impl UiWatermark {
             watermark: self.clone(),
             id,
             cursor,
+        }
+    }
+
+    /// A consumer owed while `pending()` holds, for UI work no engine seq
+    /// names (a batch with no new seq, a focus change): it never lowers
+    /// [`Self::sample`].
+    pub fn register_check(
+        self: &Arc<Self>,
+        key: impl Into<String>,
+        pending: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> UiCheck {
+        let mut guard = self.checks.lock().unwrap();
+        let (next, checks) = &mut *guard;
+        let id = *next;
+        *next += 1;
+        checks.insert(id, (key.into(), Arc::new(pending)));
+        UiCheck {
+            watermark: self.clone(),
+            id,
         }
     }
 
@@ -131,15 +155,27 @@ impl UiWatermark {
 
     /// One line per subscription that holds the watermark: its key and why.
     pub fn owed(&self) -> Vec<String> {
-        let (_, entries) = &*self.subscriptions.lock().unwrap();
-        entries
-            .values()
-            .filter_map(|entry| match (entry.primed, entry.cursor.owed_floor()) {
-                (false, _) => Some(format!("{}: no event applied yet", entry.key)),
-                (true, Some(floor)) => Some(format!("{}: applied through {floor}", entry.key)),
-                (true, None) => None,
-            })
-            .collect()
+        let mut owed: Vec<String> = {
+            let (_, entries) = &*self.subscriptions.lock().unwrap();
+            entries
+                .values()
+                .filter_map(|entry| match (entry.primed, entry.cursor.owed_floor()) {
+                    (false, _) => Some(format!("{}: no event applied yet", entry.key)),
+                    (true, Some(floor)) => Some(format!("{}: applied through {floor}", entry.key)),
+                    (true, None) => None,
+                })
+                .collect()
+        };
+        // Cloned out of the lock: a check takes its consumer's locks.
+        let checks: Vec<(String, Pending)> =
+            self.checks.lock().unwrap().1.values().cloned().collect();
+        owed.extend(
+            checks
+                .into_iter()
+                .filter(|(_, pending)| pending())
+                .map(|(key, _)| format!("{key}: not applied yet")),
+        );
+        owed
     }
 
     /// Resolves after the next change of a subscription's applied state, or
@@ -196,6 +232,19 @@ impl Drop for UiSubscription {
             .unwrap()
             .1
             .remove(&self.id);
+        self.watermark.poke();
+    }
+}
+
+/// One registered check; dropping it unregisters.
+pub struct UiCheck {
+    watermark: Arc<UiWatermark>,
+    id: u64,
+}
+
+impl Drop for UiCheck {
+    fn drop(&mut self) {
+        self.watermark.checks.lock().unwrap().1.remove(&self.id);
         self.watermark.poke();
     }
 }

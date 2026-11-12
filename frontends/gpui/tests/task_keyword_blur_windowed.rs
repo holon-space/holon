@@ -35,8 +35,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -54,40 +52,31 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Same cross-runtime fixed-point settle the other TestPlatform tests use.
-fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        futures::executor::block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    futures::executor::block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    env: &TestEnvironment,
+) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        HANG_DEADLINE,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 fn sql_rows(env: &TestEnvironment, sql: String) -> Vec<HashMap<Arc<str>, Value>> {
@@ -243,24 +232,13 @@ fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str)
 
     let edit_element = format!("block:{edit_id}");
     let blur_element = format!("block:{blur_id}");
-    let boot_deadline = Instant::now() + Duration::from_secs(180);
-    let mut painted = false;
-    while Instant::now() < boot_deadline {
-        settle(&mut app, &bounds, Duration::from_secs(30));
-        let ids: Vec<String> = bounds
-            .all_elements()
-            .iter()
-            .filter_map(|(_, info)| info.entity_id.as_ref().map(|e| e.to_string()))
-            .collect();
-        painted = ids.iter().any(|e| e == &edit_element) && ids.iter().any(|e| e == &blur_element);
-        if painted {
-            break;
-        }
-        eprintln!(
-            "[keyword-blur-boot] rows not both painted yet; {} elements",
-            bounds.all_elements().len()
-        );
-    }
+    settle_frame(&app, &bounds, &runtime, &env);
+    let ids: Vec<String> = bounds
+        .all_elements()
+        .iter()
+        .filter_map(|(_, info)| info.entity_id.as_ref().map(|e| e.to_string()))
+        .collect();
+    let painted = ids.iter().any(|e| e == &edit_element) && ids.iter().any(|e| e == &blur_element);
     assert!(
         painted,
         "boot precondition: both grafted rows must paint before anything is typed"
@@ -294,14 +272,14 @@ fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str)
     // ── promote through a REAL click + REAL keystrokes ────────────────────
     futures::executor::block_on(driver.click_entity(&edit_target, "main"))
         .expect("click the edit target row's painted text");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env);
     futures::executor::block_on(driver.send_raw_keystroke("home", &[]))
         .expect("caret to the head of the row");
     for key in ["T", "O", "D", "O", "space"] {
         futures::executor::block_on(driver.send_raw_keystroke(key, &[]))
             .unwrap_or_else(|e| panic!("typing {key:?} into the edit target row: {e}"));
     }
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env);
 
     // The promotion itself must have landed, else the blur below has no
     // promoted session to corrupt and every assertion after it is vacuous.
@@ -317,7 +295,7 @@ fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str)
     // ── the blur: click a DIFFERENT row ──────────────────────────────────
     futures::executor::block_on(driver.click_entity(&blur_target, "main"))
         .expect("click the sibling row to blur the promoted one");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env);
 
     // NON-VACUITY 1: focus genuinely left the promoted row, so its blur edge ran.
     assert_eq!(

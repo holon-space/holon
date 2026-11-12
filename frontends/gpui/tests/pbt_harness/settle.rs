@@ -157,7 +157,9 @@ fn screen(bounds: &BoundsRegistry) -> BTreeMap<String, String> {
 
 /// Settle the engine with `settle_engine`, then pump the window until a frame
 /// reflects the engine's emitted seq, every UI subscription applied its first
-/// snapshot, no admitted operation is unfinished, one more pump commits no
+/// snapshot, each view driver's tokio task applied the rows and inputs its
+/// watermark reports name (`UiWatermark::owed` is empty),
+/// no admitted operation is unfinished, one more pump commits no
 /// frame, and the emitted seq did not move. A notify during a draw marks its
 /// view pending without dirtying the window, and a test app draws only a dirty
 /// window, so while a view is pending the settle forces two frames: the window
@@ -233,7 +235,8 @@ pub fn settle_window(
 }
 
 /// [`settle_window`] until `delivered` holds: for a change that reaches the
-/// window over a hop the watermark does not count, such as a tokio task.
+/// window over a hop the watermark does not count, such as a condition on the
+/// session bus that a tokio task turns into a toast.
 #[allow(clippy::result_large_err)]
 pub fn settle_window_until(
     app: &impl Pump,

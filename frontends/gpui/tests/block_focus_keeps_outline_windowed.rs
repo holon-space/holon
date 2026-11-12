@@ -31,6 +31,9 @@
 //! because the row still is not painted. Keeping the rows painted is the same
 //! fix as keeping the handler.
 //!
+//! Examples, not property tests: one boot costs seconds, and the input is the
+//! seeded app, not a drawn value.
+//!
 //! Why a WINDOW and not the keystone: the chrome bars, the safe-area padding,
 //! the panel's flex allocation and the virtualized row measurement are all
 //! painted geometry. The headless keystone has no window, so it structurally
@@ -44,13 +47,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
 use gpui::PlatformTextSystem;
 use holon_api::EntityUri;
-use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
@@ -63,6 +64,8 @@ use holon_pbt_core::composition::CapMap;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::hold_tokio_workers;
 use crate::pbt_harness::settle::settle_window;
 
 /// The grafted outline: a page with a `parent` row owning `c1` and `c2`.
@@ -102,57 +105,11 @@ const MAIN_PANEL: &str = "block:default-main-panel";
 /// need ~110px; 200 is a wide margin above that.
 const MIN_PANEL_BOX_PX: f32 = 200.0;
 
+/// Longer than a settle of an idle window.
+const TOKIO_HOLD: Duration = Duration::from_millis(200);
+
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     gpui_platform::current_text_system()
-}
-
-/// Cross-runtime fixed-point settle (the shared windowed pattern): pump until
-/// the element count is stable and no `"loading"` placeholders remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
-    bounds: &BoundsRegistry,
-    runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
-) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    let mut trajectory: Vec<(usize, bool)> = Vec::new();
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        trajectory.push((count, still_loading));
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    let tail: Vec<String> = trajectory
-        .iter()
-        .rev()
-        .take(30)
-        .rev()
-        .map(|(c, l)| if *l { format!("{c}L") } else { c.to_string() })
-        .collect();
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements; last counts \
-         (L = loading present): {}",
-        bounds.all_elements().len(),
-        tail.join(" "),
-    );
 }
 
 fn settle_frame(
@@ -174,6 +131,32 @@ fn settle_frame(
         deadline,
     )
     .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
+
+/// [`settle_frame`] with every tokio worker busy for `TOKIO_HOLD` first, so a
+/// row that reaches the window over a tokio task arrives later than a settle
+/// that does not wait for it. The engine settles before the hold: the window
+/// settle alone must then wait for the rows.
+fn settle_frame_with_tokio_held(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    env: &TestEnvironment,
+) {
+    runtime.block_on(env.settle());
+    hold_tokio_workers(runtime, TOKIO_HOLD);
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || {},
+        HANG_DEADLINE,
+    )
+    .unwrap_or_else(|e| panic!("window settle with the tokio workers held: {e}"));
 }
 
 /// The outline rows the window is currently PAINTING: a grafted row counts only
@@ -416,7 +399,7 @@ fn a_short_window_still_paints_the_outline() {
             )
         })
         .expect("window opened");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame_with_tokio_held(&app, &bounds, &runtime, &env);
 
     // Graft a plain page with a three-row outline and land Main on it, so the
     // panel draws an outline (the booted vault lands on the journals feed,
@@ -424,8 +407,7 @@ fn a_short_window_still_paints_the_outline() {
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft the outline the panel draws");
-    runtime.block_on(env.settle());
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame_with_tokio_held(&app, &bounds, &runtime, &env);
 
     let sut = window_wide(Box::new(bounds.clone()), engine.clone());
 
@@ -462,7 +444,7 @@ fn a_short_window_still_paints_the_outline() {
         for _ in 0..10 {
             let _ = runtime.block_on(async { probe.scroll_at(200.0, 150.0, 0.0, 20.0).await });
         }
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(60));
+        settle_frame(&app, &bounds, &runtime, &env, HANG_DEADLINE);
         let scrolled = painted_outline_rows(&sut, &runtime);
         eprintln!("[probe/scroll-up] painted after scrolling to the top: {scrolled:?}");
         dump_boxes("scrolled", &sut, &runtime);
@@ -503,7 +485,7 @@ fn a_short_window_still_paints_the_outline() {
     runtime
         .block_on(async { driver.click_entity(&tapped, "main").await })
         .expect("tap the outline row to put the caret in it");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame_with_tokio_held(&app, &bounds, &runtime, &env);
 
     let after = painted_outline_rows(&sut, &runtime);
     let lost: Vec<&String> = before.difference(&after).collect();

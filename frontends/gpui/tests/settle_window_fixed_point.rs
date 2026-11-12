@@ -850,3 +850,560 @@ mod real_window {
         app.run_until_parked();
     }
 }
+
+/// A real window over a real engine. A view's driver writes the rows its
+/// provider received into the view's items on a tokio task, after the engine
+/// settled: busy tokio workers make that hop arrive after the settle's pumps.
+/// Whatever the hop's timing, an `Ok` settle shows every row the store holds
+/// for the focused page and its backlinks; a settle that times out because the
+/// hop is late names the late driver.
+mod driver_hop {
+    use std::collections::BTreeMap;
+
+    use gpui::AssetSource;
+    use gpui::HeadlessAppContext;
+    use holon_api::ContentType;
+    use holon_api::EntityUri;
+    use holon_api::PAGE_TAG;
+    use holon_api::Region;
+    use holon_api::Value;
+    use holon_gpui::RebindHandle;
+    use holon_gpui::launch_holon_window_rebindable;
+    use holon_gpui::navigation_state::NavigationState;
+    use holon_gpui::user_driver::derived_items;
+    use holon_integration_tests::test_environment::TestEnvironment;
+
+    use super::*;
+    use crate::pbt_harness::settle::HANG_DEADLINE;
+    use crate::pbt_harness::settle::hold_tokio_workers;
+    use crate::pbt_harness::windowed_wide::real_text_system;
+    use crate::pbt_harness::windowed_wide::resize_window;
+
+    const PAGES: [(&str, &str); 2] = [("hop-page-a", "Hop Page A"), ("hop-page-b", "Hop Page B")];
+    /// Rows a 1200x900 window paints without a scroll.
+    const MAX_CHILDREN: usize = 5;
+    const MAX_REFS: usize = 3;
+    /// Shorter than every drawn hold, so a late hop outlasts it.
+    const SHORT_DEADLINE: Duration = Duration::from_millis(30);
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        /// A child block under the focused page.
+        AddChild,
+        /// New content for a child of the focused page.
+        Edit(prop::sample::Index),
+        Delete(prop::sample::Index),
+        /// A block outside the focused page that links it.
+        AddRef,
+        /// Main switches to the other page: the old page's views drop.
+        Refocus,
+        /// The window's viewport changes.
+        Resize {
+            narrow: bool,
+        },
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Hop {
+        OnTime,
+        /// Every tokio worker is busy for `hold_ms` once the engine settled.
+        HeldAfterEngine {
+            hold_ms: u64,
+            short_deadline: bool,
+        },
+        /// Every tokio worker is busy for `hold_ms` before the engine settles.
+        HeldBeforeEngine {
+            hold_ms: u64,
+        },
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            4 => Just(Op::AddChild),
+            2 => any::<prop::sample::Index>().prop_map(Op::Edit),
+            2 => any::<prop::sample::Index>().prop_map(Op::Delete),
+            2 => Just(Op::AddRef),
+            1 => Just(Op::Refocus),
+            1 => any::<bool>().prop_map(|narrow| Op::Resize { narrow }),
+        ]
+    }
+
+    fn held_after_engine() -> impl Strategy<Value = Hop> {
+        (prop::sample::select(vec![50u64, 200, 400]), any::<bool>()).prop_map(
+            |(hold_ms, short_deadline)| Hop::HeldAfterEngine {
+                hold_ms,
+                short_deadline,
+            },
+        )
+    }
+
+    fn hop() -> impl Strategy<Value = Hop> {
+        prop_oneof![
+            1 => Just(Hop::OnTime),
+            3 => held_after_engine(),
+            1 => prop::sample::select(vec![50u64, 200])
+                .prop_map(|hold_ms| Hop::HeldBeforeEngine { hold_ms }),
+        ]
+    }
+
+    /// A held AddChild can supersede a render generation of holon's ui_watcher
+    /// before its `take_over`, which leaves that seq unclaimed and the settle
+    /// owed forever;
+    /// `settled_frame_shows_every_row_for_a_superseded_generation`
+    /// keeps those cases.
+    fn step() -> impl Strategy<Value = (Op, Hop)> {
+        (op(), hop()).prop_filter("held AddChild loses its seq in ui_watcher", |step| {
+            !matches!(step, (Op::AddChild, Hop::HeldBeforeEngine { .. }))
+        })
+    }
+
+    /// Children each page holds before the window opens, then random steps.
+    /// The last step moves Main to the other page with the tokio workers held
+    /// after the engine settled: the new page's views mount in a pump and
+    /// their first rows arrive on a tokio task after it.
+    fn case() -> impl Strategy<Value = ([usize; 2], Vec<(Op, Hop)>)> {
+        (
+            [1..=3usize, 1..=3usize],
+            proptest::collection::vec(step(), 0..5),
+            held_after_engine(),
+        )
+            .prop_map(|(seeded, mut steps, last)| {
+                steps.push((Op::Refocus, last));
+                (seeded, steps)
+            })
+    }
+
+    #[derive(Default)]
+    struct Model {
+        focused: usize,
+        /// Per page: child number -> content version.
+        children: [BTreeMap<usize, u32>; 2],
+        refs: [Vec<usize>; 2],
+        /// Every child ever created.
+        created: Vec<usize>,
+        next: usize,
+    }
+
+    fn child_id(k: usize) -> String {
+        format!("hop-c{k}")
+    }
+
+    fn child_text(k: usize, v: u32) -> String {
+        format!("hop-c{k}-v{v}.")
+    }
+
+    fn ref_id(k: usize) -> String {
+        format!("hop-r{k}")
+    }
+
+    struct Window {
+        app: HeadlessAppContext,
+        runtime: Arc<tokio::runtime::Runtime>,
+        env: TestEnvironment,
+        bounds: BoundsRegistry,
+        rebind: RebindHandle,
+    }
+
+    impl Window {
+        fn open(model: &mut Model, seeded: [usize; 2]) -> Self {
+            // Read by the window launcher before the window opens.
+            // SAFETY: single-threaded setup, before any window or runtime
+            // thread reads the process environment.
+            unsafe { std::env::set_var("HOLON_INITIAL_WINDOW_SIZE", "1200x900") };
+            let assets: Arc<dyn AssetSource> = Arc::new(());
+            let mut app = HeadlessAppContext::with_platform(real_text_system(), assets, || {
+                gpui_platform::current_headless_renderer()
+            });
+            let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
+            let env = runtime
+                .block_on(async { TestEnvironment::new(runtime.clone()) })
+                .expect("test environment");
+            runtime.block_on(async {
+                env.start_app(true).await.expect("start_app");
+                for (id, title) in PAGES {
+                    let mut page: holon_api::StorageEntity = std::collections::HashMap::new();
+                    page.insert("id".into(), Value::String(EntityUri::block(id).to_string()));
+                    page.insert(
+                        "parent_id".into(),
+                        Value::String(EntityUri::no_parent().as_str().to_string()),
+                    );
+                    page.insert("content".into(), Value::String(title.into()));
+                    page.insert("content_type".into(), ContentType::Text.into());
+                    page.insert(
+                        "tags".into(),
+                        Value::Array(vec![Value::String(PAGE_TAG.to_string())]),
+                    );
+                    env.test_ctx()
+                        .execute_op("block", "create", page)
+                        .await
+                        .unwrap_or_else(|e| panic!("create page {id}: {e}"));
+                }
+            });
+            for (page, &count) in seeded.iter().enumerate() {
+                for _ in 0..count {
+                    let k = model.next;
+                    model.next += 1;
+                    runtime
+                        .block_on(env.create_block(&child_id(k), PAGES[page].0, &child_text(k, 0)))
+                        .unwrap_or_else(|e| panic!("seed child {k}: {e}"));
+                    model.children[page].insert(k, 0);
+                    model.created.push(k);
+                }
+            }
+            focus(&runtime, &env, 0);
+            runtime.block_on(env.settle());
+            let engine = env
+                .reactive_engine
+                .get()
+                .cloned()
+                .expect("reactive engine after start_app");
+            let bounds = BoundsRegistry::new();
+            let debug_services = env.debug_services().cloned().expect("debug services");
+            let rebind = app
+                .update(|cx| {
+                    launch_holon_window_rebindable(
+                        env.session_arc(),
+                        engine,
+                        runtime.handle().clone(),
+                        NavigationState::new(),
+                        bounds.clone(),
+                        Some(debug_services),
+                        None,
+                        "Holon-Driver-Hop",
+                        cx,
+                    )
+                })
+                .expect("window opened");
+            let window = Window {
+                app,
+                runtime,
+                env,
+                bounds,
+                rebind,
+            };
+            window
+                .settle(Hop::OnTime)
+                .unwrap_or_else(|e| panic!("boot settle: {e}"));
+            window
+        }
+
+        #[allow(clippy::result_large_err)]
+        fn settle(&self, hop: Hop) -> Result<(), SettleError> {
+            let engine = self
+                .env
+                .reactive_engine
+                .get()
+                .expect("reactive engine after start_app");
+            let (runtime, env) = (&self.runtime, &self.env);
+            let mut settle_engine = || runtime.block_on(env.settle());
+            match hop {
+                Hop::OnTime => settle_window(
+                    &self.app,
+                    &self.bounds,
+                    engine.ui_watermark(),
+                    &mut settle_engine,
+                    HANG_DEADLINE,
+                ),
+                Hop::HeldAfterEngine {
+                    hold_ms,
+                    short_deadline,
+                } => {
+                    settle_engine();
+                    hold_tokio_workers(runtime, Duration::from_millis(hold_ms));
+                    let deadline = if short_deadline {
+                        SHORT_DEADLINE
+                    } else {
+                        HANG_DEADLINE
+                    };
+                    settle_window(
+                        &self.app,
+                        &self.bounds,
+                        engine.ui_watermark(),
+                        &mut || {},
+                        deadline,
+                    )
+                }
+                Hop::HeldBeforeEngine { hold_ms } => {
+                    hold_tokio_workers(runtime, Duration::from_millis(hold_ms));
+                    settle_window(
+                        &self.app,
+                        &self.bounds,
+                        engine.ui_watermark(),
+                        &mut settle_engine,
+                        HANG_DEADLINE,
+                    )
+                }
+            }
+            .map(|_| ())
+        }
+
+        /// Every Main list that holds one of this test's rows matches a fresh
+        /// derivation of its provider's rows: its driver applied every batch.
+        fn assert_drivers_applied(&mut self, step: &str) -> Result<(), TestCaseError> {
+            let engine = self
+                .env
+                .reactive_engine
+                .get()
+                .expect("reactive engine after start_app");
+            let ours = |rows: &[String]| rows.iter().any(|r| r.starts_with("block:hop-"));
+            let lists = self
+                .app
+                .update(|cx| self.rebind.live_panel_lists(Region::Main, cx));
+            for (watcher, live) in lists {
+                let mut live: Vec<String> = live.iter().map(|u| u.to_string()).collect();
+                let mut derived: Vec<String> = derived_items(engine, &watcher)
+                    .iter()
+                    .map(|u| u.to_string())
+                    .collect();
+                if !ours(&live) && !ours(&derived) {
+                    continue;
+                }
+                live.sort();
+                derived.sort();
+                prop_assert_eq!(
+                    live,
+                    derived,
+                    "{}: after an Ok settle, list {} lacks rows its provider holds (left: the \
+                     view's items, right: the provider's rows)",
+                    step,
+                    watcher
+                );
+            }
+            Ok(())
+        }
+
+        fn painted_texts(&self, id: &str) -> Vec<String> {
+            let entity = EntityUri::block(id).to_string();
+            self.bounds
+                .all_elements()
+                .into_iter()
+                .filter(|(_, info)| info.entity_id.as_deref() == Some(entity.as_str()))
+                .filter(|(_, info)| info.height > 0.0)
+                .filter_map(|(_, info)| info.displayed_text.map(|t| t.to_string()))
+                .collect()
+        }
+
+        fn painted(&self, id: &str) -> bool {
+            let entity = EntityUri::block(id).to_string();
+            self.bounds.all_elements().into_iter().any(|(_, info)| {
+                info.entity_id.as_deref() == Some(entity.as_str()) && info.height > 0.0
+            })
+        }
+
+        /// The screen shows the focused page's children at their latest
+        /// content and its backlinks, and no deleted child or child of the
+        /// other page.
+        fn assert_screen_shows(&self, model: &Model, step: &str) -> Result<(), TestCaseError> {
+            self.bounds.flush();
+            let page = model.focused;
+            for (&k, &v) in &model.children[page] {
+                let texts = self.painted_texts(&child_id(k));
+                prop_assert!(
+                    texts.iter().any(|t| t.contains(&child_text(k, v))),
+                    "{}: child {} must show {:?}, painted {:?}",
+                    step,
+                    k,
+                    child_text(k, v),
+                    texts
+                );
+            }
+            for &k in &model.created {
+                if !model.children[page].contains_key(&k) {
+                    prop_assert!(
+                        !self.painted(&child_id(k)),
+                        "{}: child {} is not under the focused page, yet painted",
+                        step,
+                        k
+                    );
+                }
+            }
+            for &k in &model.refs[page] {
+                prop_assert!(
+                    self.painted(&ref_id(k)),
+                    "{}: backlink {} to the focused page is not painted",
+                    step,
+                    k
+                );
+            }
+            Ok(())
+        }
+
+        fn close(self) {
+            let Window {
+                mut app,
+                env,
+                rebind,
+                ..
+            } = self;
+            drop(rebind);
+            app.update(|cx| cx.shutdown());
+            app.run_until_parked();
+            std::mem::forget(app);
+            std::mem::forget(env);
+        }
+    }
+
+    fn focus(runtime: &tokio::runtime::Runtime, env: &TestEnvironment, page: usize) {
+        let mut focus: holon_api::StorageEntity = std::collections::HashMap::new();
+        focus.insert("region".into(), Value::from(Region::Main));
+        focus.insert(
+            "block_id".into(),
+            Value::String(EntityUri::block(PAGES[page].0).to_string()),
+        );
+        runtime
+            .block_on(env.test_ctx().execute_op("navigation", "focus", focus))
+            .expect("focus Main on a page");
+    }
+
+    /// Apply `op` to the store and the model.
+    fn apply(window: &mut Window, model: &mut Model, op: &Op) {
+        let (runtime, env) = (&window.runtime, &window.env);
+        let page = model.focused;
+        let children: Vec<usize> = model.children[page].keys().copied().collect();
+        match op {
+            Op::AddChild if model.children[page].len() < MAX_CHILDREN => {
+                let k = model.next;
+                model.next += 1;
+                runtime
+                    .block_on(env.create_block(&child_id(k), PAGES[page].0, &child_text(k, 0)))
+                    .unwrap_or_else(|e| panic!("create child {k}: {e}"));
+                model.children[page].insert(k, 0);
+                model.created.push(k);
+            }
+            Op::Edit(index) if !children.is_empty() => {
+                let k = *index.get(&children);
+                let v = model.children[page][&k] + 1;
+                runtime
+                    .block_on(env.update_block_content(&child_id(k), &child_text(k, v)))
+                    .unwrap_or_else(|e| panic!("edit child {k}: {e}"));
+                model.children[page].insert(k, v);
+            }
+            Op::Delete(index) if !children.is_empty() => {
+                let k = *index.get(&children);
+                runtime
+                    .block_on(env.delete_block(&child_id(k)))
+                    .unwrap_or_else(|e| panic!("delete child {k}: {e}"));
+                model.children[page].remove(&k);
+            }
+            Op::AddRef if model.refs[page].len() < MAX_REFS => {
+                let k = model.next;
+                model.next += 1;
+                runtime
+                    .block_on(env.create_block(
+                        &ref_id(k),
+                        EntityUri::no_parent().as_str(),
+                        &format!("[[{}]] hop-r{k}.", PAGES[page].1),
+                    ))
+                    .unwrap_or_else(|e| panic!("create backlink {k}: {e}"));
+                model.refs[page].push(k);
+            }
+            Op::Refocus => {
+                model.focused = 1 - page;
+                focus(runtime, env, model.focused);
+            }
+            Op::Resize { narrow } => {
+                let width = if *narrow { 900.0 } else { 1200.0 };
+                let handle = window.rebind.window();
+                resize_window(&mut window.app, handle, width, 900.0);
+            }
+            Op::AddChild | Op::Edit(_) | Op::Delete(_) | Op::AddRef => {}
+        }
+    }
+
+    fn settled_frame_shows_every_row(
+        seeded: [usize; 2],
+        steps: Vec<(Op, Hop)>,
+    ) -> Result<(), TestCaseError> {
+        let mut model = Model::default();
+        eprintln!("[driver-hop] open {seeded:?} {steps:?}");
+        let mut window = Window::open(&mut model, seeded);
+        eprintln!("[driver-hop] opened");
+        let boot = format!("boot with {seeded:?} of {steps:?}");
+        let mut outcome = window
+            .assert_drivers_applied(&boot)
+            .and_then(|()| window.assert_screen_shows(&model, &boot));
+        for (i, (op, hop)) in steps.iter().enumerate() {
+            if outcome.is_err() {
+                break;
+            }
+            let step = format!("step {i} {op:?} {hop:?} of {steps:?}");
+            eprintln!("[driver-hop] {step}");
+            apply(&mut window, &mut model, op);
+            outcome = match window.settle(*hop) {
+                Ok(()) => Ok(()),
+                Err(SettleError::Timeout(t))
+                    if matches!(
+                        hop,
+                        Hop::HeldAfterEngine {
+                            short_deadline: true,
+                            ..
+                        }
+                    ) =>
+                {
+                    // The hold stops every tokio task, so a late watcher is as legitimate a cause
+                    // as a late driver.
+                    if t.owed.is_empty() {
+                        Err(TestCaseError::fail(format!(
+                            "{step}: the settle timed out while the tokio workers were held, yet \
+                             names nothing it waits for: {}",
+                            SettleError::Timeout(t)
+                        )))
+                    } else {
+                        window.settle(Hop::OnTime).map_err(|e| {
+                            TestCaseError::fail(format!(
+                                "{step}: once the hold ended, the settle still fails: {e}"
+                            ))
+                        })
+                    }
+                }
+                Err(e) => Err(TestCaseError::fail(format!("{step}: {e}"))),
+            }
+            .and_then(|()| {
+                window.assert_drivers_applied(&step)?;
+                window.assert_screen_shows(&model, &step)
+            });
+        }
+        window.close();
+        outcome
+    }
+
+    /// Cases the generator found, run through the same property.
+    #[test]
+    fn settled_frame_shows_every_row_its_drivers_received_on_found_cases() {
+        let held = |short_deadline| Hop::HeldAfterEngine {
+            hold_ms: 50,
+            short_deadline,
+        };
+        let found = [
+            ([1, 1], vec![(Op::Refocus, held(false))]),
+            ([1, 1], vec![(Op::Refocus, held(true))]),
+            ([3, 3], vec![(Op::Refocus, Hop::OnTime)]),
+        ];
+        for (seeded, steps) in found {
+            settled_frame_shows_every_row(seeded, steps).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    #[test]
+    #[ignore = "holon's ui_watcher Delivery::take_over leaves the seq of a superseded generation unclaimed"]
+    fn settled_frame_shows_every_row_for_a_superseded_generation() {
+        for seeded in [[2, 1], [3, 1]] {
+            let steps = vec![(Op::AddChild, Hop::HeldBeforeEngine { hold_ms: 200 })];
+            settled_frame_shows_every_row(seeded, steps).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+
+    proptest! {
+        // A case boots a backend and a window: seconds each.
+        #![proptest_config(ProptestConfig {
+            cases: 6,
+            max_shrink_iters: 24,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+        #[test]
+        fn settled_frame_shows_every_row_its_drivers_received((seeded, steps) in case()) {
+            settled_frame_shows_every_row(seeded, steps)?;
+        }
+    }
+}

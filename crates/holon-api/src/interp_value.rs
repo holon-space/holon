@@ -161,6 +161,12 @@ pub trait ReactiveRowProvider: Send + Sync {
         None
     }
 
+    /// The engine batches these rows are applied through, for a consumer that
+    /// reports what it showed. `None` when no engine batch feeds the rows.
+    fn delivery(&self) -> Option<Arc<crate::live_data::RowDelivery>> {
+        None
+    }
+
     /// Row order this provider's rows already carry, as a sort-key spec
     /// (`col` for ascending, `-col` for descending) — the same form a
     /// `sortkey:` template arg takes.

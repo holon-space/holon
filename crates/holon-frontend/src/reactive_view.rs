@@ -463,6 +463,10 @@ impl ReactiveRowProvider for AppendedRowsProvider {
     fn cache_identity(&self) -> u64 {
         self.inner.cache_identity()
     }
+
+    fn delivery(&self) -> Option<Arc<holon_api::live_data::RowDelivery>> {
+        self.inner.delivery()
+    }
 }
 
 /// Derive a display-placed occurrence's `DataRow` from the canonical block's
@@ -1243,6 +1247,14 @@ impl ReactiveView {
         // Capture the focus signal before `services` is moved into the
         // interpret closures below.
         let focus_mutable = services.focused_block_mutable();
+        let report = DriverReport::register(data_source, &services, "tree");
+        let focus_report = focus_mutable.as_ref().map(|m| {
+            Arc::new(InputReport::register(
+                m,
+                &services,
+                format!("focus of {}", report.label("tree")),
+            ))
+        });
         let tmpl = item_template.clone();
         let space_handle = space.clone();
 
@@ -1302,7 +1314,7 @@ impl ReactiveView {
         // id string — it is the display coordinate the row's identity key
         // carries, stamped onto the node so GPUI can suffix its per-row keys.
         // `Canonical` for every real row.
-        let interpret_row: Arc<InterpretRowFn> = {
+        let interpret_unrecorded: Arc<InterpretRowFn> = {
             let svc = services.clone();
             let space = space_handle.clone();
             let nif = node_interpret_fn;
@@ -1381,6 +1393,16 @@ impl ReactiveView {
                     (Arc::new(node), overrides)
                 },
             )
+        };
+        let interpret_row: Arc<InterpretRowFn> = match &focus_report {
+            Some(focus_report) => {
+                let focus_report = focus_report.clone();
+                let interpret_unrecorded = interpret_unrecorded.clone();
+                Arc::new(move |row, depth, occurrence| {
+                    focus_report.interpreting(|_| interpret_unrecorded(row, depth, occurrence))
+                })
+            }
+            None => interpret_unrecorded.clone(),
         };
 
         // Depth computed the same way `MutableTree::insert` resolves
@@ -1466,12 +1488,12 @@ impl ReactiveView {
             let probe = self.probe.clone();
             #[cfg(any(test, feature = "pbt"))]
             let probe_settle = probe.clone();
-            let diff_stream = data_source.keyed_rows_signal_vec().to_stream();
+            let diff_stream = report.events(data_source.keyed_rows_signal_vec());
             async move {
                 use futures::FutureExt as _;
                 use futures::StreamExt as _;
                 futures::pin_mut!(diff_stream);
-                let apply_one = move |diff: VecDiff<(
+                let mut apply_one = move |diff: VecDiff<(
                     holon_api::RowKey,
                     Arc<holon_api::widget_spec::DataRow>,
                 )>| {
@@ -1722,14 +1744,14 @@ impl ReactiveView {
                 //
                 // Diffs are applied in exactly the arrival order they always
                 // were; only WHEN this probe runs changed.
-                while let Some(diff) = diff_stream.next().await {
-                    apply_one(diff);
+                while let Some(event) = diff_stream.next().await {
+                    event.into_iter().for_each(&mut apply_one);
                     // Drain everything already queued before judging. The inner
                     // poll uses a noop waker, but the loop always returns to the
                     // awaited `next()` above, which re-registers the real one —
                     // so no wakeup is lost.
                     while let Some(Some(queued)) = diff_stream.next().now_or_never() {
-                        apply_one(queued);
+                        queued.into_iter().for_each(&mut apply_one);
                     }
 
                     if crate::reactive::tree_desync::enabled() {
@@ -1765,7 +1787,7 @@ impl ReactiveView {
                             None => None,
                             Some(_) => {
                                 while let Some(Some(queued)) = diff_stream.next().now_or_never() {
-                                    apply_one(queued);
+                                    queued.into_iter().for_each(&mut apply_one);
                                 }
                                 sample()
                             }
@@ -1785,6 +1807,12 @@ impl ReactiveView {
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
+                    let delivered = report.drained_through(|| {
+                        while let Some(Some(queued)) = diff_stream.next().now_or_never() {
+                            queued.into_iter().for_each(&mut apply_one);
+                        }
+                    });
+                    report.applied(delivered);
                 }
             }
         };
@@ -1802,39 +1830,36 @@ impl ReactiveView {
             match focus_mutable {
                 Some(m) => {
                     use futures_signals::signal::SignalExt;
+                    let focus_report = focus_report.expect("registered with the focus mutable");
                     let tree = tree.clone();
                     let row_map = row_map.clone();
-                    let interpret_row = interpret_row.clone();
+                    let interpret_unrecorded = interpret_unrecorded.clone();
                     let get_sort_key = get_sort_key.clone();
-                    let mut last_focus: Option<EntityUri> = m.get_cloned();
-                    Box::pin(m.signal_cloned().for_each(move |new_focus| {
-                        if new_focus != last_focus {
-                            // Collect ids whose `is_focused` predicate
-                            // flipped: the previously focused block (now
-                            // false) and the newly focused block (now
-                            // true). `last_focus`/`new_focus` are already
-                            // canonical `EntityUri`s and the row_map is keyed
-                            // by the same canonical id, so a bare-vs-schemed
-                            // mismatch can't drop the lookup.
-                            // Focus is still a bare `EntityUri` in this
-                            // increment (Increment C widens it), so it flips
-                            // only the CANONICAL occurrence of a block.
-                            let mut affected: Vec<holon_api::RowKey> = Vec::new();
-                            for uri in [last_focus.as_ref(), new_focus.as_ref()]
-                                .into_iter()
-                                .flatten()
-                            {
-                                let key = (uri.clone(), holon_api::Occurrence::Canonical);
-                                if !affected.contains(&key) {
-                                    affected.push(key);
+                    Box::pin(m.signal_ref(|_| ()).for_each(move |()| {
+                        let mut pass = focus_report.pass();
+                        // Mixed rows re-interpret all; stale rows only the
+                        // blocks whose `is_focused` flipped. Focus flips only
+                        // the CANONICAL occurrence of a block.
+                        let affected: Vec<holon_api::RowKey> = match &pass.shown {
+                            Shown::Current => Vec::new(),
+                            Shown::Mixed => row_map.lock().unwrap().keys().cloned().collect(),
+                            Shown::Stale(shown_focus) => {
+                                let mut affected = Vec::new();
+                                for uri in [shown_focus.as_ref(), pass.value.as_ref()]
+                                    .into_iter()
+                                    .flatten()
+                                {
+                                    let key = (uri.clone(), holon_api::Occurrence::Canonical);
+                                    if !affected.contains(&key) {
+                                        affected.push(key);
+                                    }
                                 }
+                                affected
                             }
-                            // Snapshot rows under the row_map lock, then
-                            // release before taking the tree lock to keep
-                            // the lock order consistent with the data
-                            // driver (which takes tree → key_index →
-                            // row_map; we take row_map then tree, but the
-                            // row_map lock is released first).
+                        };
+                        {
+                            // The row_map lock is released before the tree lock
+                            // is taken (the data driver takes tree, then row_map).
                             let updates: Vec<crate::mutable_tree::TreeEntry> = {
                                 let rm = row_map.lock().unwrap();
                                 affected
@@ -1845,7 +1870,9 @@ impl ReactiveView {
                                                 .map(|p| (p, holon_api::Occurrence::Canonical));
                                             let sk = get_sort_key(&row);
                                             let depth = rowset_depth(&rm, &row);
-                                            let (w, ov) = interpret_row(row, depth, key.1.clone());
+                                            let (w, ov) = pass.row(|_| {
+                                                interpret_unrecorded(row, depth, key.1.clone())
+                                            });
                                             (key.clone(), parent, sk, w, ov)
                                         })
                                     })
@@ -1857,8 +1884,8 @@ impl ReactiveView {
                                     t.update(&id, parent, sk, w, ov);
                                 }
                             }
-                            last_focus = new_focus;
                         }
+                        pass.finish();
                         async {}
                     }))
                 }
@@ -1899,6 +1926,28 @@ impl ReactiveView {
             _ => Vec::new(),
         };
         let has_sort = sort_key.is_some();
+        let report = DriverReport::register(data_source, &services, "flat");
+        let profiles = services.profile_signal();
+        let inputs = Arc::new(FlatInputs {
+            space: InputReport::register(
+                space,
+                &services,
+                format!("space of {}", report.label("flat")),
+            ),
+            profiles: InputReport::register(
+                &profiles,
+                &services,
+                format!("profiles of {}", report.label("flat")),
+            ),
+            focus: services.focused_block_mutable().map(|m| {
+                InputReport::register(&m, &services, format!("focus of {}", report.label("flat")))
+            }),
+        });
+        let template_report = InputReport::register(
+            template_mutable,
+            &services,
+            format!("template of {}", report.label("flat")),
+        );
 
         let target = self.items.clone();
         let space_handle = space.clone();
@@ -2023,7 +2072,7 @@ impl ReactiveView {
             let sort_key = sort_key.clone();
             let target = target.clone();
             let tmpl = item_template.clone();
-            let space = space_handle.clone();
+            let inputs = inputs.clone();
             let csf = child_space_fn.clone();
             let interpret = interpret_and_attach.clone();
             Arc::new(move || {
@@ -2043,22 +2092,22 @@ impl ReactiveView {
                         ord.then_with(|| ka.cmp(kb))
                     });
                 }
-                let parent_space = space.get_cloned();
-                let count = ordered.len();
-                let child_space = match (parent_space, csf.as_ref()) {
-                    (Some(p), Some(f)) => Some(f(p, count)),
-                    _ => parent_space,
-                };
+                let mut pass = inputs.pass();
                 let items: Vec<Arc<ReactiveViewModel>> = ordered
                     .iter()
-                    .map(|(k, row)| interpret(&tmpl, row.clone(), child_space, k.1.clone()))
+                    .map(|(k, row)| {
+                        pass.row(|parent_space| {
+                            let child_space = match (parent_space, csf.as_ref()) {
+                                (Some(p), Some(f)) => Some(f(p, ordered.len())),
+                                _ => parent_space,
+                            };
+                            interpret(&tmpl, row.clone(), child_space, k.1.clone())
+                        })
+                    })
                     .collect();
-                tracing::trace!(
-                    "[ReactiveView::flat_driver] rebuilt, len={}, child_space={:?}",
-                    items.len(),
-                    child_space,
-                );
+                tracing::trace!("[ReactiveView::flat_driver] rebuilt, len={}", items.len());
                 target.lock_mut().replace_cloned(items);
+                pass.finish();
             })
         };
 
@@ -2066,13 +2115,18 @@ impl ReactiveView {
         let data_driver = {
             let entries = entries.clone();
             let target = target.clone();
-            let tmpl = item_template.clone();
-            let space = space_handle.clone();
             let csf = child_space_fn.clone();
             let rebuild = full_rebuild.clone();
-            let interpret = interpret_and_attach.clone();
+            let interpret_row = {
+                let tmpl = item_template.clone();
+                let inputs = inputs.clone();
+                let interpret = interpret_and_attach.clone();
+                move |row, occ| {
+                    inputs.interpreting(|parent_space| interpret(&tmpl, row, parent_space, occ))
+                }
+            };
 
-            data_source.keyed_rows_signal_vec().for_each(move |diff| {
+            report.drive(data_source.keyed_rows_signal_vec(), move |diff| {
                 match diff {
                     VecDiff::Replace { values } => {
                         *entries.lock().unwrap() = values;
@@ -2095,10 +2149,7 @@ impl ReactiveView {
                             // kind. Per-row signal cells handle leaf-level
                             // prop updates, but they can't switch the
                             // active variant — only re-interpret can.
-                            let parent_space = space.get_cloned();
-                            target
-                                .lock_mut()
-                                .set_cloned(index, interpret(&tmpl, row, parent_space, occ));
+                            target.lock_mut().set_cloned(index, interpret_row(row, occ));
                         }
                     }
                     VecDiff::InsertAt {
@@ -2110,10 +2161,9 @@ impl ReactiveView {
                         if has_sort || csf.is_some() {
                             rebuild();
                         } else {
-                            let parent_space = space.get_cloned();
                             target
                                 .lock_mut()
-                                .insert_cloned(index, interpret(&tmpl, row, parent_space, occ));
+                                .insert_cloned(index, interpret_row(row, occ));
                         }
                     }
                     VecDiff::RemoveAt { index } => {
@@ -2130,10 +2180,7 @@ impl ReactiveView {
                         if has_sort || csf.is_some() {
                             rebuild();
                         } else {
-                            let parent_space = space.get_cloned();
-                            target
-                                .lock_mut()
-                                .push_cloned(interpret(&tmpl, row, parent_space, occ));
+                            target.lock_mut().push_cloned(interpret_row(row, occ));
                         }
                     }
                     VecDiff::Pop {} => {
@@ -2150,7 +2197,6 @@ impl ReactiveView {
                     }
                     VecDiff::Move { .. } => {}
                 }
-                async {}
             })
         };
 
@@ -2158,13 +2204,11 @@ impl ReactiveView {
         let space_driver = {
             let rebuild = full_rebuild.clone();
             let entries = entries.clone();
-            let mut first = true;
-            space_handle.signal().for_each(move |_| {
-                if first {
-                    first = false;
-                } else if !entries.lock().unwrap().is_empty() {
-                    rebuild();
-                }
+            let inputs = inputs.clone();
+            space_handle.signal_ref(|_| ()).for_each(move |()| {
+                inputs
+                    .space
+                    .emitted(|| !entries.lock().unwrap().is_empty(), &*rebuild);
                 async {}
             })
         };
@@ -2177,18 +2221,13 @@ impl ReactiveView {
         let profile_driver = {
             let rebuild = full_rebuild.clone();
             let entries = entries.clone();
-            let mut first = true;
-            services
-                .profile_signal()
-                .signal_cloned()
-                .for_each(move |_cache| {
-                    if first {
-                        first = false;
-                    } else if !entries.lock().unwrap().is_empty() {
-                        rebuild();
-                    }
-                    async {}
-                })
+            let inputs = inputs.clone();
+            profiles.signal_ref(|_| ()).for_each(move |()| {
+                inputs
+                    .profiles
+                    .emitted(|| !entries.lock().unwrap().is_empty(), &*rebuild);
+                async {}
+            })
         };
 
         // Focus driver: re-interpret items when the focused block changes.
@@ -2203,12 +2242,13 @@ impl ReactiveView {
                     use futures_signals::signal::SignalExt;
                     let rebuild = full_rebuild.clone();
                     let entries = entries.clone();
-                    let mut last_focus: Option<EntityUri> = m.get_cloned();
-                    Box::pin(m.signal_cloned().for_each(move |new_focus| {
-                        if new_focus != last_focus && !entries.lock().unwrap().is_empty() {
-                            rebuild();
-                        }
-                        last_focus = new_focus;
+                    let inputs = inputs.clone();
+                    Box::pin(m.signal_ref(|_| ()).for_each(move |()| {
+                        let focus = inputs
+                            .focus
+                            .as_ref()
+                            .expect("registered with the focus mutable");
+                        focus.emitted(|| !entries.lock().unwrap().is_empty(), &*rebuild);
                         async {}
                     }))
                 }
@@ -2225,29 +2265,32 @@ impl ReactiveView {
             let target = target.clone();
             let interpret_fn = node_interpret_fn;
             let interpret = interpret_and_attach;
-            let space = space_handle.clone();
-            let mut first = true;
-            template_mutable.signal_cloned().for_each(move |new_tmpl| {
-                if first {
-                    first = false;
-                } else {
+            template_mutable.signal_ref(|_| ()).for_each(move |()| {
+                if template_report.owed() {
+                    let mut pass = template_report.pass();
                     let mut items = target.lock_mut();
                     for index in 0..items.len() {
                         let item = items[index].clone();
                         let row = item.data.get_cloned();
-                        match props_under_template(&interpret_fn, &new_tmpl, &row, &item) {
-                            Some(props) => item.props.set(props),
-                            None => items.set_cloned(
-                                index,
-                                interpret(
-                                    &new_tmpl,
-                                    row,
-                                    space.get_cloned(),
-                                    item.occurrence().clone(),
-                                ),
-                            ),
-                        }
+                        pass.row(|new_tmpl| {
+                            inputs.interpreting(|parent_space| {
+                                match props_under_template(&interpret_fn, &new_tmpl, &row, &item) {
+                                    Some(props) => item.props.set(props),
+                                    None => items.set_cloned(
+                                        index,
+                                        interpret(
+                                            &new_tmpl,
+                                            row,
+                                            parent_space,
+                                            item.occurrence().clone(),
+                                        ),
+                                    ),
+                                }
+                            })
+                        });
                     }
+                    drop(items);
+                    pass.finish();
                 }
                 async {}
             })
@@ -2301,6 +2344,7 @@ impl ReactiveView {
         let sort_key = sort_key.clone();
         let tmpl = item_template.clone();
         let ds = data_source.clone();
+        let report = DriverReport::register(&ds, &services, "grouped");
         let svc = services;
         let rules: Vec<holon_api::render_types::RuleSpec> = rules.to_vec();
 
@@ -2442,7 +2486,7 @@ impl ReactiveView {
 
         let initial_rebuild = rebuild.clone();
 
-        let data_driver = ds.keyed_rows_signal_vec().for_each(move |diff| {
+        let data_driver = report.drive(ds.keyed_rows_signal_vec(), move |diff| {
             match diff {
                 VecDiff::Replace { values } => {
                     *entries.lock().unwrap() = values;
@@ -2481,7 +2525,6 @@ impl ReactiveView {
                 }
             }
             rebuild();
-            futures::future::ready(())
         });
 
         // Trigger an initial rebuild so the first render after `start()`
@@ -2597,6 +2640,357 @@ impl Drop for ReactiveView {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// A started collection driver's UI subscription: owed while its rows hold an
+/// engine batch the driver has not written into `items` yet.
+struct DriverReport(Option<DriverReportInner>);
+
+struct DriverReportInner {
+    delivery: Arc<holon_api::live_data::RowDelivery>,
+    subscription: crate::render_epoch::UiSubscription,
+    applied_batches: Arc<std::sync::atomic::AtomicU64>,
+    _batches_check: crate::render_epoch::UiCheck,
+}
+
+type DriverEvents<T> = std::pin::Pin<Box<dyn futures::Stream<Item = Option<VecDiff<T>>> + Send>>;
+
+impl DriverReport {
+    /// Registers synchronously, so a view started inside a frame or inside
+    /// another driver's pass is owed before that frame or pass ends.
+    fn register(
+        source: &Arc<dyn ReactiveRowProvider>,
+        services: &Arc<dyn crate::reactive::BuilderServices>,
+        driver: &str,
+    ) -> Self {
+        Self(
+            source
+                .delivery()
+                .zip(services.ui_watermark())
+                .map(|(delivery, watermark)| {
+                    let key = format!("{driver} driver of {}", delivery.label());
+                    let applied_batches = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let batches_check = {
+                        let delivery = delivery.clone();
+                        let applied_batches = applied_batches.clone();
+                        watermark.register_check(format!("batches of {key}"), move || {
+                            delivery.delivered_so_far().batches
+                                > applied_batches.load(std::sync::atomic::Ordering::Acquire)
+                        })
+                    };
+                    let subscription = watermark.register(key);
+                    delivery.attach(subscription.cursor());
+                    DriverReportInner {
+                        delivery,
+                        subscription,
+                        applied_batches,
+                        _batches_check: batches_check,
+                    }
+                }),
+        )
+    }
+
+    /// The key the driver's other inputs are owed under.
+    fn label(&self, driver: &str) -> String {
+        match &self.0 {
+            Some(inner) => format!("{driver} driver of {}", inner.delivery.label()),
+            None => format!("{driver} driver of rows with no engine batches"),
+        }
+    }
+
+    /// The row diffs as `Some`, and `None` after each delivered engine batch,
+    /// also one that changed no row.
+    fn events<T: Clone + Send + 'static>(
+        &self,
+        diffs: std::pin::Pin<Box<dyn futures_signals::signal_vec::SignalVec<Item = T> + Send>>,
+    ) -> DriverEvents<T> {
+        use futures::StreamExt as _;
+        let delivered: DriverEvents<T> = match &self.0 {
+            Some(inner) => Box::pin(inner.delivery.delivered_signal().to_stream().map(|_| None)),
+            None => Box::pin(futures::stream::pending()),
+        };
+        Box::pin(futures::stream::select(
+            diffs.to_stream().map(Some),
+            delivered,
+        ))
+    }
+
+    fn delivered_so_far(&self) -> holon_api::live_data::Delivered {
+        self.0
+            .as_ref()
+            .map_or_else(Default::default, |inner| inner.delivery.delivered_so_far())
+    }
+
+    /// Drain the queued events and return the batches to report. A batch's
+    /// row diffs are queued before it is counted, so the batches read before a
+    /// drain are in it; the drain can also take the notice of a later batch,
+    /// so that batch is drained and reported now, else nothing wakes the
+    /// driver for it.
+    fn drained_through(&self, mut drain: impl FnMut()) -> holon_api::live_data::Delivered {
+        let mut delivered = self.delivered_so_far();
+        loop {
+            drain();
+            match self.delivered_so_far() {
+                now if now == delivered => return delivered,
+                now => delivered = now,
+            }
+        }
+    }
+
+    fn applied(&self, delivered: holon_api::live_data::Delivered) {
+        if let Some(inner) = &self.0 {
+            inner.subscription.applied(delivered.seq);
+            inner
+                .applied_batches
+                .store(delivered.batches, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Apply every event as it comes, and report each drained batch.
+    async fn drive<T: Clone + Send + 'static>(
+        self,
+        diffs: std::pin::Pin<Box<dyn futures_signals::signal_vec::SignalVec<Item = T> + Send>>,
+        mut apply: impl FnMut(VecDiff<T>) + Send,
+    ) {
+        use futures::FutureExt as _;
+        use futures::StreamExt as _;
+        let mut events = self.events(diffs);
+        while let Some(first) = events.next().await {
+            first.into_iter().for_each(&mut apply);
+            let delivered = self.drained_through(|| {
+                while let Some(Some(event)) = events.next().now_or_never() {
+                    event.into_iter().for_each(&mut apply);
+                }
+            });
+            self.applied(delivered);
+        }
+    }
+}
+
+/// A driver input, such as the focused block, that the watermark owes until
+/// the driver re-interpreted its rows at the input's current generation.
+struct InputReport<T> {
+    input: Mutable<T>,
+    state: Arc<Mutex<InputState<T>>>,
+    _check: Option<crate::render_epoch::UiCheck>,
+}
+
+struct InputState<T> {
+    /// A private subscription: every write marks it changed, also a write
+    /// that sets the value back, so values never decide owed-ness.
+    writes: std::pin::Pin<Box<dyn futures_signals::signal::Signal<Item = ()> + Send>>,
+    /// Keeps `writes` from ending while a watermark check still holds this
+    /// state after the report dropped.
+    _input: Mutable<T>,
+    generation: u64,
+    /// The generation and value every shown row was interpreted at; `None`
+    /// while the rows were interpreted at different generations.
+    shown: Option<(u64, T)>,
+}
+
+/// What the shown rows were interpreted at, relative to the current
+/// generation.
+enum Shown<T> {
+    Current,
+    Stale(T),
+    Mixed,
+}
+
+impl<T> InputState<T> {
+    /// Each poll that finds a write since the last one bumps the generation,
+    /// so a value read between two equal generations is the current one.
+    fn generation(&mut self) -> u64 {
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        match self.writes.as_mut().poll_change(&mut cx) {
+            std::task::Poll::Ready(Some(())) => self.generation += 1,
+            std::task::Poll::Pending => {}
+            std::task::Poll::Ready(None) => unreachable!("the state holds the input"),
+        }
+        self.generation
+    }
+
+    fn shown_at(&self, generation: u64) -> Shown<T>
+    where
+        T: Clone,
+    {
+        match &self.shown {
+            Some((at, _)) if *at == generation => Shown::Current,
+            Some((_, value)) => Shown::Stale(value.clone()),
+            None => Shown::Mixed,
+        }
+    }
+
+    fn owed(&mut self) -> bool {
+        let generation = self.generation();
+        !matches!(&self.shown, Some((at, _)) if *at == generation)
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> InputReport<T> {
+    /// The rows are interpreted for the input's value at registration.
+    fn register(
+        input: &Mutable<T>,
+        services: &Arc<dyn crate::reactive::BuilderServices>,
+        key: String,
+    ) -> Self {
+        let mut state = InputState {
+            writes: Box::pin(input.signal_ref(|_| ())),
+            _input: input.clone(),
+            generation: 0,
+            shown: None,
+        };
+        let generation = state.generation();
+        state.shown = Some((generation, input.get_cloned()));
+        let state = Arc::new(Mutex::new(state));
+        let check = services.ui_watermark().map(|watermark| {
+            let state = state.clone();
+            watermark.register_check(key, move || state.lock().unwrap().owed())
+        });
+        Self {
+            input: input.clone(),
+            state,
+            _check: check,
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.state.lock().unwrap().generation()
+    }
+
+    fn owed(&self) -> bool {
+        self.state.lock().unwrap().owed()
+    }
+
+    /// The input was written: `rebuild` re-interprets every shown row (and
+    /// records the generation it used) when some row is owed.
+    fn emitted(&self, rows_shown: impl FnOnce() -> bool, rebuild: &dyn Fn()) {
+        if self.owed() {
+            if rows_shown() {
+                rebuild();
+            } else {
+                self.pass().finish();
+            }
+        }
+    }
+
+    /// Runs `interpret` for the input's current value and records its
+    /// generation for the rows it interpreted. Interpreters that read the
+    /// input themselves ignore the argument; a write while `interpret` runs
+    /// leaves the rows owed.
+    fn interpreting<R>(&self, interpret: impl FnOnce(T) -> R) -> R {
+        let before = self.generation();
+        let value = self.input.get_cloned();
+        let result = interpret(value.clone());
+        let mut state = self.state.lock().unwrap();
+        let unchanged = state.generation() == before;
+        let kept = matches!(&state.shown, Some((at, _)) if *at == before);
+        state.shown = (unchanged && kept).then_some((before, value));
+        result
+    }
+
+    /// A pass that re-interprets every shown row; see [`InputPass`].
+    fn pass(&self) -> InputPass<'_, T> {
+        let (start, shown) = {
+            let mut state = self.state.lock().unwrap();
+            let start = state.generation();
+            (start, state.shown_at(start))
+        };
+        InputPass {
+            report: self,
+            start,
+            value: self.input.get_cloned(),
+            shown,
+            consistent: true,
+        }
+    }
+}
+
+/// Re-interprets every shown row, each for the input's value at its own
+/// interpret. [`InputPass::finish`] records the start generation only when no
+/// write came during the pass, so a change and change back leaves rows owed.
+struct InputPass<'a, T: Clone> {
+    report: &'a InputReport<T>,
+    start: u64,
+    value: T,
+    /// The shown rows before the pass, relative to its start generation.
+    shown: Shown<T>,
+    consistent: bool,
+}
+
+impl<T: Clone + Send + Sync + 'static> InputPass<'_, T> {
+    fn row<R>(&mut self, interpret: impl FnOnce(T) -> R) -> R {
+        let before = self.report.generation();
+        let result = interpret(self.report.input.get_cloned());
+        self.consistent &= before == self.start && self.report.generation() == self.start;
+        result
+    }
+
+    /// Call after the rows are shown: until then the old rows are on screen.
+    fn finish(self) {
+        let mut state = self.report.state.lock().unwrap();
+        let consistent = self.consistent && state.generation() == self.start;
+        state.shown = consistent.then_some((self.start, self.value));
+    }
+}
+
+/// The inputs a flat driver interprets its rows for, besides the template
+/// (whose later rows use the creation template).
+struct FlatInputs {
+    space: InputReport<Option<AvailableSpace>>,
+    profiles: InputReport<Arc<holon_api::entity_profile::ProfileCache>>,
+    focus: Option<InputReport<Option<EntityUri>>>,
+}
+
+impl FlatInputs {
+    /// [`InputReport::interpreting`] for every input; `interpret` gets the
+    /// space.
+    fn interpreting<R>(&self, interpret: impl FnOnce(Option<AvailableSpace>) -> R) -> R {
+        self.space.interpreting(|space| {
+            self.profiles.interpreting(|_| match &self.focus {
+                Some(focus) => focus.interpreting(|_| interpret(space)),
+                None => interpret(space),
+            })
+        })
+    }
+
+    fn pass(&self) -> FlatPass<'_> {
+        FlatPass {
+            space: self.space.pass(),
+            profiles: self.profiles.pass(),
+            focus: self.focus.as_ref().map(InputReport::pass),
+        }
+    }
+}
+
+/// [`InputPass`] for every input of [`FlatInputs`].
+struct FlatPass<'a> {
+    space: InputPass<'a, Option<AvailableSpace>>,
+    profiles: InputPass<'a, Arc<holon_api::entity_profile::ProfileCache>>,
+    focus: Option<InputPass<'a, Option<EntityUri>>>,
+}
+
+impl FlatPass<'_> {
+    fn row<R>(&mut self, interpret: impl FnOnce(Option<AvailableSpace>) -> R) -> R {
+        let Self {
+            space,
+            profiles,
+            focus,
+        } = self;
+        space.row(|space| {
+            profiles.row(|_| match focus {
+                Some(focus) => focus.row(|_| interpret(space)),
+                None => interpret(space),
+            })
+        })
+    }
+
+    fn finish(self) {
+        self.space.finish();
+        self.profiles.finish();
+        if let Some(focus) = self.focus {
+            focus.finish();
+        }
+    }
+}
 
 /// Walk a ReactiveViewModel tree and start all ReactiveViews found within.
 pub fn start_reactive_views(

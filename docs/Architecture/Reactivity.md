@@ -23,7 +23,13 @@ Three refinements that make this precise:
    (`inv-org-render-fixed-point`, `inv-matview-consistent-with-recompute`).
    The engine owes nothing (`delivery_owed` is empty), and a GPUI frame's
    `RenderEpoch` reflects the emitted CDC seq; a hang deadline only turns a
-   missing signal into an error.
+   missing signal into an error. The hop from a provider's rows to a view's
+   items (a started `ReactiveView` driver on tokio) reports to the
+   `UiWatermark`: the tree, flat and grouped drivers owe each provider batch
+   (`RowDelivery`) until they wrote it; the tree and flat drivers owe a focus
+   change, and the flat driver a space, profile-cache or item-template
+   change, until they re-interpreted their rows for the input's current
+   value. `UiWatermark::owed()` names every such entry by key.
 2. **Applies to every derived holder, not just SQL matviews.** Turso matviews,
    `LiveData` mirrors, stream combinators, per-doc render caches
    (`render_with_cache`'s `doc_blocks`), UI row snapshots

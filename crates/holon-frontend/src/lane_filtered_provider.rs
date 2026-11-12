@@ -123,6 +123,10 @@ impl ReactiveRowProvider for LaneFilteredProvider {
         // upstream query's declared order.
         self.upstream.ordering_spec()
     }
+
+    fn delivery(&self) -> Option<Arc<holon_api::live_data::RowDelivery>> {
+        self.upstream.delivery()
+    }
 }
 
 #[cfg(test)]

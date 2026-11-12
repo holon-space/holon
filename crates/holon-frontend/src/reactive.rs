@@ -719,6 +719,12 @@ pub trait BuilderServices: Send + Sync {
     /// panic loudly (fail loud per CLAUDE.md) — never return a dummy handle.
     fn runtime_handle(&self) -> tokio::runtime::Handle;
 
+    /// The watermark a started collection driver reports to. `None` where no
+    /// window settles on it.
+    fn ui_watermark(&self) -> Option<Arc<crate::render_epoch::UiWatermark>> {
+        None
+    }
+
     /// Optional runtime handle — `Some` for live frontends with a tokio
     /// runtime, `None` for sync-only contexts (PBT reference model, shadow
     /// interpretation). Builders that spawn signal subscriptions to derive
@@ -1292,6 +1298,7 @@ pub struct ReactiveRenderedRows {
     /// rows AND discloses the degraded mode. Observable so the disclosure is
     /// testable headlessly and paintable as a banner.
     degraded: Mutable<Option<String>>,
+    delivery: Arc<holon_api::live_data::RowDelivery>,
 }
 
 impl Default for ReactiveRenderedRows {
@@ -1310,6 +1317,7 @@ impl ReactiveRenderedRows {
             render_expr: Mutable::new(loading_expr()),
             error: Mutable::new(None),
             expr_pending_restore: std::sync::Mutex::new(None),
+            delivery: Arc::new(holon_api::live_data::RowDelivery::new(label.clone())),
             rows: ReactiveRowSet::labeled(label),
             structure_ready: tokio::sync::Notify::new(),
             data_generation: std::sync::atomic::AtomicU64::new(0),
@@ -1318,6 +1326,12 @@ impl ReactiveRenderedRows {
             ordering_spec: std::sync::RwLock::new(None),
             degraded: Mutable::new(None),
         }
+    }
+
+    /// The rows hold engine batch `seq`: the collections built from them owe
+    /// it until their drivers wrote it.
+    pub fn delivered(&self, seq: u64) {
+        self.delivery.delivered(seq);
     }
 
     /// Disclose that this query is served by eager re-execution, not an
@@ -1743,6 +1757,9 @@ impl ReactiveRowProvider for ReactiveRenderedRows {
     }
     fn ordering_spec(&self) -> Option<String> {
         self.ordering_spec.read().unwrap().clone()
+    }
+    fn delivery(&self) -> Option<Arc<holon_api::live_data::RowDelivery>> {
+        Some(self.delivery.clone())
     }
 }
 
@@ -3618,6 +3635,7 @@ impl ReactiveEngine {
                         }
                         let seq = event.seq();
                         if reactive.apply_event(event) {
+                            reactive.delivered(seq);
                             subscription.applied(seq);
                         }
                         if bid.as_str() == "block:default-main-panel"
@@ -3869,6 +3887,7 @@ impl ReactiveEngine {
                                 for enriched_change in batch.inner.items {
                                     reactive.apply_change(enriched_change, 1);
                                 }
+                                reactive.delivered(seq);
                                 subscription.applied(seq);
                             }
                             return;
@@ -3876,6 +3895,8 @@ impl ReactiveEngine {
                         Err(e) if e.downcast_ref::<holon_api::QueryRefused>().is_some() => {
                             tracing::warn!("watch_query refused: {e:#}");
                             reactive.set_error(format!("query refused: {e:#}"));
+                            // No batch will come: the error is what the drivers show.
+                            reactive.delivered(0);
                             drop(subscription);
                             return;
                         }
@@ -4874,6 +4895,10 @@ impl BuilderServices for ReactiveEngine {
 
     fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.runtime_handle.clone()
+    }
+
+    fn ui_watermark(&self) -> Option<Arc<crate::render_epoch::UiWatermark>> {
+        Some(self.ui_watermark.clone())
     }
 
     fn list_templates(&self) -> Vec<crate::template_placement::TemplateChoice> {

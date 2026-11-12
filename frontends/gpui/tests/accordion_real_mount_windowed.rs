@@ -15,12 +15,14 @@
 //! the interpreter an `available_space` that production does not have yet at
 //! boot, so neither the mount seam nor frame one is observable there.
 //!
+//! Examples, not property tests: one boot costs seconds, and the input is the
+//! seeded app, not a drawn value.
+//!
 //! Run: `cargo nextest run -p holon-gpui --features holon-gpui/pbt
 //! --test main accordion_real_mount_windowed:: --no-fail-fast`
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -37,44 +39,44 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::windowed_wide::real_text_system;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::hold_tokio_workers;
+use crate::pbt_harness::settle::settle_window;
 
-/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
-/// pump until the element count is stable and no `"loading"` placeholders
-/// remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
+/// The engine settles before `tokio_hold`, so with the workers held the window
+/// settle alone must wait for the rows.
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
+    tokio_hold: Option<Duration>,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    let settled = match tokio_hold {
+        None => settle_window(
+            app,
+            bounds,
+            engine.ui_watermark(),
+            &mut || runtime.block_on(env.settle()),
+            HANG_DEADLINE,
+        ),
+        Some(hold) => {
+            runtime.block_on(env.settle());
+            hold_tokio_workers(runtime, hold);
+            settle_window(
+                app,
+                bounds,
+                engine.ui_watermark(),
+                &mut || {},
+                HANG_DEADLINE,
+            )
         }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len()
-    );
+    };
+    settled.unwrap_or_else(|e| panic!("window settle (tokio workers held: {tokio_hold:?}): {e}"));
 }
 
 /// Above both layout breakpoints — the width the dogfood pass called wide.
@@ -92,6 +94,10 @@ const EPS: f32 = 2.0;
 /// reference block below.
 const TARGET_PAGE_ID: &str = "accordion-refs-page";
 const TARGET_PAGE_TITLE: &str = "Accordion Refs Page";
+/// Longer than a settle of an idle window, so a row that reaches the window
+/// over a tokio task arrives after a settle that does not wait for it.
+const TOKIO_HOLD: Duration = Duration::from_millis(200);
+
 /// Reference blocks the backlinks query must return.
 const REF_COUNT: usize = 4;
 
@@ -160,7 +166,13 @@ fn census(bounds: &BoundsRegistry) -> String {
 
 /// Seed the store, THEN open the window: every rung below reads a frame that
 /// the app reached on its own, with no navigation performed against the window.
-fn with_seeded_window(window_size: &str, run: impl FnOnce(&BoundsRegistry)) {
+/// `tokio_hold` keeps every tokio worker busy before the settle, so the rows
+/// reach the window over a tokio hop that is slower than the settle.
+fn with_seeded_window(
+    window_size: &str,
+    tokio_hold: Option<Duration>,
+    run: impl FnOnce(&BoundsRegistry),
+) {
     // Read by `launch_holon_window_impl`; must be set before the window opens.
     // SAFETY: single-threaded test setup, before any window or runtime thread
     // reads the environment.
@@ -246,7 +258,7 @@ fn with_seeded_window(window_size: &str, run: impl FnOnce(&BoundsRegistry)) {
             )
         })
         .expect("window opened");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(120));
+    settle_frame(&app, &bounds, &runtime, &env, tokio_hold);
 
     run(&bounds);
 
@@ -264,7 +276,7 @@ fn with_seeded_window(window_size: &str, run: impl FnOnce(&BoundsRegistry)) {
 /// rest, has silently dropped the reader's data.
 #[test]
 fn every_backlink_the_query_returns_is_painted() {
-    with_seeded_window(DESKTOP_WINDOW, |bounds| {
+    with_seeded_window(DESKTOP_WINDOW, Some(TOKIO_HOLD), |bounds| {
         let rows = painted_ref_rows(bounds);
         let region_h = region_height(bounds);
         let cap = MAX_HEIGHT_FRACTION * DESKTOP_HEIGHT_PX;
@@ -304,7 +316,7 @@ fn every_backlink_the_query_returns_is_painted() {
 /// applied the rule to every frame except the one that matters.
 #[test]
 fn a_narrow_first_frame_starts_collapsed() {
-    with_seeded_window(PHONE_WINDOW, |bounds| {
+    with_seeded_window(PHONE_WINDOW, None, |bounds| {
         let rows = painted_ref_rows(bounds);
         assert!(
             rows.is_empty(),
@@ -324,7 +336,7 @@ fn a_narrow_first_frame_starts_collapsed() {
 /// the icon-font coverage sweep.
 #[test]
 fn the_header_paints_the_icon_through_the_icon_builder() {
-    with_seeded_window(DESKTOP_WINDOW, |bounds| {
+    with_seeded_window(DESKTOP_WINDOW, Some(TOKIO_HOLD), |bounds| {
         assert!(
             bounds
                 .find_by_entity_id("accordion-icon:Linked references")

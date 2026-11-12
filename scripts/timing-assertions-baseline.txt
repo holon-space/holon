@@ -108,6 +108,7 @@ crates/holon-app/tests/settings_ics_calendar_url_credential.rs	lower-bound	call.
 crates/holon-app/tests/stale_type_table_boots.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-app/tests/vault_file_delete_after_ingest.rs	liveness	assert!(start.elapsed() < DEADLINE, "the file was never ingested");
 crates/holon-frontend/tests/authored_builder_input_draws_error.rs	liveness	std::time::Instant::now() < deadline,
+crates/holon-frontend/tests/driver_settle_schedule.rs	liveness	Instant::now() < deadline,
 crates/holon-integration-tests/tests/boot_suite/boot_seed_outcome.rs	liveness	tokio::time::Instant::now() < deadline,
 crates/holon-integration-tests/tests/boot_suite/failed_ingest_disclosed_across_restarts.rs	liveness	started.elapsed() < holon_app::session::WRITEBACK_SETTLE_BUDGET,
 crates/holon-integration-tests/tests/boot_suite/journals_restart_survival.rs	liveness	std::time::Instant::now() < deadline,
