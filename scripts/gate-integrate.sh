@@ -199,7 +199,7 @@ pids=()
 for t in $(seq 1 $((${#TRACKS[@]} - 1))); do
   track_selected "$t" || { "$0" --track "$t" & pids+=($!); continue; }
   # A track of its own takes a slot of its own and writes its own job record.
-  env -u HOLON_BUILD_SLOT_HOLDER -u FLOW_JOB_STATUS -u FLOW_JOB_LOG FLOW_JOB_ID="${FLOW_JOB_ID:-$GATE}.track$t" GATE_SEAT_ASKED_AT="$(date +%s)" \
+  env -u HOLON_BUILD_SLOT_HOLDER -u FLOW_JOB_STATUS -u FLOW_JOB_LOG -u FLOW_JOB_TMPDIR FLOW_JOB_ID="${FLOW_JOB_ID:-$GATE}.track$t" GATE_SEAT_ASKED_AT="$(date +%s)" \
     ~/.claude/skills/orchestrator/scripts/with-build-slot.sh "$0" --track "$t" & pids+=($!)
 done
 fail="" red="" extra_red=""

@@ -3,8 +3,8 @@
 # throwaway jj repos, with `just` and `cargo` stubbed; nothing is built. Exit 0 = every case
 # behaves as specified.
 set -euo pipefail
-# Run as a flow job, the job's variables would reach the real slot script of a nested track, whose
-# end then removes the job's TMPDIR and writes into the real job registry.
+# Run as a flow job, the job's variables would reach the real slot script of a nested track, which
+# then writes into the real job registry.
 unset $(compgen -e | grep '^FLOW_')
 export GATE_DISK_FLOOR_GIB=0  # the disk guard is the host's, not under test
 
