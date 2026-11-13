@@ -432,6 +432,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `shrinker-capmap-trigger-passed`
 - `slot-reconcile-props-before-rebuild-under-load`
 - `slot-withdrawn-last-claim-no-retraction`
+- `snapshot-boot-restored-boot-timeout-under-load`
 - `span-probe-budget-count-off-by-one-load`
 - `span-trace-block-mirror-apply-unparented-under-load`
 - `split-doc-root-setup-org-sync-under-load`
