@@ -506,42 +506,41 @@ fn extract_locked_keys(traced: &TracedConfig<HolonConfig>) -> HashSet<PrefKey> {
 // Config persistence (runtime preference changes)
 // ---------------------------------------------------------------------------
 
-/// Save a single preference value to `holon.toml`, preserving all other keys.
-pub fn save_preference(config_dir: &Path, dotted_key: &str, value: toml::Value) -> Result<()> {
-    let path = config_dir.join("holon.toml");
-
-    let mut table: toml::Table = match std::fs::read_to_string(&path) {
-        Ok(content) => content
-            .parse::<toml::Table>()
-            .unwrap_or_else(|_| toml::Table::new()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-        Err(e) => return Err(e.into()),
-    };
-
-    let segments: Vec<&str> = dotted_key.split('.').collect();
-    let (parent_segments, leaf) = segments.split_at(segments.len() - 1);
-
-    let mut current = &mut table;
-    for &seg in parent_segments {
-        current = current
-            .entry(seg)
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-            .as_table_mut()
-            .unwrap_or_else(|| panic!("Expected table at '{seg}' in holon.toml"));
+/// Save the full HolonConfig to `holon.toml`. On wasm32, logs a visible
+/// warning and no-ops — config persistence is not supported.
+pub fn save_config(config_dir: &Path, config: &HolonConfig) -> Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (config_dir, config);
+        tracing::warn!(
+            "[HolonConfig] config save not supported on wasm32 — using in-memory config"
+        );
+        Ok(())
     }
-    current.insert(leaf[0].to_string(), value);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use anyhow::Context;
 
-    let content = toml::to_string_pretty(&table)?;
-    std::fs::write(&path, content)?;
-    Ok(())
+        let path = config_dir.join("holon.toml");
+        let content = toml::to_string_pretty(config)?;
+        holon_filesystem::fs_port::write_durable_blocking(&path, content.as_bytes())
+            .with_context(|| format!("Failed to write {}", path.display()))
+    }
 }
 
-/// Save the full HolonConfig to `holon.toml`.
-pub fn save_config(config_dir: &Path, config: &HolonConfig) -> Result<()> {
-    let path = config_dir.join("holon.toml");
-    let content = toml::to_string_pretty(config)?;
-    std::fs::write(&path, content)?;
-    Ok(())
+/// The table in `path`; a missing file is an empty table, a file that does not
+/// parse is an `Err` naming the path.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_table(path: &Path) -> Result<toml::Table> {
+    use anyhow::Context;
+
+    match std::fs::read_to_string(path) {
+        Ok(content) => content
+            .parse::<toml::Table>()
+            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
+        Err(e) => Err(e).with_context(|| format!("Failed to read {}", path.display())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -680,8 +679,10 @@ impl HolonConfig {
     }
 
     /// Save config to `{config_dir}/holon.toml`, preserving any keys not owned
-    /// by HolonConfig. On wasm32, logs a visible warning and no-ops —
-    /// config persistence is not supported.
+    /// by HolonConfig. A file that does not parse, or that holds a non-table
+    /// where the config writes a table, is an `Err` and stays untouched. On
+    /// wasm32, logs a visible warning and no-ops — config persistence is not
+    /// supported.
     ///
     /// Returns `Err` (never panics/aborts) when the config dir can't be created
     /// or the file can't be written — e.g. on Android when the config dir
@@ -703,15 +704,7 @@ impl HolonConfig {
 
             let path = config_dir.join("holon.toml");
 
-            let mut table: toml::Table = match std::fs::read_to_string(&path) {
-                Ok(content) => content
-                    .parse::<toml::Table>()
-                    .unwrap_or_else(|_| toml::Table::new()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-                Err(e) => {
-                    return Err(e).with_context(|| format!("Failed to read {}", path.display()));
-                }
-            };
+            let mut table = read_table(&path)?;
 
             let our_toml = toml::to_string_pretty(self).context("Failed to serialize config")?;
             let mut our_table: toml::Table = our_toml
@@ -724,6 +717,14 @@ impl HolonConfig {
             self.strip_secret_preferences(&mut our_table);
 
             for (k, v) in our_table {
+                if let (toml::Value::Table(_), Some(old)) = (&v, table.get(&k)) {
+                    anyhow::ensure!(
+                        old.is_table(),
+                        "{}: cannot set {k}: {k} is a {}, not a table",
+                        path.display(),
+                        old.type_str()
+                    );
+                }
                 table.insert(k, v);
             }
 
@@ -732,7 +733,7 @@ impl HolonConfig {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("Failed to create config dir {}", parent.display()))?;
             }
-            std::fs::write(&path, content)
+            holon_filesystem::fs_port::write_durable_blocking(&path, content.as_bytes())
                 .with_context(|| format!("Failed to write {}", path.display()))?;
             Ok(())
         }
@@ -826,17 +827,6 @@ mod tests {
         assert!(values.contains("ui.theme"));
     }
 
-    #[test]
-    fn save_preference_creates_nested_tables() {
-        let dir = tempfile::tempdir().unwrap();
-        save_preference(dir.path(), "vault.root", toml::Value::String("/org".into())).unwrap();
-
-        let content = std::fs::read_to_string(dir.path().join("holon.toml")).unwrap();
-        let table: toml::Table = content.parse().unwrap();
-        let vault = table["vault"].as_table().unwrap();
-        assert_eq!(vault["root"].as_str().unwrap(), "/org");
-    }
-
     /// A happy-path `save_runtime` persists and returns `Ok`.
     #[test]
     fn save_runtime_persists_and_returns_ok() {
@@ -882,18 +872,222 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_preference_preserves_existing_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let initial = "[ui]\ntheme = \"light\"\n";
-        std::fs::write(dir.path().join("holon.toml"), initial).unwrap();
+    mod save_runtime_pbt {
+        use proptest::prelude::*;
+        use proptest::test_runner::TestCaseError;
+        use proptest::test_runner::TestRunner;
 
-        save_preference(dir.path(), "vault.root", toml::Value::String("/org".into())).unwrap();
+        use super::*;
 
-        let content = std::fs::read_to_string(dir.path().join("holon.toml")).unwrap();
-        let table: toml::Table = content.parse().unwrap();
-        assert_eq!(table["ui"]["theme"].as_str().unwrap(), "light");
-        assert_eq!(table["vault"]["root"].as_str().unwrap(), "/org");
+        /// The top-level keys `HolonConfig` writes, so generated files collide
+        /// with the save, plus keys it never writes.
+        const KEYS: &[&str] = &[
+            "ui",
+            "vault",
+            "crdt",
+            "storage",
+            "mcp",
+            "hooks",
+            "preferences",
+            "db_path",
+            "theme",
+            "root",
+        ];
+
+        fn key() -> impl Strategy<Value = String> {
+            prop_oneof![
+                proptest::sample::select(KEYS).prop_map(String::from),
+                "[a-z._ \"-]{0,3}",
+            ]
+        }
+
+        fn value() -> impl Strategy<Value = toml::Value> {
+            let leaf = prop_oneof![
+                "[a-z \"\\\\\n]{0,4}".prop_map(toml::Value::String),
+                any::<i64>().prop_map(toml::Value::Integer),
+                any::<bool>().prop_map(toml::Value::Boolean),
+                // NaN is left out: NaN != NaN, so `Value` equality cannot judge it.
+                (proptest::num::f64::NORMAL
+                    | proptest::num::f64::SUBNORMAL
+                    | proptest::num::f64::ZERO
+                    | proptest::num::f64::INFINITE)
+                    .prop_map(toml::Value::Float),
+                proptest::sample::select(
+                    &[
+                        "1979-05-27T07:32:00Z",
+                        "1979-05-27T00:32:00.999999-07:00",
+                        "1979-05-27T07:32:00",
+                        "1979-05-27",
+                        "07:32:00",
+                    ][..]
+                )
+                .prop_map(|d| toml::Value::Datetime(d.parse().unwrap())),
+            ];
+            leaf.prop_recursive(3, 24, 4, |inner| {
+                prop_oneof![
+                    proptest::collection::vec(inner.clone(), 0..3).prop_map(toml::Value::Array),
+                    proptest::collection::btree_map(key(), inner, 0..4)
+                        .prop_map(|m| toml::Value::Table(m.into_iter().collect())),
+                ]
+            })
+        }
+
+        fn table() -> impl Strategy<Value = toml::Table> {
+            proptest::collection::btree_map(key(), value(), 0..6)
+                .prop_map(|m| m.into_iter().collect())
+        }
+
+        /// The bytes of `holon.toml` before the save; `None` is a missing file.
+        fn file_before() -> impl Strategy<Value = Option<Vec<u8>>> {
+            let rendered = table()
+                .prop_map(|t| toml::to_string_pretty(&t).unwrap())
+                .boxed();
+            prop_oneof![
+                Just(None),
+                rendered.clone().prop_map(|s| Some(s.into_bytes())),
+                (
+                    rendered.clone(),
+                    proptest::sample::select(&["\n[", "\n= =", "\nbroken ="][..])
+                )
+                    .prop_map(|(s, stray)| Some(format!("{s}{stray}").into_bytes())),
+                rendered.prop_map(|s| {
+                    let mut bytes = s.into_bytes();
+                    bytes.push(0xff);
+                    Some(bytes)
+                }),
+            ]
+        }
+
+        fn config() -> impl Strategy<Value = HolonConfig> {
+            (
+                proptest::option::of("[a-z]{1,5}"),
+                proptest::option::of("/[a-z]{1,4}"),
+                proptest::option::of("/[a-z]{1,4}"),
+                proptest::collection::hash_map(
+                    proptest::sample::select(&["ui.theme", "x.y", "a"][..]),
+                    value(),
+                    0..3,
+                ),
+                proptest::sample::subsequence(&["ui.theme", "x.y", "a"][..], 0..=3),
+            )
+                .prop_map(|(theme, root, db, prefs, secrets)| HolonConfig {
+                    ui: UiConfig {
+                        theme,
+                        ..Default::default()
+                    },
+                    vault: VaultConfig {
+                        root: root.map(PathBuf::from),
+                    },
+                    db_path: db.map(PathBuf::from),
+                    preferences: prefs
+                        .into_iter()
+                        .map(|(k, v)| (PrefKey::new(k), v))
+                        .collect(),
+                    secret_keys: secrets.into_iter().map(PrefKey::new).collect(),
+                    ..Default::default()
+                })
+        }
+
+        /// `Ok`: every top-level key the save does not set keeps its value and
+        /// every key it sets holds the config's value. `Err`: the file is
+        /// byte-identical and the message names the path.
+        fn check_save(before: Option<&[u8]>, config: &HolonConfig) -> Result<(), String> {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("holon.toml");
+            if let Some(bytes) = before {
+                std::fs::write(&path, bytes).unwrap();
+            }
+            let mut ours: toml::Table = toml::to_string_pretty(config).unwrap().parse().unwrap();
+            if let Some(toml::Value::Table(prefs)) = ours.get_mut("preferences") {
+                prefs.retain(|k, _| !config.is_secret_preference(&PrefKey::new(k)));
+            }
+
+            let parse_error = before.and_then(|bytes| match std::str::from_utf8(bytes) {
+                Ok(text) => text
+                    .parse::<toml::Table>()
+                    .err()
+                    .map(|e| e.message().to_string()),
+                Err(_) => Some(String::new()),
+            });
+            let expected = match (before, &parse_error) {
+                (None, _) => Some(ours.clone()),
+                (Some(_), Some(_)) => None,
+                (Some(bytes), None) => {
+                    let mut table: toml::Table =
+                        std::str::from_utf8(bytes).unwrap().parse().unwrap();
+                    let collides = ours.iter().any(|(k, v)| {
+                        v.is_table() && table.get(k).is_some_and(|old| !old.is_table())
+                    });
+                    (!collides).then(|| {
+                        table.extend(ours.clone());
+                        table
+                    })
+                }
+            };
+
+            match (expected, config.save_runtime(dir.path())) {
+                (Some(expected), Ok(())) => {
+                    let after: toml::Table = std::fs::read_to_string(&path)
+                        .unwrap()
+                        .parse()
+                        .map_err(|e| format!("saved file does not parse: {e}"))?;
+                    if after != expected {
+                        return Err(format!("after save:\n{after:#?}\nexpected:\n{expected:#?}"));
+                    }
+                }
+                (None, Err(e)) => {
+                    let after = std::fs::read(&path).unwrap();
+                    if Some(after.as_slice()) != before {
+                        return Err(format!("refused save changed the file: {e:#}"));
+                    }
+                    let message = format!("{e:#}");
+                    if !message.contains(&path.display().to_string()) {
+                        return Err(format!("error does not name the path: {message}"));
+                    }
+                    if let Some(toml_message) = parse_error.filter(|m| !m.is_empty()) {
+                        if !message.contains(&toml_message) {
+                            return Err(format!(
+                                "error does not carry the toml message {toml_message:?}: {message}"
+                            ));
+                        }
+                    }
+                }
+                (expected, actual) => {
+                    return Err(format!(
+                        "expected {}, got {actual:?}",
+                        if expected.is_some() { "Ok" } else { "Err" }
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn save_keeps_every_key_it_does_not_set_or_refuses_without_writing() {
+            let theme = |t: &str| HolonConfig {
+                ui: UiConfig {
+                    theme: Some(t.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let static_cases: [(&[u8], HolonConfig); 2] = [
+                (b"[ui]\ntheme = \"x\"\nbroken =", theme("y")),
+                (b"ui = \"x\"\n\n[vault]\nroot = \"/org\"\n", theme("y")),
+            ];
+            for (before, config) in &static_cases {
+                if let Err(e) = check_save(Some(before), config) {
+                    panic!("static case {:?}: {e}", String::from_utf8_lossy(before));
+                }
+            }
+
+            let mut runner = TestRunner::default();
+            if let Err(e) = runner.run(&(file_before(), config()), |(before, config)| {
+                check_save(before.as_deref(), &config).map_err(TestCaseError::fail)
+            }) {
+                panic!("{e}");
+            }
+        }
     }
 
     #[test]
