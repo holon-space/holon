@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -52,44 +51,25 @@ use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+use crate::pbt_harness::settle::settle_window_until;
 
-/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
-/// pump until the element count is stable and no `"loading"` placeholders
-/// remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
+/// Settle until `delivered` holds: the banner and the toasts reach the window
+/// from the degraded bus, a hop the watermark does not count.
+fn settle_until(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
-    runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    delivered: &dyn Fn(&BoundsRegistry) -> bool,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len()
-    );
+    settle_window_until(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        delivered,
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 /// The archived content this device wrote before the pair: a page and a note
@@ -315,7 +295,14 @@ fn the_window_paints_the_deferred_reimport_banner_and_its_retry_completes_the_pa
         .expect("window opened over the booted session");
     let window = rebind.window();
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_window(
+        &app,
+        &bounds,
+        engine.ui_watermark(),
+        &mut || {},
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 
     assert!(
         bounds.element_info(DEFERRED_REIMPORT_BANNER).is_none(),
@@ -341,7 +328,9 @@ fn the_window_paints_the_deferred_reimport_banner_and_its_retry_completes_the_pa
     };
     assert_eq!(orphans.len(), OWED_BLOCKS, "owed: {orphans:?}");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_until(&app, &bounds, &engine, &|b| {
+        b.element_info(DEFERRED_REIMPORT_RETRY).is_some()
+    });
 
     let texts = painted_texts(&bounds);
     let banner = bounds.element_info(DEFERRED_REIMPORT_BANNER).unwrap_or_else(|| {
@@ -407,7 +396,10 @@ fn the_window_paints_the_deferred_reimport_banner_and_its_retry_completes_the_pa
     // standing and say why — a banner that clears on a refusal would tell the
     // user their blocks arrived when they did not.
     click_at(&mut app, window, center_of(&retry), "Retry re-import");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_until(&app, &bounds, &engine, &|b| {
+        let toasts = tracked_text(b, DEGRADED_TOAST_STACK);
+        toasts.contains(OWED_PAGE) && toasts.contains(OWED_NOTE)
+    });
     assert!(
         bounds.element_info(DEFERRED_REIMPORT_BANNER).is_some(),
         "the blocks still have no parent, so the banner must survive the press"
@@ -449,7 +441,9 @@ fn the_window_paints_the_deferred_reimport_banner_and_its_retry_completes_the_pa
         center_of(&retry),
         "Retry re-import (satisfiable)",
     );
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_until(&app, &bounds, &engine, &|b| {
+        b.element_info(DEFERRED_REIMPORT_BANNER).is_none()
+    });
 
     assert!(
         holon_loro::pairing_swap::read_marker(&store_dir)

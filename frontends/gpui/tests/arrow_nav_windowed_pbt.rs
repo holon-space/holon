@@ -38,13 +38,13 @@
 //! (`bubble_input -> None`), so the neighbour assertion fails. GREEN once the
 //! shell shares the ambient `ctx.nav`.
 //!
-//! ⚠ `--test-threads=1` mandatory: gpui `TestApp` is not parallel-safe. A fresh
-//! window is booted per case (≈15s), so the case budget is small (default 4,
-//! override `PROPTEST_CASES`), mirroring `gpui_composed_windowed_loop.rs`.
+//! ⚠ `--test-threads=1` mandatory: gpui `HeadlessAppContext` is not
+//! parallel-safe. A fresh window is booted per case (≈15s), so the case budget
+//! is small (default 4, override `PROPTEST_CASES`), mirroring
+//! `gpui_composed_windowed_loop.rs`.
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -64,6 +64,7 @@ use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
@@ -71,34 +72,19 @@ fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
 
 static ONE_WINDOWED_APP_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        futures::executor::block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    futures::executor::block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+fn settle_frame(app: &HeadlessAppContext, bounds: &BoundsRegistry, env: &TestEnvironment) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || futures::executor::block_on(env.settle()),
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 /// The `entity_id`s of every `editable_text` the last painted frame reports as
@@ -207,26 +193,19 @@ fn drive_case(start: usize, steps: u32) -> Result<(), String> {
         })
         .expect("window opened");
 
-    // Boot barrier: both rows must paint before any gesture.
-    let boot_deadline = Instant::now() + Duration::from_secs(180);
-    loop {
-        settle(&mut app, &bounds, Duration::from_secs(30));
-        let painted = |id: &str| {
-            let el = format!("block:{id}");
-            bounds
-                .all_elements()
-                .iter()
-                .any(|(_, info)| info.entity_id.as_deref() == Some(el.as_str()))
-        };
-        if painted(&first_id) && painted(&second_id) {
-            break;
-        }
-        if Instant::now() >= boot_deadline {
-            return Err(format!(
-                "boot: both rows must paint within 180s (elements={})",
-                bounds.all_elements().len()
-            ));
-        }
+    settle_frame(&app, &bounds, &env);
+    let painted = |id: &str| {
+        let el = format!("block:{id}");
+        bounds
+            .all_elements()
+            .iter()
+            .any(|(_, info)| info.entity_id.as_deref() == Some(el.as_str()))
+    };
+    if !(painted(&first_id) && painted(&second_id)) {
+        return Err(format!(
+            "boot: both rows must paint before any gesture (elements={})",
+            bounds.all_elements().len()
+        ));
     }
 
     let interaction_tx = debug_services
@@ -253,7 +232,7 @@ fn drive_case(start: usize, steps: u32) -> Result<(), String> {
         // focused editor (engine focus AND the painted caret).
         futures::executor::block_on(driver.click_entity(&uri(start), "main"))
             .map_err(|e| format!("click start row {start}: {e}"))?;
-        settle(&mut app, &bounds, Duration::from_secs(30));
+        settle_frame(&app, &bounds, &env);
         if engine.focused_block() != Some(uri(start)) {
             return Err(format!(
                 "precondition: click must focus start row {start} ({}), engine has {:?}",
@@ -273,7 +252,7 @@ fn drive_case(start: usize, steps: u32) -> Result<(), String> {
 
             futures::executor::block_on(driver.send_raw_keystroke("home", &[]))
                 .map_err(|e| format!("step {step}: home: {e}"))?;
-            settle(&mut app, &bounds, Duration::from_secs(30));
+            settle_frame(&app, &bounds, &env);
 
             let key = match dir {
                 Dir::Up => "up",
@@ -281,7 +260,7 @@ fn drive_case(start: usize, steps: u32) -> Result<(), String> {
             };
             futures::executor::block_on(driver.send_raw_keystroke(key, &[]))
                 .map_err(|e| format!("step {step}: {key}: {e}"))?;
-            settle(&mut app, &bounds, Duration::from_secs(30));
+            settle_frame(&app, &bounds, &env);
 
             if engine.focused_block() != Some(uri(expected)) {
                 return Err(format!(

@@ -17,7 +17,6 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -44,45 +43,30 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Same cross-runtime fixed-point settle the other TestPlatform tests use.
-fn settle(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
     runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    env: &TestEnvironment,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    runtime.block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 }
 
 /// The chord the app publishes for `action`, in the wire vocabulary
@@ -167,18 +151,11 @@ impl Fixture {
             .expect("window opened");
 
         let target_element = format!("block:{CHORD_TARGET_ID}");
-        let boot_deadline = Instant::now() + Duration::from_secs(180);
-        let mut painted = false;
-        while Instant::now() < boot_deadline {
-            settle(&mut app, &bounds, &runtime, Duration::from_secs(30));
-            painted = bounds
-                .all_elements()
-                .iter()
-                .any(|(_, info)| info.entity_id.as_deref() == Some(target_element.as_str()));
-            if painted {
-                break;
-            }
-        }
+        settle_frame(&app, &bounds, &runtime, &env);
+        let painted = bounds
+            .all_elements()
+            .iter()
+            .any(|(_, info)| info.entity_id.as_deref() == Some(target_element.as_str()));
         assert!(
             painted,
             "boot precondition: the target row must paint before quick-open is opened"
@@ -218,12 +195,7 @@ impl Fixture {
     }
 
     fn settle(&mut self) {
-        settle(
-            &mut self.app,
-            &self.bounds,
-            &self.runtime,
-            Duration::from_secs(30),
-        );
+        settle_frame(&self.app, &self.bounds, &self.runtime, &self._env);
     }
 
     /// Seat both focus authorities on the chord-target row and prove it.

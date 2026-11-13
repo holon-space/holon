@@ -28,7 +28,8 @@ fn real_text_system() -> Arc<dyn PlatformTextSystem> {
 }
 
 /// Pump until the element count is stable and no `"loading"` placeholders
-/// remain.
+/// remain. `settle_window` does not settle after an engine rebind: a CDC demux
+/// of the rebound database stops routing, so its watermark stays below emitted.
 fn settle_to_fixed_point(
     app: &mut TestApp,
     bounds: &BoundsRegistry,

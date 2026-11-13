@@ -17,7 +17,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -35,45 +34,8 @@ use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 
 use crate::pbt_harness;
-
-/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
-/// pump until the element count is stable and no `"loading"` placeholders
-/// remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
-    bounds: &BoundsRegistry,
-    runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
-) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len()
-    );
-}
+use crate::pbt_harness::settle::settle_window;
+use crate::pbt_harness::settle::settle_window_until;
 
 const WINDOW: &str = "1512x900";
 const WINDOW_W: f32 = 1512.0;
@@ -141,7 +103,14 @@ fn every_pairing_toast_line_is_inside_the_window() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_window(
+        &app,
+        &bounds,
+        engine.ui_watermark(),
+        &mut || {},
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 
     // The disclosure a real pair raises (`device_pairing_op`), carried over the
     // session's own bus so the toast is built by the production bridge.
@@ -154,7 +123,25 @@ fn every_pairing_toast_line_is_inside_the_window() {
         },
     });
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    let query = holon_loro::device_pairing_op::conflict_copies_query();
+    // The bus condition reaches the toast stack over a tokio hop the watermark does
+    // not count.
+    settle_window_until(
+        &app,
+        &bounds,
+        engine.ui_watermark(),
+        &|b| {
+            b.all_elements().iter().any(|(id, info)| {
+                id.starts_with(TOAST_LINE)
+                    && info
+                        .displayed_text
+                        .as_deref()
+                        .is_some_and(|t| t.contains(&query))
+            })
+        },
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
 
     let lines: Vec<(String, ElementInfo)> = bounds
         .all_elements()
@@ -168,7 +155,6 @@ fn every_pairing_toast_line_is_inside_the_window() {
     std::mem::forget(app);
     std::mem::forget(bundle);
 
-    let query = holon_loro::device_pairing_op::conflict_copies_query();
     let painted: Vec<String> = lines
         .iter()
         .filter_map(|(_, i)| i.displayed_text.as_deref().map(str::to_string))

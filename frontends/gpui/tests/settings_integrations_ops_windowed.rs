@@ -19,7 +19,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -38,44 +37,38 @@ use holon_pbt_core::ComponentSet;
 use pbt_harness::windowed_wide::real_text_system;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::settle_window;
+use crate::pbt_harness::settle::settle_window_until;
 
-/// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):
-/// pump until the element count is stable and no `"loading"` placeholders
-/// remain.
-fn settle_to_fixed_point(
-    app: &mut HeadlessAppContext,
+fn settle_frame(
+    app: &HeadlessAppContext,
     bounds: &BoundsRegistry,
-    runtime: &tokio::runtime::Runtime,
-    timeout: Duration,
+    engine: &holon_frontend::reactive::ReactiveEngine,
+    deadline: Duration,
 ) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let elements = bounds.all_elements();
-        let count = elements.len();
-        let still_loading = elements
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                return;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
-    }
-    panic!(
-        "window never reached a fixed point within {timeout:?}: {} elements",
-        bounds.all_elements().len()
-    );
+    settle_window(app, bounds, engine.ui_watermark(), &mut || {}, deadline)
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
+
+/// The `configure_progress` the projector wrote onto gcal's mirror row.
+fn gcal_configure_progress(
+    runtime: &tokio::runtime::Runtime,
+    db: &holon::storage::DbHandle,
+) -> String {
+    runtime.block_on(async {
+        db.query(
+            "SELECT provider_name, configure_progress FROM integration_state",
+            Default::default(),
+        )
+        .await
+        .expect("read the mirror")
+        .iter()
+        .find(|r| r.get("provider_name").and_then(|v| v.as_string()) == Some("gcal"))
+        .and_then(|r| r.get("configure_progress"))
+        .and_then(|v| v.as_string())
+        .unwrap_or_default()
+        .to_string()
+    })
 }
 
 /// The toolbar affordance that opens Settings. The modal has no command and no
@@ -320,7 +313,7 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
         })
         .expect("window opened over the booted session");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     assert!(
         painted_op_buttons(&bounds).is_empty(),
@@ -342,7 +335,7 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
     let window = rebind.window();
     click_at(&mut app, window, center_of(&gear), "gear");
 
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
     let painted = painted_op_buttons(&bounds);
     let census = painted_widget_census(&bounds);
@@ -444,28 +437,19 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
         .expect("full_headless -> a Turso engine")
         .db_handle()
         .clone();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut progress = String::new();
-    while Instant::now() < deadline {
-        settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(2));
-        progress = runtime.block_on(async {
-            db.query(
-                "SELECT provider_name, configure_progress FROM integration_state",
-                Default::default(),
-            )
-            .await
-            .expect("read the mirror")
-            .iter()
-            .find(|r| r.get("provider_name").and_then(|v| v.as_string()) == Some("gcal"))
-            .and_then(|r| r.get("configure_progress"))
-            .and_then(|v| v.as_string())
-            .unwrap_or_default()
-            .to_string()
-        });
-        if !progress.is_empty() {
-            break;
-        }
-    }
+    // The DB write of the consent flow is a hop the watermark does not count.
+    settle_window_until(
+        &app,
+        &bounds,
+        engine.ui_watermark(),
+        &|_| !gcal_configure_progress(&runtime, &db).is_empty(),
+        Duration::from_secs(20),
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
+    // The write may land after the settle above; its seq is one the watermark
+    // counts.
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
+    let progress = gcal_configure_progress(&runtime, &db);
     let withdrew = bounds.element_info(GCAL_CONFIGURE).is_none();
 
     // Close and reopen the modal, which re-interprets the section from scratch.
@@ -476,12 +460,12 @@ fn the_settings_modal_paints_the_integration_rows_operations() {
         .element_info(SETTINGS_GEAR)
         .expect("the gear is still painted");
     click_at(&mut app, window, center_of(&gear), "gear (close)");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(5));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(5));
     let gear = bounds
         .element_info(SETTINGS_GEAR)
         .expect("the gear is still painted");
     click_at(&mut app, window, center_of(&gear), "gear (reopen)");
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(5));
+    settle_frame(&app, &bounds, &engine, Duration::from_secs(5));
     let withdrew_on_reopen = bounds.element_info(GCAL_CONFIGURE).is_none();
 
     // Teardown BEFORE the assertions so a red does not also trip the gpui leak
