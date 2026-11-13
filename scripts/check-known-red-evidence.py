@@ -33,11 +33,18 @@ crates/holon-integration-tests/hand-authored-regressions/*.jsonl) whose
 `known_red` key names no `known-red` row of the default registry: the
 classifier accepts that case's panic only against the named row.
 
+The default run also reads every run record (a line of a
+docs/Testing/known-red-evidence/<row key>/gate-load-runs.tsv) and fails each
+whose `log` cell does not name a committed file in that row's evidence
+directory: a rate verdict over runs whose logs never landed is no evidence. A
+`lost:` cell is no exception. Finding no gate-load-runs.tsv at all fails too.
+
 A registry table whose header ends in `Companions` gives each row a last cell
 of `—` or a code span of comma-separated invariant ids, `inv-x/*` naming every
 view of `inv-x`. A `known-red` row must sit in such a table.
 """
 
+import csv
 import functools
 import json
 import os
@@ -46,12 +53,15 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "flow-checks"))
 import known_reds_table  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRIES = [REPO / "docs/Testing/KeystoneKnownReds.md"]
+EVIDENCE_ROOT = Path("docs/Testing/known-red-evidence")
+RUN_RECORD_COLUMNS = ("test", "job", "started", "log")
 DEFAULT_CASE_FILES = sorted((REPO / "crates/holon-integration-tests/hand-authored-regressions").glob("*.jsonl"))
 
 EVIDENCE_SUFFIXES = (".log", ".zst", ".txt", ".jsonl", ".json", ".md")
@@ -92,12 +102,14 @@ def code_spans(line):
         i = close_at + n
 
 
+def is_scratch(path):
+    return path.startswith(SCRATCH_ROOTS) or bool(SCRATCH_DIRS & set(path.split("/")))
+
+
 def is_evidence(path):
     if NOT_A_PATH.search(path) or "/" not in path or not re.search(r"[A-Za-z0-9]", path):
         return False
-    if path.startswith(SCRATCH_ROOTS) or SCRATCH_DIRS & set(path.split("/")):
-        return True
-    return path.endswith(EVIDENCE_SUFFIXES)
+    return is_scratch(path) or path.endswith(EVIDENCE_SUFFIXES)
 
 
 def wanted_lines(spec):
@@ -240,6 +252,69 @@ def row_key_failures(registry, case_files):
     return failures
 
 
+class RunRecord(NamedTuple):
+    file: Path
+    lineno: int
+    test: str
+    job: str
+    started: str
+    log: str
+
+
+def run_records(tsv):
+    """Parse one gate-load-runs.tsv into RunRecords. Raise on a line whose column count differs from the header's."""
+    with tsv.open(newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        missing = [c for c in RUN_RECORD_COLUMNS if c not in (reader.fieldnames or [])]
+        if missing:
+            return missing, []
+        records = []
+        for row in reader:
+            if None in row or None in row.values():
+                raise ValueError(f"{tsv}:{reader.line_num}: a run record's cell count differs from the header's"
+                                 f" {len(reader.fieldnames)}")
+            records.append(RunRecord(tsv, reader.line_num, row["test"], row["job"], row["started"], row["log"]))
+    return [], records
+
+
+def check_run_records(evidence_root):
+    """One line per run record under `evidence_root` whose `log` is not a committed file in its row's evidence
+    directory, per gate-load-runs.tsv without a needed column, and one when there is no gate-load-runs.tsv at all."""
+    failures = []
+    count = 0
+    tsvs = sorted(evidence_root.glob("*/gate-load-runs.tsv"))
+    for tsv in tsvs:
+        where = tsv.relative_to(REPO) if tsv.is_relative_to(REPO) else tsv
+        row_key = tsv.parent.name
+        missing, records = run_records(tsv)
+        if missing:
+            failures.append(f"{where} [{row_key}] has no column {', '.join(missing)}")
+        count += len(records)
+        for r in records:
+            reason = run_log_failure(r.log, EVIDENCE_ROOT / row_key)
+            if reason:
+                failures.append(f"{where}:{r.lineno} [{row_key}] record {r.test} {r.job} {r.started}: log `{r.log}` {reason}")
+    print(f"[known-red-evidence] read {count} run record(s) from {len(tsvs)} gate-load-runs.tsv under {evidence_root}")
+    if not tsvs:
+        failures.append(f"{evidence_root} holds no */gate-load-runs.tsv")
+    return failures
+
+
+def run_log_failure(log, row_dir):
+    """Return the reason a run record's `log` is no committed file in `row_dir`, or None."""
+    if not log:
+        return "is empty"
+    if Path(log).expanduser().is_absolute():
+        return "is not a repo-relative path"
+    # shortcut: a log that the working copy holds but no commit yet counts as committed; the gate runs on the landed tree.
+    reason = check_citation(log, None, None)
+    if reason:
+        return f"{reason}: it cites a scratch location" if is_scratch(log) else reason
+    if Path(log).parent != row_dir:
+        return f"is not beside the record (expected in {row_dir}/)"
+    return None
+
+
 def self_check():
     companions_header = f"| {' | '.join(known_reds_table.HEADER)} |\n|{' --- |' * len(known_reds_table.HEADER)}\n"
     known_red = "| `k` | known-red | `p` | — | sig | ev | — | — |"
@@ -260,19 +335,54 @@ def self_check():
         "a row under a changed registry header": (f"{companions_header.replace('| Key |', '| **Key** |')}{known_red.replace('known-red', 'proposed')} — |", 1),
         "a table without registry columns": ("| Run | Summary line |\n| --- | --- |\n| r1 | `639 tests run` |", 0),
     }
-    ignored = REPO / "target/known-red-evidence-probe.log"
-    ignored.parent.mkdir(exist_ok=True)
-    ignored.write_text("probe\n")
+    good_key = Path(good).parent.name
+    untracked = f"{EVIDENCE_ROOT}/{good_key}/known-red-evidence-probe.log"
+    header = "\t".join(RUN_RECORD_COLUMNS)
+    record = "t\tj\t2026-01-01T00:00:00Z"
+    record_key = "t j 2026-01-01T00:00:00Z"
+    run_cases = {
+        "a record whose log is committed": (f"{header}\n{record}\t{good}", 0, []),
+        "a record whose log is missing": (f"{header}\n{record}\t{EVIDENCE_ROOT}/{good_key}/gone.log.zst", 1,
+                                          [record_key, f"{EVIDENCE_ROOT}/{good_key}/gone.log.zst"]),
+        "a record whose log is under target/": (f"{header}\n{record}\ttarget/known-red-evidence-probe.log", 1,
+                                                [record_key, "target/known-red-evidence-probe.log", "scratch"]),
+        "a record whose log is untracked": (f"{header}\n{record}\t{untracked}", 1, [record_key, untracked, "never lands"]),
+        "a record whose log is outside the repository": (f"{header}\n{record}\t/tmp/x.log.zst", 1, [record_key, "/tmp/x.log.zst"]),
+        "a record whose log is not beside it": (f"{header}\n{record}\tdocs/Testing/KeystoneKnownReds.md", 1,
+                                                [record_key, "docs/Testing/KeystoneKnownReds.md", "beside"]),
+        "a record with an empty log cell": (f"{header}\n{record}\t", 1, [record_key, "is empty"]),
+        "a record whose log is lost": (f"{header}\n{record}\tlost:{good}", 1, [record_key, f"lost:{good}"]),
+        "a run record file without a log column": (f"{header.replace('log', 'logfile')}\n{record}\t{good}", 1,
+                                                   ["gate-load-runs.tsv", "no column log"]),
+    }
+    probes = [REPO / "target/known-red-evidence-probe.log", REPO / untracked]
     wrong = []
-    with tempfile.TemporaryDirectory() as tmp:
-        for name, (row, want) in cases.items():
-            registry = Path(tmp) / "registry.md"
-            registry.write_text(row + "\n")
-            got = len(lint(registry))
-            print(f"[known-red-evidence] self-check {name}: {got} failure(s), expected {want}")
-            if got != want:
-                wrong.append(name)
-    ignored.unlink()
+    try:
+        for probe in probes:
+            probe.parent.mkdir(exist_ok=True)
+            probe.write_text("probe\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (row, want) in cases.items():
+                registry = Path(tmp) / "registry.md"
+                registry.write_text(row + "\n")
+                got = len(lint(registry))
+                print(f"[known-red-evidence] self-check {name}: {got} failure(s), expected {want}")
+                if got != want:
+                    wrong.append(name)
+        for name, (tsv, want, needles) in run_cases.items():
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / good_key).mkdir()
+                (Path(tmp) / good_key / "gate-load-runs.tsv").write_text(tsv + "\n")
+                failures = check_run_records(Path(tmp))
+            lacking = [n for f in failures for n in needles if n not in f]
+            print(f"[known-red-evidence] self-check {name}: {len(failures)} failure(s), expected {want}")
+            for f in failures:
+                print(f"[known-red-evidence]   {f}")
+            if len(failures) != want or lacking:
+                wrong.append(name + (f" (failure line lacks {', '.join(lacking)})" if lacking else ""))
+    finally:
+        for probe in probes:
+            probe.unlink(missing_ok=True)
     return wrong
 
 
@@ -303,14 +413,15 @@ def main(argv):
         failures += lint(registry)
     if not argv:
         failures += row_key_failures(DEFAULT_REGISTRIES[0], DEFAULT_CASE_FILES)
+        failures += check_run_records(REPO / EVIDENCE_ROOT)
     for failure in failures:
         print(f"[known-red-evidence] {failure}", file=sys.stderr)
     if failures:
         print("[known-red-evidence] FAIL: commit the evidence or mark it lost:`path`; point each case's known_red"
-              " at a known-red row", file=sys.stderr)
+              " at a known-red row; commit each run record's log beside it or delete the record", file=sys.stderr)
         return 1
     print("[known-red-evidence] PASS: every cited evidence path resolves; every hand-authored known_red key names a"
-          " known-red row")
+          " known-red row; every run record's log is committed beside it")
     return 0
 
 

@@ -59,6 +59,10 @@ def tree(tmp, rows, files):
     registry = tmp / "docs/Testing/KeystoneKnownReds.md"
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text("# Registry\n\n" + "\n".join(table) + "\n")
+    # The checker fails a tree without a run record file; a header-only one holds no record to resolve.
+    runs = tmp / "docs/Testing/known-red-evidence/k/gate-load-runs.tsv"
+    runs.parent.mkdir(parents=True)
+    runs.write_text("test\tjob\tstarted\tlog\n")
     (tmp / CASE_DIR).mkdir(parents=True)
     for name, lines in files.items():
         (tmp / CASE_DIR / name).write_text("".join((line if isinstance(line, str) else case_line(*line)) + "\n"
