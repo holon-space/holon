@@ -231,9 +231,11 @@ for log in "$@"; do
     # Another thread's output can also split a head. Text before the name on
     # the head's line is skipped. A head cut after the name, or after its
     # `' (`, continues the one head its scope has open; with two or more open,
-    # the name is lost and the panic stays classified. A location cut before
-    # its `<line>:<col>:` is completed by a later line, and the message is the
-    # line after that one.
+    # its name and that of the head it leaves open are lost and the panics
+    # stay classified. A location cut before its `<line>:<col>:` is completed
+    # by a later line, and the message is the line after that one. A panic
+    # whose message line is missing (another head follows, or the log ends)
+    # is printed with a fixed message.
     #
     # A failed test whose output holds a panic has that panic as its signature.
     # Otherwise its status line is the signature, under nextest's long label
@@ -262,25 +264,33 @@ for log in "$@"; do
                 t = substr(line, RSTART, index(substr(line, RSTART), q) - 1)
                 sub(/^[="([]+/, "", t)
                 s = scope()
-                if (substr(line, RSTART - 8, 8) != "thread " q && open_heads[s] == 1) open_heads[s] = 0
+                if (substr(line, RSTART - 8, 8) != "thread " q) closes_head(s)
                 return t
             }
             # Text written after the name: the head continues an open one.
             s = scope()
-            if (open_heads[s] != 1) return ""
-            open_heads[s] = 0
-            return open_mark head_name[s]
+            if (!open_heads[s]) return ""
+            return closes_head(s) ? open_mark head_name[s] : ""
+        }
+        # Closes one open head of scope `s`; whether it was the only one open.
+        function closes_head(s) {
+            if (!open_heads[s]) return 0
+            if (!--open_heads[s]) return 1
+            head_name[s] = ""
+            return 0
         }
         # The name `thread_of` read in libtest run `u`: an open head names the
         # one test of `u` whose full name ends its text behind a character no
-        # name holds, optionally with a verdict word glued behind it.
+        # name holds, or starts its text followed by a character no name holds
+        # or by another test'"'"'s `test ` line; either way optionally with a
+        # verdict word glued behind it.
         function named(u, t,    i, n, w, found) {
             if (substr(t, 1, 1) != open_mark) return t
             t = substr(t, 2); found = ""
             for (i = 1; i <= n_ran[u]; i++) {
                 n = ran_name[u, i]
                 for (w = 1; w <= 3; w++)
-                    if (ends_name(t, n glued[w])) {
+                    if (ends_name(t, n glued[w]) || starts_name(t, n glued[w])) {
                         if (found != "" && found != n) return ""
                         found = n
                     }
@@ -291,23 +301,34 @@ for log in "$@"; do
             p = length(t) - length(n)
             return p >= 0 && substr(t, p + 1) == n && (p == 0 || substr(t, p, 1) !~ /[A-Za-z0-9_:-]/)
         }
-        # A line that ends in `thread '"'"'<name>` or `thread '"'"'<name>'"'"' (…` opens a
-        # panic head; it stays open until a `… panicked at` line continues it.
-        # A later `<name>'"'"' (` line names the one open head.
-        function track_head(line,    rest, i, s) {
+        function starts_name(t, n,    p) {
+            p = length(n) + 1
+            return substr(t, 1, p - 1) == n && (substr(t, p, 1) !~ /[A-Za-z0-9_:-]/ || substr(t, p, 5) == "test ")
+        }
+        function head_starts(line) { return index(line, "thread " q) || line ~ /panicked at / }
+        # Each `thread '"'"'<name>` or `thread '"'"'<name>'"'"' (…` on a line opens a panic
+        # head; it stays open until a `… panicked at` line continues it. A
+        # later `<name>'"'"' (` line names the one open head.
+        function track_head(line,    rest, i, j, seg, s, n, name) {
             if (line ~ /panicked at /) return
-            rest = line
-            while ((i = index(rest, "thread " q)) > 0) rest = substr(rest, i + 8)
             s = scope()
-            if (rest == line) {
+            if (!index(line, "thread " q)) {
                 if (match(line, "[^ " q "]+" q " [(]")) head_name[s] = substr(line, RSTART, RLENGTH - 3)
                 return
             }
-            if ((i = index(rest, q))) {
-                if (substr(rest, i, 3) != q " (") return
-                rest = substr(rest, 1, i - 1)
+            rest = line; n = 0
+            while ((i = index(rest, "thread " q)) > 0) {
+                rest = substr(rest, i + 8)
+                seg = (j = index(rest, "thread " q)) ? substr(rest, 1, j - 1) : rest
+                if ((i = index(seg, q))) {
+                    if (substr(seg, i, 3) != q " (") continue
+                    seg = substr(seg, 1, i - 1)
+                }
+                if (!n++) name = seg
             }
-            if (!open_heads[s]++) head_name[s] = rest
+            if (!n) return
+            if (!open_heads[s]) head_name[s] = n == 1 ? name : ""
+            open_heads[s] += n
         }
         # Sets LABEL, STRESS and UNIT from a nextest status line, whose label
         # nextest right-aligns in 12 columns and spells in capitals; returns 0
@@ -409,11 +430,9 @@ for log in "$@"; do
             n = label; sub(/^TRY /, "", n); sub(/ .*$/, "", n)
             return n
         }
-        # Judges the panic whose message is the next line, by the head that the
-        # globals u, owner, certain, name, at, opened and loc hold.
-        function judge(    msg) {
-            if ((getline msg) <= 0) return
-            track_line(msg); track_head(msg); track_unit(msg)
+        # Judges the panic with message `msg`, by the head that the globals u,
+        # owner, certain, name, at, opened and loc hold.
+        function judge(msg) {
             if ((owner in passed) && !(owner in flaky_failed)) return
             if (certain && status_at(owner, at, opened) == "pass") {
                 in_passing++; sub(/^[0-9]+\/(\[[0-9]+\/[0-9]+\] )?/, "", owner); print owner >>dropped_out; return
@@ -435,8 +454,14 @@ for log in "$@"; do
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
-        BEGIN { split("|ok|FAILED", glued, "|") }
+        BEGIN { split("|ok|FAILED", glued, "|"); no_message = "(no message line: another panic head follows)" }
         FNR == 1 { section = ""; live = ""; captured = ""; serial = 0; marked = 0; run = 0; replay_case = ""; split("", open_heads); split("", head_name); split("", unit_of) }
+        # The line after a judged head is its message, unless it starts a head of its own.
+        judging {
+            judging = 0
+            if (!head_starts($0)) { track_line($0); track_head($0); track_unit($0); judge($0); next }
+            judge(no_message)
+        }
         # The marker comes before the `Starting` of its run; a run cut off before
         # its `Summary` does not carry it into the next run.
         index($0, "ignoring --test-threads because --no-capture is specified") { marked = 1 }
@@ -445,7 +470,7 @@ for log in "$@"; do
         # A location cut before its `<line>:<col>:` continues on the first later
         # line that completes it, before the next head, verdict line or run.
         FNR == NR && cut_at != "" {
-            if (index($0, "thread " q) || /panicked at |test [^ ]+ |running [0-9]+ tests?|^ +(Running|Doc-tests|Starting) / || parse_status($0)) cut_at = ""
+            if (head_starts($0) || /test [^ ]+ |running [0-9]+ tests?|^ +(Running|Doc-tests|Starting) / || parse_status($0)) cut_at = ""
             else if ((loc = completed(cut_head, $0)) != "") { tail_at[cut_at] = FNR; tail_loc[cut_at] = loc; cut_at = "" }
         }
         FNR == NR {
@@ -473,11 +498,13 @@ for log in "$@"; do
                 result_failed[unit()] = n
             }
             # Unbuffered stderr of another thread can put any text, even part of
-            # a word, before the head on its line.
-            if (match($0, /test [^ ]+ (- should panic )?\.\.\. /)) {
-                name = substr($0, RSTART + 5, RLENGTH - 5); sub(/ (- should panic )?\.\.\. $/, "", name)
+            # a word, before the head on its line, and several verdict lines on one line.
+            rest = $0
+            while (match(rest, /test [^ ]+ (- should panic )?\.\.\. /)) {
+                name = substr(rest, RSTART + 5, RLENGTH - 5); sub(/ (- should panic )?\.\.\. $/, "", name)
                 if (!((unit() SUBSEP name) in ran)) ran_name[unit(), ++n_ran[unit()]] = name
                 ran[unit() SUBSEP name] = 1
+                rest = substr(rest, RSTART + RLENGTH)
             }
             if (/panicked at /) {
                 panics[unit() SUBSEP thread_of($0)]++
@@ -517,11 +544,12 @@ for log in "$@"; do
             u = unit(); owner = OWNER; certain = owner_certain(); name = named(u, thread_of($0)); at = FNR; opened = captured != ""
             if (FNR in tail_at) { pending = FNR; next }
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/\r$/, "", loc); sub(/:$/, "", loc)
-            judge()
+            judging = 1
             next
         }
-        FNR == tail_at[pending] { loc = tail_loc[pending]; pending = ""; judge(); next }
+        FNR == tail_at[pending] { loc = tail_loc[pending]; pending = ""; judging = 1; next }
         END {
+            if (judging && !stopped) judge(no_message)
             print injected + 0, in_passing + 0 >injected_out
             if (!stopped)
                 for (c in red_case) if (!(c in judged)) print "-\tthe red case printed no panic\037" c "\037" declared[c]

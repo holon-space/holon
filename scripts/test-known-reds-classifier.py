@@ -10,7 +10,8 @@ default 100; SEED=<s> replays a draw). The fixed examples run first. Properties:
 - P3: interleaving never moves a printed panic out of the output, except under
   the message a cut location leaves it;
 - P4: without the `--no-capture` marker no panic leaves the output.
-It fails as well when a case of `reached` below is reached by no draw. Exits non-zero when a property fails; each failing
+Before the CASES draws it checks base draws, drawn until each case of `kinds` below is reached at least once, so every case
+is checked in every run; it fails when ATTEMPTS draws leave a case unreached. Exits non-zero when a property fails; each failing
 log is printed as an EXAMPLES entry.
 """
 import os
@@ -24,6 +25,7 @@ from pathlib import Path
 
 import known_reds_logs as logs
 
+ATTEMPTS = 5000
 CLASSIFIER = Path(os.environ.get("CLASSIFIER", Path(__file__).resolve().parent / "keystone-known-reds.sh"))
 
 
@@ -76,6 +78,47 @@ def report(text, failures):
     print(f"  as an EXAMPLES entry:\n    (\"drawn\", r'''{text}''', <exit>, r\"<line>\"),")
 
 
+def kinds(runs, clean, mixed):
+    """How often the draw `runs`, rendered as `clean` and `mixed`, reaches each case it must reach; every case is a key."""
+    k = Counter()
+    k["a panic without its thread name"] += any(name == "" for _, name, _ in mixed.panics)
+    k["the --no-capture marker"] += logs.SERIAL_MARKER in clean.text
+    k["a panic inside a passing test whose owner the text proves"] += bool(clean.in_passing)
+    k["a panic inside a passing test read by its thread name"] += bool(logs.verdict(clean).dropped - {s[2] for s, _, _ in clean.panics if s[0] == "inst"})
+    k["a verdict behind another thread's text on its line"] += any(line.endswith(tuple(f"{x}{w}" for x in logs.SPLIT_BEFORE_VERDICT for w in ("ok", "FAILED"))) for line in mixed.lines)
+    k["another thread's line that ends in a verdict word"] += any(line.endswith(tuple(logs.VERDICT_ENDED)) for line in mixed.lines)
+    k["another thread's line that starts with a verdict word"] += any(line in logs.VERDICT_LED[:2] + logs.VERDICT_LED[3:4] for line in mixed.lines)
+    k["a verdict glued behind another thread's word"] += any(re.fullmatch(r"step\d(ok|FAILED)", line) for line in mixed.lines)
+    k["another run's `test result:` line inside a run"] += any(line.endswith(logs.CHILD_RESULT) for line in mixed.lines)
+    k["a failing test's panic in a section beside a passing test's"] += any(
+        r.shape == "libtest" and {t.status for t in r.tests} == {"ok", "FAILED"} and any(t.panics for t in r.tests if t.status == "ok") for r in runs)
+    k["a head split after its ' ("] += any(re.match(r"thread '[^']+' \((?!\d+\) panicked)", line) for line in mixed.lines)
+    for what in logs.DRAWN:
+        k[what] += mixed.drawn[what]
+    k["one binary's libtest sections twice in one log"] += sum(r.shape == "libtest" for r in runs) == 2 and runs[0].binary == runs[1].binary
+    k["a test run twice in one log"] += any(n > 1 for n in Counter(inst[2] for inst, _ in clean.statuses).values())
+    k["a serial run cut off after a panic"] += any(r.cut for r in runs)
+    k["a run without the marker after a serial run"] += any(
+        a.shape == "serial" and b.shape == "parallel" for a, b in zip(runs, runs[1:]))
+    return k
+
+
+def check_draw(work, clean, mixed):
+    """Failures of P1 to P4 on one draw rendered as `clean` and `mixed`; returns (failures, the log to report)."""
+    f1, got_clean = check(work, clean.text, logs.verdict(clean), "clean")
+    f2, got_mixed = check(work, mixed.text, logs.verdict(mixed), "interleaved")
+    failures = f1 + f2
+    if not kept_within(got_clean, got_mixed, mixed.restated):
+        failures.append(f"P3: interleaving dropped a panic: clean {show(got_clean)}\n   interleaved {show(got_mixed)}")
+    if logs.SERIAL_MARKER in clean.text:
+        unmarked = work / "unmarked.log"
+        unmarked.write_text(clean.text.replace(logs.SERIAL_MARKER + "\n", ""))
+        got_unmarked = stated(unmarked)
+        if not kept_within(got_clean, got_unmarked):
+            failures.append(f"P4: without the marker a panic left the output: {show(got_unmarked)}\n   with it {show(got_clean)}")
+    return failures, clean.text if f1 or failures[-1:] and failures[-1].startswith("P4") else mixed.text
+
+
 def main():
     seed = int(os.environ.get("SEED", random.randrange(1 << 30)))
     cases = int(os.environ.get("CASES", 100))
@@ -92,48 +135,37 @@ def main():
                 failed += 1
                 print(f"example {name}: want exit {want_exit} and a line matching {line!r}, got exit {code}:\n{out}")
         print(f"drawn with seed {seed} ({cases} cases)")
-        for _ in range(cases):
+
+        def draw():
             runs = logs.draw(rng)
             render_seed = rng.randrange(1 << 30)
             clean = logs.render(runs, random.Random(render_seed), interleave=False)
             mixed = logs.render(runs, random.Random(render_seed), interleave=True)
-            f1, got_clean = check(work, clean.text, logs.verdict(clean), "clean")
-            f2, got_mixed = check(work, mixed.text, logs.verdict(mixed), "interleaved")
-            failures = f1 + f2
-            reached["a panic without its thread name"] += any(name == "" for _, name, _ in mixed.panics)
-            reached["the --no-capture marker"] += logs.SERIAL_MARKER in clean.text
-            reached["a panic inside a passing test whose owner the text proves"] += bool(clean.in_passing)
-            reached["a panic inside a passing test read by its thread name"] += bool(logs.verdict(clean).dropped - {s[2] for s, _, _ in clean.panics if s[0] == "inst"})
-            reached["a verdict behind another thread's text on its line"] += any(line.endswith(tuple(f"{x}{w}" for x in logs.SPLIT_BEFORE_VERDICT for w in ("ok", "FAILED"))) for line in mixed.lines)
-            reached["another thread's line that ends in a verdict word"] += any(line.endswith(tuple(logs.VERDICT_ENDED)) for line in mixed.lines)
-            reached["another thread's line that starts with a verdict word"] += any(line in logs.VERDICT_LED[:2] + logs.VERDICT_LED[3:4] for line in mixed.lines)
-            reached["a verdict glued behind another thread's word"] += any(re.fullmatch(r"step\d(ok|FAILED)", line) for line in mixed.lines)
-            reached["another run's `test result:` line inside a run"] += any(line.endswith(logs.CHILD_RESULT) for line in mixed.lines)
-            reached["a failing test's panic in a section beside a passing test's"] += any(
-                r.shape == "libtest" and {t.status for t in r.tests} == {"ok", "FAILED"} and any(t.panics for t in r.tests if t.status == "ok") for r in runs)
-            reached["a head split after its ' ("] += any(re.match(r"thread '[^']+' \((?!\d+\) panicked)", line) for line in mixed.lines)
-            for what in logs.DRAWN:
-                reached[what] += mixed.drawn[what]
-            reached["one binary's libtest sections twice in one log"] += sum(r.shape == "libtest" for r in runs) == 2 and runs[0].binary == runs[1].binary
-            reached["a test run twice in one log"] += any(n > 1 for n in Counter(inst[2] for inst, _ in clean.statuses).values())
-            reached["a serial run cut off after a panic"] += any(r.cut for r in runs)
-            reached["a run without the marker after a serial run"] += any(
-                a.shape == "serial" and b.shape == "parallel" for a, b in zip(runs, runs[1:]))
-            if not kept_within(got_clean, got_mixed, mixed.restated):
-                failures.append(f"P3: interleaving dropped a panic: clean {show(got_clean)}\n   interleaved {show(got_mixed)}")
-            if logs.SERIAL_MARKER in clean.text:
-                unmarked = work / "unmarked.log"
-                unmarked.write_text(clean.text.replace(logs.SERIAL_MARKER + "\n", ""))
-                got_unmarked = stated(unmarked)
-                if not kept_within(got_clean, got_unmarked):
-                    failures.append(f"P4: without the marker a panic left the output: {show(got_unmarked)}\n   with it {show(got_clean)}")
+            return clean, mixed, kinds(runs, clean, mixed)
+
+        # One base draw per case first, so every case is checked in every run, whatever CASES and the seed.
+        draws, missing = [], None
+        for _ in range(ATTEMPTS):
+            clean, mixed, k = draw()
+            missing = set(k) if missing is None else missing
+            if missing & {w for w, n in k.items() if n}:
+                missing -= {w for w, n in k.items() if n}
+                draws.append((clean, mixed, k))
+            if not missing:
+                break
+        for what in sorted(missing):
+            failed += 1
+            print(f"no draw of {ATTEMPTS} reaches {what}")
+        print(f"{len(draws)} base draw(s) reach every case")
+        draws += [draw() for _ in range(cases)]
+        for clean, mixed, k in draws:
+            reached.update(k)
+            failures, text = check_draw(work, clean, mixed)
             if failures:
                 failed += 1
-                report(clean.text if f1 or failures[-1].startswith("P4") else mixed.text, failures)
+                report(text, failures)
         for what in reached:
             print(f"draws reaching {what}: {reached[what]}")
-            if not reached[what]:
-                failed += 1
     print(f"[known-reds-classifier] {'FAIL' if failed else 'PASS'}: {failed} failing case(s), seed {seed}")
     sys.exit(1 if failed else 0)
 

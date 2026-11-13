@@ -15,8 +15,10 @@ between lines (some start or end with a verdict word, some are another run's
 name or after its `' (`, text glued before or behind the name, the name on a
 line of its own between `thread '` and `panicked at`, a panic location cut
 before its `<line>:<col>:`, a libtest verdict pushed onto a later line or glued
-to another thread's word, and another thread's text in front of a verdict word
-on its line. libtest's main thread writes the `failures:` list and the
+to another thread's word, another thread's text in front of a verdict word
+on its line, two heads opened on one line, another thread's line or panic head
+between a head and its message, and a verdict line glued behind an open head's
+name. libtest's main thread writes the `failures:` list and the
 `test result:` line after every test has ended, so nothing interleaves there.
 While it prints, it records for each panic the owner, thread name, location
 and message the text still states, and whether the panic's own test passed;
@@ -82,6 +84,10 @@ VERDICT_LED = ["okay, retrying the handshake", "ok: ()", "ok", "FAILED to bind 1
 CHILD_RESULT = "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
 FOREIGN_RESULT = [CHILD_RESULT, "[child] " + CHILD_RESULT]
 WORKER = "tokio-runtime-worker"
+# The message the classifier states for a panic whose head no message line follows.
+NO_MESSAGE = "(no message line: another panic head follows)"
+# Another thread's line that lands between a head and its message.
+LINE_AFTER_HEAD = [line for line in FOREIGN if line]
 
 
 @dataclass
@@ -162,6 +168,13 @@ def draw_panic(rng, used, thread):
     return Panic(kind, thread, site, "novel defect " + " ".join(word(rng, used) for _ in range(3)))
 
 
+def foreign_thread(rng, name):
+    """A thread that is not test `name`: the runtime's worker, or a thread whose name holds `name` before or behind a
+    name character that no verdict word starts with."""
+    sep = rng.choice("_-0123456789")
+    return rng.choice([WORKER, f"{name}{sep}w", f"w{sep}{name}"])
+
+
 def draw_test(rng, used, shape, name=None):
     name = name or f"{word(rng, used)}::case_{word(rng, used)}"
     should_panic = rng.random() < 0.5
@@ -175,7 +188,7 @@ def draw_test(rng, used, shape, name=None):
     if should_panic and passing:
         panics.append(draw_panic(rng, used, name))
     for _ in range(rng.choice([0, 0, 1, 2]) if not panics else rng.choice([0, 0, 0, 1])):
-        panics.append(draw_panic(rng, used, name if rng.random() < 0.85 else WORKER))
+        panics.append(draw_panic(rng, used, name if rng.random() < 0.85 else foreign_thread(rng, name)))
     # shortcut: a libtest test fails here only by a novel panic of its own; a failure
     # without one reads as "no signature", which a printed known red masks. Draw it once the classifier attributes libtest failures.
     if status == "FAILED" and not any(p.kind == "novel" and p.thread == name for p in panics):
@@ -254,7 +267,9 @@ DRAWN = [
     "a location cut before its closing colon", "a location cut right after its file", "a location cut with a verdict line before its rest",
     "a location with text glued behind it",
     "a verdict word glued behind an open head's name", "a name on a line of its own", "two test names that end an open head",
-    "punctuation glued before a closed name",
+    "punctuation glued before a closed name", "two heads opened on one line", "a chunk between a head and its message",
+    "a panic head right after a head", "a verdict line glued behind an open head", "a head opened after two heads were open",
+    "a split head of a thread whose name starts with a test's name", "a split head of a thread whose name ends with a test's name",
 ]
 
 
@@ -263,10 +278,18 @@ def closed_name(text):
     return text.split(" ")[-1].lstrip('"([=')
 
 
+def head_starts(line):
+    return "thread '" in line or "panicked at " in line
+
+
 def recovered(text, names, out):
-    """The one name of `names` that ends `text` behind a character no name holds, optionally followed by a glued verdict word; "" when none or several."""
+    """The one name of `names` that ends `text` behind a character no name holds, or that starts `text` followed by
+    a character no name holds or by another test's `test ` line, either way optionally followed by a glued verdict
+    word; "" when none or several."""
     found = {n for n in names for w in GLUED_WORD
              if text.endswith(n + w) and (len(text) == len(n + w) or not NAME_CHAR.match(text[-len(n + w) - 1]))}
+    found |= {n for n in names for w in GLUED_WORD if text.startswith(n + w) and (
+        len(text) == len(n + w) or not NAME_CHAR.match(text[len(n + w)]) or text[len(n + w):].startswith("test "))}
     out.drawn["two test names that end an open head"] += len(found) > 1
     return found.pop() if len(found) == 1 else ""
 
@@ -278,7 +301,8 @@ def restated(p, site, msg):
 
 
 def located(rng, out, cut, before, p):
-    """The lines of panic `p` from its head text `before` through its message, and the panic they state.
+    """The lines of panic `p` from its head text `before` through its message, the panic they state, and the index
+    of the line the classifier reads as its message.
 
     With `cut` another thread's text may cut the location before its last colon;
     the classifier completes it from the first later line that ends in the rest.
@@ -286,22 +310,22 @@ def located(rng, out, cut, before, p):
     it keeps as written, with the next line as message.
     """
     if not cut or rng.random() < 0.6:
-        return [f"{before}panicked at {p.site}:", p.msg], p
+        return [f"{before}panicked at {p.site}:", p.msg], p, 1
     where = rng.choice(DRAWN[:7])
     out.drawn[where] += 1
     path, line, col = p.site.rsplit(":", 2)
     if where == DRAWN[6]:
         glued = f"{p.site}:" + rng.choice(["()", "ok"])
         # A later line that ends like a location tail does not complete a location that is not cut.
-        return [f"{before}panicked at {glued}", p.msg, *rng.choice([[], ["   at src/peer.rs:12:3:"]])], restated(p, glued, p.msg)
+        return [f"{before}panicked at {glued}", p.msg, *rng.choice([[], ["   at src/peer.rs:12:3:"]])], restated(p, glued, p.msg), 1
     head = [f"{path}:", f"{path}:{line[:-1]}" if len(line) > 1 else f"{path}:", f"{path}:{line}:", p.site, path, f"{path}:"][DRAWN.index(where)]
     tail = rng.choice(LOC_LEAD) + f"{p.site}:"[len(head):]
     first = f"{before}panicked at {head}"
     if where == DRAWN[5]:
         bound = rng.choice(FOREIGN_RESULT)
-        return [first, bound, tail, p.msg], restated(p, path, bound)
+        return [first, bound, tail, p.msg], restated(p, path, bound), 1
     between = [rng.choice(BETWEEN) for _ in range(rng.choice([0, 0, 1, 2]))]
-    return [first, *between, tail, p.msg], restated(p, (head + re.search(r"[0-9:]*$", tail).group())[:-1], p.msg)
+    return [first, *between, tail, p.msg], restated(p, (head + re.search(r"[0-9:]*$", tail).group())[:-1], p.msg), 2 + len(between)
 
 
 def result_lines(passed, failing, indent=""):
@@ -340,11 +364,20 @@ def render_libtest(run, index, rng, interleave, out):
             chunks.append(("verdict", t))
         queues.append(chunks)
     open_heads = 0
-    # The text of the head that opened while none was open.
+    # The text of the one open head, when it opened while none was open; "" once another head was open beside it.
     head_text = ""
+    two_open = False
     tid = 100
-    while any(queues):
-        chunk = rng.choice([q for q in queues if q]).pop(0)
+
+    def held(p):
+        """Counts a split head of a thread that only holds a test's name: no prefix or suffix rule may name it."""
+        if open_heads == 1 and p.thread not in names:
+            out.drawn["a split head of a thread whose name starts with a test's name"] += any(p.thread.startswith(n) for n in names)
+            out.drawn["a split head of a thread whose name ends with a test's name"] += any(p.thread.endswith(n) for n in names)
+
+    def step(chunk, own):
+        """Prints `chunk` of queue `own`; `own` is None for a chunk printed between a head and its message."""
+        nonlocal open_heads, head_text, two_open, tid
         tid += 1
         if chunk[0] in ("head-after", "head-paren", "head-before", "head-chain"):
             if chunk[0] == "head-after":
@@ -352,11 +385,23 @@ def render_libtest(run, index, rng, interleave, out):
                 out.drawn["a verdict word glued behind an open head's name"] += bool(chunk[3])
             else:
                 text = chunk[1].thread if chunk[0] == "head-paren" else chunk[1]
-            out.lines.append(f"thread '{text}" + (f"' ({chunk[2]}" if chunk[0] == "head-paren" else ""))
+            line = f"thread '{text}" + (f"' ({chunk[2]}" if chunk[0] == "head-paren" else "")
+            # Another thread's head can open on the line of a head still open.
+            if open_heads and out.lines[-1].startswith("thread '") and "panicked at" not in out.lines[-1] and rng.random() < 0.5:
+                out.drawn["two heads opened on one line"] += 1
+                out.lines[-1] += line
+            else:
+                out.lines.append(line)
             if not open_heads:
+                out.drawn["a head opened after two heads were open"] += two_open
                 head_text = text
             open_heads += 1
-            continue
+            two_open |= open_heads > 1
+            verdicts = [q for q in queues if q and q is not own and q[0][0] == "verdict"]
+            if interleave and own is not None and verdicts and rng.random() < 0.8:
+                q = rng.choice(verdicts)
+                step(q.pop(0), q)
+            return
         if chunk[0] == "verdict-head":
             out.lines.append(rng.choice(["", "Applying transition 4/4: "]) + verdict_line(chunk[1], rng.choice(["", "()", *VERDICT_ENDED, *VERDICT_LED])))
         elif chunk[0] == "verdict-tail":
@@ -365,12 +410,19 @@ def render_libtest(run, index, rng, interleave, out):
             word = chunk[1].status
             out.lines += rng.choice([[word], [word + ": ()"], [f"step{rng.randint(1, 9)}{word}"], [rng.choice(FOREIGN_RESULT), word]])
         elif chunk[0] == "verdict":
-            out.lines.append(verdict_line(chunk[1], spliced_verdict(rng, chunk[1].status, interleave)))
+            line = verdict_line(chunk[1], spliced_verdict(rng, chunk[1].status, interleave))
+            if interleave and open_heads == 1 and out.lines[-1] == f"thread '{head_text}" and rng.random() < 0.7:
+                out.drawn["a verdict line glued behind an open head"] += 1
+                out.lines[-1] += line
+                head_text += line
+            else:
+                out.lines.append(line)
         else:
             p, t = chunk[1], chunk[2]
             if chunk[0] == "whole":
                 before, stated = f"thread '{p.thread}' ({tid}) ", p.thread
             elif chunk[0] in ("cont-after", "cont-paren"):
+                held(p)
                 before = (chunk[3] if chunk[0] == "cont-paren" else "' (") + f"{tid}) "
                 stated = recovered(head_text, names, out) if open_heads == 1 else ""
             elif chunk[0] == "cont-before":
@@ -378,17 +430,37 @@ def render_libtest(run, index, rng, interleave, out):
                 out.drawn["punctuation glued before a closed name"] += chunk[3] in ('"', 'case "', "(", "[", "=")
             else:
                 out.drawn["a name on a line of its own"] += 1
+                held(p)
                 out.lines.append(f"{chunk[3]}{p.thread}' ({tid}" + rng.choice(["", ": ()"]))
                 if interleave and rng.random() < 0.5:
                     foreign(rng, out)
                 before = rng.choice(["", "Applying transition 1/4: ()"]) + ") "
                 stated = recovered((chunk[3] + p.thread).split(" ")[-1], names, out) if open_heads == 1 else ""
-            # A head continued while exactly one was open closes it.
-            if chunk[0] != "whole" and open_heads == 1:
-                open_heads = 0
-            lines, as_stated = located(rng, out, interleave, before, p)
-            out.lines += lines
+            # A continued head closes one open head; the name of a head left open beside it is lost.
+            if chunk[0] != "whole" and open_heads:
+                open_heads -= 1
+                if open_heads:
+                    head_text = ""
+            lines, as_stated, m = located(rng, out, interleave, before, p)
+            if interleave and own is not None and lines[m] == p.msg and rng.random() < 0.4:
+                out.lines += lines[:m]
+                at = len(out.lines)
+                others = [q for q in queues if q and q is not own]
+                if others and rng.random() < 0.75:
+                    step(rng.choice(others).pop(0), None)
+                else:
+                    out.lines.append(rng.choice(LINE_AFTER_HEAD))
+                follows = out.lines[at]
+                out.drawn["a panic head right after a head" if head_starts(follows) else "a chunk between a head and its message"] += 1
+                as_stated = restated(p, as_stated.site, NO_MESSAGE if head_starts(follows) else follows.lstrip(" "))
+                out.lines += lines[m:]
+            else:
+                out.lines += lines
             add_panic(out, scope, stated, p, t.name, t.status == "ok", as_stated)
+
+    while any(queues):
+        own = rng.choice([q for q in queues if q])
+        step(own.pop(0), own)
         if interleave and rng.random() < 0.3:
             foreign(rng, out)
     failing = [t.name for t in run.tests if t.status == "FAILED"]
@@ -421,7 +493,7 @@ def render_body(t, scope, rng, interleave, out, indent="", cut=False, proven=Fal
     for line, p, open_ in body(t, cut):
         # nextest captures a test's output whole: only --no-capture output interleaves.
         if p is not None:
-            lines, as_stated = located(rng, out, interleave and not indent, f"thread '{p.thread}' (7) ", p)
+            lines, as_stated, _ = located(rng, out, interleave and not indent, f"thread '{p.thread}' (7) ", p)
             out.lines += [indent + line if line else "" for line in lines]
             add_panic(out, scope, p.thread, p, t.name, not cut and t.status in BODY_OK, as_stated)
         else:
@@ -877,6 +949,132 @@ test refusals::plain_pass ... ok
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
 """
 
+# A passing should_panic test's head with another test's verdict line glued
+# behind its name, a second verdict line, then the rest of the head.
+W188 = (SHARD_RUNNING + "\n\nrunning 19 tests\n" + r'''
+thread 'hand_authored_regressions::malformed_also_check_after_is_refused' (125338497) panicked at crates/holon-integration-tests/src/pbt/hand_authored.rs:249:17:
+hand-authored regression "<inline>":1 case "n": `also_check_after` holds "2", not a transition number
+
+thread 'hand_authored_regressions::mistyped_initial_state_key_is_loudtest hand_authored_regressions::recorded_env_flag_mismatch_is_reported ... ok
+test hand_authored_regressions::absent_initial_state_parses_as_none ... ok
+' (125338498) panicked at crates/holon-integration-tests/src/pbt/hand_authored.rs:476:9:
+hand-authored regression "<inline>":1: unknown top-level key "initail_state" — a mistyped key is SILENTLY DROPPED by serde, so this case would replay something other than what it names. Known keys: ["name", "description", "environment", "initial_state", "transitions", "also_check_after", "locks", "known_red", "boot"]
+  line: {"name": "n", "transitions": [], "initail_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}}
+test hand_authored_regressions::malformed_also_check_after_is_refused - should panic ... ok
+test hand_authored_regressions::invalid_pinned_wiring_is_loud - should panic ... ok
+test hand_authored_regressions::a_lock_skipped_at_every_checkpoint_is_refused - should panic ... ok
+test hand_authored_regressions::mistyped_initial_state_key_is_loud - should panic ... ok
+test hand_authored_regressions::pinned_initial_state_round_trips_and_rebuilds_the_draw ... ok
+'''
+        + "\ntest result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 644 filtered out; finished in 360.12s\n")
+# A passing should_panic test's head right before a failing test's head and
+# message, beside a listed red.
+HEAD_AFTER_HEAD = f"""     Running tests/main.rs (target/debug/deps/x-0123)
+
+running 3 tests
+thread 'refusals::refuses' (77) panicked at crates/x.rs:2:1:
+thread 'refusals::real_bug' (98) panicked at crates/x.rs:1:1:
+real failure
+expected refusal
+thread 'known_bug' (3) panicked at {KNOWN_SITE}:
+{KNOWN_MSG}
+test refusals::refuses - should panic ... ok
+test refusals::real_bug ... FAILED
+test known_bug ... FAILED
+{failures_list(["refusals::real_bug", "known_bug"])}test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+"""
+# A failing test's head opened on the line of a passing should_panic test's open head.
+TWO_HEADS_ONE_LINE = f"""     Running tests/main.rs (target/debug/deps/x-0123)
+
+running 2 tests
+thread 'refusals::real_bugthread 'refusals::refuses
+' (98) panicked at crates/x.rs:1:1:
+real failure
+' (77) panicked at crates/x.rs:2:1:
+expected refusal
+test refusals::refuses - should panic ... ok
+test refusals::real_bug ... FAILED
+{failures_list(["refusals::real_bug"])}test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+"""
+# Split heads of threads whose names start and end with a passing test's name behind a name character: neither is its.
+THREAD_HOLDS_A_TEST_NAME = """     Running tests/main.rs (target/debug/deps/x-0123)
+
+running 1 test
+thread 'refusals::refuses_w
+' (1) panicked at crates/x.rs:1:1:
+worker died
+thread 'w-refusals::refuses
+' (2) panicked at crates/x.rs:2:1:
+pool died
+test refusals::refuses ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+"""
+# Two heads open at once, both continued, then a passing should_panic test's split head.
+HEAD_AFTER_TWO_OPEN = f"""     Running tests/main.rs (target/debug/deps/x-0123)
+
+running 3 tests
+thread 'refusals::a_fails
+thread 'refusals::b_fails
+' (1) panicked at crates/x.rs:1:1:
+first failure
+' (2) panicked at crates/x.rs:2:1:
+second failure
+thread 'refusals::refuses
+' (3) panicked at crates/x.rs:3:1:
+expected refusal
+test refusals::refuses - should panic ... ok
+test refusals::a_fails ... FAILED
+test refusals::b_fails ... FAILED
+{failures_list(["refusals::a_fails", "refusals::b_fails"])}test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+"""
+# Two heads open at once: the second continued head is not the first's.
+TWO_OPEN_HEADS_NAME_NEITHER = f"""     Running tests/main.rs (target/debug/deps/x-0123)
+
+running 2 tests
+thread 'refusals::refuses
+thread 'refusals::real_bug
+' (77) panicked at crates/x.rs:2:1:
+expected refusal
+' (98) panicked at crates/x.rs:1:1:
+real failure
+test refusals::refuses - should panic ... ok
+test refusals::real_bug ... FAILED
+{failures_list(["refusals::real_bug"])}test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+"""
+# A failing test's head that reads as its passing twin's name too: the twin's
+# verdict word and verdict line are glued behind it.
+TWIN_GLUED_BEFORE_A_VERDICT_LINE = f"""     Running tests/main.rs (target/debug/deps/x-0123)
+
+running 2 tests
+thread 'refusals::caseFAILEDtest refusals::caseFAILED ... ok
+' (5) panicked at crates/x.rs:1:1:
+real failure
+test refusals::case ... FAILED
+{failures_list(["refusals::case"])}test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+"""
+# A passing should_panic test's head with two verdict lines glued behind its
+# name, the second its own.
+TWO_VERDICT_LINES_BEHIND_A_HEAD = """     Running tests/main.rs (target/debug/deps/x-0123)
+
+running 2 tests
+thread 'refusals::refusestest other::a ... oktest refusals::refuses - should panic ... ok
+' (3) panicked at crates/x.rs:3:1:
+expected refusal
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+"""
+# A listed red, then a log that ends on a panic head.
+ENDS_ON_A_HEAD = f"""     Running tests/main.rs (target/debug/deps/x-0123)
+
+running 1 test
+{KNOWN_FAILED}{failures_list(["hand_authored_keystone_regressions"])}test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+     Running tests/other.rs (target/debug/deps/other-0123)
+
+running 1 test
+thread 'other::case' (9) panicked at crates/x/tests/z.rs:3:3:
+"""
+
 
 def failed_instead(text, ok_line, name, n):
     """`text` with the should_panic test `name` failing instead of passing, in a run of `n` tests."""
@@ -937,6 +1135,21 @@ def examples():
         ("w973-split-ok-header", W973, 0, NOTE_ONE + mistyped + "$"),
         ("w973-split-ok-header-failed", failed_instead(W973, W973_OK, mistyped, 19), 1, W973_MSG),
         ("w973-split-ok-header-two-open-heads", W973.replace("running 19 tests\n", "running 19 tests\nthread 'hand_authored_regressions::empty_locks_are_refused\n"), 1, W973_MSG),
+        # Another test's verdict line glued behind an open head's name.
+        ("w188-verdict-line-glued-behind-a-head", W188, 0,
+         r"^\[known-reds\] NOTE: 2 panic[(]s[)] inside passing tests [(]ignored[)]: .*" + mistyped + "$"),
+        ("w188-verdict-line-glued-behind-a-head-failed", failed_instead(W188, W973_OK, mistyped, 19), 1, W973_MSG),
+        # A head whose next line is another head has no message line.
+        ("head-after-head-beside-a-red", HEAD_AFTER_HEAD, 1, r"^\[known-reds\] FAIL: 1 novel panic[(]s[)], 1 known-red"),
+        ("head-after-head-failing-panic-printed", HEAD_AFTER_HEAD, 1, r"^ *1 real failure$"),
+        ("two-heads-on-one-line", TWO_HEADS_ONE_LINE, 1, r"^ *1 real failure$"),
+        ("two-open-heads-name-neither", TWO_OPEN_HEADS_NAME_NEITHER, 1, r"^ *1 real failure$"),
+        ("head-after-two-open-heads", HEAD_AFTER_TWO_OPEN, 1, NOTE_ONE + "refusals::refuses$"),
+        ("thread-that-starts-with-a-test-name", THREAD_HOLDS_A_TEST_NAME, 1, r"^ *1 worker died$"),
+        ("thread-that-ends-with-a-test-name", THREAD_HOLDS_A_TEST_NAME, 1, r"^ *1 pool died$"),
+        ("log-ends-on-a-head", ENDS_ON_A_HEAD, 1, r"^ *1 [(]no message line: another panic head follows[)]$"),
+        ("twin-glued-before-a-verdict-line", TWIN_GLUED_BEFORE_A_VERDICT_LINE, 1, r"^ *1 real failure$"),
+        ("two-verdict-lines-behind-a-head", TWO_VERDICT_LINES_BEHIND_A_HEAD, 0, NOTE_ONE + "refusals::refuses$"),
         ("should-panic-split-ok-line", SPLIT_OK_LINE, 0, NOTE_ONE + "refusals::refuses$"),
         ("should-panic-split-ok-line-failed", failed_instead(SPLIT_OK_LINE, "test refusals::refuses - should panic ... ok\n", "refusals::refuses", 2), 1, r"^ *1 expected refusal$"),
         # The hand-authored step's shards: every should_panic test passes, one
