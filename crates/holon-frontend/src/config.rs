@@ -523,9 +523,34 @@ pub fn save_config(config_dir: &Path, config: &HolonConfig) -> Result<()> {
 
         let path = config_dir.join("holon.toml");
         let content = toml::to_string_pretty(config)?;
-        holon_filesystem::fs_port::write_durable_blocking(&path, content.as_bytes())
+        holon_filesystem::fs_port::write_durable_blocking(&resolve_link(&path)?, content.as_bytes())
             .with_context(|| format!("Failed to write {}", path.display()))
     }
+}
+
+/// The file a save replaces: `path`, or the file its symlink points to, so a
+/// user's link survives the rename. A link with no file behind it is an `Err`.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_link(path: &Path) -> Result<PathBuf> {
+    use anyhow::Context;
+
+    let is_link = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta.file_type().is_symlink(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e).with_context(|| format!("Failed to stat {}", path.display())),
+    };
+    if !is_link {
+        return Ok(path.to_path_buf());
+    }
+    let target = std::fs::read_link(path)
+        .with_context(|| format!("Failed to read the link {}", path.display()))?;
+    std::fs::canonicalize(path).with_context(|| {
+        format!(
+            "{} is a symlink to {}, which does not exist",
+            path.display(),
+            target.display()
+        )
+    })
 }
 
 /// The table in `path`; a missing file is an empty table, a file that does not
@@ -733,8 +758,11 @@ impl HolonConfig {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("Failed to create config dir {}", parent.display()))?;
             }
-            holon_filesystem::fs_port::write_durable_blocking(&path, content.as_bytes())
-                .with_context(|| format!("Failed to write {}", path.display()))?;
+            holon_filesystem::fs_port::write_durable_blocking(
+                &resolve_link(&path)?,
+                content.as_bytes(),
+            )
+            .with_context(|| format!("Failed to write {}", path.display()))?;
             Ok(())
         }
     }
@@ -958,19 +986,36 @@ mod tests {
             ]
         }
 
+        /// Every key `PrefKey::parse` accepts; the narrow alphabet makes keys
+        /// share dotted prefixes (`a`, `a.a`, `a_.a`).
+        fn pref_key() -> impl Strategy<Value = String> {
+            prop_oneof![
+                "[a_]([a._]{0,4}[a_])?",
+                "[A-Za-z0-9_ä]([A-Za-z0-9._ä]{0,6}[A-Za-z0-9_ä])?",
+                Just("ui.theme".to_string()),
+            ]
+        }
+
+        fn preferences() -> impl Strategy<Value = (HashMap<String, toml::Value>, Vec<String>)> {
+            (
+                proptest::collection::hash_map(pref_key(), value(), 0..4),
+                proptest::collection::vec(pref_key(), 0..2),
+            )
+                .prop_flat_map(|(prefs, extra)| {
+                    let keys: Vec<String> = prefs.keys().cloned().chain(extra).collect();
+                    let n = keys.len();
+                    (Just(prefs), proptest::sample::subsequence(keys, 0..=n))
+                })
+        }
+
         fn config() -> impl Strategy<Value = HolonConfig> {
             (
                 proptest::option::of("[a-z]{1,5}"),
                 proptest::option::of("/[a-z]{1,4}"),
                 proptest::option::of("/[a-z]{1,4}"),
-                proptest::collection::hash_map(
-                    proptest::sample::select(&["ui.theme", "x.y", "a"][..]),
-                    value(),
-                    0..3,
-                ),
-                proptest::sample::subsequence(&["ui.theme", "x.y", "a"][..], 0..=3),
+                preferences(),
             )
-                .prop_map(|(theme, root, db, prefs, secrets)| HolonConfig {
+                .prop_map(|(theme, root, db, (prefs, secrets))| HolonConfig {
                     ui: UiConfig {
                         theme,
                         ..Default::default()
@@ -981,21 +1026,44 @@ mod tests {
                     db_path: db.map(PathBuf::from),
                     preferences: prefs
                         .into_iter()
-                        .map(|(k, v)| (PrefKey::new(k), v))
+                        .map(|(k, v)| (PrefKey::new(&k), v))
                         .collect(),
-                    secret_keys: secrets.into_iter().map(PrefKey::new).collect(),
+                    secret_keys: secrets.iter().map(|k| PrefKey::new(k)).collect(),
                     ..Default::default()
                 })
         }
 
-        /// `Ok`: every top-level key the save does not set keeps its value and
-        /// every key it sets holds the config's value. `Err`: the file is
-        /// byte-identical and the message names the path.
-        fn check_save(before: Option<&[u8]>, config: &HolonConfig) -> Result<(), String> {
+        /// Whether `holon.toml` is a symlink to the file that holds the bytes.
+        fn link() -> impl Strategy<Value = bool> {
+            #[cfg(unix)]
+            return any::<bool>();
+            #[cfg(not(unix))]
+            return Just(false);
+        }
+
+        /// `Ok`: every top-level key the save does not set keeps its value,
+        /// every key it sets holds the config's value, and a symlinked
+        /// `holon.toml` stays a link. `Err`: the file is byte-identical and the
+        /// message names the path. A link with no file behind it is an `Err`
+        /// that also names the target.
+        fn check_save(
+            before: Option<&[u8]>,
+            link: bool,
+            config: &HolonConfig,
+        ) -> Result<(), String> {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("holon.toml");
+            let target = if link {
+                dir.path().join("real.toml")
+            } else {
+                path.clone()
+            };
+            #[cfg(unix)]
+            if link {
+                std::os::unix::fs::symlink(&target, &path).unwrap();
+            }
             if let Some(bytes) = before {
-                std::fs::write(&path, bytes).unwrap();
+                std::fs::write(&target, bytes).unwrap();
             }
             let mut ours: toml::Table = toml::to_string_pretty(config).unwrap().parse().unwrap();
             if let Some(toml::Value::Table(prefs)) = ours.get_mut("preferences") {
@@ -1010,6 +1078,7 @@ mod tests {
                 Err(_) => Some(String::new()),
             });
             let expected = match (before, &parse_error) {
+                (None, _) if link => None,
                 (None, _) => Some(ours.clone()),
                 (Some(_), Some(_)) => None,
                 (Some(bytes), None) => {
@@ -1034,15 +1103,30 @@ mod tests {
                     if after != expected {
                         return Err(format!("after save:\n{after:#?}\nexpected:\n{expected:#?}"));
                     }
+                    let is_link = std::fs::symlink_metadata(&path)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink();
+                    if is_link != link {
+                        return Err(format!("symlink before: {link}, after: {is_link}"));
+                    }
                 }
                 (None, Err(e)) => {
-                    let after = std::fs::read(&path).unwrap();
-                    if Some(after.as_slice()) != before {
+                    let after = match std::fs::read(&target) {
+                        Ok(bytes) => Some(bytes),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => panic!("read {}: {e}", target.display()),
+                    };
+                    if after.as_deref() != before {
                         return Err(format!("refused save changed the file: {e:#}"));
                     }
                     let message = format!("{e:#}");
                     if !message.contains(&path.display().to_string()) {
                         return Err(format!("error does not name the path: {message}"));
+                    }
+                    if link && before.is_none() && !message.contains(&target.display().to_string())
+                    {
+                        return Err(format!("error does not name the link target: {message}"));
                     }
                     if let Some(toml_message) = parse_error.filter(|m| !m.is_empty()) {
                         if !message.contains(&toml_message) {
@@ -1076,17 +1160,43 @@ mod tests {
                 (b"ui = \"x\"\n\n[vault]\nroot = \"/org\"\n", theme("y")),
             ];
             for (before, config) in &static_cases {
-                if let Err(e) = check_save(Some(before), config) {
+                if let Err(e) = check_save(Some(before), false, config) {
                     panic!("static case {:?}: {e}", String::from_utf8_lossy(before));
                 }
             }
+            #[cfg(unix)]
+            verify_probe_symlink_survives_save();
 
             let mut runner = TestRunner::default();
-            if let Err(e) = runner.run(&(file_before(), config()), |(before, config)| {
-                check_save(before.as_deref(), &config).map_err(TestCaseError::fail)
-            }) {
+            if let Err(e) = runner.run(
+                &(file_before(), link(), config()),
+                |(before, link, config)| {
+                    check_save(before.as_deref(), link, &config).map_err(TestCaseError::fail)
+                },
+            ) {
                 panic!("{e}");
             }
+        }
+
+        #[cfg(unix)]
+        fn verify_probe_symlink_survives_save() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("real.toml");
+            std::fs::write(&target, "[vault]\nroot = \"/org\"\n").unwrap();
+            let cfg_dir = dir.path().join("cfg");
+            std::fs::create_dir(&cfg_dir).unwrap();
+            std::os::unix::fs::symlink(&target, cfg_dir.join("holon.toml")).unwrap();
+            let mut c = HolonConfig::default();
+            c.ui.theme = Some("dark".into());
+            c.save_runtime(&cfg_dir).unwrap();
+            let meta = std::fs::symlink_metadata(cfg_dir.join("holon.toml")).unwrap();
+            let real = std::fs::read_to_string(&target).unwrap();
+            eprintln!(
+                "SYMLINK is_symlink={} real_has_dark={}",
+                meta.file_type().is_symlink(),
+                real.contains("dark")
+            );
+            assert!(meta.file_type().is_symlink(), "save replaced the symlink");
         }
     }
 
