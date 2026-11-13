@@ -1,0 +1,29 @@
+run attempt 0 plan ChildPlan { held: false, exit: Code(203), transition: "o�Ⱥ??\u{7c269}\t;H\u{b}\r#WU", subject: "\u{1b}�\u{7068f}\n~%=|🟦\u{a227b}<\u{b}\0\u{d6fe0}\u{c2d49}ᣌ\u{feff}&\u{feff}\u{64cb1}\u{60853}'%" } ctl /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/fj-1y7etb3k/.tmpzwOaPu/ctl-3 group Some(47959) task finished false
+$ ps -A -o pid,ppid,pgid,stat,etime,command | awk 'NR==1 || $1==47959 || $3==47959 || $2==42533'
+  PID  PPID  PGID STAT     ELAPSED COMMAND
+47956 42533 47956 SN         00:10 /bin/sh -c echo $$ > "$0.started.w" && mv "$0.started.w" "$0.started"; while [ ! -e "$0" ]; do sleep 0.02; done; kill -1 $$ /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/fj-1y7etb3k/.tmpzwOaPu/ctl-2
+47959 42533 47959 ZN         00:10 <defunct>
+50154 42533 89603 SN         00:00 /bin/sh -c ps -A -o pid,ppid,pgid,stat,etime,command | awk 'NR==1 || $1==47959 || $3==47959 || $2==42533'
+$ ls -la /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/fj-1y7etb3k/.tmpzwOaPu
+total 40
+drwxr-xr-x@ 9 user  staff  288 Nov 13 12:25 .
+drwx------@ 7 user  staff  224 Nov 13 12:25 ..
+-rw-r--r--@ 1 user  staff    6 Nov 13 12:25 ctl-1.started
+-rw-r--r--@ 1 user  staff    6 Nov 13 12:25 ctl-2.started
+-rw-r--r--@ 1 user  staff    6 Nov 13 12:25 ctl-3.started
+drwxr-xr-x@ 5 user  staff  160 Nov 13 12:25 logs
+-rw-r--r--@ 1 user  staff    0 Nov 13 12:25 net.pid
+-rw-r--r--@ 1 user  staff    6 Nov 13 12:25 net.pid.lock
+-rw-r--r--@ 1 user  staff  128 Nov 13 12:25 net.pid.spawn-42533-1794569084725991-198
+$ ls -la /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/fj-1y7etb3k/.tmpzwOaPu/logs
+total 0
+drwxr-xr-x@ 5 user  staff  160 Nov 13 12:25 .
+drwxr-xr-x@ 9 user  staff  288 Nov 13 12:25 ..
+-rw-r--r--@ 1 user  staff    0 Nov 13 12:25 0.log
+-rw-r--r--@ 1 user  staff    0 Nov 13 12:25 0.log.1
+-rw-r--r--@ 1 user  staff    0 Nov 13 12:25 0.log.2
+$ cat /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/fj-1y7etb3k/.tmpzwOaPu/net.pid
+$ sample 42533 2 -mayDie -file ~/Workspaces/pkm/holon/.claude/worktrees/lane-1166-net-shell-pid-restart-budget/target/net-shell-pid-restart-budget/hang/run1/dump-42533-1794569119200.sample.txt
+Sampling process 42533 for 2 seconds with 1 millisecond of run time between samples
+Sampling completed, processing symbols...
+Sample analysis of process 42533 written to file ~/Workspaces/pkm/holon/.claude/worktrees/lane-1166-net-shell-pid-restart-budget/target/net-shell-pid-restart-budget/hang/run1/dump-42533-1794569119200.sample.txt

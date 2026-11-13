@@ -1,0 +1,44 @@
+BASE: f3f6ea34da619a7383e9399103948f37fa2101f4
+TREE: 493e6005529d6051cd9a5435b30c81da9cb3401c
+STARTED: 2026-11-13T08:51:53Z
+tree: base support code (Run::result is recv_timeout(..).ok()) plus the new test; proptest failure_persistence None, random seed
+command: cargo nextest run -p holon-net-shell --test shell_pid_file_restart --no-fail-fast -E test(=a_run_without_a_result_tells_an_ended_task_from_a_running_one)
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+   Compiling holon-net-shell v0.1.0 (<home>/Workspaces/pkm/holon/.claude/worktrees/lane-1166-net-shell-pid-restart-budget/crates/holon-net-shell)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.90s
+────────────
+ Nextest run ID 1ac8eaf9-5fdf-428a-849b-dee9fa5d6193 with nextest profile: default
+    Starting 1 test across 1 binary (1 test skipped)
+        FAIL [   1.107s] (1/1) holon-net-shell::shell_pid_file_restart a_run_without_a_result_tells_an_ended_task_from_a_running_one
+  stdout ───
+
+    running 1 test
+    test a_run_without_a_result_tells_an_ended_task_from_a_running_one ... FAILED
+
+    failures:
+
+    failures:
+        a_run_without_a_result_tells_an_ended_task_from_a_running_one
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 1.08s
+
+  stderr ───
+
+    thread 'a_run_without_a_result_tells_an_ended_task_from_a_running_one' (142064396) panicked at crates/holon-net-shell/tests/shell_pid_file_restart.rs:493:1:
+    Test failed: assertion failed: `(left != right)`
+      left: `"None"`,
+     right: `"None"` at crates/holon-net-shell/tests/shell_pid_file_restart.rs:519.
+    minimal failing input: flavor = CurrentThread, wait = 1ms
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   1.108s] 1 test run: 0 passed, 1 failed, 1 skipped
+        FAIL [   1.107s] (1/1) holon-net-shell::shell_pid_file_restart a_run_without_a_result_tells_an_ended_task_from_a_running_one
+error: test run failed
+exit: 100

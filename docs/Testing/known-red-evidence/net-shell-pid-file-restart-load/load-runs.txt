@@ -1,0 +1,16 @@
+BASE: f3f6ea34da619a7383e9399103948f37fa2101f4
+TREE: 68e2154984b16d37b691598ccec72100c4aee5c9
+STARTED: 2026-11-13T08:56:41Z
+job: c1166.nextest.20261113T085242Z, flow job run --queue --min-load 30 (gate band median 29.57, p90 75.79 from scripts/known-red-gate-load.py band)
+per iteration: cargo nextest run -p holon-net-shell --no-fail-fast --retries 0 --success-output immediate; waits = the restart property's 'run N result came after' lines
+iter	started	load_start	load_max	status	seconds	n_waits	wait_p90_ms	wait_max_ms
+1	2026-11-13T09:06:28Z	70.77	95.76	PASS	38.845	208	156.6	413.1
+2	2026-11-13T09:07:57Z	76.41	86.60	PASS	59.599	203	236.1	1021.6
+3	2026-11-13T09:09:18Z	81.98	135.65	PASS	54.636	227	269.8	618.8
+4	2026-11-13T09:10:55Z	135.65	175.08	PASS	50.819	208	261.4	820.7
+5	2026-11-13T09:12:40Z	154.00	183.31	PASS	71.814	217	397.3	1233.9
+6	2026-11-13T09:14:28Z	148.65	148.65	PASS	53.986	197	249.0	583.4
+7	2026-11-13T09:16:06Z	85.74	86.00	PASS	48.662	216	154.0	1731.6
+8	2026-11-13T09:17:37Z	77.76	144.08	PASS	60.751	209	361.7	722.3
+9	2026-11-13T09:19:28Z	144.08	144.15	PASS	60.887	218	285.3	894.1
+10	2026-11-13T09:21:11Z	127.46	128.66	PASS	59.780	233	244.1	465.7

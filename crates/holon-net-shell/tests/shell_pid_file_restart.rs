@@ -13,8 +13,10 @@ use pid_file_support::Answer;
 use pid_file_support::BOUND;
 use pid_file_support::Caller;
 use pid_file_support::ChildPlan;
+use pid_file_support::Exit;
 use pid_file_support::Flavor;
 use pid_file_support::Lab;
+use pid_file_support::NoResult;
 use pid_file_support::Run;
 use pid_file_support::SETTLE;
 use pid_file_support::abandoned;
@@ -254,14 +256,16 @@ fn check_end(run: &Run, model: &mut Model, i: usize) -> Option<String> {
         run.tell();
         model.runs[i].told = true;
     }
-    let result = run.result(SETTLE);
-    match result {
-        None => Some(format!(
-            "run {attempt} has no result after {SETTLE:?}: its task panicked or did not end"
-        )),
-        Some(_) if abandoned_shared => None,
-        Some(Ok(finished)) if finished.ended == want => None,
-        Some(got) => Some(format!("run {attempt} returned {got:?}, expected {want:?}")),
+    match run.result(SETTLE) {
+        Err(none) => Some(format!("run {attempt} has no result: {none}")),
+        Ok((result, took)) => {
+            eprintln!("run {attempt} result came after {took:?}");
+            match result {
+                _ if abandoned_shared => None,
+                Ok(finished) if finished.ended == want => None,
+                got => Some(format!("run {attempt} returned {got:?}, expected {want:?}")),
+            }
+        }
     }
 }
 
@@ -486,5 +490,45 @@ proptest! {
     ) {
         let failures = play(&s);
         prop_assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+proptest! {
+    #![proptest_config(Config {
+        cases: 16,
+        failure_persistence: None,
+        ..Config::default()
+    })]
+
+    #[test]
+    fn a_run_without_a_result_tells_an_ended_task_from_a_running_one(
+        flavor in flavor(),
+        wait in (1u64..200).prop_map(Duration::from_millis),
+    ) {
+        let lab = Lab::new(flavor);
+        let held = ChildPlan {
+            held: true,
+            exit: Exit::Code(0),
+            transition: String::new(),
+            subject: String::new(),
+        };
+        let aborted = lab.start(0, held.clone());
+        aborted.drop_future();
+        let ended_task = aborted.wait_task_ended();
+        prop_assert!(ended_task.is_ok(), "{ended_task:?}");
+        let running = lab.start(1, held);
+        let ended = aborted.result(wait);
+        let still = running.result(wait);
+        running.tell();
+        let told = format!("{:?}", running.result(SETTLE));
+        prop_assert!(
+            matches!(ended, Err(NoResult::TaskEnded { .. })),
+            "the aborted run read {ended:?}"
+        );
+        prop_assert!(
+            matches!(still, Err(NoResult::StillRunning { .. })),
+            "the running run read {still:?}"
+        );
+        prop_assert!(told.contains("Exited"), "the told run returned {told}");
     }
 }

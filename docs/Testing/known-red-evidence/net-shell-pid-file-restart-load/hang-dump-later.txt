@@ -1,0 +1,7 @@
+$ ps -A -o pid,ppid,pgid,stat,etime,command | awk 'NR==1 || $2==42533'
+  PID  PPID  PGID STAT     ELAPSED COMMAND
+47956 42533 47956 SN         00:24 /bin/sh -c echo $$ > "$0.started.w" && mv "$0.started.w" "$0.started"; while [ ! -e "$0" ]; do sleep 0.02; done; kill -1 $$ /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/fj-1y7etb3k/.tmpzwOaPu/ctl-2
+47959 42533 47959 ZN         00:24 <defunct>
+53959 42533 89603 SN         00:01 /bin/sh -c ps -A -o pid,ppid,pgid,stat,etime,command | awk 'NR==1 || $2==42533'
+task finished false
+result now Err(Empty)

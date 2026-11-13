@@ -1,0 +1,17 @@
+BASE: f3f6ea34da619a7383e9399103948f37fa2101f4
+TREE: ef60fabfa7ceaff977dbff423a35e5fbc288a09e (with the spawn lock in effect.rs and the variant-asserting result property; evidence files added after the build change no code)
+STARTED: 2026-11-13T16:27:03Z
+job: c1166.test.20261113T161153Z, flow job run --queue (ended 2026-11-13T16:40:20Z)
+floor: scripts/known-red-gate-load.py band median, read before and after each run (the higher one is the row's floor); a row qualifies when load_start AND load_max are at or above it
+per iteration: cargo nextest run -p holon-net-shell --no-fail-fast --retries 0 --success-output immediate; waits = the restart property's 'run N result came after' lines; logs after-run-N.log.zst
+iter	started	floor	load_start	load_max	qualifies	status	seconds	n_waits	wait_p90_ms	wait_max_ms
+1	2026-11-13T16:27:03Z	30.50	74.83	94.84	yes	PASS	38.416	207	102.3	773.9
+2	2026-11-13T16:28:16Z	30.52	100.46	126.64	yes	PASS	31.090	214	91.0	286.3
+3	2026-11-13T16:29:29Z	30.52	114.90	129.95	yes	PASS	26.241	212	59.1	322.5
+4	2026-11-13T16:30:39Z	30.52	125.52	173.61	yes	PASS	28.504	218	71.4	444.6
+5	2026-11-13T16:32:06Z	30.52	168.35	192.19	yes	PASS	26.196	208	65.7	147.4
+6	2026-11-13T16:33:23Z	30.53	168.75	223.23	yes	PASS	39.545	220	57.9	388.4
+7	2026-11-13T16:35:00Z	30.54	215.19	221.22	yes	PASS	35.186	207	77.4	381.8
+8	2026-11-13T16:36:16Z	30.60	199.36	227.27	yes	PASS	41.390	210	93.6	286.3
+9	2026-11-13T16:37:35Z	30.60	226.83	237.39	yes	PASS	28.558	208	77.5	298.0
+10	2026-11-13T16:38:56Z	30.60	226.74	230.19	yes	PASS	45.789	228	197.6	899.6

@@ -451,16 +451,14 @@ fn check_end(run: &Run, model: &mut Model, i: usize) -> Option<String> {
         run.tell();
         model.runs[i].told = true;
     }
-    let result = run.result(SETTLE);
+    let result = run.result(SETTLE).map(|(result, _)| result);
     match (&expect, result) {
         (Expect::Dropped, _) => None,
-        (_, None) => Some(format!(
-            "run {attempt} has no result after {SETTLE:?}: its task panicked or did not end"
-        )),
-        (Expect::AnyEnd, Some(_)) => None,
-        (Expect::End(want), Some(Ok(finished))) if finished.ended == *want => None,
-        (Expect::PidFileError, Some(Err(ShellError::PidFile { .. }))) => None,
-        (want, Some(got)) => Some(format!("run {attempt} returned {got:?}, expected {want:?}")),
+        (_, Err(none)) => Some(format!("run {attempt} has no result: {none}")),
+        (Expect::AnyEnd, Ok(_)) => None,
+        (Expect::End(want), Ok(Ok(finished))) if finished.ended == *want => None,
+        (Expect::PidFileError, Ok(Err(ShellError::PidFile { .. }))) => None,
+        (want, Ok(got)) => Some(format!("run {attempt} returned {got:?}, expected {want:?}")),
     }
 }
 

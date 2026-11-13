@@ -791,7 +791,15 @@ fn spawn(
             }
         });
     }
-    let child = spawn.spawn().map_err(|source| ShellError::Spawn {
+    // macOS std opens the pipe on which spawn waits for the exec without
+    // O_CLOEXEC; a child forked meanwhile holds it open until that child exits.
+    static SPAWN: Mutex<()> = Mutex::new(());
+    let one_spawn = SPAWN
+        .lock()
+        .expect("the shell effect's spawn lock is poisoned");
+    let spawned = spawn.spawn();
+    drop(one_spawn);
+    let child = spawned.map_err(|source| ShellError::Spawn {
         argv: command.argv.join(" "),
         source,
     })?;

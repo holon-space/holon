@@ -42,7 +42,9 @@ use proptest::prelude::*;
 pub const BOUND: Duration = Duration::from_millis(200);
 
 /// How long an eventual check waits for children and writes the test does not
-/// hold: far above any child's exit and any write on an idle disk.
+/// hold: more than 2x the slowest run result measured at gate load
+/// (docs/Testing/known-red-evidence/net-shell-pid-file-restart-load/load-runs.
+/// txt).
 pub const SETTLE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,13 +177,38 @@ fn descriptor(plan: &ChildPlan, ctl: &Path, working_dir: &Path) -> ShellEffect {
 /// What one run's task hands back.
 pub type RunResult = Result<Finished, ShellError>;
 
+/// Why [`Run::result`] has no result.
+#[derive(Debug)]
+pub enum NoResult {
+    /// The task ended without sending one: it panicked or was aborted.
+    TaskEnded {
+        after: Duration,
+        why: String,
+    },
+    StillRunning {
+        waited: Duration,
+    },
+}
+
+impl std::fmt::Display for NoResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TaskEnded { after, why } => {
+                write!(f, "its task ended without one after {after:?}: {why}")
+            }
+            Self::StillRunning { waited } => write!(f, "its task still runs after {waited:?}"),
+        }
+    }
+}
+
 /// One run the test started.
 pub struct Run {
     pub attempt: u64,
     pub plan: ChildPlan,
     ctl: PathBuf,
     result: mpsc::Receiver<RunResult>,
-    task: tokio::task::JoinHandle<()>,
+    task: Mutex<tokio::task::JoinHandle<()>>,
+    handle: tokio::runtime::Handle,
     /// When the test first saw the task ended.
     ended_at: OnceLock<Instant>,
 }
@@ -222,14 +249,14 @@ impl Run {
 
     /// Drops the run's future wherever it waits.
     pub fn drop_future(&self) {
-        self.task.abort();
+        self.task.lock().unwrap().abort();
     }
 
     /// Waits until the run's task has ended, so its future takes no further
     /// step.
     pub fn wait_task_ended(&self) -> Result<(), String> {
         eventually(|| {
-            if self.task.is_finished() {
+            if self.task.lock().unwrap().is_finished() {
                 self.ended_at.get_or_init(Instant::now);
                 Ok(())
             } else {
@@ -238,9 +265,34 @@ impl Run {
         })
     }
 
-    /// The run's result, or `None` when it has none after `wait`.
-    pub fn result(&self, wait: Duration) -> Option<RunResult> {
-        self.result.recv_timeout(wait).ok()
+    /// The run's result and how long it took to come, if it comes within
+    /// `wait`.
+    pub fn result(&self, wait: Duration) -> Result<(RunResult, Duration), NoResult> {
+        let asked = Instant::now();
+        match self.result.recv_timeout(wait) {
+            Ok(result) => Ok((result, asked.elapsed())),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(NoResult::StillRunning {
+                waited: asked.elapsed(),
+            }),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let after = asked.elapsed();
+                let joined = self.handle.block_on(&mut *self.task.lock().unwrap());
+                let why = match joined {
+                    Ok(()) => unreachable!("a task that ends normally sends its result"),
+                    Err(error) if error.is_cancelled() => "it was aborted".to_owned(),
+                    Err(error) => {
+                        let payload = error.into_panic();
+                        let message = payload
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "a payload that is no string".to_owned());
+                        format!("it panicked: {message}")
+                    }
+                };
+                Err(NoResult::TaskEnded { after, why })
+            }
+        }
     }
 }
 
@@ -278,7 +330,8 @@ impl<T> Pending<T> {
             .recv_timeout(bound.saturating_sub(self.started.elapsed()))
         {
             Ok(value) => Ok((value, self.started.elapsed())),
-            Err(_) => Err(self),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(self),
+            Err(mpsc::RecvTimeoutError::Disconnected) => unanswered(),
         };
         if answer.is_ok() {
             TIMED_IN_TIME.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -286,11 +339,21 @@ impl<T> Pending<T> {
         answer
     }
 
-    /// The late answer and how long after the call it came.
+    /// The late answer and how long after the call it came; `None` when it
+    /// has none [`SETTLE`] after this call.
     pub fn late(self) -> Option<(T, Duration)> {
-        let value = self.answer.recv_timeout(SETTLE).ok()?;
-        Some((value, self.started.elapsed()))
+        match self.answer.recv_timeout(SETTLE) {
+            Ok(value) => Some((value, self.started.elapsed())),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => unanswered(),
+        }
     }
+}
+
+fn unanswered() -> ! {
+    panic!(
+        "a call to the runner ended without an answer: it panicked (its message is above) or its runtime shut down"
+    )
 }
 
 /// A runner on its own runtime, in a temporary directory that also holds the
@@ -377,7 +440,8 @@ impl Lab {
             plan,
             ctl,
             result,
-            task,
+            task: Mutex::new(task),
+            handle: self.handle.clone(),
             ended_at: OnceLock::new(),
         }
     }

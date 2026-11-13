@@ -1,0 +1,32 @@
+BASE: f3f6ea34da619a7383e9399103948f37fa2101f4
+TREE: base + the typed Run::result + a temporary probe_dump in tests/pid_file_support/mod.rs (restored after; restore log target/net-shell-pid-restart-budget/hang/probe-restore.log); effect.rs unfixed
+STARTED: job c1166.test.20261113T111951Z (ended 2026-11-13T11:25:51Z)
+shape: target/net-shell-pid-restart-budget/hang/hang-probe.sh, 4 parallel loops of the test binary --exact a_restart_reads_exactly_the_groups_that_still_run_after_any_sequence_of_runs --test-threads 1, stop at 2 FAIL
+p4 iter 1 load 170.79 rc 0
+p1 iter 1 load 170.79 rc 0
+p3 iter 1 load 170.79 rc 0
+p2 iter 1 load 170.79 rc 0
+p3 iter 2 load 168.12 rc 0
+p4 iter 2 load 170.66 rc 0
+p1 iter 2 load 168.12 rc 0
+p2 iter 2 load 168.12 rc 0
+p4 iter 3 load 166.24 rc 0
+p3 iter 3 load 170.52 rc 0
+p2 iter 3 load 166.24 rc 0
+p1 iter 3 load 166.24 rc 0
+p2 iter 4 load 166.53 rc 0
+p1 iter 4 load 169.85 rc 0
+p4 iter 4 load 166.53 rc 0
+p3 iter 4 load 166.53 rc 0
+p2 iter 5 load 154.83 rc 0
+p4 iter 5 load 155.41 rc 0
+p3 iter 5 load 155.41 rc 0
+p1 iter 5 load 154.83 rc 0
+p2 iter 6 load 154.02 rc 0
+p3 iter 6 load 157.34 rc 0
+p1 iter 6 load 157.34 rc 0
+p3 iter 7 load 170.98 rc 101
+p4 iter 6 load 153.54 rc 101
+p2 iter 7 load 170.98 rc 0
+p1 iter 7 load 171.51 rc 0
+p3 iter 8 load 174.11 rc 0
