@@ -28,14 +28,15 @@ pub fn build_session(
 
     let config_dir = config::resolve_config_dir(cli_parsed.config_dir.as_deref());
 
-    let (traced, locked) = config::load_config(&config_dir, cli_parsed)?;
+    let (traced, locked, boot_note) = config::load_config(&config_dir, cli_parsed)?;
     let holon_config = traced.into_inner();
 
     let ui_info = holon_api::UiInfo {
         available_widgets,
         screen_size: None,
     };
-    let session_config = SessionConfig::new(ui_info, std::sync::Arc::new(holon_api::SystemClock));
+    let session_config = SessionConfig::new(ui_info, std::sync::Arc::new(holon_api::SystemClock))
+        .with_boot_notes(boot_note);
 
     eprintln!(
         "Config dir: {}, db: {}, orgmode: {:?}, loro: {}",

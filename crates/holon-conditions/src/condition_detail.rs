@@ -800,6 +800,14 @@ impl ConditionKind {
                  clock table.",
                 vec![error.clone()],
             ),
+
+            // The link path is a PAYLOAD the user must find whole; the cause
+            // names its target.
+            Self::ConfigFileUnusable { path, cause } => ConditionDetail::with_body(
+                "The settings file cannot be used, so Holon runs on its defaults and saves no \
+                 setting. Repoint the link to an existing file or remove it, then restart Holon.",
+                vec![path.clone(), cause.clone()],
+            ),
         }
     }
 }

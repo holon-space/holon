@@ -770,6 +770,13 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process; the sidecar has to change.
     IntegrationTypeRefused { types: Vec<RefusedType> },
+    /// `holon.toml` (`path`) is a symlink to a file that does not exist, so
+    /// Holon runs on its defaults and saves no setting: a save would replace
+    /// the user's link. `cause` names the link and its target. Subject:
+    /// [`CONFIG_SUBJECT`].
+    ///
+    /// All-clear: none in this process; the link has to change.
+    ConfigFileUnusable { path: String, cause: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -783,6 +790,9 @@ pub const PANIC_CONDITIONS_SUBJECT: &str = "panic-conditions";
 
 /// Subject of [`ConditionKind::ClockNotRunning`].
 pub const CLOCK_SUBJECT: &str = "clock";
+
+/// Subject of [`ConditionKind::ConfigFileUnusable`].
+pub const CONFIG_SUBJECT: &str = "config";
 
 /// Subject of [`ConditionKind::ViewEngineStopped`].
 pub const VIEW_ENGINE_SUBJECT: &str = "view-engine";
@@ -884,6 +894,7 @@ impl ConditionKind {
     pub const TABLE_RESHAPED: &'static str = "table-reshaped";
     pub const SCHEMA_MODULE_FAILED: &'static str = "schema-module-failed";
     pub const CLOCK_NOT_RUNNING: &'static str = "clock-not-running";
+    pub const CONFIG_FILE_UNUSABLE: &'static str = "config-file-unusable";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -982,6 +993,7 @@ impl ConditionKind {
             Self::TableReshaped { .. } => Self::TABLE_RESHAPED,
             Self::SchemaModuleFailed { .. } => Self::SCHEMA_MODULE_FAILED,
             Self::ClockNotRunning { .. } => Self::CLOCK_NOT_RUNNING,
+            Self::ConfigFileUnusable { .. } => Self::CONFIG_FILE_UNUSABLE,
         }
     }
 }

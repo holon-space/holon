@@ -8,6 +8,7 @@ mod clock_out_of_range_boots_degraded;
 mod clock_seed_failure_boots_degraded;
 mod computed_persisted_boot_column;
 mod core_schema_failure_boots_degraded;
+mod dangling_config_link_boots_degraded;
 mod database_format_check_at_boot;
 mod database_open_disclosure;
 mod deleted_vault_profile_releases_its_claim;

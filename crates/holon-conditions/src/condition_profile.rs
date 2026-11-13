@@ -1060,6 +1060,15 @@ const CLOCK_NOT_RUNNING: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const CONFIG_FILE_UNUSABLE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Settings are not being saved",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -1152,6 +1161,7 @@ impl ConditionKind {
             Self::TableReshaped { .. } => TABLE_RESHAPED,
             Self::SchemaModuleFailed { .. } => SCHEMA_MODULE_FAILED,
             Self::ClockNotRunning { .. } => CLOCK_NOT_RUNNING,
+            Self::ConfigFileUnusable { .. } => CONFIG_FILE_UNUSABLE,
         }
     }
 }

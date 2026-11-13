@@ -149,6 +149,11 @@ impl FrontendInjectorExt for Injector {
         }));
         disclosure.performed(BootStep::WritebackDisclosure);
 
+        for note in &session_config.boot_notes {
+            self.resolve::<Arc<holon_conditions::ConditionBus>>()
+                .emit(note.clone());
+        }
+
         // The secret backend, chosen ONCE for the session so every reader —
         // the settings write path and the integration `${VAR}` resolver — holds
         // the same store. A fixture asking for the in-memory one gets a banner

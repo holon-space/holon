@@ -276,7 +276,7 @@ fn an_ics_url_persisted_in_holon_toml_configures_the_connector_after_a_restart()
     )
     .expect("write holon.toml");
 
-    let (traced, _locked) = load_config(dir.path(), HolonConfig::default())
+    let (traced, _locked, _) = load_config(dir.path(), HolonConfig::default())
         .expect("the desktop boot loader must accept this config");
     let booted = traced.into_inner();
 

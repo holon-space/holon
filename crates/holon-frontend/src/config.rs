@@ -274,6 +274,8 @@ pub struct SessionConfig {
     pub loro_peer_id: Option<u64>,
     pub timings: std::sync::Arc<holon_api::Timings>,
     pub clock: std::sync::Arc<dyn holon_api::Clock>,
+    /// Conditions found before the session existed, which its wiring raises.
+    pub boot_notes: Vec<holon_conditions::Condition>,
 }
 
 impl SessionConfig {
@@ -284,7 +286,16 @@ impl SessionConfig {
             loro_peer_id: None,
             timings: Default::default(),
             clock,
+            boot_notes: Vec::new(),
         }
+    }
+
+    pub fn with_boot_notes(
+        mut self,
+        notes: impl IntoIterator<Item = holon_conditions::Condition>,
+    ) -> Self {
+        self.boot_notes.extend(notes);
+        self
     }
 
     pub fn without_wait(mut self) -> Self {
@@ -406,46 +417,81 @@ pub fn resolve_config_dir(cli_override: Option<&Path>) -> PathBuf {
 /// Load configuration from the premortem pipeline:
 /// `Defaults → holon.toml → ClapSource(CLI+env)`
 ///
-/// Returns the traced config (for source queries) and the set of locked
-/// preference keys.
+/// Returns the traced config (for source queries), the set of locked
+/// preference keys, and the condition boot must raise when `holon.toml`
+/// cannot be used: a dangling link boots on the defaults and writes nothing.
 pub fn load_config(
     config_dir: &Path,
     cli_parsed: HolonConfig,
-) -> Result<(TracedConfig<HolonConfig>, HashSet<PrefKey>)> {
+) -> Result<(
+    TracedConfig<HolonConfig>,
+    HashSet<PrefKey>,
+    Option<holon_conditions::Condition>,
+)> {
     std::fs::create_dir_all(config_dir)?;
 
     let toml_path = config_dir.join("holon.toml");
+    let boot_note = dangling_link_target(&toml_path)?.map(|target| holon_conditions::Condition {
+        subject: holon_conditions::condition_bus::CONFIG_SUBJECT.to_string(),
+        reason: holon_conditions::ConditionKind::ConfigFileUnusable {
+            path: toml_path.display().to_string(),
+            cause: dangling_link_message(&toml_path, &target),
+        },
+    });
 
-    // First run: a missing config file is not an error. Persist the built-in
-    // defaults so the rest of the pipeline reads a real file (and the user has
-    // something to edit), and disclose it via an info line. A PRESENT but
-    // malformed file is NOT first run — it falls through to `Toml::file`, which
-    // surfaces the parse error loudly below.
-    if !toml_path.exists() {
-        save_config(config_dir, &HolonConfig::default())?;
-        tracing::info!(
-            "first run: created default config at {}",
-            toml_path.display()
-        );
+    let mut builder = Config::<HolonConfig>::builder()
+        .source(premortem::sources::Defaults::from(HolonConfig::default()));
+    if boot_note.is_none() {
+        // First run: a missing config file is not an error. Persist the
+        // built-in defaults so the rest of the pipeline reads a real file (and
+        // the user has something to edit), and disclose it via an info line. A
+        // PRESENT but malformed file is NOT first run — it falls through to
+        // `Toml::file`, which surfaces the parse error loudly below.
+        if !toml_path.exists() {
+            save_config(config_dir, &HolonConfig::default())?;
+            tracing::info!(
+                "first run: created default config at {}",
+                toml_path.display()
+            );
+        }
+
+        // The layered pipeline addresses values by dotted PATH, so a key
+        // written both flat and nested collapses to one path and premortem
+        // keeps whichever it saw last — a silent winner this crate never gets
+        // to see. Re-read the raw file through the same guard the direct parse
+        // uses, so both boot paths refuse the ambiguity identically.
+        PreferencesProbe::check(&toml_path)?;
+        builder = builder.source(premortem::sources::Toml::file(&toml_path));
     }
 
-    // The layered pipeline addresses values by dotted PATH, so a key written
-    // both flat and nested collapses to one path and premortem keeps whichever
-    // it saw last — a silent winner this crate never gets to see. Re-read the
-    // raw file through the same guard the direct parse uses, so both boot paths
-    // refuse the ambiguity identically.
-    PreferencesProbe::check(&toml_path)?;
-
-    let traced = Config::<HolonConfig>::builder()
-        .source(premortem::sources::Defaults::from(HolonConfig::default()))
-        .source(premortem::sources::Toml::file(&toml_path))
+    let traced = builder
         .source(ClapSource::new(cli_parsed))
         .build_traced()
         .map_err(|errors| anyhow::anyhow!("Config errors: {errors}"))?;
 
     let locked = extract_locked_keys(&traced);
 
-    Ok((traced, locked))
+    Ok((traced, locked, boot_note))
+}
+
+/// The text a symlink `path` points to, when no file stands behind it.
+fn dangling_link_target(path: &Path) -> Result<Option<PathBuf>> {
+    use anyhow::Context;
+
+    if !path.is_symlink() || path.exists() {
+        return Ok(None);
+    }
+    std::fs::read_link(path)
+        .map(Some)
+        .with_context(|| format!("Failed to read the link {}", path.display()))
+}
+
+fn dangling_link_message(path: &Path, target: &Path) -> String {
+    format!(
+        "{} is a symlink to {}, which does not exist",
+        path.display(),
+        target.display()
+    )
 }
 
 /// Reads nothing but `[preferences]`, so `load_config` can apply the same
@@ -544,13 +590,7 @@ fn resolve_link(path: &Path) -> Result<PathBuf> {
     }
     let target = std::fs::read_link(path)
         .with_context(|| format!("Failed to read the link {}", path.display()))?;
-    std::fs::canonicalize(path).with_context(|| {
-        format!(
-            "{} is a symlink to {}, which does not exist",
-            path.display(),
-            target.display()
-        )
-    })
+    std::fs::canonicalize(path).with_context(|| dangling_link_message(path, &target))
 }
 
 /// The table in `path`; a missing file is an empty table, a file that does not
@@ -818,6 +858,103 @@ impl HolonConfig {
             _ => {}
         }
         self.preferences.insert(key.clone(), value);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod dangling_link_boot_pbt {
+    //! The link layouts are a copy of the class generator in
+    //! `holon_toml_link_pbt`, which stays byte-identical to the verifier's
+    //! red patch.
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// A config dir whose `holon.toml` is a link, through `hops` more links,
+    /// to `real.toml` that does not exist; its directory may be missing too.
+    #[derive(Debug, Clone)]
+    struct DanglingLink {
+        absolute: bool,
+        hops: usize,
+        target_dir_exists: bool,
+    }
+
+    fn dangling_link() -> impl Strategy<Value = DanglingLink> {
+        (any::<bool>(), 0..3usize, any::<bool>()).prop_map(|(absolute, hops, target_dir_exists)| {
+            DanglingLink {
+                absolute,
+                hops,
+                target_dir_exists,
+            }
+        })
+    }
+
+    fn build(l: &DanglingLink) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("cfg");
+        std::fs::create_dir(&cfg).unwrap();
+        let real_dir = dir.path().join("real");
+        if l.target_dir_exists {
+            std::fs::create_dir(&real_dir).unwrap();
+        }
+        let target = real_dir.join("real.toml");
+        // `next` is the link text as seen from `dir`; the hops live in `dir`.
+        let mut next = if l.absolute {
+            target.clone()
+        } else {
+            PathBuf::from("real/real.toml")
+        };
+        for hop in 0..l.hops {
+            let name = format!("hop{hop}.toml");
+            std::os::unix::fs::symlink(&next, dir.path().join(&name)).unwrap();
+            next = if l.absolute {
+                dir.path().join(&name)
+            } else {
+                PathBuf::from(&name)
+            };
+        }
+        if !l.absolute {
+            next = PathBuf::from("..").join(next);
+        }
+        std::os::unix::fs::symlink(&next, cfg.join("holon.toml")).unwrap();
+        (dir, cfg, target)
+    }
+
+    proptest! {
+        #[test]
+        fn boot_on_a_dangling_link_runs_on_defaults_and_discloses_it(l in dangling_link()) {
+            let (_dir, cfg, target) = build(&l);
+            let link = cfg.join("holon.toml");
+            let link_text = std::fs::read_link(&link).unwrap();
+
+            let (traced, _, note) = load_config(&cfg, HolonConfig::default())
+                .map_err(|e| TestCaseError::fail(format!("{l:?}: boot aborts: {e:#}")))?;
+
+            prop_assert_eq!(
+                toml::Value::try_from(traced.into_inner()).unwrap(),
+                toml::Value::try_from(HolonConfig::default()).unwrap(),
+                "{:?}: boot did not run on the defaults", l
+            );
+            prop_assert_eq!(std::fs::read_link(&link).unwrap(), link_text.clone(), "{:?}: boot changed the link", l);
+            prop_assert!(!target.exists(), "{l:?}: boot wrote {}", target.display());
+
+            let note = note.ok_or_else(|| TestCaseError::fail(format!("{l:?}: no condition")))?;
+            let holon_conditions::ConditionKind::ConfigFileUnusable { path, cause } = &note.reason else {
+                return Err(TestCaseError::fail(format!("{l:?}: wrong condition {:?}", note.reason)));
+            };
+            prop_assert_eq!(path, &link.display().to_string());
+            let detail = note.reason.detail(&note.subject);
+            let shown = format!("{} {}", detail.headline, detail.body.join(" "));
+            for named in [link.display().to_string(), link_text.display().to_string()] {
+                prop_assert!(shown.contains(&named), "{l:?}: the condition does not name {named}: {shown}");
+            }
+            prop_assert!(cause.contains(&link_text.display().to_string()));
+            prop_assert!(shown.contains("defaults") && shown.contains("Repoint"), "{l:?}: no fix in {shown}");
+
+            // A later save still refuses rather than replacing the link.
+            prop_assert!(HolonConfig::default().save_runtime(&cfg).is_err(), "{l:?}: a later save succeeded");
+            prop_assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        }
     }
 }
 
@@ -1229,7 +1366,7 @@ mod tests {
         let toml_path = dir.path().join("holon.toml");
         assert!(!toml_path.exists(), "precondition: no config file yet");
 
-        let (traced1, _) = load_config(dir.path(), HolonConfig::default())
+        let (traced1, _, _) = load_config(dir.path(), HolonConfig::default())
             .expect("first run must load from defaults, not fail");
         let config1 = traced1.into_inner();
 
@@ -1248,7 +1385,7 @@ mod tests {
 
         // Second load reads the now-present file back identically and does not
         // mutate it.
-        let (traced2, _) =
+        let (traced2, _, _) =
             load_config(dir.path(), HolonConfig::default()).expect("second load must succeed");
         let config2 = traced2.into_inner();
         let on_disk_second = std::fs::read_to_string(&toml_path).unwrap();
@@ -1272,7 +1409,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("holon.toml"), "[ui]\ntheme = \"dracula\"\n").unwrap();
 
-        let (traced, _) = load_config(dir.path(), HolonConfig::default())
+        let (traced, _, _) = load_config(dir.path(), HolonConfig::default())
             .expect("load_config must succeed for a valid config");
         assert_eq!(
             traced.into_inner().ui.theme.as_deref(),
@@ -1295,7 +1432,7 @@ mod tests {
         )
         .unwrap();
 
-        let (traced, _) = load_config(dir.path(), HolonConfig::default())
+        let (traced, _, _) = load_config(dir.path(), HolonConfig::default())
             .expect("load_config must succeed for a valid config");
         let prefs = traced.into_inner().preferences;
 
@@ -1584,5 +1721,82 @@ mod tests {
         )
         .unwrap();
         HolonConfig::load_runtime(dir.path()).expect("valid config");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod holon_toml_link_pbt {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// A config dir whose `holon.toml` is a link, through `hops` more links,
+    /// to `real.toml` that does not exist; its directory may be missing too.
+    #[derive(Debug, Clone)]
+    struct DanglingLink {
+        absolute: bool,
+        hops: usize,
+        target_dir_exists: bool,
+    }
+
+    fn dangling_link() -> impl Strategy<Value = DanglingLink> {
+        (any::<bool>(), 0..3usize, any::<bool>()).prop_map(|(absolute, hops, target_dir_exists)| {
+            DanglingLink {
+                absolute,
+                hops,
+                target_dir_exists,
+            }
+        })
+    }
+
+    fn build(l: &DanglingLink) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("cfg");
+        std::fs::create_dir(&cfg).unwrap();
+        let real_dir = dir.path().join("real");
+        if l.target_dir_exists {
+            std::fs::create_dir(&real_dir).unwrap();
+        }
+        let target = real_dir.join("real.toml");
+        // `next` is the link text as seen from `dir`; the hops live in `dir`.
+        let mut next = if l.absolute {
+            target.clone()
+        } else {
+            PathBuf::from("real/real.toml")
+        };
+        for hop in 0..l.hops {
+            let name = format!("hop{hop}.toml");
+            std::os::unix::fs::symlink(&next, dir.path().join(&name)).unwrap();
+            next = if l.absolute {
+                dir.path().join(&name)
+            } else {
+                PathBuf::from(&name)
+            };
+        }
+        if !l.absolute {
+            next = PathBuf::from("..").join(next);
+        }
+        std::os::unix::fs::symlink(&next, cfg.join("holon.toml")).unwrap();
+        (dir, cfg, target)
+    }
+
+    proptest! {
+        #[test]
+        fn save_config_keeps_a_dangling_link_or_refuses(l in dangling_link()) {
+            let (_dir, cfg, target) = build(&l);
+            let result = save_config(&cfg, &HolonConfig::default());
+            let still_link = std::fs::symlink_metadata(cfg.join("holon.toml")).unwrap().file_type().is_symlink();
+            prop_assert!(still_link, "{l:?}: save_config replaced the link ({result:?})");
+            if result.is_err() {
+                prop_assert!(!target.exists(), "{l:?}: refused save wrote {}", target.display());
+            }
+        }
+
+        #[test]
+        fn boot_survives_a_dangling_holon_toml_link(l in dangling_link()) {
+            let (_dir, cfg, _target) = build(&l);
+            let result = load_config(&cfg, HolonConfig::default());
+            prop_assert!(result.is_ok(), "{l:?}: boot aborts: {:#}", result.err().unwrap());
+        }
     }
 }
