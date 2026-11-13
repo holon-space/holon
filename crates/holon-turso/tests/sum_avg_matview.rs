@@ -176,42 +176,25 @@ const FIXTURE_VIEW: &str =
     "SELECT g, SUM(x) AS sx, TOTAL(x) AS tx, AVG(y) AS ay, COUNT(*) AS c FROM t GROUP BY g";
 
 /// The schema and rows of the fixture's table `t`, read with the bare engine.
-fn table_t_in(path: &std::path::Path) -> (String, Vec<Vec<turso::Value>>) {
+/// Each row of `t`, quoted by SQL.
+const ROWS_OF_T: &str =
+    "SELECT quote(g) || ' ' || quote(x) || ' ' || quote(y) AS r FROM t ORDER BY 1";
+
+fn rows_of_t_in(path: &std::path::Path) -> Vec<String> {
     let io = Arc::new(turso_core::UnixIO::new().expect("file IO"));
     let options = turso_core::OpenOptions::new(Arc::new(turso_sqlite::SqliteDialect))
         .db_opts(turso_core::DatabaseOpts::default().with_views(true));
     let db = turso_core::Database::open(io, path.to_str().unwrap(), options).expect("raw open");
     let conn = db.connect(turso_core::ConnectOpts::new()).expect("connect");
-    let rows = |sql: &str| {
-        conn.prepare(sql)
-            .and_then(|mut stmt| stmt.run_collect_rows())
-            .unwrap_or_else(|e| panic!("{sql}: {e}"))
-    };
-    let schema = match rows("SELECT sql FROM sqlite_schema WHERE name = 't'").as_slice() {
-        [row] => match row.as_slice() {
-            [turso_core::Value::Text(sql)] => sql.as_str().to_string(),
-            other => panic!("schema of t is {other:?}"),
-        },
-        other => panic!("schema of t is {other:?}"),
-    };
-    let values = rows("SELECT g, x, y FROM t")
+    conn.prepare(ROWS_OF_T)
+        .and_then(|mut stmt| stmt.run_collect_rows())
+        .unwrap_or_else(|e| panic!("{ROWS_OF_T}: {e}"))
         .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .map(|v| match v {
-                    turso_core::Value::Null => turso::Value::Null,
-                    turso_core::Value::Numeric(turso_core::Numeric::Integer(n)) => {
-                        turso::Value::Integer(n)
-                    }
-                    turso_core::Value::Numeric(turso_core::Numeric::Float(f)) => {
-                        turso::Value::Real(f.into())
-                    }
-                    other => panic!("t holds {other:?}"),
-                })
-                .collect()
+        .map(|row| match row.as_slice() {
+            [turso_core::Value::Text(r)] => r.as_str().to_string(),
+            other => panic!("{ROWS_OF_T}: {other:?}"),
         })
-        .collect();
-    (schema, values)
+        .collect()
 }
 
 /// Writes the function-set record that Holon on that engine kept: the record
@@ -248,8 +231,12 @@ async fn a_sum_view_from_before_the_exact_sum_is_moved_aside_and_built_fresh_fol
 
     let (db, outcome) =
         TursoBackend::open_database_reporting_outcome(&path).expect("the old database opens");
-    let [OpenChange::MovedAside { reason, backup }] = outcome.0.as_slice() else {
-        panic!("the open must move the old file aside, got {outcome:?}");
+    let [
+        OpenChange::MovedAside { reason, backup },
+        OpenChange::OwnedStateKept { .. },
+    ] = outcome.0.as_slice()
+    else {
+        panic!("the open must move the old file aside and rebuild a copy, got {outcome:?}");
     };
     assert!(reason.contains("names no engine format"), "{reason}");
     assert_eq!(
@@ -259,18 +246,22 @@ async fn a_sum_view_from_before_the_exact_sum_is_moved_aside_and_built_fresh_fol
         backup.display()
     );
 
-    let (schema, rows) = table_t_in(backup);
     let (_backend, handle) = TursoBackend::new(db, broadcast::channel(64).0).expect("backend");
-    handle
-        .execute(&schema, vec![])
+    let live: Vec<String> = handle
+        .query(ROWS_OF_T, HashMap::new())
         .await
-        .unwrap_or_else(|e| panic!("{schema}: {e}"));
-    for row in rows {
-        handle
-            .execute("INSERT INTO t (g, x, y) VALUES (?, ?, ?)", row)
-            .await
-            .expect("copy a row of the backup");
-    }
+        .unwrap_or_else(|e| panic!("{ROWS_OF_T}: {e}"))
+        .iter()
+        .map(|row| match row.get("r") {
+            Some(holon_api::Value::String(r)) => r.clone(),
+            other => panic!("{ROWS_OF_T}: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        live,
+        rows_of_t_in(backup),
+        "the rebuilt copy keeps the user table t row for row"
+    );
     reconcile_named_view(&handle, "v", FIXTURE_VIEW)
         .await
         .expect("the schema modules build the view");

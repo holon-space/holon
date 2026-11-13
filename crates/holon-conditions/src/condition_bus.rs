@@ -309,12 +309,33 @@ pub enum ConditionKind {
     ///
     /// All-clear: none — it is a one-shot notice about this boot.
     UndoHistoryClearedAtBoot { entries: usize },
-    /// The engine could not open the database at boot, so it was renamed to
-    /// `backup` and a fresh one opened. The vault refills the blocks; anything
-    /// that was only in the database is in `backup`.
+    /// The engine could not use the database at boot, so it was renamed to
+    /// `backup`, unchanged. A `DatabaseOwnedStateKept` or
+    /// `DatabaseOwnedStateLost` says what took its place.
     ///
     /// All-clear: none — the backup stays where it is for the whole session.
     DatabaseMovedAside { reason: String, backup: String },
+    /// A copy of the moved-aside `backup` took its place, rebuilt: the vault
+    /// and the integrations refill what was dropped, and `kept` names each
+    /// kept table with its rows. `cleared` names the state dropped although
+    /// only the database held it.
+    ///
+    /// All-clear: none — it is a one-shot notice about this boot.
+    DatabaseOwnedStateKept {
+        backup: String,
+        kept: Vec<String>,
+        cleared: Vec<String>,
+    },
+    /// The copy of the moved-aside `backup` could not be rebuilt (`why`), so
+    /// a fresh database took its place: each kind of state in `kinds` may be
+    /// lost here, and is in `backup` if the database held it.
+    ///
+    /// All-clear: none — the backup stays where it is for the whole session.
+    DatabaseOwnedStateLost {
+        backup: String,
+        kinds: Vec<String>,
+        why: String,
+    },
     /// The database's write-ahead log was damaged at boot, so it was renamed
     /// to `backup` and the intact main file opened as it was. Commits that
     /// were only in the log are in `backup`.
@@ -797,6 +818,8 @@ impl ConditionKind {
     pub const SECRETS_HELD_IN_MEMORY: &'static str = "secrets-held-in-memory";
     pub const UNDO_HISTORY_CLEARED_AT_BOOT: &'static str = "undo-history-cleared-at-boot";
     pub const DATABASE_MOVED_ASIDE: &'static str = "database-moved-aside";
+    pub const DATABASE_OWNED_STATE_KEPT: &'static str = "database-owned-state-kept";
+    pub const DATABASE_OWNED_STATE_LOST: &'static str = "database-owned-state-lost";
     pub const DATABASE_LOG_MOVED_ASIDE: &'static str = "database-log-moved-aside";
     pub const DATABASE_COORDINATION_FILE_MOVED_ASIDE: &'static str =
         "database-coordination-file-moved-aside";
@@ -885,6 +908,8 @@ impl ConditionKind {
             Self::SecretsHeldInMemory { .. } => Self::SECRETS_HELD_IN_MEMORY,
             Self::UndoHistoryClearedAtBoot { .. } => Self::UNDO_HISTORY_CLEARED_AT_BOOT,
             Self::DatabaseMovedAside { .. } => Self::DATABASE_MOVED_ASIDE,
+            Self::DatabaseOwnedStateKept { .. } => Self::DATABASE_OWNED_STATE_KEPT,
+            Self::DatabaseOwnedStateLost { .. } => Self::DATABASE_OWNED_STATE_LOST,
             Self::DatabaseLogMovedAside { .. } => Self::DATABASE_LOG_MOVED_ASIDE,
             Self::DatabaseCoordinationFileMovedAside { .. } => {
                 Self::DATABASE_COORDINATION_FILE_MOVED_ASIDE

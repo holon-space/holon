@@ -2,8 +2,11 @@
 //!
 //! No open deletes a row. Before any write, the open reads the engine format
 //! the file records. A file in another or an unknown format is moved aside
-//! whole and a fresh database opened in its place; no view of it is dropped,
-//! because an engine must not drop views whose stored state it does not know.
+//! whole, unchanged, because an engine must not drop views whose stored state
+//! it does not know. The open then rebuilds a copy of the moved file in its
+//! place: it drops what the vault, the Loro store and the integrations restore
+//! and keeps every other table with its rows. A copy that cannot be rebuilt
+//! gives way to a fresh database.
 //! A file in this engine's format that this binary cannot use as it is loses
 //! only what it computed: its materialized views, rebuilt from the tables they
 //! read, and the `block_derived` cache. That happens when the file was built
@@ -66,11 +69,29 @@ pub enum OpenChange {
         backup: std::path::PathBuf,
     },
     /// The engine could not use the file at all, or the file is in an engine
-    /// format this binary does not maintain. It was renamed to `backup`, and a
-    /// fresh database was opened in its place.
+    /// format this binary does not maintain. It was renamed to `backup`; the
+    /// next change says whether a copy of it or a fresh database took its
+    /// place.
     MovedAside {
         reason: String,
         backup: std::path::PathBuf,
+    },
+    /// A copy of the moved file `backup` took its place, rebuilt: every table
+    /// the vault, the Loro store or an integration restores was dropped, and
+    /// `kept` lists every other table with its row count. `cleared` names the
+    /// state dropped although only the database held it.
+    OwnedStateKept {
+        backup: std::path::PathBuf,
+        kept: Vec<(String, u64)>,
+        cleared: Vec<&'static str>,
+    },
+    /// The copy of the moved file `backup` could not be rebuilt (`why`), so a
+    /// fresh database took its place: every kind of state in `kinds` may be
+    /// lost here, and is in `backup` if the file held it.
+    OwnedStateLost {
+        backup: std::path::PathBuf,
+        kinds: Vec<&'static str>,
+        why: String,
     },
     /// Another process held the file's lock. The open waited `waited_ms` for
     /// it and then got the file; nothing was changed.
@@ -99,6 +120,27 @@ impl std::fmt::Display for OpenChange {
                 f,
                 "moved the database aside to {} ({reason})",
                 backup.display()
+            ),
+            Self::OwnedStateKept {
+                backup,
+                kept,
+                cleared,
+            } => write!(
+                f,
+                "rebuilt a copy of {}, keeping the tables [{}] and clearing [{}]",
+                backup.display(),
+                kept.iter()
+                    .map(|(table, rows)| format!("{table}: {rows} rows"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                cleared.join("; ")
+            ),
+            Self::OwnedStateLost { backup, kinds, why } => write!(
+                f,
+                "could not rebuild a copy of {} ({why}) and opened a fresh database; it may have \
+                 held [{}]",
+                backup.display(),
+                kinds.join("; ")
             ),
             Self::LockWaited { waited_ms } => write!(
                 f,
@@ -255,8 +297,40 @@ fn open_recording(
                 stem,
             )?,
         });
-        if let Some(OpenChange::MovedAside { .. }) = changes.last() {
-            return open_fresh(path, fns).map_err(|e| e.classify(path));
+        if let Some(OpenChange::MovedAside { backup, .. }) = changes.last() {
+            let backup = backup.clone();
+            // A log moved aside earlier in this open is the damaged one.
+            let with_log = !changes
+                .iter()
+                .any(|change| matches!(change, OpenChange::LogMovedAside { .. }));
+            return match rebuild_on_copy(&backup, db_path, path, fns, with_log)? {
+                Ok(Rebuilt { db, kept, cleared }) => {
+                    tracing::warn!(
+                        "[open_database] {path}: rebuilt a copy of {}; kept {kept:?}, cleared \
+                         {cleared:?}",
+                        backup.display()
+                    );
+                    changes.push(OpenChange::OwnedStateKept {
+                        backup,
+                        kept,
+                        cleared,
+                    });
+                    Ok(db)
+                }
+                Err(why) => {
+                    tracing::error!(
+                        "[open_database] {path}: {why}. Opened a fresh database; the state only \
+                         the database held is in {}",
+                        backup.display()
+                    );
+                    changes.push(OpenChange::OwnedStateLost {
+                        backup,
+                        kinds: crate::table_classes::lost_kinds(),
+                        why,
+                    });
+                    open_fresh(path, fns).map_err(|e| e.classify(path))
+                }
+            };
         }
     }
 }
@@ -546,8 +620,8 @@ fn move_database_aside(
         }
     }
     tracing::error!(
-        "[open_database] {path} is unusable: {reason}. Moved it aside to {} and opened a fresh \
-         database; anything that was only in the database is in that file",
+        "[open_database] {path} is unusable: {reason}. Moved it aside to {}; the moved file \
+         keeps everything the database held",
         stem.display()
     );
     Ok(OpenChange::MovedAside {
@@ -699,44 +773,246 @@ fn open_fresh(path: &str, fns: &[ScalarFn]) -> Step<Arc<Database>> {
 /// Returns the dropped view names.
 fn drop_computed(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Vec<String>> {
     let conn = connect(db)?;
-    let unloadable: Vec<String> = unloadable_views(&conn)?
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
-    let mut views: Vec<(String, String)> = view_rows(&conn)?
-        .into_iter()
-        .filter(|(name, sql)| is_materialized(sql) || unloadable.contains(name))
-        .collect();
-    let run = |sql: &str| conn.execute(sql).map_err(engine(sql));
+    let views = computed_views(&conn)?;
     in_write_tx(&conn, || {
-        let mut dropped = Vec::new();
-        while !views.is_empty() {
-            let (free, held): (Vec<_>, Vec<_>) = views.iter().cloned().partition(|(name, _)| {
-                !views
-                    .iter()
-                    .any(|(other, sql)| other != name && names_word(sql, name))
-            });
-            if free.is_empty() {
-                return Err(invalid(format!(
-                    "the views [{}] read each other, so none can be dropped first",
-                    held.iter()
-                        .map(|(n, _)| n.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-            for (name, _) in free {
-                run(&format!("DROP VIEW \"{name}\""))?;
-                dropped.push(name);
-            }
-            views = held;
-        }
+        let dropped = drop_views(&conn, views)?;
         if has_table(&conn, DERIVED_CACHE_TABLE)? {
-            run(&format!("DELETE FROM {DERIVED_CACHE_TABLE}"))?;
+            let sql = format!("DELETE FROM {DERIVED_CACHE_TABLE}");
+            conn.execute(&sql).map_err(engine(&sql))?;
         }
         write_signature(&conn, fns)?;
         Ok(dropped)
     })
+}
+
+/// Every materialized view and every view the engine could not load.
+fn computed_views(conn: &Arc<Connection>) -> Step<Vec<(String, String)>> {
+    let unloadable: Vec<String> = unloadable_views(conn)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    Ok(view_rows(conn)?
+        .into_iter()
+        .filter(|(name, sql)| is_materialized(sql) || unloadable.contains(name))
+        .collect())
+}
+
+/// Drops `views`, dependents first, inside the caller's transaction. Returns
+/// the dropped names.
+fn drop_views(conn: &Arc<Connection>, mut views: Vec<(String, String)>) -> Step<Vec<String>> {
+    let mut dropped = Vec::new();
+    while !views.is_empty() {
+        let (free, held): (Vec<_>, Vec<_>) = views.iter().cloned().partition(|(name, _)| {
+            !views
+                .iter()
+                .any(|(other, sql)| other != name && names_word(sql, name))
+        });
+        if free.is_empty() {
+            return Err(invalid(format!(
+                "the views [{}] read each other, so none can be dropped first",
+                held.iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        for (name, _) in free {
+            let sql = format!("DROP VIEW \"{name}\"");
+            conn.execute(&sql).map_err(engine(&sql))?;
+            dropped.push(name);
+        }
+        views = held;
+    }
+    Ok(dropped)
+}
+
+/// The rebuilt copy of a moved-aside database.
+struct Rebuilt {
+    db: Arc<Database>,
+    kept: Vec<(String, u64)>,
+    cleared: Vec<&'static str>,
+}
+
+/// Copies the moved-aside files at `stem` (the log only `with_log`) to
+/// `path`, then rebuilds the copy: see [`rebuild`]. The backup is only read.
+/// `Ok(Err(why))`: the copy was not rebuilt and every file of it is removed,
+/// so a fresh database can take its place. `Err`: a file of the copy could not
+/// be removed.
+fn rebuild_on_copy(
+    stem: &Path,
+    db_path: &Path,
+    path: &str,
+    fns: &[ScalarFn],
+    with_log: bool,
+) -> Result<std::result::Result<Rebuilt, String>> {
+    let failed = match copy_backup(stem, path, with_log).and_then(|()| rebuild(path, fns)) {
+        Ok(rebuilt) => return Ok(Ok(rebuilt)),
+        Err(error) => error,
+    };
+    for file in TursoDurableState::new(db_path).durable_paths() {
+        if file.exists() {
+            std::fs::remove_file(&file).map_err(|e| {
+                StorageError::DatabaseError(format!(
+                    "rebuild a copy of {} at {path}: {failed}; then removing the copy's file {} \
+                     failed: {e}",
+                    stem.display(),
+                    file.display()
+                ))
+            })?;
+        }
+    }
+    Ok(Err(format!(
+        "rebuild a copy of {} at {path}: {failed}",
+        stem.display()
+    )))
+}
+
+fn copy_backup(stem: &Path, path: &str, with_log: bool) -> Step<()> {
+    let suffixes: &[&str] = match with_log {
+        true => &["", LOG_SUFFIX],
+        false => &[""],
+    };
+    for suffix in suffixes {
+        let from = std::path::PathBuf::from(format!("{}{suffix}", stem.display()));
+        if from.exists() {
+            let to = sidecar(path, suffix);
+            std::fs::copy(&from, &to).map_err(|e| {
+                invalid(format!("copy {} to {}: {e}", from.display(), to.display()))
+            })?;
+        }
+    }
+    #[cfg(test)]
+    rebuild_fault::at(rebuild_fault::Cut::Copied)?;
+    Ok(())
+}
+
+/// In one transaction on the copy at `path`: drops its computed views, then
+/// every table [`rebuild_action`](crate::table_classes::rebuild_action) drops,
+/// and records `fns`. The copy must then be usable as it is.
+fn rebuild(path: &str, fns: &[ScalarFn]) -> Step<Rebuilt> {
+    use crate::table_classes::Class;
+    use crate::table_classes::RebuildAction;
+
+    let db = open_file(path, fns)?;
+    let conn = connect(&db)?;
+    // `advice_suppressed` cascades from `block_raw`, which the rebuild drops.
+    conn.execute("PRAGMA foreign_keys = OFF")
+        .map_err(engine("PRAGMA foreign_keys = OFF"))?;
+    #[cfg(test)]
+    rebuild_fault::at(rebuild_fault::Cut::Opened)?;
+    let views = computed_views(&conn)?;
+    let (kept, cleared) = in_write_tx(&conn, || {
+        let caches: std::collections::HashMap<String, String> =
+            match has_table(&conn, "integration_cache")? {
+                true => text_pairs(&conn, "SELECT table_name, provider FROM integration_cache")?
+                    .into_iter()
+                    .collect(),
+                false => Default::default(),
+            };
+        drop_views(&conn, views)?;
+        let mut kept = Vec::new();
+        let mut cleared = Vec::new();
+        for table in user_tables(&conn)? {
+            match crate::table_classes::rebuild_action(&table, &caches) {
+                RebuildAction::Keep => kept.push(table),
+                RebuildAction::Drop => {
+                    if let Some(Class::Lost(what)) = crate::table_classes::class_of(&table, &caches)
+                    {
+                        cleared.push(what);
+                    }
+                    let sql = format!("DROP TABLE \"{table}\"");
+                    conn.execute(&sql).map_err(engine(&sql))?;
+                }
+            }
+        }
+        #[cfg(test)]
+        rebuild_fault::at(rebuild_fault::Cut::Dropped)?;
+        write_signature(&conn, fns)?;
+        Ok((kept, cleared))
+    })?;
+    #[cfg(test)]
+    rebuild_fault::at(rebuild_fault::Cut::Committed)?;
+    match verdict(&db, fns)? {
+        Verdict::Usable => {}
+        Verdict::Recompute(why) | Verdict::MoveAside(why) => {
+            return Err(invalid(format!(
+                "the rebuilt copy is still unusable: {why}"
+            )));
+        }
+    }
+    let kept = kept
+        .into_iter()
+        .map(|table| {
+            let sql = format!("SELECT count(*) FROM \"{table}\"");
+            match rows(&conn, &sql)?.as_slice() {
+                [row] => match row.as_slice() {
+                    [Value::Numeric(turso_core::Numeric::Integer(n))] => Ok((table, *n as u64)),
+                    other => Err(invalid(format!("{sql} gave {other:?}"))),
+                },
+                other => Err(invalid(format!("{sql} gave {other:?}"))),
+            }
+        })
+        .collect::<Step<Vec<_>>>()?;
+    drop(conn);
+    Ok(Rebuilt { db, kept, cleared })
+}
+
+/// The tables of the schema, without the engine's own.
+fn user_tables(conn: &Arc<Connection>) -> Step<Vec<String>> {
+    Ok(text_pairs(
+        conn,
+        "SELECT name, name FROM sqlite_schema WHERE type = 'table' ORDER BY name",
+    )?
+    .into_iter()
+    .map(|(name, _)| name)
+    .filter(|name| !name.starts_with("sqlite_") && !name.starts_with("__turso_internal_"))
+    .collect())
+}
+
+fn text_pairs(conn: &Arc<Connection>, sql: &str) -> Step<Vec<(String, String)>> {
+    rows(conn, sql)?
+        .into_iter()
+        .map(|row| match row.as_slice() {
+            [Value::Text(a), Value::Text(b)] => {
+                Ok((a.as_str().to_string(), b.as_str().to_string()))
+            }
+            other => Err(invalid(format!("{sql}: a row is {other:?}"))),
+        })
+        .collect()
+}
+
+/// Lets a test fail or crash a rebuild at one point.
+#[cfg(test)]
+mod rebuild_fault {
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Cut {
+        Copied,
+        Opened,
+        /// Inside the transaction, before the signature is written.
+        Dropped,
+        Committed,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Fault {
+        Error,
+        Crash,
+    }
+
+    pub static PLANTED: Mutex<Option<(Cut, Fault)>> = Mutex::new(None);
+
+    pub fn at(cut: Cut) -> super::Step<()> {
+        let planted = *PLANTED.lock().expect("rebuild fault");
+        match planted {
+            Some((at, Fault::Error)) if at == cut => {
+                Err(super::invalid(format!("injected failure after {cut:?}")))
+            }
+            Some((at, Fault::Crash)) if at == cut => panic!("injected crash after {cut:?}"),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Runs `body` in one write transaction. The engine keeps a transaction open
@@ -1237,9 +1513,24 @@ mod tests {
         ));
     }
 
+    /// The files of the database at `path`, with their bytes.
+    fn files_of(path: &Path) -> Vec<(String, Vec<u8>)> {
+        TursoDurableState::new(path)
+            .durable_paths()
+            .into_iter()
+            .filter(|file| file.exists())
+            .map(|file| {
+                let suffix = suffix_of(&file, path.to_str().unwrap()).to_string();
+                (suffix, std::fs::read(&file).unwrap())
+            })
+            .collect()
+    }
+
     /// A record that names no engine format, another one, or that is torn or
     /// foreign leaves the format unknown: the file moves aside whole, with its
-    /// rows and views, and the open starts a fresh database.
+    /// rows and views, and a rebuilt copy takes its place: the view is gone,
+    /// the table nothing classifies keeps its rows, and the record is this
+    /// binary's.
     #[test]
     fn a_file_in_another_or_an_unknown_engine_format_is_moved_aside_whole() {
         for (case, record_rows) in [
@@ -1272,16 +1563,46 @@ mod tests {
                     .unwrap();
                 }
             }
+            let before = files_of(&path);
             let (db, outcome) = open(&path, &[DOUBLE], WhenHeld::Wait)
                 .unwrap_or_else(|e| panic!("{case}: the file must not stop the open: {e}"));
-            let [OpenChange::MovedAside { backup, reason }] = outcome.0.as_slice() else {
-                panic!("{case}: the open must report the move, got {outcome:?}");
+            let [
+                OpenChange::MovedAside { backup, reason },
+                OpenChange::OwnedStateKept {
+                    backup: copied,
+                    kept,
+                    cleared,
+                },
+            ] = outcome.0.as_slice()
+            else {
+                panic!("{case}: the open must report the move and the rebuild, got {outcome:?}");
             };
             assert!(
                 reason.contains(VIEW_FORMAT),
                 "{case}: the reason must name the format this engine maintains: {reason}"
             );
-            assert!(!has(&db, "table", "t"), "{case}: the open must start fresh");
+            assert_eq!(copied, backup, "{case}");
+            assert_eq!(
+                (kept.as_slice(), cleared.as_slice()),
+                (&[("t".to_string(), 2)][..], &[][..]),
+                "{case}"
+            );
+            assert!(!has(&db, "view", "v"), "{case}: the rebuild drops the view");
+            assert_eq!(
+                count(&db, "SELECT sum(n) FROM t"),
+                3,
+                "{case}: t keeps its rows"
+            );
+            let conn = connect(&db).unwrap();
+            assert!(matches!(
+                stored_signature(&conn).unwrap(),
+                StoredSignature::Recorded(s) if s == record(&[DOUBLE])
+            ));
+            assert_eq!(
+                files_of(backup),
+                before,
+                "{case}: the backup holds the original files byte for byte"
+            );
             let moved = open_file(backup.to_str().unwrap(), &[DOUBLE]).unwrap();
             assert_eq!(
                 (
@@ -1291,6 +1612,137 @@ mod tests {
                 (2, 6),
                 "{case}: the moved file must keep its rows and its view"
             );
+        }
+    }
+
+    /// A file of the previous format with one table of each action.
+    fn build_previous_format(path: &Path) {
+        let db = open(path, &[DOUBLE], WhenHeld::Wait).unwrap().0;
+        for sql in [
+            "CREATE TABLE block_raw (id TEXT PRIMARY KEY)",
+            // ALLOW(sole_block_writer): test fixture of a previous-format file.
+            "INSERT INTO block_raw (id) VALUES ('block:a')",
+            "CREATE TABLE advice_suppressed (anchor_id TEXT NOT NULL, lesson_id TEXT NOT NULL, \
+             PRIMARY KEY (anchor_id, lesson_id), \
+             FOREIGN KEY (anchor_id) REFERENCES block_raw(id) ON DELETE CASCADE)",
+            "INSERT INTO advice_suppressed VALUES ('block:a', 'block:lesson')",
+            "CREATE TABLE sync_states (provider_name TEXT PRIMARY KEY, sync_token TEXT)",
+            "INSERT INTO sync_states VALUES ('gcal', 'token')",
+            "CREATE TABLE gcal_event (id TEXT)",
+            "INSERT INTO gcal_event VALUES ('e')",
+            "CREATE MATERIALIZED VIEW v AS SELECT id, holon_test_double(1) AS d FROM block_raw",
+        ] {
+            exec(&db, sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        }
+        exec(
+            &db,
+            &format!(
+                "UPDATE {FN_SET_TABLE} SET signature = '{};view-state/exact-real-sum'",
+                scalar_fns::signature(&[DOUBLE])
+            ),
+        )
+        .unwrap();
+    }
+
+    fn tables(db: &Arc<Database>) -> Vec<String> {
+        user_tables(&connect(db).unwrap()).unwrap()
+    }
+
+    /// The rebuild keeps the owned row whose anchor table it drops, clears the
+    /// sync tokens with the caches, and drops the derived tables.
+    #[test]
+    fn a_rebuild_keeps_owned_rows_and_clears_the_caches_with_their_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        build_previous_format(&path);
+        let (db, outcome) = open(&path, &[DOUBLE], WhenHeld::Wait).unwrap();
+        let [
+            OpenChange::MovedAside { .. },
+            OpenChange::OwnedStateKept { kept, cleared, .. },
+        ] = outcome.0.as_slice()
+        else {
+            panic!("expected a move and a rebuild, got {outcome:?}");
+        };
+        assert_eq!(kept, &[("advice_suppressed".to_string(), 1)]);
+        assert_eq!(
+            cleared,
+            &[crate::table_classes::lost_kinds()
+                .into_iter()
+                .find(|what| what.starts_with("sync tokens"))
+                .unwrap()]
+        );
+        assert_eq!(
+            tables(&db),
+            ["advice_suppressed".to_string(), FN_SET_TABLE.to_string()]
+        );
+    }
+
+    /// Every cut point of a rebuild, as an error and as a crash. An error
+    /// leaves no file of the copy and opens a fresh database with a notice
+    /// naming the backup; a crash leaves what it leaves, and the next open
+    /// ends as one clean rebuild. The backups always hold the original bytes.
+    /// Example-based: the input space is these eight named points.
+    #[test]
+    fn a_failed_or_crashed_rebuild_falls_back_and_the_next_open_converges() {
+        use rebuild_fault::Cut;
+        use rebuild_fault::Fault;
+        for cut in [Cut::Copied, Cut::Opened, Cut::Dropped, Cut::Committed] {
+            for fault in [Fault::Error, Fault::Crash] {
+                let case = format!("{fault:?} after {cut:?}");
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("holon.db");
+                build_previous_format(&path);
+                let original = files_of(&path);
+                *rebuild_fault::PLANTED.lock().unwrap() = Some((cut, fault));
+                let opened = std::panic::catch_unwind(|| open(&path, &[DOUBLE], WhenHeld::Wait));
+                *rebuild_fault::PLANTED.lock().unwrap() = None;
+                match (fault, opened) {
+                    (Fault::Error, Ok(Ok((db, outcome)))) => {
+                        let [
+                            OpenChange::MovedAside { backup, .. },
+                            OpenChange::OwnedStateLost {
+                                backup: lost_in,
+                                kinds,
+                                why,
+                            },
+                        ] = outcome.0.as_slice()
+                        else {
+                            panic!("{case}: expected a move and a lost notice, got {outcome:?}");
+                        };
+                        assert_eq!(lost_in, backup, "{case}");
+                        assert_eq!(kinds, &crate::table_classes::lost_kinds(), "{case}");
+                        assert!(why.contains("injected failure"), "{case}: {why}");
+                        assert_eq!(tables(&db), [FN_SET_TABLE.to_string()], "{case}: fresh");
+                        assert_eq!(files_of(backup), original, "{case}: backup bytes");
+                    }
+                    (Fault::Crash, Err(_)) => {
+                        let (db, outcome) = open(&path, &[DOUBLE], WhenHeld::Wait)
+                            .unwrap_or_else(|e| panic!("{case}: the open after it: {e}"));
+                        assert_eq!(
+                            tables(&db),
+                            ["advice_suppressed".to_string(), FN_SET_TABLE.to_string()],
+                            "{case}: the next open ends as one clean rebuild ({outcome:?})"
+                        );
+                        assert_eq!(count(&db, "SELECT count(*) FROM advice_suppressed"), 1);
+                        let mut backups: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+                            .unwrap()
+                            .map(|e| e.unwrap().path())
+                            .filter(|p| {
+                                p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                                    n.starts_with("holon.db.unusable-")
+                                        && !["-wal", "-shm", "-tshm"].iter().any(|s| n.ends_with(s))
+                                })
+                            })
+                            .collect();
+                        backups.sort();
+                        assert!(!backups.is_empty(), "{case}: a backup exists");
+                        assert_eq!(files_of(&backups[0]), original, "{case}: first backup");
+                    }
+                    (_, Ok(Err(e))) => panic!("{case}: the open failed: {e}"),
+                    (Fault::Error, Err(_)) => panic!("{case}: the open crashed"),
+                    (Fault::Crash, Ok(Ok(_))) => panic!("{case}: the open did not crash"),
+                }
+            }
         }
     }
 
@@ -1495,8 +1947,12 @@ mod tests {
 
         let (db, outcome) = open(&path, &[DOUBLE], WhenHeld::Wait)
             .unwrap_or_else(|e| panic!("an unopenable file must not stop the open: {e}"));
-        let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
-            panic!("the open must report the move, got {outcome:?}");
+        let [
+            OpenChange::MovedAside { backup, .. },
+            OpenChange::OwnedStateLost { .. },
+        ] = outcome.0.as_slice()
+        else {
+            panic!("the open must report the move and the lost state, got {outcome:?}");
         };
         exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").expect("the fresh file is usable");
         let backups: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
@@ -1535,8 +1991,12 @@ mod tests {
 
         let (db, outcome) = open(&path, &[DOUBLE], WhenHeld::Wait)
             .expect("an unopenable file must not stop the open");
-        let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
-            panic!("the open must report the move, got {outcome:?}");
+        let [
+            OpenChange::MovedAside { backup, .. },
+            OpenChange::OwnedStateLost { .. },
+        ] = outcome.0.as_slice()
+        else {
+            panic!("the open must report the move and the lost state, got {outcome:?}");
         };
         exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").expect("the fresh file is usable");
         for (suffix, bytes) in &contents {

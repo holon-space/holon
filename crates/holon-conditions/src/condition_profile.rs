@@ -581,6 +581,24 @@ const DATABASE_MOVED_ASIDE: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DATABASE_OWNED_STATE_KEPT: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Info,
+    "The database was rebuilt from a copy of the moved file",
+    icons::INFO,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const DATABASE_OWNED_STATE_LOST: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "State only the database held may be lost",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const DATABASE_LOG_MOVED_ASIDE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "The database's write-ahead log was damaged and was moved aside",
@@ -1077,6 +1095,8 @@ impl ConditionKind {
             Self::SecretsHeldInMemory { .. } => SECRETS_HELD_IN_MEMORY,
             Self::UndoHistoryClearedAtBoot { .. } => UNDO_HISTORY_CLEARED_AT_BOOT,
             Self::DatabaseMovedAside { .. } => DATABASE_MOVED_ASIDE,
+            Self::DatabaseOwnedStateKept { .. } => DATABASE_OWNED_STATE_KEPT,
+            Self::DatabaseOwnedStateLost { .. } => DATABASE_OWNED_STATE_LOST,
             Self::DatabaseLogMovedAside { .. } => DATABASE_LOG_MOVED_ASIDE,
             Self::DatabaseCoordinationFileMovedAside { .. } => {
                 DATABASE_COORDINATION_FILE_MOVED_ASIDE

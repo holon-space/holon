@@ -145,6 +145,42 @@ pub fn class_of(table: &str, caches: &HashMap<String, String>) -> Option<Class> 
     None
 }
 
+/// What a rebuild on a copy of a moved-aside database does with a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildAction {
+    Drop,
+    Keep,
+}
+
+/// Lost state the rebuild clears anyway: its sync tokens name rows of the
+/// integration caches the rebuild drops, so keeping them would resume an
+/// incremental sync into empty caches.
+const CLEARED_WITH_CACHES: &[&str] = &["sync_states"];
+
+pub fn rebuild_action(table: &str, caches: &HashMap<String, String>) -> RebuildAction {
+    match class_of(table, caches) {
+        Some(Class::Rebuilt) | Some(Class::IntegrationCache(_)) => RebuildAction::Drop,
+        Some(Class::Lost(_)) if CLEARED_WITH_CACHES.contains(&table) => RebuildAction::Drop,
+        Some(Class::Lost(_)) => RebuildAction::Keep,
+        // A table nothing classifies may be the user's own.
+        None => RebuildAction::Keep,
+    }
+}
+
+/// Every table named [`Class::Lost`] by name; any other `_raw` table is `Lost`
+/// too.
+pub fn lost_tables() -> impl Iterator<Item = &'static str> {
+    LOST.iter().map(|(name, _)| *name)
+}
+
+/// Every kind of state a database alone holds, in the words of [`Class::Lost`].
+pub fn lost_kinds() -> Vec<&'static str> {
+    LOST.iter()
+        .map(|(_, what)| *what)
+        .chain([RAW_TABLE_LOST_WHAT])
+        .collect()
+}
+
 /// Without the Loro store (`crdt.enabled = false`) the block tree's tables
 /// hold the only durable copy of the blocks, so a drifted one has its rows
 /// carried into the declared shape, never dropped.
@@ -167,6 +203,47 @@ mod tests {
     fn no_table_is_in_both_lists() {
         for (table, _) in LOST {
             assert!(!REBUILT.contains(table), "{table} is both rebuilt and lost");
+        }
+    }
+
+    fn table_name() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let named: Vec<String> = REBUILT
+            .iter()
+            .chain(REBUILT_RAW)
+            .chain(LOST.iter().map(|(name, _)| name))
+            .map(|name| name.to_string())
+            .collect();
+        prop_oneof![
+            prop::sample::select(named),
+            (prop::sample::select(CACHE_PREFIXES), "[a-z_]{0,8}")
+                .prop_map(|((prefix, _), rest)| format!("{prefix}{rest}")),
+            "[a-z_][a-z0-9_]{0,12}",
+        ]
+    }
+
+    proptest::proptest! {
+        /// A rebuild keeps exactly the state nothing else restores, except the
+        /// sync tokens of the caches it drops, and every table no class names.
+        #[test]
+        fn a_rebuild_keeps_lost_and_unclassified_tables_and_drops_the_rest(
+            table in table_name(),
+            cached in proptest::prelude::any::<bool>(),
+        ) {
+            let caches: HashMap<String, String> = match cached {
+                true => [(table.clone(), "pbt-provider".to_string())].into(),
+                false => HashMap::new(),
+            };
+            let keep = match class_of(&table, &caches) {
+                Some(Class::Lost(_)) => table != "sync_states",
+                None => true,
+                Some(Class::Rebuilt) | Some(Class::IntegrationCache(_)) => false,
+            };
+            proptest::prop_assert_eq!(
+                rebuild_action(&table, &caches),
+                if keep { RebuildAction::Keep } else { RebuildAction::Drop },
+                "{} in class {:?}", table, class_of(&table, &caches)
+            );
         }
     }
 

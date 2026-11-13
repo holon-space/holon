@@ -288,9 +288,35 @@ impl ConditionKind {
             // path would be cut by the headline cap.
             Self::DatabaseMovedAside { reason, backup } => ConditionDetail::with_body(
                 format!(
-                    "The database could not be used ({reason}), so Holon moved it aside and \
-                     started a fresh one. The blocks came back from the vault. Anything that was \
-                     only in the database is in the moved file"
+                    "The database could not be used ({reason}), so Holon moved it aside. The \
+                     moved file keeps everything the database held"
+                ),
+                vec![backup.clone()],
+            ),
+
+            Self::DatabaseOwnedStateKept {
+                backup,
+                kept,
+                cleared,
+            } => ConditionDetail::with_body(
+                format!(
+                    "Holon rebuilt the database from a copy of the moved file: the blocks came \
+                     back from the vault, and these tables were kept: {}. Cleared: {}",
+                    kept.join(", "),
+                    match cleared.is_empty() {
+                        true => "nothing".to_string(),
+                        false => cleared.join("; "),
+                    }
+                ),
+                vec![backup.clone()],
+            ),
+
+            Self::DatabaseOwnedStateLost { backup, kinds, why } => ConditionDetail::with_body(
+                format!(
+                    "Holon could not rebuild the database from a copy of the moved file ({why}), \
+                     so it started a fresh one. The blocks came back from the vault. This state \
+                     may be lost here and is in the moved file if the database held it: {}",
+                    kinds.join("; ")
                 ),
                 vec![backup.clone()],
             ),

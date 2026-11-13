@@ -19,6 +19,22 @@ use crate::warm_reboot_keeps_matviews::ensure_all;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/previous_engine_vault.db.zst");
 const FIXTURE_BLOCK_ROWS: i64 = 34;
+const FIXTURE_KEPT_TABLES: [&str; 14] = [
+    "_holon_quarantine",
+    "advice_suppressed",
+    "block_history",
+    "block_redirects",
+    "ingredient_use_raw",
+    "local_ui_state",
+    "navigation_cursor",
+    "navigation_history",
+    "operation",
+    "pantry_item_raw",
+    "person_raw",
+    "recipe_raw",
+    "shopping_item_raw",
+    "undo_log",
+];
 
 async fn names(handle: &DbHandle, sql: &str) -> BTreeSet<String> {
     handle
@@ -62,9 +78,19 @@ async fn a_previous_engine_database_is_moved_aside_and_its_views_are_built_fresh
 
     let (db, outcome) =
         TursoBackend::open_database_reporting_outcome(&path).expect("the old database opens");
-    let [OpenChange::MovedAside { reason, backup }] = outcome.0.as_slice() else {
-        panic!("the open must move the old file aside, got {outcome:?}");
+    let [
+        OpenChange::MovedAside { reason, backup },
+        OpenChange::OwnedStateKept { kept, .. },
+    ] = outcome.0.as_slice()
+    else {
+        panic!("the open must move the old file aside and rebuild a copy, got {outcome:?}");
     };
+    let kept: BTreeSet<&str> = kept.iter().map(|(table, _)| table.as_str()).collect();
+    assert_eq!(
+        kept,
+        FIXTURE_KEPT_TABLES.into_iter().collect(),
+        "the rebuilt copy keeps exactly the tables nothing else restores"
+    );
     assert!(
         reason.contains(holon_turso::db_open::VIEW_FORMAT),
         "the reason names the format this engine maintains: {reason}"
@@ -85,7 +111,7 @@ async fn a_previous_engine_database_is_moved_aside_and_its_views_are_built_fresh
         )
         .await,
         BTreeSet::new(),
-        "the fresh file holds no view yet"
+        "the rebuilt copy holds no view yet"
     );
     ensure_all(&handle).await;
     let rebuilt = names(

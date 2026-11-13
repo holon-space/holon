@@ -201,8 +201,14 @@ fn a_database_in_a_missing_directory_is_an_io_error() {
 fn assert_moved_aside(path: &Path, files: &[(&str, Vec<u8>)], case: &str) {
     let opened = TursoBackend::open_database_reporting_outcome(path);
     let (db, outcome) = opened.unwrap_or_else(|e| panic!("{case}: the open must recover: {e:?}"));
-    let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
-        panic!("{case}: a damaged file must be moved aside, got {outcome:?}");
+    let [
+        OpenChange::MovedAside { backup, .. },
+        OpenChange::OwnedStateKept { .. } | OpenChange::OwnedStateLost { .. },
+    ] = outcome.0.as_slice()
+    else {
+        panic!(
+            "{case}: a damaged file must be moved aside, then rebuilt or replaced, got {outcome:?}"
+        );
     };
     for (suffix, bytes) in files {
         let moved = PathBuf::from(format!("{}{suffix}", backup.display()));
@@ -418,8 +424,12 @@ fn a_backup_name_that_is_taken_is_not_overwritten() {
 
     let (_, outcome) = TursoBackend::open_database_reporting_outcome(&path)
         .unwrap_or_else(|e| panic!("a taken backup name must not stop the open: {e:?}"));
-    let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
-        panic!("a damaged file must be moved aside, got {outcome:?}");
+    let [
+        OpenChange::MovedAside { backup, .. },
+        OpenChange::OwnedStateLost { .. },
+    ] = outcome.0.as_slice()
+    else {
+        panic!("a file that is no database must be moved aside and replaced, got {outcome:?}");
     };
     assert!(
         std::fs::read(backup).ok() == Some(garbage),

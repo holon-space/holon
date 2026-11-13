@@ -205,11 +205,32 @@ async fn a_database_the_engine_cannot_open_is_moved_aside_and_disclosed() {
     let rendered = format!("{} {}", detail.headline, detail.body.join(" | "));
     for needle in [
         backup.display().to_string(),
-        "only in the database is in the moved file".to_string(),
+        "keeps everything the database held".to_string(),
     ] {
         assert!(
             rendered.contains(&needle),
             "the text Martin reads must hold {needle:?}: {rendered}"
+        );
+    }
+    let lost = current
+        .iter()
+        .find(|c| c.condition_key().kind == "database-owned-state-lost")
+        .unwrap_or_else(|| {
+            panic!(
+                "a file no copy of which could be rebuilt raised no lost-state notice: {:?}",
+                raised_kinds(&booted)
+            )
+        });
+    let detail = lost.reason.detail(&lost.subject);
+    let rendered = format!("{} {}", detail.headline, detail.body.join(" | "));
+    for needle in std::iter::once(backup.display().to_string()).chain(
+        holon::storage::table_classes::lost_kinds()
+            .into_iter()
+            .map(String::from),
+    ) {
+        assert!(
+            rendered.contains(&needle),
+            "the lost-state notice must name {needle:?}: {rendered}"
         );
     }
 

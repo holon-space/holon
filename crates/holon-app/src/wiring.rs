@@ -530,6 +530,25 @@ impl FrontendInjectorExt for Injector {
                                 backup: backup.display().to_string(),
                             }
                         }
+                        OpenChange::OwnedStateKept {
+                            backup,
+                            kept,
+                            cleared,
+                        } => holon_conditions::ConditionKind::DatabaseOwnedStateKept {
+                            backup: backup.display().to_string(),
+                            kept: kept
+                                .iter()
+                                .map(|(table, rows)| format!("{table}: {rows} rows"))
+                                .collect(),
+                            cleared: cleared.iter().map(|what| what.to_string()).collect(),
+                        },
+                        OpenChange::OwnedStateLost { backup, kinds, why } => {
+                            holon_conditions::ConditionKind::DatabaseOwnedStateLost {
+                                backup: backup.display().to_string(),
+                                kinds: kinds.iter().map(|what| what.to_string()).collect(),
+                                why: why.clone(),
+                            }
+                        }
                         OpenChange::LogMovedAside { reason, backup } => {
                             holon_conditions::ConditionKind::DatabaseLogMovedAside {
                                 reason: reason.clone(),
