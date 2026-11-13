@@ -43,7 +43,6 @@ use crate::peer_versions::PeerVersions;
 use crate::share_enrollment::AcceptorRefused;
 use crate::share_enrollment::AdmissionBasis;
 use crate::share_enrollment::AuthorizedPeer;
-use crate::share_enrollment::ENROLLMENT_FAILED_CODE;
 use crate::share_enrollment::ENROLLMENT_REFUSED_CODE;
 use crate::share_enrollment::ShareRoster;
 use crate::share_enrollment::acceptor_enroll;
@@ -446,20 +445,11 @@ async fn accept_loop(
                             AdmittedPeer::enrolled(&id, &authorized, capabilities.clone())
                         }
                         Err(e) => {
-                            // The close code is the ONE signal the dialer can
-                            // read to tell a refusal from an I/O failure, so it
-                            // is set by matching the typed error, never by
-                            // phrasing.
                             let refused = e.downcast_ref::<AcceptorRefused>().is_some();
                             warn!(
                                 "[advertiser:{id}] enrollment gate closed the connection \
                                  (refused={refused}): {e:#}"
                             );
-                            if refused {
-                                conn.close(ENROLLMENT_REFUSED_CODE.into(), b"enrollment refused");
-                            } else {
-                                conn.close(ENROLLMENT_FAILED_CODE.into(), b"enrollment failed");
-                            }
                             return;
                         }
                     }
@@ -1148,9 +1138,9 @@ mod tests {
     /// a security decision. Three live dials, one per shape:
     ///
     /// 1. a GATED share turning down a forged capability — the only refusal;
-    /// 2. an acceptor that closes with [`ENROLLMENT_FAILED_CODE`] — the shape
-    ///    the real accept loop uses when enrollment fails for any non-roster
-    ///    reason;
+    /// 2. an acceptor that closes with
+    ///    [`crate::share_enrollment::ENROLLMENT_FAILED_CODE`] — the shape the
+    ///    real acceptor uses when enrollment fails for any non-roster reason;
     /// 3. an acceptor that drops the connection with no application close at
     ///    all — the unclassifiable case, which must stay loud.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1265,6 +1255,161 @@ mod tests {
         drop_task.abort();
 
         Ok(())
+    }
+
+    /// How a dial into a gated share goes wrong, as the real acceptor sees it.
+    #[derive(Debug, Clone, Copy)]
+    enum EnrollmentVerdict {
+        ForgedCapability,
+        ExpiredWindow,
+        MalformedProof,
+        NoProof,
+    }
+
+    impl EnrollmentVerdict {
+        fn is_roster_refusal(self) -> bool {
+            matches!(self, Self::ForgedCapability | Self::ExpiredWindow)
+        }
+    }
+
+    /// Dial a gated share so that the real acceptor reaches `verdict`, and
+    /// return the dial's error as the production dialer classifies it.
+    async fn dial_into_verdict(verdict: EnrollmentVerdict, tree_id: &str) -> Result<anyhow::Error> {
+        use crate::share_enrollment::CapabilitySecret;
+        use crate::share_enrollment::ExpiryTime;
+        use crate::share_enrollment::ShareRoster;
+
+        let capability = CapabilitySecret::generate();
+        let now = chrono::Utc::now().timestamp();
+        let expiry = match verdict {
+            EnrollmentVerdict::ExpiredWindow => now - 3600,
+            _ => now + 3600,
+        };
+        let roster = Arc::new(tokio::sync::Mutex::new(ShareRoster::new(
+            tree_id,
+            capability.clone(),
+            ExpiryTime(expiry),
+            4,
+        )));
+        let server_doc = Arc::new(LoroDoc::new());
+        server_doc.set_peer_id(41)?;
+        let adv = IrohAdvertiser::new();
+        let addr = adv
+            .start_share_gated(
+                tree_id.into(),
+                server_doc,
+                roster,
+                Capabilities::read_write(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let alpn = make_alpn(ALPN_PREFIX, tree_id);
+        let ep = create_endpoint(vec![alpn.clone()]).await?;
+        let err = match verdict {
+            EnrollmentVerdict::ForgedCapability | EnrollmentVerdict::ExpiredWindow => {
+                let dial_capability = match verdict {
+                    EnrollmentVerdict::ForgedCapability => CapabilitySecret::generate(),
+                    _ => capability,
+                };
+                let doc = Arc::new(LoroDoc::new());
+                doc.set_peer_id(42)?;
+                sync_doc_initiate_enrolled_rw(&ep, &doc, &alpn, addr, &dial_capability, tree_id)
+                    .await
+                    .expect_err("the acceptor's verdict must fail the dial")
+            }
+            EnrollmentVerdict::MalformedProof | EnrollmentVerdict::NoProof => {
+                let conn = ep.connect(addr, &alpn).await?;
+                let attempt: Result<()> = async {
+                    let (mut send, mut recv) = conn.accept_bi().await?;
+                    let mut challenge_frame = [0u8; 4 + 32];
+                    recv.read_exact(&mut challenge_frame).await?;
+                    if matches!(verdict, EnrollmentVerdict::MalformedProof) {
+                        send.write_all(&3u32.to_be_bytes()).await?;
+                        send.write_all(b"bad").await?;
+                    }
+                    send.finish()?;
+                    let mut ack_len = [0u8; 4];
+                    recv.read_exact(&mut ack_len).await?;
+                    Ok(())
+                }
+                .await;
+                let err = attempt.expect_err("the acceptor must not acknowledge a bad proof");
+                crate::share_enrollment::classify_enrollment_failure(&conn, err)
+            }
+        };
+        adv.drop_share(tree_id).await?;
+        Ok(err)
+    }
+
+    /// Whatever the time between the acceptor's verdict and its close, the
+    /// dialer types the dial as `EnrollmentRefused` exactly when the roster
+    /// refused it: the stream end must never overtake the close that carries
+    /// the verdict.
+    #[test]
+    #[serial_test::serial]
+    fn a_verdict_reaches_the_dialer_whatever_the_close_delay() {
+        use proptest::prelude::*;
+        use proptest::test_runner::Config;
+        use proptest::test_runner::TestCaseError;
+        use proptest::test_runner::TestRunner;
+
+        use crate::share_enrollment::EnrollmentRefused;
+        use crate::share_enrollment::verdict_close_delay;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let case = std::cell::Cell::new(0usize);
+        let check = |verdict: EnrollmentVerdict, delay_ms: u64| -> Result<(), TestCaseError> {
+            case.set(case.get() + 1);
+            let tree_id = format!("verdictDelay{}", case.get());
+            let reached_before = verdict_close_delay::reached();
+            let _held = verdict_close_delay::hold(std::time::Duration::from_millis(delay_ms));
+            let err = rt
+                .block_on(dial_into_verdict(verdict, &tree_id))
+                .map_err(|e| TestCaseError::fail(format!("{e:#}")))?;
+            prop_assert_eq!(
+                err.downcast_ref::<EnrollmentRefused>().is_some(),
+                verdict.is_roster_refusal(),
+                "{:?} with a {} ms close delay was classified wrongly: {:#}",
+                verdict,
+                delay_ms,
+                err
+            );
+            prop_assert_eq!(
+                verdict_close_delay::reached(),
+                reached_before + 1,
+                "the acceptor never reached the point between verdict and close"
+            );
+            Ok(())
+        };
+
+        for (verdict, delay_ms) in [
+            (EnrollmentVerdict::ForgedCapability, 300),
+            (EnrollmentVerdict::MalformedProof, 300),
+        ] {
+            check(verdict, delay_ms).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let verdicts = prop_oneof![
+            Just(EnrollmentVerdict::ForgedCapability),
+            Just(EnrollmentVerdict::ExpiredWindow),
+            Just(EnrollmentVerdict::MalformedProof),
+            Just(EnrollmentVerdict::NoProof),
+        ];
+        let mut runner = TestRunner::new(Config {
+            cases: 16,
+            failure_persistence: None,
+            ..Config::default()
+        });
+        runner
+            .run(&(verdicts, 0u64..=400), |(verdict, delay_ms)| {
+                check(verdict, delay_ms)
+            })
+            .unwrap_or_else(|e| panic!("{e}"));
     }
 
     /// Live-gate rejections beyond forgery: an EXPIRED enrollment window and a

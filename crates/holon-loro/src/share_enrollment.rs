@@ -951,25 +951,59 @@ mod wire {
     /// there), so the two streams never collide. Returns the loud
     /// [`AuthzReject`] (wrapped) on any failure so the caller drops the
     /// connection without ever reaching the sync primitive.
+    ///
+    /// On failure the connection is already closed with
+    /// [`ENROLLMENT_REFUSED_CODE`] or [`ENROLLMENT_FAILED_CODE`]. The close is
+    /// issued while the enrollment stream is still open: a dropped stream
+    /// sends its end first, and the dialer would read that end as an I/O
+    /// failure before the close tells it the verdict.
     pub async fn acceptor_enroll(
         conn: &iroh::endpoint::Connection,
         roster: &mut ShareRoster,
         now: i64,
     ) -> Result<AuthorizedPeer> {
-        let (mut send, mut recv) = bounded("open stream", async {
+        let opened = bounded("open stream", async {
             conn.open_bi()
                 .await
                 .map_err(|e| anyhow::anyhow!("open enrollment stream: {e}"))
         })
-        .await?;
+        .await;
+        let (mut send, mut recv) = match opened {
+            Ok(streams) => streams,
+            Err(e) => {
+                close_with_verdict(conn, &e).await;
+                return Err(e);
+            }
+        };
+        let result = acceptor_exchange(conn, &mut send, &mut recv, roster, now).await;
+        if let Err(e) = &result {
+            close_with_verdict(conn, e).await;
+        }
+        result
+    }
+
+    async fn close_with_verdict(conn: &iroh::endpoint::Connection, err: &anyhow::Error) {
+        #[cfg(test)]
+        verdict_close_delay::pause().await;
+        if err.downcast_ref::<AcceptorRefused>().is_some() {
+            conn.close(ENROLLMENT_REFUSED_CODE.into(), b"enrollment refused");
+        } else {
+            conn.close(ENROLLMENT_FAILED_CODE.into(), b"enrollment failed");
+        }
+    }
+
+    async fn acceptor_exchange(
+        conn: &iroh::endpoint::Connection,
+        send: &mut iroh::endpoint::SendStream,
+        recv: &mut iroh::endpoint::RecvStream,
+        roster: &mut ShareRoster,
+        now: i64,
+    ) -> Result<AuthorizedPeer> {
         let challenge = Challenge::generate();
-        bounded(
-            "send challenge",
-            write_frame(&mut send, challenge.as_bytes()),
-        )
-        .await
-        .context("send enrollment challenge")?;
-        let proof_bytes = bounded("read proof", read_frame(&mut recv))
+        bounded("send challenge", write_frame(send, challenge.as_bytes()))
+            .await
+            .context("send enrollment challenge")?;
+        let proof_bytes = bounded("read proof", read_frame(recv))
             .await
             .context("read enrollment proof")?;
         let msg = EnrollmentProofMsg::from_wire(&proof_bytes)?;
@@ -978,7 +1012,7 @@ mod wire {
             .authorize(now, &challenge, &msg.capability_id, &msg.proof, peer)
             .map_err(|reject| anyhow::Error::new(AcceptorRefused(reject)))?;
         // Ack so the initiator knows the sync stream may proceed.
-        bounded("send ack", write_frame(&mut send, b"OK"))
+        bounded("send ack", write_frame(send, b"OK"))
             .await
             .context("send enrollment ack")?;
         send.finish().context("finish enrollment ack stream")?;
@@ -1025,6 +1059,47 @@ mod wire {
         }
         Ok(())
     }
+
+    /// A test holds the acceptor between its enrollment verdict and the close
+    /// that carries it, so the order of stream end and close is observable.
+    #[cfg(test)]
+    pub mod verdict_close_delay {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        static DELAY_MS: AtomicU64 = AtomicU64::new(0);
+        static REACHED: AtomicUsize = AtomicUsize::new(0);
+
+        #[must_use = "the delay ends when this is dropped"]
+        pub struct Held;
+
+        impl Drop for Held {
+            fn drop(&mut self) {
+                DELAY_MS.store(0, Ordering::SeqCst);
+            }
+        }
+
+        pub fn hold(delay: Duration) -> Held {
+            DELAY_MS.store(
+                u64::try_from(delay.as_millis()).expect("delay fits in u64 ms"),
+                Ordering::SeqCst,
+            );
+            Held
+        }
+
+        /// How often an acceptor reached the point between verdict and close.
+        pub fn reached() -> usize {
+            REACHED.load(Ordering::SeqCst)
+        }
+
+        pub(crate) async fn pause() {
+            REACHED.fetch_add(1, Ordering::SeqCst);
+            let ms = DELAY_MS.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
+    }
 }
 
 #[cfg(all(
@@ -1067,6 +1142,12 @@ pub use wire::initiator_enroll;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub use wire::peer_fingerprint;
+#[cfg(all(
+    test,
+    feature = "iroh-sync",
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+pub use wire::verdict_close_delay;
 
 #[cfg(test)]
 mod tests {

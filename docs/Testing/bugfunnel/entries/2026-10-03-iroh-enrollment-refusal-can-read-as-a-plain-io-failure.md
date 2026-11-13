@@ -3,7 +3,7 @@ id: 2026-10-03-iroh-enrollment-refusal-can-read-as-a-plain-io-failure
 date: 2026-10-03
 gap: ENVIRONMENT
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   An unauthorized iroh dial can fail with "stream finished early" and no typed refusal even
   though the acceptor logged the refusal, so the dialer cannot always tell a refusal from an I/O failure.
@@ -26,22 +26,25 @@ frame length: stream finished early (0 bytes read)`. The transport witness
 
 ## Root cause
 
-Candidate, not measured. The dialer decides "refused" by reading `conn.close_reason()` right
-after its ack read fails (`share_enrollment.rs`, `classify_enrollment_failure`). The acceptor
-returns from `acceptor_enroll` with the error, and only then calls `conn.close(
-ENROLLMENT_REFUSED_CODE, ..)` (`iroh_advertiser.rs`, the `Err(e)` arm). If the stream end reaches
-the dialer before the connection-close frame, `close_reason()` is still `None` and the failure is
-classified as plain I/O. Evidence for the candidate: the acceptor's `refused=true` line and the
-dialer's untyped error occur in the same run.
+Measured. On a refusal the acceptor returned from `acceptor_enroll` with the error, which
+dropped the enrollment `SendStream`; its drop finishes the stream when the connection has no
+error yet (noq `SendStream::drop`). Only then did the caller run `conn.close(
+ENROLLMENT_REFUSED_CODE, ..)`. The stream end could reach the dialer first: its ack read failed
+with "stream finished early" while the connection had no close reason yet, so
+`classify_enrollment_failure` left the failure untyped. A pause between verdict and close made
+the forged-capability dial untyped every time.
 
 ## Missing piece
 
-No test pins the order in which the refusal reaches the dialer. The classifier trusts a single
-read of `close_reason()` at one instant.
+No test held the acceptor between its verdict and its close, so the order in which stream end
+and close reach the dialer was left to scheduling.
 
 ## Remedy
 
-OPEN. Candidate fix: the dialer waits for the connection's close (bounded) before it classifies a
-failed ack read. It is a product change on a security signal and needs the `holon-feature`
-red-first test. Until then the registry row `iroh-pairing-refusal-reads-as-io-failure`
-classifies the shape.
+`acceptor_enroll` closes the connection with the verdict's code while the enrollment stream is
+still open, then returns the error; the dropped stream no longer sends an end, because the
+connection already holds its error. The accept loop only logs. The property
+`iroh_advertiser::tests::a_verdict_reaches_the_dialer_whatever_the_close_delay` draws the verdict
+(roster refusal or enrollment failure) and a pause of 0 to 400 ms between verdict and close, and
+asserts the dial is typed `EnrollmentRefused` exactly for a roster refusal. The registry row
+`iroh-pairing-refusal-reads-as-io-failure` is deleted.
