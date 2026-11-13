@@ -455,6 +455,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `typechars-no-focused-block`
 - `typechars-sql-reads-budget`
 - `typed-link-in-pasted-decision-block-file-disagrees`
+- `undo-concurrent-keystrokes-tail-lost-load`
 - `undo-create-sibling-order`
 - `undo-prod-session-source-block-marks`
 - `undo-prod-session-stale-dropped`
