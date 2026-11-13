@@ -19,6 +19,8 @@ use crate::device_key_store::load_or_create_device_key;
 use crate::share_enrollment::CapabilitySecret;
 use crate::share_enrollment::ExpiryTime;
 use crate::shared_snapshot_store::SharedSnapshotStore;
+use crate::shared_tree::SharedTreeId;
+use crate::shared_tree::arb_shared_tree_id;
 use crate::ticket::Ticket;
 
 const DEVICE_KEY_HEX: &str = "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc";
@@ -78,11 +80,12 @@ fn a_ticket_written_by_the_previous_iroh_decodes_and_re_encodes_byte_equal() {
 fn a_peers_sidecar_written_by_the_previous_iroh_loads_and_re_saves_byte_equal() {
     let dir = TempDir::new().unwrap();
     let store = store_in(&dir);
-    let path = store.peers_path("share-fixture");
+    let id = SharedTreeId::try_from("share-fixture".to_owned()).unwrap();
+    let path = store.peers_path(&id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, PEERS_JSON).unwrap();
 
-    let peers = store.load_peers("share-fixture").unwrap();
+    let peers = store.load_peers(&id).unwrap();
 
     assert_eq!(peers.len(), 2);
     assert_eq!(hex(peers[0].id.as_bytes()), NODE_ID_HEX);
@@ -90,7 +93,7 @@ fn a_peers_sidecar_written_by_the_previous_iroh_loads_and_re_saves_byte_equal() 
     assert_eq!(hex(peers[1].id.as_bytes()), OTHER_ID_HEX);
     assert!(peers[1].addrs.is_empty());
 
-    store.save_peers("share-fixture", &peers).unwrap();
+    store.save_peers(&id, &peers).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), PEERS_JSON);
 }
 
@@ -99,7 +102,7 @@ fn endpoint_addr(key_bytes: [u8; 32], addrs: Vec<TransportAddr>) -> EndpointAddr
 }
 
 /// Every stored writer round-trips the key and the address set it was given.
-fn assert_stored_formats_round_trip(key_bytes: [u8; 32], addr: EndpointAddr) {
+fn assert_stored_formats_round_trip(id: SharedTreeId, key_bytes: [u8; 32], addr: EndpointAddr) {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("device.key"), key_bytes).unwrap();
     let key = load_or_create_device_key(dir.path()).unwrap();
@@ -107,9 +110,9 @@ fn assert_stored_formats_round_trip(key_bytes: [u8; 32], addr: EndpointAddr) {
     assert_eq!(key.public(), SecretKey::from_bytes(&key_bytes).public());
 
     let ticket = Ticket::new(
-        "share-prop".into(),
+        id.clone(),
         addr.clone(),
-        "loro-sync/share-prop".into(),
+        format!("loro-sync/{id}"),
         CapabilitySecret::from_bytes(key_bytes),
         ExpiryTime(7),
     );
@@ -118,8 +121,8 @@ fn assert_stored_formats_round_trip(key_bytes: [u8; 32], addr: EndpointAddr) {
 
     let store = store_in(&dir);
     let peers = vec![addr.clone(), EndpointAddr::new(key.public())];
-    store.save_peers("share-prop", &peers).unwrap();
-    assert_eq!(store.load_peers("share-prop").unwrap(), peers);
+    store.save_peers(&id, &peers).unwrap();
+    assert_eq!(store.load_peers(&id).unwrap(), peers);
 }
 
 fn arb_transport_addr() -> impl Strategy<Value = TransportAddr> {
@@ -147,16 +150,21 @@ fn stored_formats_round_trip_for_each_address_shape() {
     ];
     for (i, addrs) in shapes.into_iter().enumerate() {
         let key_bytes = [i as u8; 32];
-        assert_stored_formats_round_trip(key_bytes, endpoint_addr(key_bytes, addrs));
+        assert_stored_formats_round_trip(
+            SharedTreeId::try_from(format!("share-shape-{i}")).unwrap(),
+            key_bytes,
+            endpoint_addr(key_bytes, addrs),
+        );
     }
 }
 
 proptest! {
     #[test]
     fn stored_formats_round_trip(
+        id in arb_shared_tree_id(),
         key_bytes in any::<[u8; 32]>(),
         addrs in proptest::collection::vec(arb_transport_addr(), 0..6),
     ) {
-        assert_stored_formats_round_trip(key_bytes, endpoint_addr(key_bytes, addrs));
+        assert_stored_formats_round_trip(id, key_bytes, endpoint_addr(key_bytes, addrs));
     }
 }

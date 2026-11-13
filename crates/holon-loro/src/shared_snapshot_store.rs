@@ -38,6 +38,8 @@ use loro::LoroDoc;
 use tracing::debug;
 use tracing::warn;
 
+use crate::shared_tree::SharedTreeId;
+
 pub struct SharedSnapshotStore {
     shares_dir: PathBuf,
     bus: Arc<ConditionBus>,
@@ -93,7 +95,7 @@ impl SharedSnapshotStore {
         &self.shares_dir
     }
 
-    pub fn snapshot_path(&self, shared_tree_id: &str) -> PathBuf {
+    pub fn snapshot_path(&self, shared_tree_id: &SharedTreeId) -> PathBuf {
         self.shares_dir.join(format!("{shared_tree_id}.loro"))
     }
 
@@ -101,7 +103,7 @@ impl SharedSnapshotStore {
     /// the snapshot so `ls shares/` shows them paired. JSON — peer
     /// addresses are per-device local state, intentionally not
     /// replicated through the shared CRDT.
-    pub fn peers_path(&self, shared_tree_id: &str) -> PathBuf {
+    pub fn peers_path(&self, shared_tree_id: &SharedTreeId) -> PathBuf {
         self.shares_dir.join(format!("{shared_tree_id}.peers.json"))
     }
 
@@ -151,7 +153,7 @@ impl SharedSnapshotStore {
 
     /// Atomic write: tmp → fsync → rename. Overwrites any existing
     /// snapshot safely.
-    pub fn save(&self, shared_tree_id: &str, doc: &LoroDoc) -> Result<()> {
+    pub fn save(&self, shared_tree_id: &SharedTreeId, doc: &LoroDoc) -> Result<()> {
         let bytes = doc
             .export(ExportMode::Snapshot)
             .context("export shared doc snapshot")?;
@@ -183,7 +185,7 @@ impl SharedSnapshotStore {
     /// Every error names the share, because the caller that cares most is
     /// revocation: a sidecar it could not rewrite is a revoked peer whose
     /// dial addr comes back at the next launch.
-    pub fn save_peers(&self, shared_tree_id: &str, peers: &[EndpointAddr]) -> Result<()> {
+    pub fn save_peers(&self, shared_tree_id: &SharedTreeId, peers: &[EndpointAddr]) -> Result<()> {
         let bytes = serde_json::to_vec(peers).context("serialize known peers as JSON")?;
         let final_path = self.peers_path(shared_tree_id);
 
@@ -208,7 +210,7 @@ impl SharedSnapshotStore {
     /// share, pre-restart, or never persisted — all benign). Malformed
     /// JSON is an error so the caller can decide between surfacing it
     /// and starting over with an empty peer set.
-    pub fn load_peers(&self, shared_tree_id: &str) -> Result<Vec<EndpointAddr>> {
+    pub fn load_peers(&self, shared_tree_id: &SharedTreeId) -> Result<Vec<EndpointAddr>> {
         let path = self.peers_path(shared_tree_id);
         if !path.is_file() {
             return Ok(Vec::new());
@@ -223,12 +225,12 @@ impl SharedSnapshotStore {
     /// same port across restarts keeps the addrs that peers persisted
     /// for us dialable (relay and discovery are disabled, so socket
     /// addrs are the only routing information peers have).
-    pub fn port_path(&self, shared_tree_id: &str) -> PathBuf {
+    pub fn port_path(&self, shared_tree_id: &SharedTreeId) -> PathBuf {
         self.shares_dir.join(format!("{shared_tree_id}.port"))
     }
 
     /// Atomically persist the advertiser's bound port for this share.
-    pub fn save_port(&self, shared_tree_id: &str, port: u16) -> Result<()> {
+    pub fn save_port(&self, shared_tree_id: &SharedTreeId, port: u16) -> Result<()> {
         let final_path = self.port_path(shared_tree_id);
         let tmp_path = self.stage_tmp(&final_path, port.to_string().as_bytes())?;
         self.publish_tmp(&tmp_path, &final_path)
@@ -238,7 +240,7 @@ impl SharedSnapshotStore {
     /// (fresh share or pre-port-sidecar vault — benign). Malformed
     /// content is an error: the caller decides whether to surface it
     /// or rebind ephemeral.
-    pub fn load_port(&self, shared_tree_id: &str) -> Result<Option<u16>> {
+    pub fn load_port(&self, shared_tree_id: &SharedTreeId) -> Result<Option<u16>> {
         let path = self.port_path(shared_tree_id);
         if !path.is_file() {
             return Ok(None);
@@ -256,14 +258,14 @@ impl SharedSnapshotStore {
     /// Bumped on every peer-id mint (share/accept/rehydrate) so that a
     /// stale loaded snapshot cannot re-mint an already-used
     /// `(peer_id, counter)` after a crash — see [`crate::share_peer_id`].
-    pub fn gen_path(&self, shared_tree_id: &str) -> PathBuf {
+    pub fn gen_path(&self, shared_tree_id: &SharedTreeId) -> PathBuf {
         self.shares_dir.join(format!("{shared_tree_id}.gen"))
     }
 
     /// Load the persisted generation. Missing file → `Ok(0)` (fresh
     /// share or pre-generation vault — benign). Malformed content is an
     /// error: a persisted identity counter must never be silently reset.
-    pub fn load_generation(&self, shared_tree_id: &str) -> Result<u64> {
+    pub fn load_generation(&self, shared_tree_id: &SharedTreeId) -> Result<u64> {
         let path = self.gen_path(shared_tree_id);
         if !path.is_file() {
             return Ok(0);
@@ -279,7 +281,7 @@ impl SharedSnapshotStore {
 
     /// Atomically persist the generation for this share (tmp → fsync →
     /// rename), mirroring [`Self::save_port`].
-    pub fn save_generation(&self, shared_tree_id: &str, generation: u64) -> Result<()> {
+    pub fn save_generation(&self, shared_tree_id: &SharedTreeId, generation: u64) -> Result<()> {
         let final_path = self.gen_path(shared_tree_id);
         let tmp_path = self.stage_tmp(&final_path, generation.to_string().as_bytes())?;
         self.publish_tmp(&tmp_path, &final_path)
@@ -288,7 +290,7 @@ impl SharedSnapshotStore {
     /// Monotonic bump: load the current generation (default 0), add 1,
     /// durably persist it, and return the new value. Every peer-id mint
     /// site calls this before deriving `stable_peer_id`.
-    pub fn next_generation(&self, shared_tree_id: &str) -> Result<u64> {
+    pub fn next_generation(&self, shared_tree_id: &SharedTreeId) -> Result<u64> {
         let next = self.load_generation(shared_tree_id)? + 1;
         self.save_generation(shared_tree_id, next)?;
         Ok(next)
@@ -298,7 +300,7 @@ impl SharedSnapshotStore {
     /// to `<id>.loro.corrupt-<rfc3339-ts>`) and emit
     /// [`Condition::SnapshotLoadFailed`] on the bus. Returns `Err`
     /// — the caller skips this share.
-    pub fn load(&self, shared_tree_id: &str) -> Result<LoroDoc> {
+    pub fn load(&self, shared_tree_id: &SharedTreeId) -> Result<LoroDoc> {
         let path = self.snapshot_path(shared_tree_id);
         let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         let doc = crate::loro_backend::styled_loro_doc();
@@ -338,7 +340,7 @@ impl SharedSnapshotStore {
     }
 
     /// Does `<id>.loro` exist on disk?
-    pub fn exists(&self, shared_tree_id: &str) -> bool {
+    pub fn exists(&self, shared_tree_id: &SharedTreeId) -> bool {
         self.snapshot_path(shared_tree_id).is_file()
     }
 
@@ -383,7 +385,7 @@ impl SharedSnapshotStore {
     /// Returns the number of files removed. Missing files are NOT an
     /// error — this op is expected to run on orphaned ids where some
     /// artifacts may already be absent.
-    pub fn delete_snapshot(&self, shared_tree_id: &str) -> Result<usize> {
+    pub fn delete_snapshot(&self, shared_tree_id: &SharedTreeId) -> Result<usize> {
         let mut removed = 0;
         if !self.shares_dir.exists() {
             return Ok(0);
@@ -451,6 +453,10 @@ mod tests {
 
     use super::*;
 
+    fn sid(id: &str) -> SharedTreeId {
+        SharedTreeId::try_from(id.to_owned()).unwrap()
+    }
+
     fn store_in(dir: &Path) -> (SharedSnapshotStore, Arc<ConditionBus>) {
         let bus = Arc::new(ConditionBus::new());
         let store = SharedSnapshotStore::new(dir.to_path_buf(), bus.clone());
@@ -468,11 +474,11 @@ mod tests {
         tree.get_meta(node).unwrap().insert("k", "v").unwrap();
         doc.commit();
 
-        store.save("abc", &doc).unwrap();
-        assert!(store.exists("abc"));
+        store.save(&sid("abc"), &doc).unwrap();
+        assert!(store.exists(&sid("abc")));
         assert!(dir.path().join("shares").join("abc.loro").exists());
 
-        let reloaded = store.load("abc").unwrap();
+        let reloaded = store.load(&sid("abc")).unwrap();
         let reloaded_tree = reloaded.get_tree("tree");
         let roots = reloaded_tree.roots();
         assert_eq!(roots.len(), 1);
@@ -483,7 +489,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (store, _bus) = store_in(dir.path());
         let doc = LoroDoc::new();
-        store.save("x", &doc).unwrap();
+        store.save(&sid("x"), &doc).unwrap();
         let tmps: Vec<_> = std::fs::read_dir(dir.path().join("shares"))
             .unwrap()
             .filter_map(|e| e.ok()) // ALLOW(filter_map_ok) ALLOW(ok): test fixture — readdir entry failure isn't part of
@@ -514,17 +520,17 @@ mod tests {
 
         let addr = EndpointAddr::new(iroh::SecretKey::generate().public());
         store
-            .save_peers("share", std::slice::from_ref(&addr))
+            .save_peers(&sid("share"), std::slice::from_ref(&addr))
             .unwrap();
 
         store.stall_next_peers_publish(std::time::Duration::from_millis(500));
         let slow = {
             let store = Arc::clone(&store);
             let addr = addr.clone();
-            std::thread::spawn(move || store.save_peers("share", std::slice::from_ref(&addr)))
+            std::thread::spawn(move || store.save_peers(&sid("share"), std::slice::from_ref(&addr)))
         };
         std::thread::sleep(std::time::Duration::from_millis(150));
-        store.save_peers("share", &[]).unwrap();
+        store.save_peers(&sid("share"), &[]).unwrap();
 
         slow.join()
             .unwrap()
@@ -559,17 +565,17 @@ mod tests {
         let slow = {
             let store = Arc::clone(&store);
             let doc = doc.fork();
-            std::thread::spawn(move || store.save("x", &doc))
+            std::thread::spawn(move || store.save(&sid("x"), &doc))
         };
         std::thread::sleep(std::time::Duration::from_millis(150));
         store.set_publish_stall(std::time::Duration::ZERO);
-        store.save("x", &doc).unwrap();
+        store.save(&sid("x"), &doc).unwrap();
 
         slow.join()
             .unwrap()
             .expect("a concurrent snapshot save must not destroy this writer's tmp file");
         store
-            .load("x")
+            .load(&sid("x"))
             .expect("the published snapshot must be a whole file from one writer, not a torn mix");
     }
 
@@ -585,7 +591,7 @@ mod tests {
         .unwrap();
 
         let mut rx = bus.subscribe().changes;
-        let err = store.load("bad").unwrap_err();
+        let err = store.load(&sid("bad")).unwrap_err();
         assert!(format!("{err}").contains("corrupt"));
         // Original file gone.
         assert!(!dir.path().join("shares").join("bad.loro").exists());
@@ -643,8 +649,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (store, _bus) = store_in(dir.path());
         let doc = LoroDoc::new();
-        store.save("alpha", &doc).unwrap();
-        store.save("beta", &doc).unwrap();
+        store.save(&sid("alpha"), &doc).unwrap();
+        store.save(&sid("beta"), &doc).unwrap();
         let mut ids = store.list_snapshots().unwrap();
         ids.sort();
         assert_eq!(ids, vec!["alpha", "beta"]);

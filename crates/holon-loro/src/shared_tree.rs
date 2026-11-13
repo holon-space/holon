@@ -28,7 +28,97 @@ use loro::TreeID;
 use loro::TreeParentId;
 use loro::ValueOrContainer;
 
+use crate::container_registry::ROOT_CONTAINER_ID;
 use crate::loro_backend::TREE_NAME;
+
+/// The id of a shared tree. Store paths under `shares/` are built from it, and
+/// a peer controls it (tickets, invites, synced mount meta), so it holds only
+/// `[A-Za-z0-9_-]`: never empty, no separator, no `.`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
+pub struct SharedTreeId(String);
+
+const fn is_shared_tree_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+            return false;
+        }
+        i += 1;
+    }
+    !bytes.is_empty()
+}
+
+const _: () = assert!(is_shared_tree_id(ROOT_CONTAINER_ID));
+
+impl SharedTreeId {
+    pub fn new_random() -> Self {
+        // ALLOW(identity_minting): names a replication container, not an entity.
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// The root container, the whole vault's global tree.
+    pub fn root() -> Self {
+        Self(ROOT_CONTAINER_ID.to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("shared tree id {0:?} must match [A-Za-z0-9_-]+")]
+pub struct InvalidSharedTreeId(pub String);
+
+impl TryFrom<String> for SharedTreeId {
+    type Error = InvalidSharedTreeId;
+
+    fn try_from(id: String) -> std::result::Result<Self, Self::Error> {
+        if is_shared_tree_id(&id) {
+            Ok(Self(id))
+        } else {
+            Err(InvalidSharedTreeId(id))
+        }
+    }
+}
+
+impl From<SharedTreeId> for String {
+    fn from(id: SharedTreeId) -> Self {
+        id.0
+    }
+}
+
+impl std::ops::Deref for SharedTreeId {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for SharedTreeId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SharedTreeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Every id [`SharedTreeId`] accepts: the full charset, any length from 1.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn arb_shared_tree_id() -> impl proptest::strategy::Strategy<Value = SharedTreeId> {
+    use proptest::strategy::Strategy;
+    "[A-Za-z0-9_-]{1,40}".prop_map(|id| SharedTreeId::try_from(id).unwrap())
+}
 
 /// Registry that maps shared_tree_id → LoroDoc for mount-node traversal.
 /// LoroBackend uses this to follow mount nodes into shared trees transparently.
@@ -355,7 +445,7 @@ fn collect_non_subtree_descendants(
 pub struct MountInfo {
     /// Unique identifier for the shared tree (used to look up the shared
     /// LoroDoc)
-    pub shared_tree_id: String,
+    pub shared_tree_id: SharedTreeId,
     /// TreeID of the root node in the shared tree
     pub shared_root: TreeID,
     /// What the mount places, as recorded on it.
@@ -574,7 +664,7 @@ pub struct ShareResult {
     /// The mount node created in the source tree
     pub mount_node: TreeID,
     /// The unique shared tree ID assigned to this collaboration
-    pub shared_tree_id: String,
+    pub shared_tree_id: SharedTreeId,
 }
 
 /// Phase A of the share: the shared doc has been forked off, but the
@@ -590,7 +680,7 @@ pub struct ExtractedShare {
     pub subtree_root_in_source: TreeID,
     /// Parent of the subtree in the source doc. None = was a root.
     pub parent_in_source: Option<TreeID>,
-    pub shared_tree_id: String,
+    pub shared_tree_id: SharedTreeId,
     pub node_count: usize,
     pub snapshot_size: usize,
     /// Whether the source's own copy of the shared content is unrecoverable —
@@ -615,7 +705,7 @@ pub fn extract_for_share(
     source_doc: &LoroDoc,
     subtree_root: TreeID,
     parent_in_source: Option<TreeID>,
-    shared_tree_id: String,
+    shared_tree_id: SharedTreeId,
     retention: HistoryRetention,
 ) -> Result<ExtractedShare> {
     let source_copy_is_dead = matches!(retention, HistoryRetention::None);
@@ -677,7 +767,7 @@ pub fn share_subtree(
     source_doc: &LoroDoc,
     subtree_root: TreeID,
     parent_in_source: Option<TreeID>,
-    shared_tree_id: String,
+    shared_tree_id: SharedTreeId,
     retention: HistoryRetention,
 ) -> Result<ShareResult> {
     let extracted = extract_for_share(
@@ -718,14 +808,11 @@ pub fn share_subtree(
 pub fn create_mount_node(
     tree: &LoroTree,
     parent: Option<TreeID>,
-    shared_tree_id: &str,
+    shared_tree_id: &SharedTreeId,
     shared_root: TreeID,
 ) -> Result<TreeID> {
     debug_assert!(
-        !tree.get_nodes(false).iter().any(|n| {
-            !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist)
-                && read_mount_info(tree, n.id).is_some_and(|i| i.shared_tree_id == shared_tree_id)
-        }),
+        find_mount_node(tree, shared_tree_id).is_none(),
         "shared tree {shared_tree_id} already has a live mount in this doc"
     );
     let mount = tree.create(parent).context("Failed to create mount node")?;
@@ -733,7 +820,7 @@ pub fn create_mount_node(
         .get_meta(mount)
         .context("Failed to get mount node metadata")?;
     meta.insert(MOUNT_KIND, MOUNT_KIND_VALUE)?;
-    meta.insert(MOUNT_SHARED_TREE_ID, shared_tree_id)?;
+    meta.insert(MOUNT_SHARED_TREE_ID, shared_tree_id.as_str())?;
     meta.insert(
         MOUNT_SHARED_ROOT,
         format!("{}:{}", shared_root.peer, shared_root.counter),
@@ -759,7 +846,7 @@ pub fn mounts_in_subtree(tree: &LoroTree, root: TreeID) -> Vec<(TreeID, MountInf
     let mut queue = vec![root];
     while let Some(node) = queue.pop() {
         queue.extend(tree.children(node).unwrap_or_default());
-        if let Some(info) = read_mount_info(tree, node) {
+        if let Some(info) = scan_mount_info(tree, node) {
             mounts.push((node, info));
         }
     }
@@ -774,28 +861,50 @@ pub fn find_mount_node(tree: &LoroTree, shared_tree_id: &str) -> Option<TreeID> 
         .into_iter()
         .filter(|n| !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist))
         .find(|n| {
-            read_mount_info(tree, n.id).is_some_and(|info| info.shared_tree_id == shared_tree_id)
+            scan_mount_info(tree, n.id)
+                .is_some_and(|info| info.shared_tree_id.as_str() == shared_tree_id)
         })
         .map(|n| n.id)
 }
 
-/// Read mount info from a mount node. Returns None if the node is not a mount.
-pub fn read_mount_info(tree: &LoroTree, node: TreeID) -> Option<MountInfo> {
-    let meta = tree.get_meta(node).ok()?; // ALLOW(ok): node may be deleted
+/// A mount whose recorded shared tree id does not parse. The id comes from
+/// synced meta, so a peer can plant one.
+#[derive(Debug, thiserror::Error)]
+#[error("mount node {node:?} records an unusable shared tree id: {source}")]
+pub struct UnparsableMountId {
+    pub node: TreeID,
+    pub source: InvalidSharedTreeId,
+}
+
+/// Read mount info from a mount node. `Ok(None)` if the node is not a mount.
+pub fn read_mount_info(
+    tree: &LoroTree,
+    node: TreeID,
+) -> std::result::Result<Option<MountInfo>, UnparsableMountId> {
+    // A deleted node has no meta.
+    let Ok(meta) = tree.get_meta(node) else {
+        return Ok(None);
+    };
 
     match meta.get(MOUNT_KIND) {
         Some(ValueOrContainer::Value(LoroValue::String(s))) if s.as_ref() == MOUNT_KIND_VALUE => {}
-        _ => return None,
+        _ => return Ok(None),
     };
 
     let shared_tree_id = match meta.get(MOUNT_SHARED_TREE_ID) {
-        Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
-        _ => return None,
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => {
+            SharedTreeId::try_from(s.to_string())
+                .map_err(|source| UnparsableMountId { node, source })?
+        }
+        _ => return Ok(None),
     };
 
     let shared_root = match meta.get(MOUNT_SHARED_ROOT) {
-        Some(ValueOrContainer::Value(LoroValue::String(s))) => parse_tree_id_str(&s)?,
-        _ => return None,
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => match parse_tree_id_str(&s) {
+            Some(root) => root,
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
     };
 
     let kind = match read_kind(|key| meta.get(key)) {
@@ -812,11 +921,21 @@ pub fn read_mount_info(tree: &LoroTree, node: TreeID) -> Option<MountInfo> {
         _ => None,
     };
 
-    Some(MountInfo {
+    Ok(Some(MountInfo {
         shared_tree_id,
         shared_root,
         kind,
         role,
+    }))
+}
+
+/// [`read_mount_info`] for a scan over many nodes: a mount whose id does not
+/// parse is left out with a warning; boot rehydrate discloses it as a
+/// condition.
+pub fn scan_mount_info(tree: &LoroTree, node: TreeID) -> Option<MountInfo> {
+    read_mount_info(tree, node).unwrap_or_else(|e| {
+        tracing::warn!("[share] {e}; the mount is left out");
+        None
     })
 }
 
@@ -834,9 +953,7 @@ pub fn unmount(
     reintegrate_doc: Option<&LoroDoc>,
 ) -> Result<()> {
     let tree = source_doc.get_tree(TREE_NAME);
-    let mount_info = read_mount_info(&tree, mount_node);
-
-    if mount_info.is_none() {
+    if read_mount_info(&tree, mount_node)?.is_none() {
         bail!("Node is not a mount node");
     }
 
@@ -902,6 +1019,10 @@ mod tests {
     use loro::LoroText;
 
     use super::*;
+
+    fn sid(id: &str) -> SharedTreeId {
+        SharedTreeId::try_from(id.to_owned()).unwrap()
+    }
 
     fn set_text(tree: &LoroTree, node: TreeID, content: &str) {
         let meta = tree.get_meta(node).unwrap();
@@ -1153,7 +1274,7 @@ mod tests {
             &doc,
             first,
             Some(doc_root),
-            "share-1".to_string(),
+            sid("share-1"),
             HistoryRetention::None,
         )
         .unwrap();
@@ -1170,7 +1291,7 @@ mod tests {
             &doc,
             second,
             Some(doc_root),
-            "share-2".to_string(),
+            sid("share-2"),
             HistoryRetention::None,
         )
         .unwrap();
@@ -1219,7 +1340,7 @@ mod tests {
             &doc,
             first,
             Some(doc_root),
-            "tripwire-share-1".to_string(),
+            sid("tripwire-share-1"),
             HistoryRetention::Full,
         )
         .unwrap();
@@ -1231,7 +1352,7 @@ mod tests {
             &doc,
             second,
             Some(doc_root),
-            "tripwire-share-2".to_string(),
+            sid("tripwire-share-2"),
             HistoryRetention::None,
         )
         .unwrap();
@@ -1265,7 +1386,7 @@ mod tests {
             &doc,
             shared_root,
             Some(doc_root),
-            "collab-mount-purge".to_string(),
+            sid("collab-mount-purge"),
             HistoryRetention::None,
         )
         .unwrap();
@@ -1449,7 +1570,7 @@ mod tests {
             &doc,
             shared_root,
             Some(doc_root),
-            "collab-123".to_string(),
+            sid("collab-123"),
             HistoryRetention::None,
         )
         .unwrap();
@@ -1464,8 +1585,8 @@ mod tests {
         assert!(is_mount_node(&tree, result.mount_node));
 
         // The mount node should reference the shared tree
-        let info = read_mount_info(&tree, result.mount_node).unwrap();
-        assert_eq!(info.shared_tree_id, "collab-123");
+        let info = read_mount_info(&tree, result.mount_node).unwrap().unwrap();
+        assert_eq!(info.shared_tree_id.as_str(), "collab-123");
         assert_eq!(info.shared_root, shared_root);
 
         // The shared doc should have the subtree content
@@ -1481,7 +1602,7 @@ mod tests {
 
         let tree = doc.get_tree(TREE_NAME);
         assert!(!is_mount_node(&tree, doc_root));
-        assert!(read_mount_info(&tree, doc_root).is_none());
+        assert!(read_mount_info(&tree, doc_root).unwrap().is_none());
     }
 
     #[test]
@@ -1493,7 +1614,8 @@ mod tests {
 
         let root = tree.create(None).unwrap();
         let shared_root_id = TreeID::new(42, 7);
-        let mount = create_mount_node(&tree, Some(root), "my-share-id", shared_root_id).unwrap();
+        let mount =
+            create_mount_node(&tree, Some(root), &sid("my-share-id"), shared_root_id).unwrap();
         doc.commit();
 
         // Snapshot and restore
@@ -1503,8 +1625,8 @@ mod tests {
         let restored_tree = restored.get_tree(TREE_NAME);
 
         assert!(is_mount_node(&restored_tree, mount));
-        let info = read_mount_info(&restored_tree, mount).unwrap();
-        assert_eq!(info.shared_tree_id, "my-share-id");
+        let info = read_mount_info(&restored_tree, mount).unwrap().unwrap();
+        assert_eq!(info.shared_tree_id.as_str(), "my-share-id");
         assert_eq!(info.shared_root, shared_root_id);
     }
 
@@ -1518,7 +1640,7 @@ mod tests {
             &doc,
             shared_root,
             Some(doc_root),
-            "collab-456".to_string(),
+            sid("collab-456"),
             HistoryRetention::None,
         )
         .unwrap();
@@ -1542,7 +1664,7 @@ mod tests {
             &doc,
             shared_root,
             Some(doc_root),
-            "collab-789".to_string(),
+            sid("collab-789"),
             HistoryRetention::Full,
         )
         .unwrap();
@@ -1591,7 +1713,7 @@ mod tests {
             &doc,
             shared_root,
             Some(doc_root),
-            "collab-none".to_string(),
+            sid("collab-none"),
             HistoryRetention::None,
         )
         .unwrap();
@@ -1646,7 +1768,7 @@ mod tests {
             &doc,
             shared_root,
             Some(doc_root),
-            "collab-plain".to_string(),
+            sid("collab-plain"),
             HistoryRetention::None,
         )
         .unwrap();

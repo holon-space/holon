@@ -3079,7 +3079,7 @@ fn tombstoned_block_ids(doc: &loro::LoroDoc) -> Result<std::collections::HashSet
     }
     let mounted: std::collections::HashSet<loro::TreeID> = live
         .into_iter()
-        .filter_map(|node| crate::shared_tree::read_mount_info(&tree, node))
+        .filter_map(|node| crate::shared_tree::scan_mount_info(&tree, node))
         .map(|info| info.shared_root)
         .collect();
     if mounted.is_empty() {
@@ -3139,10 +3139,10 @@ fn registered_share_rows(
         .collect();
     let tree = global.get_tree(crate::loro_backend::TREE_NAME);
     for node in tree.get_nodes(false) {
-        let Some(info) = crate::shared_tree::read_mount_info(&tree, node.id) else {
+        let Some(info) = crate::shared_tree::scan_mount_info(&tree, node.id) else {
             continue;
         };
-        if loaded.contains(&info.shared_tree_id)
+        if loaded.contains(info.shared_tree_id.as_str())
             && info.kind == KindRecord::Recorded(ShareKind::Block)
         {
             let meta = tree.get_meta(node.id)?;

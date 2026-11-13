@@ -1345,7 +1345,12 @@ mod tests {
                         // B has nowhere to dial.
                         let peers_on_a = a
                             .snapshot_store()
-                            .load_peers(&shared_tree_id)
+                            .load_peers(
+                                &holon_loro::shared_tree::SharedTreeId::try_from(
+                                    shared_tree_id.clone(),
+                                )
+                                .unwrap(),
+                            )
                             .expect("load_peers after RestartA");
                         assert!(
                             !peers_on_a.is_empty(),

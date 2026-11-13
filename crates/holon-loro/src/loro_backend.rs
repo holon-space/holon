@@ -54,6 +54,7 @@ use crate::settled_read::warn_half_born;
 use crate::shared_tree::SharedTreeStore;
 use crate::shared_tree::is_mount_node;
 use crate::shared_tree::read_mount_info;
+use crate::shared_tree::scan_mount_info;
 use crate::tree_watch::Drained;
 use crate::tree_watch::TreeWatch;
 use crate::write_origin::WriteOrigin;
@@ -649,7 +650,7 @@ enum WalkEnd {
 fn walk_to_page(tree: &loro::LoroTree, start: loro::TreeID) -> anyhow::Result<WalkEnd> {
     let mut node = start;
     for _ in 0..holon_core::traits::MAX_OWNING_PAGE_WALK {
-        if let Some(info) = read_mount_info(tree, node) {
+        if let Some(info) = scan_mount_info(tree, node) {
             return Ok(WalkEnd::Mount {
                 info,
                 mount: Box::new(block_at(tree, node)),
@@ -760,11 +761,11 @@ fn mount_node_of(
     index.watch(doc, &tree);
     let fresh = index.built && !index.mounts_touched(&tree);
     if fresh && let Some(&mount) = index.canonical.get(shared_tree_id) {
-        let info = read_mount_info(&tree, mount);
+        let info = scan_mount_info(&tree, mount);
         if node_deleted_now(&tree, mount)
             || info
                 .as_ref()
-                .is_none_or(|info| info.shared_tree_id != shared_tree_id)
+                .is_none_or(|info| info.shared_tree_id.as_str() != shared_tree_id)
         {
             // The next lookup rescans; a panic here would poison the lock.
             index.built = false;
@@ -784,8 +785,11 @@ fn mount_node_of(
         ) {
             continue;
         }
-        if let Some(info) = read_mount_info(&tree, node.id) {
-            found.entry(info.shared_tree_id).or_default().push(node.id);
+        if let Some(info) = scan_mount_info(&tree, node.id) {
+            found
+                .entry(info.shared_tree_id.into())
+                .or_default()
+                .push(node.id);
         }
     }
     let mut canonical = HashMap::with_capacity(found.len());
@@ -2239,7 +2243,7 @@ pub struct RemovedShare {
     /// What the user knows the share by: the page of a page share, the
     /// mount's own container otherwise.
     pub handle: EntityUri,
-    pub shared_tree_id: String,
+    pub shared_tree_id: crate::shared_tree::SharedTreeId,
     pub role: crate::shared_tree::MountRole,
 }
 
@@ -2247,7 +2251,7 @@ impl RemovedShare {
     pub fn exited(&self) -> holon_core::ExitedShare {
         holon_core::ExitedShare {
             handle: self.handle.clone(),
-            shared_tree_id: self.shared_tree_id.clone(),
+            shared_tree_id: self.shared_tree_id.to_string(),
         }
     }
 }
@@ -2922,7 +2926,8 @@ impl LoroBackend {
             .with_read(|global| {
                 let tree = global.get_tree(TREE_NAME);
                 Ok(crate::shared_tree::find_mount_node(&tree, shared_tree_id)
-                    .map(|mount| (mount, read_mount_info(&tree, mount))))
+                    .map(|mount| read_mount_info(&tree, mount).map(|info| (mount, info)))
+                    .transpose()?)
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("placement_mount: read global tree failed: {e}"),
@@ -3166,7 +3171,7 @@ impl LoroBackend {
         };
         let info = self
             .collab_doc
-            .with_read(|doc| Ok(read_mount_info(&doc.get_tree(TREE_NAME), node)))
+            .with_read(|doc| Ok(read_mount_info(&doc.get_tree(TREE_NAME), node)?))
             .map_err(|e| ApiError::InternalError {
                 message: format!("is {id} a share's mount: {e:#}"),
             })?;
@@ -3373,7 +3378,7 @@ impl LoroBackend {
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 Ok(if is_mount_node(&tree, tree_id) {
-                    Some(read_mount_info(&tree, tree_id))
+                    Some(read_mount_info(&tree, tree_id)?)
                 } else {
                     None
                 })
@@ -3404,7 +3409,7 @@ impl LoroBackend {
             })?;
         Ok(Some(ParentRoute {
             target: ParentWriteTarget::Shared {
-                shared_tree_id: info.shared_tree_id,
+                shared_tree_id: info.shared_tree_id.into(),
                 doc,
             },
             parent: EntityUri::block_from_tree_id(info.shared_root.peer, info.shared_root.counter),
@@ -4633,7 +4638,7 @@ impl LoroBackend {
                 let Some(shared) = self.loaded_shared_doc(&info.shared_tree_id) else {
                     return Ok(OwningPage::Broken(
                         holon_core::ChainBreak::SharedSubtreeNotMaterialized {
-                            shared_tree_id: info.shared_tree_id,
+                            shared_tree_id: info.shared_tree_id.into(),
                         },
                     ));
                 };
@@ -5123,7 +5128,7 @@ impl CoreOperations for LoroBackend {
 
                     // Check if this is a mount node — skip it and record info for later
                     if is_mount_node(&tree, tree_node.id) {
-                        if let Some(info) = read_mount_info(&tree, tree_node.id) {
+                        if let Some(info) = scan_mount_info(&tree, tree_node.id) {
                             let mount_parent = match tree_node.parent {
                                 loro::TreeParentId::Node(pid) => {
                                     let meta = tree.get_meta(pid)?;
@@ -5227,7 +5232,7 @@ impl CoreOperations for LoroBackend {
                 for tid in &children_tids {
                     if is_mount_node(&tree, *tid)
                         && let (Some(store), Some(info)) =
-                            (&shared_trees, read_mount_info(&tree, *tid))
+                            (&shared_trees, scan_mount_info(&tree, *tid))
                         && let Some(shared_doc) = store.get_shared_doc(&info.shared_tree_id)
                     {
                         let shared_tree = shared_doc.get_tree(TREE_NAME);

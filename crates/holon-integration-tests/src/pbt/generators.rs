@@ -940,7 +940,7 @@ pub fn generate_org_file_content_with_keywords(
         "[a-z_]+_[0-9]+\\.org",
         "[A-Z][a-z][a-zA-Z0-9 ]{0,15}", // mount headline
         "[a-z0-9-]+",                   // mount block id
-        "[a-z0-9-]+",                   // shared-tree-id
+        holon_loro::shared_tree::arb_shared_tree_id(),
         prop_vec(("[A-Z][a-z][a-zA-Z0-9 ]{0,19}", "[a-z0-9-]+"), 1..=3),
     )
         .prop_map(|(filename, mount_headline, mount_id, tree_id, children)| {
@@ -956,14 +956,14 @@ pub fn generate_org_file_content_with_keywords(
             let mut mount = Block::new_text(mount_uri.clone(), doc_uri.clone(), &mount_headline);
             mount.set_property("ID", Value::String(ids[0].clone()));
             mount.set_property("share-role", Value::String("mount".to_string()));
-            mount.set_property("shared-tree-id", Value::String(tree_id.clone()));
+            mount.set_property("shared-tree-id", Value::String(tree_id.to_string()));
 
             let mut blocks = vec![mount];
             for ((headline, _), child_id) in children.iter().zip(&ids[1..]) {
                 let mut child =
                     Block::new_text(EntityUri::block(child_id), mount_uri.clone(), headline);
                 child.set_property("ID", Value::String(child_id.clone()));
-                child.set_property("shared-tree-id", Value::String(tree_id.clone()));
+                child.set_property("shared-tree-id", Value::String(tree_id.to_string()));
                 blocks.push(child);
             }
 

@@ -33,6 +33,7 @@ use crate::share_enrollment::ExpiryTime;
 use crate::share_enrollment::PeerFingerprint;
 use crate::share_enrollment::ShareRoster;
 use crate::share_enrollment::SignedDeviceEntry;
+use crate::shared_tree::SharedTreeId;
 
 const SIDECAR_VERSION: u32 = 1;
 
@@ -40,7 +41,7 @@ const SIDECAR_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterSidecarBody {
     pub v: u32,
-    pub shared_tree_id: String,
+    pub shared_tree_id: SharedTreeId,
     pub expires_at: ExpiryTime,
     pub max_peers: usize,
     /// Peers already pinned (QUIC-authenticated + admitted). Restored so a
@@ -62,7 +63,7 @@ impl RosterSidecarBody {
         )?;
         Ok(RosterSidecarBody {
             v: SIDECAR_VERSION,
-            shared_tree_id: roster.shared_tree_id().to_string(),
+            shared_tree_id: SharedTreeId::try_from(roster.shared_tree_id().to_owned())?,
             expires_at: roster.expires_at(),
             max_peers: roster.max_peers(),
             enrolled: roster.enrolled_peers().to_vec(),
@@ -86,7 +87,7 @@ pub struct RosterSidecar {
 
 impl RosterSidecar {
     /// `<shares_dir>/<shared_tree_id>.roster.json`.
-    pub fn path(shares_dir: &Path, shared_tree_id: &str) -> PathBuf {
+    pub fn path(shares_dir: &Path, shared_tree_id: &SharedTreeId) -> PathBuf {
         shares_dir.join(format!("{shared_tree_id}.roster.json"))
     }
 
@@ -123,7 +124,7 @@ impl RosterSidecar {
     /// `expected_owner`, or an owner signature that does not verify (tamper).
     pub fn load(
         shares_dir: &Path,
-        shared_tree_id: &str,
+        shared_tree_id: &SharedTreeId,
         expected_owner: &OwnerPublicKey,
     ) -> Result<RosterSidecarBody> {
         let path = Self::path(shares_dir, shared_tree_id);
@@ -163,7 +164,7 @@ impl RosterSidecar {
         capability_secret: crate::share_enrollment::CapabilitySecret,
     ) -> ShareRoster {
         ShareRoster::rehydrate(
-            body.shared_tree_id,
+            String::from(body.shared_tree_id),
             capability_secret,
             body.expires_at,
             body.max_peers,
@@ -178,6 +179,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    fn sid(id: &str) -> SharedTreeId {
+        SharedTreeId::try_from(id.to_owned()).unwrap()
+    }
     use crate::share_enrollment::CapabilitySecret;
 
     fn owner_and_roster() -> (OwnerIdentityKey, ShareRoster, CapabilitySecret) {
@@ -197,7 +202,7 @@ mod tests {
         let body = RosterSidecarBody::from_roster(&roster, vec![entry.clone()]).unwrap();
         RosterSidecar::save(dir.path(), &body, &owner).unwrap();
 
-        let loaded = RosterSidecar::load(dir.path(), "share-xyz", &owner.public()).unwrap();
+        let loaded = RosterSidecar::load(dir.path(), &sid("share-xyz"), &owner.public()).unwrap();
         assert_eq!(loaded, body);
 
         let mut rehydrated = RosterSidecar::into_roster(loaded, secret);
@@ -214,13 +219,13 @@ mod tests {
         RosterSidecar::save(dir.path(), &body, &owner).unwrap();
 
         // Flip the peer cap on disk without re-signing.
-        let path = RosterSidecar::path(dir.path(), "share-xyz");
+        let path = RosterSidecar::path(dir.path(), &sid("share-xyz"));
         let raw = std::fs::read_to_string(&path).unwrap();
         let tampered = raw.replace("\"max_peers\": 3", "\"max_peers\": 999");
         assert_ne!(raw, tampered, "test fixture must actually change the file");
         std::fs::write(&path, tampered).unwrap();
 
-        let err = RosterSidecar::load(dir.path(), "share-xyz", &owner.public()).unwrap_err();
+        let err = RosterSidecar::load(dir.path(), &sid("share-xyz"), &owner.public()).unwrap_err();
         assert!(format!("{err:#}").contains("verification"));
     }
 
@@ -232,7 +237,8 @@ mod tests {
         RosterSidecar::save(dir.path(), &body, &owner).unwrap();
 
         let attacker = OwnerIdentityKey::generate();
-        let err = RosterSidecar::load(dir.path(), "share-xyz", &attacker.public()).unwrap_err();
+        let err =
+            RosterSidecar::load(dir.path(), &sid("share-xyz"), &attacker.public()).unwrap_err();
         assert!(format!("{err:#}").contains("different owner key"));
     }
 

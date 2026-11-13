@@ -157,7 +157,7 @@ async fn a_loaded_shares_rows_and_container_survive_the_full_walk() -> Result<()
         let mount = holon_loro::shared_tree::create_mount_node(
             &tree,
             None,
-            "live-share",
+            &holon_loro::shared_tree::SharedTreeId::try_from("live-share".to_owned())?,
             loro::TreeID::new(1, 0),
         )?;
         tree.get_meta(mount)?
@@ -232,7 +232,7 @@ async fn the_rows_of_a_share_that_failed_to_rehydrate_are_reconciled_away() -> R
         let mount = holon_loro::shared_tree::create_mount_node(
             &tree,
             None,
-            "unloaded-share",
+            &holon_loro::shared_tree::SharedTreeId::try_from("unloaded-share".to_owned())?,
             loro::TreeID::new(1, 0),
         )?;
         tree.get_meta(mount)?
@@ -324,7 +324,7 @@ async fn sharing_a_page_deletes_none_of_its_rows() -> Result<()> {
             txn,
             page,
             None,
-            "share-id".into(),
+            holon_loro::shared_tree::SharedTreeId::try_from("share-id".to_owned())?,
             holon_loro::shared_tree::HistoryRetention::None,
         )?;
         shares.register("share-id".into(), extracted.shared_doc.fork());

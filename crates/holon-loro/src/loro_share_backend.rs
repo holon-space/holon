@@ -79,6 +79,7 @@ use crate::shared_tree::SHARE_ROLE_MOUNT;
 use crate::shared_tree::SHARE_ROLE_PROPERTY;
 use crate::shared_tree::SHARED_TREE_ID_PROPERTY;
 use crate::shared_tree::ShareKind;
+use crate::shared_tree::SharedTreeId;
 use crate::shared_tree::{self};
 use crate::ticket::Ticket;
 use crate::write_origin::WriteOrigin;
@@ -255,7 +256,7 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(150);
 fn spawn_save_worker(
     store: Arc<SharedSnapshotStore>,
     bus: Arc<ConditionBus>,
-    shared_tree_id: String,
+    shared_tree_id: SharedTreeId,
     doc: Arc<LoroDoc>,
 ) -> SaveWorker {
     let id_for_work = shared_tree_id.clone();
@@ -282,7 +283,7 @@ fn spawn_save_worker(
                     // tracing::error so both the bus-listener and the
                     // operator log the same failure — no swallowing.
                     bus.emit(Condition {
-                        subject: id.clone(),
+                        subject: id.to_string(),
                         reason: ConditionKind::SnapshotSaveFailed(format!("{e:#}")),
                     });
                     return Err(Box::<dyn std::error::Error + Send + Sync>::from(format!(
@@ -292,7 +293,7 @@ fn spawn_save_worker(
                 // The save condition's all-clear: the snapshot is on disk, so a
                 // banner from a previous failure is no longer true.
                 bus.clear(&ConditionKey {
-                    subject: id.clone(),
+                    subject: id.to_string(),
                     kind: ConditionKind::SNAPSHOT_SAVE_FAILED,
                 });
                 Ok(())
@@ -345,11 +346,11 @@ pub struct LoroShareBackend {
     known_peers: Arc<RwLock<HashMap<String, Vec<EndpointAddr>>>>,
     /// Per-share save worker. Dropped when `unregister` is called or
     /// when the backend itself is dropped.
-    save_workers: Arc<RwLock<HashMap<String, SaveWorker>>>,
+    save_workers: Arc<RwLock<HashMap<SharedTreeId, SaveWorker>>>,
     /// Per-share auto-resync worker. Fires `sync_with_peers` on local
     /// commits (debounced at `SYNC_DEBOUNCE`, separate from the save
     /// debounce because the cadence goals differ).
-    sync_workers: Arc<RwLock<HashMap<String, SyncWorker>>>,
+    sync_workers: Arc<RwLock<HashMap<SharedTreeId, SyncWorker>>>,
     /// Per-share SQL projection worker. On each shared-doc change
     /// (debounced), diffs the doc and writes creates/updates/deletes
     /// into the SQL block table so the UI stays in sync.
@@ -431,7 +432,7 @@ const SYNC_DEBOUNCE: Duration = Duration::from_millis(500);
 /// line shows it for debugging — the filter itself is `local_only()`.
 fn spawn_sync_worker(
     weak_backend: std::sync::Weak<LoroShareBackend>,
-    shared_tree_id: String,
+    shared_tree_id: SharedTreeId,
     doc: Arc<LoroDoc>,
     local_peer_id: u64,
 ) -> SyncWorker {
@@ -549,7 +550,7 @@ impl ShareRoot {
                  places its root"
             )
         })?;
-        let info = shared_tree::read_mount_info(&tree, mount)
+        let info = shared_tree::read_mount_info(&tree, mount)?
             .ok_or_else(|| anyhow::anyhow!("mount node {mount:?} carries no mount metadata"))?;
         Ok(Self {
             mount,
@@ -917,7 +918,7 @@ impl LoroShareBackend {
     /// Attach (or replace) the save worker for a given shared doc.
     /// Called by `share_subtree`, `accept_shared_subtree`, and the
     /// startup rehydration path.
-    pub async fn attach_save_worker(&self, shared_tree_id: String, doc: Arc<LoroDoc>) {
+    pub async fn attach_save_worker(&self, shared_tree_id: SharedTreeId, doc: Arc<LoroDoc>) {
         let worker = spawn_save_worker(
             self.snapshot_store.clone(),
             self.degraded_bus.clone(),
@@ -934,7 +935,7 @@ impl LoroShareBackend {
     /// doc. Subscribes to `subscribe_root` and, on non-remote commits,
     /// debounces + calls `sync_with_peers`. Called wherever
     /// `attach_save_worker` is called.
-    pub async fn attach_sync_worker(&self, shared_tree_id: String, doc: Arc<LoroDoc>) {
+    pub async fn attach_sync_worker(&self, shared_tree_id: SharedTreeId, doc: Arc<LoroDoc>) {
         // Read the doc's real peer id (already set via `set_peer_id`
         // before this worker is attached). Recomputing `stable_peer_id`
         // here would re-bump the generation and diverge from the id the
@@ -983,7 +984,7 @@ impl LoroShareBackend {
     /// flushing before process exit. Failures are logged + emitted
     /// but do not abort the flush of the remaining shares.
     pub async fn flush_all(&self) {
-        let snapshots: Vec<(String, Arc<LoroDoc>)> = {
+        let snapshots: Vec<(SharedTreeId, Arc<LoroDoc>)> = {
             let guard = self.save_workers.read().await;
             guard
                 .iter()
@@ -998,7 +999,7 @@ impl LoroShareBackend {
                     "[share] flush_all: save failed"
                 );
                 self.degraded_bus.emit(Condition {
-                    subject: id,
+                    subject: id.into(),
                     reason: ConditionKind::SnapshotSaveFailed(format!("{e:#}")),
                 });
             }
@@ -1211,7 +1212,7 @@ impl LoroShareBackend {
                 if matches!(node.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
                     continue;
                 }
-                let Some(info) = shared_tree::read_mount_info(&tree, node.id) else {
+                let Some(info) = shared_tree::scan_mount_info(&tree, node.id) else {
                     continue;
                 };
                 if let Some(sid) = read_stable_id(&tree, node.id)
@@ -1281,7 +1282,9 @@ impl LoroShareBackend {
                 "[share] remember_peer updated known_peers"
             );
             let persisted = entry.clone();
-            self.snapshot_store.save_peers(shared_tree_id, &persisted)
+            SharedTreeId::try_from(shared_tree_id.to_owned())
+                .map_err(anyhow::Error::from)
+                .and_then(|id| self.snapshot_store.save_peers(&id, &persisted))
         };
         if let Err(e) = persist {
             // Not fatal — the in-memory entry is authoritative while
@@ -1322,7 +1325,9 @@ impl LoroShareBackend {
             };
             entry.retain(|addr| &PeerFingerprint::from_bytes(*addr.id.as_bytes()) != peer);
             let remaining = entry.clone();
-            self.snapshot_store.save_peers(shared_tree_id, &remaining)
+            SharedTreeId::try_from(shared_tree_id.to_owned())
+                .map_err(anyhow::Error::from)
+                .and_then(|id| self.snapshot_store.save_peers(&id, &remaining))
         };
         persist.map_err(|e| {
             err(format!(
@@ -1407,7 +1412,7 @@ impl LoroShareBackend {
     ///
     /// Every failure is loud. A share whose capability or sidecar is gone must
     /// not be advertised at all — advertising it un-gated is the hole.
-    async fn rehydrate_roster(&self, shared_tree_id: &str) -> Result<SharedRoster> {
+    async fn rehydrate_roster(&self, shared_tree_id: &SharedTreeId) -> Result<SharedRoster> {
         let capability = self
             .credentials
             .load_capability(shared_tree_id)
@@ -1504,7 +1509,7 @@ impl LoroShareBackend {
 
     async fn start_advertising_stable(
         &self,
-        shared_tree_id: &str,
+        shared_tree_id: &SharedTreeId,
         doc: Arc<LoroDoc>,
         admission: ShareAdmission,
     ) -> anyhow::Result<EndpointAddr> {
@@ -1566,14 +1571,17 @@ impl LoroShareBackend {
     /// advertiser has no endpoint for this share.
     ///
     /// Renamed from `pull_from_peers` to reflect bidirectional semantics.
-    pub async fn sync_with_peers(&self, shared_tree_id: &str) -> Result<usize> {
+    pub async fn sync_with_peers(&self, shared_tree_id: &SharedTreeId) -> Result<usize> {
         let doc = self
             .manager
             .get_doc(shared_tree_id)
             .ok_or_else(|| err(format!("no shared doc registered for {shared_tree_id}")))?;
         let peers = {
             let guard = self.known_peers.read().await;
-            guard.get(shared_tree_id).cloned().unwrap_or_default()
+            guard
+                .get(shared_tree_id.as_str())
+                .cloned()
+                .unwrap_or_default()
         };
         // Save-before-push barrier: persist the shared doc so any ops we
         // are about to push are already durable on disk. A crash right
@@ -1888,8 +1896,8 @@ fn find_mount_by_shared_tree_id(
         if !shared_tree::is_mount_node(&tree, node.id) {
             continue;
         }
-        if let Some(info) = shared_tree::read_mount_info(&tree, node.id)
-            && info.shared_tree_id == shared_tree_id
+        if let Some(info) = shared_tree::scan_mount_info(&tree, node.id)
+            && info.shared_tree_id.as_str() == shared_tree_id
         {
             if let Some(page) = info.placed_page() {
                 return Ok(Some((node.id, page.to_string())));
@@ -2039,7 +2047,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         }
         let retention = parse_retention(&retention)?;
         let collab = self.global_doc().await?;
-        let shared_tree_id = Uuid::new_v4().to_string();
+        let shared_tree_id = SharedTreeId::new_random();
         let mount_stable_id = format!("block:{}", Uuid::new_v4());
 
         // Phase A (non-destructive) + snapshot save + Phase B (destructive)
@@ -2149,7 +2157,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     .save(&shared_tree_id, &extracted.shared_doc)
                 {
                     self.degraded_bus.emit(Condition {
-                        subject: shared_tree_id.clone(),
+                        subject: shared_tree_id.to_string(),
                         reason: ConditionKind::SnapshotSaveFailed(format!("{e:#}")),
                     });
                     // Source doc is still untouched — drop the extracted
@@ -2176,7 +2184,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 // share's and deletes none of them.
                 let shared_arc = Arc::new(extracted.shared_doc);
                 self.manager
-                    .register_arc(shared_tree_id.clone(), shared_arc.clone());
+                    .register_arc(shared_tree_id.to_string(), shared_arc.clone());
                 // Not `doc.commit()`: `commit_share_prune` already consumed the
                 // scope's armed origin, so a bare commit here would land
                 // unlabelled and a text-undo manager would offer to take the
@@ -2194,7 +2202,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // because the caller didn't get a ticket — the op failed.
         if let Err(e) = self.store.read().await.save_all().await {
             self.degraded_bus.emit(Condition {
-                subject: shared_tree_id.clone(),
+                subject: shared_tree_id.to_string(),
                 reason: ConditionKind::SnapshotSaveFailed(format!(
                     "global doc save_all failed after fork-prune: {e:#}"
                 )),
@@ -2273,7 +2281,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             .await;
         self.attach_sync_worker(shared_tree_id.clone(), shared_arc.clone())
             .await;
-        self.attach_projection_worker(shared_tree_id.clone(), shared_arc)
+        self.attach_projection_worker(shared_tree_id.to_string(), shared_arc)
             .await?;
 
         let alpn = format!("{ALPN_PREFIX}/{shared_tree_id}");
@@ -2436,7 +2444,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // created — drop the doc and return Err.
         if let Err(e) = self.snapshot_store.save(&shared_tree_id, &shared_arc) {
             self.degraded_bus.emit(Condition {
-                subject: shared_tree_id.clone(),
+                subject: shared_tree_id.to_string(),
                 reason: ConditionKind::SnapshotSaveFailed(format!("{e:#}")),
             });
             return Err(err(format!(
@@ -2535,7 +2543,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // Flush the global doc so the mount node is durable.
         if let Err(e) = self.store.read().await.save_all().await {
             self.degraded_bus.emit(Condition {
-                subject: shared_tree_id.clone(),
+                subject: shared_tree_id.to_string(),
                 reason: ConditionKind::SnapshotSaveFailed(format!(
                     "global doc save_all failed after accept: {e:#}"
                 )),
@@ -2555,7 +2563,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // find it the moment the rows land. A block share then projects its
         // synthetic container page; a page share's page is its own row.
         self.manager
-            .register_arc(shared_tree_id.clone(), shared_arc.clone());
+            .register_arc(shared_tree_id.to_string(), shared_arc.clone());
         if kind == ShareKind::Block {
             self.project_container_to_sql(&mount_stable_id, &mount_parent_uri, &shared_tree_id)
                 .await?;
@@ -2570,7 +2578,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
 
         self.attach_sync_worker(shared_tree_id.clone(), shared_arc.clone())
             .await;
-        self.attach_projection_worker(shared_tree_id.clone(), shared_arc.clone())
+        self.attach_projection_worker(shared_tree_id.to_string(), shared_arc.clone())
             .await?;
         self.attach_save_worker(shared_tree_id.clone(), shared_arc)
             .await;
@@ -2603,8 +2611,8 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 .into_iter()
                 .filter(|n| !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist))
                 .filter(|n| shared_tree::is_mount_node(&tree, n.id))
-                .filter_map(|n| shared_tree::read_mount_info(&tree, n.id))
-                .map(|m| m.shared_tree_id)
+                .filter_map(|n| shared_tree::scan_mount_info(&tree, n.id))
+                .map(|m| m.shared_tree_id.into())
                 .collect())
         })?;
 
@@ -2618,8 +2626,10 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             if known.contains(&id) {
                 continue;
             }
+            let shared_tree_id = SharedTreeId::try_from(id.clone())
+                .map_err(|e| err(format!("snapshot {id}.loro in the shares folder: {e}")))?;
             self.snapshot_store
-                .delete_snapshot(&id)
+                .delete_snapshot(&shared_tree_id)
                 .map_err(|e| err(format!("delete_snapshot({id}): {e:#}")))?;
             deleted.push(id);
         }
@@ -2646,7 +2656,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         let (mount_tid, info) = collab.with_read(|doc| {
             let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
             if let Some(tid) = find_tree_id_by_stable_id(doc, &uri) {
-                let info = shared_tree::read_mount_info(&tree, tid).ok_or_else(|| {
+                let info = shared_tree::read_mount_info(&tree, tid)?.ok_or_else(|| {
                     anyhow::Error::msg(format!(
                         "block {id} is neither a shared page nor a mount; unshare applies to \
                          shares only"
@@ -2664,7 +2674,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 .into_iter()
                 .filter(|n| !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist))
                 .find_map(|n| {
-                    shared_tree::read_mount_info(&tree, n.id)
+                    shared_tree::scan_mount_info(&tree, n.id)
                         .filter(|info| info.placed_page().as_ref() == Some(&uri))
                         .map(|info| (n.id, info))
                 })
@@ -2686,7 +2696,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         Ok(OperationResult::irreversible(vec![FieldDelta::history_only(
             id,
             SHARED_TREE_ID_PROPERTY,
-            Value::String(shared_tree_id),
+            Value::String(shared_tree_id.into()),
             Value::Null,
         )])
         .with_response(Value::String(response.to_string())))
@@ -2711,7 +2721,7 @@ impl LoroShareBackend {
             let mount = shared_tree::find_mount_node(&tree, shared_tree_id).ok_or_else(|| {
                 anyhow::anyhow!("shared tree {shared_tree_id} has no mount on this device")
             })?;
-            let info = shared_tree::read_mount_info(&tree, mount)
+            let info = shared_tree::read_mount_info(&tree, mount)?
                 .ok_or_else(|| anyhow::anyhow!("mount {mount:?} carries no mount metadata"))?;
             Ok((mount, info))
         })?;
@@ -2780,7 +2790,7 @@ impl LoroShareBackend {
         self.projection_workers
             .write()
             .await
-            .remove(&shared_tree_id);
+            .remove(shared_tree_id.as_str());
 
         // (3) Close the advertiser endpoint + stop advertising. A share whose
         // roster could not be rebuilt at rehydration is loaded unadvertised.
@@ -2889,7 +2899,7 @@ impl LoroShareBackend {
         };
         let unregistered = crate::loro_document::LoroDocument::from_existing(
             doc,
-            shared_tree_id.clone(),
+            shared_tree_id.to_string(),
         )
         .with_read(|doc| {
             if root == ExitRoot::Leaf {
@@ -3003,8 +3013,22 @@ pub async fn rehydrate_shared_trees(
             if !shared_tree::is_mount_node(&tree, node.id) {
                 continue;
             }
-            let Some(info) = shared_tree::read_mount_info(&tree, node.id) else {
-                continue;
+            let info = match shared_tree::read_mount_info(&tree, node.id) {
+                Ok(Some(info)) => info,
+                Ok(None) => continue,
+                Err(e) => {
+                    let mount = read_stable_id(&tree, node.id)
+                        .map(|s| block_uri_from_bare(&s))
+                        .unwrap_or_else(|| format!("{:?}", node.id));
+                    warn!(%mount, "[share] {e}; the share is not loaded");
+                    backend.degraded_bus.emit(Condition {
+                        subject: mount,
+                        reason: ConditionKind::RehydrationFailed(format!(
+                            "{e}; the share is not loaded"
+                        )),
+                    });
+                    continue;
+                }
             };
             let mount_stable_id = read_stable_id(&tree, node.id);
             let parent_stable_id = parent_tid.and_then(|pid| read_stable_id(&tree, pid));
@@ -3075,7 +3099,7 @@ pub async fn rehydrate_shared_trees(
                     "[share] the share's kind is unknown; the share is not loaded"
                 );
                 backend.degraded_bus.emit(Condition {
-                    subject: shared_tree_id.clone(),
+                    subject: shared_tree_id.to_string(),
                     reason: ConditionKind::RehydrationFailed(format!(
                         "share kind unknown, share not loaded: {e:#}"
                     )),
@@ -3096,7 +3120,7 @@ pub async fn rehydrate_shared_trees(
                     "[share] bump peer-id generation during rehydrate failed"
                 );
                 backend.degraded_bus.emit(Condition {
-                    subject: shared_tree_id.clone(),
+                    subject: shared_tree_id.to_string(),
                     reason: ConditionKind::RehydrationFailed(format!("next_generation: {e:#}")),
                 });
                 continue;
@@ -3110,7 +3134,7 @@ pub async fn rehydrate_shared_trees(
                 "[share] set_peer_id during rehydrate failed"
             );
             backend.degraded_bus.emit(Condition {
-                subject: shared_tree_id.clone(),
+                subject: shared_tree_id.to_string(),
                 reason: ConditionKind::RehydrationFailed(format!("set_peer_id: {e:#}")),
             });
             continue;
@@ -3119,7 +3143,7 @@ pub async fn rehydrate_shared_trees(
         let arc = Arc::new(doc);
         backend
             .manager
-            .register_arc(shared_tree_id.clone(), arc.clone());
+            .register_arc(shared_tree_id.to_string(), arc.clone());
 
         // Load the sidecar peer list, if present. Missing sidecar is
         // normal (fresh share pre-autopersist, or the file was never
@@ -3130,7 +3154,7 @@ pub async fn rehydrate_shared_trees(
         match backend.snapshot_store.load_peers(&shared_tree_id) {
             Ok(peers) if !peers.is_empty() => {
                 let mut guard = backend.known_peers.write().await;
-                guard.insert(shared_tree_id.clone(), peers);
+                guard.insert(shared_tree_id.to_string(), peers);
             }
             Ok(_) => {}
             Err(e) => {
@@ -3140,7 +3164,7 @@ pub async fn rehydrate_shared_trees(
                     "[share] load_peers during rehydrate failed"
                 );
                 backend.degraded_bus.emit(Condition {
-                    subject: shared_tree_id.clone(),
+                    subject: shared_tree_id.to_string(),
                     reason: ConditionKind::RehydrationFailed(format!("load_peers: {e:#}")),
                 });
             }
@@ -3161,7 +3185,7 @@ pub async fn rehydrate_shared_trees(
                     "[share] roster could not be rebuilt; refusing to advertise this share"
                 );
                 backend.degraded_bus.emit(Condition {
-                    subject: shared_tree_id.clone(),
+                    subject: shared_tree_id.to_string(),
                     reason: ConditionKind::RehydrationFailed(format!(
                         "roster unavailable, share not advertised: {e:#}"
                     )),
@@ -3195,7 +3219,7 @@ pub async fn rehydrate_shared_trees(
                         "[share] advertiser start_share failed during rehydrate"
                     );
                     backend.degraded_bus.emit(Condition {
-                        subject: shared_tree_id.clone(),
+                        subject: shared_tree_id.to_string(),
                         reason: ConditionKind::RehydrationFailed(format!("advertiser: {e:#}")),
                     });
                     // Intentionally continue — the share is usable for
@@ -3223,7 +3247,9 @@ pub async fn rehydrate_shared_trees(
         let kick_id = shared_tree_id.clone();
         let had_peers = {
             let guard = backend.known_peers.read().await;
-            guard.get(&shared_tree_id).is_some_and(|p| !p.is_empty())
+            guard
+                .get(shared_tree_id.as_str())
+                .is_some_and(|p| !p.is_empty())
         };
         if had_peers {
             tokio::spawn(async move {
@@ -3309,7 +3335,7 @@ pub async fn rehydrate_shared_trees(
             );
         }
         if let Err(e) = backend
-            .attach_projection_worker(shared_tree_id.clone(), arc.clone())
+            .attach_projection_worker(shared_tree_id.to_string(), arc.clone())
             .await
         {
             warn!(
@@ -3451,6 +3477,10 @@ mod tests {
         )
     }
 
+    fn sid(id: &str) -> SharedTreeId {
+        SharedTreeId::try_from(id.to_owned()).unwrap()
+    }
+
     fn make_backend() -> (Arc<LoroShareBackend>, TempDir) {
         let (backend, _keychain, dir) = make_backend_with_keychain();
         (backend, dir)
@@ -3543,7 +3573,8 @@ mod tests {
         let doc = LoroDoc::new();
         let tree = doc.get_tree(TREE_NAME);
         let shared_root = tree.create(None).unwrap();
-        let mount = shared_tree::create_mount_node(&tree, None, "tree-77", shared_root).unwrap();
+        let mount =
+            shared_tree::create_mount_node(&tree, None, &sid("tree-77"), shared_root).unwrap();
         doc.commit();
 
         let err = find_mount_by_shared_tree_id(&doc, "tree-77")
@@ -4099,7 +4130,8 @@ mod tests {
             other => panic!("unexpected response type: {other:?}"),
         };
         let ticket = ticket_json["ticket"].as_str().unwrap().to_string();
-        let shared_tree_id = ticket_json["shared_tree_id"].as_str().unwrap().to_string();
+        let shared_tree_id: SharedTreeId =
+            serde_json::from_value(ticket_json["shared_tree_id"].clone()).unwrap();
 
         backend_b
             .accept_shared_subtree("block:root-b", ticket)
@@ -4206,7 +4238,8 @@ mod tests {
             other => panic!("unexpected response type: {other:?}"),
         };
         let ticket = ticket_json["ticket"].as_str().unwrap().to_string();
-        let shared_tree_id = ticket_json["shared_tree_id"].as_str().unwrap().to_string();
+        let shared_tree_id: SharedTreeId =
+            serde_json::from_value(ticket_json["shared_tree_id"].clone()).unwrap();
 
         backend_b
             .accept_shared_subtree("block:root-b", ticket)
@@ -4275,7 +4308,7 @@ mod tests {
         Arc<LoroShareBackend>,
         Arc<LoroShareBackend>,
         crate::loro_backend::LoroBackend,
-        String,
+        SharedTreeId,
         TempDir,
         TempDir,
     ) {
@@ -4311,7 +4344,8 @@ mod tests {
             other => panic!("unexpected response type: {other:?}"),
         };
         let ticket = ticket_json["ticket"].as_str().unwrap().to_string();
-        let shared_tree_id = ticket_json["shared_tree_id"].as_str().unwrap().to_string();
+        let shared_tree_id: SharedTreeId =
+            serde_json::from_value(ticket_json["shared_tree_id"].clone()).unwrap();
 
         backend_b
             .accept_shared_subtree("block:root-b", ticket)
@@ -4688,7 +4722,7 @@ mod tests {
         let _worker = spawn_save_worker(
             snapshot_store.clone(),
             bus.clone(),
-            "burst".to_string(),
+            sid("burst"),
             doc.clone(),
         );
 
@@ -4736,7 +4770,7 @@ mod tests {
         ));
         store.set_publish_stall(stall);
         let doc = Arc::new(LoroDoc::new());
-        let worker = spawn_save_worker(store.clone(), bus, "stalled".to_string(), doc.clone());
+        let worker = spawn_save_worker(store.clone(), bus, sid("stalled"), doc.clone());
         let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
         let node = tree.create(None::<TreeID>).unwrap();
         tree.get_meta(node).unwrap().insert("n", 1i64).unwrap();
@@ -4823,8 +4857,8 @@ mod tests {
         const CORRUPT: &[u8] = b"\x00\x01not-loro";
 
         let (backend, _dir) = make_backend();
-        let id = "corrupt".to_string();
-        backend.manager.register(id.clone(), LoroDoc::new());
+        let id = sid("corrupt");
+        backend.manager.register(id.to_string(), LoroDoc::new());
         let doc = backend.manager.get_doc(&id).unwrap();
         backend.snapshot_store().save(&id, &doc).unwrap();
         backend.attach_sync_worker(id.clone(), doc.clone()).await;
@@ -4874,8 +4908,8 @@ mod tests {
             .snapshot_store()
             .set_publish_stall(Duration::from_secs(5));
 
-        let id = "unreachable".to_string();
-        backend.manager.register(id.clone(), LoroDoc::new());
+        let id = sid("unreachable");
+        backend.manager.register(id.to_string(), LoroDoc::new());
         let doc = backend.manager.get_doc(&id).unwrap();
 
         // TEST-NET-1 (RFC 5737). Never routed, so the dial either sits
@@ -4929,7 +4963,7 @@ mod tests {
     }
 
     /// Share A's subtree and return `(ticket, shared_tree_id)`.
-    async fn share_and_ticket(backend: &LoroShareBackend, block: &str) -> (String, String) {
+    async fn share_and_ticket(backend: &LoroShareBackend, block: &str) -> (String, SharedTreeId) {
         let resp = backend
             .share_subtree(block, "none".into())
             .await
@@ -4940,7 +4974,7 @@ mod tests {
         };
         (
             j["ticket"].as_str().unwrap().to_string(),
-            j["shared_tree_id"].as_str().unwrap().to_string(),
+            serde_json::from_value(j["shared_tree_id"].clone()).unwrap(),
         )
     }
 
@@ -5255,7 +5289,7 @@ mod tests {
             .await
             .expect_err("a revocation that cannot be persisted must not report success");
         let msg = format!("{err:#}");
-        assert!(msg.contains(&shared_tree_id), "{msg}");
+        assert!(msg.contains(shared_tree_id.as_str()), "{msg}");
         assert!(
             msg.contains(&format!("{b_peer:?}")),
             "the error must name the peer whose revocation did not stick: {msg}"
@@ -5280,7 +5314,7 @@ mod tests {
     #[serial_test::serial]
     async fn a_concurrent_admission_does_not_fail_a_revocations_sidecar_write() {
         let (backend, _dir) = make_backend();
-        let id = "tree-revocation-race".to_string();
+        let id = sid("tree-revocation-race");
         let (revoked, revoked_fp) = synthetic_peer();
         let (other, _) = synthetic_peer();
         backend.remember_peer(&id, revoked.clone()).await;
@@ -5312,7 +5346,7 @@ mod tests {
     #[serial_test::serial]
     async fn a_concurrent_admission_cannot_restore_a_revoked_peers_addr_on_disk() {
         let (backend, _dir) = make_backend();
-        let id = "tree-admission-race".to_string();
+        let id = sid("tree-admission-race");
         let (revoked, revoked_fp) = synthetic_peer();
         backend.remember_peer(&id, revoked.clone()).await;
 
@@ -5399,7 +5433,7 @@ mod tests {
         while let Ok(change) = changes.try_recv() {
             if let Some(event) = change.raised()
                 && let ConditionKind::RehydrationFailed(detail) = &event.reason
-                && event.subject == shared_tree_id
+                && event.subject == shared_tree_id.as_str()
             {
                 disclosed.push(detail.clone());
             }
@@ -5559,7 +5593,8 @@ mod tests {
             _ => panic!(),
         };
         let ticket = j["ticket"].as_str().unwrap().to_string();
-        let shared_tree_id = j["shared_tree_id"].as_str().unwrap().to_string();
+        let shared_tree_id: SharedTreeId =
+            serde_json::from_value(j["shared_tree_id"].clone()).unwrap();
 
         backend_b
             .accept_shared_subtree("block:root-b", ticket)
@@ -5622,7 +5657,8 @@ mod tests {
             _ => panic!(),
         };
         let ticket = j["ticket"].as_str().unwrap().to_string();
-        let shared_tree_id = j["shared_tree_id"].as_str().unwrap().to_string();
+        let shared_tree_id: SharedTreeId =
+            serde_json::from_value(j["shared_tree_id"].clone()).unwrap();
 
         backend_b
             .accept_shared_subtree("block:root-b", ticket)
@@ -5762,7 +5798,8 @@ mod tests {
             _ => panic!(),
         };
         let ticket = j["ticket"].as_str().unwrap().to_string();
-        let shared_tree_id = j["shared_tree_id"].as_str().unwrap().to_string();
+        let shared_tree_id: SharedTreeId =
+            serde_json::from_value(j["shared_tree_id"].clone()).unwrap();
 
         backend_b
             .accept_shared_subtree("block:root-b", ticket)
@@ -5871,7 +5908,7 @@ mod tests {
         // Materialise `shares/` first (save once so the dir exists and
         // has at least one successful write), then chmod it read-only.
         let doc = Arc::new(LoroDoc::new());
-        snapshot_store.save("readonly", &doc).unwrap();
+        snapshot_store.save(&sid("readonly"), &doc).unwrap();
 
         let shares_dir = dir.path().join("shares");
         let orig_perm = std::fs::metadata(&shares_dir).unwrap().permissions();
@@ -5881,7 +5918,7 @@ mod tests {
         let _worker = spawn_save_worker(
             snapshot_store.clone(),
             bus.clone(),
-            "readonly".to_string(),
+            sid("readonly"),
             doc.clone(),
         );
 
@@ -6114,9 +6151,13 @@ mod tests {
         // exists to observe.
         let doc = global.doc();
         let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
-        let mount =
-            shared_tree::create_mount_node(&tree, parent, shared_tree_id, TreeID::new(u64::MAX, 0))
-                .unwrap();
+        let mount = shared_tree::create_mount_node(
+            &tree,
+            parent,
+            &sid(shared_tree_id),
+            TreeID::new(u64::MAX, 0),
+        )
+        .unwrap();
         set_stable_id(&doc, mount, "mount").unwrap();
         doc.commit();
         ShareRoot {
@@ -6567,9 +6608,13 @@ mod tests {
             // exists to observe.
             let doc = global.doc();
             let tree = doc.get_tree(TREE_NAME);
-            let node =
-                shared_tree::create_mount_node(&tree, None, "stid-descendants", TreeID::new(0, 0))
-                    .unwrap();
+            let node = shared_tree::create_mount_node(
+                &tree,
+                None,
+                &sid("stid-descendants"),
+                TreeID::new(0, 0),
+            )
+            .unwrap();
             set_stable_id(&doc, node, mount).unwrap();
             shared_tree::record_mount(&tree, node, &ShareKind::Block, MountRole::Recipient)
                 .unwrap();
@@ -6844,7 +6889,8 @@ mod tests {
             o => panic!("unexpected: {o:?}"),
         };
         let ticket = tj["ticket"].as_str().unwrap().to_string();
-        let shared_tree_id = tj["shared_tree_id"].as_str().unwrap().to_string();
+        let shared_tree_id: SharedTreeId =
+            serde_json::from_value(tj["shared_tree_id"].clone()).unwrap();
 
         let accept_resp = backend_b
             .accept_shared_subtree("block:root-b", ticket.clone())
@@ -6960,7 +7006,7 @@ mod tests {
         b: Arc<LoroShareBackend>,
         sql_b: Arc<RecordingSqlOps>,
         ticket: String,
-        shared_tree_id: String,
+        shared_tree_id: SharedTreeId,
         _dirs: (TempDir, TempDir),
     }
 
@@ -6987,7 +7033,7 @@ mod tests {
                 b,
                 sql_b,
                 ticket: json["ticket"].as_str().unwrap().to_string(),
-                shared_tree_id: json["shared_tree_id"].as_str().unwrap().to_string(),
+                shared_tree_id: serde_json::from_value(json["shared_tree_id"].clone()).unwrap(),
                 _dirs: (dir_a, dir_b),
             }
         }
@@ -7076,6 +7122,7 @@ mod tests {
                         })
                         .filter(|n| {
                             shared_tree::read_mount_info(&tree, n.id)
+                                .unwrap()
                                 .is_some_and(|m| m.shared_tree_id == self.shared_tree_id)
                         })
                         .count())
@@ -7215,7 +7262,10 @@ mod tests {
                 .with_read(|doc| {
                     let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
                     let mount = shared_tree::find_mount_node(&tree, &id).unwrap();
-                    Ok(shared_tree::read_mount_info(&tree, mount).unwrap().kind)
+                    Ok(shared_tree::read_mount_info(&tree, mount)
+                        .unwrap()
+                        .unwrap()
+                        .kind)
                 })
                 .unwrap()
         };
@@ -7876,7 +7926,7 @@ mod tests {
 
     /// The owner's own share of `shared_tree_id` is gone: no mount, no loaded
     /// doc, no advertiser, no snapshot, and the revocation is disclosed once.
-    async fn assert_owner_revoked(a: &LoroShareBackend, shared_tree_id: &str, page: &str) {
+    async fn assert_owner_revoked(a: &LoroShareBackend, shared_tree_id: &SharedTreeId, page: &str) {
         assert!(
             !has_mount(a, shared_tree_id).await,
             "the mount outlived the delete"
@@ -8020,7 +8070,7 @@ mod tests {
     #[serial_test::serial]
     async fn accepting_and_unsharing_report_the_share_they_change() {
         let fixture = PageShareFixture::shared().await;
-        let stid = Value::String(fixture.shared_tree_id.clone());
+        let stid = Value::String(fixture.shared_tree_id.to_string());
         let rows = |result: &OperationResult| -> Vec<(String, String, Value, Value)> {
             result
                 .changes
@@ -8487,7 +8537,7 @@ mod tests {
             other => panic!("unexpected response: {other:?}"),
         };
         let mount_id = json["mount_block_id"].as_str().unwrap().to_string();
-        let stid = json["shared_tree_id"].as_str().unwrap().to_string();
+        let stid: SharedTreeId = serde_json::from_value(json["shared_tree_id"].clone()).unwrap();
 
         // Preconditions.
         assert!(backend.advertiser.is_active(&stid).await);
@@ -8651,7 +8701,7 @@ mod tests {
     }
 
     /// `(mount_block_id, shared_tree_id)` of a fresh share of `id`.
-    async fn share_ok(b: &LoroShareBackend, id: &str) -> (String, String) {
+    async fn share_ok(b: &LoroShareBackend, id: &str) -> (String, SharedTreeId) {
         let r = b
             .share_subtree(id, "none".into())
             .await
@@ -8662,7 +8712,7 @@ mod tests {
         };
         (
             j["mount_block_id"].as_str().unwrap().to_string(),
-            j["shared_tree_id"].as_str().unwrap().to_string(),
+            serde_json::from_value(j["shared_tree_id"].clone()).unwrap(),
         )
     }
 
@@ -8715,7 +8765,7 @@ mod tests {
             inner.downcast_ref::<NestedShareRefusal>(),
             Some(&NestedShareRefusal::InsideShare {
                 id: "block:gamma-one".into(),
-                shared_tree_id: st1,
+                shared_tree_id: st1.to_string(),
             }),
             "{inner}"
         );
@@ -8754,7 +8804,7 @@ mod tests {
         assert_eq!(
             unloaded.owning_page(&m1).unwrap(),
             OwningPage::Broken(ChainBreak::SharedSubtreeNotMaterialized {
-                shared_tree_id: st1.clone()
+                shared_tree_id: st1.to_string()
             })
         );
 
@@ -8778,7 +8828,7 @@ mod tests {
         assert_eq!(
             reads.owning_page("block:gamma").unwrap(),
             OwningPage::Broken(ChainBreak::OrphanedShare {
-                shared_tree_id: st1
+                shared_tree_id: st1.to_string()
             })
         );
         b.advertiser.close_all().await;
@@ -8812,7 +8862,7 @@ mod tests {
             refused.downcast_ref::<NestedShareRefusal>(),
             Some(&NestedShareRefusal::InsideShare {
                 id: "block:bx1".into(),
-                shared_tree_id: st_b,
+                shared_tree_id: st_b.to_string(),
             }),
             "{refused}"
         );
@@ -8833,7 +8883,8 @@ mod tests {
         {
             let tree = shared.get_tree(crate::loro_backend::TREE_NAME);
             let root = tree.roots()[0];
-            shared_tree::create_mount_node(&tree, Some(root), "planted-inner-share", root).unwrap();
+            shared_tree::create_mount_node(&tree, Some(root), &sid("planted-inner-share"), root)
+                .unwrap();
             shared.commit();
         }
         b.snapshot_store.save(&st1, &shared).unwrap();
@@ -8854,8 +8905,76 @@ mod tests {
                 disclosed.push(event.subject.clone());
             }
         }
-        assert_eq!(disclosed, vec![st1]);
+        assert_eq!(disclosed, vec![st1.to_string()]);
         b.advertiser.close_all().await;
+    }
+
+    /// A mount whose synced meta records an id outside the charset is not
+    /// loaded: rehydrate discloses it under the mount's name, writes no file
+    /// for it, and still loads every other share.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_mount_with_an_unsafe_synced_id_is_disclosed_and_boot_continues() {
+        let (b, keychain, dir) = make_backend_with_keychain();
+        seed_page(&b, "host", None, "Host").await;
+        seed_block(&b, "gamma", Some("host"), "Gamma").await;
+        let (_, good) = share_ok(&b, "block:gamma").await;
+        b.test_global_doc()
+            .await
+            .with_write(WriteOrigin::ShareLifecycle, |txn| {
+                let tree = txn.get_tree(crate::loro_backend::TREE_NAME);
+                let mount = shared_tree::create_mount_node(
+                    &tree,
+                    None,
+                    &sid("placeholder"),
+                    TreeID::new(7, 0),
+                )?;
+                tree.get_meta(mount)?
+                    .insert("shared_tree_id", "../escape")?;
+                set_stable_id(txn, mount, "hostile-mount")?;
+                txn.commit();
+                Ok(())
+            })
+            .unwrap();
+        b.store.read().await.save_all().await.unwrap();
+        b.advertiser.close_all().await;
+        b.flush_all().await;
+        drop(b);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let b = make_backend_at(dir.path(), test_credentials(keychain));
+        let mut changes = b.degraded_bus().subscribe().changes;
+        assert_eq!(rehydrate_over(&b).await, 1, "the valid share still loads");
+        assert!(b.manager.get_doc(&good).is_some());
+        let mut refused = Vec::new();
+        while let Ok(change) = changes.try_recv() {
+            if let Some(event) = change.raised()
+                && let ConditionKind::RehydrationFailed(_) = &event.reason
+            {
+                refused.push(event.subject.clone());
+            }
+        }
+        assert_eq!(refused, vec![block_uri_from_bare("hostile-mount")]);
+        let escaped: Vec<_> = walkdir_files(dir.path())
+            .into_iter()
+            .filter(|path| path.parent() != Some(b.snapshot_store.shares_dir()))
+            .filter(|path| path.to_string_lossy().contains("escape"))
+            .collect();
+        assert!(escaped.is_empty(), "files outside shares/: {escaped:?}");
+        b.advertiser.close_all().await;
+    }
+
+    fn walkdir_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(walkdir_files(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
     }
 
     /// An older peer can sync a mount into a shared doc this device has
@@ -8875,7 +8994,8 @@ mod tests {
         {
             let tree = older_peer.get_tree(crate::loro_backend::TREE_NAME);
             let root = tree.roots()[0];
-            shared_tree::create_mount_node(&tree, Some(root), "synced-inner-share", root).unwrap();
+            shared_tree::create_mount_node(&tree, Some(root), &sid("synced-inner-share"), root)
+                .unwrap();
             older_peer.commit();
         }
         shared
@@ -8895,13 +9015,14 @@ mod tests {
                 disclosed.push(event.subject.clone());
             }
         }
-        assert_eq!(disclosed, vec![st1.clone()]);
+        assert_eq!(disclosed, vec![st1.to_string()]);
 
         let second_peer = shared.fork();
         {
             let tree = second_peer.get_tree(crate::loro_backend::TREE_NAME);
             let root = tree.roots()[0];
-            shared_tree::create_mount_node(&tree, Some(root), "second-inner-share", root).unwrap();
+            shared_tree::create_mount_node(&tree, Some(root), &sid("second-inner-share"), root)
+                .unwrap();
             second_peer.commit();
         }
         shared
@@ -8920,7 +9041,11 @@ mod tests {
                 second.push(event.subject.clone());
             }
         }
-        assert_eq!(second, vec![st1], "a second nested mount is disclosed too");
+        assert_eq!(
+            second,
+            vec![st1.to_string()],
+            "a second nested mount is disclosed too"
+        );
         b.advertiser.close_all().await;
     }
 
@@ -8962,6 +9087,7 @@ mod tests {
                     let m1_tid = find_tree_id_by_stable_id(doc, &EntityUri::parse(&m1)?)
                         .expect("m1 is live");
                     let shared_root = shared_tree::read_mount_info(&tree, m1_tid)
+                        .unwrap()
                         .expect("m1 is a mount")
                         .shared_root;
                     let host =
@@ -9159,6 +9285,7 @@ mod tests {
                     d.m2_tid,
                 ))
             })
+            .unwrap()
             .unwrap()
             .expect("m2 is a mount");
         let peer = peer_of(&d, 0);

@@ -65,6 +65,7 @@ use crate::loro_document_store::LoroDocumentStore;
 use crate::share_enrollment::CapabilitySecret;
 use crate::share_enrollment::ExpiryTime;
 use crate::share_enrollment::ShareRoster;
+use crate::shared_tree::SharedTreeId;
 use crate::ticket::Ticket;
 use crate::write_origin::WriteOrigin;
 
@@ -628,7 +629,7 @@ impl DevicePairing {
                 .into_iter()
                 .filter(|node| crate::shared_tree::is_mount_node(&tree, node.id))
                 .filter_map(|node| {
-                    match crate::shared_tree::read_mount_info(&tree, node.id)
+                    match crate::shared_tree::scan_mount_info(&tree, node.id)
                         .and_then(|info| info.placed_page())
                     {
                         Some(page) => Some(page.to_string()),
@@ -759,7 +760,7 @@ impl DevicePairing {
                     ticket.alpn.as_bytes(),
                     ticket.addr.clone(),
                     &ticket.capability,
-                    &ticket.shared_tree_id,
+                    ticket.shared_tree_id.as_str(),
                     // Whole-store pairing adopts the OWNER's document, so the
                     // owner authors into the staging doc we just built for it
                     // (D72.a: an own device is a full writer).
@@ -1010,15 +1011,15 @@ impl DevicePairing {
         }
         let set = self.registry().replication_set().await?;
         for ticket in &invite.containers {
-            if !set.iter().any(|c| c.id == ticket.shared_tree_id) {
+            if !set.iter().any(|c| c.id == ticket.shared_tree_id.as_str()) {
                 return Err(PairingRefused::InviteContainerUnknown {
-                    container: ticket.shared_tree_id.clone(),
+                    container: ticket.shared_tree_id.to_string(),
                 }
                 .into());
             }
-            if ticket.shared_tree_id != crate::container_registry::ROOT_CONTAINER_ID {
+            if ticket.shared_tree_id != SharedTreeId::root() {
                 return Err(PairingRefused::InviteHasNonRootContainer {
-                    container: ticket.shared_tree_id.clone(),
+                    container: ticket.shared_tree_id.to_string(),
                 }
                 .into());
             }
@@ -1252,7 +1253,7 @@ impl DevicePairingOperations<()> for DevicePairing {
             minted.containers.push(container.id.clone());
             minted.rosters.push(roster);
             containers.push(Ticket::new(
-                container.id.clone(),
+                SharedTreeId::try_from(container.id.clone()).map_err(anyhow::Error::from)?,
                 addr,
                 String::from_utf8(make_alpn(ALPN_PREFIX, &container.id))
                     .context("container ALPN is not UTF-8")?,
@@ -1375,7 +1376,7 @@ impl DevicePairingOperations<()> for DevicePairing {
                 containers: invite
                     .containers
                     .iter()
-                    .map(|t| t.shared_tree_id.clone())
+                    .map(|t| t.shared_tree_id.to_string())
                     .collect(),
                 archive: marker.archive.clone(),
             },
@@ -1766,7 +1767,7 @@ mod tests {
     fn an_invite_with_too_many_containers_is_refused() {
         let ticket = || {
             Ticket::new(
-                "tree".into(),
+                SharedTreeId::try_from("tree".to_owned()).unwrap(),
                 iroh::EndpointAddr::new(iroh::SecretKey::generate().public()),
                 "loro-sync/tree".into(),
                 CapabilitySecret::generate(),

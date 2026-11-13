@@ -839,6 +839,7 @@ impl TwoInstanceHandle {
                 })
                 .find(|n| {
                     holon_loro::shared_tree::read_mount_info(&tree, n.id)
+                        .expect("a mount this harness made records a valid shared tree id")
                         .is_some_and(|info| info.placed_page().as_ref() == Some(page))
                 })
                 .map(|n| {

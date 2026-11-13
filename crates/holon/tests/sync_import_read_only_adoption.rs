@@ -272,8 +272,13 @@ async fn a_block_imported_by_the_share_projection_refuses_the_users_next_edit() 
         // exists to observe.
         let doc = global.doc();
         let tree = doc.get_tree(TREE_NAME);
-        let mount =
-            holon_loro::shared_tree::create_mount_node(&tree, None, "stid-seam", root).unwrap();
+        let mount = holon_loro::shared_tree::create_mount_node(
+            &tree,
+            None,
+            &holon_loro::shared_tree::SharedTreeId::try_from("stid-seam".to_owned()).unwrap(),
+            root,
+        )
+        .unwrap();
         tree.get_meta(mount)
             .unwrap()
             .insert(STABLE_ID, loro::LoroValue::from("mount"))

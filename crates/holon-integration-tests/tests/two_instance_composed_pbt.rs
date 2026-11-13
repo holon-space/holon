@@ -2429,7 +2429,11 @@ fn an_invite_for_a_container_this_device_lacks_is_refused_before_anything_moves(
         let mut foreign = holon_loro::device_pairing_op::PairingInvite::decode(&invite)
             .expect("the minted invite decodes");
         for ticket in &mut foreign.containers {
-            ticket.shared_tree_id = format!("{}-from-another-vault", ticket.shared_tree_id);
+            ticket.shared_tree_id = holon_loro::shared_tree::SharedTreeId::try_from(format!(
+                "{}-from-another-vault",
+                ticket.shared_tree_id
+            ))
+            .expect("a suffixed valid id stays valid");
         }
         let foreign = foreign.encode().expect("the tampered invite encodes");
 

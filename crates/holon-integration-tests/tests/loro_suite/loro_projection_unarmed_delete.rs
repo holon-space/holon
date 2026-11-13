@@ -204,7 +204,7 @@ async fn the_unarmed_cold_boot_walk_keeps_the_rows_of_an_unregistered_share() ->
             txn,
             shared_root.expect("the loop created the shared root"),
             Some(host),
-            "share-id".into(),
+            holon_loro::shared_tree::SharedTreeId::try_from("share-id".to_owned())?,
             holon_loro::shared_tree::HistoryRetention::None,
         )?;
         let mount = holon_loro::shared_tree::commit_share_prune(txn, &extracted)?;
