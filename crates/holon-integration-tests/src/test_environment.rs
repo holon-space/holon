@@ -781,7 +781,10 @@ pub(crate) fn publish_reactive_builder_services(
 /// at `temp_path`, a second boot over it is refused by the writer lock, names
 /// the holder, and writes nothing into the vault. The second DB lives inside
 /// the vault, so a DB opened before the lock shows up as a new file.
-pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path) {
+pub(crate) async fn run_second_writer_refusal_check(
+    temp_path: &std::path::Path,
+    vault_root: &std::path::Path,
+) {
     // The live session's DB is not vault content, and its WAL moves on its own.
     let is_live_db = |p: &std::path::Path| {
         p.parent() == Some(temp_path)
@@ -790,7 +793,7 @@ pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path)
     };
     let vault_bytes = || {
         let mut files = std::collections::BTreeMap::new();
-        let mut dirs = vec![temp_path.to_path_buf()];
+        let mut dirs = vec![vault_root.to_path_buf()];
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir).expect("[SecondWriterRefused] list the vault") {
                 let path = entry
@@ -812,7 +815,7 @@ pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path)
     let second = holon_frontend::config::HolonConfig {
         db_path: Some(temp_path.join("second-writer.db")),
         vault: holon_frontend::config::VaultConfig {
-            root: Some(temp_path.to_path_buf()),
+            root: Some(vault_root.to_path_buf()),
         },
         ..Default::default()
     };
@@ -832,7 +835,7 @@ pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path)
     .await;
     let err = match result {
         Ok(_) => panic!(
-            "[SecondWriterRefused] a second session booted on the vault {temp_path:?} that the \
+            "[SecondWriterRefused] a second session booted on the vault {vault_root:?} that the \
              live session holds — both now write its .loro and org files"
         ),
         Err(e) => format!("{e:#}"),
@@ -864,10 +867,10 @@ pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path)
 /// its session down first: while one holds the vault, the writer lock refuses
 /// the boot before the guard runs.
 ///
-/// `temp_path` is the config/vault/db root the app booted from — NOT its
-/// canonicalized `org_root` (the marker was written under the un-canonicalized
-/// path). `currently_loro_enabled` is the consolidator the live app pinned; we
-/// boot the opposite to force the epoch mismatch.
+/// `temp_path` is the config/db root and `vault_root` the vault the app booted
+/// from — NOT the canonicalized `org_root` (the marker was written under the
+/// un-canonicalized path). `currently_loro_enabled` is the consolidator the
+/// live app pinned; we boot the opposite to force the epoch mismatch.
 ///
 /// Faithfulness: this drives the exact production entry point (no direct call
 /// to `guard_consolidator_epoch`, which would only re-test the guard fn its own
@@ -877,6 +880,7 @@ pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path)
 /// guard's `Err` short-circuits `add_frontend`.
 pub(crate) async fn run_epoch_flip_rejection_check(
     temp_path: &std::path::Path,
+    vault_root: &std::path::Path,
     currently_loro_enabled: bool,
 ) {
     // A live migrate acknowledgement would make the guard WIPE the app's durable
@@ -902,7 +906,7 @@ pub(crate) async fn run_epoch_flip_rejection_check(
     let flipped_config = holon_frontend::config::HolonConfig {
         db_path: Some(db_path),
         vault: holon_frontend::config::VaultConfig {
-            root: Some(temp_path.to_path_buf()),
+            root: Some(vault_root.to_path_buf()),
         },
         crdt: flipped_crdt_preferences(currently_loro_enabled),
         ..Default::default()

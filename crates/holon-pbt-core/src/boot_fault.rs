@@ -13,6 +13,9 @@ pub enum BootFault {
     PriorCrash(PriorPanic),
     /// A task spawned after the app started panics.
     TaskPanic,
+    /// The vault directory does not exist when the app starts, as on a fresh
+    /// mobile install: the platform hands over a data dir, not a vault.
+    MissingVaultDir,
 }
 
 /// The panic record a [`BootFault::PriorCrash`] leaves behind.
@@ -45,6 +48,7 @@ pub fn any_boot_fault() -> BoxedStrategy<BootFault> {
         6 => Just(BootFault::None),
         1 => any_prior_panic().prop_map(BootFault::PriorCrash),
         1 => Just(BootFault::TaskPanic),
+        1 => Just(BootFault::MissingVaultDir),
     ]
     .boxed()
 }

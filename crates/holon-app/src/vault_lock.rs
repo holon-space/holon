@@ -25,6 +25,30 @@ pub const VAULT_STATE_DIR: &str = ".holon";
 /// The writer lock, inside [`VAULT_STATE_DIR`].
 pub const WRITER_LOCK_FILE: &str = "writer.lock";
 
+/// Create `vault_root` and seed an empty one with the bundled `index.org`.
+///
+/// A mobile platform hands the app a data dir, not a vault, so its entry runs
+/// this before the boot. [`VaultLock::acquire`] stays strict: a desktop user
+/// who names a missing vault has made a mistake the boot must report.
+pub fn ensure_vault_dir(vault_root: &Path) -> Result<()> {
+    std::fs::create_dir_all(vault_root)
+        .with_context(|| format!("creating the vault {}", vault_root.display()))?;
+    let empty = std::fs::read_dir(vault_root)
+        .with_context(|| format!("listing the vault {}", vault_root.display()))?
+        .next()
+        .is_none();
+    if empty {
+        // The Journals page is seeded at boot as blocks: a `Journals.org`
+        // here would make a second Journals page.
+        let seed = vault_root.join("index.org");
+        std::fs::write(&seed, DEFAULT_INDEX_ORG)
+            .with_context(|| format!("seeding the vault with {}", seed.display()))?;
+    }
+    Ok(())
+}
+
+const DEFAULT_INDEX_ORG: &str = include_str!("../../../assets/default/index.org");
+
 /// The held writer lock of one vault. Released by [`VaultLock::release`] or,
 /// failing that, when the value drops and the file closes.
 #[derive(Debug)]
@@ -249,5 +273,97 @@ mod tests {
         let b = tempfile::tempdir().unwrap();
         let _a = VaultLock::acquire(a.path()).unwrap();
         VaultLock::acquire(b.path()).expect("another vault is not held");
+    }
+
+    #[derive(Debug, Clone)]
+    enum VaultState {
+        /// Missing, under `depth` missing parents.
+        Absent {
+            depth: usize,
+        },
+        Empty,
+        Holding(Vec<(String, Vec<u8>)>),
+        /// A file sits where the vault dir belongs.
+        FileInTheWay,
+    }
+
+    fn any_vault_state() -> impl proptest::strategy::Strategy<Value = VaultState> {
+        use proptest::prelude::*;
+        prop_oneof![
+            (0usize..4).prop_map(|depth| VaultState::Absent { depth }),
+            Just(VaultState::Empty),
+            prop::collection::btree_map(
+                "[a-z]{1,8}(\\.org)?",
+                prop::collection::vec(any::<u8>(), 0..64),
+                1..4
+            )
+            .prop_map(|files| VaultState::Holding(files.into_iter().collect())),
+            Just(VaultState::FileInTheWay),
+        ]
+    }
+
+    fn files_under(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect()
+    }
+
+    proptest::proptest! {
+        /// Whatever the vault's state, the result is a lockable vault dir:
+        /// a missing or empty one holds exactly the bundled `index.org`, an
+        /// existing one keeps its bytes, and a second call changes nothing.
+        /// A file in the way is an error that leaves the file alone.
+        #[test]
+        fn ensure_vault_dir_makes_a_lockable_vault(state in any_vault_state()) {
+            let temp = tempfile::tempdir().unwrap();
+            let vault = match &state {
+                VaultState::Absent { depth } => (0..*depth)
+                    .fold(temp.path().to_path_buf(), |p, i| p.join(format!("d{i}")))
+                    .join("vault"),
+                _ => temp.path().join("vault"),
+            };
+            match &state {
+                VaultState::Absent { .. } => {}
+                VaultState::Empty => std::fs::create_dir(&vault).unwrap(),
+                VaultState::Holding(files) => {
+                    std::fs::create_dir(&vault).unwrap();
+                    for (name, bytes) in files {
+                        std::fs::write(vault.join(name), bytes).unwrap();
+                    }
+                }
+                VaultState::FileInTheWay => std::fs::write(&vault, b"not a vault").unwrap(),
+            }
+
+            let result = ensure_vault_dir(&vault);
+            if let VaultState::FileInTheWay = state {
+                proptest::prop_assert!(result.is_err());
+                proptest::prop_assert_eq!(std::fs::read(&vault).unwrap(), b"not a vault".to_vec());
+                proptest::prop_assert!(VaultLock::acquire(&vault).is_err());
+                return Ok(());
+            }
+            result.unwrap();
+            proptest::prop_assert!(vault.is_dir());
+            let after = files_under(&vault);
+            let expected = match &state {
+                VaultState::Holding(files) => files
+                    .iter()
+                    .map(|(name, bytes)| (vault.join(name), bytes.clone()))
+                    .collect(),
+                _ => std::collections::BTreeMap::from([(
+                    vault.join("index.org"),
+                    DEFAULT_INDEX_ORG.as_bytes().to_vec(),
+                )]),
+            };
+            proptest::prop_assert_eq!(&after, &expected);
+
+            ensure_vault_dir(&vault).unwrap();
+            proptest::prop_assert_eq!(files_under(&vault), after);
+            VaultLock::acquire(&vault).expect("an ensured vault can be locked");
+        }
     }
 }

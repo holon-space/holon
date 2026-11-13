@@ -3,6 +3,7 @@
 //! These are activated only with `--features mobile` and compile only on their
 //! respective target OS.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,17 +17,10 @@ use holon_frontend::SessionConfig;
 
 use crate::geometry::BoundsRegistry;
 
-/// Single mobile boot-failure chokepoint.
-///
-/// The recovery shell (increment 2) does not exist yet, so a load-bearing boot
-/// failure still terminates the process — but it terminates HERE, through one
-/// funnel that logs the structured, component-attributed [`BootError`] loudly
-/// on every platform first (android_logger bridges `log`; iOS routes `tracing`
-/// to os_log; stderr always). Increment 2 replaces the `exit` with the rung-0
-/// recovery shell without touching any call site. No `catch_unwind` — that is
-/// open question 2, deliberately unresolved.
-#[track_caller]
-fn boot_failed(err: BootError) -> ! {
+/// Logs `err` on every platform (android_logger bridges `log`; iOS routes
+/// `tracing` to os_log; stderr always) and records it, so the next start
+/// discloses it too.
+fn record_boot_failure(err: &BootError) {
     let report = format!("BOOT FAILED\n{}", err.structured_report());
     log_boot_failure(&report);
     if let Err(e) = holon_frontend::panic_record::record_exit(report) {
@@ -34,6 +28,31 @@ fn boot_failed(err: BootError) -> ! {
             "the next start cannot show this boot failure: {e}"
         ));
     }
+}
+
+/// The single mobile boot-failure funnel: shows `err` on screen and keeps the
+/// process alive. An `exit` here runs the static destructors while the GPU
+/// driver's threads still use the surface, and they crash.
+fn boot_failed(cx: &mut App, err: BootError, vault: Option<&Path>) {
+    record_boot_failure(&err);
+    crate::boot_error_view::show_boot_error(
+        &err,
+        vault,
+        |text| crate::boot_error_view::open_boot_error_window(cx, text, safe_area_top_px()),
+        |e| {
+            log_boot_failure(&format!(
+                "the boot error window did not open, so the process ends: {e:#}"
+            ));
+            std::process::exit(1);
+        },
+    );
+}
+
+/// A boot failure before the platform can open a window: nothing can show
+/// it, so the process ends after the record.
+#[cfg(target_os = "android")]
+fn boot_failed_without_window(err: BootError) -> ! {
+    record_boot_failure(&err);
     std::process::exit(1);
 }
 
@@ -110,29 +129,56 @@ struct AndroidStoragePaths {
     orgmode_root: Option<PathBuf>,
 }
 
-/// Open the main Holon window. `config_dir` holds `holon.toml` and other
-/// app-local config; the entry point has armed the panic record there.
+/// Open the main Holon window, or the boot-error window when the boot fails.
+/// `config_dir` holds `holon.toml` and other app-local config; the entry
+/// point has armed the panic record there.
 fn open_holon_window(
     cx: &mut App,
     db_path: Option<PathBuf>,
     orgmode_root: Option<PathBuf>,
     config_dir: PathBuf,
 ) {
+    let vault = orgmode_root.clone();
+    if let Err(e) = boot_holon_window(cx, db_path, orgmode_root, config_dir) {
+        boot_failed(cx, e, vault.as_deref());
+    }
+}
+
+fn boot_holon_window(
+    cx: &mut App,
+    db_path: Option<PathBuf>,
+    orgmode_root: Option<PathBuf>,
+    config_dir: PathBuf,
+) -> Result<(), BootError> {
     // Register the embedded icon-coverage font before the window renders any
     // text, so the toolbar/menu Unicode symbols resolve on their first frame.
     #[cfg(target_os = "android")]
     register_android_icon_fonts(cx);
 
-    let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
-        boot_failed(BootError::new(
+    if let Some(dir) = db_path.as_deref().and_then(Path::parent) {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            BootError::new(
+                BootComponent::Config,
+                BootStage::ConfigLoad,
+                anyhow::anyhow!("create the database dir {}: {e}", dir.display()),
+            )
+        })?;
+    }
+    if let Some(vault) = orgmode_root.as_deref() {
+        holon_app::vault_lock::ensure_vault_dir(vault)
+            .map_err(|e| BootError::new(BootComponent::Config, BootStage::ConfigLoad, e))?;
+    }
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+        BootError::new(
             BootComponent::Platform,
             BootStage::ConfigLoad,
             anyhow::anyhow!("Failed to create tokio runtime: {e}"),
-        ))
-    });
+        )
+    })?;
     let rt_handle = rt.handle().clone();
 
-    let (session, engine, debug, degraded_bus, app) = rt.block_on(async {
+    let booted = rt.block_on(async {
         let widgets = crate::render_supported_widgets();
         let ui_info = holon_api::UiInfo {
             available_widgets: widgets,
@@ -155,7 +201,7 @@ fn open_holon_window(
             orgmode_root,
             true,
         )
-        .unwrap_or_else(|e| panic!("Cannot boot: {e:#}"));
+        .map_err(|e| BootError::new(BootComponent::Config, BootStage::ConfigLoad, e))?;
         let session_config =
             SessionConfig::new(ui_info, std::sync::Arc::new(holon_api::SystemClock));
 
@@ -172,9 +218,9 @@ fn open_holon_window(
             config_dir,
             std::collections::HashSet::new(),
         ));
-        if let Err(e) = app.bootstrap().await {
-            boot_failed(BootError::from_bootstrap_error(e));
-        }
+        app.bootstrap()
+            .await
+            .map_err(BootError::from_bootstrap_error)?;
 
         let injector = app.injector();
         let session = injector.resolve::<FrontendSession>();
@@ -184,8 +230,17 @@ fn open_holon_window(
         let degraded_bus =
             (*injector.resolve::<std::sync::Arc<holon_conditions::ConditionBus>>()).clone();
 
-        (session, engine, debug, degraded_bus, app)
+        Ok::<_, BootError>((session, engine, debug, degraded_bus, app))
     });
+    let (session, engine, debug, degraded_bus, app) = match booted {
+        Ok(booted) => booted,
+        Err(e) => {
+            // A plain drop would wait on this UI thread for the failed boot's
+            // blocking tasks.
+            rt.shutdown_background();
+            return Err(e);
+        }
+    };
 
     // Keep the runtime AND the DI application alive for the process lifetime:
     // the spawned MCP server task and background factories hold services
@@ -215,13 +270,13 @@ fn open_holon_window(
         "Holon",
         cx,
     )
-    .unwrap_or_else(|| {
-        boot_failed(BootError::new(
+    .ok_or_else(|| {
+        BootError::new(
             BootComponent::Platform,
             BootStage::SessionResolve,
             anyhow::anyhow!("rebindable Holon window failed to open"),
-        ))
-    });
+        )
+    })?;
 
     // Install the gpui-side reset builder so the (tokio) `reset_vault` tool can
     // boot a fresh SUT without a second MCP server. It runs on whatever runtime
@@ -256,12 +311,10 @@ fn open_holon_window(
         }
     })
     .detach();
+    Ok(())
 }
 
 // ─── iOS ─────────────────────────────────────────────────────────────────
-
-#[cfg(target_os = "ios")]
-const DEFAULT_INDEX_ORG: &str = include_str!("../../../assets/default/index.org");
 
 #[cfg(target_os = "ios")]
 fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
@@ -272,52 +325,6 @@ fn ios_data_paths() -> (Option<PathBuf>, Option<PathBuf>) {
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     let db_path = home.as_ref().map(|h| h.join("Library").join("holon.db"));
     let orgmode_root = home.as_ref().map(|h| h.join("Documents").join("holon-pkm"));
-    if let Some(db) = db_path.as_ref() {
-        if let Some(parent) = db.parent() {
-            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
-                boot_failed(BootError::new(
-                    BootComponent::Config,
-                    BootStage::ConfigLoad,
-                    anyhow::anyhow!("create Library dir for holon.db: {e}"),
-                ))
-            });
-        }
-    }
-    if let Some(org) = orgmode_root.as_ref() {
-        std::fs::create_dir_all(org).unwrap_or_else(|e| {
-            boot_failed(BootError::new(
-                BootComponent::Config,
-                BootStage::ConfigLoad,
-                anyhow::anyhow!("create orgmode root dir: {e}"),
-            ))
-        });
-        let is_empty = std::fs::read_dir(org)
-            .unwrap_or_else(|e| {
-                boot_failed(BootError::new(
-                    BootComponent::Config,
-                    BootStage::ConfigLoad,
-                    anyhow::anyhow!("read orgmode root dir: {e}"),
-                ))
-            })
-            .next()
-            .is_none();
-        if is_empty {
-            let seed = org.join("index.org");
-            std::fs::write(&seed, DEFAULT_INDEX_ORG).unwrap_or_else(|e| {
-                boot_failed(BootError::new(
-                    BootComponent::Config,
-                    BootStage::ConfigLoad,
-                    anyhow::anyhow!("write seed index.org: {e}"),
-                ))
-            });
-            eprintln!("GPUI iOS: seeded {}", seed.display());
-        }
-        // The Journals page (`block:journals` + its query/render/auto-create
-        // rule) is seeded programmatically at boot by
-        // `build_default_layout_blocks`, NOT as a disk `Journals.org` —
-        // writing the org file too would mint a second "Journals" Page
-        // (the disk file parses to a distinct `file:` document).
-    }
     (db_path, orgmode_root)
 }
 
@@ -402,7 +409,7 @@ fn android_main(app: android_activity::AndroidApp) {
     log::info!("android_main: platform initialised");
 
     let shared = gpui_mobile::android::jni::shared_platform().unwrap_or_else(|| {
-        boot_failed(BootError::new(
+        boot_failed_without_window(BootError::new(
             BootComponent::Platform,
             BootStage::ContainerConfigure,
             anyhow::anyhow!("shared_platform() returned None after init_platform"),

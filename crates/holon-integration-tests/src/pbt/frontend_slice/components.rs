@@ -190,6 +190,9 @@ pub fn keystone_boot_journal_id() -> EntityUri {
 /// filled and shut down.
 pub struct HeadlessStore {
     temp: TempDir,
+    /// The temp dir itself, or a dir under it when the vault must start
+    /// apart from the config and database (a missing-vault boot).
+    vault_root: PathBuf,
     org_fs: Arc<holon_filesystem::InMemoryFileSystem>,
     org_emitted: crate::pbt::convergence::EmittedChanges,
     org_root: PathBuf,
@@ -211,6 +214,10 @@ impl HeadlessStore {
         self.temp.path().to_path_buf()
     }
 }
+
+/// The vault dir of a missing-vault boot, under the temp dir, named as the
+/// mobile entries name it.
+const MISSING_VAULT_DIR: &str = "holon-pkm";
 
 /// A [`HeadlessStore`] after a clean shutdown, which any number of
 /// components boot over copies of. Its own files are never booted.
@@ -1004,7 +1011,14 @@ impl HeadlessFrontendComponent {
              commit through the dispatcher"
         );
         let temp = TempDir::new().expect("temp dir");
-        let org_root = std::fs::canonicalize(temp.path()).expect("canonicalize temp dir");
+        let canonical_temp = std::fs::canonicalize(temp.path()).expect("canonicalize temp dir");
+        let (vault_root, org_root) = match boot_fault {
+            holon_pbt_core::BootFault::MissingVaultDir => (
+                temp.path().join(MISSING_VAULT_DIR),
+                canonical_temp.join(MISSING_VAULT_DIR),
+            ),
+            _ => (temp.path().to_path_buf(), canonical_temp),
+        };
         let org_fs = Arc::new(holon_filesystem::InMemoryFileSystem::with_path_case(
             holon_filesystem::PathCase::Insensitive,
         ));
@@ -1038,11 +1052,20 @@ impl HeadlessFrontendComponent {
 
         let store = Arc::new(HeadlessStore {
             temp,
+            vault_root,
             org_emitted: crate::pbt::convergence::EmittedChanges::watch(&org_fs),
             org_fs,
             org_root,
             org_paths,
         });
+        if *boot_fault == holon_pbt_core::BootFault::MissingVaultDir {
+            assert!(
+                !store.vault_root.exists(),
+                "a missing-vault boot starts without its vault"
+            );
+            holon_app::vault_lock::ensure_vault_dir(&store.vault_root)
+                .unwrap_or_else(|e| panic!("the mobile entry's vault step failed: {e:#}"));
+        }
         if let holon_pbt_core::BootFault::PriorCrash(prior) = boot_fault {
             holon_frontend::panic_record::PanicRecord {
                 message: prior.message.clone(),
@@ -1134,7 +1157,7 @@ impl HeadlessFrontendComponent {
             "[snapshot boot] the template's session outlives its shutdown"
         );
         let store = &component.store;
-        holon_app::vault_lock::VaultLock::acquire(store.temp.path())
+        holon_app::vault_lock::VaultLock::acquire(&store.vault_root)
             .and_then(|lock| lock.release())
             .unwrap_or_else(|e| {
                 panic!("[snapshot boot] the vault lock is held after the shutdown: {e:#}")
@@ -1181,6 +1204,7 @@ impl HeadlessFrontendComponent {
         let org_root = std::fs::canonicalize(temp.path()).expect("canonicalize temp dir");
         let org_fs = Arc::new(snapshot.org_fs.copy_rebased(&snapshot.org_root, &org_root));
         let store = Arc::new(HeadlessStore {
+            vault_root: temp.path().to_path_buf(),
             temp,
             org_emitted: crate::pbt::convergence::EmittedChanges::watch(&org_fs),
             org_fs,
@@ -1228,7 +1252,6 @@ impl HeadlessFrontendComponent {
         use holon_frontend::HolonConfig;
         use holon_frontend::SessionConfig;
 
-        let temp_path = store.temp.path();
         let org_fs = &store.org_fs;
         let org_scanned_through = org_fs.last_change_seq();
         let loro_enabled = params.loro_enabled;
@@ -1237,7 +1260,7 @@ impl HeadlessFrontendComponent {
         let holon_config = HolonConfig {
             db_path: Some(store.db_path()),
             vault: holon_frontend::config::VaultConfig {
-                root: Some(temp_path.to_path_buf()),
+                root: Some(store.vault_root.clone()),
             },
             crdt: holon_frontend::config::CrdtPreferences {
                 enabled: Some(loro_enabled),
@@ -1697,6 +1720,7 @@ impl HeadlessFrontendComponent {
             RebootGap::EpochFlipRejected => {
                 crate::test_environment::run_epoch_flip_rejection_check(
                     self.store.temp.path(),
+                    &self.store.vault_root,
                     loro_enabled,
                 )
                 .await;
@@ -6551,7 +6575,11 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
     }
 
     async fn assert_second_writer_refused(&self) {
-        crate::test_environment::run_second_writer_refusal_check(self.store.temp.path()).await;
+        crate::test_environment::run_second_writer_refusal_check(
+            self.store.temp.path(),
+            &self.store.vault_root,
+        )
+        .await;
     }
 }
 

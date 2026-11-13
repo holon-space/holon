@@ -8,6 +8,7 @@
 
 #![recursion_limit = "1024"]
 
+pub mod boot_error_view;
 pub mod breadcrumb;
 #[cfg(feature = "pbt")]
 pub mod bridge_hold;

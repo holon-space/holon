@@ -43,6 +43,7 @@ pub fn model_boot_fault(state: &mut ReferenceState, fault: BootFault) {
             location: injected_task_panic(false),
             message: TASK_PANIC_MESSAGE.to_string(),
         }),
+        BootFault::MissingVaultDir => {}
     }
     state.boot_fault = fault;
 }
@@ -70,8 +71,9 @@ pub async fn inject_task_panic(bus: Arc<holon_conditions::ConditionBus>) {
     }
 }
 
-/// The drawn fault, shrinking toward `None`. `HOLON_PBT_BOOT_FAULT=prior` or
-/// `=task` pins one variant (`prior` still draws its record).
+/// The drawn fault, shrinking toward `None`. `HOLON_PBT_BOOT_FAULT=prior`,
+/// `=task` or `=missing-vault` pins one variant (`prior` still draws its
+/// record).
 pub fn boot_fault_strategy() -> proptest::strategy::BoxedStrategy<BootFault> {
     use proptest::strategy::Strategy;
     match std::env::var("HOLON_PBT_BOOT_FAULT").as_deref() {
@@ -81,7 +83,10 @@ pub fn boot_fault_strategy() -> proptest::strategy::BoxedStrategy<BootFault> {
             })
             .boxed(),
         Ok("task") => proptest::strategy::Just(BootFault::TaskPanic).boxed(),
-        Ok(other) => panic!("HOLON_PBT_BOOT_FAULT={other:?}: expected `prior` or `task`"),
+        Ok("missing-vault") => proptest::strategy::Just(BootFault::MissingVaultDir).boxed(),
+        Ok(other) => {
+            panic!("HOLON_PBT_BOOT_FAULT={other:?}: expected `prior`, `task` or `missing-vault`")
+        }
         Err(_) => holon_pbt_core::any_boot_fault(),
     }
 }
