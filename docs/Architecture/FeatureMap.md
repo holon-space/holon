@@ -477,6 +477,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-keyword-surface-stale-done-text`
 - `windowed-live-promotion-typed-todo-pre-warm-flake`
 - `windowed-live-promotion-undo-pre-warm-flake`
+- `windowed-mcp-write-repaints-pre-warm-flake`
 - `windowed-nested-page-no-chevron-under-load`
 - `windowed-previous-run-toast-box-under-load`
 - `windowed-quick-open-fresh-slot-pre-warm-timeout`
