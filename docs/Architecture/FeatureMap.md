@@ -395,6 +395,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `iroh-proptest-fork-child-wrapper`
 - `iroh-proptest-fork-parent-aborted-before-first-case-load`
 - `iroh-proptest-fork-parent-wrapper`
+- `iroh-reverse-leg-imports-nothing-at-owner`
 - `iroh-roster-refusal-reads-as-early-stream-end-load`
 - `join-then-stale-second-join`
 - `journal-feed-main-panel-still-loading`
