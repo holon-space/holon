@@ -72,9 +72,8 @@ extra_nextest() {
   if [ -n "$set" ]; then
     filter=(-E "$set" --no-tests=fail)
   elif [ -n "${GATE_STEP_ARGS:-}" ]; then
-    # A selected crate may hold no test of this profile: that is a pass, not a wrong filter.
     # The joined form keeps args that start with `-` from reading as nextest options.
-    filter=(--filterset="$GATE_STEP_ARGS" --no-tests=warn)
+    filter=(--filterset="$GATE_STEP_ARGS" --no-tests=fail)
   fi
   mark=$(mktemp); trap 'rm -f "$mark"' EXIT
   if gate_nextest ${filter[@]+"${filter[@]}"} 2>&1 | tee "$log"; then :; else

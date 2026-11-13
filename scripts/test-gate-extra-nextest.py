@@ -8,10 +8,18 @@ the plan (each test P, K or U).
 Properties, per case:
 - an unparsable filter ends the step with exit 2 and one line naming the args, before any test starts and before
   the known-reds classifier;
-- a parsable filter, and empty or unset args, give the exit and the ran tests of the step at BASE, with the same
-  plan.
+- a parsable filter that matches no test (`cargo nextest list`) ends the step red with no test run, also where the
+  step at BASE passed;
+- a parsable filter that matches a test, and empty or unset args, give the exit and the ran tests of the step at
+  BASE, with the same plan.
 Fixed filters run first through the same properties.
+Then, on this repo's selection: a change under each workspace crate's `tests/` gives an extra-nextest step that names
+that crate exactly when the load-tolerant profile does not exclude it by `package()`.
 """
+import contextlib
+import importlib.util
+import io
+import json
 import os
 import random
 import subprocess
@@ -27,7 +35,8 @@ WORDS = ["one", "two", "three", "flaky", "known", "red", "org", "suite", "timing
 OPTIONS = ["-x", "--help", "--workspace", "-E", "--no-tests=fail"]
 # (args, parsable); None = GATE_STEP_ARGS unset.
 EXAMPLES = [("two three", False), ("package(nope)", False), ("package(fixture) |", False), ("--help", False),
-            ("-x", False), ("  ", False), ("test(=t00) | test(=t01)", True), ("", True), (None, True)]
+            ("-x", False), ("  ", False), ("test(=t00) | test(=t01)", True), ("", True), (None, True),
+            ("none()", True), ("test(=t00) & test(=t01)", True)]
 
 
 def draw_valid(rng, depth=0):
@@ -70,14 +79,26 @@ def run_step(root, script, args, plan):
     return r, sorted(ran_tests((logs / f"{GATE}-extra.log").read_text()))
 
 
+def matches(root, args):
+    """How many fixture tests the load-tolerant profile runs for the filter set `args`."""
+    out = subprocess.run(["cargo", "nextest", "list", "--profile", "load-tolerant", "--features", "pbt",
+                          "--message-format", "json", f"--filterset={args}"], cwd=root, check=True, capture_output=True,
+                         text=True, env={**os.environ, "CARGO_TARGET_DIR": str(root / "target")})
+    return sum(case["filter-match"]["status"] == "matches" for s in json.loads(out.stdout)["rust-suites"].values()
+               for case in s["testcases"].values())
+
+
 def check(root, base, args, parsable, plan):
     r, ran = run_step(root, SUT, args, plan)
     log = f"args={args!r} plan={plan}\nexit {r.returncode}\n{r.stdout}\n{r.stderr}"
+    if parsable and args and args.strip() and not matches(root, args):
+        assert r.returncode != 0 and ran == [], f"{log}\nmatches no test: want a red step that ran nothing"
+        return "empty"
     if parsable:
         b, base_ran = run_step(root, base, args, plan)
         assert (r.returncode, ran) == (b.returncode, base_ran), \
             f"{log}\nran {ran}, at BASE: exit {b.returncode}, ran {base_ran}\n{b.stdout}\n{b.stderr}"
-        return
+        return "parsable"
     lines = r.stdout.splitlines()
     named = [l for l in lines if l.startswith("extra-nextest: ")]
     assert r.returncode == 2, f"{log}\nwant exit 2"
@@ -85,6 +106,28 @@ def check(root, base, args, parsable, plan):
     assert not [l for l in lines if l.startswith("[known-reds]")], f"{log}\nthe classifier ran"
     assert not (root / f"target/gate-logs/{GATE}-extra-classify.txt").exists(), f"{log}\na classify file exists"
     assert ran == [], f"{log}\ntests started: {ran}"
+    return "unparsable"
+
+
+def selection_problems():
+    """A `tests/` change of each workspace crate gives `extra-nextest package(<crate>)` unless the profile excludes the
+    crate by `package()`, and then no extra-nextest step."""
+    spec = importlib.util.spec_from_file_location("select_tests", REPO / "scripts/select-tests.py")
+    st = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(st)
+    meta = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=REPO, check=True,
+                                     capture_output=True, text=True).stdout)
+    dirs, _ = st.workspace_graph(meta)
+    excluded = st.excluded_packages(st.profile_default_filter(st.nextest_config(REPO), st.LOAD_TOLERANT))
+    assert excluded & set(dirs), f"no workspace crate is excluded by package(): {sorted(excluded)}; the case is vacuous"
+    for crate, d in sorted(dirs.items()):
+        if d.parts[0] in st.FULL_DIRS:
+            continue
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = {step: args for step, _, args in st.gate_selection(REPO, meta, "integrate", [f"{d}/tests/gate_probe.rs"])}
+        want = None if crate in excluded else f"package({crate})"
+        assert got.get("extra-nextest") == want, f"{d}/tests/gate_probe.rs: extra-nextest {got.get('extra-nextest')!r}, want {want!r}"
+    print(f"ok selection: {len(dirs)} crates, excluded by package(): {sorted(excluded & set(dirs))}")
 
 
 def main():
@@ -108,10 +151,13 @@ def main():
                                         cwd=REPO, capture_output=True, check=True).stdout)
         subprocess.run(["cargo", "build", "--tests", "--features", "pbt", "--quiet"], cwd=root, check=True,
                        env={**os.environ, "CARGO_TARGET_DIR": str(root / "target")})
+        kinds = []
         for args, parsable in EXAMPLES + generated:
             plan = "".join(rng.choice("PPKU") for _ in TESTS)
-            check(root, base, args, parsable, plan)
-            print(f"ok {'parsable' if parsable else 'unparsable'} args={args!r} plan={plan}", flush=True)
+            kinds.append(check(root, base, args, parsable, plan))
+            print(f"ok {kinds[-1]} args={args!r} plan={plan}", flush=True)
+        assert {"empty", "parsable", "unparsable"} <= set(kinds), f"a case class never ran: {kinds}"
+    selection_problems()
     print("ok")
 
 

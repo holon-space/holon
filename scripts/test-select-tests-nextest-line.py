@@ -8,7 +8,13 @@ default for an empty run (NEXTEST_NO_TESTS unset, `pass` or `warn`):
 - the run exits non-zero exactly when the line matches no test (`cargo nextest list` of the same arguments);
 - tests-cover-diff accepts the run-step log of a line that matches tests;
 - `scripts/lane-nextest.py rerun` of the same arguments reruns one of its tests, as `just lane-nextest-reds` does
-  (nextest refuses a second `--no-tests`).
+  (nextest refuses a second `--no-tests`);
+- a line matches no test only when it names a crate that holds no test (TESTLESS): every other crate of the
+  fixture holds a test, so an empty line is one whose crates the profile excludes;
+- the crates of the line plus the crates logged as `<pkg>: no test of this profile` are the selected crates, and
+  each dropped crate keeps its owner line (or the `unowned:` line naming it).
+Then, over drawn default filters (`package()`, `test()` and `binary_id()` terms under `|`, `+`, `&`, `not`), every
+crate that `excluded_packages` returns lists no test under that filter; the draws must prove some crate excluded.
 Exits non-zero when a property fails; each failing change set is printed as an EXAMPLES entry.
 """
 import contextlib
@@ -17,6 +23,7 @@ import io
 import json
 import os
 import random
+import re
 import shlex
 import subprocess
 import sys
@@ -28,7 +35,12 @@ RUN_STEP = REPO / "scripts/flow-checks/run-step.sh"
 FLAG = "--no-tests=fail"
 DEFAULTS = (None, "pass", "warn")
 # (change set, NEXTEST_NO_TESTS), run before the drawn ones: selections that match no test and one that matches tests.
-EXAMPLES = [(["crates/leaf/src/lib.rs"], None), (["crates/leaf/src/lib.rs"], "pass"), (["crates/core/src/lib.rs"], "pass")]
+EXAMPLES = [(["crates/bare/src/lib.rs"], None), (["crates/bare/src/lib.rs"], "pass"), (["crates/core/src/lib.rs"], "pass"),
+            (["crates/gpui/tests/window.rs"], None)]
+TESTLESS = frozenset({"bare"})
+# Draws of default filters: the soundness of `excluded_packages`, before the drawn ones.
+FILTER_EXAMPLES = ["not (package(gpui) | package(leaf) & test(=lib))", "not (package(core)) & not (package(rows) + package(app))",
+                   "not (package(core) | test(=w)) | package(core)", "not (not (package(core)))", "package(core)"]
 
 
 def load(name, path):
@@ -62,8 +74,8 @@ def real_workspace(root):
         (crate / "Cargo.toml").write_text(manifest(name, deps, tests))
         lib = crate / "src/lib.rs"
         lib.parent.mkdir(parents=True, exist_ok=True)
-        if not lib.exists():
-            lib.write_text("")
+        text = lib.read_text() if lib.exists() else ""
+        lib.write_text(text if name in TESTLESS else text + "\n#[test] fn lib() {}\n")
         members.append(f'"crates/{name}"')
     (root / "Cargo.toml").write_text(f'[workspace]\nresolver = "2"\nmembers = [{", ".join(members)}]\n')
     out = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=root, check=True,
@@ -82,16 +94,37 @@ def matched(root, env, args):
             if case["filter-match"]["status"] == "matches"]
 
 
-def nextest_line(root, meta, changed):
-    with contextlib.redirect_stderr(io.StringIO()):
-        lines = st.selection(root, meta, changed)
-    return next((line for line in lines if line.startswith("nextest: ")), None)
+def crates_of(line):
+    return set(re.findall(r"\bpackage\(([\w-]+)\)", line))
+
+
+def drop_problems(root, lines, log):
+    """The selected crates (the stderr reason lines) are the crates of the nextest line plus the dropped ones, and
+    each dropped crate keeps the line of its owner recipe."""
+    selected = set(re.findall(r"^  (\S+): ", log, re.M))
+    dropped = set(re.findall(r"^(\S+): no test of this profile$", log, re.M))
+    line = next((line for line in lines if line.startswith("nextest: ")), "")
+    found = []
+    if crates_of(line) | dropped != selected:
+        found.append(f"selected {sorted(selected)}, printed {sorted(crates_of(line))}, dropped {sorted(dropped)}")
+    owners = st.owner_recipes(root)
+    for pkg in sorted(dropped):
+        term = f"package({pkg})"
+        if term in owners and st.recipe_line(owners[term]) not in lines:
+            found.append(f"dropped {pkg} without the owner line {st.recipe_line(owners[term])!r}: {lines}")
+        if term not in owners and not any(line.startswith("unowned: ") and term in line for line in lines):
+            found.append(f"dropped {pkg} without an `unowned:` line naming {term}: {lines}")
+    return found, dropped
 
 
 def problems(root, meta, env, changed, default, seen):
-    line = nextest_line(root, meta, changed)
+    log = io.StringIO()
+    with contextlib.redirect_stderr(log):
+        lines = st.selection(root, meta, changed)
+    found, dropped = drop_problems(root, lines, log.getvalue())
+    line = next((line for line in lines if line.startswith("nextest: ")), None)
     if line is None or (line, default) in seen:
-        return [], line
+        return found, dropped
     seen.add((line, default))
     env = {k: v for k, v in env.items() if k != "NEXTEST_NO_TESTS"} | ({"NEXTEST_NO_TESTS": default} if default else {})
     args = shlex.split(line.removeprefix("nextest: "))
@@ -99,7 +132,8 @@ def problems(root, meta, env, changed, default, seen):
     run = subprocess.run([str(RUN_STEP), line], cwd=root, env=env, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True)
     print(f"{changed}, NEXTEST_NO_TESTS={default}: `{line}` matches {tests} test(s), run exit {run.returncode}")
-    found = []
+    if not tests and not crates_of(line) & TESTLESS:
+        found.append(f"`{line}` matches no test and names no crate without tests")
     if (run.returncode != 0) != (tests == 0):
         found.append(f"`{line}` matches {tests} test(s) and the run exits {run.returncode}")
     if tests:
@@ -114,7 +148,39 @@ def problems(root, meta, env, changed, default, seen):
                                stderr=subprocess.STDOUT, text=True)
         if rerun.returncode:
             found.append(f"the rerun of `{line}` exits {rerun.returncode}: {rerun.stdout.strip()[-300:]}")
-    return found, line
+    return found, dropped
+
+
+def draw_filter(rng, depth=0):
+    """A default filter of `package()`, `test()` and `binary_id()` terms of the fixture; often `not (...) & not (...)`."""
+    if depth == 0 and rng.random() < 0.5:
+        return " & ".join(f"not ({draw_sum(rng)})" for _ in range(rng.randint(1, 3)))
+    if depth == 3 or rng.random() < 0.4:
+        return rng.choice([f"package({rng.choice(list(st.FIXTURE_PACKAGES))})", "test(=lib)", "test(=w)", "test(/^li/)",
+                           "binary_id(ofmt::deep)", "binary_id(gpui::window)"])
+    kind = rng.choice(["|", "+", "&", "not", "()"])
+    if kind == "not":
+        return f"not {draw_filter(rng, depth + 1)}"
+    if kind == "()":
+        return f"({draw_filter(rng, depth + 1)})"
+    return f"{draw_filter(rng, depth + 1)} {kind} {draw_filter(rng, depth + 1)}"
+
+
+def draw_sum(rng):
+    return f" {rng.choice('|+')} ".join(draw_filter(rng, 1) for _ in range(rng.randint(1, 4)))
+
+
+def excluded_problems(root, env, filt):
+    """Every crate `excluded_packages` returns for the default filter `filt` lists no test under it."""
+    config = root / ".config/nextest.toml"
+    own = config.read_text()
+    config.write_text(own + f'\n[profile.drawn]\ndefault-filter = "{filt}"\n')
+    try:
+        kept = {b.partition("::")[0] for b, _ in matched(root, env, ["--workspace", "--profile", "drawn"])}
+    finally:
+        config.write_text(own)
+    excluded = st.excluded_packages(filt)
+    return [f"`{filt}`: excluded_packages returns {sorted(excluded & kept)}, which list tests"] if excluded & kept else [], excluded
 
 
 def main():
@@ -128,12 +194,28 @@ def main():
         root = Path(tmp)
         meta = real_workspace(root)
         env = {**os.environ, "BASE": "0" * 40, "CARGO_TARGET_DIR": str(root / "target")}
-        seen = set()
+        seen, dropping = set(), 0
         for changed, default in EXAMPLES + drawn:
-            found, _ = problems(root, meta, env, changed, default, seen)
+            found, dropped = problems(root, meta, env, changed, default, seen)
+            dropping += bool(dropped)
             for f in found:
                 print(f"FAIL: EXAMPLES entry ({changed}, {default!r}): {f}")
             failures += len(found)
+        if not dropping:
+            print("FAIL: no change set dropped a crate: the drop properties ran on nothing")
+            failures += 1
+        proved = 0
+        filters = FILTER_EXAMPLES + [draw_filter(rng) for _ in range(int(os.environ.get("FILTERS", "12")))]
+        for filt in filters:
+            found, excluded = excluded_problems(root, env, filt)
+            print(f"default filter `{filt}`: excluded_packages {sorted(excluded)}")
+            proved += bool(excluded)
+            for f in found:
+                print(f"FAIL: FILTER_EXAMPLES entry {filt!r}: {f}")
+            failures += len(found)
+        if not proved:
+            print("FAIL: no drawn default filter proved a crate excluded: the soundness property ran on nothing")
+            failures += 1
     print(f"test-select-tests-nextest-line: {failures} failure(s)")
     return 1 if failures else 0
 

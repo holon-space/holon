@@ -744,7 +744,9 @@ The scoped rule, per changed path:
   batch;
 - a path inside a workspace crate reaches that crate and every crate that
   depends on it; each step runs when it builds or tests a reached crate, and
-  extra-nextest runs only those crates' tests (`package(...)` filter set);
+  extra-nextest runs only those crates' tests (`package(...)` filter set),
+  less the crates a `package()` term of the load-tolerant default filter
+  excludes, and does not run when none is left;
   a path under a crate's `tests/` reaches only that crate;
 - a file outside the crates runs the steps whose sources (recipe, script,
   path table of `scripts/timing-split.py`) name it, and the steps of every

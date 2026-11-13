@@ -14,6 +14,8 @@ stdout: first the `BASE:` and `TREE:` lines (commit ids of the fork point of `@`
   `--workspace --features <the justfile's CANON_FEATURES>`; the nextest line adds `--no-tests=fail`, so a run that
   matches no test fails under any nextest default, and `-E '<filterset>'` naming the crates to run. There is no `nextest:` line when no crate owns a changed path, and no `-E` when a root build
   file changed (every crate runs).
+  A crate that a `package()` term of the profile's default filter excludes is left out of `-E` and logged on stderr
+  as `<crate>: no test of this profile`; its owner line stays. When every crate is left out there is no `nextest:` line.
   `holon-integration-tests` reached as a reverse dep enters the filterset by its test binaries, never as a whole
   crate. A binary drops its env-bound top-level modules and those the default profile excludes, by test name;
   a binary whose root file is env-bound or that the default profile excludes is left out.
@@ -287,6 +289,34 @@ def excluded_terms(filt):
     return terms
 
 
+def split_top(expr, ops):
+    """`expr` cut at each character of `ops` outside parentheses, each part stripped."""
+    parts, cur, depth = [], "", 0
+    for ch in expr:
+        if ch in ops and depth == 0:
+            parts.append(cur.strip())
+            cur = ""
+            continue
+        depth += (ch == "(") - (ch == ")")
+        cur += ch
+    return parts + [cur.strip()]
+
+
+def excluded_packages(filt):
+    """The packages a `default-filter` excludes by proof: the filter is `not (...) & not (...) ...` and a term of the
+    sum in one of those groups is exactly `package(<name>)`. Any other shape proves nothing: sound, never complete."""
+    found = set()
+    for conjunct in split_top(filt, "&"):
+        m = re.fullmatch(r"not\s*(\(.*\))", conjunct, re.S)
+        if not m or _unwrap(m.group(1)) == m.group(1):
+            return frozenset()
+        for term in split_top(_unwrap(m.group(1)), "|+"):
+            name = re.fullmatch(r"package\(=?([\w-]+)\)", _unwrap(term))
+            if name:
+                found.add(name.group(1))
+    return frozenset(found)
+
+
 def term_reaches_selection(term, pkgs, bins, binary_pkgs, never_owner):
     """Whether the printed selection runs anything the excluded `term` names.
 
@@ -416,8 +446,7 @@ def arg_lines(pkgs, bins, features, profile=None, owners=(), path_owners=()):
 
     Both halves of cargo's feature hash stay fixed (the justfile's CANON block): a `-p` selection
     would narrow the feature resolve and mint a build directory per lane, so what RUNS is narrowed by `-E`.
-    The owner lines belong to the nextest run, so nothing runs without it and they stay unprinted;
-    the path owner lines print either way.
+    Without a selected crate there is no owner line; one whose crates the profile excludes keeps its owner lines.
     """
     canon = canon_args(features)
     lines = [f"clippy: {canon}"]
@@ -427,8 +456,6 @@ def arg_lines(pkgs, bins, features, profile=None, owners=(), path_owners=()):
         lines.append(f"nextest: {run} -E '{sel}'")
     elif pkgs is None:
         lines.append(f"nextest: {run}")
-    else:
-        return lines + list(path_owners)
     return lines + sorted(set(owners) | set(path_owners))
 
 
@@ -475,6 +502,12 @@ def selection(root, meta, changed, never_owner=NEVER_OWNER_MODULES, registry_dat
             print(f"  {INTEGRATION}: reverse dep, named by binary()", file=sys.stderr)
     owners = (owner_lines(excluding, pkgs, bins, test_binary_packages(meta), owner_recipes(root), never_owner)
               if excluding else [])
+    if pkgs is not None and excluding:
+        excluded = excluded_packages(excluding)
+        for n in sorted(excluded & {*pkgs, *([INTEGRATION] if bins else [])}):
+            print(f"{n}: no test of this profile", file=sys.stderr)
+        pkgs = [n for n in pkgs if n not in excluded]
+        bins = {} if INTEGRATION in excluded else bins
     return checked(arg_lines(pkgs, bins, canon_features(root), profile, owners, paths))
 
 
@@ -670,7 +703,9 @@ def gate_selection(root, meta, gate, changed):
     if reached:
         add("gate-compile", "crate-reached")
         add("check-release-shape", "crate-reached")
-        add("extra-nextest", "crate-reached", " | ".join(f"package({n})" for n in sorted(reached)))
+    tested = sorted(reached - excluded_packages(profile_default_filter(nextest_config(root), LOAD_TOLERANT)))
+    if tested:
+        add("extra-nextest", "crate-reached", " | ".join(f"package({n})" for n in tested))
     if "holon-frontend" in reached:
         add("check-frontend-wasm", "crate-reached")
     for step, d in NON_MEMBER_STEPS.items():
@@ -724,14 +759,16 @@ FIXTURE_PACKAGES = {
     "core": ((), {}),
     "rows": (("core",), {}),
     "app": (("rows",), {}),
-    "gpui": (("app",), {}),
+    "gpui": (("app",), {"window": "tests/window.rs"}),
     "leaf": ((), {}),
+    "bare": ((), {}),
     "ofmt": ((), {"deep": "tests/deep.rs"}),
     INTEGRATION: (("app",), {"integration": "tests/main.rs"}),
 }
 FIXTURE_FILES = {
     "crates/core/src/lib.rs": 'const SEED: &str = "assets/default";',
     "crates/ofmt/tests/deep.rs": "#[test] fn t() {}",
+    "crates/gpui/tests/window.rs": "#[test] fn w() {}",
     f"crates/{INTEGRATION}/tests/main.rs": "mod latency_slo_gate;\nmod hand;\nmod e2e;\nmod plain;\nmod suite;\nmod web;\n",
     f"crates/{INTEGRATION}/tests/latency_slo_gate.rs": "#[test] fn s() {}",
     f"crates/{INTEGRATION}/tests/hand.rs": "#[test] fn h() {}",
@@ -788,10 +825,11 @@ RUN = f"{CANON} --no-tests=fail --profile load-tolerant"
 OLD_BINARIES = f"(package({INTEGRATION}) & (binary(e2e) | binary(plain) | binary(suite)))"
 ONE_BINARY = f"(package({INTEGRATION}) & binary(integration) & not (test(/^hand::/) | test(/^latency_slo_gate::/) | test(/^web::/)))"
 UNOWNED_LEAF = f"unowned: package(leaf) is excluded by the load-tolerant profile and has no recipe in {OWNER_TABLE_FILE}"
-RDEP_OF_CORE = f"nextest: {RUN} -E 'package(app) | package(core) | package(gpui) | package(rows) | {OLD_BINARIES}'"
+RDEP_OF_CORE = f"nextest: {RUN} -E 'package(app) | package(core) | package(rows) | {OLD_BINARIES}'"
 # Each case: the changed paths, the lines the per-file-binary selector printed for them on the same workspace laid
 # out as one test binary per tests/*.rs file (`ValueError` when it failed) plus the owner lines of the modules the
-# default profile drops (none for a module in NEVER_OWNER_MODULES), and the integration term this layout prints.
+# default profile drops (none for a module in NEVER_OWNER_MODULES), less the crates the profile excludes by
+# `package()`, and the integration term this layout prints.
 GOLDEN = [
     (["crates/core/src/lib.rs"],
      [f"clippy: {CANON}", RDEP_OF_CORE, "hand-authored: just hand-authored", "timing: just timing-gate",
@@ -799,7 +837,9 @@ GOLDEN = [
     (["assets/default/seed.yaml"],
      [f"clippy: {CANON}", RDEP_OF_CORE, "hand-authored: just hand-authored", "timing: just timing-gate",
       "windowed: just windowed-gate"], ONE_BINARY),
-    (["crates/leaf/src/lib.rs"], [f"clippy: {CANON}", f"nextest: {RUN} -E 'package(leaf)'", UNOWNED_LEAF], None),
+    (["crates/leaf/src/lib.rs"], [f"clippy: {CANON}", UNOWNED_LEAF], None),
+    (["crates/gpui/tests/window.rs"], [f"clippy: {CANON}", "windowed: just windowed-gate"], None),
+    (["crates/bare/src/lib.rs"], [f"clippy: {CANON}", f"nextest: {RUN} -E 'package(bare)'"], None),
     (["crates/rows/tests/r.rs"],
      [f"clippy: {CANON}", f"nextest: {RUN} -E 'package(rows)'", "timing: just timing-gate"], None),
     (["crates/ofmt/src/lib.rs"],
@@ -985,12 +1025,13 @@ def gate_crate_problems(root, meta):
     dirs, _ = workspace_graph(meta)
     dependents = dependents_oracle(meta)
     timing = timing_packages(root, meta)
+    excluded = excluded_packages(profile_default_filter(nextest_config(root), LOAD_TOLERANT))
     names = set(gate_step_names(root, "integrate"))
     found = []
     # A change in a FULL_DIRS crate runs every step: gate_full_problems covers it.
     for crate in sorted(c for c in dependents if dirs[c].parts[0] not in FULL_DIRS):
         reached = dependents[crate]
-        want = set(TREE_STEPS) | {"gate-compile", "check-release-shape", "extra-nextest"}
+        want = set(TREE_STEPS) | {"gate-compile", "check-release-shape"} | ({"extra-nextest"} if reached - excluded else set())
         want |= set(INTEGRATION_STEPS) if INTEGRATION in reached else set()
         want |= {"windowed-gate"} if "holon-gpui" in reached else set()
         want |= {"check-frontend-wasm"} if "holon-frontend" in reached else set()
@@ -1004,7 +1045,7 @@ def gate_crate_problems(root, meta):
                                    " ".join(k for k, v in path_recipes(root).items() if v == r)}
         if want - set(got) or extra:
             found.append(f"{path}: integrate misses {sorted(want - set(got))}, adds {sorted(extra)}")
-        filt = " | ".join(f"package({n})" for n in sorted(reached))
+        filt = " | ".join(f"package({n})" for n in sorted(reached - excluded)) or None
         if got.get("extra-nextest") != filt:
             found.append(f"{path}: extra-nextest filter {got.get('extra-nextest')!r}, want {filt!r}")
         timing_got = [step for step, _, _ in quiet_gate_selection(root, meta, "timing", [path])]
