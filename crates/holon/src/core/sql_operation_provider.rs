@@ -68,12 +68,42 @@ where
     serde_json::to_string(&canonical).expect("properties must serialize")
 }
 
-/// Compare a SQL literal string (as produced by `value_to_sql`) with a stored
-/// `Value` from the DB. Returns `true` when they represent the same value.
+/// `text` parsed as JSON and printed with object keys sorted; `None` when it
+/// is not JSON, which the caller treats as changed.
+fn json_canonical(text: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .map_err(|e| tracing::warn!("sql_literal_equals_value: not valid JSON ({e}): {text:?}"))
+        .ok() // ALLOW(ok): None means "not valid JSON → treat as changed"
+        .map(canonical_json_string)
+}
+
+/// serde_json keeps insertion order (`preserve_order`), so the keys are sorted
+/// at every depth: a nested object's order differs between writes.
+fn canonical_json_string(v: serde_json::Value) -> String {
+    fn sorted(v: serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(map) => {
+                let by_key: std::collections::BTreeMap<_, _> = map.into_iter().collect();
+                by_key.into_iter().map(|(k, v)| (k, sorted(v))).collect()
+            }
+            serde_json::Value::Array(items) => items.into_iter().map(sorted).collect(),
+            other => other,
+        }
+    }
+    serde_json::to_string(&sorted(v)).expect("serde_json::Value serialization cannot fail")
+}
+
+/// Compare a SQL literal string (as produced by `value_to_sql`) with the
+/// stored `Value` of `column`. Returns `true` when they represent the same
+/// value.
 ///
-/// Used by `prepare_update`'s Rust diff guard to drop pairs that haven't
-/// changed without relying on Turso's `IS NOT` string-comparison semantics.
-fn sql_literal_equals_value(sql_literal: &str, db_val: Option<&Value>) -> bool {
+/// Used by the diff guards of `prepare_update` and `prepare_create` to drop
+/// pairs that haven't changed without relying on Turso's `IS NOT`
+/// string-comparison semantics. Only `properties` compares as JSON: its stored
+/// bag may be key-ordered differently from the canonical form a write produces.
+/// Every other column compares bytes, so a reformatted value still reaches the
+/// store.
+fn sql_literal_equals_value(column: &str, sql_literal: &str, db_val: Option<&Value>) -> bool {
     // NULL on either side.
     if sql_literal == "NULL" {
         return matches!(db_val, None | Some(Value::Null));
@@ -87,85 +117,26 @@ fn sql_literal_equals_value(sql_literal: &str, db_val: Option<&Value>) -> bool {
         .and_then(|s| s.strip_suffix('\''))
     {
         let unescaped = inner.replace("''", "'");
+        // The DB read boundary never mints a sentinel, so a `Removed` here
+        // means one leaked out of the write leg into stored state.
+        assert!(
+            !matches!(db, Value::Removed(_)),
+            "sql_literal_equals_value: Value::REMOVED read out of the store for '{column}' — the \
+             removal sentinel must never be stored"
+        );
+        if column != "properties" {
+            return matches!(db, Value::String(s) if *s == unescaped);
+        }
         return match db {
             Value::String(s) => {
-                if *s == unescaped {
-                    return true;
-                }
-                // Try semantic JSON comparison: `{"b":1,"a":2}` == `{"a":2,"b":1}`.
-                // This handles the `properties` column where the stored value may be
-                // non-canonical (insertion-ordered) while new values are always
-                // BTreeMap-sorted by `properties_to_canonical_json`.
-                // We canonicalize both via BTreeMap round-trip because serde_json
-                // may use `preserve_order` (IndexMap), making Value equality
-                // order-sensitive.
-                if let (Ok(a), Ok(b)) = (
-                    serde_json::from_str::<serde_json::Value>(&unescaped),
-                    serde_json::from_str::<serde_json::Value>(s.as_str()),
-                ) {
-                    fn canonical_json(v: serde_json::Value) -> String {
-                        match v {
-                            serde_json::Value::Object(map) => {
-                                let sorted: std::collections::BTreeMap<_, _> =
-                                    map.into_iter().collect();
-                                serde_json::to_string(&sorted).unwrap_or_default()
-                            }
-                            other => serde_json::to_string(&other).unwrap_or_default(),
-                        }
-                    }
-                    return canonical_json(a) == canonical_json(b);
-                }
-                false
+                *s == unescaped
+                    || json_canonical(&unescaped).is_some_and(|new| Some(new) == json_canonical(s))
             }
-            Value::Null => false,
-            // The DB read boundary never mints a sentinel, so a `Removed` here
-            // means one leaked out of the write leg into stored state.
-            Value::Removed(_) => panic!(
-                "sql_literal_equals_value: Value::REMOVED read out of the store — the removal \
-                 sentinel must never be stored"
-            ),
+            // The read path parses the `properties` TEXT into an Object.
             Value::Object(_) | Value::Json(_) => {
-                // Turso may parse JSON TEXT columns into Value::Object (or
-                // Value::Json). Serialize back to string and compare canonically.
-                fn canonical_json_from_value(v: &Value) -> String {
-                    let json_val = value_to_json(v)
-                        .unwrap_or_else(|e| panic!("a value read out of the store was JSON: {e}"));
-                    match json_val {
-                        serde_json::Value::Object(map) => {
-                            let sorted: std::collections::BTreeMap<_, _> =
-                                map.into_iter().collect();
-                            serde_json::to_string(&sorted)
-                                .expect("BTreeMap serialization cannot fail")
-                        }
-                        other => serde_json::to_string(&other)
-                            .expect("serde_json::Value serialization cannot fail"),
-                    }
-                }
-                fn canonical_json_from_str(s: &str) -> Option<String> {
-                    // Returns None when `s` is not valid JSON — treat as not-equal.
-                    let parsed: serde_json::Value = serde_json::from_str(s)
-                        .map_err(|e| {
-                            tracing::warn!(
-                                "sql_literal_equals_value: SQL literal is not valid JSON ({e}): \
-                                 {s:?}"
-                            )
-                        })
-                        .ok()?; // ALLOW(ok): None means "not valid JSON → treat as changed"
-                    Some(match parsed {
-                        serde_json::Value::Object(map) => {
-                            let sorted: std::collections::BTreeMap<_, _> =
-                                map.into_iter().collect();
-                            serde_json::to_string(&sorted)
-                                .expect("BTreeMap serialization cannot fail")
-                        }
-                        other => serde_json::to_string(&other)
-                            .expect("serde_json::Value serialization cannot fail"),
-                    })
-                }
-                match canonical_json_from_str(&unescaped) {
-                    Some(new_canonical) => new_canonical == canonical_json_from_value(db),
-                    None => false,
-                }
+                let stored = value_to_json(db)
+                    .unwrap_or_else(|e| panic!("a value read out of the store was JSON: {e}"));
+                json_canonical(&unescaped) == Some(canonical_json_string(stored))
             }
             _ => false,
         };
@@ -1226,19 +1197,20 @@ impl SqlOperationProvider {
         })
     }
 
-    /// Execute a prepared operation: run its SQL statements, rows before edges
-    /// so a junction never precedes its referenced `block_raw` row.
+    /// Execute a prepared operation as ONE transaction, rows before edges so a
+    /// junction never precedes its referenced `block_raw` row: a failing
+    /// statement rolls back the row statements already run.
     async fn execute_prepared(&self, prepared: PreparedOp) -> Result<()> {
-        for sql in prepared
+        let stmts: Vec<(String, Vec<turso::Value>)> = prepared
             .row_statements
-            .iter()
-            .chain(&prepared.edge_statements)
-        {
-            self.db_handle
-                .execute(sql, vec![])
-                .await
-                .map_err(|e| format!("Failed to execute SQL: {}", e))?;
-        }
+            .into_iter()
+            .chain(prepared.edge_statements)
+            .map(|s| (s, vec![]))
+            .collect();
+        self.db_handle
+            .transaction(stmts)
+            .await
+            .map_err(|e| format!("Failed to execute SQL: {}", e))?;
         Ok(())
     }
 
@@ -1382,7 +1354,7 @@ impl SqlOperationProvider {
             // writes NOTHING — no row touched, no CDC, no timestamp churn.
             // What survives is what the authority genuinely re-asserts.
             sql_fields.retain(|(k, new_sql_literal)| {
-                k == "id" || !sql_literal_equals_value(new_sql_literal, old_row.get(k.as_str()))
+                k == "id" || !sql_literal_equals_value(k, new_sql_literal, old_row.get(k.as_str()))
             });
         }
 
@@ -1627,7 +1599,7 @@ impl SqlOperationProvider {
                             return true; // keep timestamps — pruned later if nothing else changed
                         }
                         let old_val = old_row.get(k.as_str());
-                        !sql_literal_equals_value(new_sql_literal, old_val)
+                        !sql_literal_equals_value(k, new_sql_literal, old_val)
                     });
                 }
             }
@@ -3634,12 +3606,16 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         })
                         .collect::<std::result::Result<Vec<_>, _>>()?;
                     descriptor.field.refuse_malformed_targets(&targets)?;
-                    for stmt in Self::edge_field_replace_sql(id, descriptor, &targets) {
-                        self.db_handle
-                            .execute(&stmt, vec![])
-                            .await
-                            .map_err(|e| format!("Failed to execute edge-field SQL: {}", e))?;
-                    }
+                    // One transaction: a failing INSERT must not leave the
+                    // leading DELETE committed.
+                    let stmts = Self::edge_field_replace_sql(id, descriptor, &targets)
+                        .into_iter()
+                        .map(|s| (s, vec![]))
+                        .collect();
+                    self.db_handle
+                        .transaction(stmts)
+                        .await
+                        .map_err(|e| format!("Failed to execute edge-field SQL: {}", e))?;
                     // Edge targets live in a junction table the staleness reader
                     // (column-only) cannot fingerprint, so the precondition is
                     // empty (single-writer safe); the inverse is still a real
@@ -3910,8 +3886,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     // rejected INSERT would leave the junction half-cleared. Run row
                     // + edge statements in ONE transaction — mirrors the create path
                     // — so any failure rolls the whole update back instead of
-                    // leaving a torn edge set. (`execute_prepared`'s per-statement
-                    // autocommit did NOT give this guarantee.)
+                    // leaving a torn edge set.
                     let stmts: Vec<(String, Vec<turso::Value>)> = prepared
                         .row_statements
                         .iter()

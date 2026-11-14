@@ -74,6 +74,7 @@ mod share_mount_tags_e2e;
 mod sharing_boundary_enforcement_pbt;
 #[cfg(feature = "test-helpers")]
 mod shopping_authoring_door_e2e;
+mod sql_provider_atomic_writes;
 #[cfg(feature = "test-helpers")]
 mod sql_write_authority_previous_sibling;
 mod stress_tests;
