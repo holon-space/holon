@@ -4,6 +4,7 @@ mod bidirectional_sync;
 mod conflict_copy_on_adoption;
 mod convert_block_to_page_inherits_the_source_ring;
 mod convert_block_to_page_materializes_child_file;
+mod copied_heading_children_keep_their_rows;
 mod doc_id_writeback_stability;
 mod idless_external_reedit_dup;
 mod journals_folder_is_the_seeded_page;

@@ -721,79 +721,37 @@ impl BlockOrdering for SqlBlockOperations {
             return Ok(());
         }
         let parent_str = parent_id.as_str();
-        // (parent_id, sort_key) per block, read from the raw rows — the
-        // internal `sort_key` column is no longer on the domain `Block`.
-        let rows = self.cache.query_raw("", vec![]).await?;
-        let by_id: HashMap<String, (String, String)> = rows
-            .into_iter()
-            .filter_map(|r| {
-                let id = r
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .map(str::to_string)?;
-                let parent = r
-                    .get("parent_id")
-                    .and_then(|v| v.as_string())
-                    .map(str::to_string)
-                    .unwrap_or_default();
-                let sk = r
-                    .get("sort_key")
-                    .and_then(|v| v.as_string())
-                    .map(str::to_string)
-                    .unwrap_or_else(default_sort_key);
-                Some((id, (parent, sk)))
-            })
-            .collect();
-        let entity = EntityName::new(Block::entity_name());
-        let default_key = default_sort_key();
-
-        // Resolve current keys in target order, fixing parent_id where it
-        // diverges (rare: a re-parent into this parent). A missing block is
-        // treated as unkeyed (default sentinel) so a not-yet-projected row
-        // still gets a real key rather than panicking the scan.
-        let mut cur_keys: Vec<String> = Vec::with_capacity(ordered_ids.len());
-        for id in ordered_ids {
-            match by_id.get(id.as_str()) {
-                Some((parent, sk)) => {
-                    if parent != parent_str {
-                        let mut parent_params: StorageEntity = HashMap::new();
-                        parent_params.insert("id".into(), Value::String(id.as_str().to_string()));
-                        parent_params
-                            .insert("field".into(), Value::String("parent_id".to_string()));
-                        parent_params.insert("value".into(), Value::String(parent_str.to_string()));
-                        self.sql_ops
-                            .execute_operation(&entity, "set_field", parent_params)
-                            .await?;
-                    }
-                    cur_keys.push(sk.clone());
-                }
-                None => cur_keys.push(default_key.clone()),
-            }
-        }
-
-        // Compute the total order key for each child (keep already-ordered keys,
-        // re-mint only violators) and write only the ones that changed.
-        // Idempotent: a parent whose children carry born-correct keys makes
-        // zero writes — so the common org-ingest path (blocks created already
-        // carrying their order key, see `order_keys`) leaves no half-applied
-        // window for a concurrent reader.
         let ordered_strs: Vec<&str> = ordered_ids.iter().map(|u| u.as_str()).collect();
+        let placements = self
+            .sql_ops
+            .child_placements(parent_str, &ordered_strs)
+            .await?;
+        let reparent: Vec<&str> = ordered_strs
+            .iter()
+            .zip(&placements)
+            .filter(|(_, (parent, _))| parent != parent_str)
+            .map(|(id, _)| *id)
+            .collect();
+        // A NULL key is an unkeyed row: the relabel re-mints it in place.
+        let cur_keys: Vec<String> = placements
+            .into_iter()
+            .map(|(_, sk)| sk.unwrap_or_else(default_sort_key))
+            .collect();
+
+        // Keep already-ordered keys, re-mint only violators, write only the
+        // ones that changed: a parent whose children carry born-correct keys
+        // (see `order_keys`) makes zero writes.
         let target = relabel_order(&ordered_strs, &cur_keys)?;
-        for (i, key) in target.iter().enumerate() {
-            if *key != cur_keys[i] {
-                let mut sort_params: StorageEntity = HashMap::new();
-                sort_params.insert(
-                    "id".into(),
-                    Value::String(ordered_ids[i].as_str().to_string()),
-                );
-                sort_params.insert("field".into(), Value::String("sort_key".to_string()));
-                sort_params.insert("value".into(), Value::String(key.clone()));
-                self.sql_ops
-                    .execute_operation(&entity, "set_field", sort_params)
-                    .await?;
-            }
-        }
-        Ok(())
+        let keys: Vec<(&str, &str)> = ordered_strs
+            .iter()
+            .zip(&target)
+            .zip(&cur_keys)
+            .filter(|((_, key), cur)| key != cur)
+            .map(|((id, key), _)| (*id, key.as_str()))
+            .collect();
+        self.sql_ops
+            .write_child_order(parent_str, &reparent, &keys)
+            .await
     }
 
     /// Loro mode → `create_entity` (LoroBackend::create_block, synchronous).

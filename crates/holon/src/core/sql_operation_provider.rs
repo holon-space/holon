@@ -1039,6 +1039,93 @@ impl SqlOperationProvider {
         err_msg.to_lowercase().contains("foreign key constraint")
     }
 
+    /// `(parent_id, sort_key)` of each of `ids`, in `ids` order, from ONE read
+    /// of this table. Refused with every id that has no row, named under
+    /// `parent_id`: an order cannot be restated over a row that is not there.
+    pub async fn child_placements(
+        &self,
+        parent_id: &str,
+        ids: &[&str],
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let list = ids
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows = self
+            .db_handle
+            .query(
+                &format!(
+                    "SELECT id, parent_id, sort_key FROM {} WHERE id IN ({list})",
+                    self.table_name
+                ),
+                HashMap::new(),
+            )
+            .await
+            .map_err(|e| format!("child_placements under {parent_id}: {e}"))?;
+        let mut by_id: HashMap<String, (String, Option<String>)> = HashMap::new();
+        for mut row in rows {
+            let text = |v: Option<Value>| match v {
+                Some(Value::String(s)) => Some(s),
+                _ => None,
+            };
+            let id = text(row.remove("id")).ok_or("child_placements: row without a text id")?;
+            let parent = text(row.remove("parent_id")).unwrap_or_default();
+            by_id.insert(id, (parent, text(row.remove("sort_key"))));
+        }
+        let missing: Vec<&str> = ids
+            .iter()
+            .copied()
+            .filter(|id| !by_id.contains_key(*id))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "cannot order the children of {parent_id}: {} of them have no row in `{}`: \
+                 {missing:?}",
+                missing.len(),
+                self.table_name,
+            )
+            .into());
+        }
+        Ok(ids.iter().map(|id| by_id[*id].clone()).collect())
+    }
+
+    /// Moves `reparent` under `parent_id` and writes each `(id, sort_key)` of
+    /// `keys`, all in ONE transaction, so a failure leaves every old key.
+    pub async fn write_child_order(
+        &self,
+        parent_id: &str,
+        reparent: &[&str],
+        keys: &[(&str, &str)],
+    ) -> Result<()> {
+        let stmts: Vec<(String, Vec<turso::Value>)> = reparent
+            .iter()
+            .map(|id| (self.column_update_sql(id, "parent_id", parent_id), vec![]))
+            .chain(
+                keys.iter()
+                    .map(|(id, key)| (self.column_update_sql(id, "sort_key", key), vec![])),
+            )
+            .collect();
+        if stmts.is_empty() {
+            return Ok(());
+        }
+        let expected = stmts.len() as u64;
+        let changed = self
+            .db_handle
+            .transaction_changes(stmts)
+            .await
+            .map_err(|e| format!("order the children of {parent_id}: {e}"))?;
+        if changed != expected {
+            return Err(format!(
+                "order the children of {parent_id}: {expected} row write(s) matched {changed} \
+                 row(s) in `{}`",
+                self.table_name
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Whether a `block_raw` row with `id` currently exists. Used to attribute
     /// a create-time FK failure accurately: the parent FK and the junction
     /// source FKs both surface the same opaque message, so "parent not

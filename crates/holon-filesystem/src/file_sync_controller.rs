@@ -6622,19 +6622,23 @@ impl FileSyncController {
         // write-back brings the file in line. A deleted block's file subtree
         // goes with it.
         let mut reseed: HashSet<EntityUri> = HashSet::new();
+        let mut lost: HashSet<EntityUri> = HashSet::new();
         let mut overruled: HashMap<EntityUri, HolonChange> = HashMap::new();
         let upstream = matches!(self.ordering.consolidator(), Consolidator::Upstream);
-        // Without upstream history, a base block the store no longer holds
-        // under this document is one Holon deleted or moved since the base.
-        let in_store: HashSet<EntityUri> = if upstream || !store_may_be_ahead {
-            HashSet::new()
+        let store_blocks: Vec<Block> = if old_blocks.is_empty() {
+            Vec::new()
         } else {
             self.block_reader
                 .get_blocks(&document_uri)
-                .await?
-                .into_iter()
-                .map(|b| b.id)
-                .collect()
+                .await
+                .with_context(|| format!("read current store blocks (doc {document_uri})"))?
+        };
+        // Without upstream history, a base block the store no longer holds
+        // under this document is one Holon deleted or moved since the base.
+        let in_store: HashSet<EntityUri> = if upstream {
+            HashSet::new()
+        } else {
+            store_blocks.iter().map(|b| b.id.clone()).collect()
         };
         {
             let mut base_children: HashMap<EntityUri, Vec<EntityUri>> = HashMap::new();
@@ -6649,10 +6653,23 @@ impl FileSyncController {
                 let change = if overruled.get(&block.parent_id) == Some(&HolonChange::Deleted) {
                     HolonChange::Deleted
                 } else if !upstream {
-                    if !store_may_be_ahead || old_block.is_none() || in_store.contains(&block.id) {
+                    if old_block.is_none() || in_store.contains(&block.id) {
                         continue;
                     }
-                    match self.resolve_authoritative_doc(&block.id).await? {
+                    let owner = self.resolve_authoritative_doc(&block.id).await?;
+                    if !store_may_be_ahead {
+                        if owner.is_none() {
+                            tracing::warn!(
+                                block_id = %block.id,
+                                file = %path.display(),
+                                "[FileSyncController] the store lost a block the file still \
+                                 holds; it is re-created from the file"
+                            );
+                            lost.insert(block.id.clone());
+                        }
+                        continue;
+                    }
+                    match owner {
                         None => HolonChange::Deleted,
                         Some(doc) if doc != document_uri => HolonChange::Moved,
                         Some(_) => continue,
@@ -6788,14 +6805,9 @@ impl FileSyncController {
         let text_merge_active = self.text_merge.is_some()
             && matches!(self.ordering.consolidator(), Consolidator::Store);
         let store_content: HashMap<EntityUri, String> = if !old_blocks.is_empty() {
-            self.block_reader
-                .get_blocks(&document_uri)
-                .await
-                .with_context(|| {
-                    format!("read current store blocks for 3-way text merge (doc {document_uri})")
-                })?
+            store_blocks
                 .into_iter()
-                .map(|b| (b.id.clone(), b.content))
+                .map(|b| (b.id, b.content))
                 .collect()
         } else {
             HashMap::new()
@@ -6990,7 +7002,10 @@ impl FileSyncController {
                 });
                 continue;
             }
-            if !old_blocks.contains_key(&block.id) || moved_in.contains_key(&block.id) {
+            if !old_blocks.contains_key(&block.id)
+                || moved_in.contains_key(&block.id)
+                || lost.contains(&block.id)
+            {
                 let parent_id = if block.parent_id == new_parse.document.id {
                     &document_uri
                 } else {
@@ -7083,6 +7098,7 @@ impl FileSyncController {
             if foreign_subtree_ids.contains(id)
                 || moved_in.contains_key(id)
                 || overruled.contains_key(id)
+                || lost.contains(id)
             {
                 continue;
             }
@@ -7196,6 +7212,7 @@ impl FileSyncController {
         // puts it back.
         let mut puts_back = false;
         let mut put_back: Vec<(EntityUri, EntityUri, HashSet<CanonicalPath>)> = Vec::new();
+        let mut deleted_here: HashSet<EntityUri> = HashSet::new();
         for id in old_blocks.keys() {
             if !new_blocks.contains_key(id) {
                 // The file that adopted it already deleted it as its copy's
@@ -7252,6 +7269,7 @@ impl FileSyncController {
                     }
                 }
                 has_structural_changes = true;
+                deleted_here.insert(id.clone());
                 let mut params: holon_api::StorageEntity = HashMap::new();
                 params.insert("id".into(), Value::String(id.to_string()));
                 // Phase 3: pin the document URI so the provider's prepare_delete
@@ -7287,6 +7305,7 @@ impl FileSyncController {
                 continue;
             };
             has_structural_changes = true;
+            deleted_here.insert(id.clone());
             let mut params: holon_api::StorageEntity = HashMap::new();
             params.insert("id".into(), Value::String(id.to_string()));
             params.insert(
@@ -7298,6 +7317,7 @@ impl FileSyncController {
         // The members an adopted copy no longer holds.
         for id in &dropped_by_copies {
             has_structural_changes = true;
+            deleted_here.insert(id.clone());
             let mut params: holon_api::StorageEntity = HashMap::new();
             params.insert("id".into(), Value::String(id.to_string()));
             params.insert(
@@ -7305,6 +7325,10 @@ impl FileSyncController {
                 Value::String(document_uri.to_string()),
             );
             operations.push(("delete".to_string(), params));
+        }
+        // A store sibling this batch deletes leaves the order it was kept in.
+        for order in kept_order.values_mut() {
+            order.retain(|id| !deleted_here.contains(id));
         }
 
         // Apply each operation through `BlockOrdering` — the single org→block
