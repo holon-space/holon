@@ -9,7 +9,10 @@ case $op in
     pkgs=$(for c in "$@"; do printf -- '-p %s ' "$c"; done)
     tests=""
     for c in "$@"; do lay=$("$0" layout "$c"); tests+="\`$(sed -n 's/^tests: //p' <<<"$lay")/\`, "; done
-    sed -e "s#@PKGS@#${pkgs% }#g" -e "s#@HOOK_DIR@#$here#g" -e "s#@TESTS_DIRS@#${tests%, }#g" "$here/prompt-facts.md" ;;
+    feats=$("$here/test-command.py" features "$@")
+    lints=$(sed -n 's/^CLIPPY_LINTS := "\(.*\)"$/\1/p' justfile)
+    [ -n "$lints" ] || { echo "the justfile holds no CLIPPY_LINTS" >&2; exit 1; }
+    sed -e "s#@PKGS@#${pkgs% }${feats:+ $feats}#g" -e "s#@CLIPPY_LINTS@#$lints#g" -e "s#@HOOK_DIR@#$here#g" -e "s#@TESTS_DIRS@#${tests%, }#g" "$here/prompt-facts.md" ;;
   dependents)
     for c in "$@"; do cargo tree --locked -i "$c" --workspace -e normal,build,dev --prefix none --depth 1 | awk '{print $1}'; done ;;
   layout)
@@ -21,9 +24,8 @@ case $op in
   code-hash) find crates/*/src frontends/*/src -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 ;;
   register-tests) "$here/add-mods.sh" "$(dirname "$1")" "$PWD" "$2" ;;
   merge-manifest) "$here/merge-devdeps.py" "$1" "$2" ;;
-  test-command)
-    echo "CARGO_TARGET_DIR=$1/target"; shift
-    printf '%s\n' cargo nextest run; for c in "$@"; do printf -- '-p\n%s\n' "$c"; done; echo --no-fail-fast ;;
+  test-command) "$here/test-command.py" run "$@" ;;
+  capabilities) echo scope ;;
   report)
     grep -m1 -E '^ *Summary' "$1" | sed 's/^ *//' || echo
     grep -E '^\s*(FAIL|TIMEOUT|SIGSEGV|PASS) |Summary' "$1" | tail -40 || : ;;

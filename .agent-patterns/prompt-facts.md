@@ -1,4 +1,4 @@
-The holon text of the lane briefs: `hook prompt-facts` prints this file with @PKGS@, @HOOK_DIR@ and @TESTS_DIRS@ filled in.
+The holon text of the lane briefs: `hook prompt-facts` prints this file with @PKGS@ (packages and their test features), @CLIPPY_LINTS@, @HOOK_DIR@ and @TESTS_DIRS@ filled in.
 Block format and the names the kit's prompts use: the agent-patterns kit's hook-interface.md.
 
 @@ STEWARD
@@ -80,7 +80,7 @@ You may add dev-dependencies to the crate's `Cargo.toml` before the first freeze
 - The crate may have ONE test binary (`autotests = false`, `tests/main.rs` with `mod` lines). Then list each module line you need in @R@/tester-mods.txt as `<crate> mod <name>;`; the kit's tester-run script and the landing append it, and `@HOOK_DIR@/add-mods.sh @R@ @T@ <crate>` does it for your own runs. Never edit `tests/main.rs` itself.
 
 @@ LINT_RULE
-- Your last tester-run script run must also be clippy-clean for your files: run `cd @T@ && CARGO_TARGET_DIR=@W@/target FLOW_CARD=@CARD@ @BIN@/nosecrets.sh @SLOT@ cargo clippy @PKGS@ --tests -- -D warnings > <log> 2>&1` and fix each warning in your files (for example `type_complexity`: a type alias), then freeze again. The lane checks run clippy with `-D warnings`.
+- Your last tester-run script run must also be clippy-clean for your files: run `cd @T@ && CARGO_TARGET_DIR=@W@/target FLOW_CARD=@CARD@ @BIN@/nosecrets.sh @SLOT@ cargo clippy @PKGS@ --tests -- @CLIPPY_LINTS@ > <log> 2>&1` and fix each warning in your files (for example `type_complexity`: a type alias), then freeze again. The lane checks run clippy with `-D warnings`.
 
 @@ BEFORE_LANE_CHECKS
 Before the lane checks, run `jj diff --git --from <base> -- Cargo.lock`. A changed Cargo.lock (e.g. the tester's dev-dependency) makes the test selection the whole workspace: run that full selection ONCE, never a narrow run first. Also run the cheap generated-row checks first: `just arch-validate` (strict already; a new test dir needs `just arch-baseline`, keep only your crate's hunk) and `scripts/timing-split.py check` plus `assertions` (a new wait or a new timing-critical test needs its rows). Each such row is an edit outside Owns: ask holon-steward in questions.md and get the answer BEFORE the long lane-check run.
