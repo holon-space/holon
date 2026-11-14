@@ -862,10 +862,68 @@ impl HolonConfig {
 }
 
 #[cfg(all(test, unix))]
+mod live_link_boot_pbt {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// A config dir whose `holon.toml` is a link, through `hops` more links,
+    /// to an existing `real.toml` that sets `db_path`.
+    #[derive(Debug, Clone)]
+    struct LiveLink {
+        absolute: bool,
+        hops: usize,
+    }
+
+    fn live_link() -> impl Strategy<Value = LiveLink> {
+        (any::<bool>(), 0..3usize).prop_map(|(absolute, hops)| LiveLink { absolute, hops })
+    }
+
+    proptest! {
+        #[test]
+        fn boot_reads_the_file_behind_a_live_holon_toml_link(l in live_link()) {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = dir.path().join("cfg");
+            let real_dir = dir.path().join("real");
+            std::fs::create_dir(&cfg).unwrap();
+            std::fs::create_dir(&real_dir).unwrap();
+            let target = real_dir.join("real.toml");
+            std::fs::write(&target, "db_path = \"/from/the/linked/file.db\"\n").unwrap();
+            let mut next = if l.absolute {
+                target.clone()
+            } else {
+                PathBuf::from("real/real.toml")
+            };
+            for hop in 0..l.hops {
+                let name = format!("hop{hop}.toml");
+                std::os::unix::fs::symlink(&next, dir.path().join(&name)).unwrap();
+                next = if l.absolute {
+                    dir.path().join(&name)
+                } else {
+                    PathBuf::from(&name)
+                };
+            }
+            if !l.absolute {
+                next = PathBuf::from("..").join(next);
+            }
+            std::os::unix::fs::symlink(&next, cfg.join("holon.toml")).unwrap();
+
+            let (traced, _, note) = load_config(&cfg, HolonConfig::default())
+                .map_err(|e| TestCaseError::fail(format!("{l:?}: boot aborts: {e:#}")))?;
+            prop_assert!(note.is_none(), "{:?}: a live link raised {:?}", l, note);
+            prop_assert_eq!(
+                traced.into_inner().db_path,
+                Some(PathBuf::from("/from/the/linked/file.db")),
+                "{:?}: boot ignored the linked file", l
+            );
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
 mod dangling_link_boot_pbt {
-    //! The link layouts are a copy of the class generator in
-    //! `holon_toml_link_pbt`, which stays byte-identical to the verifier's
-    //! red patch.
+    //! The link layouts repeat the `dangling_link` layouts of
+    //! `holon_toml_link_pbt`.
     use proptest::prelude::*;
 
     use super::*;
