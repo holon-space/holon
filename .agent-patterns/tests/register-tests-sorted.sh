@@ -13,11 +13,11 @@ run() { # run <label> <main.rs text> <new mod name>...
   local label=$1 text=$2; shift 2
   local t; t=$(mktemp -d); mkdir -p "$t/$tests"; cp "$ws/rustfmt.toml" "$t/"
   printf '%s\n' "$text" | fmt > "$t/$tests/main.rs" || { echo "SKIP $label: the drawn binary is no Rust"; return; }
-  local n; for n in "$@"; do echo "$crate mod $n;"; done > "$t/tester-mods.txt"
+  local n; for n in "$@"; do case $n in *' '*) echo "$crate $n;" ;; *) echo "$crate mod $n;" ;; esac; done > "$t/tester-mods.txt"
   (cd "$t" && "$hook" register-tests "$t/tester-mods.txt" $crate) || { echo "FAIL $label: register-tests exit non-zero"; fail=1; return; }
   # rustfmt --check on stdin exits 0 on a diff, so compare its output instead
   fmt < "$t/$tests/main.rs" | diff "$t/$tests/main.rs" - > "$t/diff" || { echo "FAIL $label: not rustfmt-clean:"; cat "$t/diff"; fail=1; }
-  local want n; mapfile -t want < <(sed -nE 's/^(pub )?mod ([A-Za-z0-9_]+);$/\2/p' <<<"$text"; printf '%s\n' "$@")
+  local want n; mapfile -t want < <(sed -nE 's/^(pub )?mod ([A-Za-z0-9_]+);$/\2/p' <<<"$text"; printf '%s\n' "${@##* }")
   for n in "${want[@]}"; do
     [ "$(grep -cxE "(pub )?mod $n;" "$t/$tests/main.rs")" = 1 ] || { echo "FAIL $label: module $n is not declared exactly once"; fail=1; }
   done
@@ -38,4 +38,13 @@ for ((i = 0; i < draws; i++)); do
   text=$( ((RANDOM % 2)) && printf 'use std::fmt;\n\n'; for o in "${old[@]}"; do ((RANDOM % 3)) || printf 'pub '; echo "mod $o;"; done; ((RANDOM % 2)) && printf '\nfn helper() {}\n')
   run "draw $i: old ${old[*]} new ${new[*]}" "$text" "${new[@]}"
 done
+# The mods file may request one module twice, as `mod` and as `pub mod`; it is declared once.
+request_vis_check() { # request_vis_check <draws>: drawn names requested as `mod` and, in half the cases, also as `pub mod`
+  local i j n new; for ((i = 0; i < $1; i++)); do
+    new=(); for ((j = RANDOM % 3; j >= 0; j--)); do n=$(name); new+=("$n"); ((RANDOM % 2)) && new+=("pub mod $n"); done
+    run "vis draw $i: new ${new[*]}" $'mod b;' "${new[@]}"
+  done
+}
+run "one module requested as mod and as pub mod" $'mod b;' a "pub mod a"
+request_vis_check "$draws"
 exit $fail

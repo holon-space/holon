@@ -113,4 +113,21 @@ new_module_check() { # new_module_check <unit> <new file name>: the filter names
 }
 new_module_check holon-integration-tests added_by_tester_pbt.rs
 for ((i = 0; i < draws; i++)); do new_module_check "${tested[RANDOM % ${#tested[@]}]}" "$(printf 'added_%s_pbt.rs' "$RANDOM")"; done
+# A path under tests/ that is no test file name and no target root (a data file next to the targets, a source file in a folder no target declares) concerns no new target.
+odd_path_check() { # odd_path_check <unit> <path>: the filter names the package whole or only real test targets
+  local u=$1 p=$2; printf '%s\n' "$p" > "$s"
+  local out; out=$("$hook" test-command --scope "$s" /x "$u" 2>&1) || { echo "FAIL $p: exit non-zero: $out"; fail=1; return; }
+  local expr t; expr=$(grep -A1 -x -- -E <<<"$out" | tail -1)
+  for t in $(grep -oE "binary_id\(=$u::[^)]*\)" <<<"$expr" | sed -E 's/.*::(.*)\)/\1/'); do
+    targets_of "$u" | grep -qx "$t" || { echo "FAIL $p: $u has no test target $t, the filter is '$expr'"; fail=1; return; }
+  done
+  echo "ok odd $p"
+}
+odd_path_check holon-api crates/holon-api/tests/added_snapshot.json
+odd_path_check holon-api crates/holon-api/tests/added_support/helper.rs
+for ((i = 0; i < draws; i++)); do
+  u=${tested[RANDOM % ${#tested[@]}]}; exts=(json snap txt feature yaml)
+  odd_path_check "$u" "$(dir_of "$u")/tests/added_$RANDOM.${exts[RANDOM % ${#exts[@]}]}"
+  odd_path_check "$u" "$(dir_of "$u")/tests/added_$RANDOM/helper_$RANDOM.rs"
+done
 exit $fail
