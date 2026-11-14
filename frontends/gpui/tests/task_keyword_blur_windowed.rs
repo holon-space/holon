@@ -35,6 +35,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -53,6 +54,7 @@ use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
 use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::hold_tokio_workers;
 use crate::pbt_harness::settle::settle_window;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
@@ -77,6 +79,47 @@ fn settle_frame(
         HANG_DEADLINE,
     )
     .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
+
+/// Longer than a window settle of an idle window: the clicked editor's task
+/// vocabulary resolves over a tokio hop, so it lands after a settle that does
+/// not wait for it, as it does on a loaded host.
+const TOKIO_HOLD: Duration = Duration::from_millis(300);
+
+/// Click `target`, then settle. With `hold`, the engine settles first and every
+/// tokio worker stays busy across the click, so the window settle alone must
+/// wait until the clicked editor's task vocabulary has resolved.
+fn click_and_settle(
+    driver: &SimUserDriver,
+    target: &EntityUri,
+    hold: bool,
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    env: &TestEnvironment,
+) {
+    if !hold {
+        futures::executor::block_on(driver.click_entity(target, "main"))
+            .unwrap_or_else(|e| panic!("click {target}: {e:#}"));
+        settle_frame(app, bounds, runtime, env);
+        return;
+    }
+    runtime.block_on(env.settle());
+    hold_tokio_workers(runtime, TOKIO_HOLD);
+    futures::executor::block_on(driver.click_entity(target, "main"))
+        .unwrap_or_else(|e| panic!("click {target} with the tokio workers held: {e:#}"));
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || {},
+        HANG_DEADLINE,
+    )
+    .unwrap_or_else(|e| panic!("window settle with the tokio workers held: {e}"));
 }
 
 fn sql_rows(env: &TestEnvironment, sql: String) -> Vec<HashMap<Arc<str>, Value>> {
@@ -173,7 +216,7 @@ static ONE_WINDOWED_APP_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(
 
 /// One arm. `loro` picks the storage mode; `suffix` keys the row ids so the
 /// arms never share a `local_edit_epoch` entry.
-fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str) {
+fn drive_promote_then_blur(loro: bool, hold: bool, suffix: &str, window_title: &'static str) {
     let _serialized = ONE_WINDOWED_APP_AT_A_TIME
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -270,9 +313,7 @@ fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str)
     );
 
     // ── promote through a REAL click + REAL keystrokes ────────────────────
-    futures::executor::block_on(driver.click_entity(&edit_target, "main"))
-        .expect("click the edit target row's painted text");
-    settle_frame(&app, &bounds, &runtime, &env);
+    click_and_settle(&driver, &edit_target, hold, &app, &bounds, &runtime, &env);
     futures::executor::block_on(driver.send_raw_keystroke("home", &[]))
         .expect("caret to the head of the row");
     for key in ["T", "O", "D", "O", "space"] {
@@ -293,9 +334,7 @@ fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str)
     let history_before = history_rows(&env, &edit_id);
 
     // ── the blur: click a DIFFERENT row ──────────────────────────────────
-    futures::executor::block_on(driver.click_entity(&blur_target, "main"))
-        .expect("click the sibling row to blur the promoted one");
-    settle_frame(&app, &bounds, &runtime, &env);
+    click_and_settle(&driver, &blur_target, hold, &app, &bounds, &runtime, &env);
 
     // NON-VACUITY 1: focus genuinely left the promoted row, so its blur edge ran.
     assert_eq!(
@@ -356,7 +395,12 @@ fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str)
 /// `set_field` is the editor's own commit funnel.
 #[test]
 fn promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly() {
-    drive_promote_then_blur(false, "kwblur-sqlonly", "Holon-TestPlatform-KwBlur-SqlOnly");
+    drive_promote_then_blur(
+        false,
+        false,
+        "kwblur-sqlonly",
+        "Holon-TestPlatform-KwBlur-SqlOnly",
+    );
 }
 
 /// The control: with a Loro cell attached the blur `set_field("content")` is
@@ -364,5 +408,29 @@ fn promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly() {
 /// green all along. It fails only if the fix breaks the drop.
 #[test]
 fn promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_loro() {
-    drive_promote_then_blur(true, "kwblur-loro", "Holon-TestPlatform-KwBlur-Loro");
+    drive_promote_then_blur(true, false, "kwblur-loro", "Holon-TestPlatform-KwBlur-Loro");
+}
+
+/// The finding's arm on a loaded host: every tokio worker is busy across each
+/// click, so the keystroke after it lands only if the window settle waits for
+/// the editor's task vocabulary.
+#[test]
+fn promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly_tokio_held() {
+    drive_promote_then_blur(
+        false,
+        true,
+        "kwblur-sqlonly-held",
+        "Holon-TestPlatform-KwBlur-SqlOnly-Held",
+    );
+}
+
+/// The Loro control on a loaded host.
+#[test]
+fn promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_loro_tokio_held() {
+    drive_promote_then_blur(
+        true,
+        true,
+        "kwblur-loro-held",
+        "Holon-TestPlatform-KwBlur-Loro-Held",
+    );
 }

@@ -31,7 +31,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use gpui::AssetSource;
 use gpui::HeadlessAppContext;
@@ -49,6 +48,9 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 use crate::pbt_harness;
+use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::hold_tokio_workers;
+use crate::pbt_harness::settle::settle_window;
 
 /// The typed tail. Distinctive enough that a duplicate is unambiguous in a
 /// whole-store scan, and keyword-free so no task facet is involved.
@@ -58,35 +60,65 @@ fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
     gpui_platform::current_text_system()
 }
 
-/// Same cross-runtime fixed-point settle the other TestPlatform tests use.
-fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {
-    let start = Instant::now();
-    let mut last_count = 0usize;
-    let mut stable_iters = 0u32;
-    while start.elapsed() < timeout {
-        futures::executor::block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
-        app.run_until_parked();
-        app.advance_clock(Duration::from_secs(1));
-        app.run_until_parked();
-        bounds.flush();
-        let count = bounds.all_elements().len();
-        let still_loading = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.widget_type.as_ref() == "loading");
-        if count == last_count && count > 0 && !still_loading {
-            stable_iters += 1;
-            if stable_iters >= 5 {
-                break;
-            }
-        } else {
-            stable_iters = 0;
-        }
-        last_count = count;
+fn settle_frame(
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    env: &TestEnvironment,
+) {
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || runtime.block_on(env.settle()),
+        HANG_DEADLINE,
+    )
+    .unwrap_or_else(|e| panic!("window settle: {e}"));
+}
+
+/// Longer than a window settle of an idle window: the clicked editor's task
+/// vocabulary resolves over a tokio hop, so it lands after a settle that does
+/// not wait for it, as it does on a loaded host.
+const TOKIO_HOLD: Duration = Duration::from_millis(300);
+
+/// Click `target`, then settle. With `hold`, the engine settles first and every
+/// tokio worker stays busy across the click, so the window settle alone must
+/// wait until the clicked editor's task vocabulary has resolved.
+fn click_and_settle(
+    driver: &SimUserDriver,
+    target: &EntityUri,
+    hold: bool,
+    app: &HeadlessAppContext,
+    bounds: &BoundsRegistry,
+    runtime: &tokio::runtime::Runtime,
+    env: &TestEnvironment,
+) {
+    if !hold {
+        futures::executor::block_on(driver.click_entity(target, "main"))
+            .unwrap_or_else(|e| panic!("click {target}: {e:#}"));
+        settle_frame(app, bounds, runtime, env);
+        return;
     }
-    futures::executor::block_on(async { tokio::task::yield_now().await });
-    app.run_until_parked();
-    bounds.flush();
+    runtime.block_on(env.settle());
+    hold_tokio_workers(runtime, TOKIO_HOLD);
+    futures::executor::block_on(driver.click_entity(target, "main"))
+        .unwrap_or_else(|e| panic!("click {target} with the tokio workers held: {e:#}"));
+    let engine = env
+        .reactive_engine
+        .get()
+        .expect("reactive engine after start_app");
+    settle_window(
+        app,
+        bounds,
+        engine.ui_watermark(),
+        &mut || {},
+        HANG_DEADLINE,
+    )
+    .unwrap_or_else(|e| panic!("window settle with the tokio workers held: {e}"));
 }
 
 fn sql_rows(env: &TestEnvironment, sql: String) -> Vec<HashMap<Arc<str>, Value>> {
@@ -186,7 +218,12 @@ static ONE_WINDOWED_APP_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(
 
 /// One arm. `loro` picks the storage mode; `suffix` keys the row ids so the
 /// arms never share a `local_edit_epoch` entry.
-fn drive_external_split_then_chord(loro: bool, suffix: &str, window_title: &'static str) {
+fn drive_external_split_then_chord(
+    loro: bool,
+    hold: bool,
+    suffix: &str,
+    window_title: &'static str,
+) {
     let _serialized = ONE_WINDOWED_APP_AT_A_TIME
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -237,22 +274,11 @@ fn drive_external_split_then_chord(loro: bool, suffix: &str, window_title: &'sta
         .expect("window opened");
 
     let edit_element = format!("block:{edit_id}");
-    let boot_deadline = Instant::now() + Duration::from_secs(180);
-    let mut painted = false;
-    while Instant::now() < boot_deadline {
-        settle(&mut app, &bounds, Duration::from_secs(30));
-        painted = bounds
-            .all_elements()
-            .iter()
-            .any(|(_, info)| info.entity_id.as_deref() == Some(edit_element.as_str()));
-        if painted {
-            break;
-        }
-        eprintln!(
-            "[chord-flush-boot] edit row not painted yet; {} elements",
-            bounds.all_elements().len()
-        );
-    }
+    settle_frame(&app, &bounds, &runtime, &env);
+    let painted = bounds
+        .all_elements()
+        .iter()
+        .any(|(_, info)| info.entity_id.as_deref() == Some(edit_element.as_str()));
     assert!(
         painted,
         "boot precondition: the edit row must paint before anything is typed"
@@ -273,7 +299,7 @@ fn drive_external_split_then_chord(loro: bool, suffix: &str, window_title: &'sta
     );
     futures::executor::block_on(env.execute_operation("block", "move_block", params))
         .expect("move the sibling ahead of the edit row");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env);
 
     let interaction_tx = debug_services
         .interaction_tx
@@ -302,16 +328,14 @@ fn drive_external_split_then_chord(loro: bool, suffix: &str, window_title: &'sta
     // ── type the tail through a REAL click + REAL keystrokes ─────────────
     // The editor must be the row's last writer, so the split below is a
     // genuinely EXTERNAL write against a buffer this editor authored.
-    futures::executor::block_on(driver.click_entity(&edit_target, "main"))
-        .expect("click the edit target row's painted text");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    click_and_settle(&driver, &edit_target, hold, &app, &bounds, &runtime, &env);
     futures::executor::block_on(driver.send_raw_keystroke("end", &[]))
         .expect("caret to the end of the row");
     for key in ["Z", "Z", "Z", "Z"] {
         futures::executor::block_on(driver.send_raw_keystroke(key, &[]))
             .unwrap_or_else(|e| panic!("typing {key:?} into the edit target row: {e}"));
     }
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env);
 
     let typed = format!("{UNDO_EDIT_CONTENT}{TAIL}");
     assert_eq!(
@@ -330,7 +354,7 @@ fn drive_external_split_then_chord(loro: bool, suffix: &str, window_title: &'sta
     params.insert("position".into(), Value::Integer(split_at));
     futures::executor::block_on(env.execute_operation("block", "split_block", params))
         .expect("external split_block");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env);
 
     // PRECONDITION: the split really landed and really is external — the
     // original truncated, the tail in a NEW block.
@@ -350,7 +374,7 @@ fn drive_external_split_then_chord(loro: bool, suffix: &str, window_title: &'sta
     // ── the structural chord ─────────────────────────────────────────────
     futures::executor::block_on(driver.send_raw_keystroke("tab", &[]))
         .expect("the structural chord must be consumed by the window");
-    settle(&mut app, &bounds, Duration::from_secs(30));
+    settle_frame(&app, &bounds, &runtime, &env);
 
     let after_chord = blocks_mentioning_tail(&env);
     let edit_content = stored_content(&env, &edit_id);
@@ -412,6 +436,7 @@ fn drive_external_split_then_chord(loro: bool, suffix: &str, window_title: &'sta
 fn structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly() {
     drive_external_split_then_chord(
         false,
+        false,
         "chordflush-sqlonly",
         "Holon-TestPlatform-ChordFlush-SqlOnly",
     );
@@ -423,7 +448,32 @@ fn structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly
 fn structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro() {
     drive_external_split_then_chord(
         true,
+        false,
         "chordflush-loro",
         "Holon-TestPlatform-ChordFlush-Loro",
+    );
+}
+
+/// The finding's arm on a loaded host: every tokio worker is busy across the
+/// click, so the `end` keystroke after it lands only if the window settle
+/// waits for the editor's task vocabulary.
+#[test]
+fn structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_sqlonly_tokio_held() {
+    drive_external_split_then_chord(
+        false,
+        true,
+        "chordflush-sqlonly-held",
+        "Holon-TestPlatform-ChordFlush-SqlOnly-Held",
+    );
+}
+
+/// The Loro control on a loaded host.
+#[test]
+fn structural_chord_does_not_flush_a_stale_buffer_over_an_external_split_loro_tokio_held() {
+    drive_external_split_then_chord(
+        true,
+        true,
+        "chordflush-loro-held",
+        "Holon-TestPlatform-ChordFlush-Loro-Held",
     );
 }

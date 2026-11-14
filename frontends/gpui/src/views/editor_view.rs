@@ -252,7 +252,15 @@ impl EditorView {
             let block_for_vocab = row_uri.clone();
             let ctrl_for_vocab = controller.clone();
             let field_for_vocab = field_for_subscription.clone();
+            // The editor is not seated for typing until this task ends: a key
+            // typed before then commits on the vocabulary-free channel, and the
+            // converge below rewrites the buffer. The watermark owes the check
+            // until the task drops it.
+            let vocabulary_check = services.ui_watermark().map(|watermark| {
+                watermark.register_check(format!("task vocabulary of {row_uri}"), || true)
+            });
             cx.spawn(async move |this, cx| {
+                let _vocabulary_check = vocabulary_check;
                 let vocabulary = holon_frontend::editor_source::vocabulary_for_block(
                     services_for_vocab.as_ref(),
                     &block_for_vocab,

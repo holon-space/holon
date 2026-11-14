@@ -76,6 +76,11 @@ use holon_integration_tests::test_environment::TestEnvironment;
 use holon_mcp::server::InteractionCommand;
 use holon_mcp::server::InteractionEvent;
 
+use crate::pbt_harness::settle::HANG_DEADLINE;
+use crate::pbt_harness::settle::SettleError;
+use crate::pbt_harness::settle::settle_window;
+use crate::pbt_harness::settle::settle_window_until;
+
 /// Content of every block these rungs create over the MCP operation path.
 /// Distinct from anything the default vault or the graft fixture ships, so a
 /// painted element carrying it can only be one of ours.
@@ -258,17 +263,40 @@ impl Fixture {
         uri
     }
 
-    /// Pump until `entity` has a text element in the LIVE registry, so a later
-    /// bounds failure names visibility rather than a write that never rendered.
-    fn settle_until_painted(&mut self, entity: &str, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            pump(&mut self.app, &self.bounds);
-            if !painted_texts(&self.bounds.all_elements(), entity).is_empty() {
-                return true;
-            }
-        }
-        false
+    /// Settle the window; the read after it sees every change the engine
+    /// emitted and every seat the clicked editor owes.
+    fn settle(&self) {
+        settle_window(
+            &self.app,
+            &self.bounds,
+            self.engine.ui_watermark(),
+            &mut || {},
+            HANG_DEADLINE,
+        )
+        .unwrap_or_else(|e| panic!("window settle: {e}"));
+    }
+
+    /// Settle until the LIVE registry paints a text of `entity` that
+    /// `shows` accepts, so a later bounds failure names visibility rather than
+    /// a write that never rendered.
+    #[allow(clippy::result_large_err)]
+    fn settle_until_painted(
+        &self,
+        entity: &str,
+        shows: &dyn Fn(&str) -> bool,
+    ) -> Result<(), SettleError> {
+        settle_window_until(
+            &self.app,
+            &self.bounds,
+            self.engine.ui_watermark(),
+            &|bounds| {
+                painted_texts(&bounds.all_elements(), entity)
+                    .iter()
+                    .any(|(_, text)| shows(text))
+            },
+            HANG_DEADLINE,
+        )
+        .map(|_| ())
     }
 
     /// Is `entity` resolvable in the view the DRIVER reads (as opposed to the
@@ -377,10 +405,10 @@ fn with_fixture(title: &str, body: impl FnOnce(&mut Fixture, &GpuiUserDriver)) {
     };
 
     let seeded_element = format!("block:{PROMOTION_TARGET_ID}");
-    assert!(
-        fx.settle_until_painted(&seeded_element, Duration::from_secs(180)),
-        "boot precondition: the seeded row must paint before anything is driven"
-    );
+    fx.settle_until_painted(&seeded_element, &|_| true)
+        .unwrap_or_else(|e| {
+            panic!("boot precondition: the seeded row must paint before anything is driven: {e}")
+        });
     // The window painted when it opened; that frame is what the driver starts
     // from, exactly as an agent attaching to a running app does.
     fx.geometry.capture();
@@ -403,6 +431,7 @@ fn an_mcp_created_block_is_clickable_without_a_navigation() {
             "control: click the seeded row",
         )
         .expect("the seeded row is in the boot frame, so its bounds resolve at once");
+        fx.settle();
         drive(
             fx,
             driver.send_raw_keystroke(CONTROL_CHAR, &[]),
@@ -410,34 +439,20 @@ fn an_mcp_created_block_is_clickable_without_a_navigation() {
         )
         .expect("typing into the focused row");
 
-        let control_deadline = Instant::now() + Duration::from_secs(60);
-        let mut control_painted = Vec::new();
-        while Instant::now() < control_deadline {
-            pump(&mut fx.app, &fx.bounds);
-            control_painted = painted_texts(&fx.bounds.all_elements(), &seeded_element);
-            if control_painted
-                .iter()
-                .any(|(_, t)| t.contains(CONTROL_CHAR))
-            {
-                break;
-            }
+        if let Err(e) = fx.settle_until_painted(&seeded_element, &|t| t.contains(CONTROL_CHAR)) {
+            panic!(
+                "CONTROL: a keyboard write must reach the screen with no navigation. The row still \
+                 paints {:?} (seeded content {PROMOTION_TARGET_CONTENT:?}): {e}",
+                painted_texts(&fx.bounds.all_elements(), &seeded_element)
+            );
         }
-        assert!(
-            control_painted
-                .iter()
-                .any(|(_, t)| t.contains(CONTROL_CHAR)),
-            "CONTROL: a keyboard write must reach the screen with no navigation. The row still \
-             paints {control_painted:?} (seeded content {PROMOTION_TARGET_CONTENT:?})"
-        );
 
         // ── the bug: a write that arrives off the input path ──────────────
         let sentinel = fx.create_over_mcp("mcp-paint-sentinel-row");
         let sentinel_element = sentinel.as_str().to_string();
-        assert!(
-            fx.settle_until_painted(&sentinel_element, Duration::from_secs(120)),
-            "the MCP-origin row never rendered at all — that is a write/projection failure, not \
-             the repaint-notification bug this rung is about"
-        );
+        fx.settle_until_painted(&sentinel_element, &|_| true)
+            .unwrap_or_else(|e| panic!("{}: {e}", "the MCP-origin row never rendered at all — that is a write/projection failure, not \
+             the repaint-notification bug this rung is about"));
 
         // The driver's last drawn frame predates the create, and nothing about
         // the create asked for another one. Resolving the row's bounds is
@@ -473,10 +488,13 @@ fn only_a_drawing_event_reveals_an_mcp_created_row() {
     with_fixture("Holon-TestPlatform-McpPaint-Negative", |fx, _driver| {
         let sentinel = fx.create_over_mcp("mcp-paint-negative-row");
         let sentinel_element = sentinel.as_str().to_string();
-        assert!(
-            fx.settle_until_painted(&sentinel_element, Duration::from_secs(120)),
-            "the MCP-origin row never rendered at all — the probe below would be vacuous"
-        );
+        fx.settle_until_painted(&sentinel_element, &|_| true)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{}: {e}",
+                    "the MCP-origin row never rendered at all — the probe below would be vacuous"
+                )
+            });
         assert!(
             !fx.driver_sees(&sentinel_element),
             "precondition: the row must be invisible to the driver before any event is sent"
