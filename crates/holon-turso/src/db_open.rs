@@ -195,6 +195,12 @@ const FN_SET_TABLE: &str = "holon_db_fn_set";
 /// The engine format of the stored view state, recorded after the function set
 /// in [`FN_SET_TABLE`]. A file recording another format is moved aside whole.
 pub const VIEW_FORMAT: &str = "view-state/dbsp-3-probe-key";
+/// The `turso_core` commit this binary links. The engine plans a view's
+/// maintenance when it creates the view, so views another build planned are
+/// rebuilt even when their stored format is the same.
+const ENGINE_BUILD: &str = env!("HOLON_TURSO_CORE_COMMIT");
+/// Joins the engine build to the function set in the record.
+const ENGINE_BUILD_TAG: &str = "+ivm:";
 /// Values computed with the functions; the derived-field reconciler refills it.
 const DERIVED_CACHE_TABLE: &str = "block_derived";
 
@@ -1183,7 +1189,8 @@ fn open_failure(e: &LimboError) -> DatabaseOpenFailure {
 enum Verdict {
     Usable,
     /// The file is in this engine's format, but its views were computed with
-    /// other functions or no longer load: they are dropped and rebuilt.
+    /// other functions or by another engine build, or no longer load: they
+    /// are dropped and rebuilt.
     Recompute(String),
     /// The file is in another or an unknown engine format.
     MoveAside(String),
@@ -1229,10 +1236,21 @@ fn verdict(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Verdict> {
             incompatible.join(", ")
         )));
     }
+    let (stored_fns, stored_build) = match stored_fns.rsplit_once(ENGINE_BUILD_TAG) {
+        Some((fns, build)) => (fns, Some(build)),
+        None => (stored_fns, None),
+    };
     let wanted = scalar_fns::signature(fns);
     if stored_fns != wanted {
         return Ok(Verdict::Recompute(format!(
             "it was built with the scalar functions [{stored_fns}], this binary registers [{wanted}]"
+        )));
+    }
+    if stored_build != Some(ENGINE_BUILD) {
+        return Ok(Verdict::Recompute(format!(
+            "its views were built by another IVM engine build [{}], this binary links turso_core \
+             [{ENGINE_BUILD}]",
+            stored_build.unwrap_or("none recorded")
         )));
     }
     let unusable: Vec<String> = unloadable_views(&conn)?
@@ -1285,7 +1303,10 @@ fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<()> {
 
 /// What a file built by `fns` on this engine holds in [`FN_SET_TABLE`].
 fn record(fns: &[ScalarFn]) -> String {
-    format!("{};{VIEW_FORMAT}", scalar_fns::signature(fns))
+    format!(
+        "{}{ENGINE_BUILD_TAG}{ENGINE_BUILD};{VIEW_FORMAT}",
+        scalar_fns::signature(fns)
+    )
 }
 
 /// Inside the caller's transaction.
@@ -1401,6 +1422,62 @@ mod tests {
             3,
             "a function-set change must keep every table row"
         );
+    }
+
+    /// The engine build in the record is compared on its own: only this
+    /// binary's build keeps the views; another build or a record written
+    /// before builds were recorded rebuilds them, and both keep every row.
+    #[test]
+    fn views_another_engine_build_planned_are_rebuilt_and_rows_stay() {
+        let signature = scalar_fns::signature(&[DOUBLE]);
+        for (case, stored, rebuilt) in [
+            ("this build", record(&[DOUBLE]), false),
+            (
+                "another build",
+                format!(
+                    "{signature}{ENGINE_BUILD_TAG}0000000000000000000000000000000000000000;{VIEW_FORMAT}"
+                ),
+                true,
+            ),
+            (
+                "no build recorded",
+                format!("{signature};{VIEW_FORMAT}"),
+                true,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("holon.db");
+            build_with_double(&path);
+            {
+                let db = open(&path, &[DOUBLE], WhenHeld::Wait).unwrap().0;
+                exec(
+                    &db,
+                    &format!("UPDATE {FN_SET_TABLE} SET signature = '{stored}'"),
+                )
+                .unwrap();
+            }
+            let (db, outcome) =
+                open(&path, &[DOUBLE], WhenHeld::Wait).unwrap_or_else(|e| panic!("{case}: {e}"));
+            match (rebuilt, outcome.0.as_slice()) {
+                (false, []) => assert_eq!(count(&db, "SELECT sum(d) FROM v"), 6, "{case}"),
+                (true, [OpenChange::ViewsDropped { reason, views }]) => {
+                    assert!(reason.contains("IVM engine build"), "{case}: {reason}");
+                    assert_eq!(views, &["v".to_string()], "{case}");
+                    assert!(!has(&db, "view", "v"), "{case}");
+                }
+                (_, other) => panic!("{case}: rebuilt {rebuilt}, got {other:?}"),
+            }
+            assert_eq!(
+                count(&db, "SELECT count(*) FROM t"),
+                2,
+                "{case} keeps every row"
+            );
+            let conn = connect(&db).unwrap();
+            assert!(
+                matches!(stored_signature(&conn).unwrap(), StoredSignature::Recorded(s) if s == record(&[DOUBLE])),
+                "{case}: the open records this build"
+            );
+        }
     }
 
     #[test]

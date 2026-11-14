@@ -616,6 +616,9 @@ impl SchemaModule for BlockMatviewSchemaModule {
             reconcile_named_view(db_handle, &name, &edge_agg_view_select(d))
                 .await
                 .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+            // `block` joins each agg on `source_id`; unindexed, every block
+            // write makes that join scan the whole agg.
+            create_matview_indexes(db_handle, &name, &["source_id"]).await?;
         }
         let created = reconcile_named_view(db_handle, "block", &block_matview_select(&descriptors))
             .await

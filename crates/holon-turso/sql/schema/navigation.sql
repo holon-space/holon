@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS navigation_cursor (
     history_id INTEGER REFERENCES navigation_history(id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_navigation_cursor_history_id
+ON navigation_cursor(history_id);
+
 -- Which live watch is looking at which subtree root. This is what makes ONE
 -- descendant matview serve every watch: the root enters the view as DATA (a
 -- row joined in) instead of as a literal baked into the view's SQL, so the
