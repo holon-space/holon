@@ -770,6 +770,57 @@ error: test run failed
 EOF
 expect_outcome violation/iroh-accept-drain-recv-stream 0 '^PRIMARY: \[known-red:iroh-accept-drain-recv-stream\]' \
     "$work/iroh-accept-drain-recv-stream.log"
+# A wall-clock deadline that runs out under load is known by its site, and its
+# message continues over the file text on the following lines.
+cat >"$work/writeback-undone-deletion-prune-deadline.log" <<'EOF'
+        FAIL [  11.424s] (1/1) holon-integration-tests::integration org_suite::writeback_stale_cross_doc_prune::an_undone_deletion_stands_when_the_copy_lets_go_while_closed
+  stderr ───
+    thread 'org_suite::writeback_stale_cross_doc_prune::an_undone_deletion_stands_when_the_copy_lets_go_while_closed' (249187321) panicked at crates/holon-integration-tests/tests/org_suite/writeback_stale_cross_doc_prune.rs:1295:9:
+    DayPage.org still holds the child the user deleted in an_undone_deletion_stands_when_the_copy_lets_go_while_closed:
+    #+TITLE: DayPage
+    ** child line
+    :ID: bulk-0-0-kid
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+     Summary [  11.436s] 1 test run: 0 passed, 1 failed, 664 skipped
+        FAIL [  11.424s] (1/1) holon-integration-tests::integration org_suite::writeback_stale_cross_doc_prune::an_undone_deletion_stands_when_the_copy_lets_go_while_closed
+error: test run failed
+EOF
+expect_outcome violation/writeback-undone-deletion-prune-deadline-load-flake 0 '^PRIMARY: \[known-red:writeback-undone-deletion-prune-deadline-load-flake\]' \
+    "$work/writeback-undone-deletion-prune-deadline.log"
+# The same message from another line of the test is not this row.
+sed 's/prune\.rs:1295:9/prune.rs:1301:9/' \
+    "$work/writeback-undone-deletion-prune-deadline.log" >"$work/writeback-undone-deletion-prune-other-site.log"
+expect_outcome writeback-undone-deletion-prune-other-site 1 '^\[known-reds\] FAIL: cross-family match: writeback-undone-deletion-prune-deadline-load-flake at ' \
+    "$work/writeback-undone-deletion-prune-other-site.log"
+# The row's evidence is one test; another test that waits through the same
+# helper at the same site is not this row.
+other_deletion_stands_callers() {
+    printf '%s\n' \
+        an_undone_deletion_stands_when_the_other_copy_drops_the_whole_heading \
+        an_undone_deletion_stands_when_the_other_copy_file_is_deleted \
+        an_undone_deletion_stands_when_the_last_copy_is_deleted \
+        a_child_no_copy_holds_is_deleted_at_once \
+        an_undone_deletion_survives_a_restart \
+        an_undone_deletion_stays_while_its_copy_file_cannot_be_read \
+        an_unread_copy_file_the_user_deletes_lets_the_deletion_stand \
+        a_put_back_child_whose_grandchild_no_copy_holds_still_lets_its_deletion_stand \
+        an_undone_deletion_survives_a_crash_after_the_put_back \
+        an_undone_deletion_survives_a_crash_before_the_put_back \
+        an_adopted_copy_keeps_the_deletion_after_a_crash_before_its_store_change \
+        an_adopted_copy_keeps_the_deletion_after_a_crash_after_its_write_back \
+        an_adopted_copy_keeps_the_deletion_after_a_crash_before_the_record_is_written \
+        a_copy_letting_go_keeps_the_deletion_after_a_crash_before_its_store_change \
+        a_copy_letting_go_keeps_the_deletion_after_a_crash_before_the_record_is_written \
+        a_deleted_copy_file_keeps_the_deletion_after_a_crash_before_the_record_is_written \
+        a_holon_deletion_keeps_the_deletion_after_a_crash_before_the_record_is_written
+}
+for other_test in $(other_deletion_stands_callers); do
+    sed "s/an_undone_deletion_stands_when_the_copy_lets_go_while_closed/$other_test/g" \
+        "$work/writeback-undone-deletion-prune-deadline.log" >"$work/writeback-undone-deletion-prune-$other_test.log"
+    expect_outcome "writeback-undone-deletion-prune-other-test/$other_test" 1 '^\[known-reds\] FAIL: 1 novel panic' \
+        "$work/writeback-undone-deletion-prune-$other_test.log"
+done
 # The same test name in two binaries, one passing: one failure, one signature.
 cat >"$work/same-name-two-binaries.log" <<'EOF'
         PASS [   0.010s] (1/2) holon-app::suite shared_name

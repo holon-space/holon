@@ -865,13 +865,14 @@ mod backend {
         let (reactive, runtime) = reactive_and_rt("snapshot_view")?;
         // ALLOW(entity_uri_from_raw): NAPI/FFI block_id String from JS worker caller
         let block_uri = EntityUri::from_raw(&block_id);
-        runtime.block_on(async {
-            let _ = tokio::time::timeout(
+        runtime
+            .block_on(super::await_ready_within(
+                &holon_api::SystemClock,
+                &format!("snapshot_view {block_id}"),
                 std::time::Duration::from_secs(5),
                 reactive.await_ready(&block_uri),
-            )
-            .await;
-        });
+            ))
+            .map_err(|e| super::nerr("await_ready", e))?;
         let snapshot = reactive.snapshot(&block_uri);
         serde_json::to_string(&snapshot).map_err(|e| super::nerr("serialize snapshot", e))
     }
@@ -1214,13 +1215,14 @@ mod backend {
                     .to_string();
                 // ALLOW(entity_uri_from_raw): block_id from MCP args JSON
                 let block_uri = EntityUri::from_raw(&block_id);
-                runtime.block_on(async {
-                    let _ = tokio::time::timeout(
+                runtime
+                    .block_on(super::await_ready_within(
+                        &holon_api::SystemClock,
+                        &format!("describe_ui {block_id}"),
                         std::time::Duration::from_secs(5),
                         reactive.await_ready(&block_uri),
-                    )
-                    .await;
-                });
+                    ))
+                    .map_err(|e| super::nerr("await_ready", e))?;
                 // `snapshot_resolved`, not raw `snapshot`: the RESOLVED tree
                 // round-trips as a `ViewModel` for the live-MCP twin's
                 // `refresh_ui`, whereas `snapshot` leaves unresolved
@@ -1886,6 +1888,22 @@ fn nerr(label: &str, e: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(format!("{label}: {e}"))
 }
 
+/// `Err` naming `what` when `ready` has not completed once `limit` passes, so
+/// a caller never takes a not-yet-ready snapshot for the real one. A plain
+/// `String` error: a `napi::Error` cannot be dropped in the native test build.
+async fn await_ready_within(
+    clock: &dyn holon_api::Clock,
+    what: &str,
+    limit: Duration,
+    ready: impl std::future::Future<Output = ()>,
+) -> Result<(), String> {
+    use holon_api::ClockExt;
+    clock
+        .timeout(limit, ready)
+        .await
+        .map_err(|_| format!("{what} not ready within {limit:?}"))
+}
+
 /// The wire value of an `OpOutcome` leaving the worker: the operation's raw
 /// response, `null` when there is none.
 ///
@@ -2087,7 +2105,10 @@ pub fn db_query(sql: String) -> napi::Result<String> {
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
+    use holon_api::ClockExt;
+    use holon_api::SystemClock;
     use holon_api::Value;
 
     /// `execute_operation` deserializes `params_json` into
@@ -2251,5 +2272,39 @@ mod tests {
             Value::Object(m) => assert_eq!(m["k"], Value::String("v".into())),
             other => panic!("expected Value::Object, got {other:?}"),
         }
+    }
+
+    /// Exhaustive over boundary values instead of proptest: this crate is its
+    /// own workspace without proptest, and the paused clock makes each pair
+    /// deterministic. The timeout polls the future before the deadline, so a
+    /// future ready exactly at the limit counts as ready.
+    #[tokio::test(start_paused = true)]
+    async fn await_ready_within_is_ok_iff_ready_by_the_limit() {
+        let ms = [0u64, 1, 4_999, 5_000, 5_001];
+        for ready_ms in ms {
+            for limit_ms in ms {
+                let ready = SystemClock.sleep(Duration::from_millis(ready_ms));
+                let result = super::await_ready_within(
+                    &SystemClock,
+                    "describe_ui block:x",
+                    Duration::from_millis(limit_ms),
+                    ready,
+                )
+                .await;
+                assert_eq!(
+                    result.is_ok(),
+                    ready_ms <= limit_ms,
+                    "ready after {ready_ms} ms, limit {limit_ms} ms: {result:?}"
+                );
+            }
+        }
+        let never = super::await_ready_within(
+            &SystemClock,
+            "snapshot_view block:x",
+            Duration::from_secs(5),
+            std::future::pending(),
+        )
+        .await;
+        assert!(never.is_err(), "a future that never completes times out");
     }
 }

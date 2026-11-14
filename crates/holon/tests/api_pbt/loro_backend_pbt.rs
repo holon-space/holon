@@ -1099,3 +1099,195 @@ mod custom_properties_round_trip {
         );
     }
 }
+
+/// A `StreamPosition::Version` token that is not 8 bytes is the caller's
+/// error: both backends answer it with one `InvalidOperation` and nothing else.
+#[cfg(test)]
+mod stream_token {
+    use std::time::Duration;
+
+    use holon::api::repository::CoreOperations;
+    use holon::api::repository::Lifecycle;
+    use holon_api::ApiError;
+    use holon_api::Block;
+    use holon_api::BlockContent;
+    use holon_api::EntityUri;
+    use holon_api::StreamPosition;
+    use holon_api::streaming::ChangeNotifications;
+    use holon_loro::LoroBackend;
+    use holon_loro_wiring::memory_backend::MemoryBackend;
+    use proptest::prelude::*;
+    use tokio_stream::StreamExt;
+
+    #[derive(Debug, Clone)]
+    enum Token {
+        Current,
+        Malformed(Vec<u8>),
+    }
+
+    fn token() -> impl Strategy<Value = Token> {
+        prop_oneof![
+            Just(Token::Current),
+            prop::collection::vec(any::<u8>(), 0..17)
+                .prop_filter("not 8 bytes", |t| t.len() != 8)
+                .prop_map(Token::Malformed),
+        ]
+    }
+
+    const STATIC_EXAMPLES: [(usize, &[u8]); 3] = [(0, &[]), (2, &[0; 7]), (1, &[0; 9])];
+
+    async fn check<B>(backend: B, prior_blocks: usize, token: &Token)
+    where
+        B: CoreOperations + ChangeNotifications<Block>,
+    {
+        for i in 0..prior_blocks {
+            backend
+                .create_block(
+                    EntityUri::no_parent(),
+                    BlockContent::text(format!("b{i}")),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let bytes = match token {
+            Token::Current => backend.get_current_version().await.unwrap(),
+            Token::Malformed(bytes) => bytes.clone(),
+        };
+        let mut stream = backend
+            .watch_changes_since(StreamPosition::Version(bytes.clone()))
+            .await;
+        backend
+            .create_block(EntityUri::no_parent(), BlockContent::text("after"), None)
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("the subscription yields an item for a new change or a refused token");
+        match token {
+            Token::Current => assert!(
+                matches!(first, Some(Ok(ref batch)) if !batch.is_empty()),
+                "a valid token streams the next change, got {first:?}"
+            ),
+            Token::Malformed(_) => {
+                assert!(
+                    matches!(first, Some(Err(ApiError::InvalidOperation { .. }))),
+                    "a {}-byte token is refused as InvalidOperation, got {first:?}",
+                    bytes.len()
+                );
+                let next = tokio::time::timeout(Duration::from_millis(50), stream.next()).await;
+                assert!(
+                    !matches!(next, Ok(Some(Ok(_)))),
+                    "no change follows a refused token, got {next:?}"
+                );
+            }
+        }
+    }
+
+    async fn check_both(prior_blocks: usize, token: &Token) {
+        let clock = std::sync::Arc::new(holon_api::SystemClock);
+        let memory = MemoryBackend::create_new("token-memory".to_string(), clock.clone())
+            .await
+            .unwrap();
+        check(memory, prior_blocks, token).await;
+        let loro = LoroBackend::create_new("token-loro".to_string(), clock)
+            .await
+            .unwrap();
+        check(loro, prior_blocks, token).await;
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 24, failure_persistence: None, .. ProptestConfig::default() })]
+
+        #[test]
+        fn malformed_token_is_refused_on_both_backends(prior_blocks in 0usize..4, token in token()) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            for (prior, bytes) in STATIC_EXAMPLES {
+                runtime.block_on(check_both(prior, &Token::Malformed(bytes.to_vec())));
+            }
+            runtime.block_on(check_both(prior_blocks, &token));
+        }
+    }
+}
+
+/// An 8-byte token whose watermark the ring has evicted stays the
+/// expired-window error on both backends: the subscriber must re-sync.
+#[cfg(test)]
+mod stream_token_expired {
+    use std::time::Duration;
+
+    use holon::api::repository::CoreOperations;
+    use holon::api::repository::Lifecycle;
+    use holon_api::ApiError;
+    use holon_api::Block;
+    use holon_api::BlockContent;
+    use holon_api::EntityUri;
+    use holon_api::StreamPosition;
+    use holon_api::streaming::ChangeNotifications;
+    use holon_loro::LoroBackend;
+    use holon_loro::event_ring::DEFAULT_EVENT_RING_CAPACITY;
+    use holon_loro_wiring::memory_backend::MemoryBackend;
+    use proptest::prelude::*;
+    use tokio_stream::StreamExt;
+
+    const EVICTED: u64 = 16;
+
+    async fn check_evicted<B>(backend: B, stale: u64)
+    where
+        B: CoreOperations + ChangeNotifications<Block>,
+    {
+        for i in 0..(DEFAULT_EVENT_RING_CAPACITY as u64 + EVICTED) {
+            backend
+                .create_block(
+                    EntityUri::no_parent(),
+                    BlockContent::text(format!("b{i}")),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let mut stream = backend
+            .watch_changes_since(StreamPosition::Version(stale.to_le_bytes().to_vec()))
+            .await;
+        backend
+            .create_block(EntityUri::no_parent(), BlockContent::text("after"), None)
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("the subscription yields an item");
+        assert!(
+            matches!(first, Some(Err(ApiError::InternalError { .. }))),
+            "an evicted watermark {stale} is the expired-window error, got {first:?}"
+        );
+        let next = tokio::time::timeout(Duration::from_millis(50), stream.next()).await;
+        assert!(
+            !matches!(next, Ok(Some(Ok(_)))),
+            "no change follows an expired watermark, got {next:?}"
+        );
+    }
+
+    async fn check_both(stale: u64) {
+        let clock = std::sync::Arc::new(holon_api::SystemClock);
+        let memory = MemoryBackend::create_new("expired-memory".to_string(), clock.clone())
+            .await
+            .unwrap();
+        check_evicted(memory, stale).await;
+        let loro = LoroBackend::create_new("expired-loro".to_string(), clock)
+            .await
+            .unwrap();
+        check_evicted(loro, stale).await;
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 3, failure_persistence: None, .. ProptestConfig::default() })]
+
+        #[test]
+        fn evicted_watermark_is_the_expired_window_error_on_both_backends(stale in 0u64..EVICTED) {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            // Static example: 8 zero bytes after an evicted ring.
+            runtime.block_on(check_both(0));
+            runtime.block_on(check_both(stale));
+        }
+    }
+}

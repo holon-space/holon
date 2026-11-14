@@ -1113,3 +1113,226 @@ proptest::proptest! {
         }
     }
 }
+
+/// A page as the corrupt-carrier property generates it: its header keyword
+/// lines, and per heading its body keyword lines.
+#[derive(Debug, Clone)]
+struct CarrierPage {
+    header: Vec<&'static str>,
+    headings: Vec<Vec<&'static str>>,
+}
+
+impl CarrierPage {
+    fn text(&self) -> String {
+        let mut text = "#+ID: p\n".to_string();
+        for line in &self.header {
+            text.push_str(line);
+            text.push('\n');
+        }
+        for (i, keyword_lines) in self.headings.iter().enumerate() {
+            // ZED before ALPHA: an authored drawer order that is not byte order.
+            text.push_str(&format!(
+                "* H{i}\n:PROPERTIES:\n:ID: h{i}\n:ZED: 1\n:ALPHA: 2\n:END:\n"
+            ));
+            for line in keyword_lines {
+                text.push_str(line);
+                text.push('\n');
+            }
+            text.push_str(&format!("text {i}\n"));
+        }
+        text
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CarrierOwner {
+    Page,
+    Heading(usize),
+}
+
+#[derive(Debug, Clone)]
+struct Corruption {
+    owner: CarrierOwner,
+    carrier: &'static str,
+    value: holon_api::Value,
+}
+
+fn carrier_page() -> proptest::strategy::BoxedStrategy<CarrierPage> {
+    use proptest::prelude::*;
+    let header_line = proptest::sample::select(vec!["#+FOO: x", "#+AUTHOR: a", "#+STARTUP: fold"]);
+    let body_line = proptest::sample::select(vec!["#+CAPTION: c", "#+FOO: y"]);
+    (
+        proptest::collection::vec(header_line, 0..=3),
+        proptest::collection::vec(proptest::collection::vec(body_line, 0..=2), 0..=3),
+    )
+        .prop_map(|(header, headings)| CarrierPage { header, headings })
+        .boxed()
+}
+
+fn corrupt_value() -> proptest::strategy::BoxedStrategy<holon_api::Value> {
+    use holon_api::Value;
+    use proptest::prelude::*;
+    prop_oneof![
+        Just(Value::String("not json".into())),
+        Just(Value::String(r#"{"a": 1}"#.into())),
+        Just(Value::String("null".into())),
+        Just(Value::String("[]".into())),
+        Just(Value::String("{".into())),
+        Just(Value::Integer(5)),
+    ]
+    .boxed()
+}
+
+fn corruption(page: &CarrierPage) -> proptest::strategy::BoxedStrategy<Corruption> {
+    use holon_org_format::models::org_props;
+    use proptest::prelude::*;
+    let page_carriers =
+        proptest::sample::select(vec![org_props::HEADER_LINES, org_props::HEADER_PLACES])
+            .prop_map(|carrier| (CarrierOwner::Page, carrier))
+            .boxed();
+    let owners = if page.headings.is_empty() {
+        page_carriers
+    } else {
+        let heading_carriers = (
+            0..page.headings.len(),
+            proptest::sample::select(vec![org_props::KEYWORD_LINES, org_props::DRAWER_ORDER]),
+        )
+            .prop_map(|(i, carrier)| (CarrierOwner::Heading(i), carrier))
+            .boxed();
+        prop_oneof![page_carriers, heading_carriers].boxed()
+    };
+    (owners, corrupt_value())
+        .prop_map(|((owner, carrier), value)| Corruption {
+            owner,
+            carrier,
+            value,
+        })
+        .boxed()
+}
+
+fn page_and_corruption() -> proptest::strategy::BoxedStrategy<(CarrierPage, Corruption)> {
+    use proptest::prelude::*;
+    carrier_page()
+        .prop_flat_map(|page| {
+            let c = corruption(&page);
+            (Just(page), c)
+        })
+        .boxed()
+}
+
+/// The page parsed, `corruption` applied, and with `strip_org_properties` each
+/// heading without its `org_properties`, as a store round trip leaves it.
+fn corrupted_render(
+    page: &CarrierPage,
+    corruption: Option<&Corruption>,
+    strip_org_properties: bool,
+) -> (EntityUri, bool, holon_api::Rendered) {
+    use holon_org_format::OrgDocumentExt;
+    let (mut document, mut blocks) = parse(&page.text());
+    if strip_org_properties {
+        for block in &mut blocks {
+            block.set_org_properties(None);
+        }
+    }
+    let (owner, unreadable) = match corruption {
+        None => (document.id.clone(), false),
+        Some(c) => {
+            let target: &mut Block = match c.owner {
+                CarrierOwner::Page => &mut document,
+                CarrierOwner::Heading(i) => blocks
+                    .iter_mut()
+                    .find(|b| b.id.id() == format!("h{i}"))
+                    .expect("the heading the page writes"),
+            };
+            target.set_property(c.carrier, c.value.clone());
+            let unreadable = match c.owner {
+                CarrierOwner::Page => target.header_keyword_lines().is_err(),
+                CarrierOwner::Heading(_) => {
+                    target.keyword_lines().is_err() || target.authored_drawer_order().is_err()
+                }
+            };
+            (target.id.clone(), unreadable)
+        }
+    };
+    let rendered = OrgRenderer::render_document(&document, &blocks, Path::new(FILE), &document.id)
+        .expect("a corrupt carrier degrades the render, never fails it");
+    (owner, unreadable, rendered)
+}
+
+fn check_one_loss_per_corrupt_carrier(
+    page: &CarrierPage,
+    corruption: &Corruption,
+    strip_org_properties: bool,
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    let (clean_owner, _, clean) = corrupted_render(page, None, strip_org_properties);
+    proptest::prop_assert!(
+        clean.losses.is_empty() && clean.text == page.text(),
+        "a page with readable carriers writes back its bytes with no loss (page {clean_owner}): \
+         {:?}\n{}",
+        clean.losses,
+        clean.text
+    );
+    let (owner, unreadable, rendered) =
+        corrupted_render(page, Some(corruption), strip_org_properties);
+    let owners: Vec<&EntityUri> = rendered.losses.iter().map(|l| &l.block).collect();
+    if unreadable {
+        proptest::prop_assert_eq!(
+            owners,
+            vec![&owner],
+            "an unreadable carrier is one loss owned by its block: {:?}\n{}",
+            rendered.losses,
+            rendered.text
+        );
+    } else {
+        proptest::prop_assert!(
+            matches!(corruption.value, holon_api::Value::String(ref s) if s == "[]"),
+            "only `[]` is a readable value: {corruption:?}"
+        );
+        proptest::prop_assert!(
+            owners.is_empty(),
+            "a readable carrier is no loss: {:?}",
+            rendered.losses
+        );
+    }
+    Ok(())
+}
+
+proptest::proptest! {
+    /// A carrier the store holds unreadable degrades its block: the page still
+    /// renders, and the render records exactly one loss, owned by that block.
+    #[test]
+    fn a_corrupt_carrier_is_one_loss_owned_by_its_block(
+        (page, corruption) in page_and_corruption(),
+        strip_org_properties in proptest::prelude::any::<bool>(),
+    ) {
+        use holon_api::Value;
+        use holon_org_format::models::org_props;
+        let one_heading = CarrierPage { header: vec![], headings: vec![vec!["#+FOO: y"]] };
+        let static_examples = [
+            (
+                CarrierPage { header: vec!["#+FOO: x"], headings: vec![] },
+                Corruption { owner: CarrierOwner::Page, carrier: org_props::HEADER_LINES, value: Value::String("{".into()) },
+                false,
+            ),
+            (
+                one_heading.clone(),
+                Corruption { owner: CarrierOwner::Heading(0), carrier: org_props::KEYWORD_LINES, value: Value::String("garbage".into()) },
+                false,
+            ),
+            (
+                one_heading,
+                Corruption { owner: CarrierOwner::Heading(0), carrier: org_props::DRAWER_ORDER, value: Value::String("5".into()) },
+                true,
+            ),
+            (
+                CarrierPage { header: vec!["#+FOO: x", "#+AUTHOR: a"], headings: vec![] },
+                Corruption { owner: CarrierOwner::Page, carrier: org_props::HEADER_PLACES, value: Value::String("[1]".into()) },
+                false,
+            ),
+        ];
+        for (page, corruption, strip) in &static_examples {
+            check_one_loss_per_corrupt_carrier(page, corruption, *strip)?;
+        }
+        check_one_loss_per_corrupt_carrier(&page, &corruption, strip_org_properties)?;
+    }
+}

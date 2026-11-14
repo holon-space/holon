@@ -239,6 +239,7 @@ crates/holon-rows/tests/mapper_bounds.rs	timing	holon_api::duration_budget::Dura
 crates/holon-turso/tests/stuck_actor_watch.rs	liveness	Instant::now() < deadline,
 crates/holon-turso/tests/stuck_actor_watch.rs	liveness	Instant::now() < deadline,
 crates/holon-turso/tests/stuck_actor_watch.rs	lower-bound	waited >= Duration::from_millis(500),
+frontends/holon-worker/src/lib.rs	virtual-clock	ready_ms <= limit_ms,
 frontends/mcp/src/standalone.rs	liveness	Instant::now() < deadline,
 frontends/mcp/src/tools.rs	liveness	std::time::Instant::now() < deadline,
 frontends/mcp/src/tools.rs	timing	holon_api::duration_budget::DurationBudget::small(

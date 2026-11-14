@@ -147,6 +147,7 @@ impl OrgRenderer {
     ) -> anyhow::Result<Pass> {
         let mut losses = Vec::new();
         let (mut result, header) = crate::models::document_head(doc_block, edits, &mut losses)?;
+        // document_head records the loss for an unreadable carrier.
         let header_lines_authored = doc_block.header_lines().unwrap_or_default();
         // The doc-root's OWN body — the pre-first-headline text. Like a
         // headline, a doc-root stores `title\nbody` in its content; the title
@@ -258,6 +259,8 @@ impl OrgRenderer {
         file_id: &EntityUri,
     ) -> anyhow::Result<Vec<(crate::page_keywords::LineAt, String)>> {
         use crate::page_keywords::LineAt;
+        // document_head and render_headline_block record the loss for an unreadable
+        // carrier; a render discloses each one once.
         let mut lines: Vec<(LineAt, String)> = doc_block
             .header_keyword_lines()
             .unwrap_or_default()
@@ -287,6 +290,7 @@ impl OrgRenderer {
 
     /// `block` with the page-keyword edits to its own keyword lines applied.
     fn apply_page_keyword_edits(block: &mut Block, edits: &crate::page_keywords::Edits) {
+        // render_headline_block records the loss for an unreadable carrier.
         let Ok(lines) = block.keyword_lines() else {
             return;
         };
@@ -637,7 +641,8 @@ impl OrgRenderer {
 
             // serde_json::Map uses IndexMap (preserve_order feature is enabled
             // by a transitive dependency), so insertion order is line order.
-            // An unreadable order carrier leaves the drawer in alphabetical order.
+            // An unreadable order carrier leaves the drawer in alphabetical
+            // order; render_headline_block records the loss.
             let mut drawer_props = block.drawer_properties();
             let order = drawer_key_order(
                 &block.authored_drawer_order().unwrap_or_default(),
@@ -686,7 +691,11 @@ fn check_header_reads_back(
             .collect()
     };
     let id_differs = !doc_block.id.is_file() && read.id != doc_block.id;
-    let read_lines = lines(&read.header_keyword_lines().unwrap_or_default());
+    let read_lines = lines(
+        &read
+            .header_keyword_lines()
+            .expect("the parser writes a readable carrier"),
+    );
     if !id_differs
         && read.file_title() == doc_block.file_title()
         && declared(read) == declared(doc_block)

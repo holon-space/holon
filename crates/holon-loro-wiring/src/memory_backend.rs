@@ -683,15 +683,20 @@ impl ChangeNotifications<Block> for MemoryBackend {
                 // watermark fails loud — re-subscribe from `Beginning` —
                 // instead of silently replaying partial history.
                 let state = self.state.read().unwrap();
-                let watermark = u64::from_le_bytes(version.as_slice().try_into().unwrap_or([0; 8]));
-
-                match state.event_log.replay_since(watermark) {
-                    Ok(events) => events,
-                    Err(expired) => {
-                        tracing::error!("[MemoryBackend] watch_changes_since: {expired}");
-                        let error_stream = tokio_stream::iter(vec![Err(ApiError::InternalError {
+                let replay = holon_loro::event_ring::watermark_from_token(&version).and_then(|w| {
+                    state
+                        .event_log
+                        .replay_since(w)
+                        .map_err(|expired| ApiError::InternalError {
                             message: expired.to_string(),
-                        })]);
+                        })
+                });
+
+                match replay {
+                    Ok(events) => events,
+                    Err(e) => {
+                        tracing::error!("[MemoryBackend] watch_changes_since: {e}");
+                        let error_stream = tokio_stream::iter(vec![Err(e)]);
                         let (_tx, rx) =
                             mpsc::channel::<std::result::Result<Vec<Change<Block>>, ApiError>>(100);
                         return Box::pin(error_stream.chain(ReceiverStream::new(rx)));

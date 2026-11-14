@@ -486,6 +486,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `windowed-shape-gate-split-anchor-not-simulated`
 - `windowed-splitblock-no-editable-surface`
 - `writeback-churning-file-stall-disclosed-twice`
+- `writeback-undone-deletion-prune-deadline-load-flake`
 - `writeorgfile-sql-reads-budget`
 
 ## Sources

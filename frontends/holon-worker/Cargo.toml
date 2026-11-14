@@ -93,6 +93,10 @@ loro_fractional_index = { git = "https://github.com/nightscape/loro.git", rev = 
 [build-dependencies]
 napi-build = "=2.3.2"
 
+[dev-dependencies]
+# `test-util` gives the paused clock that makes the readiness-timeout test deterministic.
+tokio = { version = "1", default-features = false, features = ["rt", "time", "macros", "test-util"] }
+
 [features]
 # `browser` toggles the vendored Turso OPFS shim. Phase 2 enables it by
 # default so the harness exercises OPFS-backed Turso.

@@ -85,6 +85,20 @@ impl<T: Clone> EventRing<T> {
     }
 }
 
+/// Parse a `StreamPosition::Version` token, which `next_seq` encodes as
+/// little-endian `u64` bytes.
+pub fn watermark_from_token(token: &[u8]) -> Result<u64, holon_api::ApiError> {
+    let bytes: [u8; 8] = token
+        .try_into()
+        .map_err(|_| holon_api::ApiError::InvalidOperation {
+            message: format!(
+                "stream version token must be 8 bytes (little-endian u64 watermark), got {} bytes",
+                token.len()
+            ),
+        })?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
 /// Deliver one change batch to every subscriber, fail-loud.
 ///
 /// The previous `retain(|s| s.try_send(..).is_ok())` conflated two cases:
@@ -126,7 +140,33 @@ pub async fn deliver_to_subscribers<T>(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        #[test]
+        fn watermark_token_round_trips(n in any::<u64>()) {
+            prop_assert_eq!(watermark_from_token(&n.to_le_bytes()).unwrap(), n);
+        }
+
+        #[test]
+        fn watermark_token_of_other_length_is_invalid(
+            token in prop::collection::vec(any::<u8>(), 0..17).prop_filter("not 8 bytes", |t| t.len() != 8)
+        ) {
+            // The static examples run on every case count: empty, 7 and 9 bytes.
+            for fixed in [&[][..], &[0u8; 7][..], &[0u8; 9][..]] {
+                let refused = matches!(
+                    watermark_from_token(fixed),
+                    Err(holon_api::ApiError::InvalidOperation { .. })
+                );
+                prop_assert!(refused, "{} bytes are not refused", fixed.len());
+            }
+            let parsed = watermark_from_token(&token);
+            let refused = matches!(parsed, Err(holon_api::ApiError::InvalidOperation { .. }));
+            prop_assert!(refused, "{} bytes parsed as {:?}", token.len(), parsed);
+        }
+    }
 
     #[test]
     fn replay_from_zero_returns_everything_within_capacity() {

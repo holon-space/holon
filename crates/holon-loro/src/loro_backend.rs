@@ -4990,14 +4990,20 @@ impl ChangeNotifications<Block> for LoroBackend {
             // exactly the changes with seq >= watermark. A watermark that has
             // been evicted fails loud — the subscriber must re-sync from
             // `Beginning` — instead of silently replaying partial history.
-            let watermark = u64::from_le_bytes(watermark.as_slice().try_into().unwrap_or([0; 8]));
-            match self.event_log.lock().unwrap().replay_since(watermark) {
-                Ok(events) => replay_items.extend(events),
-                Err(expired) => {
-                    tracing::error!("[LoroBackend] watch_changes_since: {expired}");
-                    let error_stream = tokio_stream::iter(vec![Err(ApiError::InternalError {
+            let replay = crate::event_ring::watermark_from_token(watermark).and_then(|w| {
+                self.event_log
+                    .lock()
+                    .unwrap()
+                    .replay_since(w)
+                    .map_err(|expired| ApiError::InternalError {
                         message: expired.to_string(),
-                    })]);
+                    })
+            });
+            match replay {
+                Ok(events) => replay_items.extend(events),
+                Err(e) => {
+                    tracing::error!("[LoroBackend] watch_changes_since: {e}");
+                    let error_stream = tokio_stream::iter(vec![Err(e)]);
                     let (_tx, rx) =
                         mpsc::channel::<std::result::Result<Vec<Change<Block>>, ApiError>>(100);
                     return Box::pin(error_stream.chain(ReceiverStream::new(rx)));

@@ -1282,7 +1282,7 @@ const THIRD_WITHOUT_COPY: &str = "\
 
 const OVERVIEW_NO_COPY: &str = "#+TITLE: Overview\n#+ID: overview\n";
 
-async fn assert_the_deletion_stands(env: &TestEnvironment) {
+async fn assert_the_deletion_stands(env: &TestEnvironment, test: &str) {
     assert_eq!(count_rows(env, KID).await, 0, "the deletion does not stand");
     assert!(
         !copy_conditions(env).iter().any(|(_, kind)| *kind
@@ -1294,7 +1294,7 @@ async fn assert_the_deletion_stands(env: &TestEnvironment) {
     while read_file(env, "DayPage.org").await.contains("bulk-0-0-kid") {
         assert!(
             std::time::Instant::now() < deadline,
-            "DayPage.org still holds the child the user deleted:\n{}",
+            "DayPage.org still holds the child the user deleted in {test}:\n{}",
             read_file(env, "DayPage.org").await
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1331,7 +1331,11 @@ fn an_undone_deletion_stands_when_the_other_copy_drops_the_whole_heading() {
             "Overview.org still holds the child"
         );
         save_and_settle(&env, "Overview.org", OVERVIEW_COPY_WITHOUT_KID).await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(
+            &env,
+            "an_undone_deletion_stands_when_the_other_copy_drops_the_whole_heading",
+        )
+        .await;
         env.stop_app().await.expect("stop_app");
     });
 }
@@ -1354,7 +1358,11 @@ fn an_undone_deletion_stands_when_the_other_copy_file_is_deleted() {
             "Overview.org still holds the child"
         );
         save_and_settle(&env, "Overview.org", OVERVIEW_COPY_WITHOUT_KID).await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(
+            &env,
+            "an_undone_deletion_stands_when_the_other_copy_file_is_deleted",
+        )
+        .await;
         env.stop_app().await.expect("stop_app");
     });
 }
@@ -1383,7 +1391,11 @@ fn an_undone_deletion_stands_when_the_last_copy_is_deleted() {
             ],
         );
         save_and_settle(&env, "Overview.org", OVERVIEW_NO_COPY).await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(
+            &env,
+            "an_undone_deletion_stands_when_the_last_copy_is_deleted",
+        )
+        .await;
         assert!(
             copy_conditions(&env).is_empty(),
             "{:?}",
@@ -1402,7 +1414,7 @@ fn a_child_no_copy_holds_is_deleted_at_once() {
         wait_for_row(&env, KID).await;
         save_and_settle(&env, "Overview.org", OVERVIEW_COPY_WITHOUT_KID).await;
         save_and_settle(&env, "DayPage.org", DAY_PAGE_KID_REMOVED).await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(&env, "a_child_no_copy_holds_is_deleted_at_once").await;
         assert_eq!(
             copy_conditions(&env),
             vec![(
@@ -1503,7 +1515,11 @@ fn an_undone_deletion_stands_when_the_copy_lets_go_while_closed() {
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
         env.settle().await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(
+            &env,
+            "an_undone_deletion_stands_when_the_copy_lets_go_while_closed",
+        )
+        .await;
         assert_eq!(
             copy_conditions(&env),
             vec![(
@@ -1534,7 +1550,7 @@ fn an_undone_deletion_survives_a_restart() {
             copy_conditions(&env)
         );
         save_and_settle(&env, "Overview.org", OVERVIEW_COPY_WITHOUT_KID).await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(&env, "an_undone_deletion_survives_a_restart").await;
         env.stop_app().await.expect("stop_app");
     });
 }
@@ -1695,7 +1711,11 @@ fn a_file_sync_controller_that_cannot_start_is_disclosed() {
 /// child: the record of the undone deletion reached the vault first, so the
 /// next boot still knows the deletion is pending, and it stands once the copy
 /// lets go of the child.
-fn an_undone_deletion_survives_a_crash_at(crash_point: &'static str, put_back_before_crash: bool) {
+fn an_undone_deletion_survives_a_crash_at(
+    test: &'static str,
+    crash_point: &'static str,
+    put_back_before_crash: bool,
+) {
     let rt = runtime();
     rt.clone().block_on(async move {
         let mut env = started_with_day_page(rt, DAY_PAGE_WITH_KID_AND_KEEPER).await;
@@ -1729,7 +1749,7 @@ fn an_undone_deletion_survives_a_crash_at(crash_point: &'static str, put_back_be
             copy_conditions(&env)
         );
         save_and_settle(&env, "Overview.org", OVERVIEW_COPY_WITHOUT_KID).await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(&env, test).await;
         env.stop_app().await.expect("stop_app");
     });
 }
@@ -1737,14 +1757,22 @@ fn an_undone_deletion_survives_a_crash_at(crash_point: &'static str, put_back_be
 /// The put-back line is in the file, and the record written before it.
 #[test]
 fn an_undone_deletion_survives_a_crash_after_the_put_back() {
-    an_undone_deletion_survives_a_crash_at("after_ingest_write_back", true);
+    an_undone_deletion_survives_a_crash_at(
+        "an_undone_deletion_survives_a_crash_after_the_put_back",
+        "after_ingest_write_back",
+        true,
+    );
 }
 
 /// Only the record reached the vault: the child is gone from its own file and
 /// still in the store. The next boot puts it back again.
 #[test]
 fn an_undone_deletion_survives_a_crash_before_the_put_back() {
-    an_undone_deletion_survives_a_crash_at("after_undone_deletions_persisted", false);
+    an_undone_deletion_survives_a_crash_at(
+        "an_undone_deletion_survives_a_crash_before_the_put_back",
+        "after_undone_deletions_persisted",
+        false,
+    );
 }
 
 /// A vault the app cannot watch says so: file changes stop reaching Holon,
@@ -1817,7 +1845,11 @@ async fn end_the_undone_deletion(env: &TestEnvironment, ending: Ending) {
 /// The app dies at `crash_point` while `ending` ends the undone deletion of
 /// the child: after the restart the user's deletion stands, and nothing about
 /// it is left disclosed.
-fn a_standing_deletion_survives_a_crash_at(ending: Ending, crash_point: &'static str) {
+fn a_standing_deletion_survives_a_crash_at(
+    test: &'static str,
+    ending: Ending,
+    crash_point: &'static str,
+) {
     let rt = runtime();
     rt.clone().block_on(async move {
         let mut env = started_with_day_page(rt, DAY_PAGE_WITH_KID_AND_KEEPER).await;
@@ -1844,7 +1876,7 @@ fn a_standing_deletion_survives_a_crash_at(ending: Ending, crash_point: &'static
         env.start_app(true).await.expect("restart");
         wait_for_row(&env, "block:day-keeps").await;
         env.settle().await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(&env, test).await;
         if matches!(ending, Ending::CopyAdopted) {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             while read_file(&env, "Overview.org")
@@ -1866,6 +1898,7 @@ fn a_standing_deletion_survives_a_crash_at(ending: Ending, crash_point: &'static
 #[test]
 fn an_adopted_copy_keeps_the_deletion_after_a_crash_before_its_store_change() {
     a_standing_deletion_survives_a_crash_at(
+        "an_adopted_copy_keeps_the_deletion_after_a_crash_before_its_store_change",
         Ending::CopyAdopted,
         "after_undone_deletions_persisted",
     );
@@ -1873,27 +1906,44 @@ fn an_adopted_copy_keeps_the_deletion_after_a_crash_before_its_store_change() {
 
 #[test]
 fn an_adopted_copy_keeps_the_deletion_after_a_crash_after_its_write_back() {
-    a_standing_deletion_survives_a_crash_at(Ending::CopyAdopted, "after_ingest_write_back");
+    a_standing_deletion_survives_a_crash_at(
+        "an_adopted_copy_keeps_the_deletion_after_a_crash_after_its_write_back",
+        Ending::CopyAdopted,
+        "after_ingest_write_back",
+    );
 }
 
 #[test]
 fn an_adopted_copy_keeps_the_deletion_after_a_crash_before_the_record_is_written() {
-    a_standing_deletion_survives_a_crash_at(Ending::CopyAdopted, "before_undone_deletions_written");
+    a_standing_deletion_survives_a_crash_at(
+        "an_adopted_copy_keeps_the_deletion_after_a_crash_before_the_record_is_written",
+        Ending::CopyAdopted,
+        "before_undone_deletions_written",
+    );
 }
 
 #[test]
 fn a_copy_letting_go_keeps_the_deletion_after_a_crash_before_its_store_change() {
-    a_standing_deletion_survives_a_crash_at(Ending::CopyLetsGo, "after_undone_deletions_persisted");
+    a_standing_deletion_survives_a_crash_at(
+        "a_copy_letting_go_keeps_the_deletion_after_a_crash_before_its_store_change",
+        Ending::CopyLetsGo,
+        "after_undone_deletions_persisted",
+    );
 }
 
 #[test]
 fn a_copy_letting_go_keeps_the_deletion_after_a_crash_before_the_record_is_written() {
-    a_standing_deletion_survives_a_crash_at(Ending::CopyLetsGo, "before_undone_deletions_written");
+    a_standing_deletion_survives_a_crash_at(
+        "a_copy_letting_go_keeps_the_deletion_after_a_crash_before_the_record_is_written",
+        Ending::CopyLetsGo,
+        "before_undone_deletions_written",
+    );
 }
 
 #[test]
 fn a_deleted_copy_file_keeps_the_deletion_after_a_crash_before_the_record_is_written() {
     a_standing_deletion_survives_a_crash_at(
+        "a_deleted_copy_file_keeps_the_deletion_after_a_crash_before_the_record_is_written",
         Ending::CopyFileDeleted,
         "before_undone_deletions_written",
     );
@@ -1902,6 +1952,7 @@ fn a_deleted_copy_file_keeps_the_deletion_after_a_crash_before_the_record_is_wri
 #[test]
 fn a_holon_deletion_keeps_the_deletion_after_a_crash_before_the_record_is_written() {
     a_standing_deletion_survives_a_crash_at(
+        "a_holon_deletion_keeps_the_deletion_after_a_crash_before_the_record_is_written",
         Ending::DeletedInHolon,
         "before_undone_deletions_written",
     );
@@ -1978,7 +2029,11 @@ fn an_undone_deletion_stays_while_its_copy_file_cannot_be_read() {
             "the repaired copy lost the child"
         );
         save_and_settle(&env, "Overview.org", OVERVIEW_COPY_WITHOUT_KID).await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(
+            &env,
+            "an_undone_deletion_stays_while_its_copy_file_cannot_be_read",
+        )
+        .await;
         env.stop_app().await.expect("stop_app");
     });
 }
@@ -2194,7 +2249,11 @@ fn an_unread_copy_file_the_user_deletes_lets_the_deletion_stand() {
             .remove_file(&env.org_root().join("Overview.org"))
             .expect("delete Overview.org");
         env.settle().await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(
+            &env,
+            "an_unread_copy_file_the_user_deletes_lets_the_deletion_stand",
+        )
+        .await;
         env.stop_app().await.expect("stop_app");
     });
 }
@@ -2420,7 +2479,11 @@ fn a_put_back_child_whose_grandchild_no_copy_holds_still_lets_its_deletion_stand
             copy_conditions(&env)
         );
         save_and_settle(&env, "Overview.org", OVERVIEW_COPY_WITHOUT_KID).await;
-        assert_the_deletion_stands(&env).await;
+        assert_the_deletion_stands(
+            &env,
+            "a_put_back_child_whose_grandchild_no_copy_holds_still_lets_its_deletion_stand",
+        )
+        .await;
         env.stop_app().await.expect("stop_app");
     });
 }
