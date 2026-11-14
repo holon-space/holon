@@ -13,7 +13,8 @@ stdout: first the `BASE:` and `TREE:` lines (commit ids of the fork point of `@`
   `clippy:` and `nextest:` hold the arguments of that command. Both carry the canonical compile shape
   `--workspace --features <the justfile's CANON_FEATURES>`; the nextest line adds `--no-tests=fail`, so a run that
   matches no test fails under any nextest default, and `-E '<filterset>'` naming the crates to run. There is no `nextest:` line when no crate owns a changed path, and no `-E` when a root build
-  file changed (every crate runs).
+  file changed (every crate runs). There is no `clippy:` line either when the changed paths reach no crate (before
+  the profile below leaves any out) and hold no root file of every compile (FULL_FILES, e.g. clippy.toml).
   A crate that a `package()` term of the profile's default filter excludes is left out of `-E` and logged on stderr
   as `<crate>: no test of this profile`; its owner line stays. When every crate is left out there is no `nextest:` line.
   `holon-integration-tests` reached as a reverse dep enters the filterset by its test binaries, never as a whole
@@ -42,6 +43,7 @@ import functools
 import io
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -435,21 +437,26 @@ def run_args(canon, profile):
     return canon + " --no-tests=fail" + (f" --profile {profile}" if profile else "")
 
 
+def root_build_file(path):
+    """A root file that every compile or test step reads and no crate owns, such as clippy.toml."""
+    return len(path.parts) == 1 and path.name in FULL_FILES
+
+
 def registry_data_only(changed, registry_data):
     data = [PurePosixPath(d) for d in registry_data]
     return KNOWN_REDS_REGISTRY in changed and all(
         any(p == d or d in p.parents for d in data) for p in map(PurePosixPath, changed))
 
 
-def arg_lines(pkgs, bins, features, profile=None, owners=(), path_owners=()):
-    """The canonical compile shape for clippy, and the same shape plus the run filter for nextest.
+def arg_lines(pkgs, bins, features, profile=None, owners=(), path_owners=(), lint=True):
+    """The canonical compile shape for clippy when `lint`, and the same shape plus the run filter for nextest.
 
     Both halves of cargo's feature hash stay fixed (the justfile's CANON block): a `-p` selection
     would narrow the feature resolve and mint a build directory per lane, so what RUNS is narrowed by `-E`.
     Without a selected crate there is no owner line; one whose crates the profile excludes keeps its owner lines.
     """
     canon = canon_args(features)
-    lines = [f"clippy: {canon}"]
+    lines = [f"clippy: {canon}"] if lint else []
     run = run_args(canon, profile)
     sel = filterset(pkgs, bins)
     if sel:
@@ -491,11 +498,14 @@ def selection(root, meta, changed, never_owner=NEVER_OWNER_MODULES, registry_dat
         canon = canon_args(canon_features(root))
         return checked([f"clippy: {canon}", f"nextest: {run_args(canon, profile)} -E '{REGISTRY_TESTS}'",
                         *sorted({REGISTRY_FIXTURE_LINE, *paths})])
+    # Decided before the profile filter below: a crate that the profile excludes is still linted.
+    lint = pkgs is None or bool(pkgs) or bool(bins) or any(root_build_file(PurePosixPath(c)) for c in changed)
     if pkgs is None:
         print(f"ALL CRATES: {reasons['*']}", file=sys.stderr)
     else:
         if not pkgs and not bins:
-            print("no workspace crate owns a changed path: no crate tests", file=sys.stderr)
+            print("no workspace crate owns a changed path: no crate tests, "
+                  + ("clippy for a changed root build file" if lint else "no clippy"), file=sys.stderr)
         for n in pkgs:
             print(f"  {n}: {reasons[n]}", file=sys.stderr)
         if bins:
@@ -508,7 +518,7 @@ def selection(root, meta, changed, never_owner=NEVER_OWNER_MODULES, registry_dat
             print(f"{n}: no test of this profile", file=sys.stderr)
         pkgs = [n for n in pkgs if n not in excluded]
         bins = {} if INTEGRATION in excluded else bins
-    return checked(arg_lines(pkgs, bins, canon_features(root), profile, owners, paths))
+    return checked(arg_lines(pkgs, bins, canon_features(root), profile, owners, paths, lint))
 
 
 # ── landing gate ─────────────────────────────────────────────────────
@@ -518,7 +528,7 @@ GATE_SCRIPTS = {"integrate": "scripts/gate-integrate.sh", "timing": "scripts/gat
 GATE_MACHINERY = frozenset({"scripts/select-tests.py", OWNER_TABLE_FILE, "scripts/gate-integrate.sh",
                             "scripts/gate-integrate-steps.sh", "scripts/gate-timing.sh"})
 # Inputs of every compile or test step: a change runs every step.
-FULL_FILES = frozenset({*ALL_TRIGGERS, "justfile", "proptest.toml"})
+FULL_FILES = frozenset({*ALL_TRIGGERS, "justfile", "proptest.toml", "clippy.toml"})
 FULL_DIRS = frozenset({".cargo", ".config", "workspace-hack"})
 # Roots no compile or test step reads except through a crate's string literal or a step's own sources.
 INERT_ROOTS = frozenset({"docs", "devlog", "wiki", "scripts", "assets", "archlint", ".archidoc", ".beads", ".claude",
@@ -649,7 +659,7 @@ def full_reason(path, dirs, root):
     p = PurePosixPath(path)
     if str(p) in GATE_MACHINERY:
         return f"{p} selects or runs the gate steps"
-    if is_all_trigger(p) or p.name == "Cargo.toml" or (len(p.parts) == 1 and p.name in FULL_FILES) or p.parts[0] in FULL_DIRS:
+    if is_all_trigger(p) or p.name == "Cargo.toml" or root_build_file(p) or p.parts[0] in FULL_DIRS:
         return f"{p} is an input of every compile"
     if owner(p, dirs) or len(p.parts) == 1 or p.parts[0] in INERT_ROOTS:
         return None
@@ -767,6 +777,7 @@ FIXTURE_PACKAGES = {
 }
 FIXTURE_FILES = {
     "crates/core/src/lib.rs": 'const SEED: &str = "assets/default";',
+    "crates/bare/build.rs": 'fn main() { println!("cargo:rerun-if-changed=../../assets/build/schema.sql"); }',
     "crates/ofmt/tests/deep.rs": "#[test] fn t() {}",
     "crates/gpui/tests/window.rs": "#[test] fn w() {}",
     f"crates/{INTEGRATION}/tests/main.rs": "mod latency_slo_gate;\nmod hand;\nmod e2e;\nmod plain;\nmod suite;\nmod web;\n",
@@ -858,10 +869,74 @@ GOLDEN = [
      [f"clippy: {CANON}", f"nextest: {RUN}", "hand-authored: just hand-authored",
       "org-deep-text-timing: just org-deep-text-timing", "timing: just timing-gate", UNOWNED_LEAF,
       "windowed: just windowed-gate"], None),
-    (["docs/Testing/Testing.md"], [f"clippy: {CANON}"], None),
-    (["frontends/worker/src/lib.rs"], [f"clippy: {CANON}", "check-worker-wasm: just check-worker-wasm"], None),
+    (["docs/Testing/Testing.md"], [], None),
+    (["frontends/worker/src/lib.rs"], ["check-worker-wasm: just check-worker-wasm"], None),
     (["frontends/other/src/lib.rs"], ValueError, None),
 ]
+
+
+# {changed path: whether it reaches what `cargo clippy --workspace` sees}, by the fixture's owners and readers.
+CLIPPY_REACH = {
+    "crates/core/src/lib.rs": True,
+    "crates/bare/src/lib.rs": True,
+    "crates/rows/tests/r.rs": True,
+    f"crates/{INTEGRATION}/tests/hand.rs": True,
+    # Read by the build.rs of `bare`, and by a string literal of `core`.
+    "assets/build/schema.sql": True,
+    "assets/default/seed.yaml": True,
+    ".cargo/config.toml": True,
+    "Cargo.lock": True,
+    "clippy.toml": True,
+    "justfile": True,
+    "assets/unread/notes.txt": False,
+    "docs/Testing/Testing.md": False,
+    ".agent-patterns/hook": False,
+    "scripts/lane.sh": False,
+    # Built by an owner line only: no workspace member.
+    "frontends/worker/src/lib.rs": False,
+    # Root-level files outside FULL_FILES, and a FULL_FILES name below the root: read by no compile.
+    "README.md": False,
+    "deny.toml": False,
+    "docs/clippy.toml": False,
+}
+# Crates the load-tolerant profile excludes: still linted.
+PROFILE_EXCLUDED = {"crates/leaf/src/lib.rs": True, "crates/gpui/tests/window.rs": True}
+CLIPPY_EXAMPLES = [[".agent-patterns/hook"], ["docs/Testing/Testing.md"], ["crates/leaf/src/lib.rs"],
+                   ["assets/default/seed.yaml"], ["assets/build/schema.sql"], ["scripts/lane.sh", "clippy.toml"]]
+
+
+def step_names(lines):
+    return {line.split(":", 1)[0] for line in lines}
+
+
+def clippy_reach_problems(root, meta, cases=200):
+    """Over drawn sets of changed paths: clippy is selected iff a path reaches a linted crate or a root build file,
+    adding a path removes no step, and a crate the profile excludes keeps clippy. Returns (problems, draw counts)."""
+    reach = {**CLIPPY_REACH, **PROFILE_EXCLUDED}
+    pool = sorted(reach)
+    rng = random.Random()
+    draws = CLIPPY_EXAMPLES + [rng.sample(pool, rng.randint(1, 3)) for _ in range(cases)]
+    found, counts = [], {"sets": 0, "no reach": 0, "profile-excluded": 0}
+
+    def names(changed):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return step_names(selection(root, meta, changed))
+
+    for changed in draws:
+        counts["sets"] += 1
+        counts["no reach"] += not any(reach[p] for p in changed)
+        counts["profile-excluded"] += any(p in PROFILE_EXCLUDED for p in changed)
+        got = names(changed)
+        if ("clippy" in got) != any(reach[p] for p in changed):
+            found.append(f"{changed}: clippy {'selected' if 'clippy' in got else 'missing'}, reach"
+                         f" {[p for p in changed if reach[p]]}")
+        added = rng.choice(pool)
+        if not got <= (more := names([*changed, added])):
+            found.append(f"{changed} + {added!r}: drops steps {sorted(got - more)}")
+    for kind in ("no reach", "profile-excluded"):
+        if not counts[kind]:
+            found.append(f"no drawn set with {kind}: the property never ran on that class")
+    return found, counts
 
 
 def without_integration_term(lines):
@@ -1009,7 +1084,8 @@ def gate_full_problems(root, meta):
     also beside a docs change."""
     dirs, _ = workspace_graph(meta)
     found = []
-    for path in ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "justfile", "proptest.toml", ".cargo/config.toml",
+    for path in ["Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "justfile", "proptest.toml", "clippy.toml",
+                 ".cargo/config.toml",
                  ".config/nextest.toml", "workspace-hack/Cargo.toml", f"{dirs[INTEGRATION]}/Cargo.toml",
                  "frontends/dioxus-web/Cargo.toml", *sorted(GATE_MACHINERY)]:
         for gate in GATE_SCRIPTS:
@@ -1102,6 +1178,10 @@ def self_check():
         root = Path(tmp)
         meta = fixture_workspace(root)
         found = golden_problems(root, meta) + never_owner_problems(root, meta)
+        clippy_found, counts = clippy_reach_problems(root, meta)
+        found += clippy_found
+        print(f"[select-tests] clippy reach: {counts['sets']} sets, {counts['no reach']} with no reach,"
+              f" {counts['profile-excluded']} with a profile-excluded crate")
     cwd = Path.cwd()
     meta = load_metadata()
     found += removed_binary_problems(cwd) + dropped_module_owner_problems(cwd) + keystone_tour_problems(cwd)
