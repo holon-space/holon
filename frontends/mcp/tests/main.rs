@@ -5,4 +5,5 @@ mod dense_patch_pbt;
 mod describe_ui_deferred;
 mod describe_ui_geometry;
 mod foreign_host_or_origin_is_refused;
+mod http_bind_refuses_non_loopback;
 mod sigterm_shuts_the_session_down;

@@ -300,6 +300,36 @@ async fn add_utf8_charset_to_content_type(
     response
 }
 
+/// Why the MCP HTTP server refuses to listen on an address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpBindError {
+    /// The server has no login, so an address the LAN reaches hands every
+    /// tool to the LAN.
+    NotLoopback(SocketAddr),
+}
+
+impl std::fmt::Display for McpBindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotLoopback(addr) => write!(
+                f,
+                "refusing to serve MCP on a non-loopback address {addr}: it has no login"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for McpBindError {}
+
+/// The MCP HTTP server serves only addresses this host alone reaches.
+pub fn require_loopback(addr: SocketAddr) -> Result<(), McpBindError> {
+    if addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(McpBindError::NotLoopback(addr))
+    }
+}
+
 /// Run the MCP HTTP server
 ///
 /// This is the core server loop, extracted for reuse by both the standalone
@@ -316,6 +346,7 @@ pub async fn run_http_server(
     bind_address: SocketAddr,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    require_loopback(bind_address)?;
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
     serve_http_on(
         engine,
@@ -769,5 +800,87 @@ mod content_type_charset_tests {
             probe("text/event-stream; charset=utf-8").await,
             "text/event-stream; charset=utf-8"
         );
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use std::net::IpAddr;
+    use std::net::Ipv4Addr;
+    use std::net::Ipv6Addr;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use proptest::prelude::*;
+    use tokio_util::sync::CancellationToken;
+
+    use super::McpBindError;
+    use super::run_http_server;
+    use crate::server::DebugServices;
+
+    fn is_loopback(ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => v4.octets()[0] == 127,
+            IpAddr::V6(v6) => v6 == Ipv6Addr::LOCALHOST,
+        }
+    }
+
+    /// The server only ever listens on a loopback address, and refuses every
+    /// other one by its own error. A cancelled token ends a loopback serve as
+    /// soon as it starts.
+    #[test]
+    fn bind_refuses_non_loopback() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let check = |ip: IpAddr| {
+            let addr = SocketAddr::new(ip, 0);
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let served = runtime.block_on(run_http_server(
+                None,
+                Arc::new(DebugServices::default()),
+                None,
+                None,
+                addr,
+                cancel,
+            ));
+            let refusal = served
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<McpBindError>().copied());
+            if is_loopback(ip) {
+                assert_eq!(refusal, None, "{addr} is loopback: {served:?}");
+            } else {
+                assert_eq!(
+                    refusal,
+                    Some(McpBindError::NotLoopback(addr)),
+                    "{addr} is reachable from off the host: {served:?}"
+                );
+            }
+        };
+
+        for ip in [
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv4Addr::LOCALHOST.to_ipv6_mapped()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            check(ip);
+        }
+        let ips = prop_oneof![
+            any::<IpAddr>(),
+            any::<[u8; 3]>().prop_map(|[a, b, c]| IpAddr::V4(Ipv4Addr::new(127, a, b, c))),
+            Just(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+        ];
+        proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(256))
+            .run(&ips, |ip| {
+                check(ip);
+                Ok(())
+            })
+            .expect("bind refusal");
     }
 }

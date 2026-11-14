@@ -257,6 +257,7 @@ frontends/gpui/tests/stop_signals_quit_through_the_session_shutdown.rs	liveness	
 frontends/gpui/tests/stop_signals_quit_through_the_session_shutdown.rs	liveness	if Instant::now() >= deadline {
 frontends/gpui/tests/vault_loading_placeholder_windowed.rs	liveness	start.elapsed() < timeout,
 frontends/mcp/tests/describe_ui_deferred.rs	timing	holon_api::duration_budget::DurationBudget::small(
+frontends/mcp/tests/http_bind_refuses_non_loopback.rs	liveness	if Instant::now() > deadline {
 frontends/mcp/tests/sigterm_shuts_the_session_down.rs	liveness	Instant::now() < deadline,
 frontends/mcp/tests/sigterm_shuts_the_session_down.rs	liveness	Instant::now() < deadline,
 frontends/tui/tests/stop_signals_quit_through_the_session_shutdown.rs	liveness	Instant::now() < deadline,

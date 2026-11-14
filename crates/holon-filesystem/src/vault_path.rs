@@ -130,6 +130,42 @@ impl VaultPath {
         Ok(Self(normalized))
     }
 
+    /// Accept an existing `path` only if the entry it names, every symlink
+    /// resolved, is a strict descendant of the entry `root` names.
+    ///
+    /// The value carries the resolved path, so a read through it opens the
+    /// file containment was proven for and not whatever a link in the
+    /// caller's spelling points at.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn inside_canonical(
+        fs: &dyn crate::fs_port::FileSystem,
+        root: &Path,
+        path: &Path,
+    ) -> Result<Self> {
+        use anyhow::Context;
+
+        let canonical_root = fs
+            .canonicalize(root)
+            .with_context(|| format!("resolving the vault root '{}'", root.display()))?;
+        // `realpath` resolves `..` and a trailing `/` past a link to a file,
+        // spellings the kernel refuses to open.
+        if !fs.exists(path) {
+            bail!("'{}' names no entry", path.display());
+        }
+        let canonical = fs
+            .canonicalize(path)
+            .with_context(|| format!("resolving '{}'", path.display()))?;
+        if canonical == canonical_root || !canonical.starts_with(&canonical_root) {
+            bail!(
+                "'{}' resolves to '{}', which lies OUTSIDE the vault root '{}'",
+                path.display(),
+                canonical.display(),
+                canonical_root.display()
+            );
+        }
+        Ok(Self(canonical))
+    }
+
     pub fn as_path(&self) -> &Path {
         &self.0
     }
@@ -366,5 +402,229 @@ mod tests {
             hidden_vault_segment(Path::new("/vault"), Path::new("/vault/.draft.org")),
             Some(".draft.org".to_string())
         );
+    }
+
+    /// A vault, a sibling holding the secret, a sibling whose name extends
+    /// the vault's, and links that leave the vault, stay in it, or name its
+    /// root.
+    #[cfg(unix)]
+    fn linked_vault() -> tempfile::TempDir {
+        let base = tempfile::tempdir().expect("temp dir");
+        let at = |rel: &str| base.path().join(rel);
+        for dir in ["vault/notes", "outside", "vault-evil"] {
+            std::fs::create_dir_all(at(dir)).expect("create fixture dir");
+        }
+        for file in [
+            "vault/notes/a.org",
+            "outside/secret.org",
+            "vault-evil/secret.org",
+        ] {
+            std::fs::write(at(file), file).expect("write fixture file");
+        }
+        for (link, target) in [
+            ("vault/file_link", "../outside/secret.org"),
+            ("vault/dir_link", "../outside"),
+            ("vault/inside_link", "./notes/a.org"),
+            ("vault/notes/root_link", ".."),
+        ] {
+            std::os::unix::fs::symlink(target, at(link)).expect("create fixture link");
+        }
+        base
+    }
+
+    /// The entries strictly inside the vault, by inode, so the oracle judges
+    /// what a path reaches without resolving or comparing any path.
+    #[cfg(unix)]
+    fn inodes_inside(vault: &Path) -> std::collections::BTreeSet<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let mut inside = std::collections::BTreeSet::new();
+        let mut todo = vec![vault.to_path_buf()];
+        while let Some(dir) = todo.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read fixture dir") {
+                let entry = entry.expect("fixture dir entry");
+                let meta = std::fs::symlink_metadata(entry.path()).expect("fixture entry");
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                inside.insert((meta.dev(), meta.ino()));
+                if meta.is_dir() {
+                    todo.push(entry.path());
+                }
+            }
+        }
+        inside
+    }
+
+    const SEGMENTS: &[&str] = &[
+        "notes",
+        "a.org",
+        "notes/a.org",
+        "..",
+        ".",
+        "",
+        "dir_link",
+        "file_link",
+        "inside_link",
+        "root_link",
+        "secret.org",
+        "outside",
+        "vault",
+        "vault-evil",
+        "missing.org",
+    ];
+
+    fn segment_path() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop::collection::vec(prop::sample::select(SEGMENTS), 0..5).prop_map(|s| s.join("/"))
+    }
+
+    /// Over the real file system: a path is accepted exactly when the entry
+    /// it reaches is one of the vault's own, and the accepted value reaches
+    /// that same entry. The root is given as the temp dir spells it, which
+    /// on macOS runs through the `/var` link.
+    #[cfg(unix)]
+    #[test]
+    fn inside_canonical_accepts_exactly_what_reaches_a_vault_entry() {
+        use std::os::unix::fs::MetadataExt;
+
+        use proptest::prelude::*;
+
+        let base = linked_vault();
+        let root = base.path().join("vault");
+        let canonical_base = std::fs::canonicalize(base.path()).expect("canonical base");
+        let inside = inodes_inside(&root);
+        let fs = crate::fs_port::RealFileSystem;
+
+        let check = |path: &Path| {
+            let reached = match std::fs::metadata(path) {
+                Ok(m) => Some((m.dev(), m.ino())),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    None
+                }
+                Err(e) => panic!("stat '{}': {e}", path.display()),
+            };
+            let verdict = VaultPath::inside_canonical(&fs, &root, path);
+            match reached.filter(|r| inside.contains(r)) {
+                Some(entry) => {
+                    let accepted = verdict.unwrap_or_else(|e| {
+                        panic!("'{}' reaches a vault entry: {e:#}", path.display())
+                    });
+                    let meta = std::fs::metadata(accepted.as_path()).expect("accepted path exists");
+                    assert_eq!((meta.dev(), meta.ino()), entry, "{}", path.display());
+                }
+                None => {
+                    assert!(
+                        verdict.is_err(),
+                        "'{}' reaches no vault entry but was accepted as {:?}",
+                        path.display(),
+                        verdict
+                    );
+                }
+            }
+        };
+
+        for rel in [
+            "../outside/secret.org",
+            "dir_link/secret.org",
+            "file_link",
+            "notes/root_link",
+            "",
+            ".",
+            "inside_link",
+            "inside_link/",
+            "inside_link/..",
+            "notes/a.org",
+            "../vault-evil/secret.org",
+        ] {
+            check(&root.join(rel));
+        }
+        check(&PathBuf::from(format!(
+            "{}-evil/secret.org",
+            root.display()
+        )));
+
+        let prefixes = prop_oneof![
+            Just(root.clone()),
+            Just(canonical_base.join("vault")),
+            Just(base.path().to_path_buf()),
+            Just(PathBuf::from(format!("{}-evil", root.display()))),
+        ];
+        proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(512))
+            .run(&(prefixes, segment_path()), |(prefix, rel)| {
+                check(&prefix.join(rel));
+                Ok(())
+            })
+            .expect("inside_canonical property");
+    }
+
+    /// The in-memory adapter holds no links, so only spelling can climb out:
+    /// `..`, `.`, a root-equal path and a name-prefix sibling.
+    #[test]
+    fn inside_canonical_over_the_in_memory_adapter_refuses_every_lexical_escape() {
+        use proptest::prelude::*;
+
+        use crate::fs_port::FileSystem;
+
+        let fs = crate::in_memory::InMemoryFileSystem::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        for dir in ["/vault/notes", "/outside", "/vault-evil"] {
+            fs.mkdir_all(Path::new(dir));
+        }
+        for file in [
+            "/vault/notes/a.org",
+            "/outside/secret.org",
+            "/vault-evil/secret.org",
+        ] {
+            runtime
+                .block_on(fs.write(Path::new(file), b"x"))
+                .expect("write fixture file");
+        }
+        let inside: [&Path; 2] = [Path::new("/vault/notes"), Path::new("/vault/notes/a.org")];
+        let root = Path::new("/vault");
+
+        let check = |path: &Path| {
+            let mut reached = PathBuf::from("/");
+            for component in path.components() {
+                match component {
+                    Component::ParentDir => {
+                        reached.pop();
+                    }
+                    Component::Normal(name) => reached.push(name),
+                    Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+                }
+            }
+            let verdict = VaultPath::inside_canonical(&fs, root, path);
+            if inside.contains(&reached.as_path()) {
+                assert_eq!(
+                    verdict.expect("a vault entry is accepted").as_path(),
+                    reached.as_path()
+                );
+            } else {
+                assert!(verdict.is_err(), "'{}' was accepted", path.display());
+            }
+        };
+
+        for path in [
+            "/vault",
+            "/vault/.",
+            "/vault/notes/..",
+            "/vault/../outside/secret.org",
+        ] {
+            check(Path::new(path));
+        }
+        let prefixes = prop_oneof![Just("/vault"), Just("/"), Just("/vault-evil")];
+        proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(256))
+            .run(&(prefixes, segment_path()), |(prefix, rel)| {
+                check(&Path::new(prefix).join(rel));
+                Ok(())
+            })
+            .expect("inside_canonical in-memory property");
     }
 }

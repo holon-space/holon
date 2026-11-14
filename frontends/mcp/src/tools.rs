@@ -4861,18 +4861,21 @@ impl HolonMcpServer {
 
     #[tool(
         description = "Read raw org file content from disk for a document. Resolves doc_id (UUID \
-                       or file path) to a file path via aliases."
+                       or file path) to a file path via aliases. A relative path joins the vault \
+                       root; the file must lie inside the vault, symlinks resolved, or the call \
+                       fails."
     )]
     async fn read_org_file(
         &self,
         Parameters(params): Parameters<ReadOrgFileParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let file_path = self.resolve_to_file_path(&params.doc_id).await?;
+        let file_path = file_path.as_path();
 
         let content = self
             .debug
             .org_filesystem()
-            .read_to_string(&file_path)
+            .read_to_string(file_path)
             .await
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(
@@ -4904,7 +4907,9 @@ impl HolonMcpServer {
                        disk; `loro` is the CRDT tree. `scope`: `document` (default) includes the \
                        `#+TITLE:`/`#+ID:` header, `blocks` is the body alone. Diff \
                        `source=sql` against read_org_file to see pending or lost write-back, and \
-                       `sql` against `loro` at the SAME scope to spot Loro↔SQL divergence."
+                       `sql` against `loro` at the SAME scope to spot Loro↔SQL divergence. A \
+                       path `doc_id` is relative to the vault root; the file must lie inside \
+                       the vault, symlinks resolved, or the call fails."
     )]
     async fn render_org(
         &self,
@@ -4924,10 +4929,11 @@ impl HolonMcpServer {
                 )
             })?;
 
-        let file_path = self.resolve_to_file_path(&params.doc_id).await?;
+        let vault_file = self.resolve_to_file_path(&params.doc_id).await?;
         let doc_uri = self
-            .resolve_document_uri(&renderer, &params.doc_id, &file_path)
+            .resolve_document_uri(&renderer, &params.doc_id, &vault_file)
             .await?;
+        let file_path = vault_file.as_path();
 
         // The Loro store is ONE global tree, so its blocks are scoped to the
         // document here; the SQL reader is already doc-scoped.
@@ -4947,18 +4953,18 @@ impl HolonMcpServer {
 
         let rendered = match (params.source, params.scope) {
             (_, RenderScope::Blocks) => renderer
-                .render_body(&doc_uri, &file_path, &blocks)
+                .render_body(&doc_uri, file_path, &blocks)
                 .await
                 .map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    format!("body render of `{doc_uri}` failed: {e:#}"),
-                    None,
-                )
-            })?,
+                    rmcp::ErrorData::internal_error(
+                        format!("body render of `{doc_uri}` failed: {e:#}"),
+                        None,
+                    )
+                })?,
             // The write-back path proper: the header comes from the document
             // store, exactly as the FileSyncController takes it.
             (RenderSource::Sql, RenderScope::Document) => renderer
-                .render_blocks(&doc_uri, &file_path, &blocks)
+                .render_blocks(&doc_uri, file_path, &blocks)
                 .await
                 .map_err(|e| {
                     rmcp::ErrorData::internal_error(
@@ -4979,7 +4985,7 @@ impl HolonMcpServer {
                     )
                 })?;
                 renderer
-                    .render_document_block(doc_block, &blocks, &file_path)
+                    .render_document_block(doc_block, &blocks, file_path)
                     .await
                     .map_err(|e| {
                         rmcp::ErrorData::internal_error(
@@ -6677,11 +6683,12 @@ impl HolonMcpServer {
         &self,
         renderer: &holon_filesystem::WritebackRenderer,
         doc_id: &str,
-        file_path: &std::path::Path,
+        vault_file: &holon_filesystem::VaultPath,
     ) -> Result<EntityUri, rmcp::ErrorData> {
         if !doc_arg_is_path(doc_id) {
             return doc_uri_from_arg(doc_id);
         }
+        let file_path = vault_file.as_path();
 
         let content = self
             .debug
@@ -6723,26 +6730,37 @@ impl HolonMcpServer {
     async fn resolve_to_file_path(
         &self,
         doc_id: &str,
-    ) -> Result<std::path::PathBuf, rmcp::ErrorData> {
-        // If it looks like a file path already, use it directly
+    ) -> Result<holon_filesystem::VaultPath, rmcp::ErrorData> {
+        let root = self
+            .debug
+            .live_debug
+            .read()
+            .expect("live_debug cell poisoned")
+            .org_root
+            .clone()
+            .ok_or_else(|| {
+                rmcp::ErrorData::invalid_params(
+                    format!(
+                        "cannot read '{doc_id}': this session has no vault root to confine reads to"
+                    ),
+                    None,
+                )
+            })?;
+        let fs = self.debug.org_filesystem();
+        // Every arm passes the gate: an alias target comes from org files, which
+        // anyone who can write the vault controls.
+        let confine = |path: &std::path::Path| {
+            holon_filesystem::VaultPath::inside_canonical(&*fs, &root, path).map_err(|e| {
+                rmcp::ErrorData::invalid_params(format!("refusing to read '{doc_id}': {e:#}"), None)
+            })
+        };
+
         if doc_arg_is_path(doc_id) {
-            let fs = self.debug.org_filesystem();
-            let path = std::path::PathBuf::from(doc_id);
-            if fs.exists(&path) {
-                return Ok(path);
-            }
-            let root = self
-                .debug
-                .live_debug
-                .read()
-                .expect("live_debug cell poisoned")
-                .org_root
-                .clone();
-            if let Some(root) = root {
-                let full = root.join(doc_id);
-                if fs.exists(&full) {
-                    return Ok(full);
-                }
+            // An absolute argument replaces the root in `join`, so both kinds meet the
+            // gate.
+            let full = root.join(doc_id);
+            if fs.exists(&full) {
+                return confine(&full);
             }
         }
 
@@ -6752,12 +6770,12 @@ impl HolonMcpServer {
         if let Some(store) = self.current_loro_doc_store() {
             let store_read = store.read().await;
             if let Some(path) = store_read.resolve_alias_to_path(doc_id).await {
-                return Ok(path);
+                return confine(&path);
             }
             if let Ok(uri) = doc_uri_from_arg(doc_id) {
                 if uri.as_str() != doc_id {
                     if let Some(path) = store_read.resolve_alias_to_path(uri.as_str()).await {
-                        return Ok(path);
+                        return confine(&path);
                     }
                 }
             }
@@ -8245,7 +8263,7 @@ mod render_org_doc_id_tests {
     ) -> HolonMcpServer {
         server_reading(
             dir,
-            alias,
+            alias.as_slice(),
             vec![Block::new_text(
                 EntityUri::block("child"),
                 doc_uri(),
@@ -8257,7 +8275,7 @@ mod render_org_doc_id_tests {
 
     async fn server_reading(
         dir: &std::path::Path,
-        alias: Option<(&EntityUri, &std::path::Path)>,
+        aliases: &[(&EntityUri, &std::path::Path)],
         blocks: Vec<Block>,
     ) -> HolonMcpServer {
         let debug = Arc::new(DebugServices::default());
@@ -8272,13 +8290,14 @@ mod render_org_doc_id_tests {
                     .expect("one adapter claims .org"),
             ),
         ));
-        let loro = match alias {
-            Some((uri, file)) => {
-                let store = holon_loro::LoroDocumentStore::new(dir.to_path_buf());
+        let loro = if aliases.is_empty() {
+            None
+        } else {
+            let store = holon_loro::LoroDocumentStore::new(dir.to_path_buf());
+            for (uri, file) in aliases {
                 store.register_alias(uri.as_str(), file).await;
-                Some(Arc::new(tokio::sync::RwLock::new(store)))
             }
-            None => None,
+            Some(Arc::new(tokio::sync::RwLock::new(store)))
         };
         {
             let mut cell = debug.live_debug.write().expect("live_debug cell poisoned");
@@ -8336,7 +8355,7 @@ mod render_org_doc_id_tests {
             vault_with_file(&format!("#+TITLE: {TITLE}\n#+ID: {DECLARED}\n\n* {BODY}\n"));
         let server = server_reading(
             dir.path(),
-            None,
+            &[],
             vec![Block::new_text(
                 EntityUri::block("orphan"),
                 EntityUri::block("ghost"),
@@ -8488,6 +8507,334 @@ mod render_org_doc_id_tests {
                 .as_str(),
             doc_uri().as_str()
         );
+    }
+
+    /// Both file-reading tools return bytes exactly when the argument reaches
+    /// a file of the vault, through any spelling, link or alias.
+    #[cfg(unix)]
+    mod vault_confinement {
+        use std::path::PathBuf;
+
+        use holon_api::EntityUri;
+        use holon_api::block::Block;
+        use rmcp::handler::server::wrapper::Parameters;
+
+        use super::BODY;
+        use super::DECLARED;
+        use super::TITLE;
+        use super::doc_uri;
+        use super::server_reading;
+        use crate::server::HolonMcpServer;
+        use crate::types::ReadOrgFileParams;
+        use crate::types::RenderOrgParams;
+        use crate::types::RenderScope;
+        use crate::types::RenderSource;
+
+        const OUTSIDE_ALIAS: &str = "0a7f51de-0000-4000-8000-00000000a11a";
+
+        /// A temp dir holding the vault (`vault/`), a secret beside it, a
+        /// sibling whose name extends the vault's, and links out of and
+        /// within the vault. Every outside file carries `marker`, which
+        /// no output may contain.
+        struct EscapeFixture {
+            base: tempfile::TempDir,
+            marker: String,
+        }
+
+        impl EscapeFixture {
+            fn new() -> Self {
+                let base = tempfile::tempdir().expect("temp dir");
+                let marker = uuid::Uuid::new_v4().simple().to_string();
+                let fixture = Self { base, marker };
+                for dir in ["vault/notes", "outside", "vault-evil"] {
+                    std::fs::create_dir_all(fixture.at(dir)).expect("create fixture dir");
+                }
+                let page = format!("#+TITLE: {TITLE}\n#+ID: {DECLARED}\n\n* {BODY}\n");
+                let secret = format!("#+TITLE: secret\n#+ID: {0}\n\n* {0}\n", fixture.marker);
+                let titled = format!("vault/{TITLE}.org");
+                for (file, content) in [
+                    ("vault/notes/a.org", &page),
+                    (titled.as_str(), &page),
+                    ("outside/secret.org", &secret),
+                    ("vault-evil/secret.org", &secret),
+                ] {
+                    std::fs::write(fixture.at(file), content).expect("write fixture file");
+                }
+                for (link, target) in [
+                    ("vault/file_link", "../outside/secret.org"),
+                    ("vault/dir_link", "../outside"),
+                    ("vault/inside_link", "./notes/a.org"),
+                ] {
+                    std::os::unix::fs::symlink(target, fixture.at(link)).expect("create link");
+                }
+                fixture
+            }
+
+            fn at(&self, rel: &str) -> PathBuf {
+                self.base.path().join(rel)
+            }
+
+            fn root(&self) -> PathBuf {
+                self.at("vault")
+            }
+
+            /// The vault's own files by inode, so the oracle judges what an
+            /// argument reaches without resolving or comparing any path.
+            fn files_inside(&self) -> Vec<(u64, u64)> {
+                use std::os::unix::fs::MetadataExt;
+                [
+                    "vault/notes/a.org".to_string(),
+                    format!("vault/{TITLE}.org"),
+                ]
+                .iter()
+                .map(|f| {
+                    let meta = std::fs::symlink_metadata(self.at(f)).expect("fixture file");
+                    (meta.dev(), meta.ino())
+                })
+                .collect()
+            }
+
+            /// The file whose bytes `doc_id` may return: the one it names under
+            /// the vault root if that is a vault file, else its alias target if
+            /// that is one.
+            fn expected_file(&self, doc_id: &str) -> Option<PathBuf> {
+                use std::os::unix::fs::MetadataExt;
+                let inside = self.files_inside();
+                let is_vault_file = |path: &std::path::Path| {
+                    std::fs::metadata(path)
+                        .is_ok_and(|m| m.is_file() && inside.contains(&(m.dev(), m.ino())))
+                };
+                if crate::tools::doc_arg_is_path(doc_id) {
+                    let named = self.root().join(doc_id);
+                    return is_vault_file(&named).then_some(named);
+                }
+                let alias_target = match doc_id {
+                    DECLARED => self.at("vault/notes/a.org"),
+                    OUTSIDE_ALIAS => self.at("outside/secret.org"),
+                    _ => return None,
+                };
+                is_vault_file(&alias_target).then_some(alias_target)
+            }
+
+            async fn server(&self) -> HolonMcpServer {
+                let (inside, outside) = (doc_uri(), EntityUri::block(OUTSIDE_ALIAS));
+                let (a, secret) = (self.at("vault/notes/a.org"), self.at("outside/secret.org"));
+                server_reading(
+                    &self.root(),
+                    &[(&inside, a.as_path()), (&outside, secret.as_path())],
+                    vec![Block::new_text(
+                        EntityUri::block("child"),
+                        doc_uri(),
+                        BODY.to_string(),
+                    )],
+                )
+                .await
+            }
+        }
+
+        /// The tool's whole answer as text: the result on success, the message
+        /// and data on error.
+        fn answer(
+            result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+        ) -> Result<String, String> {
+            match result {
+                Ok(r) => match &r.content[0].raw {
+                    rmcp::model::RawContent::Text(t) => Ok(t.text.clone()),
+                    other => panic!("expected a text result, got {other:?}"),
+                },
+                Err(e) => Err(format!("{} {:?}", e.message, e.data)),
+            }
+        }
+
+        async fn read_and_render(
+            server: &HolonMcpServer,
+            doc_id: &str,
+        ) -> (Result<String, String>, Result<String, String>) {
+            let read = server
+                .read_org_file(Parameters(ReadOrgFileParams {
+                    doc_id: doc_id.to_string(),
+                }))
+                .await;
+            let rendered = server
+                .render_org(Parameters(RenderOrgParams {
+                    doc_id: doc_id.to_string(),
+                    source: RenderSource::Sql,
+                    scope: RenderScope::Blocks,
+                }))
+                .await;
+            (answer(read), answer(rendered))
+        }
+
+        fn assert_confined(
+            fixture: &EscapeFixture,
+            doc_id: &str,
+            read: &Result<String, String>,
+            rendered: &Result<String, String>,
+        ) {
+            for (tool, out) in [("read_org_file", read), ("render_org", rendered)] {
+                let text = match out {
+                    Ok(t) | Err(t) => t,
+                };
+                assert!(
+                    !text.contains(&fixture.marker),
+                    "{tool}({doc_id:?}) returned bytes of a file outside the vault: {text}"
+                );
+            }
+            match fixture.expected_file(doc_id) {
+                Some(file) => {
+                    let read = read.as_ref().unwrap_or_else(|e| {
+                        panic!(
+                            "read_org_file({doc_id:?}) names the vault file {}: {e}",
+                            file.display()
+                        )
+                    });
+                    let json: serde_json::Value =
+                        serde_json::from_str(read).expect("tool output is JSON");
+                    assert_eq!(
+                        json["content"].as_str(),
+                        Some(
+                            std::fs::read_to_string(&file)
+                                .expect("read vault file")
+                                .as_str()
+                        ),
+                        "read_org_file({doc_id:?})"
+                    );
+                    let rendered = rendered.as_ref().unwrap_or_else(|e| {
+                        panic!(
+                            "render_org({doc_id:?}) names the vault file {}: {e}",
+                            file.display()
+                        )
+                    });
+                    let json: serde_json::Value =
+                        serde_json::from_str(rendered).expect("tool output is JSON");
+                    assert!(
+                        json["rendered"].as_str().expect("rendered").contains(BODY),
+                        "render_org({doc_id:?}): {json}"
+                    );
+                }
+                None => {
+                    assert!(
+                        read.is_err(),
+                        "read_org_file({doc_id:?}) names no vault file: {read:?}"
+                    );
+                    assert!(
+                        rendered.is_err(),
+                        "render_org({doc_id:?}) names no vault file: {rendered:?}"
+                    );
+                }
+            }
+        }
+
+        /// The bytes of an outside file reach no answer, error or success.
+        #[test]
+        fn confined_reads() {
+            use proptest::prelude::*;
+
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let fixture = EscapeFixture::new();
+            let server = runtime.block_on(fixture.server());
+            let root = fixture.root().display().to_string();
+            let canonical_root = std::fs::canonicalize(fixture.root())
+                .expect("canonical root")
+                .display()
+                .to_string();
+            let check = |doc_id: &str| {
+                let (read, rendered) = runtime.block_on(read_and_render(&server, doc_id));
+                assert_confined(&fixture, doc_id, &read, &rendered);
+            };
+
+            for doc_id in [
+                fixture.at("outside/secret.org").display().to_string(),
+                "../outside/secret.org".to_string(),
+                "dir_link/secret.org".to_string(),
+                "./file_link".to_string(),
+                format!("{root}/file_link"),
+                format!("{root}-evil/secret.org"),
+                OUTSIDE_ALIAS.to_string(),
+                format!("{root}/"),
+                "./".to_string(),
+                "./inside_link".to_string(),
+                format!("{root}/{TITLE}.org"),
+                format!("{canonical_root}/notes/a.org"),
+                DECLARED.to_string(),
+            ] {
+                check(&doc_id);
+            }
+
+            const SEGMENTS: &[&str] = &[
+                "notes",
+                "a.org",
+                "notes/a.org",
+                "Plain-Text Layer.org",
+                "..",
+                ".",
+                "",
+                "dir_link",
+                "file_link",
+                "inside_link",
+                "secret.org",
+                "outside",
+                "vault",
+                "vault-evil",
+                "missing.org",
+            ];
+            let base = fixture.base.path().display().to_string();
+            let prefixes = prop::sample::select(vec![
+                String::new(),
+                "/".to_string(),
+                format!("{root}/"),
+                format!("{canonical_root}/"),
+                format!("{base}/"),
+                format!("{root}-evil/"),
+            ]);
+            let composed = (
+                prefixes,
+                prop::collection::vec(prop::sample::select(SEGMENTS), 0..4),
+                prop::sample::select(vec!["", ".org"]),
+            )
+                .prop_map(|(prefix, segments, suffix)| {
+                    format!("{prefix}{}{suffix}", segments.join("/"))
+                });
+            let doc_ids = prop_oneof![
+                4 => composed,
+                1 => prop::sample::select(vec![
+                    DECLARED.to_string(),
+                    OUTSIDE_ALIAS.to_string(),
+                    fixture.at("outside/secret.org").display().to_string(),
+                ]),
+            ];
+            proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(256))
+                .run(&doc_ids, |doc_id| {
+                    check(&doc_id);
+                    Ok(())
+                })
+                .expect("confined reads");
+        }
+
+        /// A session that syncs no org files has no root to confine a read to.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_session_without_a_vault_root_reads_no_file() {
+            let fixture = EscapeFixture::new();
+            let server = fixture.server().await;
+            server
+                .debug
+                .live_debug
+                .write()
+                .expect("live_debug cell poisoned")
+                .org_root = None;
+
+            for doc_id in [
+                "notes/a.org".to_string(),
+                fixture.at("vault/notes/a.org").display().to_string(),
+            ] {
+                let (read, rendered) = read_and_render(&server, &doc_id).await;
+                assert!(read.is_err(), "read_org_file({doc_id:?}): {read:?}");
+                assert!(rendered.is_err(), "render_org({doc_id:?}): {rendered:?}");
+            }
+        }
     }
 
     /// A path without a space DOES form a URI, so the guard cannot be "does it

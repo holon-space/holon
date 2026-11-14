@@ -83,6 +83,7 @@ fn parse_args() -> Result<Config> {
                 let addr: SocketAddr = addr_str
                     .parse()
                     .map_err(|e| anyhow::anyhow!("Invalid bind address '{}': {}", addr_str, e))?;
+                holon_mcp::di::require_loopback(addr)?;
                 transport_mode = TransportMode::Http { bind_address: addr };
             }
             "--stdio" | "-S" => {

@@ -375,6 +375,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `failed-slot-create-loro-dispatch-keystrokes-run-anyway`
 - `failed-slot-create-sqlonly-keystrokes-run-anyway`
 - `folder-companion-subdir-fileless-page-not-homed-load`
+- `fs-watcher-control-org-missing-load`
 - `fs-watcher-move-out-lost-remove`
 - `fs-watcher-rename-no-pair-in-seen-list`
 - `fs-watcher-stall`
