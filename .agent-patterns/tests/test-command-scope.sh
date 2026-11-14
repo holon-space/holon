@@ -2,7 +2,7 @@
 # test-command-scope.sh : the hook says `scope` in `capabilities`, and for fixed and drawn scope files of real workspace paths, `test-command --scope` selects a package whole when a listed file of it lies outside its tests folder, else only test targets of it that the listed test files concern; files outside the units change nothing.
 set -uo pipefail
 hook=$(cd "${0%/*}/.." && pwd)/hook
-RANDOM=${SEED:-1080}; draws=${DRAWS:-40}
+RANDOM=${SEED:-1}; draws=${DRAWS:-40}
 "$hook" capabilities 2>/dev/null | grep -qx scope || { echo "FAIL capabilities: no scope"; exit 1; }
 meta=$(cargo metadata --no-deps --format-version 1 --offline)
 root=$(pwd -P)/
@@ -68,4 +68,49 @@ for ((i = 0; i < draws; i++)); do
   ((RANDOM % 2)) && paths+=(docs/Architecture.md)
   check "draw $i: ${units[*]} :: ${paths[*]}" "${units[@]}" -- "${paths[@]}"
 done
+# Where the package lists its targets itself, register-tests declares a new file in the single test binary tests/main.rs.
+single_binary_check() { # single_binary_check <unit> <new file name>: the filter names the target rooted at tests/main.rs
+  local u=$1 p t; p=$(dir_of "$u")/tests/$2; t=$(target_at "$u" "$(dir_of "$u")/tests/main.rs"); printf '%s\n' "$p" > "$s"
+  local out; out=$("$hook" test-command --scope "$s" /x "$u" 2>&1)
+  if grep -qF "binary_id(=$u::$t)" <<<"$out"; then echo "ok single binary $p"; else echo "FAIL $p: the new file joins $u::$t, the run is: $out"; fail=1; fi
+}
+mapfile -t single < <(for u in "${tested[@]}"; do grep -q 'autotests *= *false' "$(dir_of "$u")/Cargo.toml" && [ -n "$(target_at "$u" "$(dir_of "$u")/tests/main.rs")" ] && echo "$u"; done)
+single_binary_check holon-integration-tests added_by_tester_pbt.rs
+for ((i = 0; i < draws; i++)); do single_binary_check "${single[RANDOM % ${#single[@]}]}" "$(printf 'added_%s_pbt.rs' "$RANDOM")"; done
+# Files under tests/ that are no Rust source (fixtures, snapshots, feature files) are read by test targets, never declared.
+src_of() { jq -r --arg n "$1" --arg t "$2" '.packages[] | select(.name == $n) | .targets[] | select(.kind == ["test"] and .name == $t) | .src_path' <<<"$meta"; }
+data_check() { # data_check <unit> <path>: the filter names only real test targets, and each target whose root names the file's tests/ subfolder
+  local u=$1 p=$2 d; d=$(dir_of "$u"); printf '%s\n' "$p" > "$s"
+  local out; out=$("$hook" test-command --scope "$s" /x "$u" 2>&1) || { echo "FAIL $p: exit non-zero: $out"; fail=1; return; }
+  local expr; expr=$(grep -A1 -x -- -E <<<"$out" | tail -1)
+  grep -qF "package(=$u)" <<<"$expr" && { echo "ok $p"; return; }
+  local t; for t in $(grep -oE "binary_id\(=$u::[^)]*\)" <<<"$expr" | sed -E 's/.*::(.*)\)/\1/'); do
+    targets_of "$u" | grep -qx "$t" || { echo "FAIL $p: $u has no test target $t, the filter is '$expr'"; fail=1; }
+  done
+  local sub=${p#"$d/tests/"}; sub=${sub%%/*}
+  [ "$sub" != "${p##*/}" ] || { echo "ok $p"; return; }
+  for t in $(targets_of "$u"); do
+    grep -qF "$sub/" "$(src_of "$u" "$t")" && ! grep -qF "binary_id(=$u::$t)" <<<"$expr" && { echo "FAIL $p: $u::$t reads $sub/, the filter is '$expr'"; fail=1; }
+  done
+  echo "ok $p"
+}
+mapfile -t data_files < <(for u in "${tested[@]}"; do d=$(dir_of "$u"); [ -d "$d/tests" ] && find "$d/tests" -type f ! -name '*.rs' | sed "s#^#$u #"; done | sort)
+data_check holon-filesystem crates/holon-filesystem/tests/fixtures/sync_base_legacy_sample.json
+data_check holon-gpui frontends/gpui/tests/features/ordinary_block_interaction.feature
+for ((i = 0; i < draws; i++)); do e=${data_files[RANDOM % ${#data_files[@]}]}; data_check "${e%% *}" "${e#* }"; done
+# A new test file of the tester is in no target of the build workspace yet; register-tests adds its `mod` line later.
+new_module_check() { # new_module_check <unit> <new file name>: the filter names only real test targets when the package lists its targets itself
+  local u=$1 p; p=$(dir_of "$u")/tests/$2; printf '%s\n' "$p" > "$s"
+  local out; out=$("$hook" test-command --scope "$s" /x "$u" 2>&1) || { echo "FAIL $p: exit non-zero: $out"; fail=1; return; }
+  local expr; expr=$(grep -A1 -x -- -E <<<"$out" | tail -1)
+  if [ "$(jq -r --arg n "$u" '.packages[] | select(.name == $n) | .targets | map(select(.kind == ["test"])) | length' <<<"$meta")" -gt 0 ] \
+    && grep -q 'autotests *= *false' "$(dir_of "$u")/Cargo.toml"; then
+    local t; for t in $(grep -oE "binary_id\(=$u::[^)]*\)" <<<"$expr" | sed -E 's/.*::(.*)\)/\1/'); do
+      targets_of "$u" | grep -qx "$t" || { echo "FAIL $p: $u lists its test targets and has no $t, the filter is '$expr'"; fail=1; }
+    done
+  fi
+  echo "ok $p"
+}
+new_module_check holon-integration-tests added_by_tester_pbt.rs
+for ((i = 0; i < draws; i++)); do new_module_check "${tested[RANDOM % ${#tested[@]}]}" "$(printf 'added_%s_pbt.rs' "$RANDOM")"; done
 exit $fail

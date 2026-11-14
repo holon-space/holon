@@ -4,8 +4,8 @@
 `features` prints `--features <list>` (or nothing): the features of scripts/select-tests.py's canonical list that belong
 to the given units; cargo refuses a `<pkg>/<feature>` whose package is not selected.
 `run` prints the nextest run, one word per line. With `--scope`, it selects the test targets the listed files concern:
-a file under <unit>/tests/<name>[.rs|/...] concerns the test target <name>, or the targets whose root declares
-`mod <name>;`; any other file of a unit concerns all of the unit's tests. Files outside the units concern nothing.
+a .rs file under <unit>/tests/<name>[.rs|/...] concerns the test target <name>, or the targets whose root declares
+`mod <name>;`, or, as a new test file, the target it will join; any other file of a unit concerns all of the unit's tests. Files outside the units concern nothing.
 Runs in the workspace root.
 """
 import importlib.util
@@ -43,9 +43,10 @@ def packages(units):
 
 def concerned_targets(pkg, rel):
     """The test target names a file at `rel` (relative to the package dir) concerns; None means the whole package."""
-    if rel.parts[0] != "tests" or len(rel.parts) < 2:
+    if rel.parts[0] != "tests" or len(rel.parts) < 2 or rel.suffix != ".rs":
         return None
     name = PurePosixPath(rel.parts[1]).stem
+    pkg_dir = Path(pkg["manifest_path"]).parent
     tests = {t["name"]: Path(t["src_path"]) for t in pkg["targets"] if t["kind"] == ["test"]}
     if name in tests:
         return {name}
@@ -53,14 +54,14 @@ def concerned_targets(pkg, rel):
     owners = {t for t, src in tests.items() if declares.search(src.read_text())}
     if owners:
         return owners
-    manifest = tomllib.loads(Path(pkg["manifest_path"]).read_text())
-    if manifest["package"].get("autotests", True):
-        # A new test file of the tester: cargo discovers it as its own target in the tester's workspace.
+    if len(rel.parts) != 2 and rel.parts[2:] != ("main.rs",):
+        return None
+    # A new test file of the tester: cargo discovers it as its own target in the tester's workspace, or, where the
+    # package lists its targets itself, the kit's register-tests declares it in the single test binary tests/main.rs.
+    if tomllib.loads(Path(pkg["manifest_path"]).read_text())["package"].get("autotests", True):
         return {name}
-    if "main" in tests:
-        # The kit's register-tests adds the new file's `mod` line to the single test binary tests/main.rs.
-        return {"main"}
-    sys.exit(f"{pkg['name']}/{rel}: no test target of the package concerns it and the package has no tests/main.rs")
+    single = {t for t, src in tests.items() if src == pkg_dir / "tests/main.rs"}
+    return single or None
 
 
 def scope_filter(units, scope_file):

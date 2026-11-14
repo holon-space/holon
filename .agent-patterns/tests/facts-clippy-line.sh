@@ -2,7 +2,7 @@
 # facts-clippy-line.sh : for fixed and drawn sets of cargo packages, the clippy command of the `prompt-facts` lint rule selects the same packages and features as `test-command` and passes the justfile's CLIPPY_LINTS.
 set -uo pipefail
 hook=$(cd "${0%/*}/.." && pwd)/hook
-RANDOM=${SEED:-1080}; draws=${DRAWS:-15}
+RANDOM=${SEED:-1}; draws=${DRAWS:-15}
 mapfile -t all < <(cargo metadata --no-deps --format-version 1 --offline | jq -r '.packages[].name')
 lints=$(sed -n 's/^CLIPPY_LINTS := "\(.*\)"$/\1/p' justfile)
 [ -n "$lints" ] || { echo "FAIL: the justfile holds no CLIPPY_LINTS"; exit 1; }

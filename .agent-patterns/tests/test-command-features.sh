@@ -2,7 +2,7 @@
 # test-command-features.sh : for fixed and drawn sets of cargo packages, `test-command` enables exactly the features of select-tests.py's canonical list that belong to the selected packages, and cargo accepts the package and feature selection it prints.
 set -euo pipefail
 hook=$(cd "${0%/*}/.." && pwd)/hook
-RANDOM=${SEED:-1080}; draws=${DRAWS:-25}
+RANDOM=${SEED:-1}; draws=${DRAWS:-25}
 mapfile -t all < <(cargo metadata --no-deps --format-version 1 --offline | jq -r '.packages[].name')
 mapfile -t canon < <(python3 -c 'import importlib.util as u, pathlib, sys
 s = u.spec_from_file_location("s", "scripts/select-tests.py"); m = u.module_from_spec(s); s.loader.exec_module(m)

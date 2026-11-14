@@ -8,7 +8,11 @@ grep -q "^$c " "$R/tester-mods.txt" || exit 0
 d=$(cd "$here/.." && "$here/hook" layout "$c" | sed -n 's/^tests: //p')
 m=$ws/$d/main.rs
 [ -f "$m" ] || { echo "$m missing: the crate has no single test binary" >&2; exit 1; }
-new=$(sed -n "s/^$c //p" "$R/tester-mods.txt" | while IFS= read -r l; do grep -qxF "$l" "$m" || echo "$l"; done | sort -u)
+# A module counts as declared by its name, whatever its visibility: `mod a;` next to `pub mod a;` does not compile.
+modname() { sed -E 's/^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+([A-Za-z0-9_]+)[[:space:]]*;.*/\3/'; }
+have=$(grep -E '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z0-9_]+[[:space:]]*;' "$m" | modname || :)
+new=$(sed -n "s/^$c //p" "$R/tester-mods.txt" | sort -u | while IFS= read -r l; do
+  n=$(modname <<<"$l"); grep -qxF "$n" <<<"$have" || { echo "$l"; have+=$'\n'$n; }; done)
 [ -n "$new" ] || exit 0
 # Next to the last `mod` line the new lines join its group, which rustfmt then sorts as `cargo fmt` does.
 last=$(awk '/^(pub(\([^)]*\))? )?mod [A-Za-z0-9_]+;/ { n = NR } END { print n }' "$m")
