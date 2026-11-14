@@ -3,6 +3,11 @@
 #
 # Usage:
 #   scripts/keystone-known-reds.sh <run.log> [<run.log> ...]
+#   scripts/keystone-known-reds.sh --class <run.log>
+#
+# `--class` takes exactly one log, keeps the exit codes below and prints only
+# one word on stdout: `green` (exit 0, the run passed), `known-red-only` (exit
+# 0, every red matched a row) or `red` (exit 1 or 3). On exit 2 it prints no word.
 #
 # `just keystone-nightly` passes only the runs that exited non-zero, but logs
 # also arrive by hand, so each log's outcome is read from the log itself. For a
@@ -58,6 +63,16 @@ fail() {
 }
 trap 'fail "$BASH_COMMAND" "$?"' ERR
 
+class=0
+if [ "${1:-}" = --class ]; then
+    class=1
+    shift
+    if [ "$#" -ne 1 ]; then
+        echo "usage: $0 --class <run.log>" >&2
+        exit 2
+    fi
+fi
+
 here=$(dirname "${BASH_SOURCE[0]}")
 repo_root=$(cd "$here/.." && pwd)
 registry="$repo_root/docs/Testing/KeystoneKnownReds.md"
@@ -72,7 +87,18 @@ if [ ! -f "$registry" ]; then
 fi
 
 work=$(mktemp -d)
-trap 'rm -rf "$work" || fail "rm -rf $work" "$?"' EXIT
+say_class() {
+    local rc=$1
+    case $rc in
+        0) if [ "$green" -eq 1 ]; then echo green >&3; else echo known-red-only >&3; fi ;;
+        1 | 3) echo red >&3 ;;
+    esac
+}
+if [ "$class" -eq 1 ]; then
+    exec 3>&1 >"$work/full-output"
+    green=0
+fi
+trap 'rc=$?; rm -rf "$work" || fail "rm -rf $work" "$?"; [ "$class" -eq 0 ] || say_class "$rc"' EXIT
 
 # The input logs' `BASE:`/`TREE:` lines head the output, so a tee of it names
 # the tree it judged. An unreadable log is reported in the loop below.

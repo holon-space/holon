@@ -25,7 +25,8 @@ case $op in
   register-tests) "$here/add-mods.sh" "$(dirname "$1")" "$PWD" "$2" ;;
   merge-manifest) "$here/merge-devdeps.py" "$1" "$2" ;;
   test-command) "$here/test-command.py" run "$@" ;;
-  capabilities) echo scope ;;
+  capabilities) printf 'scope\nclassify\n' ;;
+  classify-run) "$here/../scripts/keystone-known-reds.sh" --class "${1:?log}" ;;
   report)
     grep -m1 -E '^ *Summary' "$1" | sed 's/^ *//' || echo
     grep -E '^\s*(FAIL|TIMEOUT|SIGSEGV|PASS) |Summary' "$1" | tail -40 || : ;;
