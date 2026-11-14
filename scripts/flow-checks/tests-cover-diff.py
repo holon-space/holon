@@ -4,6 +4,9 @@
     scripts/flow-checks/tests-cover-diff.py --base <commit> --summary <path> [--tree <commit>]
 
 Run from the lane root. It runs `scripts/select-tests.py --base <commit>` and reads its `<step>: <args>` lines.
+When the chain from `--base` to the summary's `Commit:` change holds both registry-only changes (all paths registry
+data and one of them the registry: `registry_data_only` of select-tests.py) and other changes, it runs the selector
+once per side with `--paths-from` (the union of that side's paths) and needs the lines of both.
 The cited logs are the `target/...` `.log` and `.txt` paths between the summary's `How tested` and `Confidence` lines;
 a brace list (`target/x/{a,b}.log`) cites each of its paths, as the shell expands it.
 Of a cited log it reads line 1 and the last line: a log written by scripts/flow-checks/run-step.sh has the step line
@@ -49,19 +52,21 @@ A classifier log is a cited run-step log of the line `known-reds: scripts/keysto
 classifies the log whose path resolves, from the lane root, to the same file. It counts only when its `TREE:` commit
 has the source tree of the checked commit: `--tree`, else jj's `@`.
 The selector's disclosure steps (NOT_RUN_STEPS of select-tests.py) need no log.
-PASS (exit 0) when every selected step ran, every cited log exists, every cited log whose line 1 names a selected step
-has the selected line as line 1, every backticked `<step>: <args>` span of the summary equals the selected line, and
-the selector printed no step twice.
+PASS (exit 0) when every selected line ran, every cited log exists, every cited log whose line 1 names a selected step
+has one of that step's selected lines as line 1, every backticked `<step>: <args>` span of the summary equals one of
+its step's selected lines, and no selector run printed a step twice.
 Every problem is one stderr line and the check prints them all; only a failing selector stops it early.
 Lines compare with runs of whitespace collapsed. It never runs tests.
 """
 import argparse
+import functools
 import hashlib
 import importlib.util
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -119,12 +124,27 @@ NEXTEST_SUMMARY = re.compile(r"Summary \[[^]]*\] (?:(\d+)/)?(\d+) tests? run: ")
 GATE_END = "windowed-gate: wall="
 
 
-def not_run_steps():
+@functools.cache
+def selector_module():
     selector = Path(__file__).resolve().parents[1] / "select-tests.py"
     spec = importlib.util.spec_from_file_location("select_tests", selector)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return set(module.NOT_RUN_STEPS)
+    return module
+
+
+def not_run_steps():
+    return set(selector_module().NOT_RUN_STEPS)
+
+
+def partition(chain):
+    """(code paths, registry paths) of the `(change, [path])` chain: a change goes to the registry side only when
+    the selector's registry-data rule holds for its own paths."""
+    st = selector_module()
+    code, rows = set(), set()
+    for _, paths in chain:
+        (rows if st.registry_data_only(paths, st.REGISTRY_DATA) else code).update(paths)
+    return sorted(code), sorted(rows)
 
 
 def norm(line):
@@ -403,8 +423,7 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
     def on_tree(lines):
         return head is not None and (tree := tree_line(lines)) is not None and tree_of(tree) == head
 
-    counts = Counter(m.group(1) for line in selected_text.splitlines() if (m := STEP_LINE.match(line)))
-    bad = [f"the selector prints step `{step}` {n} times" for step, n in sorted(counts.items()) if n > 1]
+    bad = []
     selected = step_lines(selected_text)
     ran = set()
     split = {path: text.splitlines() or [""] for path, text in logs.items()}
@@ -427,7 +446,7 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
         elif kind == ACCEPTED:
             accepts[step].append(path)
         elif cited(path, logs):
-            ran.add(step)
+            ran |= selected[step]
         else:
             bad.append(f"{ROUTE} of step `{step}` names evidence {path}, which is no cited existing log")
     base_tree = base and tree_of(base)
@@ -435,11 +454,12 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
         first = (m := STEP_LINE.match(lines[0])) and m.group(1)
         if first not in selected or any(same_file(path, e) for e in evidence):
             continue
-        if {norm(lines[0])} != selected[first]:
+        line = norm(lines[0])
+        if line not in selected[first]:
             bad.append(f"{path} runs `{lines[0]}`, the selector prints {sorted(selected[first])}")
             continue
         if lines[-1] == EXIT_OK:
-            ran.add(first)
+            ran.add(line)
             continue
         if not EXIT_RED.fullmatch(lines[-1]):
             bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `exit: <code>`")
@@ -447,35 +467,83 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
         judges = [c for c, target in sorted(classifiers.items()) if same_file(target, path)]
         verdicts = [problem for c in judges for problem in judged(c, split[c], f"{path} of step `{first}`", on_tree)]
         if judges and not verdicts:
-            ran.add(first)
+            ran.add(line)
             continue
-        line = next(iter(selected[first]))
         refusals = [base_red_problems(first, path, lines, b, logs, line, base_tree, tree_of, notes)
                     for b in accepts[first]]
         if [] in refusals:
-            ran.add(first)
+            ran.add(line)
             continue
         units = unit_problems(first, path, lines, classifiers, split, on_tree) if first == WINDOWED else None
         if units == []:
-            ran.add(first)
+            ran.add(line)
             continue
         if not judges and units is None:
             others = "".join(f"; {c} classifies {t}" for c, t in sorted(classifiers.items()))
             bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `{EXIT_OK}`, and no cited "
                        f"classifier log has line 1 `{CLASSIFIER} {path}`{others}")
         bad += verdicts + [problem for r in refusals for problem in r] + (units or [])
-    bad += [f"no cited run-step log ran the selected step `{step}`" for step in sorted(set(selected) - not_run - ran)]
+    for step in sorted(set(selected) - not_run):
+        missing = sorted(selected[step] - ran)
+        if len(selected[step]) == 1:
+            bad += [f"no cited run-step log ran the selected step `{step}`" for _ in missing]
+        else:
+            bad += [f"no cited run-step log ran the selected step `{step}` line `{line}`" for line in missing]
     for span in SPAN.findall(summary_text):
-        if (m := STEP_LINE.match(span)) and m.group(1) in selected and {norm(span)} != selected[m.group(1)]:
+        if (m := STEP_LINE.match(span)) and m.group(1) in selected and norm(span) not in selected[m.group(1)]:
             bad.append(f"the summary cites `{span}`, the selector prints {sorted(selected[m.group(1)])}")
     return bad
 
 
-def jj_head():
-    done = subprocess.run(["jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"], capture_output=True, text=True)
+def repeated_steps(selected_text):
+    counts = Counter(m.group(1) for line in selected_text.splitlines() if (m := STEP_LINE.match(line)))
+    return [f"the selector prints step `{step}` {n} times" for step, n in sorted(counts.items()) if n > 1]
+
+
+def jj(*args):
+    done = subprocess.run(["jj", *args], capture_output=True, text=True)
     if done.returncode:
-        sys.exit(f"tests-cover-diff: `jj log -r @` exited {done.returncode}: {done.stderr.strip()}")
-    return done.stdout.strip()
+        sys.exit(f"tests-cover-diff: `jj {' '.join(args)}` exited {done.returncode}: {done.stderr.strip()}")
+    return done.stdout
+
+
+def jj_head():
+    return jj("log", "-r", "@", "--no-graph", "-T", "commit_id").strip()
+
+
+def summary_commit(summary_text):
+    if not (m := re.search(r"^Commit:\s+([k-z]{8,32})\b", summary_text, re.M)):
+        sys.exit("tests-cover-diff: the summary has no line `Commit: <change id>`")
+    return m.group(1)
+
+
+def chain_paths(base, commit):
+    """[(commit id, [path])] of each non-empty change of `base..commit`, oldest first."""
+    chain = []
+    for row in jj("log", "-r", f"{base}..{commit}", "--reversed", "--no-graph",
+                  "-T", 'commit_id ++ " " ++ parents.len() ++ " " ++ empty ++ "\n"').splitlines():
+        change, parents, empty = row.split()
+        if parents != "1":
+            sys.exit(f"tests-cover-diff: change {change} of {base}..{commit} has {parents} parents; merges are not "
+                     f"supported")
+        if empty == "false":
+            chain.append((change, jj("diff", "--name-only", "-r", change).splitlines()))
+    return chain
+
+
+def select_lines(base, paths=None):
+    """The selector's output for the diff from `base` to @, or for `paths` when given."""
+    with tempfile.NamedTemporaryFile("w", suffix=".paths") as f:
+        extra = []
+        if paths is not None:
+            f.write("".join(p + "\n" for p in paths))
+            f.flush()
+            extra = ["--paths-from", f.name]
+        done = subprocess.run([sys.executable, SELECTOR, "--base", base, *extra], capture_output=True, text=True)
+    if done.returncode:
+        tail = " | ".join(done.stderr.strip().splitlines()[-3:])
+        sys.exit(f"tests-cover-diff: {SELECTOR} --base {base} {' '.join(extra)} exited {done.returncode}: {tail}")
+    return done.stdout
 
 
 def main():
@@ -486,11 +554,10 @@ def main():
                                   "jj's @)")
     a = p.parse_args()
     summary_text = a.summary.read_text()
-    done = subprocess.run([sys.executable, SELECTOR, "--base", a.base], capture_output=True, text=True)
-    if done.returncode:
-        tail = " | ".join(done.stderr.strip().splitlines()[-3:])
-        sys.exit(f"tests-cover-diff: {SELECTOR} --base {a.base} exited {done.returncode}: {tail}")
+    code, rows = partition(chain_paths(a.base, summary_commit(summary_text)))
+    outputs = [select_lines(a.base, code), select_lines(a.base, rows)] if code and rows else [select_lines(a.base)]
     paths, bad = cited_logs(summary_text)
+    bad += [problem for out in outputs for problem in repeated_steps(out)]
     logs = {}
     for path in paths:
         f = Path(path).expanduser()
@@ -502,7 +569,7 @@ def main():
     if (head := git_tree(commit)) is None:
         sys.exit(f"tests-cover-diff: git cannot resolve the source tree of the checked commit {commit}")
     notes = []
-    bad += check(done.stdout, summary_text, logs, not_run_steps(), a.base, notes=notes, head=head)
+    bad += check("".join(outputs), summary_text, logs, not_run_steps(), a.base, notes=notes, head=head)
     for note in notes:
         print(f"tests-cover-diff: note: {note}")
     for problem in bad:

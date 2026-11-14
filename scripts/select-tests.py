@@ -1123,7 +1123,8 @@ def main(argv):
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--base", help="jj revision the lane started from, e.g. main")
     mode.add_argument("--gate", choices=sorted(GATE_SCRIPTS), help="print the selection of one landing gate")
-    ap.add_argument("--paths-from", help="with --gate: the changed paths, one per line (default: $GATE_CHANGED)")
+    ap.add_argument("--paths-from", help="the changed paths, one per line (default: with --gate $GATE_CHANGED, with "
+                                         "--base the diff from the base to @)")
     a = ap.parse_args(argv)
     cwd = Path.cwd()
     meta = load_metadata()
@@ -1133,10 +1134,9 @@ def main(argv):
         for line in gate_lines(gate_selection(cwd, meta, a.gate, changed)):
             print(line)
         return 0
-    if a.paths_from:
-        ap.error("--paths-from goes with --gate")
     header = jj_header(a.base)
-    lines = selection(cwd, meta, jj_changed(a.base))
+    changed = Path(a.paths_from).read_text().splitlines() if a.paths_from else jj_changed(a.base)
+    lines = selection(cwd, meta, changed)
     print(*header, *lines, sep="\n")
     return 0
 

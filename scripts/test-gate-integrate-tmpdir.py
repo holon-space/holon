@@ -3,10 +3,10 @@
 the order and the way its tracks end.
 
 Each case runs scripts/gate-integrate.sh inside the real with-build-slot.sh with FLOW_JOB_TMPDIR set, as
-`flow job run` starts it, under a scratch HOME (its own slot semaphore, hold marker and job registry) with
-`just` and `cargo` stubbed. The last step of every track sleeps a drawn time, records whether the job's TMPDIR
+`flow job run` starts it, with FLOW_JOB_TMPDIR_OWNER drawn as the job's id, unset or another id, under a
+scratch HOME (its own slot semaphore, hold marker and job registry) with `just` and `cargo` stubbed. The last step of every track sleeps a drawn time, records whether the job's TMPDIR
 exists, and ends its track by exit 0, exit 1 or a TERM of the track. A drawn slot count of 2 makes one track
-wait for its seat until the other one ends.
+wait for its seat until the other one ends. The job removes its TMPDIR at its end only when the owner is its id.
 
 Run: `python3 scripts/test-gate-integrate-tmpdir.py` (CASES=<n>, SEED=<s>, JOBS=<parallel cases>, KEEP=1 keeps the
 scratch folder with each case's log). The fixed examples run first.
@@ -93,6 +93,8 @@ def case_env(home, stubs, job_tmp, probe, case):
         FLOW_JOB_TMPDIR=str(job_tmp), TMPDIR=str(job_tmp), PROBE_DIR=str(job_tmp), PROBE=str(probe),
         HOLON_BUILD_SLOTS=str(case["slots"]), GATE_DISK_FLOOR_GIB="0", GATE_STEP_POLL_S="0.1",
     )
+    if case["owner"] != "unset":
+        env["FLOW_JOB_TMPDIR_OWNER"] = env["FLOW_JOB_ID"] if case["owner"] == "own" else "another-job"
     for t, steps in enumerate(TRACKS):
         env[f"LAST_STEP_{t}"] = steps[-1]
         env[f"PROBE_END_{t}"] = f"{case['delay'][t]} {case['kind'][t]}"
@@ -133,21 +135,24 @@ def check(stubs, n, case):
     assert ends == case["selected"], f"the probe did not see every track's end: {where}"
     assert all(line.endswith(" exists") for line in lines), f"the job's TMPDIR was gone before the job ended: {where}"
     assert lines[-1].startswith("gate-end "), f"no probe after the gate's last track: {where}"
-    assert not left, f"the job's TMPDIR outlived the job: {where}"
+    assert left == (case["owner"] != "own"), \
+        f"the job's TMPDIR {'outlived' if left else 'did not outlive'} the job: {where}"
 
 
 def draw(rng):
     return {"delay": [rng.choice([0, 0.5, 1, 2, 3]) for _ in range(3)], "kind": [rng.choice(KINDS) for _ in range(3)],
-            "slots": rng.choice([2, 6]),
+            "slots": rng.choice([2, 6]), "owner": rng.choice(["own", "own", "unset", "other"]),
             "selected": rng.choice([[0, 1, 2], [0, 1, 2], [0, 1], [0, 2], [1, 2], [1], [2]])}
 
 
 # The evidence run (track 2 ends first while track 1 still runs), the same with one track waiting for its seat,
-# and a TERM-ed and a red track.
+# a TERM-ed and a red track, and a folder that the job does not own (owner unset, another id).
 EXAMPLES = [
-    {"delay": [1, 3, 0], "kind": ["exit0", "exit0", "exit0"], "slots": 6, "selected": [0, 1, 2]},
-    {"delay": [0, 3, 0], "kind": ["exit0", "exit0", "exit0"], "slots": 2, "selected": [0, 1, 2]},
-    {"delay": [3, 0, 1], "kind": ["exit0", "term", "exit1"], "slots": 6, "selected": [0, 1, 2]},
+    {"delay": [1, 3, 0], "kind": ["exit0", "exit0", "exit0"], "slots": 6, "selected": [0, 1, 2], "owner": "own"},
+    {"delay": [0, 3, 0], "kind": ["exit0", "exit0", "exit0"], "slots": 2, "selected": [0, 1, 2], "owner": "own"},
+    {"delay": [3, 0, 1], "kind": ["exit0", "term", "exit1"], "slots": 6, "selected": [0, 1, 2], "owner": "own"},
+    {"delay": [1, 3, 0], "kind": ["exit0", "exit0", "exit0"], "slots": 6, "selected": [0, 1, 2], "owner": "unset"},
+    {"delay": [0, 1, 0], "kind": ["exit0", "exit1", "exit0"], "slots": 2, "selected": [0, 1, 2], "owner": "other"},
 ]
 
 

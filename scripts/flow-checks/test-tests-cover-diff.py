@@ -4,20 +4,29 @@
 Run: `python3 scripts/flow-checks/test-tests-cover-diff.py [cases]`. Exits non-zero on the first violation.
 Each fixture is a lane root in a temp dir whose `scripts/select-tests.py` prints a fixed selection.
 fixtures/run-step-clippy.txt is a log scripts/flow-checks/run-step.sh wrote for a real lane.
-Every lane root sits in a git repo, so a log's `TREE:` commit resolves to a real source tree; the checked tree is
-`--tree` of the repo's child commit, whose tree is the base's.
+Every lane root sits in a colocated jj repo, so a log's `TREE:` commit resolves to a real source tree; the checked tree
+is `--tree` of the repo's child commit, whose tree is the base's, and the summary's `Commit:` is that child.
 fixtures/windowed-*.txt are red windowed gate step logs of real lanes (the ledger path's home folder shortened to ~).
 """
+import contextlib
+import functools
 import hashlib
 import importlib.util
+import io
+import itertools
+import json
+import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 CHECKER = Path(__file__).resolve().parent / "tests-cover-diff.py"
+REPO = Path(__file__).resolve().parents[2]
 REAL_LOG = Path(__file__).resolve().parent / "fixtures/run-step-clippy.txt"
 # run() writes the repo's base commit for TREE_ID and its commit of another tree for OTHER_TREE_ID.
 TREE_ID, OTHER_TREE_ID = "e5d2c227" + "a" * 32, "0bad" + "f" * 36
@@ -59,12 +68,12 @@ def run(selected, logs, spans=(), selector_exit=0, ran={}, cites=None):
             (root / path).write_text(text.replace(TREE_ID, base).replace(OTHER_TREE_ID, other))
         summary = root / "target/summary.md"
         summary.parent.mkdir(exist_ok=True)
-        summary.write_text("# lane change summary\n\nHow tested:\n"
+        summary.write_text(f"# lane change summary\n\nCommit: {change_of(root, child)}\n\nHow tested:\n"
                            + "".join(f"- Green log: {p.replace('<root>', str(root))} (`Summary [ 1s]`)\n"
                                      for p in (cites if cites is not None else [*logs, *ran]))
                            + "".join(f"- selector line `{s}`\n" for s in spans)
                            + "\nConfidence (1-5) that the verifier will confirm: 4\n")
-        return subprocess.run([sys.executable, str(CHECKER), "--base", "3936d83", "--summary", str(summary),
+        return subprocess.run([sys.executable, str(CHECKER), "--base", base, "--summary", str(summary),
                                "--tree", child], cwd=root, capture_output=True, text=True)
 
 
@@ -165,10 +174,7 @@ def fixtures():
 
 
 def load_checker():
-    spec = importlib.util.spec_from_file_location("tests_cover_diff", CHECKER)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module("tests_cover_diff", CHECKER)
 
 
 def generated(cases):
@@ -203,7 +209,8 @@ def generated(cases):
         step = rng.choice(steps)
         mutated = selected[step] + " extra"
         assert check(stdout, spans.replace(selected[step], mutated), logs, not_run), f"case {case}: changed span passes"
-        assert check(stdout + selected[step] + "\n", spans, logs, not_run), f"case {case}: step printed twice passes"
+        assert checker.repeated_steps(stdout + selected[step] + "\n"), f"case {case}: step printed twice passes"
+        assert checker.repeated_steps(stdout) == [], f"case {case}: steps printed once each fail"
         if step in not_run:
             continue
         path = f"target/r1/{step}.log"
@@ -633,7 +640,13 @@ def git_repo(root):
     child = git("rev-parse", "HEAD")
     (root / "f").write_text("b\n")
     git("commit", "-qam", "other")
+    subprocess.run(["jj", "git", "init", "--colocate"], cwd=root, check=True, capture_output=True)
     return base, child, git("rev-parse", "HEAD")
+
+
+def change_of(root, commit):
+    return subprocess.run(["jj", "log", "--no-graph", "-r", commit, "-T", "change_id"], cwd=root, check=True,
+                          capture_output=True, text=True).stdout
 
 
 def lane_files(rng, spec, commits):
@@ -805,7 +818,7 @@ def run_lane(root, spec, rng, commits):
         (root / path).write_text(text)
     summary = root / "summary.md"
     prose = "- The `accepted-base-red:` line names a log and a ruling; ruled-route: with an id and a log.\n"
-    summary.write_text("# s\n\nHow tested:\n" + prose + "".join(f"- log: {p} (`x`)\n" for p in cites)
+    summary.write_text(f"# s\n\nCommit: {change_of(root, commits[1])}\n\nHow tested:\n" + prose + "".join(f"- log: {p} (`x`)\n" for p in cites)
                        + "\n".join(extra)
                        + "\n\nConfidence (1-5) that the verifier will confirm: 4\n")
     r = subprocess.run([sys.executable, str(CHECKER), "--base", commits[0], "--summary", str(summary),
@@ -1325,6 +1338,194 @@ def real_windowed_logs():
         print(f"[tests-cover-diff] real windowed log {f.name}: {len(fails)} FAIL lines = RED={red} HUNG={hung}")
 
 
+REGISTRY = "docs/Testing/KeystoneKnownReds.md"
+EVIDENCE = "docs/Testing/known-red-evidence/a-row/keystone-smoke-gate.log.zst"
+FEATUREMAP = "docs/Architecture/FeatureMap.md"
+DATA = (REGISTRY, EVIDENCE, FEATUREMAP)
+CRATE_SRC, CRATE_TESTS, BUILD = ("crates/holon-toon/src/lib.rs", "frontends/gpui/tests/accordion_bounded_pbt.rs",
+                                 "crates/holon-toon/Cargo.toml")
+CODE = (CRATE_SRC, CRATE_TESTS, BUILD)
+# The stub prints the real selection of this tree for the paths of its `--paths-from` file, else of its jj diff.
+CHAIN_STUB = """import json, subprocess, sys
+a = sys.argv[1:]
+if "--paths-from" in a:
+    paths = open(a[a.index("--paths-from") + 1]).read().splitlines()
+else:
+    paths = subprocess.run(["jj", "diff", "--name-only", "--from", a[a.index("--base") + 1], "--to", "@"],
+                           capture_output=True, text=True, check=True).stdout.splitlines()
+table = json.load(open("selections.json"))
+key = "\\n".join(sorted(set(paths)))
+if key not in table:
+    sys.exit(f"stub selector: no selection for {key!r}")
+sys.stdout.write(%r + "".join(line + "\\n" for line in table[key]))
+""" % HEADER
+# (name, chain), run before the drawn chains.
+CHAINS = [
+    ("code in gpui tests, then a rows change", [[CRATE_TESTS], [REGISTRY, EVIDENCE]]),
+    ("crate code, then a rows change: two nextest lines", [[CRATE_SRC], [REGISTRY, EVIDENCE, FEATUREMAP]]),
+    ("crate code, then a change of the registry and gpui tests", [[CRATE_SRC], [REGISTRY, CRATE_TESTS]]),
+    ("a rows change, then a change of the registry and gpui tests", [[REGISTRY, EVIDENCE], [REGISTRY, CRATE_TESTS]]),
+    ("evidence without the registry, then a rows change", [[EVIDENCE], [REGISTRY]]),
+    ("rows changes only", [[REGISTRY], [REGISTRY, FEATUREMAP]]),
+]
+
+
+@functools.cache
+def real_selection():
+    """{sorted paths joined by newlines: the selection of this tree} for every set of pool paths."""
+    st = load_module("select_tests_real", REPO / "scripts/select-tests.py")
+    meta = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=REPO,
+                                     check=True, capture_output=True, text=True).stdout)
+    pool = sorted({*DATA, *CODE})
+    table = {}
+    with contextlib.redirect_stderr(io.StringIO()):
+        for k in range(len(pool) + 1):
+            for paths in itertools.combinations(pool, k):
+                table["\n".join(paths)] = st.selection(REPO, meta, list(paths))
+    return table
+
+
+def load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def selected_for(paths):
+    return set(real_selection()["\n".join(sorted(set(paths)))])
+
+
+def rows_only(change):
+    return REGISTRY in change and all(p in DATA for p in change)
+
+
+def required(chain):
+    """The reference: the lines of the code changes' paths plus those of the rows-only changes' paths, one
+    selection of all paths when either side is empty."""
+    rows = {p for c in chain if rows_only(c) for p in c}
+    code = {p for c in chain if not rows_only(c) for p in c}
+    if rows and code:
+        return selected_for(code) | selected_for(rows)
+    return selected_for(rows | code)
+
+
+def chain_repo(root, chain):
+    """A colocated repo whose base holds the stub selector and whose changes after it are `chain`; every change
+    writes new text, so the diff from the base to @ is the union of the chain's paths. Returns the base and the
+    change id and commit id of the last change."""
+    env = {**os.environ, "JJ_USER": "t", "JJ_EMAIL": "t@t"}
+
+    def run(*args):
+        return subprocess.run(args, cwd=root, env=env, check=True, capture_output=True, text=True).stdout.strip()
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts/select-tests.py").write_text(CHAIN_STUB)
+    (root / "selections.json").write_text(json.dumps(real_selection()))
+    (root / ".gitignore").write_text("target/\n")
+    run("git", "init", "-q")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "add", ".")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+    base = run("git", "rev-parse", "HEAD")
+    run("jj", "git", "init", "--colocate")
+    for i, change in enumerate(chain):
+        for path in change:
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(f"change {i}\n")
+        run("jj", "commit", "-m", f"change {i}")
+    return base, *run("jj", "log", "--no-graph", "-r", "@-", "-T", 'change_id ++ " " ++ commit_id').split()
+
+
+def cover(root, base, change, commit, lines):
+    """Run the checker with one exit-0 run-step log per line of `lines`, each also cited as a span."""
+    if (root / "target").exists():
+        shutil.rmtree(root / "target")
+    logs = []
+    for i, line in enumerate(sorted(lines)):
+        path = f"target/c/{i}.log"
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(step_log(line))
+        logs.append(path)
+    summary = root / "target/summary.md"
+    summary.write_text(f"# s\n\nCommit: {change}\n\nHow tested:\n" + "".join(f"- log: {p}\n" for p in logs)
+                       + "".join(f"- line `{line}`\n" for line in sorted(lines))
+                       + "\nConfidence (1-5) that the verifier will confirm: 4\n")
+    return subprocess.run([sys.executable, str(CHECKER), "--base", base, "--summary", str(summary), "--tree", commit],
+                          cwd=root, capture_output=True, text=True)
+
+
+def draw_change(rng):
+    kind = rng.choice(["rows", "mixed", "code"])
+    data = [REGISTRY, *rng.sample(DATA[1:], rng.randint(0, 2))]
+    if kind == "rows":
+        return data
+    if kind == "mixed":
+        return data + rng.sample(CODE, rng.randint(1, 2))
+    return rng.sample([*CODE, *DATA[1:]], rng.randint(1, 3))
+
+
+def regrouped(rng, chain):
+    """`chain` reordered, with one change split in two parts of its own class: the same paths per class."""
+    chain = [list(c) for c in chain]
+    i = rng.randrange(len(chain))
+    change = chain[i]
+    if len(change) > 1:
+        cut = rng.randint(1, len(change) - 1)
+        parts = [change[:cut], change[cut:]]
+        if rows_only(change):
+            parts = [sorted({REGISTRY, *part}) for part in parts]
+        if all(rows_only(part) == rows_only(change) for part in parts):
+            chain[i:i + 1] = parts
+    rng.shuffle(chain)
+    return chain
+
+
+def per_change(cases):
+    """The lines the checker requires for a lane chain equal the reference `required`: a run citing exactly those
+    lines passes, a run missing any one of them fails naming its step; a reordered chain with a split change, which
+    keeps the paths of each class, requires the same lines."""
+    rng = random.Random(16)
+    not_run = load_checker().not_run_steps()
+    drawn = list(CHAINS) + [(f"chain {i}", [draw_change(rng) for _ in range(rng.randint(1, 5))])
+                            for i in range(cases)]
+    both = two_lines = 0
+    for n, (name, chain) in enumerate(drawn):
+        want = required(chain)
+        rows = [c for c in chain if rows_only(c)]
+        both += bool(rows) and len(rows) < len(chain)
+        if rows and len(rows) < len(chain):
+            registry_lines = selected_for({p for c in rows for p in c})
+            assert not any(line.startswith(("hand-authored:", "timing:")) for line in registry_lines), \
+                f"{name}: the rows changes {rows} select {sorted(registry_lines)}"
+        steps = Counter(line.split(":")[0] for line in want)
+        two_lines += any(k > 1 for k in steps.values())
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            base, change, commit = chain_repo(root, chain)
+            r = cover(root, base, change, commit, want)
+            assert r.returncode == 0, f"{name} {chain}: the reference lines {sorted(want)} fail:\n{r.stderr}"
+            runnable = sorted(line for line in want if line.split(":")[0] not in not_run)
+            dropped = runnable if n < len(CHAINS) else [rng.choice(
+                [line for line in runnable if steps[line.split(":")[0]] > 1] or runnable)]
+            for line in dropped:
+                step = line.split(":")[0]
+                r = cover(root, base, change, commit, want - {line})
+                assert r.returncode == 1 and any(f"no cited run-step log ran the selected step `{step}`" in b
+                                                 for b in r.stderr.splitlines()), \
+                    f"{name} {chain}: without the log of `{line}`: exit {r.returncode}:\n{r.stderr}"
+        other = regrouped(rng, chain)
+        assert required(other) == want, f"{name}: the reference differs for {chain} and {other}"
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            base, change, commit = chain_repo(root, other)
+            r = cover(root, base, change, commit, want)
+            assert r.returncode == 0, f"{name}: {other}, regrouped from {chain}, fails:\n{r.stderr}"
+        print(f"[tests-cover-diff] per change: {name}: PASS")
+    assert both >= len(drawn) // 4, f"only {both} of {len(drawn)} chains hold both rows-only and other changes"
+    assert two_lines >= len(drawn) // 8, f"only {two_lines} of {len(drawn)} chains require one step on two lines"
+    print(f"[tests-cover-diff] per change: {len(drawn)} chains PASS; {both} with rows-only and other changes, "
+          f"{two_lines} with a step on two lines")
+
+
 if __name__ == "__main__":
     fixtures()
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 300
@@ -1342,3 +1543,4 @@ if __name__ == "__main__":
     hand_died_shards(cases // 3)
     hand_killed_steps(cases // 3)
     complete_runs_of_any_size(cases // 3)
+    per_change(cases // 10)
