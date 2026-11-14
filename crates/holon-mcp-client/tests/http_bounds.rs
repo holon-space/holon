@@ -17,6 +17,10 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
+use crate::redirect_downgrade::bind_loopback;
+use crate::redirect_downgrade::serve_chain;
+use crate::redirect_downgrade::serve_victim;
+
 fn surface_calling(url: &str) -> RestCallSurface {
     let yaml = format!(
         r#"
@@ -263,5 +267,28 @@ async fn an_mcp_redirect_off_https_is_refused() {
     assert!(
         msg.contains("refused a redirect"),
         "the error must say the redirect hop was refused; got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_cross_origin_redirect_never_reaches_second_host() {
+    let victim = bind_loopback().await;
+    let victim_addr = victim.local_addr().expect("addr");
+    let received = serve_victim(victim);
+    let first = bind_loopback().await;
+    let addr = first.local_addr().expect("addr");
+    serve_chain(first, vec![(307, format!("http://{victim_addr}/stolen"))]);
+
+    let msg = mcp_connect_error(addr).await;
+
+    let received = received.lock().unwrap().clone();
+    assert!(
+        received.is_empty(),
+        "the second host received:\n{}",
+        String::from_utf8_lossy(&received)
+    );
+    assert!(
+        msg.contains("refused a redirect") && !msg.contains("stolen"),
+        "the error must say the redirect hop was refused, without quoting it; got: {msg}"
     );
 }

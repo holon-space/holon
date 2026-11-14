@@ -1,15 +1,14 @@
 //! The HTTP clients every outbound connection call uses.
 //!
-//! Checking the URL a sidecar declares is only half a guard. `reqwest`'s
-//! default policy follows up to ten redirects and does not look at the scheme,
-//! so an `https://` endpoint answering `302 Location: http://…` gets the next
-//! request — carrying the same auth header — sent in the clear, and the body
-//! that becomes rows in the vault arrives from whoever answered. The load-time
-//! guard cannot see that: it only ever sees the first URL.
-//!
-//! So the rule is applied twice, from one definition
-//! ([`crate::integration_config::is_secure_url`]): once when the sidecar loads,
-//! and once per hop at request time.
+//! A client built by [`https_only`] follows a redirect hop only when all of
+//! these hold, and otherwise fails with an error carrying [`REDIRECT_REFUSED`]
+//! before anything is sent to the hop's target:
+//! - the target passes [`crate::integration_config::is_secure_url`] (https, or
+//!   http to loopback), the rule the sidecar load applies to the first URL;
+//! - the target has the origin (scheme, host and port) of the hop before it,
+//!   since reqwest strips only the standard auth headers on a host change and a
+//!   connector may send its secret in a header it names itself;
+//! - fewer than ten hops came before it.
 
 use crate::peer_budget::BodyCap;
 
@@ -129,8 +128,8 @@ pub const MAX_DISCLOSED_PEER_TEXT_BYTES: usize = 4096;
 /// rather than left growing, and the worst real bundled call measures 4.5 s.
 pub const CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// A client that refuses any redirect hop leaving https (loopback excepted)
-/// and gives up on a request after [`REQUEST_TIMEOUT`].
+/// A client with the redirect rules of this module that gives up on a
+/// request after [`REQUEST_TIMEOUT`].
 pub(crate) fn secure_http_client() -> reqwest::Client {
     https_only()
         .timeout(REQUEST_TIMEOUT)
@@ -138,8 +137,8 @@ pub(crate) fn secure_http_client() -> reqwest::Client {
         .expect("a reqwest client with a redirect policy and a timeout must build")
 }
 
-/// A builder whose clients refuse any redirect hop leaving https (loopback
-/// excepted).
+/// A builder whose clients follow redirects only under the rules of this
+/// module.
 ///
 /// The refusal names neither the target nor the origin: a redirect target is
 /// attacker-chosen text and a connection's URL can itself be a credential, and
@@ -154,8 +153,18 @@ pub(crate) fn https_only() -> reqwest::ClientBuilder {
                  the clear. The target is not quoted here because it is chosen by the peer."
             ));
         }
-        // Keep the default hop budget: a policy that allowed unlimited
-        // same-scheme hops would trade one hazard for a redirect loop.
+        let from = attempt
+            .previous()
+            .last()
+            .expect("reqwest asks about a redirect only with the hop it came from");
+        if attempt.url().origin() != from.origin() {
+            return attempt.error(format!(
+                "{REDIRECT_REFUSED} to another origin (scheme, host or port) — a \
+                 connection's requests carry its credentials, so they stay on the origin the \
+                 connection named. Configure the URL the service redirects to instead. The \
+                 target is not quoted here because it is chosen by the peer."
+            ));
+        }
         if attempt.previous().len() >= 10 {
             return attempt.error(format!("{REDIRECT_REFUSED}: too many redirects"));
         }
