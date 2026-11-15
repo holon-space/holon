@@ -3214,23 +3214,46 @@ mod tests {
     /// initial state boots — so a violation surfaces as that assertion instead
     /// of as the `CapMap::expect` abort it causes in a real run.
     ///
-    /// NONDETERMINISTIC by construction: each run draws a fresh seed, so
-    /// which draw carries the trigger varies (~30s). Fail-safe rather than
-    /// flaky-green — a seed that never draws a triggering sequence fails on the
+    /// Runs the fixed `SHRINK_WALK_SEEDS`: some random seeds never draw a
+    /// triggering sequence in 512 cases, and such a seed fails on the
     /// `expected the trigger to fail the property` arm instead of passing
-    /// vacuously. The seed is printed first; `HOLON_SHRINK_WALK_SEED` replays
-    /// it.
+    /// vacuously. `HOLON_SHRINK_WALK_SEED=<u64>` replays one seed;
+    /// `HOLON_SHRINK_WALK_SEED=random` explores a fresh one.
     #[test]
     fn the_shrinker_never_yields_a_sequence_its_capmap_cannot_host() {
         use std::hash::BuildHasher;
 
-        let seed = std::env::var("HOLON_SHRINK_WALK_SEED").map_or_else(
-            |_| std::collections::hash_map::RandomState::new().hash_one(0u8),
-            |seed| seed.parse().expect("HOLON_SHRINK_WALK_SEED must be a u64"),
-        );
-        eprintln!("shrink walk seed: {seed} (replay with HOLON_SHRINK_WALK_SEED={seed})");
-        shrink_walk_keeps_every_transition_hostable(seed);
+        let seeds = match std::env::var("HOLON_SHRINK_WALK_SEED") {
+            Err(std::env::VarError::NotPresent) => SHRINK_WALK_SEEDS.to_vec(),
+            Ok(seed) if seed == "random" => {
+                vec![std::collections::hash_map::RandomState::new().hash_one(0u8)]
+            }
+            Ok(seed) => vec![
+                seed.parse()
+                    .expect("HOLON_SHRINK_WALK_SEED must be a u64 or `random`"),
+            ],
+            Err(err) => panic!("HOLON_SHRINK_WALK_SEED: {err}"),
+        };
+        for seed in seeds {
+            eprintln!("shrink walk seed: {seed} (replay with HOLON_SHRINK_WALK_SEED={seed})");
+            shrink_walk_keeps_every_transition_hostable(seed);
+        }
     }
+
+    /// Each seed draws the trigger, and each goes red on the property when
+    /// `WideE2EMachine::preconditions` drops its `transition_applicable` gate:
+    /// the shrink then keeps the named transition under a `{Loro}` wiring.
+    const SHRINK_WALK_SEEDS: [u64; 3] = [
+        SHRINK_WALK_KEEPS_EPOCH_FLIP_SEED,
+        SHRINK_WALK_KEEPS_RESTART_SEED,
+        SHRINK_WALK_KEEPS_CREATE_DOCUMENT_SEED,
+    ];
+    /// Shrinks to one `EpochFlipRejected`.
+    const SHRINK_WALK_KEEPS_EPOCH_FLIP_SEED: u64 = 2733559622741551526;
+    /// Shrinks to one `SimulateRestart`, with the MCP server actor drawn.
+    const SHRINK_WALK_KEEPS_RESTART_SEED: u64 = 4854631172499973227;
+    /// Shrinks to one `CreateDocument`.
+    const SHRINK_WALK_KEEPS_CREATE_DOCUMENT_SEED: u64 = 4346985140921193573;
 
     /// A seed whose shrink dropped the row a later remote-list change
     /// addressed, while that change's precondition still let it through.
@@ -3306,6 +3329,14 @@ mod tests {
             // transition retained while everything else, the wiring included,
             // was minimized.
             Err(TestError::Fail(reason, (initial, transitions, _))) => {
+                eprintln!(
+                    "shrink walk seed {seed}: minimal case {:?} under wiring {:?}",
+                    transitions
+                        .iter()
+                        .map(|t| t.variant_name())
+                        .collect::<Vec<_>>(),
+                    initial.harness.wiring,
+                );
                 assert!(
                     reason.message().contains(TRIGGER),
                     "the shrink must end on the trigger, not on the applicability abort: {reason}"
