@@ -1562,6 +1562,8 @@ gate-arch:
     ./scripts/test-select-tests-dev-edges.py 2>&1 | tee target/gate-logs/gate-arch-select-tests-dev-edges.log
     # Each case is a whole integrate run under the real build slot script: too slow for the cargo-free checks.
     ./scripts/test-gate-integrate-tmpdir.py 2>&1 | tee target/gate-logs/gate-arch-gate-integrate-tmpdir.log
+    # Asks jj for the tree id, so it cannot run in the cargo-free checks' copied tree.
+    ./scripts/flow-checks/test-windowed-gate-logs.py 2>&1 | tee target/gate-logs/gate-arch-windowed-gate-logs.log
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
 
 # Tier 1 pre-commit gate: gate-integrity lints, defensive-code ratchet, typecheck.

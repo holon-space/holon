@@ -24,6 +24,7 @@ With $GATE_IDS_FILE set, a run whose bad units are all RED writes `failed <unit>
 there; a HUNG unit names no test, so a run with one writes none.
 After the FAIL line of each RED or HUNG unit, one `unit-log: <unit> <log> sha256=<hex>` line per log of that unit
 (first run and rerun) records the log's hash when the gate ends; scripts/flow-checks/tests-cover-diff.py reads it.
+Each unit log starts with the BASE:/TREE:/STARTED: header of scripts/flow-checks/run-step.sh; BASE is $BASE, else `(unset)`.
 """
 import argparse
 import hashlib
@@ -119,11 +120,22 @@ def alive(pid: int) -> bool:
     return True
 
 
+# BASE and TREE of every unit log's header: read once in main, before the units run in parallel.
+RUN: dict[str, str] = {}
+
+
+def log_header() -> bytes:
+    return (f"BASE: {RUN['base']}\nTREE: {RUN['tree']}\n"
+            f"STARTED: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n").encode()
+
+
 def run_cmd(cmd: list[str], log: Path, timeout: int) -> tuple[int, bool, int]:
     """Returns (rc, hung, killed_descendants). On timeout the whole descendant
     tree is snapshotted BEFORE anything dies (killing nextest first would
     re-parent the tests to init and hide them), killed, and verified gone."""
     with open(log, "wb") as fh:
+        fh.write(log_header())
+        fh.flush()
         proc = subprocess.Popen(cmd, cwd=REPO, stdout=fh, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         try:
@@ -217,6 +229,9 @@ def main() -> int:
     args = ap.parse_args()
     wanted = args.unit or [u for u in os.environ.get("WINDOWED_GATE_UNITS", "").splitlines() if u]
     args.log_dir.mkdir(parents=True, exist_ok=True)
+    RUN["base"] = os.environ.get("BASE") or "(unset)"
+    RUN["tree"] = subprocess.run(["jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"], cwd=REPO, check=True,
+                                 stdout=subprocess.PIPE, text=True).stdout.strip()
 
     reuse = build(args.features, args.log_dir)
     binaries = inventory(reuse)
