@@ -18,6 +18,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -1613,12 +1614,23 @@ fn folded_file_name(transition_key: &str) -> String {
 ///
 /// Only writes if `HOLON_PERF_FLAMEGRAPH` env var is set (to a directory path).
 pub fn maybe_write_flamegraph(collector: &SpanCollector, transition_key: &str) {
-    let dir = match std::env::var("HOLON_PERF_FLAMEGRAPH") {
-        Ok(d) if !d.is_empty() => std::path::PathBuf::from(d),
-        _ => return,
-    };
+    write_flamegraph_where_asked(|name| std::env::var(name).ok(), collector, transition_key);
+}
 
-    std::fs::create_dir_all(&dir).expect("failed to create flamegraph output dir");
+fn write_flamegraph_where_asked(
+    env: impl Fn(&str) -> Option<String>,
+    collector: &SpanCollector,
+    transition_key: &str,
+) {
+    if let Some(dir) = env("HOLON_PERF_FLAMEGRAPH").filter(|d| !d.is_empty()) {
+        write_flamegraph(collector, transition_key, Path::new(&dir));
+    }
+}
+
+/// Writes a folded stacks file for the spans currently in the collector into
+/// `dir`.
+fn write_flamegraph(collector: &SpanCollector, transition_key: &str, dir: &Path) {
+    std::fs::create_dir_all(dir).expect("failed to create flamegraph output dir");
 
     let spans = collector.finished_spans();
     if spans.is_empty() {
@@ -1658,16 +1670,13 @@ mod folded_stacks_tests {
     #[test]
     fn repeated_writes_for_one_key_keep_both_files() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: nextest runs every test in its own process, so nothing else
-        // reads the environment while this write happens.
-        unsafe { std::env::set_var("HOLON_PERF_FLAMEGRAPH", dir.path()) };
 
         let collector = SpanCollector::global();
         begin_test_scope();
         tracing::info_span!("query").in_scope(|| {});
 
-        maybe_write_flamegraph(collector, "ApplyTransition");
-        maybe_write_flamegraph(collector, "ApplyTransition");
+        write_flamegraph(collector, "ApplyTransition", dir.path());
+        write_flamegraph(collector, "ApplyTransition", dir.path());
 
         let written = std::fs::read_dir(dir.path()).expect("read dir").count();
         assert_eq!(written, 2, "both writes must survive");
@@ -1680,9 +1689,6 @@ mod folded_stacks_tests {
     #[test]
     fn folded_stacks_keep_ancestors_that_are_not_perf_spans() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: nextest runs every test in its own process, so nothing else
-        // reads the environment while this write happens.
-        unsafe { std::env::set_var("HOLON_PERF_FLAMEGRAPH", dir.path()) };
 
         let collector = SpanCollector::global();
         begin_test_scope();
@@ -1693,7 +1699,7 @@ mod folded_stacks_tests {
             });
         });
 
-        maybe_write_flamegraph(collector, "ApplyTransition");
+        write_flamegraph(collector, "ApplyTransition", dir.path());
 
         let file = std::fs::read_dir(dir.path())
             .expect("read dir")
@@ -1707,6 +1713,38 @@ mod folded_stacks_tests {
                 .any(|line| line.starts_with("frontend.render;resolve_doc;query ")),
             "folded output must carry the full ancestry, got:\n{folded}"
         );
+    }
+
+    #[test]
+    fn the_harness_writes_into_the_dir_the_env_names_and_nowhere_when_it_names_none() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let named = root.path().join("named");
+        let collector = SpanCollector::global();
+        begin_test_scope();
+        tracing::info_span!("query").in_scope(|| {});
+
+        for unset_or_empty in [None, Some(String::new())] {
+            write_flamegraph_where_asked(|_| unset_or_empty.clone(), collector, "HarnessNoDir");
+        }
+        let stray: Vec<_> = std::fs::read_dir(".")
+            .expect("read the working dir")
+            .map(|e| e.expect("dir entry").file_name())
+            .filter(|n| n.to_string_lossy().ends_with("-HarnessNoDir.folded"))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "an unset or empty env must write nothing: {stray:?}"
+        );
+
+        write_flamegraph_where_asked(
+            |name| (name == "HOLON_PERF_FLAMEGRAPH").then(|| named.display().to_string()),
+            collector,
+            "HarnessDir",
+        );
+        let written = std::fs::read_dir(&named)
+            .expect("the named dir exists")
+            .count();
+        assert_eq!(written, 1, "the env's dir must hold the folded file");
     }
 }
 
