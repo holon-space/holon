@@ -888,7 +888,7 @@ fn copy_backup(stem: &Path, path: &str, with_log: bool) -> Step<()> {
         }
     }
     #[cfg(test)]
-    rebuild_fault::at(rebuild_fault::Cut::Copied)?;
+    fault::at(fault::Cut::Copied)?;
     Ok(())
 }
 
@@ -905,7 +905,7 @@ fn rebuild(path: &str, fns: &[ScalarFn]) -> Step<Rebuilt> {
     conn.execute("PRAGMA foreign_keys = OFF")
         .map_err(engine("PRAGMA foreign_keys = OFF"))?;
     #[cfg(test)]
-    rebuild_fault::at(rebuild_fault::Cut::Opened)?;
+    fault::at(fault::Cut::Opened)?;
     let views = computed_views(&conn)?;
     let (kept, cleared) = in_write_tx(&conn, || {
         let caches: std::collections::HashMap<String, String> =
@@ -932,12 +932,12 @@ fn rebuild(path: &str, fns: &[ScalarFn]) -> Step<Rebuilt> {
             }
         }
         #[cfg(test)]
-        rebuild_fault::at(rebuild_fault::Cut::Dropped)?;
+        fault::at(fault::Cut::Dropped)?;
         write_signature(&conn, fns)?;
         Ok((kept, cleared))
     })?;
     #[cfg(test)]
-    rebuild_fault::at(rebuild_fault::Cut::Committed)?;
+    fault::at(fault::Cut::Committed)?;
     match verdict(&db, fns)? {
         Verdict::Usable => {}
         Verdict::Recompute(why) | Verdict::MoveAside(why) => {
@@ -987,10 +987,11 @@ fn text_pairs(conn: &Arc<Connection>, sql: &str) -> Step<Vec<(String, String)>> 
         .collect()
 }
 
-/// Lets a test fail or crash a rebuild at one point.
+/// Lets a test fail or crash an open at one point. A planted fault fires only
+/// on the planting thread, which runs the whole open, until its guard drops.
 #[cfg(test)]
-mod rebuild_fault {
-    use std::sync::Mutex;
+mod fault {
+    use std::cell::Cell;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Cut {
@@ -999,6 +1000,8 @@ mod rebuild_fault {
         /// Inside the transaction, before the signature is written.
         Dropped,
         Committed,
+        /// Between the DELETE and the INSERT of a signature write.
+        SignatureDeleted,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1007,11 +1010,28 @@ mod rebuild_fault {
         Crash,
     }
 
-    pub static PLANTED: Mutex<Option<(Cut, Fault)>> = Mutex::new(None);
+    thread_local! {
+        static PLANTED: Cell<Option<(Cut, Fault)>> = const { Cell::new(None) };
+    }
+
+    /// Clears the planted fault when dropped, also during a panic.
+    #[must_use = "the fault is cleared when the guard drops"]
+    pub struct Planted(());
+
+    impl Drop for Planted {
+        fn drop(&mut self) {
+            PLANTED.set(None);
+        }
+    }
+
+    pub fn plant(cut: Cut, fault: Fault) -> Planted {
+        let before = PLANTED.replace(Some((cut, fault)));
+        assert_eq!(before, None, "a fault is already planted on this thread");
+        Planted(())
+    }
 
     pub fn at(cut: Cut) -> super::Step<()> {
-        let planted = *PLANTED.lock().expect("rebuild fault");
-        match planted {
+        match PLANTED.get() {
             Some((at, Fault::Error)) if at == cut => {
                 Err(super::invalid(format!("injected failure after {cut:?}")))
             }
@@ -1287,10 +1307,6 @@ fn stored_signature(conn: &Arc<Connection>) -> Step<StoredSignature> {
     })
 }
 
-#[cfg(test)]
-static CRASH_AFTER_DELETE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// One transaction: a crash inside it leaves the previous record.
 fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<()> {
     let conn = connect(db)?;
@@ -1317,9 +1333,7 @@ fn write_signature(conn: &Arc<Connection>, fns: &[ScalarFn]) -> Step<()> {
     ))?;
     run(&format!("DELETE FROM {FN_SET_TABLE}"))?;
     #[cfg(test)]
-    if CRASH_AFTER_DELETE.load(std::sync::atomic::Ordering::SeqCst) {
-        panic!("injected crash between DELETE and INSERT");
-    }
+    fault::at(fault::Cut::SignatureDeleted)?;
     let insert = format!("INSERT INTO {FN_SET_TABLE} (signature) VALUES (?1)");
     let mut stmt = conn.prepare(&insert).map_err(engine(&insert))?;
     stmt.bind_at(
@@ -1532,6 +1546,31 @@ mod tests {
         ));
     }
 
+    /// One fixed interleaving: a fault planted on this thread, an open on
+    /// another thread while it is planted, then an open on this thread.
+    #[test]
+    fn a_planted_fault_reaches_only_the_opens_of_the_planting_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.db");
+        let own = dir.path().join("own.db");
+
+        let planted = fault::plant(fault::Cut::SignatureDeleted, fault::Fault::Crash);
+        let other_open = std::thread::spawn(move || {
+            open(&other, &[DOUBLE], WhenHeld::Wait)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .join();
+        let own_open = std::panic::catch_unwind(|| open(&own, &[DOUBLE], WhenHeld::Wait));
+        drop(planted);
+
+        assert!(
+            matches!(other_open, Ok(Ok(()))),
+            "an open of another test must not see the planted fault: {other_open:?}"
+        );
+        assert!(own_open.is_err(), "the planting test's own open must crash");
+    }
+
     /// A crash after the views are dropped but before the record is written
     /// rolls the whole transaction back; the next open drops them again.
     #[test]
@@ -1544,9 +1583,9 @@ mod tests {
             ..DOUBLE
         };
 
-        CRASH_AFTER_DELETE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let planted = fault::plant(fault::Cut::SignatureDeleted, fault::Fault::Crash);
         let crashed = std::panic::catch_unwind(|| open(&path, &[double_v2], WhenHeld::Wait));
-        CRASH_AFTER_DELETE.store(false, std::sync::atomic::Ordering::SeqCst);
+        drop(planted);
         assert!(crashed.is_err(), "the injected crash must end that open");
         drop(crashed);
         {
@@ -1761,8 +1800,8 @@ mod tests {
     /// Example-based: the input space is these eight named points.
     #[test]
     fn a_failed_or_crashed_rebuild_falls_back_and_the_next_open_converges() {
-        use rebuild_fault::Cut;
-        use rebuild_fault::Fault;
+        use fault::Cut;
+        use fault::Fault;
         for cut in [Cut::Copied, Cut::Opened, Cut::Dropped, Cut::Committed] {
             for fault in [Fault::Error, Fault::Crash] {
                 let case = format!("{fault:?} after {cut:?}");
@@ -1770,9 +1809,9 @@ mod tests {
                 let path = dir.path().join("holon.db");
                 build_previous_format(&path);
                 let original = files_of(&path);
-                *rebuild_fault::PLANTED.lock().unwrap() = Some((cut, fault));
+                let planted = fault::plant(cut, fault);
                 let opened = std::panic::catch_unwind(|| open(&path, &[DOUBLE], WhenHeld::Wait));
-                *rebuild_fault::PLANTED.lock().unwrap() = None;
+                drop(planted);
                 match (fault, opened) {
                     (Fault::Error, Ok(Ok((db, outcome)))) => {
                         let [
