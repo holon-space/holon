@@ -1202,6 +1202,112 @@ def hand_exited_shards(cases):
     print(f"[tests-cover-diff] hand-authored exited shards: {cases} cases PASS")
 
 
+STATIC_STEPS = frozenset({"gate-arch", "fmt"})
+# The end of a real red `gate-arch` run: its recipe stops at the first red check, so no check after it ran.
+GATE_ARCH_RED = [
+    "test-select-tests-registry-data: 0 failure(s)", "Traceback (most recent call last):",
+    '  File "./scripts/test-gate-integrate-tmpdir.py", line 169, in <module>', "    main()",
+    '  File "./scripts/test-gate-integrate-tmpdir.py", line 136, in check',
+    '    assert not left, f"the job\'s TMPDIR outlived the job: {where}"',
+    "AssertionError: the job's TMPDIR outlived the job: case 1000 {'delay': [1, 3, 0], 'kind': ['exit0', 'exit0', "
+    "'exit0'], 'slots': 6, 'selected': [0, 1, 2]}", "error: recipe `gate-arch` failed with exit code 1", ""]
+ARCH_TESTS = [f"holon-architecture-tests::architecture_rules {t}" for t in (
+    "archlint_all_passes", "holon_frontend_does_not_depend_on_holon_loro",
+    "latency_events_are_emitted_above_the_release_level_ceiling")]
+STATIC_FIXED = {
+    "a gate-arch citation with a valid base log": dict(kind="static", base_line=True, tree=True, lane=[ARCH_TESTS[0]],
+                                                      base=ARCH_TESTS[:2], comparable=True, cited=True),
+    "a step name neither the selector nor a gate prints": dict(kind="unknown", base_line=True, tree=True,
+                                                               lane=[ARCH_TESTS[0]], base=ARCH_TESTS[:1],
+                                                               comparable=True, cited=True),
+    "a gate-arch base log on another tree": dict(kind="static", base_line=True, tree=False, lane=[ARCH_TESTS[0]],
+                                                 base=ARCH_TESTS, comparable=True, cited=True),
+    "a gate-arch red only in the lane": dict(kind="static", base_line=True, tree=True, lane=ARCH_TESTS[:2],
+                                             base=ARCH_TESTS[:1], comparable=True, cited=True),
+    "a real gate-arch red that stopped at its first red check": dict(kind="static", base_line=True, tree=True, lane=[],
+                                                                      base=[], comparable=False, cited=True),
+    "a gate-arch base log of another step line": dict(kind="static", base_line=False, tree=True, lane=[ARCH_TESTS[0]],
+                                                      base=ARCH_TESTS, comparable=True, cited=True),
+    "a gate-arch citation without a cited lane log": dict(kind="static", base_line=True, tree=True,
+                                                          lane=[ARCH_TESTS[0]], base=ARCH_TESTS, comparable=True,
+                                                          cited=False),
+}
+
+
+def static_citation(rng):
+    lane = rng.sample(ARCH_TESTS, rng.randint(1, 3))
+    base = sorted(set(lane) - ({rng.choice(lane)} if rng.random() < 0.3 else set())
+                  | set(rng.sample(ARCH_TESTS, rng.randint(0, 2))))
+    return dict(kind=rng.choice(["selected", "static", "unknown"]), base_line=rng.random() < 0.75,
+                tree=rng.random() < 0.75, lane=lane, base=base, comparable=rng.random() < 0.8,
+                cited=rng.random() < 0.85)
+
+
+def static_citation_logs(rng, c):
+    """(selected text, summary, logs) of one `accepted-base-red:` citation of a lane red log."""
+    step = {"selected": "nextest", "static": rng.choice(sorted(STATIC_STEPS)), "unknown": "gate-archive"}[c["kind"]]
+    line = "nextest: --workspace -E 'package(holon-architecture-tests)'" if step == "nextest" else f"{step}: just {step}"
+    selected = line + "\n" if c["kind"] == "selected" else "clippy: --workspace\n"
+    def body(tests):
+        if not c["comparable"]:
+            return GATE_ARCH_RED
+        return [result_line(rng, t, rng.choice(STATUSES)) for t in tests] + [nextest_end_line(rng, 14, len(tests))]
+    def log(first, commit, tests):
+        return "\n".join([first, "BASE: b", f"TREE: {commit}", "STARTED: 2026-11-14T08:03:10Z", *body(tests),
+                          "exit: 1"])
+    logs = {"target/r1/clippy.log": log("clippy: --workspace", "lane", []).replace("exit: 1", "exit: 0"),
+            "target/base/step.log": log(line if c["base_line"] else line + " --profile other",
+                                        "bc" if c["tree"] else "oc", c["base"])}
+    if c["cited"]:
+        logs["target/r1/step.log"] = log(line, "lane", c["lane"])
+    summary = ("How tested:\n" + "".join(f"- {p}\n" for p in logs)
+               + f"- accepted-base-red: {step} target/base/step.log {ACCEPT_URL}\nConfidence (1-5): 4\n")
+    return selected, summary, logs
+
+
+def static_step_citations(cases):
+    """An `accepted-base-red:` line of a static gate step is accepted exactly when it would be for a selected step:
+    the base log runs the lane log's line 1 on the base tree and every lane red is red there; a step name that
+    neither the selector nor a gate prints is refused."""
+    checker = load_checker()
+    rng = random.Random(19)
+    drawn = list(STATIC_FIXED.items()) + [(f"case {i}", static_citation(rng)) for i in range(cases)]
+    kinds = Counter()
+    for name, c in drawn:
+        selected, summary, logs = static_citation_logs(rng, c)
+        bad = checker.check(selected, summary, logs, set(), "b", tree_of={"b": "T", "bc": "T", "oc": "U"}.get,
+                            static=STATIC_STEPS)
+        accepted = (c["kind"] != "unknown" and c["base_line"] and c["tree"] and c["comparable"] and c["cited"]
+                    and set(c["lane"]) <= set(c["base"]))
+        assert (bad == []) == accepted, (name, c, bad)
+        kinds[f"{c['kind']} {'accepted' if accepted else 'refused'}"] += 1
+        assert c["kind"] != "unknown" or any("which the selector does not print" in b for b in bad), (name, bad)
+        compared = c["kind"] != "unknown" and c["cited"] and c["base_line"] and c["tree"]
+        assert c["comparable"] or not compared or any("cannot compare" in b for b in bad), (name, bad)
+        if name in STATIC_FIXED:
+            print(f"[tests-cover-diff] {name}: {'accepted' if accepted else 'refused'} as expected")
+    assert all(kinds[k] for k in ("selected accepted", "selected refused", "static accepted", "static refused",
+                                  "unknown refused")), kinds
+    print(f"[tests-cover-diff] static step citations: {cases} cases PASS; per step kind {dict(kinds)}")
+
+
+def static_steps_fail_loud():
+    """A gate script whose step list cannot be read stops the check instead of leaving every static step unknown."""
+    checker = load_checker()
+    def no_steps(root, gate):
+        raise ValueError(f"{gate} --steps printed no step name")
+    selector = checker.selector_module()
+    real, selector.gate_step_names = selector.gate_step_names, no_steps
+    try:
+        checker.static_steps()
+    except ValueError:
+        print("[tests-cover-diff] an unreadable gate step list: raises as expected")
+        return
+    finally:
+        selector.gate_step_names = real
+    raise AssertionError("static_steps returned although no gate step list could be read")
+
+
 def killed_step_lines(rng):
     """A sharded lane run of the real lines whose recipe was cut while it waited for shard k: the earlier shards'
     output stands, the later shards and the `HAND-AUTHORED RED:` block never print, and the step exits with a signal
@@ -1647,5 +1753,7 @@ if __name__ == "__main__":
     hand_died_shards(cases // 3)
     hand_exited_shards(cases // 3)
     hand_killed_steps(cases // 3)
+    static_step_citations(cases)
+    static_steps_fail_loud()
     complete_runs_of_any_size(cases // 3)
     per_change(cases // 10)

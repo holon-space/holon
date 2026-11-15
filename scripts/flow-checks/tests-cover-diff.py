@@ -42,6 +42,10 @@ A step ran when a cited log has the selected line as line 1, and one of these ho
     log must show the end of a complete run, else it is refused too, as its reds prove nothing about the tests it never
     ran: a log with nextest failing-test lines needs a `Summary [...] N tests run` line (`k/n tests run` with k < n is a
     cut run, in any log), and a log with windowed gate verdicts needs the gate's `windowed-gate: wall=` end line.
+A static gate step (a name `bash <gate script> --steps` prints, `gate_step_names` of select-tests.py) that the
+selector does not print may carry an `accepted-base-red:` line too: every cited red log whose line 1 runs that step is
+then its lane log, compared as above with the base log of the same normalised line 1, and at least one is cited. A
+`ruled-route:` line names only a selected step.
 A step also ran by a ruled route: the How-tested block has a line `ruled-route: <step> <ruling> <evidence log>` and the
 evidence log is cited and exists. The check does not read the ruling ledger; the verifier checks the ruling id.
 An `<acceptance>` or `<ruling>` is a ruling id (a letter or digit, then letters, digits and `_./-`, with a digit) or an
@@ -141,6 +145,13 @@ def selector_module():
 
 def not_run_steps():
     return set(selector_module().NOT_RUN_STEPS)
+
+
+def static_steps():
+    """The step names every gate script declares; raises when a gate script cannot print them."""
+    st = selector_module()
+    root = Path(st.__file__).resolve().parents[1]
+    return {name for gate in st.GATE_SCRIPTS for name in st.gate_step_names(root, gate)}
 
 
 def partition(chain):
@@ -419,11 +430,14 @@ def cited(path, logs):
 
 
 def base_red_problems(step, lane_path, lane_lines, base_path, logs, selected_line, base_tree, tree_of, notes):
-    """Why `base_path` does not prove every red of `lane_path` red on the base; [] when it does."""
+    """Why `base_path` does not prove every red of `lane_path` red on the base; [] when it does. `selected_line` is
+    the selector's line of the step, or None for a static step, whose base log runs the lane log's line 1."""
     if not (key := cited(base_path, logs)):
         return [f"{ACCEPTED} of step `{step}` names base log {base_path}, which is no cited existing log"]
     base = logs[key].splitlines() or [""]
-    if norm(base[0]) != selected_line:
+    if selected_line is None and norm(base[0]) != norm(lane_lines[0]):
+        return [f"{ACCEPTED} base log {base_path} runs `{base[0]}`, lane log {lane_path} runs `{lane_lines[0]}`"]
+    if selected_line is not None and norm(base[0]) != selected_line:
         return [f"{ACCEPTED} base log {base_path} runs `{base[0]}`, the selector prints `{selected_line}`"]
     tree = tree_line(base)
     if tree is None:
@@ -447,10 +461,12 @@ def base_red_problems(step, lane_path, lane_lines, base_path, logs, selected_lin
     return []
 
 
-def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tree, notes=None, head=None):
+def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tree, notes=None, head=None,
+          static=frozenset()):
     """`logs` maps each cited existing path to its text; `not_run` names the steps no log runs; `tree_of` maps a
     commit to its source tree id; `notes` collects the module-level compares; `head` is the source tree id of the
-    checked tree, which every classifier log must have run on. Returns the problems."""
+    checked tree, which every classifier log must have run on; `static` names the gates' static steps. Returns the
+    problems."""
     notes = [] if notes is None else notes
 
     def on_tree(lines):
@@ -474,7 +490,7 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
     for kind, step, path, token in found:
         if not TOKEN.fullmatch(token):
             bad.append(f"{kind} of step `{step}` names `{token}`, which is no ruling id or issue-comment URL")
-        elif step not in selected:
+        elif step not in selected and not (kind == ACCEPTED and step in static):
             bad.append(f"{kind} names step `{step}`, which the selector does not print")
         elif kind == ACCEPTED:
             accepts[step].append(path)
@@ -483,9 +499,19 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
         else:
             bad.append(f"{ROUTE} of step `{step}` names evidence {path}, which is no cited existing log")
     base_tree = base and tree_of(base)
+    static_runs = set()
     for path, lines in sorted(split.items()):
         first = (m := STEP_LINE.match(lines[0])) and m.group(1)
-        if first not in selected or any(same_file(path, e) for e in evidence):
+        if any(same_file(path, e) for e in evidence):
+            continue
+        if first not in selected and first in accepts:
+            static_runs.add(first)
+            if lines[-1] != EXIT_OK:
+                refusals = [base_red_problems(first, path, lines, b, logs, None, base_tree, tree_of, notes)
+                            for b in accepts[first]]
+                bad += [] if [] in refusals else [problem for r in refusals for problem in r]
+            continue
+        if first not in selected:
             continue
         line = norm(lines[0])
         if line not in selected[first]:
@@ -516,6 +542,8 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
             bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `{EXIT_OK}`, and no cited "
                        f"classifier log has line 1 `{CLASSIFIER} {path}`{others}")
         bad += verdicts + [problem for r in refusals for problem in r] + (units or [])
+    bad += [f"{ACCEPTED} names static step `{step}`, which no cited log runs" for step in sorted(accepts)
+            if step not in selected and step not in static_runs]
     for step in sorted(set(selected) - not_run):
         missing = sorted(selected[step] - ran)
         if len(selected[step]) == 1:
@@ -602,7 +630,8 @@ def main():
     if (head := git_tree(commit)) is None:
         sys.exit(f"tests-cover-diff: git cannot resolve the source tree of the checked commit {commit}")
     notes = []
-    bad += check("".join(outputs), summary_text, logs, not_run_steps(), a.base, notes=notes, head=head)
+    bad += check("".join(outputs), summary_text, logs, not_run_steps(), a.base, notes=notes, head=head,
+                 static=static_steps())
     for note in notes:
         print(f"tests-cover-diff: note: {note}")
     for problem in bad:
