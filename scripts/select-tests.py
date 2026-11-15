@@ -28,6 +28,8 @@ stdout: first the `BASE:` and `TREE:` lines (commit ids of the fork point of `@`
   (`keystone-smoke: just keystone-smoke`), also when there is no `nextest:` line.
 stderr: why each crate is in the list.
 A crate whose changed paths all sit under its own `tests/` is listed alone, without its reverse deps.
+A crate reached only through a dev-dependency is listed without its own reverse deps (its library does not change),
+unless a changed path is a `Cargo.toml`.
 A changed path under `assets/` adds every crate whose `.rs` sources hold that path or one of its parent directories
 as a complete string literal.
 A diff whose every path is registry data (REGISTRY_DATA) and that holds the known-reds registry prints only the
@@ -71,17 +73,21 @@ REGISTRY_TESTS = f"package({INTEGRATION}) & kind(lib) & test(/^pbt::known_reds::
 REGISTRY_FIXTURE_LINE = "known-reds-fixture: just known-reds-fixture"
 
 
+DEV_REASON = "tests dev-depend on"
+
+
 def workspace_graph(meta):
+    """({crate: its dir}, {crate: {workspace crate depending on it: whether every such edge is a dev-dependency}})."""
     root = PurePosixPath(meta["workspace_root"])
     members = set(meta["workspace_members"])
     pkgs = [p for p in meta["packages"] if p["id"] in members]
     dirs = {p["name"]: PurePosixPath(p["manifest_path"]).parent.relative_to(root) for p in pkgs}
     names = set(dirs)
-    rdeps = {n: set() for n in names}
+    rdeps = {n: {} for n in names}
     for p in pkgs:
         for d in p["dependencies"]:
             if d["name"] in names:
-                rdeps[d["name"]].add(p["name"])
+                rdeps[d["name"]][p["name"]] = rdeps[d["name"]].get(p["name"], True) and d["kind"] == "dev"
     return dirs, rdeps
 
 
@@ -137,17 +143,25 @@ def compute(meta, changed, has_manifest=lambda rel_dir: False, asset_readers=lam
     for name in list(reasons):
         if name not in outside_tests:
             reasons[name] += " (only tests/ changed: no reverse deps)"
+    # A dev-dependency links into the dependent's tests only, never into its library, so the walk stops there; a
+    # changed manifest can move features of any build, so then every edge carries on.
+    manifest_changed = any(p.name == "Cargo.toml" for p in paths)
     expanded = set(outside_tests)
     frontier = list(expanded)
     while frontier:
         cur = frontier.pop()
-        for r in rdeps[cur]:
+        for r, dev_only in rdeps[cur].items():
+            if dev_only and not manifest_changed:
+                reasons.setdefault(r, f"{DEV_REASON} {cur}")
+                continue
+            if reasons.get(r, "").startswith(DEV_REASON):
+                reasons[r] = f"depends on {cur}"
             reasons.setdefault(r, f"depends on {cur}")
             if r not in expanded:
                 expanded.add(r)
                 frontier.append(r)
     bins = {}
-    if reasons.get(INTEGRATION, "").startswith("depends on"):
+    if reasons.get(INTEGRATION, "").startswith(("depends on", DEV_REASON)):
         del reasons[INTEGRATION]
         bins = test_binaries()
     return sorted(reasons), reasons, bins
@@ -1059,15 +1073,19 @@ def contract_problems(root):
 
 
 
-def dependents_oracle(meta):
-    """{crate: the crate and every workspace crate whose dependency closure holds it}, by a forward walk per crate."""
+def dependents_oracle(meta, through_dev=False):
+    """{crate: the crate and every workspace crate whose tests link it}, by a forward walk per crate: a crate's tests
+    link its dependencies of every kind and, from there on, only normal and build dependencies (every kind when
+    `through_dev`, as for a changed manifest)."""
     members = {p["name"]: p for p in meta["packages"] if p["id"] in meta["workspace_members"]}
     closure = {}
     for name in members:
         seen, todo = set(), [name]
         while todo:
-            for d in members[todo.pop()]["dependencies"]:
-                if d["name"] in members and d["name"] not in seen:
+            cur = todo.pop()
+            for d in members[cur]["dependencies"]:
+                linked = through_dev or cur == name or d["kind"] != "dev"
+                if linked and d["name"] in members and d["name"] not in seen:
                     seen.add(d["name"])
                     todo.append(d["name"])
         closure[name] = seen

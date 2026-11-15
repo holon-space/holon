@@ -1559,6 +1559,7 @@ gate-arch:
     just cargo-free-checks
     # Reads `cargo metadata`, so it cannot sit among the cargo-free checks.
     ./scripts/test-select-tests-registry-data.py 2>&1 | tee target/gate-logs/gate-arch-select-tests-registry-data.log
+    ./scripts/test-select-tests-dev-edges.py 2>&1 | tee target/gate-logs/gate-arch-select-tests-dev-edges.log
     # Each case is a whole integrate run under the real build slot script: too slow for the cargo-free checks.
     ./scripts/test-gate-integrate-tmpdir.py 2>&1 | tee target/gate-logs/gate-arch-gate-integrate-tmpdir.log
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log

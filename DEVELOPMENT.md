@@ -743,7 +743,9 @@ The scoped rule, per changed path:
 - the tree checks (fmt, deny, machete, the arch checks, guests-verify) run for every
   batch;
 - a path inside a workspace crate reaches that crate and every crate that
-  depends on it; each step runs when it builds or tests a reached crate, and
+  depends on it; a crate that reaches it only through a dev-dependency is
+  reached without its own dependents, since its library does not change, unless
+  a changed path is a `Cargo.toml` (then every edge carries on); each step runs when it builds or tests a reached crate, and
   extra-nextest runs only those crates' tests (`package(...)` filter set),
   less the crates a `package()` term of the load-tolerant default filter
   excludes, and does not run when none is left;
