@@ -95,11 +95,26 @@ def every_log_has_the_run_header(base, want_base):
             f"the classifier reads a log with the header as the same log without it: {classified(first)}"
 
 
+def only_this_runs_logs_stay():
+    with tempfile.TemporaryDirectory() as d:
+        log_dir, scratch = Path(d) / "logs", Path(d) / "scratch"
+        scratch.mkdir()
+        log_dir.mkdir()
+        (log_dir / "stale.rerun.log").write_text("thread 'old::run' panicked at a.rs:1:1:\nan older run\n")
+        (log_dir / "stale.rerun.classified").write_text("PRIMARY: [novel] stale.rerun.log\n")
+        (log_dir / "notes.txt").write_text("not a log of the gate\n")
+        run_gate(log_dir, scratch, BASE)
+        names = sorted(p.name for p in log_dir.iterdir())
+        assert names == ["holon-gpui.classified", "holon-gpui.log", "holon-gpui.rerun.log", "notes.txt"], names
+
+
 def main():
     every_log_has_the_run_header(BASE, BASE)
     print("[windowed-gate logs] every per-unit and rerun log starts with the BASE/TREE/STARTED header: PASS")
     every_log_has_the_run_header(None, "(unset)")
     print("[windowed-gate logs] an unset BASE reads `BASE: (unset)`: PASS")
+    only_this_runs_logs_stay()
+    print("[windowed-gate logs] a stale log and classifier file of an older run are gone, other files stay: PASS")
 
 
 main()

@@ -24,6 +24,7 @@ With $GATE_IDS_FILE set, a run whose bad units are all RED writes `failed <unit>
 there; a HUNG unit names no test, so a run with one writes none.
 After the FAIL line of each RED or HUNG unit, one `unit-log: <unit> <log> sha256=<hex>` line per log of that unit
 (first run and rerun) records the log's hash when the gate ends; scripts/flow-checks/tests-cover-diff.py reads it.
+A run first deletes the unit logs and classifier files of earlier runs in its log dir, so the dir holds this run's only.
 Each unit log starts with the BASE:/TREE:/STARTED: header of scripts/flow-checks/run-step.sh; BASE is $BASE, else `(unset)`.
 """
 import argparse
@@ -229,6 +230,8 @@ def main() -> int:
     args = ap.parse_args()
     wanted = args.unit or [u for u in os.environ.get("WINDOWED_GATE_UNITS", "").splitlines() if u]
     args.log_dir.mkdir(parents=True, exist_ok=True)
+    for old in [*args.log_dir.glob("*.log"), *args.log_dir.glob("*.classified")]:
+        old.unlink()
     RUN["base"] = os.environ.get("BASE") or "(unset)"
     RUN["tree"] = subprocess.run(["jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"], cwd=REPO, check=True,
                                  stdout=subprocess.PIPE, text=True).stdout.strip()
