@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# classify-run.sh : the hook says `classify` in `capabilities`, and `classify-run` prints the class a generated log was built to have: no failure -> green, only registered known reds -> known-red-only, a novel failure, a truncated, an empty or a missing log -> red. Without `--class`, the classifier's output is byte-equal to the fork-point script's.
+# classify-run.sh : the hook says `classify` in `capabilities`, and `classify-run` prints the class a generated log was built to have: no failure -> green, only registered known reds -> known-red-only, a novel failure, a truncated, an empty or a missing log -> red. A log of the unit scripts' test run, made by that run on drawn test files, is green exactly when no file failed; cut before its summary it is red. Without `--class`, the classifier's output is byte-equal to the fork-point script's.
 set -uo pipefail
 here=$(cd "${0%/*}/.." && pwd)
 hook=$here/hook
@@ -39,11 +39,11 @@ mklog() {
 }
 
 declare -A seen
-check() { # check <label> <want> <log>
+check() { # check <label> <want> <log> [any] : the keystone classifier exits 1 or 3 on red; `any` takes exit 0 for red too
   local got; got=$("$hook" classify-run "$3" 2>"$work/err"); local rc=$?
   seen[$2]=$((${seen[$2]:-0} + 1))
   local ok=0
-  case $2 in red) [ "$rc" -eq 1 ] || [ "$rc" -eq 3 ] || ok=1 ;; *) [ "$rc" -eq 0 ] || ok=1 ;; esac
+  case $2 in red) [ "$rc" -eq 1 ] || [ "$rc" -eq 3 ] || { [ "${4:-}" = any ] && [ "$rc" -eq 0 ]; } || ok=1 ;; *) [ "$rc" -eq 0 ] || ok=1 ;; esac
   [ "$got" = "$2" ] && [ $ok -eq 0 ] || { echo "FAIL $1: want '$2', got '$got' (exit $rc)"; fail=1; return; }
   echo "ok $1"
 }
@@ -67,6 +67,25 @@ for ((i = 0; i < draws; i++)); do
   esac
   check "draw $i ($want)" "$want" "$f"
 done
+mapfile -t words < <("$hook" test-command /nonexistent-build-ws scripts)
+envs=(); while [[ ${words[0]} =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do envs+=("${words[0]}"); words=("${words[@]:1}"); done
+# scripts_log <file> <exit code>... : the log of the scripts test run on one test file per exit code, each printing a nextest-like line.
+scripts_log() {
+  local f=$1 t; shift; t=$(mktemp -d "$work/scripts.XXXX"); mkdir -p "$t/scripts/sub"
+  local k=0 c; for c in "$@"; do
+    k=$((k + 1)); printf 'echo "test result: ok. 1 passed; 0 failed"\nexit %s\n' "$c" > "$t/scripts/$([ $((RANDOM % 2)) = 0 ] && echo sub/)test-$k.sh"
+  done
+  (cd "$t" && env "${envs[@]}" "${words[@]}") > "$f" 2>&1
+}
+scripts_log "$work/sg" 0 0; check "static scripts run green" green "$work/sg"
+scripts_log "$work/sr" 0 1; check "static scripts run with a failing file" red "$work/sr" any
+for ((i = 0; i < draws / 3; i++)); do
+  codes=(); want=green; for ((j = RANDOM % 4; j >= 0; j--)); do c=$(( RANDOM % 3 == 0 ? RANDOM % 3 : 0 )); codes+=("$c"); [ "$c" = 0 ] || want=red; done
+  scripts_log "$work/s$i" "${codes[@]}"
+  if [ $((RANDOM % 4)) = 0 ]; then sed -i '' '/^Summary: /,$d' "$work/s$i"; want=red; fi
+  check "scripts draw $i (${codes[*]}, $want)" "$want" "$work/s$i" any
+done
+
 for c in green known-red-only red; do [ "${seen[$c]:-0}" -gt 0 ] || { echo "FAIL generator: class $c never drawn"; fail=1; }; echo "drawn $c: ${seen[$c]:-0}"; done
 
 # The classifier prints byte-equal output without --class: compare the script with the one at the fork point.

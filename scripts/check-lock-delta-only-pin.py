@@ -3,7 +3,7 @@
 lane's original lockfile change chose a value: no entry outside the pinned
 crates may take a value that neither side had.
 
-usage: test-lock-delta-only-pin.py NEW_BASE ORIGINAL_TIP REBASED_TIP LOCK PIN_PREFIX
+usage: check-lock-delta-only-pin.py NEW_BASE ORIGINAL_TIP REBASED_TIP LOCK PIN_PREFIX
 """
 import subprocess
 import sys

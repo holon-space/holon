@@ -25,7 +25,8 @@ MARK = 2_000_000_100
 
 def gc(target, *args, env=None):
     return subprocess.run(
-        [sys.executable, str(SCRIPT), str(target), *args], capture_output=True, text=True, env=env
+        [sys.executable, str(SCRIPT), str(target), *args], capture_output=True, text=True,
+        env={k: v for k, v in os.environ.items() if k != "HOLON_CARGO_RECORD"} if env is None else env,
     )
 
 

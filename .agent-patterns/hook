@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
 # hook <op> ... : holon's answers to the agent-patterns kit (interface: the agent-patterns kit's hook-interface.md).
-# A unit is a cargo package. Every op runs in the workspace it concerns.
+# A unit is a cargo package, or `scripts`: the scripts folder, whose `test-*` files are its tests. Every op runs in the workspace it concerns.
 set -euo pipefail
 here=$(cd "${0%/*}" && pwd)
 op=${1:?op}; shift
+is_scripts() {
+  [ "$1" = scripts ] || return 1
+  local meta; meta=$(cargo metadata --no-deps --format-version 1 --offline) || { echo "cargo metadata failed in $PWD" >&2; exit 1; }
+  [ "$(jq '[.packages[] | select(.name == "scripts")] | length' <<<"$meta")" = 0 ] \
+    || { echo "a cargo package is named scripts too: the unit scripts is ambiguous" >&2; exit 1; }
+}
+# Units of both kinds in one call have no common test run or facts.
+scripts_only() {
+  local c s=0; for c in "$@"; do is_scripts "$c" && s=$((s + 1)); done
+  (( s == 0 )) && return 1
+  (( s == $# )) || { echo "units $*: scripts and cargo packages cannot share one call" >&2; exit 1; }
+}
 case $op in
   prompt-facts)
     pkgs=$(for c in "$@"; do printf -- '-p %s ' "$c"; done)
@@ -12,21 +24,49 @@ case $op in
     feats=$("$here/test-command.py" features "$@")
     lints=$(sed -n 's/^CLIPPY_LINTS := "\(.*\)"$/\1/p' justfile)
     [ -n "$lints" ] || { echo "the justfile holds no CLIPPY_LINTS" >&2; exit 1; }
-    sed -e "s#@PKGS@#${pkgs% }${feats:+ $feats}#g" -e "s#@CLIPPY_LINTS@#$lints#g" -e "s#@HOOK_DIR@#$here#g" -e "s#@TESTS_DIRS@#${tests%, }#g" "$here/prompt-facts.md" ;;
+    overlay=/dev/null; ! scripts_only "$@" || overlay=$here/prompt-facts-scripts.md
+    # The overlay's blocks replace the blocks of the same name.
+    awk 'FILENAME == ARGV[1] { if (/^@@ /) n = $0; else if (n != "") o[n] = o[n] $0 "\n"; next }
+         /^@@ / { skip = ($0 in o); print; if (skip) printf "%s", o[$0]; next }
+         !skip' "$overlay" "$here/prompt-facts.md" \
+      | sed -e "s#@PKGS@#${pkgs% }${feats:+ $feats}#g" -e "s#@CLIPPY_LINTS@#$lints#g" -e "s#@HOOK_DIR@#$here#g" -e "s#@TESTS_DIRS@#${tests%, }#g" ;;
   dependents)
-    for c in "$@"; do cargo tree --locked -i "$c" --workspace -e normal,build,dev --prefix none --depth 1 | awk '{print $1}'; done ;;
+    for c in "$@"; do is_scripts "$c" && continue; cargo tree --locked -i "$c" --workspace -e normal,build,dev --prefix none --depth 1 | awk '{print $1}'; done ;;
   layout)
+    if is_scripts "$1"; then printf 'dir: scripts\ncode: scripts\ntests: scripts\nmanifest: -\n'; exit 0; fi
     # A package's directory is not always crates/<name> (frontends/gpui holds holon-gpui).
     dir=$(cargo metadata --no-deps --format-version 1 --offline | jq -r --arg n "$1" --arg w "$(pwd -P)/" '.packages[] | select(.name == $n) | .manifest_path | ltrimstr($w) | rtrimstr("/Cargo.toml")')
     [ -n "$dir" ] || { echo "no package $1 in $PWD" >&2; exit 1; }
     printf 'dir: %s\ncode: %s/src\ntests: %s/tests\nmanifest: %s/Cargo.toml\n' "$dir" "$dir" "$dir" "$dir" ;;
   build-dir) echo target ;;
-  code-hash) find crates/*/src frontends/*/src -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 ;;
-  register-tests) "$here/add-mods.sh" "$(dirname "$1")" "$PWD" "$2" ;;
+  code-hash) find crates/*/src frontends/*/src scripts -name __pycache__ -prune -o -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 ;;
+  register-tests) is_scripts "$2" || "$here/add-mods.sh" "$(dirname "$1")" "$PWD" "$2" ;;
   merge-manifest) "$here/merge-devdeps.py" "$1" "$2" ;;
-  test-command) "$here/test-command.py" run "$@" ;;
+  test-command)
+    [ "$1" = --scope ] && units=("${@:4}") || units=("${@:2}")
+    # Every scripts change may concern every scripts test, so a scoped run is the whole run.
+    if scripts_only "${units[@]}"; then printf '%s\n' PYTHONDONTWRITEBYTECODE=1 "$0" run-scripts-tests; else "$here/test-command.py" run "$@"; fi ;;
+  run-scripts-tests)
+    # The test-command of the unit scripts, run in the tree to test: each test file once, its kind by its suffix.
+    mapfile -t files < <(find scripts -type f -name 'test-*' | sort)
+    (( ${#files[@]} > 0 )) || { echo "no test-* file under scripts/ in $PWD" >&2; exit 1; }
+    echo "Scripts test run: ${#files[@]} test files"
+    failed=0
+    for f in "${files[@]}"; do
+      case $f in *.py) run=(python3 "$f") ;; *.sh) run=(bash "$f") ;; *) echo "FAIL $f: no runner for its suffix"; failed=$((failed + 1)); continue ;; esac
+      echo "== $f"
+      "${run[@]}" && echo "PASS $f" || { echo "FAIL $f exit=$?"; failed=$((failed + 1)); }
+    done
+    echo "Summary: ${#files[@]} test files, $failed failed"
+    (( failed == 0 )) ;;
   capabilities) printf 'scope\nclassify\n' ;;
-  classify-run) "$here/../scripts/keystone-known-reds.sh" --class "${1:?log}" ;;
+  classify-run)
+    # A scripts test run has no known reds: only its last summary line can make it green.
+    if grep -q '^Scripts test run: ' "${1:?log}" 2>/dev/null; then
+      [[ $(grep -E '^Summary: [0-9]+ test files, [0-9]+ failed$' "$1" | tail -1) == *', 0 failed' ]] && echo green || echo red
+    else
+      "$here/../scripts/keystone-known-reds.sh" --class "$1"
+    fi ;;
   report)
     grep -m1 -E '^ *Summary' "$1" | sed 's/^ *//' || echo
     grep -E '^\s*(FAIL|TIMEOUT|SIGSEGV|PASS) |Summary' "$1" | tail -40 || : ;;
