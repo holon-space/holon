@@ -59,8 +59,17 @@ jobs:
           key: web-app
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # The cache can restore the trunk binary without cargo's install metadata,
+      # and then a plain `cargo install` refuses to overwrite it.
       - name: Install trunk
-        run: cargo install trunk --locked
+        env:
+          TRUNK_VERSION: "0.22.1"
+        run: |
+          if command -v trunk >/dev/null && [ "$(trunk --version)" = "trunk $TRUNK_VERSION" ]; then
+            echo "trunk $TRUNK_VERSION already installed"
+          else
+            cargo install trunk --version "$TRUNK_VERSION" --locked --force
+          fi
 
       # The worker + dioxus-web are their own cargo workspaces and hand-mirror
       # the root's fork pins. Fail fast on a stale mirror (a lagging rev shows

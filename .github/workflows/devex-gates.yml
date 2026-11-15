@@ -181,8 +181,17 @@ jobs:
             ${{ runner.os }}-cargo-web-
             ${{ runner.os }}-cargo-
 
+      # The cache can restore the trunk binary without cargo's install metadata,
+      # and then a plain `cargo install` refuses to overwrite it.
       - name: Install Trunk
-        run: cargo install trunk --locked
+        env:
+          TRUNK_VERSION: "0.22.1"
+        run: |
+          if command -v trunk >/dev/null && [ "$(trunk --version)" = "trunk $TRUNK_VERSION" ]; then
+            echo "trunk $TRUNK_VERSION already installed"
+          else
+            cargo install trunk --version "$TRUNK_VERSION" --locked --force
+          fi
 
       # The worker is its own cargo workspace, so it hand-mirrors
       # the root's fork pins. Assert the mirrors match before spending a build
