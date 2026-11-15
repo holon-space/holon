@@ -459,6 +459,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `typed-link-in-pasted-decision-block-file-disagrees`
 - `undo-concurrent-keystrokes-tail-lost-load`
 - `undo-create-sibling-order`
+- `undo-prod-session-did-not-revert`
 - `undo-prod-session-source-block-marks`
 - `undo-prod-session-stale-dropped`
 - `vault-scale-main-panel-delivery`

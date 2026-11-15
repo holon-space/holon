@@ -298,6 +298,34 @@ assertion `left == right` failed: the newborn must carry the characters in typed
 EOF
 expect_outcome quick-open-fresh-slot-prepend 1 '^PRIMARY: \[novel\] .* @ frontends/gpui/tests/quick_open_returns_focus_windowed\.rs:782:5: ' \
     "$work/quick-open-fresh-slot-prepend.log"
+# The undo that leaves the edit in place is known from the row's own evidence.
+undo_evidence="$repo_root/docs/Testing/known-red-evidence/undo-prod-session-did-not-revert"
+for run in gate-extra-excerpt standalone-rerun-excerpt; do
+    zstd -dq -o "$work/undo-did-not-revert-$run.log" "$undo_evidence/$run.log.zst"
+    expect_outcome "undo-did-not-revert/$run" 0 '^PRIMARY: \[known-red:undo-prod-session-did-not-revert\] .* @ crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring\.rs:184:9: ' \
+        "$work/undo-did-not-revert-$run.log"
+done
+# The same assertion with the content gone, or reverted to other text, is another failure: novel.
+for case in 'none:None' 'other-text:Some("Journals reverted-elsewhere")'; do
+    still=${case#*:}
+    cat >"$work/undo-did-not-revert-other.log" <<EOT
+thread 'editing_suite::undo_prod_session_wiring::prod_session_wires_undo_and_mcp_shares_the_same_stack' (1713881406) panicked at crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring.rs:184:9:
+undo did not revert 'block:journals' to its original content 'Journals' (still: $still)
+test editing_suite::undo_prod_session_wiring::prod_session_wires_undo_and_mcp_shares_the_same_stack ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 641 filtered out; finished in 6.36s
+EOT
+    expect_outcome "undo-did-not-revert/still-${case%%:*}" 1 '^PRIMARY: \[novel\] .* @ crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring\.rs:184:9: ' \
+        "$work/undo-did-not-revert-other.log"
+done
+# An unrelated failure of the same test stays novel.
+cat >"$work/undo-prod-session-other-assert.log" <<'EOT'
+thread 'editing_suite::undo_prod_session_wiring::prod_session_wires_undo_and_mcp_shares_the_same_stack' (1713881406) panicked at crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring.rs:163:9:
+MCP-STACK GAP: the editor's undo entry is invisible to a HolonService over the same DI BackendEngine — editor and MCP are not sharing one undo stack
+test editing_suite::undo_prod_session_wiring::prod_session_wires_undo_and_mcp_shares_the_same_stack ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 641 filtered out; finished in 6.36s
+EOT
+expect_outcome undo-prod-session-other-assert 1 '^PRIMARY: \[novel\] .* @ crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring\.rs:163:9: ' \
+    "$work/undo-prod-session-other-assert.log"
 # cargo test prints the expected panic of a passing `#[should_panic]` test.
 cat >"$work/should-panic-only.log" <<'EOF'
 thread 'mistyped_initial_state_key_is_loud' (1) panicked at crates/holon-integration-tests/src/pbt/hand_authored.rs:166:9:
