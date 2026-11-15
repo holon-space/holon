@@ -16,6 +16,8 @@ scripts_only() {
   (( s == 0 )) && return 1
   (( s == $# )) || { echo "units $*: scripts and cargo packages cannot share one call" >&2; exit 1; }
 }
+# code_files <dir>... : the files under the dirs, NUL-separated; a Python bytecode cache is no file of the code.
+code_files() { find "$@" -name __pycache__ -prune -o -type f -print0; }
 case $op in
   prompt-facts)
     pkgs=$(for c in "$@"; do printf -- '-p %s ' "$c"; done)
@@ -39,7 +41,7 @@ case $op in
     [ -n "$dir" ] || { echo "no package $1 in $PWD" >&2; exit 1; }
     printf 'dir: %s\ncode: %s/src\ntests: %s/tests\nmanifest: %s/Cargo.toml\n' "$dir" "$dir" "$dir" "$dir" ;;
   build-dir) echo target ;;
-  code-hash) find crates/*/src frontends/*/src scripts -name __pycache__ -prune -o -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 ;;
+  code-hash) code_files crates/*/src frontends/*/src scripts | sort -z | xargs -0 shasum -a 256 | shasum -a 256 ;;
   register-tests) is_scripts "$2" || "$here/add-mods.sh" "$(dirname "$1")" "$PWD" "$2" ;;
   merge-manifest) "$here/merge-devdeps.py" "$1" "$2" ;;
   test-command)
@@ -48,7 +50,7 @@ case $op in
     if scripts_only "${units[@]}"; then printf '%s\n' PYTHONDONTWRITEBYTECODE=1 "$0" run-scripts-tests; else "$here/test-command.py" run "$@"; fi ;;
   run-scripts-tests)
     # The test-command of the unit scripts, run in the tree to test: each test file once, its kind by its suffix.
-    mapfile -t files < <(find scripts -type f -name 'test-*' | sort)
+    mapfile -t files < <(code_files scripts | tr '\0' '\n' | grep '/test-[^/]*$' | sort)
     (( ${#files[@]} > 0 )) || { echo "no test-* file under scripts/ in $PWD" >&2; exit 1; }
     echo "Scripts test run: ${#files[@]} test files"
     failed=0

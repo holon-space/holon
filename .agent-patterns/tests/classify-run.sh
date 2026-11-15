@@ -69,11 +69,13 @@ for ((i = 0; i < draws; i++)); do
 done
 mapfile -t words < <("$hook" test-command /nonexistent-build-ws scripts)
 envs=(); while [[ ${words[0]} =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; do envs+=("${words[0]}"); words=("${words[@]:1}"); done
-# scripts_log <file> <exit code>... : the log of the scripts test run on one test file per exit code, each printing a nextest-like line.
+# scripts_log <file> <exit code>... : the log of the scripts test run on one test file per exit code, each printing a nextest-like line, some beside a bytecode cache of a test module.
 scripts_log() {
   local f=$1 t; shift; t=$(mktemp -d "$work/scripts.XXXX"); mkdir -p "$t/scripts/sub"
   local k=0 c; for c in "$@"; do
-    k=$((k + 1)); printf 'echo "test result: ok. 1 passed; 0 failed"\nexit %s\n' "$c" > "$t/scripts/$([ $((RANDOM % 2)) = 0 ] && echo sub/)test-$k.sh"
+    k=$((k + 1)); local d=$t/scripts/$([ $((RANDOM % 2)) = 0 ] && echo sub/)
+    printf 'echo "test result: ok. 1 passed; 0 failed"\nexit %s\n' "$c" > "${d}test-$k.sh"
+    if [ $((RANDOM % 2)) = 0 ]; then mkdir -p "${d}__pycache__"; echo pyc > "${d}__pycache__/test-$k.cpython-3$((RANDOM % 20)).pyc"; fi
   done
   (cd "$t" && env "${envs[@]}" "${words[@]}") > "$f" 2>&1
 }
