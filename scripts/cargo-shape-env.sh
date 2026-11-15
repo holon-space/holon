@@ -7,9 +7,10 @@
 #                                            test runs (nextest, cargo test) run N tests at once
 # Both set HOLON_PBT_BUDGET to the mode: the slow composed-harness property tests draw fewer cases in a lane
 # (crates/holon-integration-tests/src/pbt/composed/case_budget.rs). No build script reads it.
-# Both put scripts/cargo-shape first on PATH, so every cargo call is recorded in
+# Both put scripts/shims first on PATH, so every cargo call is recorded in
 # $HOLON_CARGO_RECORD (default target/cargo-shape/calls.jsonl) for
-# scripts/check-compile-shape.py. `shape_env_header` prints the values for a log.
+# scripts/check-compile-shape.py, and every `just` call in $HOLON_JUST_RECORD when set
+# (scripts/check-just-calls-once.py). `shape_env_header` prints the values for a log.
 cargo_shape_env() {
   local root mode=${1:-}
   root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -34,7 +35,7 @@ cargo_shape_env() {
   fi
   export HOLON_PBT_BUDGET=$mode
   export HOLON_CARGO_RECORD=${HOLON_CARGO_RECORD:-$root/target/cargo-shape/calls.jsonl}
-  case ":$PATH:" in *":$root/scripts/cargo-shape:"*) ;; *) export PATH="$root/scripts/cargo-shape:$PATH" ;; esac
+  case ":$PATH:" in *":$root/scripts/shims:"*) ;; *) export PATH="$root/scripts/shims:$PATH" ;; esac
 }
 
 shape_env_header() {

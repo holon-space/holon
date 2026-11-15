@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Property check of the hand-authored row-key rule of scripts/check-known-red-evidence.py, run as gate-arch runs it.
+"""Property check of the hand-authored row-key rule of scripts/check-known-red-evidence.py, run as `just cargo-free-checks` runs it.
 
 Run: `python3 scripts/test-known-red-evidence-row-key.py` (SEED=<n>, CASES=<n>, default 30).
 Each case writes a registry and a hand-authored case file into a temp copy of the checker's tree and runs the

@@ -12,10 +12,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 combine="$here/gate-combine.sh"
 integrate="$here/gate-integrate.sh"
 timing="$here/gate-timing.sh"
-real_just=$(command -v just)
 # A caller that sourced cargo-shape-env.sh (run-step.sh does) put this checkout's
 # shim on PATH; behind the stubs it would keep the gate scripts from adding it in front.
-PATH=$(tr ':' '\n' <<<"$PATH" | grep -vxF "$here/cargo-shape" | paste -sd: -)
+PATH=$(tr ':' '\n' <<<"$PATH" | grep -vxF "$here/shims" | paste -sd: -)
+real_just=$(command -v just)
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 fails=0
@@ -105,6 +105,7 @@ for tool in just cargo; do
 #!/usr/bin/env bash
 echo "$(basename "$0") $* | timing=${HOLON_PBT_TIMING-unset} | record=${GATE_RECORD-unset} | shape=font:${RUST_FONTCONFIG_DLOPEN-unset} sha:${HOLON_BUILD_SHA-unset} time:${HOLON_BUILD_TIME-unset} rustflags:${RUSTFLAGS-unset} | quiet=$(cat "$HOME/.cache/holon-build/quiet" 2>/dev/null)" >> "$GATE_PROBE"
 case " $* " in *" --evaluate "*) exec "$REAL_JUST" "$@" ;; esac
+[ "$*" != "${STUB_RECALL:-}" ] || STUB_RECALL= HOLON_JUST_RECORD_ARMED=1 just "$@"
 [ "${STUB_KILL:-}" != "$(basename "$0"):${1:-}" ] || { kill -TERM "$(ps -o ppid= -p "$PPID" | tr -d ' ')"; sleep 1; exit 1; }
 [ "$*" != timing-gate-build ] || [ -z "${STUB_HOLDER_DIES:-}" ] || kill "$HOLON_BUILD_SLOT_HOLDER"
 [ "$*" != timing-gate-build ] || printf '%s\n' "${BUILD_OUT:-}"
@@ -214,6 +215,13 @@ echo "== the integrate run with a red cargo-free check"
 rc=0; in_stubs STUB_RED=cargo-free-checks "$integrate" g7 "1 2" "$tip" >"$scratch/integrate-cargo-free.out" 2>&1 || rc=$?
 expect "exits 1 (got $rc)" [ "$rc" = 1 ]
 expect "names the feature-map step red" grep -qx 'RED STEP \[9\] featuremap: exit 1, log target/gate-logs/g7-step-9.log' "$scratch/integrate-cargo-free.out"
+
+echo "== the integrate run in which one just call runs twice"
+rc=0; in_stubs STUB_RECALL=cargo-free-checks "$integrate" g10 "1 2" "$tip" >"$scratch/integrate-just-twice.out" 2>&1 || rc=$?
+expect "exits 1 (got $rc)" [ "$rc" = 1 ]
+expect "names the repeated call" grep -qx 'FAIL: just cargo-free-checks ran 2 times' "$scratch/integrate-just-twice.out"
+expect "names the red gate" grep -qx 'RED: a just call ran twice in this gate' "$scratch/integrate-just-twice.out"
+expect "names no candidate tip" [ -z "$(grep '^candidate tip' "$scratch/integrate-just-twice.out")" ]
 
 echo "== the integrate run with a red step under the hold"
 rc=0; in_stubs STUB_RED=windowed-gate "$integrate" g5 "1 2" "$tip" >"$scratch/integrate-held-red.out" 2>&1 || rc=$?
@@ -1319,6 +1327,9 @@ expect "holds no job line of this run" [ -z "$( [ -e "$live_jobs" ] && tail -c +
 
 starts=$(cat "$FLOW_RUNTIME_DIR/jobs.jsonl" 2>/dev/null | grep -c '"event":"job.start"' || true)
 expect "this run's registry ($starts job starts) starts no job id twice" [ -z "$( [ -e "$FLOW_RUNTIME_DIR/jobs.jsonl" ] && grep '"event":"job.start"' "$FLOW_RUNTIME_DIR/jobs.jsonl" | grep -oE '"id":"[^"]*"' | sort | uniq -d)" ]
+
+echo "== a gate step's own script that calls its recipe again"
+expect "adds no second call to the just record" python3 "$here/test-just-record-nested.py"
 
 echo "check-gate-scripts: $fails failure(s)"
 [ "$fails" = 0 ]

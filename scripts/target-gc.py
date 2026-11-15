@@ -207,7 +207,7 @@ def in_use(target_dir, record):
     if not calls:
         raise SystemExit("HOLON_CARGO_RECORD=%s holds no cargo call: the in-use units are unknown" % record)
     target = os.path.realpath(target_dir)
-    shim = os.path.realpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "cargo-shape"))
+    shim = os.path.realpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "shims"))
     path = os.pathsep.join(d for d in os.environ["PATH"].split(os.pathsep) if os.path.realpath(d) != shim)
     replays, skipped = {}, {}
     for call in calls:

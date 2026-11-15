@@ -55,6 +55,16 @@ TRACKS=(
 QUIET_TRACK=1
 read -ra STEPS <<<"${TRACKS[*]}"
 step_names() { echo fmt deny machete gate-compile "${STEPS[@]#*:}"; }
+# Sets the positional parameters to the command of track step $1.
+step_command() {
+  case $1 in
+    featuremap) set -- just cargo-free-checks ;;
+    keystone-smoke | hand-authored | extra-nextest | keystone-tour) set -- bash "$(dirname "$0")/gate-integrate-steps.sh" "$1" ;;
+    loro-suite | projector-lag-lock) set -- env HOLON_PBT_TIMING=measure just "$1" ;;
+    *) set -- just "$1" ;;
+  esac
+  STEP_CMD=("$@")
+}
 if [ "${1:-}" = --steps ]; then step_names; exit; fi
 if [ -z "${GATE_RECORD:-}" ] && [ "${1:-}" != --track ] && [ "${1:-}" != rerun ]; then
   if [ -n "${GATE_FULL:-}${GATE_SELECT:-}" ]; then export GATE_REUSE=; else export GATE_REUSE=1; fi
@@ -112,7 +122,7 @@ gate_step() {
       echo "reuse: $name runs only the failed tests of $from"
       [ "$name" != windowed-gate ] || set -- env WINDOWED_GATE_UNITS="$GATE_ONLY_IDS" "$@" ;;
   esac
-  FLOW_JOB_ID=${GATE_JOB_ID:-${FLOW_JOB_ID:-}} step "$n" "$name" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED TMPDIR="$GATE_STEP_TMP" "$@" || return
+  FLOW_JOB_ID=${GATE_JOB_ID:-${FLOW_JOB_ID:-}} step "$n" "$name" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED HOLON_JUST_RECORD_ARMED=1 TMPDIR="$GATE_STEP_TMP" "$@" || return
   [ -z "${GATE_RECORD:-}" ] || return "$(awk -v l="red [$n] $name (exit " 'index($0, l) == 1 { rc = substr($0, length(l) + 1) + 0 } END { print rc + 0 }' "$GATE_RECORD")"
 }
 # How step $1 ($2) runs, from its last row on this tip that ran in full and was not skipped:
@@ -156,13 +166,8 @@ track() {
   [ "$1" != "$QUIET_TRACK" ] || ! track_selected "$1" || quiet_hold
   for entry in ${TRACKS[$1]}; do
     n=${entry%%:*} name=${entry#*:}
-    case $name in
-      featuremap) set -- just cargo-free-checks ;;
-      keystone-smoke | hand-authored | extra-nextest | keystone-tour) set -- bash "$(dirname "$0")/gate-integrate-steps.sh" "$name" ;;
-      loro-suite | projector-lag-lock) set -- env HOLON_PBT_TIMING=measure just "$name" ;;
-      *) set -- just "$name" ;;
-    esac
-    rc=0; gate_step "$n" "$name" "$@" >"$(step_file "$n" log)" 2>&1 || rc=$?
+    step_command "$name"
+    rc=0; gate_step "$n" "$name" "${STEP_CMD[@]}" >"$(step_file "$n" log)" 2>&1 || rc=$?
     echo "$rc" >"$(step_file "$n" rc)"
     echo "step [$n] $name: exit $rc"
   done
@@ -182,6 +187,7 @@ gate_env() {
   [ -z "$(jj diff -r @ --summary)" ] || { echo "WRONG TREE: @ carries edits on top of the tip $tip"; exit 9; }
   mkdir -p target/gate-logs
   export HOLON_CARGO_RECORD=$PWD/target/gate-logs/$GATE-cargo-calls.jsonl
+  export HOLON_JUST_RECORD=$PWD/target/gate-logs/$GATE-just-calls.jsonl
   # shellcheck source=scripts/cargo-shape-env.sh
   source "$(dirname "$0")/cargo-shape-env.sh" gate
   PBT_FEATURES=$(just --justfile "$(dirname "$0")/../justfile" --evaluate CANON_FEATURES)
@@ -241,6 +247,7 @@ gate_env
 DISK_FLOOR_GIB=$(just --justfile "$(dirname "$0")/../justfile" --evaluate GATE_DISK_FLOOR_GIB)
 [ "$(df -g . | awk 'NR==2{print $4}')" -ge "$DISK_FLOOR_GIB" ] || { echo "DISK BELOW $DISK_FLOOR_GIB GiB"; exit 8; }
 : >"$HOLON_CARGO_RECORD"
+: >"$HOLON_JUST_RECORD"
 echo "gate-integrate.sh: $GATE (pid $$), tip $tip, cards: $GATE_CARDS"
 shape_env_header
 if [ "${GATE_REUSE:-}" = 1 ]; then echo "step reuse: on, from the rows of tip $tip in $ROWS"
@@ -285,6 +292,7 @@ done
 # A red half ends the gate here, so it prints the breach summary gate-timing.sh would print.
 [ -z "$fail$red$extra_red" ] || python3 "$(dirname "$0")/timing-breaches.py" "$GATE" || echo "TIMING BREACHES NOT SUMMARIZED (exit $?)"
 [ -z "$fail" ] || exit "$fail"
+python3 "$(dirname "$0")/check-just-calls-once.py" "$HOLON_JUST_RECORD" || { echo "RED: a just call ran twice in this gate"; exit 1; }
 if [ -n "$red$extra_red" ]; then
   [ "${GATE_FULL:-}" != 1 ] && [ "${GATE_SELECT:-}" != 1 ] || exit 0
   exit "${red:-$extra_red}"

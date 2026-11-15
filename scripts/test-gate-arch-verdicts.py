@@ -8,7 +8,7 @@ exits with the example's code, and asserts:
 - the recipe exits non-zero iff a check failed;
 - each piped check's log holds the check's output.
 An example list, not drawn cases: the input is which checks are red, and the list holds one example per class
-(none, one unpiped, two, the last, one piped).
+(none, the first, two, the last, one in between).
 """
 import os
 import re
@@ -20,7 +20,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 # (check name, what the stub replaces, its log under target/gate-logs or None), in recipe order.
 CHECKS = [
-    ("cargo-free-checks", "recipe", None),
     ("gate-arch-verdicts", "scripts/test-gate-arch-verdicts.py", "gate-arch-verdicts.log"),
     ("run-step-header", "scripts/flow-checks/test-run-step-header.py", "gate-arch-run-step-header.log"),
     ("select-tests-registry-data", "scripts/test-select-tests-registry-data.py",
@@ -34,7 +33,7 @@ CHECKS = [
 NAMES = [name for name, _, _ in CHECKS]
 EXAMPLES = [
     set(),
-    {"cargo-free-checks"},
+    {"gate-arch-verdicts"},
     {"run-step-header", "windowed-gate-logs", "windowed-gate-unit-logs"},
     {"architecture_rules"},
     {"gate-integrate-tmpdir"},
@@ -50,14 +49,11 @@ def run(scratch, recipe, red):
     exits = {name: 3 + i if name in red else 0 for i, name in enumerate(NAMES)}
     (scratch / "stubs").mkdir(exist_ok=True)
     for name, replaces, _ in CHECKS:
-        if replaces == "recipe":
-            continue
         path = scratch / ("stubs/cargo" if replaces == "cargo" else replaces)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(stub(name, exits[name]))
         path.chmod(0o755)
-    body = stub("cargo-free-checks", exits["cargo-free-checks"]).replace("\n", "\n    ").rstrip()
-    (scratch / "justfile").write_text(f'CANON := "--stubbed"\n\ncargo-free-checks:\n    {body}\n\n{recipe}')
+    (scratch / "justfile").write_text(f'CANON := "--stubbed"\n\n{recipe}')
     logs = scratch / "target/gate-logs"
     for log in logs.glob("*.log") if logs.exists() else []:
         log.unlink()

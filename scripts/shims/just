@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+"""Records each `just` call for scripts/check-just-calls-once.py, then runs the next `just` on PATH.
+
+Appends one JSON line {argv} to $HOLON_JUST_RECORD when that is set and HOLON_JUST_RECORD_ARMED is set;
+otherwise only runs just. The gate arms its steps; the shim disarms the just it starts, so a just call
+made below a recorded one never records.
+"""
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+
+
+def next_just():
+    for d in os.environ["PATH"].split(os.pathsep):
+        exe = os.path.join(d, "just")
+        if os.path.realpath(d) != HERE and os.access(exe, os.X_OK):
+            return exe
+    sys.exit("just shim: no just on PATH after %s" % HERE)
+
+
+record = os.environ.get("HOLON_JUST_RECORD")
+armed = os.environ.pop("HOLON_JUST_RECORD_ARMED", None)
+if record and armed:
+    os.makedirs(os.path.dirname(os.path.abspath(record)), exist_ok=True)
+    with open(record, "a") as f:
+        f.write(json.dumps({"argv": sys.argv[1:]}) + "\n")
+just = next_just()
+os.execv(just, [just, *sys.argv[1:]])

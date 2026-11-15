@@ -1508,10 +1508,10 @@ check-web-arm:
     cargo clippy {{CANON}} --all-targets -- {{CLIPPY_LINTS}} \
         2>&1 | tee target/gate-logs/check-web-arm.log
 
-# The gate's checks that read the tree and build nothing (about 60 s): gate-arch
-# and the landing gate's feature-map step run them. The only cargo command
-# allowed here is `cargo fmt` (it reads the tree and builds nothing): any other
-# fails scripts/test-cargo-free-checks.py.
+# The gate's checks that read the tree and build nothing (about 60 s): the
+# integrate gate's feature-map step, landing-gate and prepush run them, each
+# once. The only cargo command allowed here is `cargo fmt` (it reads the tree
+# and builds nothing): any other fails scripts/test-cargo-free-checks.py.
 # Every script runs and prints one `PASS <name>` or `FAIL <name> (exit N)` line.
 cargo-free-checks:
     #!/usr/bin/env bash
@@ -1561,6 +1561,7 @@ cargo-free-checks:
     check known-red-gate-load target/gate-logs/gate-arch-known-red-gate-load.log ./scripts/test-known-red-gate-load.py
     check archlint-baseline target/gate-logs/gate-arch-archlint-baseline.log ./scripts/test-archlint-baseline.py
     check featuremap target/gate-logs/landing-featuremap.log /usr/bin/python3 scripts/featuremap.py check
+    check just-calls-once target/gate-logs/gate-arch-just-calls-once.log ./scripts/test-just-calls-once.py
     # Keeps the deny.toml ignore of RUSTSEC-2026-0514 true.
     check hickory-dnssec-off target/gate-logs/gate-arch-hickory-dnssec-off.log \
         with_self_check ./scripts/check-hickory-dnssec-off.py . {{DENY_OWN_LOCKS}}
@@ -1575,7 +1576,8 @@ cargo-free-checks:
 # no gate runs that — a red architecture test sat on main for 4 days
 # (BugFunnel 2026-08-12). Cheap (~35s): any per-lane or per-landing gate list,
 # even a hand-picked subset, should include THIS recipe — omitting it is how a
-# red architecture rule escapes a landing.
+# red architecture rule escapes a landing. It leaves out the cargo-free checks:
+# a gate list runs `just cargo-free-checks` beside it.
 gate-arch:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1599,8 +1601,6 @@ gate-arch:
             failed+=" $name"
         fi
     }
-    # cargo-free-checks writes its own logs.
-    check cargo-free-checks /dev/null just cargo-free-checks
     check gate-arch-verdicts target/gate-logs/gate-arch-verdicts.log ./scripts/test-gate-arch-verdicts.py
     # Calls `cargo nextest --help`, so it cannot sit among the cargo-free checks.
     check run-step-header target/gate-logs/gate-arch-run-step-header.log ./scripts/flow-checks/test-run-step-header.py
@@ -1659,13 +1659,15 @@ prepush:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    echo "== Tier 2 [1/4]: architecture rules =="
+    echo "== Tier 2 [1/5]: cargo-free checks =="
+    just cargo-free-checks
+    echo "== Tier 2 [2/5]: architecture rules =="
     just gate-arch
-    echo "== Tier 2 [2/4]: browser-target typecheck =="
+    echo "== Tier 2 [3/5]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== Tier 2 [3/4]: out-of-workspace browser frontend =="
+    echo "== Tier 2 [4/5]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== Tier 2 [4/4]: full keystone (PROPTEST_CASES=16) =="
+    echo "== Tier 2 [5/5]: full keystone (PROPTEST_CASES=16) =="
     PROPTEST_CASES=16 cargo test \
         {{CANON}} --test integration general_e2e_composed_pbt:: \
         2>&1 | tee target/gate-logs/prepush-keystone.log

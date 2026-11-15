@@ -91,7 +91,7 @@ against this registry rather than against "zero failures".
   holds: `` `path:A-B` quotes `snippet` ``. Evidence that is gone is written
   `` lost:`path` ``; re-measure it by running the test the row names and
   classifying its log with `scripts/keystone-known-reds.sh`.
-  `scripts/check-known-red-evidence.py` (run by `just gate-arch`) enforces this.
+  `scripts/check-known-red-evidence.py` (run by `just cargo-free-checks`) enforces this.
 
 **How the matching works:** `scripts/keystone-known-reds.sh` parses THIS FILE.
 The `Match pattern` column is the single source of truth for classification —

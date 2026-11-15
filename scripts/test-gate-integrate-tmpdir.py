@@ -82,11 +82,14 @@ def make_stubs():
 
 def case_env(home, stubs, job_tmp, probe, case):
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("FLOW_", "GATE_", "HOLON_BUILD_", "HOLON_PBT_", "HOLON_GATE_", "HOLON_CARGO_"))}
+           if not k.startswith(("FLOW_", "GATE_", "HOLON_BUILD_", "HOLON_PBT_", "HOLON_GATE_", "HOLON_CARGO_", "HOLON_JUST_"))}
+    # The stub just runs REAL_JUST: it must not be the just shim, which would run the stub again.
+    shims = (HERE / "shims").resolve()
+    env["PATH"] = os.pathsep.join(d for d in env["PATH"].split(os.pathsep) if Path(d).resolve() != shims)
     env.update(
         HOME=str(home), RUSTUP_HOME=os.environ.get("RUSTUP_HOME", str(Path.home() / ".rustup")),
         CARGO_HOME=os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")),
-        PATH=f"{stubs}:{env['PATH']}", REAL_JUST=shutil.which("just"),
+        PATH=f"{stubs}:{env['PATH']}", REAL_JUST=shutil.which("just", path=env["PATH"]),
         # An explicit empty wrapper skips the slot script's sccache probe compile; nothing here compiles.
         RUSTC_WRAPPER="",
         FLOW_RUNTIME_DIR=str(home / "flow-runtime"), FLOW_JOB_ID=f"tmpdir-prop.{home.name}",

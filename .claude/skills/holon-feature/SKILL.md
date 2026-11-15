@@ -33,7 +33,7 @@ Before touching implementation code:
    a `TREE:` line and cites the seed and the command that reproduce it, never a
    `target/` path (ignored, purged with the workspace). Stamp the TREE id after a
    plain `jj status` snapshot, never with `--ignore-working-copy` inside the lane:
-   that names the commit before the last edit. `just gate-arch` checks both
+   that names the commit before the last edit. `just cargo-free-checks` checks both
    (`scripts/check-red-logs.py`).
 
 Model FIRST, then red-for-the-right-reason, then green (the standing

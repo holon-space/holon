@@ -352,13 +352,23 @@ every rerun builds ONE shape:
   `scripts/lane-nextest.py` and `gate-integrate.sh rerun` source it, and their logs
   print the values of these variables and of `RUSTFLAGS`, and only the NAMES
   of the set `CARGO_*` variables.
-- The helper puts `scripts/cargo-shape/cargo` first on `PATH`; it records each
+- The helper puts `scripts/shims/cargo` first on `PATH`; it records each
   cargo call with its shape env. Step 17 of `gate-timing.sh` runs
   `scripts/check-compile-shape.py` on that record before
   `just timing-gate-build`, and fails the gate on a second shape. The calls
   that are off the shape by necessity (app launches, `--target` triples,
   out-of-workspace manifests, the release shape) are its `EXCEPTIONS` list,
   the one place that names them.
+- The same directory holds a `just` shim. Under `HOLON_JUST_RECORD` (set by
+  `gate-integrate.sh`) it records each `just` call; the last step of the
+  integrate gate runs `scripts/check-just-calls-once.py` on that record and
+  fails when one recipe call with the same args ran twice. Only a call made by
+  a gate step itself records (the gate arms the step with
+  `HOLON_JUST_RECORD_ARMED`; the shim disarms the `just` it starts), so a
+  recipe's own test script that calls the recipe again adds nothing. `--evaluate`-style
+  calls and env prefixes do not change a call's key. A branch that did not run
+  in this gate is not checked. The landing gate does not source the shape env,
+  so it records nothing.
 
 Rerun the red test steps of a gate job in the integration checkout with
 `scripts/gate-integrate.sh rerun <gate-id> <tip> <red gate job id>`: it

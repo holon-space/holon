@@ -3,7 +3,7 @@
 
     scripts/check-compile-shape.py <record.jsonl>
 
-The record is what scripts/cargo-shape/cargo wrote. Exit 0 iff every compiling call that no EXCEPTIONS entry names
+The record is what scripts/shims/cargo wrote. Exit 0 iff every compiling call that no EXCEPTIONS entry names
 1. has build options (BUILD_OPTIONS, reduced from its argv) equal to the justfile's CANON, and
 2. sees the same value of every recorded build-script variable as every other such call, with HOLON_BUILD_TIME unset,
 3. if it is a clippy call, has lint args (after `--`) equal to the justfile's CLIPPY_LINTS.
