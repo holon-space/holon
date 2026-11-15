@@ -40,7 +40,9 @@ EXAMPLES = [(["crates/bare/src/lib.rs"], None), (["crates/bare/src/lib.rs"], "pa
 TESTLESS = frozenset({"bare"})
 # Draws of default filters: the soundness of `excluded_packages`, before the drawn ones.
 FILTER_EXAMPLES = ["not (package(gpui) | package(leaf) & test(=lib))", "not (package(core)) & not (package(rows) + package(app))",
-                   "not (package(core) | test(=w)) | package(core)", "not (not (package(core)))", "package(core)"]
+                   "not (package(core) | test(=w)) | package(core)", "not (not (package(core)))", "package(core)",
+                   # A term under `&` excludes only part of core: its `lib` test stays.
+                   "not (package(core) & test(=w) | package(rows) - test(=w))"]
 
 
 def load(name, path):
