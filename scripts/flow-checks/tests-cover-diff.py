@@ -31,11 +31,14 @@ A step ran when a cited log has the selected line as line 1, and one of these ho
     module of each failing test; stdout notes each such compare. A lane log with neither line that `just hand-authored`
     wrote (a `] RED case "<name>"` or `HAND-AUTHORED RED:` line) compares its red case names and failing tests (the
     indented names of each libtest `failures:` list, and each intact `test <name> ... FAILED` result line), whatever
-    shard ran them; it is refused when a red shard names no case, when the run is not shown complete (every process
-    ended with libtest's exit 101 or 0 and no cargo `process didn't exit successfully ... (signal: N` line; a sharded
-    run ends with a `HAND-AUTHORED RED:` line for every red shard head and `exit: 1`, a single process with
-    `exit: 101`), or when it skipped a case (`] SKIPPED case "<name>" via HOLON_HAND_AUTHORED_SKIP`) the base log did
-    not skip. A red log with none of these lines is refused, so a red of another step kind cannot be compared. A lane
+    shard ran them; it is refused when a red shard names no case, when the run is not shown complete, or when it
+    skipped a case (`] SKIPPED case "<name>" via HOLON_HAND_AUTHORED_SKIP`) the base log did not skip. Complete: each
+    test process (from cargo's `Running <target> (<binary>)` line, else the whole shard) printed libtest's end line
+    `test result: ok|FAILED. `, a FAILED one after its `failures:` list, in the lines of its own shard (from its
+    `== hand-authored shard k (exit N):` head to the next head or the `HAND-AUTHORED RED:` block); every shard exited
+    0 or 101 and no cargo `process didn't exit successfully ... (signal: N` line stands; a sharded run ends with a
+    `HAND-AUTHORED RED:` line for every red shard head and `exit: 1`, a single process with `exit: 101`. An exit code
+    never proves an end: a process that ends itself early also exits 101. A red log with none of these lines is refused, so a red of another step kind cannot be compared. A lane
     log must show the end of a complete run, else it is refused too, as its reds prove nothing about the tests it never
     ran: a log with nextest failing-test lines needs a `Summary [...] N tests run` line (`k/n tests run` with k < n is a
     cut run, in any log), and a log with windowed gate verdicts needs the gate's `windowed-gate: wall=` end line.
@@ -106,12 +109,15 @@ HAND_CASE = re.compile(r'\] RED case "([^"]*)"')
 HAND_SKIP = re.compile(r'\] SKIPPED case "([^"]*)" via HOLON_HAND_AUTHORED_SKIP')
 HAND_SHARD = re.compile(r"HAND-AUTHORED RED: shard (\d+) exit (\d+), red cases: (.*), log: ")
 HAND_SHARD_HEAD = re.compile(r"== hand-authored shard (\d+) \(exit (\d+)\): ")
-# libtest's exit when tests failed; any other exit means the process died and never ran its remaining tests.
+# libtest's exit when tests failed, and the exit of a test process that ends itself early; any other exit means the
+# process died.
 LIBTEST_RED_EXIT = "101"
 # The recipe ends a red sharded run with its `HAND-AUTHORED RED:` block and `exit 1`; a single process ends with
 # cargo's exit.
 SHARDED_RED_EXIT = "exit: 1"
 CARGO_SIGNAL = re.compile(r"process didn't exit successfully.*\(signal: \d+")
+CARGO_RUNNING = re.compile(r"\s+(?:Running|Doc-tests) \S.*")
+LIBTEST_END = re.compile(r"test result: (ok|FAILED)\. ")
 HAND_UNNAMED = "none, see the log"
 # Other threads' output under --nocapture can surround a libtest result line or split FAILED off it; the
 # `failures:` list that ends the run names each failing test on a line of its own.
@@ -290,11 +296,38 @@ def libtest_failures(lines):
     return found
 
 
+def shard_bodies(lines):
+    """(shard, its exit, its lines) of each shard head of a sharded log, up to the next head or the
+    `HAND-AUTHORED RED:` block; one (None, the step's exit line, all lines) for a single process."""
+    starts = [(i, m.group(1), m.group(2)) for i, line in enumerate(lines) if (m := HAND_SHARD_HEAD.search(line))]
+    if not starts:
+        return [(None, lines[-1], lines)]
+    block = next((i for i, line in enumerate(lines) if HAND_SHARD.search(line)), len(lines))
+    ends = [i for i, _, _ in starts[1:]] + [max(block, starts[-1][0])]
+    return [(k, rc, lines[i + 1:end]) for (i, k, rc), end in zip(starts, ends)]
+
+
+def unended(body):
+    """Why the test processes of one shard's lines did not each print libtest's end; [] when they did."""
+    starts = [i for i, line in enumerate(body) if CARGO_RUNNING.fullmatch(line)] or [0]
+    why = []
+    for n, (a, b) in enumerate(zip(starts, starts[1:] + [len(body)]), 1):
+        process = body[a:b]
+        end = next((i for i, line in enumerate(process) if LIBTEST_END.search(line)), None)
+        if end is None:
+            why.append(f"process {n} of {len(starts)} printed no libtest `test result:` line")
+        elif LIBTEST_END.search(process[end]).group(1) == "FAILED" and "failures:" not in process[:end]:
+            why.append(f"process {n} of {len(starts)} printed `test result: FAILED` without its `failures:` list")
+    return why
+
+
 def incomplete(lines, heads, shards):
     """Why a red `just hand-authored` log does not show a run that ended normally; [] when it does. Complete means
-    every process ended with libtest's exit and, when sharded, the recipe reached its end: its `HAND-AUTHORED RED:`
-    block names every red shard head and the step ends `exit: 1`."""
+    every test process printed libtest's end in its own shard and, when sharded, the recipe reached its end: its
+    `HAND-AUTHORED RED:` block names every red shard head and the step ends `exit: 1`."""
     why = [line.strip() for line in lines if CARGO_SIGNAL.search(line)]
+    why += [f"{f'shard {k} exit {rc}' if k is not None else f'the process, step `{rc}`'}: {reason}"
+            for k, rc, body in shard_bodies(lines) for reason in unended(body)]
     why += [f"shard {k} exit {rc}" for k, rc in sorted({**heads, **{k: rc for k, rc, _, _ in shards}}.items())
             if rc not in ("0", LIBTEST_RED_EXIT)]
     if not heads:

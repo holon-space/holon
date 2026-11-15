@@ -340,31 +340,42 @@ WBS, HM4_EDIT, CRASH_COPY, HM4_IDS = (
 HAND_CASES = [WBS, HM4_EDIT, CRASH_COPY, HM4_IDS, "create-block-smoke", "lane-only-case"]
 SKIPS = ["reboot-orphans-the-previous-boots-watchers", "external-rewrite-keeps-a-promoted-pages-body",
          "split-then-two-backspaces-caret-follows-second-join"]
+RUNNING = ("     Running tests/main.rs (target/debug/build/holon-integration-tests/7df5d042db08f7bc/out/"
+           "integration-7df5d042db08f7bc)")
+EARLIER_BINARY = ["     Running unittests src/lib.rs (target/debug/deps/holon_integration_tests-1c2d3e4f)", "",
+                  "running 0 tests", "", "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; "
+                  "finished in 0.00s", ""]
+GUARD = "[inv-no-database-stuck] No harness timeout ended the run within 2940 s, so the guard ends it."
 # Text the shard's other output writes into the same line under --nocapture; the recipe reads the name after it.
 INTERLEAVED = ["", "Applying transition 2/6: ", "[inv-sql-budget] UndoLastMutation: not judged] "]
 
 
 def real_hand_log(tree, first_skip):
     """The step line, header, shard, case, failing-test and HAND-AUTHORED RED lines of a real hand-authored run
-    whose cases ran red on the base too, with each red shard's libtest `failures:` list; `first_skip` is its shard 0
-    skip line, which the lane run interleaved."""
+    whose cases ran red on the base too, with each shard's cargo `Running` line and libtest end: a red shard's
+    `failures:` list and `test result: FAILED` line; `first_skip` is its shard 0 skip line, which the lane run
+    interleaved."""
     skip = ' via HOLON_HAND_AUTHORED_SKIP (known issue — see docs/Testing/BugFunnel.md)'
     shard = "target/gate-logs/pbt-hand-authored-shard-{}.log"
     keystone_failed = [f"test {KEYSTONE} ... FAILED", "", "failures:", "", "failures:", f"    {KEYSTONE}", ""]
+    def ended(passed):
+        return [f"test result: FAILED. {passed} passed; 1 failed; 0 ignored; 0 measured; 644 filtered out; finished in "
+                "235.31s", "", "error: test failed, to rerun pass `-p holon-integration-tests --test integration`"]
     return [
         HAND, "BASE: d80bb20cbbabd282d19d78af6aafb5eb93d26c96", f"TREE: {tree}", "STARTED: 2026-11-09T15:44:25Z",
-        f"== hand-authored shard 0 (exit 101): {shard.format(0)} ==", first_skip,
-        f'[hand-authored regression] RED case "{WBS}"', *keystone_failed,
-        f"== hand-authored shard 1 (exit 0): {shard.format(1)} ==",
+        f"== hand-authored shard 0 (exit 101): {shard.format(0)} ==", RUNNING, first_skip,
+        f'[hand-authored regression] RED case "{WBS}"', *keystone_failed, *ended(18),
+        f"== hand-authored shard 1 (exit 0): {shard.format(1)} ==", RUNNING,
         f'[hand-authored regression] SKIPPED case "reboot-orphans-the-previous-boots-watchers"{skip}',
-        f"== hand-authored shard 2 (exit 101): {shard.format(2)} ==",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 662 filtered out; finished in 222.63s", "",
+        f"== hand-authored shard 2 (exit 101): {shard.format(2)} ==", RUNNING,
         f'[hand-authored regression] SKIPPED case "a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch"{skip}',
         f'[hand-authored regression] RED case "{HM4_EDIT}"', f'[hand-authored regression] RED case "{CRASH_COPY}"',
-        *keystone_failed,
-        f"== hand-authored shard 3 (exit 101): {shard.format(3)} ==",
+        *keystone_failed, *ended(0),
+        f"== hand-authored shard 3 (exit 101): {shard.format(3)} ==", RUNNING,
         f'[hand-authored regression] SKIPPED case "split-then-two-backspaces-caret-follows-second-join"{skip}',
         f'[hand-authored regression] SKIPPED case "external-rewrite-keeps-a-promoted-pages-body"{skip}',
-        f'[hand-authored regression] RED case "{HM4_IDS}"', *keystone_failed,
+        f'[hand-authored regression] RED case "{HM4_IDS}"', *keystone_failed, *ended(0),
         f"HAND-AUTHORED RED: shard 0 exit 101, red cases: {WBS}, log: {shard.format(0)}",
         f"HAND-AUTHORED RED: shard 2 exit 101, red cases: {HM4_EDIT},{CRASH_COPY}, log: {shard.format(2)}",
         f"HAND-AUTHORED RED: shard 3 exit 101, red cases: {HM4_IDS}, log: {shard.format(3)}",
@@ -513,7 +524,8 @@ def hand_spec(rng, cases, skips, shards=None):
     is 1; a shard with red cases fails its keystone test, and any shard may fail a test that names no case. A red
     shard's process may die by a signal after its failing tests: `died` is (the shard's exit, the signal's exit). A
     test binary's death leaves cargo's exit 101 and its `process didn't exit successfully` line; cargo's own death
-    leaves only the signal's exit. A sharded run's recipe may be cut while it waits for shard k >= 1, so shards k..
+    leaves only the signal's exit. A test process that ends itself (the stuck-database guard) is `died` (101, None):
+    exit 101 and no signal line, but no libtest end either. `earlier`: a test binary ran before the shard's one. A sharded run's recipe may be cut while it waits for shard k >= 1, so shards k..
     and the `HAND-AUTHORED RED:` block never print, or after its block: `cut` is then (k, the step's exit), k = the
     shard count for a cut after the block."""
     shards = shards or rng.choice([4, 4, 4, 1])
@@ -522,9 +534,10 @@ def hand_spec(rng, cases, skips, shards=None):
     if rng.random() < 0.25:
         rng.choice(spec)["tests"].append(rng.choice([MODULE_TEST, KEYSTONE]))
     for shard in spec:
+        shard["earlier"] = rng.random() < 0.3
         if shard["tests"] and rng.random() < 0.15:
             sig = rng.choice(list(SIGNALS))
-            shard["died"] = rng.choice([(101, sig), (sig, sig)])
+            shard["died"] = rng.choice([(101, sig), (sig, sig), (101, None)])
     h = {"shards": spec, "skip": skips}
     # A cut before shard 0's head leaves no hand-authored line: the generic refusal, drawn by the static examples.
     if shards > 1 and rng.random() < 0.15:
@@ -579,6 +592,7 @@ def hand_lines(rng, h):
         log = f"target/gate-logs/pbt-hand-authored-shard-{k}.log"
         if sharded:
             lines.append(f"{head_stamp}== hand-authored shard {k} (exit {rc}): {log} ==")
+        lines += EARLIER_BINARY * shard.get("earlier", False) + [RUNNING]
         lines += skips if k == 0 else []
         lines += [f'{rng.choice(INTERLEAVED)}[hand-authored regression] RED case "{c}"' for c in shard["cases"]]
         # A shard process that dies leaves only the intact result lines of the tests that failed before; the test that
@@ -588,7 +602,10 @@ def hand_lines(rng, h):
             should_panic = t != KEYSTONE and rng.random() < 0.5
             lines += ([f"test {t}{' - should panic' if should_panic else ''} ... FAILED"] if died
                       else libtest_failure_lines(rng, t, should_panic)[:-4])
-        if died and rc == 101:
+        if died and shard["died"][1] is None:
+            lines += [GUARD] * (rng.random() < 0.5) + [
+                "error: test failed, to rerun pass `-p holon-integration-tests --test integration`"]
+        elif died and rc == 101:
             lines += ["error: test failed, to rerun pass `-p holon-integration-tests --test integration`", "",
                       "Caused by:", "  process didn't exit successfully: `target/debug/deps/integration-0a1b "
                       f"--nocapture` ({SIGNALS[shard['died'][1]]})"]
@@ -913,6 +930,21 @@ STATIC = {
                "base_hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE, MODULE_TEST]},
                                         {"cases": [], "tests": []}, {"cases": [], "tests": []},
                                         {"cases": [], "tests": []}], "skip": []}}},
+    "a hand-authored shard that ended itself with exit 101 before libtest's end line": {
+        HAND: {"kind": "red", "red": [],
+               "hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE]}, {"cases": [], "tests": []},
+                                   {"cases": [HM4_IDS], "tests": [KEYSTONE], "died": (101, None)},
+                                   {"cases": [], "tests": []}], "skip": []},
+               "base_hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE]}, {"cases": [], "tests": []},
+                                        {"cases": [HM4_IDS], "tests": [KEYSTONE]}, {"cases": [], "tests": []}],
+                             "skip": []}}},
+    "a hand-authored shard that ended itself with exit 101 after an earlier test binary's end line": {
+        HAND: {"kind": "red", "red": [],
+               "hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE]},
+                                   {"cases": [HM4_IDS], "tests": [KEYSTONE], "died": (101, None), "earlier": True}],
+                        "skip": []},
+               "base_hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE]}, {"cases": [HM4_IDS], "tests": [KEYSTONE]}],
+                             "skip": []}}},
     "a hand-authored run killed after its HAND-AUTHORED RED block": {
         HAND: {"kind": "red", "red": [],
                "hand": {"shards": [{"cases": [WBS], "tests": [KEYSTONE]}, {"cases": [], "tests": []},
@@ -1005,6 +1037,12 @@ def outcomes(cases):
                   for i in range(cases)]
         judges = Counter(str(o.get("classifier")) for _, spec in drawn for o in spec.values() if o["kind"] == "red")
         assert all(judges[str(c)] for c in [None, *JUDGE_EXITS]), f"a classifier state no red step drew: {judges}"
+        ends = Counter(("ended" if "died" not in shard else "guard" if shard["died"][1] is None else "signal")
+                       + (" after an earlier binary" if shard.get("earlier") else "")
+                       for _, spec in drawn for o in spec.values() if "hand" in o for shard in hand_shown(o["hand"])
+                       if shard["tests"])
+        assert all(ends[e + a] for e in ("ended", "guard", "signal") for a in ("", " after an earlier binary")), \
+            f"a red shard end no hand step drew: {ends}"
         for i, (name, spec) in enumerate(drawn):
             r, want = run_lane(repo / f"lane{i}", spec, rng, commits)
             judge(name, r, want)
@@ -1012,7 +1050,8 @@ def outcomes(cases):
             assert notes == module_notes(spec), f"{name}: {notes} module notes, want {module_notes(spec)}:\n{r.stdout}"
             if name in STATIC:
                 print(f"[tests-cover-diff] {name}: {'PASS' if not want else 'FAIL'} as expected")
-    print(f"[tests-cover-diff] outcomes: {cases} cases PASS; red steps per classifier state {dict(judges)}")
+    print(f"[tests-cover-diff] outcomes: {cases} cases PASS; red steps per classifier state {dict(judges)}, "
+          f"red hand shards per end {dict(ends)}")
 
 
 def result_pattern():
@@ -1118,6 +1157,49 @@ def hand_died_shards(cases):
         bad = checker.check(HAND + "\n", summary, logs, set(), "b", tree_of=lambda c: "t")
         assert any("target/r1/hand-authored.log" in b for b in bad), (case, k, rc, "\n".join(lane), bad)
     print(f"[tests-cover-diff] hand-authored died shards: {cases} cases PASS")
+
+
+def exited_shard_lines(rng):
+    """A lane run of the real lines in which one shard's test process ended itself with libtest's red exit 101
+    (`std::process::exit(101)`, as the database-stuck guard does) after its last RED case line: cargo writes the
+    same `error: test failed` line as for a red shard, but libtest never wrote its `test result:` line nor its
+    `failures:` list, and the tests after the exit never ran."""
+    k = rng.choice([0, 1, 2, 3])
+    guard = rng.random() < 0.5
+    log = f"target/gate-logs/pbt-hand-authored-shard-{k}.log"
+    lines, shard = [], None
+    for line in REAL_HAND_LANE:
+        if line.startswith("== hand-authored shard ") or line.startswith("HAND-AUTHORED RED:"):
+            if shard == k:
+                if guard:
+                    lines.append("[inv-no-database-stuck] No harness timeout ended the run within 2940 s, so the "
+                                 "guard ends it.")
+                lines.append("error: test failed, to rerun pass `-p holon-integration-tests --test integration`")
+            shard = int(line.split()[3]) if line.startswith("== ") else None
+            if shard == k:
+                line = re.sub(r"\(exit \d+\)", "(exit 101)", line)
+        if shard == k and (line in ("failures:", "", f"    {KEYSTONE}") or line == f"test {KEYSTONE} ... FAILED"):
+            continue
+        lines.append(line)
+    if not any(line.startswith(f"HAND-AUTHORED RED: shard {k} ") for line in lines):
+        lines.insert(lines.index("exit: 1"), f"HAND-AUTHORED RED: shard {k} exit 101, red cases: none, see the log, log: {log}")
+    return k, guard, lines
+
+
+def hand_exited_shards(cases):
+    """A lane shard whose test process exited with code 101 before libtest's `test result:` line ran only part of
+    its tests: the check never accepts it, whatever case reds the base shares."""
+    checker = load_checker()
+    rng = random.Random(17)
+    summary = ("How tested:\n- target/r1/hand-authored.log\n- target/base/hand-authored.log\n"
+               f"- accepted-base-red: hand-authored target/base/hand-authored.log {ACCEPT_URL}\n")
+    for case in range(cases):
+        k, guard, lane = exited_shard_lines(rng)
+        logs = {"target/r1/hand-authored.log": "\n".join(lane),
+                "target/base/hand-authored.log": "\n".join(REAL_HAND_BASE)}
+        bad = checker.check(HAND + "\n", summary, logs, set(), "b", tree_of=lambda c: "t")
+        assert any("target/r1/hand-authored.log" in b for b in bad), (case, k, guard, bad)
+    print(f"[tests-cover-diff] hand-authored exited shards: {cases} cases PASS")
 
 
 def killed_step_lines(rng):
@@ -1563,6 +1645,7 @@ if __name__ == "__main__":
     real_hand_lines()
     hand_lane_only_tests(cases // 3)
     hand_died_shards(cases // 3)
+    hand_exited_shards(cases // 3)
     hand_killed_steps(cases // 3)
     complete_runs_of_any_size(cases // 3)
     per_change(cases // 10)
