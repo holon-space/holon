@@ -90,11 +90,11 @@ done
 
 for c in green known-red-only red; do [ "${seen[$c]:-0}" -gt 0 ] || { echo "FAIL generator: class $c never drawn"; fail=1; }; echo "drawn $c: ${seen[$c]:-0}"; done
 
-# The classifier prints byte-equal output without --class: compare the script with the one at the fork point.
+# The classifier prints byte-equal output without --class: compare the script with the one at the base (BASE, else the fork point).
 base=$work/base; mkdir -p "$base/scripts"
 for f in "$root"/scripts/*; do ln -s "$f" "$base/scripts/"; done
 rm "$base/scripts/keystone-known-reds.sh"
-(cd "$root" && jj file show -r 'fork_point(trunk() | @)' scripts/keystone-known-reds.sh) > "$base/scripts/keystone-known-reds.sh" || { echo "FAIL base script unreadable"; exit 1; }
+python3 "$root/scripts/jj_read.py" file show -r "${BASE:-fork_point(trunk() | @)}" scripts/keystone-known-reds.sh > "$base/scripts/keystone-known-reds.sh" || { echo "FAIL base script unreadable"; exit 1; }
 chmod +x "$base/scripts/keystone-known-reds.sh"; ln -s "$root/docs" "$base/docs"
 mklog "$work/s" "${registered[0]}" "$(novel)"
 cmp <("$root/scripts/keystone-known-reds.sh" "$work/s" 2>&1) <("$base/scripts/keystone-known-reds.sh" "$work/s" 2>&1 | sed "s#$base#$root#g") || { echo "FAIL no-flag output differs from base"; fail=1; }

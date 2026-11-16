@@ -27,6 +27,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from jj_read import jj
 from nextest_fixture import REPO, TESTS, fixture, known_red_wording, ran_tests
 
 SUT = REPO / "scripts" / "gate-integrate-steps.sh"
@@ -147,8 +148,7 @@ def main():
         (root / "docs").symlink_to(REPO / "docs")
         (root / "target/gate-logs").mkdir(parents=True)
         base = Path(tmp) / "base-steps.sh"
-        base.write_bytes(subprocess.run(["jj", "file", "show", "-r", os.environ["BASE"], "scripts/gate-integrate-steps.sh"],
-                                        cwd=REPO, capture_output=True, check=True).stdout)
+        base.write_text(jj("file", "show", "-r", os.environ["BASE"], "scripts/gate-integrate-steps.sh"))
         subprocess.run(["cargo", "build", "--tests", "--features", "pbt", "--quiet"], cwd=root, check=True,
                        env={**os.environ, "CARGO_TARGET_DIR": str(root / "target")})
         kinds = []

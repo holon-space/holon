@@ -17,6 +17,8 @@ from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from jj_read import jj  # noqa: E402
 spec = importlib.util.spec_from_file_location("owned_known_reds", HERE / "owned-known-reds.py")
 check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
@@ -455,9 +457,7 @@ def static_examples():
 def history_example():
     """The registry of a real lane's base and tip, and its summary with and without one owned row."""
     def show(rev):
-        return {REGISTRY: with_owner_cells(subprocess.run(
-            ["jj", "--ignore-working-copy", "file", "show", f"--revision={rev}", "--", f"root:{REGISTRY}"],
-            cwd=HERE, capture_output=True, text=True, check=True).stdout)}
+        return {REGISTRY: with_owner_cells(jj("file", "show", f"--revision={rev}", "--", f"root:{REGISTRY}"))}
     base, tip = (show(rev) for rev in HISTORY)
     final = (HERE / "fixtures/owned-known-reds-summary.md").read_text()
     round_one = "".join(line for line in final.splitlines(True) if LEFT_OUT not in line)

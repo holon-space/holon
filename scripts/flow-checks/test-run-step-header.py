@@ -21,6 +21,10 @@ RUN_STEP = HERE / "run-step.sh"
 FIXTURE = HERE / "fixtures/run-step-header.txt"
 LANE_CHECK = Path.home() / ".claude/skills/orchestrator/scripts/lane-check.py"
 BASE = "4f9afab597faeb1d0e31b3c382074c8aabb35002"
+# run-step.sh reads its TREE: line from the jj repo it runs in.
+RUN_TMP = tempfile.TemporaryDirectory()
+RUN_DIR = Path(RUN_TMP.name)
+subprocess.run(["jj", "git", "init", "--quiet"], cwd=RUN_DIR, check=True)
 
 spec = importlib.util.spec_from_file_location("lane_check", LANE_CHECK)
 lane_check = importlib.util.module_from_spec(spec)
@@ -36,7 +40,7 @@ def assert_l1_header(text, label):
 
 
 def live_log():
-    out = subprocess.run([str(RUN_STEP), "echo: echo hello"], cwd=HERE, capture_output=True, text=True,
+    out = subprocess.run([str(RUN_STEP), "echo: echo hello"], cwd=RUN_DIR, capture_output=True, text=True,
                          env={**os.environ, "BASE": BASE}, check=True).stdout
     lines = out.splitlines()
     assert lines[:2] == ["echo: echo hello", f"BASE: {BASE}"], lines[:2]
@@ -46,7 +50,7 @@ def live_log():
 
 def keystone_smoke_timing(caller):
     env = {k: v for k, v in os.environ.items() if k != "HOLON_PBT_TIMING"}
-    out = subprocess.run([str(RUN_STEP), "keystone-smoke: printenv HOLON_PBT_TIMING"], cwd=HERE,
+    out = subprocess.run([str(RUN_STEP), "keystone-smoke: printenv HOLON_PBT_TIMING"], cwd=RUN_DIR,
                          capture_output=True, text=True, env={**env, **caller, "BASE": BASE}).stdout
     return out.splitlines()[-3]
 
@@ -62,7 +66,7 @@ def run_step(line, cores, record):
     env |= {"BASE": BASE, "NEXTEST_TEST_THREADS": "8", "HOLON_CARGO_RECORD": record}
     if cores is not None:
         env["FLOW_JOB_CORES"] = cores
-    return subprocess.run([str(RUN_STEP), line], cwd=HERE, capture_output=True, text=True, env=env)
+    return subprocess.run([str(RUN_STEP), line], cwd=RUN_DIR, capture_output=True, text=True, env=env)
 
 
 def threads(step, cores, record):

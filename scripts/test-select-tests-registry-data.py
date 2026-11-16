@@ -27,6 +27,8 @@ import tempfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
+from jj_read import jj, tree_files
+
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -38,7 +40,6 @@ def load(name, path):
 
 
 st = load("select_tests", REPO / "scripts/select-tests.py")
-evidence = load("check_known_red_evidence", REPO / "scripts/check-known-red-evidence.py")
 
 REGISTRY = "docs/Testing/KeystoneKnownReds.md"
 FEATUREMAP = "docs/Architecture/FeatureMap.md"
@@ -81,10 +82,9 @@ def classify(changed):
 
 
 def pools(meta):
-    """{pool: sorted paths}: tracked files from the evidence check's listing of every file this tree's commit carries,
-    plus paths a diff can hold that the tree does not (a deleted evidence file, near misses)."""
+    """{pool: sorted paths}: the files of this tree, plus paths a diff can hold that the tree does not (a deleted evidence file, near misses)."""
     dirs, _ = st.workspace_graph(meta)
-    files = sorted(p for p in evidence.landing_paths() if (REPO / p).is_file())
+    files = sorted(p for p in tree_files(REPO) if (REPO / p).is_file())
     assert REGISTRY in files, f"{REGISTRY} is not tracked in {REPO}"
     crate_src, crate_tests = [], []
     for p in files:
@@ -201,8 +201,7 @@ def integrate_problems():
 def base_selector(rev):
     if not rev:
         return None
-    text = subprocess.run(["jj", "--ignore-working-copy", "file", "show", "-r", rev, "scripts/select-tests.py"],
-                          cwd=REPO, check=True, stdout=subprocess.PIPE, text=True).stdout
+    text = jj("file", "show", "-r", rev, "scripts/select-tests.py")
     path = Path(tempfile.mkdtemp()) / "select_tests_base.py"
     path.write_text(text)
     return load("select_tests_base", path)

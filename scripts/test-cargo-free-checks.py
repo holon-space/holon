@@ -18,6 +18,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from jj_read import tree_files
+
 REPO = Path(__file__).resolve().parent.parent
 REGISTRY = Path("docs/Testing/KeystoneKnownReds.md")
 COMPANIONS_HEADER = re.compile(r"^\| Key \|.*\| Companions \|$")
@@ -29,9 +31,8 @@ EXAMPLES = [("a-new-known-red", 0, 0)]
 
 
 def copy_tree(dest):
-    """The files of this tree's commit, in a git top level of their own (check-known-red-evidence.py asks git)."""
-    files = subprocess.run(["jj", "file", "list"], cwd=REPO, check=True, capture_output=True, text=True).stdout.split("\n")
-    for rel in filter(None, files):
+    """The files of this tree, in a git top level of their own (check-known-red-evidence.py asks git)."""
+    for rel in tree_files(REPO):
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO / rel, dest / rel, follow_symlinks=False)
     subprocess.run(["git", "init", "-q"], cwd=dest, check=True)
