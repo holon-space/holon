@@ -1190,13 +1190,44 @@ def compaction_beside_another_rows_primary(text):
     return "\n".join(lines[:at - 1] + [f"{head} panicked at {KNOWN_SITE}:", "    " + KNOWN_MSG] + lines[at + 1:])
 
 
+def pinned_test():
+    """(test, row key) of the first line of the registry's `Test | Registry key` table."""
+    scripts = Path(__file__).resolve().parent
+    out = subprocess.run(["python3", str(scripts / "check-known-red-evidence.py"), "--tests",
+                          str(scripts.parent / "docs/Testing/KeystoneKnownReds.md")], check=True, capture_output=True, text=True).stdout
+    test, key = out.splitlines()[0].split("\x1f")
+    return test, key
+
+
+def green_run(*units):
+    """A green nextest run of `units`, at least two."""
+    return "\n".join([f"    Starting {len(units)} tests across 1 binary"]
+                     + [status_line("PASS", i, len(units), u) for i, u in enumerate(units, 1)]
+                     + [f"     Summary [   1.000s] {len(units)} tests run: {len(units)} passed, 0 skipped"]) + "\n"
+
+
 def examples():
     """(name, log text, want exit, a regex one output line must match), in grep's and Python's common syntax."""
     gate = GATE
     nested, mistyped = "hand_authored_regressions::nested_unknown_wiring_field_is_loud", "hand_authored_regressions::mistyped_initial_state_key_is_loud"
     twin = W183.replace("running 19 tests", "running 20 tests").replace(W183_OK, W183_OK + W183_OK.replace("_loud - should panic", "_loudok")).replace("19 passed", "20 passed")
     compaction = compaction_instance()
+    pinned, pinned_key = pinned_test()
+    other = "holon-x::main a::case_b"
+    green = r"^\[known-reds\] PASS: 1 green run[(]s[)], nothing to classify[.]$"
     return [
+        # A test that reproduces a deterministic known red passes: the row is stale, which a report says and the
+        # verdict ignores.
+        ("deterministic-row-test-passes", green_run(other, pinned), 0,
+         rf"^\[known-reds\] STALE: {pinned_key}: its test {pinned} passed at .*:3[.]"),
+        ("deterministic-row-test-passes-verdict", green_run(other, pinned), 0, green),
+        ("deterministic-row-test-passes-beside-a-known-red", compaction + status_line("PASS", 2, 2, pinned) + "\n", 0,
+         rf"^\[known-reds\] STALE: {pinned_key}: its test {pinned} passed at .*:[0-9][0-9]*[.]"),
+        ("deterministic-row-test-passes-beside-a-known-red-verdict", compaction + status_line("PASS", 2, 2, pinned) + "\n", 0,
+         r"^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic[(]s[)], 0 novel, 30 collateral [(]ignored[)][.]$"),
+        # The test of a draw-dependent row (`loro-move-false-cycle-duplicate-id`) is not in the table.
+        ("rate-based-row-test-passes", green_run(other, "holon-loro::stable_id_index_pbt stable_id_index_matches_the_full_scan"), 0, green),
+        ("deterministic-row-test-not-run", green_run(other, "holon-x::main a::case_c"), 0, green),
         # The row's collateral pairs count only inside the instance whose primary matched the row.
         ("compaction-collateral-beside-its-primary", compaction, 0,
          r"^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic[(]s[)], 0 novel, 30 collateral [(]ignored[)][.]$"),

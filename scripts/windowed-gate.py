@@ -18,6 +18,7 @@ unit per top-level module, the former per-file binary. Each unit runs alone unde
 A failing binary's nextest log is classified by scripts/keystone-known-reds.sh
 against docs/Testing/KeystoneKnownReds.md (see docs/Testing/WindowedKnownReds.md):
 all signatures registered -> KNOWN-RED (pass with note); anything else -> RED.
+Every log that did not hang prints the classifier's `--stale` reports.
 
 Exit 0: every binary PASS or KNOWN-RED. Exit 1: any RED or HUNG.
 With $GATE_IDS_FILE set, a run whose bad units are all RED writes `failed <unit>` per RED unit
@@ -166,6 +167,9 @@ def run_one(unit: str, filt: str, tests: int, reuse: list[str], log_dir: Path, t
     start = time.monotonic()
     rc, hung, killed = run_cmd(nextest_args(reuse, filt), log, timeout)
     wall = time.monotonic() - start
+    if not hung:
+        sys.stdout.write(subprocess.run([str(CLASSIFIER), "--stale", str(log)], cwd=REPO, stdout=subprocess.PIPE,
+                                        text=True, check=True).stdout)
     if hung:
         verdict = "HUNG"
     elif rc == 0:

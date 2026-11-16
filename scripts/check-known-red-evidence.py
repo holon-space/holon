@@ -14,6 +14,8 @@ with the workspace that held it.
                                                   companions, then a payload and a site field
                                                   per collateral pair (separated by \x1f, so
                                                   an empty cell stays a field)
+  check-known-red-evidence.py --tests REGISTRY.md print each line of the `Test | Registry key` table as
+                                                  the nextest test id and the row key, separated by \x1f
 
 An evidence citation is a backticked path that ends in an evidence extension or
 lies under a lane, scratch or temp location. Source paths (`.rs`, `.org`, ...)
@@ -45,6 +47,10 @@ of `—` or a code span of comma-separated invariant ids, `inv-x/*` naming every
 view of `inv-x`, followed by zero or more collateral pairs
 `; collateral `<payload ERE>` at `<site ERE>``. A `known-red` row must sit in
 such a table.
+
+The `Test | Registry key` table names the test that deterministically reproduces
+a `known-red` row. A key that is no `known-red` row, or a test listed twice,
+fails the default run and `--tests`.
 """
 
 import csv
@@ -76,6 +82,7 @@ QUOTES = re.compile(r"\s+quotes\s+$")
 COMPANION = re.compile(r"inv-[a-z0-9-]+(/([a-z0-9_]+|\*))?")
 COMPANIONS_CELL = re.compile(r"(?P<ids>—|`[^`]+`)(?P<pairs>(?:; collateral `[^`]+` at `[^`]+`)*)")
 COLLATERAL_PAIR = re.compile(r"; collateral `([^`]+)` at `([^`]+)`")
+TEST_TABLE_HEADER = ["Test", "Registry key"]
 
 
 def code_spans(line):
@@ -205,10 +212,36 @@ def registry_rows(registry):
         yield e.lineno, "table header", str(e)
 
 
+def test_rows(registry):
+    """Yield (lineno, test, key) per row of the `Test | Registry key` table of `registry`."""
+    lines = registry.read_text().splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("|") and known_reds_table.split(line) == TEST_TABLE_HEADER:
+            assert known_reds_table.is_separator(known_reds_table.split(lines[i + 1])), f"{registry.name}:{i + 2} is no separator line"
+            for lineno, row in enumerate(lines[i + 2:], i + 3):
+                if not row.startswith("|"):
+                    break
+                test, key = (known_reds_table.unticked(c) for c in known_reds_table.split(row))
+                yield lineno, test, key
+
+
+def test_table_failures(registry):
+    keys = {row[1] for row in registry_rows(registry) if len(row) == 7 and row[2] == "known-red"}
+    first = {}
+    failures = []
+    for lineno, test, key in test_rows(registry):
+        if key not in keys:
+            failures.append(f"{registry.name}:{lineno} test {test} names row {key}, which is no known-red row")
+        if test in first:
+            failures.append(f"{registry.name}:{lineno} test {test} is listed twice (first at line {first[test]})")
+        first.setdefault(test, lineno)
+    return failures
+
+
 def lint(registry):
     failures = [
         f"{registry.name}:{row[0]} [{row[1]}] {row[2]}" for row in registry_rows(registry) if len(row) == 3
-    ]
+    ] + test_table_failures(registry)
     for lineno, line in enumerate(registry.read_text().splitlines(), 1):
         row = re.match(r"\|\s*`([^`]+)`", line)
         where = f"{registry.name}:{lineno}" + (f" [{row.group(1)}]" if row else "")
@@ -323,6 +356,7 @@ def run_log_failure(log, row_dir):
 def self_check():
     companions_header = f"| {' | '.join(known_reds_table.HEADER)} |\n|{' --- |' * len(known_reds_table.HEADER)}\n"
     known_red = "| `k` | known-red | `p` | — | sig | ev | — | — |"
+    test_header = "| Test | Registry key |\n| --- | --- |\n"
     good = "docs/Testing/known-red-evidence/slot-withdrawn-last-claim-no-retraction/green.log.zst"
     quote = "the slot of 'journals' differs between the devices"
     cases = {
@@ -341,6 +375,14 @@ def self_check():
         "a collateral pair without its site": (f"{companions_header}{known_red} `inv-a`; collateral `^x$` |", 1),
         "a row under a changed registry header": (f"{companions_header.replace('| Key |', '| **Key** |')}{known_red.replace('known-red', 'proposed')} — |", 1),
         "a table without registry columns": ("| Run | Summary line |\n| --- | --- |\n| r1 | `639 tests run` |", 0),
+        "a test of a known-red row": (f"{companions_header}{known_red} — |\n\n{test_header}| `b t` | `k` |", 0),
+        "a test of no row": (f"{companions_header}{known_red} — |\n\n{test_header}| `b t` | `x` |", 1),
+        "a test of a proposed row": (f"{companions_header}{known_red.replace('known-red', 'proposed')} — |\n\n{test_header}| `b t` | `k` |", 1),
+        "a test listed twice": (f"{companions_header}{known_red} — |\n\n{test_header}| `b t` | `k` |\n| `b t` | `k` |", 1),
+    }
+    tests_cases = {
+        "a registry with the test table": (f"{companions_header}{known_red} — |\n\n{test_header}| `b t` | `k` |", 0),
+        "a registry without the test table": (f"{companions_header}{known_red} — |", 1),
     }
     good_key = Path(good).parent.name
     untracked = f"{EVIDENCE_ROOT}/{good_key}/known-red-evidence-probe.log"
@@ -376,6 +418,15 @@ def self_check():
                 print(f"[known-red-evidence] self-check {name}: {got} failure(s), expected {want}")
                 if got != want:
                     wrong.append(name)
+            for name, (text, want) in tests_cases.items():
+                registry = Path(tmp) / "registry.md"
+                registry.write_text(text + "\n")
+                failures = tests_failures(registry)
+                print(f"[known-red-evidence] self-check --tests {name}: {len(failures)} failure(s), expected {want}")
+                for f in failures:
+                    print(f"[known-red-evidence]   {f}")
+                if len(failures) != want:
+                    wrong.append(name)
         for name, (tsv, want, needles) in run_cases.items():
             with tempfile.TemporaryDirectory() as tmp:
                 (Path(tmp) / good_key).mkdir()
@@ -406,9 +457,30 @@ def print_rows(registry):
     return 0
 
 
+def tests_failures(registry):
+    """The failures that make `--tests` refuse `registry`; a registry without the table is one of them."""
+    if not any(line.startswith("|") and known_reds_table.split(line) == TEST_TABLE_HEADER
+               for line in registry.read_text().splitlines()):
+        return [f"{registry.name} has no `| {' | '.join(TEST_TABLE_HEADER)} |` table"]
+    return test_table_failures(registry)
+
+
+def print_tests(registry):
+    failures = tests_failures(registry)
+    for failure in failures:
+        print(f"[known-red-evidence] {failure}", file=sys.stderr)
+    if failures:
+        return 1
+    for _, test, key in test_rows(registry):
+        print(f"{test}\x1f{key}")
+    return 0
+
+
 def main(argv):
     if len(argv) == 2 and argv[0] == "--rows":
         return print_rows(Path(argv[1]))
+    if len(argv) == 2 and argv[0] == "--tests":
+        return print_tests(Path(argv[1]))
     if argv == ["--self-check"]:
         wrong = self_check()
         if wrong:

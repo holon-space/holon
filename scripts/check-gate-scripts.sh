@@ -42,6 +42,7 @@ make_repo() {
   printf '.claude/worktrees/\ntarget/\n' > .gitignore
   mkdir scripts
   printf '#!/bin/sh\n' > scripts/check-target-leftovers.sh && chmod +x scripts/check-target-leftovers.sh
+  printf '#!/bin/sh\n[ "${STUB_CLASSIFY:-}" != note ] || echo "PASS-WITH-NOTE (stub classifier)"\n' > scripts/keystone-known-reds.sh && chmod +x scripts/keystone-known-reds.sh
   jj commit --quiet -m base
   jj bookmark create --quiet main -r @-
   jj workspace add --quiet --name _sw_integ -r main "$integ"
@@ -549,13 +550,11 @@ EOF
 chmod +x "$rstubs"/*
 in_rstubs() { in_stubs env RSTUB_BASE="$stubs" RERUN_PROBE="$rprobe" STUB_SHAPE_CASE="$shape_case" PATH="$rstubs:$stubs:$PATH" "$@"; }
 shape_case=$("$real_just" --justfile "$here/../justfile" --evaluate SHAPE_CASE)
-# The red steps run on a tip whose known-reds classifier says PASS-WITH-NOTE under STUB_CLASSIFY=note and whose
-# target check fails under STUB_LEFTOVERS; the gate scripts call both from the checkout.
+# The red steps run on a tip whose target check fails under STUB_LEFTOVERS; the gate scripts call it from the checkout.
 jj new --quiet "$tip"
-printf '#!/bin/sh\n[ "${STUB_CLASSIFY:-}" != note ] || echo "PASS-WITH-NOTE (stub classifier)"\n' > scripts/keystone-known-reds.sh
 printf '#!/bin/sh\n[ -z "${STUB_LEFTOVERS:-}" ]\n' > scripts/check-target-leftovers.sh
-chmod +x scripts/keystone-known-reds.sh scripts/check-target-leftovers.sh
-jj commit --quiet -m 'stub classifier'
+chmod +x scripts/check-target-leftovers.sh
+jj commit --quiet -m 'stub target check'
 tip2=$(cid @-)
 jj new --quiet "$tip2" -m other; printf 'other\n' > other; jj commit --quiet -m other
 tip3=$(cid @-)

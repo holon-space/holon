@@ -10,8 +10,9 @@ Both runs pass the nextest output through to stdout. `run` writes the red list t
 its path. It exits 0 when nextest passed or every red is on the known-reds list, else 1 with one `[lane-nextest]
 novel:` line per novel signature of the classifier's verdict. A nextest failure that is not only its reds (no test
 selected, a build error, a killed or cancelled nextest) exits with nextest's code. A classifier error is an error of
-`run` too. `rerun` refuses an empty or missing red list. Both refuse args that do not pass `--no-tests=fail` exactly
-once, as the printed `nextest:` line does: it beats a NEXTEST_NO_TESTS=pass in the environment.
+`run` too. `run` prints the classifier's `--stale` reports of the whole run. `rerun` refuses an empty or missing red
+list. Both refuse args that do not pass `--no-tests=fail` exactly once, as the printed `nextest:` line does: it beats
+a NEXTEST_NO_TESTS=pass in the environment.
 """
 import os
 import re
@@ -68,6 +69,8 @@ def run(args):
     reds = list(dict.fromkeys(reds))
     reds_file.write_text("".join(f"{b} {t}\n" for b, t in reds))
     print(f"[lane-nextest] red list: {reds_file} ({len(reds)} tests)", flush=True)
+    sys.stdout.write(subprocess.run([str(CLASSIFIER), "--stale", str(stream_log)], stdout=subprocess.PIPE, text=True,
+                                    check=True).stdout)
     if rc == 0 or not reds:
         return rc
     with open(verdict_log, "w") as f:

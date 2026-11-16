@@ -60,6 +60,17 @@ against this registry rather than against "zero failures".
   believed, not proven, and the tier stops absorbing that signature silently.
   Delete the row once the soak is green; revert it to `known-red` (with the new
   payload decoded) if the soak brings it back.
+- **A deterministic `known-red` row whose test passes is reported as STALE.**
+  The table under "Tests that reproduce a deterministic known red" names, for
+  a `known-red` row that reds on every run, the nextest test that reproduces
+  it. When a gate step's log, red or green, shows that test passing, the
+  classifier prints a `STALE` line with the row, the test and the log line: a
+  stale row would absorb a new red of the same signature. The report never
+  changes the step's exit code (Martin, 2026-11-04); a broken table fails the
+  step. A row whose red depends on the draw or on the load is never listed
+  (one green run of it is no evidence, see the soak rule below), and a listed
+  test that did not run is no finding. Move a reported row to
+  `fixed-pending-soak` once Martin agrees, or fix the table.
 - **The target end state is a MINIMAL registry of OWNED residuals, not
   necessarily an empty one** (Martin, 2026-08-04). The known-reds fix program
   closes when every family is either FIXED or is a low-frequency residual
@@ -115,6 +126,17 @@ that run re-raised the `inv-displayed-text/widget` and SplitBlock families, and
 the re-raise path (`drive_windowed_case` -> `out` -> the test's `panic!`) is the
 same for every family the composed harness verdict names. Only a site measured
 from a real log belongs in a `Site` — a guessed site fabricates evidence.
+
+## Tests that reproduce a deterministic known red
+
+One line per `known-red` row that reds on every run of a named test; the test
+is the nextest id `<binary id> <test name>`. `scripts/check-known-red-evidence.py`
+fails a key that is no `known-red` row and a test listed twice.
+
+| Test | Registry key |
+| --- | --- |
+| `holon-orgmode::main deleted_page_is_not_rewritten_from_a_stale_page_mirror::a_late_block_change_of_a_deleted_page_does_not_recreate_its_file` | `deleted-page-rewritten-from-stale-page-mirror-pin` |
+| `holon-integration-tests::integration advice_live_mcp_gate::advice_live_mcp_gate` | `advice-gate-weave-row-missing` |
 
 ## End-state audit — known-reds fix program, 2026-08-05
 

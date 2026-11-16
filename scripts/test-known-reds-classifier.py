@@ -13,6 +13,7 @@ default 100; SEED=<s> replays a draw). The fixed examples run first. Properties:
 Before the CASES draws it checks base draws, drawn until each case of `kinds` below is reached at least once, so every case
 is checked in every run; it fails when ATTEMPTS draws leave a case unreached. Exits non-zero when a property fails; each failing
 log is printed as an EXAMPLES entry.
+Fixed cases also check `--stale` on green runs and that a broken `Test | Registry key` table is a broken-registry exit.
 """
 import os
 import random
@@ -121,6 +122,43 @@ def check_draw(work, clean, mixed):
     return failures, clean.text if f1 or failures[-1:] and failures[-1].startswith("P4") else mixed.text
 
 
+def stale_only_failures(work):
+    """`--stale` prints nothing for a green run without a stale row, and the STALE report for one with it."""
+    pinned, key = logs.pinned_test()
+    failures = []
+    for name, units, want in (("no-stale", ("holon-x::main a::case_b",), ""),
+                              ("stale", ("holon-x::main a::case_b", pinned), f"[known-reds] STALE: {key}: its test {pinned} passed at ")):
+        log = work / f"stale-only-{name}.log"
+        log.write_text(logs.green_run(*units))
+        out = subprocess.run([CLASSIFIER, "--stale", log], capture_output=True, text=True)
+        if out.returncode != 0 or not out.stdout.startswith(want) or bool(want) != bool(out.stdout):
+            failures.append(f"--stale {name}: want exit 0 and stdout starting {want!r}, got exit {out.returncode}:\n{out.stdout}{out.stderr}")
+    return failures
+
+
+def broken_table_failures(work):
+    """A table row that names no known-red row, or a test listed twice, stops the classifier with exit 2."""
+    repo = CLASSIFIER.resolve().parent.parent
+    registry = (repo / "docs/Testing/KeystoneKnownReds.md").read_text()
+    header = "| Test | Registry key |\n| --- | --- |\n"
+    pinned, key = logs.pinned_test()
+    failures = []
+    for name, row, want in (("unknown key", "| `holon-x::main a::case_b` | `no-such-row` |", "no-such-row"),
+                            ("test twice", f"| `{pinned}` | `{key}` |", "listed twice")):
+        tree = work / name.replace(" ", "-")
+        (tree / "docs/Testing").mkdir(parents=True)
+        (tree / "scripts").symlink_to(CLASSIFIER.resolve().parent)
+        (tree / "docs/Testing/known-red-evidence").symlink_to(repo / "docs/Testing/known-red-evidence")
+        assert registry.count(header) == 1
+        (tree / "docs/Testing/KeystoneKnownReds.md").write_text(registry.replace(header, header + row + "\n"))
+        log = work / "broken-table.log"
+        log.write_text(logs.green_run("holon-x::main a::case_b", "holon-x::main a::case_c"))
+        out = subprocess.run([tree / "scripts/keystone-known-reds.sh", log], capture_output=True, text=True)
+        if out.returncode != 2 or want not in out.stderr:
+            failures.append(f"broken table, {name}: want exit 2 and stderr naming {want!r}, got exit {out.returncode}:\n{out.stdout}{out.stderr}")
+    return failures
+
+
 def main():
     seed = int(os.environ.get("SEED", random.randrange(1 << 30)))
     cases = int(os.environ.get("CASES", 100))
@@ -136,6 +174,9 @@ def main():
             if code != want_exit or not re.search(line, out, re.M):
                 failed += 1
                 print(f"example {name}: want exit {want_exit} and a line matching {line!r}, got exit {code}:\n{out}")
+        for failure in stale_only_failures(work) + broken_table_failures(work):
+            failed += 1
+            print(failure)
         print(f"drawn with seed {seed} ({cases} cases)")
 
         def draw():

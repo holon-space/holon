@@ -43,7 +43,7 @@ keystone_smoke() {
     [ "${#tests[@]}" = 0 ] || HOLON_PBT_TIMING=measure just pbt general 1 --exact "${tests[@]}" 2>&1 | tee -a "$log" || rc=$?
     [ -z "$rerun_shape" ] || HOLON_PBT_TIMING=measure just keystone-smoke-shape 2>&1 | tee -a "$log" || { r=$?; [ "$rc" != 0 ] || rc=$r; }
   fi
-  [ "$rc" != 0 ] || return 0
+  [ "$rc" != 0 ] || { bash scripts/keystone-known-reds.sh --stale "$log" || exit 2; return 0; }
   bash scripts/keystone-known-reds.sh "$log" | tee "$classified"
   grep -q 'PASS-WITH-NOTE' "$classified" || { record_failed keystone-smoke "$log" "$shape"; echo "KEYSTONE SMOKE NOVEL RED"; exit 11; }
   echo "keystone smoke: pass-with-note (known reds only)"
@@ -57,7 +57,7 @@ hand_authored() {
     [[ $id =~ ^[a-z0-9-]+$ ]] || cannot_rerun hand-authored "$id"
     cases+="${cases:+,}$id"
   done
-  env ${cases:+HOLON_HAND_AUTHORED_CASE="$cases"} just hand-authored 2>&1 | tee "$log" && return
+  env ${cases:+HOLON_HAND_AUTHORED_CASE="$cases"} just hand-authored 2>&1 | tee "$log" && { bash scripts/keystone-known-reds.sh --stale "$log" || exit 2; return 0; }
   bash scripts/keystone-known-reds.sh "$log" | tee "$classified" || true
   grep -q 'PASS-WITH-NOTE' "$classified" || { record_failed hand-authored "$log"; echo "HAND-AUTHORED NOVEL RED"; exit 11; }
   echo "hand-authored: pass-with-note (known reds only)"
@@ -76,7 +76,9 @@ extra_nextest() {
     filter=(--filterset="$GATE_STEP_ARGS")
   fi
   mark=$(mktemp); trap 'rm -f "$mark"' EXIT
-  if gate_nextest ${filter[@]+"${filter[@]}"} 2>&1 | tee "$log"; then :; else
+  if gate_nextest ${filter[@]+"${filter[@]}"} 2>&1 | tee "$log"; then
+    bash scripts/keystone-known-reds.sh --stale "$log" || exit 2
+  else
     local status=("${PIPESTATUS[@]}")
     # nextest exits 94 on a command-line filter set it cannot parse, before it builds.
     if [ -n "${GATE_STEP_ARGS:-}" ] && [ "${status[0]}" = 94 ]; then

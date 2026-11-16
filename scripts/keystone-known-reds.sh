@@ -4,10 +4,18 @@
 # Usage:
 #   scripts/keystone-known-reds.sh <run.log> [<run.log> ...]
 #   scripts/keystone-known-reds.sh --class <run.log>
+#   scripts/keystone-known-reds.sh --stale <run.log>
 #
 # `--class` takes exactly one log, keeps the exit codes below and prints only
 # one word on stdout: `green` (exit 0, the run passed), `known-red-only` (exit
 # 0, every red matched a row) or `red` (exit 1 or 3). On exit 2 it prints no word.
+#
+# `--stale` is for a step that its own command already judged green: it prints
+# only the STALE reports below and exits 0, or 2 as below.
+#
+# A STALE report names a deterministic known red whose test (the registry's
+# `Test | Registry key` table) has a nextest PASS in the log. It is a question
+# for Martin and never changes the exit code.
 #
 # `just keystone-nightly` passes only the runs that exited non-zero, but logs
 # also arrive by hand, so each log's outcome is read from the log itself. For a
@@ -64,13 +72,14 @@ fail() {
 trap 'fail "$BASH_COMMAND" "$?"' ERR
 
 class=0
-if [ "${1:-}" = --class ]; then
-    class=1
-    shift
-    if [ "$#" -ne 1 ]; then
-        echo "usage: $0 --class <run.log>" >&2
+stale_only=0
+if [ "${1:-}" = --class ] || [ "${1:-}" = --stale ]; then
+    [ "$1" = --class ] && class=1 || stale_only=1
+    if [ "$#" -ne 2 ]; then
+        echo "usage: $0 $1 <run.log>" >&2
         exit 2
     fi
+    shift
 fi
 
 here=$(dirname "${BASH_SOURCE[0]}")
@@ -94,11 +103,15 @@ say_class() {
         1 | 3) echo red >&3 ;;
     esac
 }
-if [ "$class" -eq 1 ]; then
+say_stale() {
+    [ "$1" -ne 2 ] || return 2
+    awk '/^\[known-reds\] STALE: / { p = 1 } /^$/ { p = 0 } p' "$work/full-output" >&3
+}
+if [ "$class" -eq 1 ] || [ "$stale_only" -eq 1 ]; then
     exec 3>&1 >"$work/full-output"
     green=0
 fi
-trap 'rc=$?; rm -rf "$work" || fail "rm -rf $work" "$?"; [ "$class" -eq 0 ] || say_class "$rc"' EXIT
+trap 'rc=$?; [ "$class" -eq 0 ] || say_class "$rc"; [ "$stale_only" -eq 0 ] || { say_stale "$rc" && rc=0 || rc=$?; }; rm -rf "$work" || fail "rm -rf $work" "$?"; exit "$rc"' EXIT
 
 # The input logs' `BASE:`/`TREE:` lines head the output, so a tee of it names
 # the tree it judged. An unreadable log is reported in the loop below.
@@ -128,6 +141,8 @@ python3 "$repo_root/scripts/check-known-red-evidence.py" --rows "$registry" >"$r
 if [ ! -s "$rows" ]; then
     echo "[known-reds] registry has no known-red rows — every failure is novel."
 fi
+tests="$work/tests"
+python3 "$repo_root/scripts/check-known-red-evidence.py" --tests "$registry" >"$tests"
 
 # The keystone's `BootFault::TaskPanic` panics on purpose and asserts the
 # disclosure itself. Only this payload at this site is no failure: it is
@@ -219,6 +234,7 @@ unreadable=0
 : >"$work/novel"
 : >"$work/hits"
 : >"$work/dropped"
+: >"$work/stale"
 
 for log in "$@"; do
     if [ ! -f "$log" ] || [ ! -r "$log" ]; then
@@ -280,7 +296,7 @@ for log in "$@"; do
     # panic line starts with its test instance when the text proves the owner
     # (empty otherwise) and \035: the scope of a row's collateral pairs.
     sigs="$work/sigs"
-    awk_verdict '
+    awk_verdict -v pins_path="$tests" '
         # The thread name of panic head `line`, or "" when the text lost it,
         # or the open head'"'"'s text behind `open_mark` when the line continues one.
         function thread_of(line,    t, s) {
@@ -482,7 +498,12 @@ for log in "$@"; do
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
-        BEGIN { split("|ok|FAILED", glued, "|"); no_message = "(no message line: another panic head follows)" }
+        BEGIN {
+            split("|ok|FAILED", glued, "|"); no_message = "(no message line: another panic head follows)"
+            while ((r = (getline pin < pins_path)) > 0) { split(pin, f, "\037"); pinned[f[1]] = f[2] }
+            if (r < 0) { printf "[known-reds] cannot read %s\n", pins_path >"/dev/stderr"; exit 2 }
+            close(pins_path)
+        }
         FNR == 1 { section = ""; live = ""; captured = ""; serial = 0; marked = 0; run = 0; replay_case = ""; split("", open_heads); split("", head_name); split("", unit_of) }
         # The line after a judged head is its message, unless it starts a head of its own.
         judging {
@@ -507,6 +528,7 @@ for log in "$@"; do
                 o = outcome(LABEL)
                 track_status(o, inst)
                 if (o == "pass" || o == "fail") { n_status[inst]++; status_line[inst, n_status[inst]] = FNR; status_is[inst, n_status[inst]] = o }
+                if (o == "pass" && (UNIT in pinned) && !(UNIT in stale)) { stale[UNIT] = 1; print pinned[UNIT] "\t" UNIT "\t" FILENAME ":" FNR >>stale_out }
                 if (LABEL ~ /^FLAKY / || (LABEL ~ /^TRY / && o == "pass")) passed[inst] = 1
                 else if (LABEL ~ /^FLKY-FL /) flaky_failed[inst] = 1
                 else if (LABEL ~ /^TRY [0-9]+ / && o == "fail" && try_of(LABEL) + 0 > last_try[inst] + 0) last_try[inst] = try_of(LABEL)
@@ -581,7 +603,7 @@ for log in "$@"; do
             print injected + 0, in_passing + 0 >injected_out
             if (!stopped)
                 for (c in red_case) if (!(c in judged)) print "-\tthe red case printed no panic\037" c "\037" declared[c]
-        }' q="'" open_mark="$(printf '\001')" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" dropped_out="$work/dropped" "$log" "$log" >"$sigs"
+        }' q="'" open_mark="$(printf '\001')" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" dropped_out="$work/dropped" stale_out="$work/stale" "$log" "$log" >"$sigs"
 
     read -r log_injected log_in_passing <"$work/injected"
     in_passing=$((in_passing + log_in_passing))
@@ -935,6 +957,13 @@ awk 'BEGIN { FS = "\037" }
         for (i = 1; i <= nrows; i++)
             if (count[i]) { print "WARN known-red [" key[i] "] x" count[i]; print "     " example[i] }
     }' "$rows" "$work/hits"
+while IFS=$'\t' read -r -u 3 key test at; do
+    echo ""
+    echo "[known-reds] STALE: $key: its test $test passed at $at."
+    echo "             The row is a deterministic known red, so this pass says it no longer fires."
+    echo "             Move the row to fixed-pending-soak once Martin agrees, or fix the"
+    echo "             \`Test | Registry key\` table in docs/Testing/KeystoneKnownReds.md."
+done 3<"$work/stale"
 if [ -s "$work/novel" ]; then
     echo ""
     echo "NOVEL signatures (distinct, with occurrence counts):"
