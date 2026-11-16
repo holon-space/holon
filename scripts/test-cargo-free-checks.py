@@ -4,8 +4,9 @@
 Run: `python3 scripts/test-cargo-free-checks.py` (CASES=<n> draws n rows, default 2).
 It works in a copy of this tree whose `cargo` is a stub that records each call:
 - the unchanged tree passes the recipe, and the recipe calls no cargo;
-- a known-red row whose slug FeatureMap.md does not list fails the recipe and
-  `just gate-arch`, both before any cargo call, with the feature-map drift named.
+- a known-red row whose slug FeatureMap.md does not list fails the recipe before any
+  cargo call, with the feature-map drift named (scripts/test-gate-arch-verdicts.py
+  shows that a red cargo-free-checks fails `just gate-arch`).
 Exits non-zero when a property fails; each failing row is printed as an EXAMPLES entry.
 """
 import os
@@ -117,12 +118,11 @@ def main():
         print(f"drawn with seed {seed}: {drawn}")
         for case in EXAMPLES + drawn:
             registry.write_text("\n".join(with_row(lines, *case)) + "\n")
-            for recipe in ("cargo-free-checks", "gate-arch"):
-                rc, out, called = run(tree, env, calls, recipe)
-                print(f"{case}: just {recipe}: exit {rc}, cargo calls {called}")
-                if rc == 0 or called or DRIFT not in out:
-                    failures.append(f"EXAMPLES entry {case}: `just {recipe}` exit {rc}, cargo calls {called}, "
-                                    f"drift named: {DRIFT in out}\n{tail(out)}")
+            rc, out, called = run(tree, env, calls, "cargo-free-checks")
+            print(f"{case}: exit {rc}, cargo calls {called}")
+            if rc == 0 or called or DRIFT not in out:
+                failures.append(f"EXAMPLES entry {case}: exit {rc}, cargo calls {called}, "
+                                f"drift named: {DRIFT in out}\n{tail(out)}")
             registry.write_text(original)
     for failure in failures:
         print(f"FAIL: {failure}")

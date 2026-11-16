@@ -1556,17 +1556,42 @@ gate-arch:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    just cargo-free-checks
+    failed=""
+    # check <name> <log> <command...>: runs every check to the end and names each one's verdict, so a red log
+    # cites every red check. The exit is the command's, or tee's when only tee failed.
+    check() {
+        local name=$1 log=$2 st rc
+        shift 2
+        set +e
+        "$@" 2>&1 | tee "$log"
+        st=("${PIPESTATUS[@]}")
+        set -e
+        rc=${st[0]}
+        [ "$rc" -ne 0 ] || rc=${st[1]}
+        if [ "$rc" -eq 0 ]; then
+            echo "PASS $name"
+        else
+            echo "FAIL $name (exit $rc)"
+            failed+=" $name"
+        fi
+    }
+    # cargo-free-checks writes its own logs.
+    check cargo-free-checks /dev/null just cargo-free-checks
+    check gate-arch-verdicts target/gate-logs/gate-arch-verdicts.log ./scripts/test-gate-arch-verdicts.py
     # Calls `cargo nextest --help`, so it cannot sit among the cargo-free checks.
-    ./scripts/flow-checks/test-run-step-header.py 2>&1 | tee target/gate-logs/gate-arch-run-step-header.log
+    check run-step-header target/gate-logs/gate-arch-run-step-header.log ./scripts/flow-checks/test-run-step-header.py
     # Reads `cargo metadata`, so it cannot sit among the cargo-free checks.
-    ./scripts/test-select-tests-registry-data.py 2>&1 | tee target/gate-logs/gate-arch-select-tests-registry-data.log
-    ./scripts/test-select-tests-dev-edges.py 2>&1 | tee target/gate-logs/gate-arch-select-tests-dev-edges.log
+    check select-tests-registry-data target/gate-logs/gate-arch-select-tests-registry-data.log ./scripts/test-select-tests-registry-data.py
+    check select-tests-dev-edges target/gate-logs/gate-arch-select-tests-dev-edges.log ./scripts/test-select-tests-dev-edges.py
     # Each case is a whole integrate run under the real build slot script: too slow for the cargo-free checks.
-    ./scripts/test-gate-integrate-tmpdir.py 2>&1 | tee target/gate-logs/gate-arch-gate-integrate-tmpdir.log
+    check gate-integrate-tmpdir target/gate-logs/gate-arch-gate-integrate-tmpdir.log ./scripts/test-gate-integrate-tmpdir.py
     # Asks jj for the tree id, so it cannot run in the cargo-free checks' copied tree.
-    ./scripts/flow-checks/test-windowed-gate-logs.py 2>&1 | tee target/gate-logs/gate-arch-windowed-gate-logs.log
-    cargo nextest run {{CANON}} --test architecture_rules --no-tests=fail 2>&1 | tee target/gate-logs/gate-arch.log
+    check windowed-gate-logs target/gate-logs/gate-arch-windowed-gate-logs.log ./scripts/flow-checks/test-windowed-gate-logs.py
+    check architecture_rules target/gate-logs/gate-arch.log cargo nextest run {{CANON}} --test architecture_rules --no-tests=fail
+    if [ -n "$failed" ]; then
+        echo "gate-arch: red checks:$failed"
+        exit 1
+    fi
 
 # Tier 1 pre-commit gate: gate-integrity lints, defensive-code ratchet, typecheck.
 # The justfile guard runs FIRST and costs ~10ms: a never-fail recipe invalidates
