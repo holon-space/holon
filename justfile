@@ -403,7 +403,7 @@ keystone-full cases='16':
 # green and the runner budget is known.
 #
 # Keystone runs must be serialized against every other keystone lane:
-#   /opt/homebrew/opt/parallel/bin/parallel --semaphore --id holon-keystone -j1 \
+#   parallel --semaphore --id holon-keystone -j1 \
 #       --fg -- just keystone-nightly
 keystone-nightly runs='2' cases='64':
     #!/usr/bin/env bash

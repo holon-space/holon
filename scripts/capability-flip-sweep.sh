@@ -28,6 +28,11 @@
 # the source tree.
 set -uo pipefail
 
+command -v parallel >/dev/null || {
+    echo "FATAL: GNU parallel is not on PATH; it serializes the build under the shared holon-build semaphore"
+    exit 89
+}
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 90
 cd "$ROOT" || exit 90
 YAML="crates/holon-org-format/profile.yaml"
@@ -55,7 +60,7 @@ export HOLON_CAPABILITY_REPORT_DIR="$ROOT/$WORK/reports"
 # (measured: ~6s per flip, then ~10 MINUTES per flip under contention).
 echo "building the certification binary (once)…"
 BUILD_JSON="$WORK/build.json"
-/opt/homebrew/opt/parallel/bin/parallel --semaphore --id holon-build -j4 --fg -- \
+parallel --semaphore --id holon-build -j4 --fg -- \
     cargo test -p holon-org-format --test main --no-run --message-format=json \
     >"$BUILD_JSON" 2>"$WORK/build.err" || {
     echo "FATAL: building the certification binary failed — see $WORK/build.err"
@@ -292,7 +297,7 @@ echo "SWEEP: $total flips, $defects silent-defect(s), $surprises surprise(s)"
 # the in-tree yaml, whatever the last flip did.
 echo "restoring the ledger's input with a clean certification…"
 unset HOLON_CAPABILITY_PROFILE HOLON_CAPABILITY_REPORT_DIR
-/opt/homebrew/opt/parallel/bin/parallel --semaphore --id holon-build -j4 --fg -- \
+parallel --semaphore --id holon-build -j4 --fg -- \
     ./scripts/capability-cert.sh >"$WORK/clean-cert.txt" 2>&1 || {
     echo "FATAL: the closing clean certification failed — see $WORK/clean-cert.txt"
     exit 94
