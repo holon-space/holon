@@ -9,7 +9,6 @@
 # path that depends on nothing but the guest's name, and built with the channel
 # pinned in the repository's rust-toolchain.toml.
 set -euo pipefail
-export PATH=/opt/homebrew/opt/rustup/bin:$PATH
 export RUSTC_WRAPPER=
 export CARGO_BUILD_JOBS=6
 
@@ -32,11 +31,14 @@ if ! rustup target list --installed --toolchain "$CHANNEL" | grep -qx wasm32-unk
     rustup target add wasm32-unknown-unknown --toolchain "$CHANNEL"
 fi
 
-# Restaging key. Only files cargo reads are hashed: a stray `target/` left in a
-# checkout by an older build must not count as a source.
-SRC_HASH=$(cd "$HERE" && find "$GUEST/src" "$GUEST/Cargo.toml" "$GUEST/Cargo.lock" \
-    abi-guest/src abi-guest/Cargo.toml plugin-rows/src plugin-rows/Cargo.toml -type f \
-    | sort | xargs shasum -a 256 | shasum -a 256 | cut -c1-16)
+# Hash of the files cargo reads under a `guests` tree: a stray `target/` left
+# in a checkout by an older build must not count as a source.
+sources_hash() {
+    (cd "$1" && find "$GUEST/src" "$GUEST/Cargo.toml" "$GUEST/Cargo.lock" \
+        abi-guest/src abi-guest/Cargo.toml plugin-rows/src plugin-rows/Cargo.toml -type f \
+        | sort | xargs shasum -a 256 | shasum -a 256 | cut -c1-16)
+}
+SRC_HASH=$(sources_hash "$HERE")
 
 STAGE_ROOT=${HOLON_GUEST_STAGE:-/tmp/holon-guest-build}
 mkdir -p "$STAGE_ROOT/$GUEST/guests"
@@ -61,13 +63,14 @@ until mkdir "$LOCK" 2>/dev/null; do
 done
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
-if [ "$(cat "$STAGE/guests/.staged" 2>/dev/null || true)" != "$SRC_HASH" ]; then
+# macOS reaps old files under /tmp: compare the staged copy itself, so a
+# missing or changed staged file restages.
+if [ "$(sources_hash "$STAGE/guests" 2>/dev/null || true)" != "$SRC_HASH" ]; then
     for pkg in "$GUEST" abi-guest plugin-rows; do
         rm -rf "${STAGE:?}/guests/$pkg"
         cp -R "$HERE/$pkg" "$STAGE/guests/$pkg"
         rm -rf "$STAGE/guests/$pkg/target"
     done
-    echo "$SRC_HASH" > "$STAGE/guests/.staged"
 fi
 
 CARGO_HOME_DIR=$(cd "${CARGO_HOME:-$HOME/.cargo}" && pwd)
