@@ -85,7 +85,7 @@ use holon_api::latency_slo::RungVerdict;
 use holon_api::latency_slo::SERVICE_TIME_SLO_MS;
 use holon_api::latency_slo::SloWindow;
 use holon_api::latency_slo::THROUGHPUT_FLOOR_WRITES_PER_SEC;
-use holon_api::latency_slo::fault_injection::set_delivery_delay_ms;
+use holon_api::latency_slo::fault_injection::delivery_delay;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::dispatch_intent_through_armed_door;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
@@ -279,24 +279,6 @@ fn require_a_judgeable_host() {
     });
 }
 
-/// Arms the per-row delivery delay, and disarms it when dropped, a panic
-/// included: the delay is process-global, and a later test must not run
-/// against a slowed pipeline.
-struct ArmedDeliveryDelay;
-
-impl ArmedDeliveryDelay {
-    fn arm(ms: u64) -> Self {
-        set_delivery_delay_ms(ms);
-        Self
-    }
-}
-
-impl Drop for ArmedDeliveryDelay {
-    fn drop(&mut self) {
-        set_delivery_delay_ms(0);
-    }
-}
-
 /// One drain drive: the wall-time verdict, and what the process spent on it.
 struct DrainRun {
     verdict: DrainVerdict,
@@ -339,7 +321,7 @@ fn run_drain_test(sut: &ComposedSut<WideE2E>, test: DrainTest, delay_ms: u64) ->
     );
 
     let probe = SloProbe::arm();
-    let delay = ArmedDeliveryDelay::arm(delay_ms);
+    let delay = sut.delivery_delay().arm(delay_ms);
     let (samples, host) = sut.runtime().block_on(async {
         engine.ui_state().set_detached_dispatch(true);
         let mut seen = 0;
@@ -1089,7 +1071,7 @@ fn a_slowed_pipeline_moves_the_service_statistic() {
     let (mut sut, mut ref_state) = boot(DriveTargets::Skip, Host::Any);
 
     let probe = SloProbe::arm();
-    set_delivery_delay_ms(TEETH_DELAY_MS);
+    let delay = sut.delivery_delay().arm(TEETH_DELAY_MS);
     // A transition returns before the slowed delivery lands. Each write waits
     // for its own sample, so every write flies alone and is service time.
     for (i, t) in write_sequence(TEETH_PACED_WRITES).into_iter().enumerate() {
@@ -1105,7 +1087,7 @@ fn a_slowed_pipeline_moves_the_service_statistic() {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
-    set_delivery_delay_ms(0);
+    drop(delay);
     let window = probe.snapshot(ClockOrigin::Ui);
     drop(probe);
 
@@ -1133,6 +1115,43 @@ fn a_slowed_pipeline_moves_the_service_statistic() {
     eprintln!(
         "[latency-slo gate] teeth (wiring): injection reached the scorer — p50 {p50}ms \
          (max {max}ms) over n={n}, against a 22-45ms unslowed baseline"
+    );
+}
+
+/// Per-row delay armed on one SUT of the two-SUT test.
+const OTHER_SUT_DELAY_MS: u64 = 2_000;
+
+/// The delay a delivery actor of `sut` reads: a task on the SUT's runtime asks,
+/// as the actors do.
+fn delay_seen_by_delivery(sut: &ComposedSut<WideE2E>) -> Option<std::time::Duration> {
+    sut.runtime()
+        .block_on(sut.runtime().spawn(async { delivery_delay() }))
+        .expect("the probe task ran to completion")
+}
+
+/// Delivery delay is armed per SUT: two SUTs share this process, the delay is
+/// armed for one, and the other's delivery threads read no delay.
+#[test]
+fn arming_the_delay_for_one_sut_leaves_another_undelayed() {
+    let (armed_sut, _) = boot(DriveTargets::Skip, Host::Any);
+    let (sut, _) = boot(DriveTargets::Skip, Host::Any);
+
+    let delay = armed_sut.delivery_delay().arm(OTHER_SUT_DELAY_MS);
+    assert_eq!(
+        delay_seen_by_delivery(&armed_sut),
+        Some(std::time::Duration::from_millis(OTHER_SUT_DELAY_MS)),
+        "the armed SUT's delivery threads must read its delay"
+    );
+    assert_eq!(
+        delay_seen_by_delivery(&sut),
+        None,
+        "the delay armed on one SUT leaked to the other SUT's delivery threads"
+    );
+    drop(delay);
+    assert_eq!(
+        delay_seen_by_delivery(&armed_sut),
+        None,
+        "dropping the guard must disarm the delay"
     );
 }
 

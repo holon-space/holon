@@ -80,6 +80,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use holon_api::EntityUri;
+use holon_api::latency_slo::fault_injection::DeliveryDelay;
 use holon_loro_testing::LoroSut;
 use holon_loro_testing::ref_ext::ClockFeedLease;
 use holon_pbt_core::capabilities::SutBackend;
@@ -872,6 +873,9 @@ pub struct ComposedSut<S: ComposedSlice> {
     failed_create_synthetics: BTreeSet<EntityUri>,
     unheld_history: UnheldHistory,
     rt: SutRuntime,
+    /// Bound to every thread of `rt`; `None` when the backend runs on a
+    /// runtime the harness did not build.
+    delivery_delay: Option<DeliveryDelay>,
     /// Pumps an attached gpui window to a fixed point before each
     /// `check_invariants` read; a no-op for the headless path. See
     /// [`SettleHook`].
@@ -954,7 +958,13 @@ impl<S: ComposedSlice> ComposedSut<S> {
         // Bind the SUT runtime's worker threads to THIS case's scope so a
         // swallowed panic / `error!` on a worker is attributed here — the
         // cross-thread capture `inv-no-observed-errors` exists for.
-        crate::test_tracing::attach_scope_to_runtime(&mut builder, scope);
+        let delivery_delay = DeliveryDelay::default();
+        let bound = delivery_delay.clone();
+        builder.on_thread_start(move || {
+            crate::test_tracing::register_worker_thread(scope);
+            bound.bind_to_this_thread();
+        });
+        builder.on_thread_stop(crate::test_tracing::unregister_worker_thread);
         let rt = builder.build().expect("build SUT runtime");
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let (caps, handle, scaffold_ids) = rt.block_on(build(resolver.clone()));
@@ -977,6 +987,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             failed_create_synthetics: BTreeSet::new(),
             unheld_history: UnheldHistory::default(),
             rt: SutRuntime(Some(rt)),
+            delivery_delay: Some(delivery_delay),
             settle: Box::new(|| {}),
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
@@ -1377,6 +1388,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             failed_create_synthetics,
             mut unheld_history,
             rt,
+            delivery_delay,
             settle,
             engaged,
             telemetry,
@@ -1465,6 +1477,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             failed_create_synthetics,
             unheld_history,
             rt,
+            delivery_delay,
             settle,
             engaged,
             telemetry,
@@ -1526,6 +1539,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             failed_create_synthetics: BTreeSet::new(),
             unheld_history: UnheldHistory::default(),
             rt: SutRuntime(Some(rt)),
+            delivery_delay: None,
             settle,
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
@@ -1543,6 +1557,13 @@ impl<S: ComposedSlice> ComposedSut<S> {
     /// `boot_and_seed_wide`'s headless focus drive).
     pub fn runtime(&self) -> &tokio::runtime::Runtime {
         &self.rt
+    }
+
+    /// The CDC delivery delay of this SUT alone.
+    pub fn delivery_delay(&self) -> &DeliveryDelay {
+        self.delivery_delay
+            .as_ref()
+            .expect("this SUT's backend runs on a runtime the harness did not build")
     }
 
     /// The slice handle — a deterministic test needs it to reach the booted

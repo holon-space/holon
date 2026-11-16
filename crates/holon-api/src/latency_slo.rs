@@ -72,28 +72,65 @@ const MIN_SATURATED_PASSES: usize = 3;
 /// Feature-gated (`slo-fault-injection`, off by default): a release build has
 /// no injector to call and no branch in the CDC apply path at all. Enabled only
 /// by `holon-integration-tests`. Cost when the feature IS on and the injector
-/// is disarmed: one relaxed atomic load per delivered batch.
+/// is disarmed: one thread-local read and one relaxed atomic load per
+/// delivered batch.
+///
+/// Scoped to one SUT: each SUT binds its own [`fault_injection::DeliveryDelay`]
+/// to the threads of its tokio runtime, where its delivery actors run.
 #[cfg(feature = "slo-fault-injection")]
 pub mod fault_injection {
+    use std::cell::RefCell;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
-    static DELIVERY_DELAY_MS: AtomicU64 = AtomicU64::new(0);
-
-    /// Delay every subsequent CDC delivery by `ms` PER ROW it carries (`0`
-    /// disarms) — so the armed pipeline behaves as though each write costs
-    /// `ms` more, which caps its capacity at `1000 / ms` writes/s.
-    pub fn set_delivery_delay_ms(ms: u64) {
-        DELIVERY_DELAY_MS.store(ms, Ordering::Relaxed);
+    thread_local! {
+        static BOUND: RefCell<Option<DeliveryDelay>> = const { RefCell::new(None) };
     }
 
-    /// The armed delay, or `None`. Called once per delivered batch.
+    /// One SUT's per-row delivery delay in ms (`0` disarmed).
+    #[derive(Clone, Debug, Default)]
+    pub struct DeliveryDelay(Arc<AtomicU64>);
+
+    impl DeliveryDelay {
+        /// Makes this the delay the calling thread's deliveries read. Call it
+        /// from the SUT runtime's `on_thread_start`.
+        pub fn bind_to_this_thread(&self) {
+            BOUND.set(Some(self.clone()));
+        }
+
+        /// Delay every subsequent CDC delivery of this SUT by `ms` PER ROW it
+        /// carries, until the returned guard drops: the armed pipeline
+        /// behaves as though each write costs `ms` more, which caps its
+        /// capacity at `1000 / ms` writes/s.
+        pub fn arm(&self, ms: u64) -> ArmedDelay {
+            let before = self.0.swap(ms, Ordering::Relaxed);
+            assert_eq!(
+                before, 0,
+                "the delivery delay is already armed for this SUT"
+            );
+            ArmedDelay(self.clone())
+        }
+    }
+
+    /// Disarms its [`DeliveryDelay`] when dropped, also during a panic.
+    #[must_use = "the delay is disarmed when the guard drops"]
+    pub struct ArmedDelay(DeliveryDelay);
+
+    impl Drop for ArmedDelay {
+        fn drop(&mut self) {
+            self.0.0.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// The delay armed for the calling thread's SUT, or `None`. Called once
+    /// per delivered batch.
     pub fn delivery_delay() -> Option<Duration> {
-        match DELIVERY_DELAY_MS.load(Ordering::Relaxed) {
+        BOUND.with_borrow(|bound| match bound.as_ref()?.0.load(Ordering::Relaxed) {
             0 => None,
             ms => Some(Duration::from_millis(ms)),
-        }
+        })
     }
 }
 

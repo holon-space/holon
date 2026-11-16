@@ -603,8 +603,8 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 let touched = crate::latency_e2e::touched_entities(source_name, &changes);
                 let t_rows = std::time::Instant::now();
                 // Falsification hook for the latency-SLO gate: disarmed in
-                // every real run (one relaxed atomic load), armed only by
-                // `latency_slo_gate.rs` to prove its rungs can go red.
+                // every real run, armed only by `latency_slo_gate.rs` to prove
+                // its rungs can go red.
                 //
                 // Scaled by the batch's row count, so the armed delay models a
                 // pipeline where each WRITE costs more. A flat per-batch sleep
