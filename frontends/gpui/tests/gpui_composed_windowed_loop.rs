@@ -33,6 +33,7 @@ use holon_integration_tests::pbt::transitions::ClickBlock;
 use holon_integration_tests::pbt::transitions::E2ETransition;
 use holon_integration_tests::pbt::transitions::NavigateFocus;
 use holon_integration_tests::pbt::transitions::ToggleState;
+use holon_pbt_core::TransitionRef;
 use holon_pbt_core::types::CycleTarget;
 use pbt_harness::capture::FrameSink;
 use pbt_harness::panic_message;
@@ -44,6 +45,7 @@ use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
+use validated::Validated;
 
 use crate::pbt_harness;
 
@@ -72,7 +74,18 @@ fn benchmark_windowed_per_case_boot_cost() {
                     block_id: EntityUri::block(block),
                 });
                 if !<WideE2EMachine as ReferenceStateMachine>::preconditions(&cur_oracle, &t) {
-                    continue;
+                    let why = match TransitionRef::preconditions(&t, &cur_oracle) {
+                        Validated::Good(()) => "alphabet gate".to_string(),
+                        Validated::Fail(reasons) => reasons
+                            .iter()
+                            .map(|r| format!("{r:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    };
+                    panic!(
+                        "case {i}: ClickBlock precondition failed for block {block} ({why}); \
+                         the benchmark's fixed clicks must all apply"
+                    );
                 }
                 cur_oracle = <WideE2EMachine as ReferenceStateMachine>::apply(cur_oracle, &t);
                 sut = ComposedSut::<WideE2E>::apply(sut, &cur_oracle, t);
