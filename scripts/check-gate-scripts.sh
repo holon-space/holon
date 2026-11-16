@@ -126,7 +126,7 @@ chmod +x "$stubs"/*
 tip=$(cat target/gate-tip)
 # "<n> <name> <exit>" per gate-steps.jsonl row of gate $1, by step number.
 rows_of() {
-  /usr/bin/python3 -c 'import json, sys
+  python3 -c 'import json, sys
 for l in open(sys.argv[1]):
     r = json.loads(l)
     if r["gate"] == sys.argv[2]: print(r["step"], r["name"], r.get("exit", "skipped"))' "$home/.cache/holon-build/gate-steps.jsonl" "$1" | sort -n
@@ -237,7 +237,7 @@ stub_key() { case $1 in fmt) echo cargo:fmt ;; extra-nextest) echo cargo:nextest
 # Prints "<property> <0|1> <detail>" for the run of job $1 that ended with $2 and printed $3, drawn as
 # reds $4, pre-compile red $5, killed step $6, failure before the steps $7.
 judge() {
-  /opt/homebrew/bin/python3 - "$@" "$tip" "${names[*]}" "$home/.cache/holon-build" "$HOME/.claude/skills/gh-kanban" <<'PY'
+  python3 - "$@" "$tip" "${names[*]}" "$home/.cache/holon-build" "$HOME/.claude/skills/gh-kanban" <<'PY'
 import json, os, re, sys
 job, rc, out, reds, pre, kill, early, tip, declared, logs, flow = sys.argv[1:]
 sys.path.insert(0, flow)
@@ -477,7 +477,7 @@ if [ -n "${STUB_JUNIT:-}" ]; then cp "$STUB_JUNIT" "$junit"; exit 100; fi
 fails=${STUB_FAIL_TESTS:-}
 [ -z "${STUB_RERUN_RED:-}" ] || fails="holon-integration-tests::integration org_suite::red_again"
 [ -n "$fails" ] || exit 0
-/usr/bin/python3 - "$junit" "$fails" <<'PY'
+python3 - "$junit" "$fails" <<'PY'
 import sys
 junit, fails = sys.argv[1], sys.argv[2].split(";")
 cases = "".join(f'<testcase name="{t}" classname="{b}"><failure message="stub" type="test failure with exit code 101"/></testcase>'
@@ -563,7 +563,7 @@ jj new --quiet "$tip2"
 # hold $6 (cover | none | open), the rerun started $7 (after | before) the hold returned, the rerun's tests $8 (pass | note |
 # novel: red again, then classified), and the mutation $9 of the rerun's input; the gate ran with the STUB_* knobs in the env.
 judge_rerun() {
-  /opt/homebrew/bin/python3 - "$@" "$tip2" "$home/.cache/holon-build" "$HOME/.claude/skills/gh-kanban" "$rprobe" "$shape_case" <<'PY'
+  python3 - "$@" "$tip2" "$home/.cache/holon-build" "$HOME/.claude/skills/gh-kanban" "$rprobe" "$shape_case" <<'PY'
 import json, os, re, sys
 from datetime import datetime, timedelta, timezone
 job, rc, rjob, rrc, out, hold, when, again, mutation, tip, logs, flow, probe, shape = sys.argv[1:]
@@ -823,6 +823,134 @@ done
 expect "a job without red steps is refused by name" grep -q '^RERUN REFUSED: no red step of the gate job no.such.job' "$scratch/rerun-usage.out"
 jj new --quiet "$tip"
 
+echo "== a plain integrate run reuses the steps its tip already passed"
+# Each case seeds a fresh step record with earlier rows of some track steps, then runs the gate as a
+# flow job does (no GATE_FULL, no GATE_SELECT) or with GATE_FULL=1. A history is
+# "<step>:<state>@<tip>,...;..." oldest first:
+#   state  green (exit 0, as a step with known reds only) | gone (green, its job log deleted) |
+#          red (failed ids, for a test step) | bare (red without ids) | skipped | only (green on a narrowed id list)
+#   tip    same | other (another commit) | at (`@`) | change (a change id) | none (no tip key)
+# The oracle: a step is reused iff GATE_FULL is off and its last full, not skipped row on the same commit
+# is green with its job log; it runs on exactly the failed ids iff that row is a red test step's with ids.
+# A track after the first takes a build seat of its own iff one of its steps runs.
+reuse_py() {
+  python3 - "$@" <<'PY'
+import json, os, sys
+mode, d, tip, hist = sys.argv[1:5]
+IDS = {"extra-nextest": "holon-integration-tests::integration org_suite::a",
+       "keystone-tour": "holon-integration-tests::integration keystone_tour::tour_a",
+       "keystone-smoke": "test general_e2e_composed_pbt::general_e2e_composed_pbt",
+       "hand-authored": "a-red-case", "windowed-gate": "unit-a"}
+TIPS = {"same": tip, "other": tip[::-1], "at": "@", "change": "k" * 32}
+items = [(i, name, *item.split("@")) for i, (name, h) in enumerate(p.split(":") for p in hist.split(";") if p)
+         for item in h.split(",")]
+rows_path, jobs = f"{d}/gate-steps.jsonl", f"{d}/jobs"
+seed_job = lambda k: f"seed.{k}"
+if mode == "seed":
+    with open(rows_path, "w") as f:
+        for k, (i, name, state, t) in enumerate(items):
+            row = {"gate": "g0", "cards": "1", "step": i, "name": name, "start": "2026-11-16T00:00:00Z",
+                   "end": "2026-11-16T00:01:00Z", "job": seed_job(k), **({"tip": TIPS[t]} if t != "none" else {})}
+            if state == "skipped":
+                row |= {"skipped": True, "reason": "not selected"}
+            else:
+                row |= {"wall_s": 60.0, "exit": 1 if state in ("red", "bare") else 0, "cont": True, "full": True}
+            if state == "red" and name in IDS:
+                row["failed"] = [IDS[name]]
+            if state == "only":
+                row["only"] = [IDS.get(name, "x")]
+            f.write(json.dumps(row) + "\n")
+            if state != "gone":
+                open(f"{jobs}/{seed_job(k)}.log", "w").write("seeded\n")
+    sys.exit()
+full, rednow, job, rc, probe, *pre = sys.argv[5:]
+out = open(f"{d}/out").read().splitlines()
+mine = [r for r in map(json.loads, open(rows_path)) if r.get("job") == job]
+def expected(name):
+    """("reused", seed job) or ("run", ids or None)."""
+    counted = [(k, s) for k, (_, n, s, t) in enumerate(items) if n == name and t == "same" and s not in ("skipped", "only")]
+    if full or not counted:
+        return "run", None
+    k, s = counted[-1]
+    if s == "green":
+        return "reused", seed_job(k)
+    if s == "red" and name in IDS:
+        return "run", [IDS[name]]
+    return "run", None
+ran_red = False
+for name in sorted({r["name"] for r in mine} | {n for _, n, _, _ in items} | set(pre)):
+    got = [r for r in mine if r["name"] == name]
+    print("one-row", int(len(got) == 1), f"{name}: rows {got}")
+    if len(got) != 1:
+        continue
+    r = got[0]
+    how, what = ("run", None) if name in pre else expected(name)
+    landing = f"== landing [{r['step']}]: {name} =="
+    if how == "reused":
+        log = f"{jobs}/{what}.log"
+        print("reused-row", int(r.get("skipped") is True and r.get("reused_from") == what and r.get("log") == log
+                                and r.get("tip") == tip and "wall_s" not in r), f"{name}: from {what}, row {r}")
+        print("reused-line", int(f"reused {what} {log}" in out and landing not in out), f"{name}: from {what}")
+    else:
+        print("ran", int(not r.get("skipped") and "wall_s" in r and landing in out), f"{name}: row {r}")
+        print("ids", int(r.get("only") == what), f"{name}: only {r.get('only')}, want {what}")
+        ran_red |= name == "extra-nextest" and bool(rednow)
+        if name == "windowed-gate":
+            units = [l.rstrip("\n").rsplit("units=", 1)[1] for l in open(probe) if l.startswith("just windowed-gate ")]
+            print("units", int(units == [",".join(what or [])]), f"windowed-gate units {units}, want {what}")
+for t, track in enumerate(os.environ["TRACK_SPEC"].split(";")[1:], 1):
+    runs = [e.split(":")[1] for e in track.split() if full or expected(e.split(":")[1])[0] != "reused"]
+    seat = any(l.startswith(f"track {t}: build seat after ") for l in out)
+    print("seat", int(seat == bool(runs)), f"track {t}: own seat {seat}, steps that run {runs}")
+print("verdict", int(int(rc) == (1 if ran_red else 0)), f"exit {rc}, a ran red step: {ran_red}")
+PY
+}
+track_spec=$(sed -n '/^TRACKS=(/,/^)/s/^  "\(.*\)"$/\1/p' "$integrate" | paste -sd ';' -)
+reuse_k=0
+reuse_case() {
+  local full=$1 rednow=$2 hist=$3 rc=0 prop ok detail d job
+  reuse_k=$((reuse_k + 1)) d="$scratch/reuse-$reuse_k" job="$job_prefix.reuse.$reuse_k"
+  mkdir -p "$d/jobs"
+  reuse_py seed "$d" "$tip" "$hist"
+  : > "$rprobe"
+  in_rstubs HOLON_BUILD_HOLD_LOG="$d/holds.jsonl" FLOW_JOB_ID="$job" FLOW_JOB_LOG="$d/jobs/$job.log" ${full:+GATE_FULL=1} ${rednow:+STUB_RED_NEXTEST=1} \
+    "$integrate" g5 "1 2" "$tip" >"$d/out" 2>&1 || rc=$?
+  while read -r prop ok detail; do expect "reuse $reuse_k full=${full:-off} red=${rednow:-off} [$hist]: $prop ($detail)" [ "$ok" = 1 ]; done \
+    < <(TRACK_SPEC=$track_spec reuse_py judge "$d" "$tip" "$hist" "$full" "$rednow" "$job" "$rc" "$rprobe" fmt deny machete gate-compile)
+}
+reuse_case "" "" "extra-nextest:green@same"
+reuse_case 1 "" "extra-nextest:green@same"
+for t in other at change none; do reuse_case "" "" "extra-nextest:green@$t"; done
+reuse_case "" "" "extra-nextest:gone@same"
+reuse_case "" "" "extra-nextest:red@same"
+reuse_case "" 1 "extra-nextest:red@same"
+reuse_case "" "" "extra-nextest:bare@same"
+reuse_case "" "" "extra-nextest:green@same,red@same"
+reuse_case "" "" "extra-nextest:red@same,green@same"
+reuse_case "" "" "extra-nextest:green@same,red@other"
+reuse_case "" "" "extra-nextest:skipped@same"
+reuse_case "" "" "extra-nextest:green@same,skipped@same"
+reuse_case "" "" "extra-nextest:only@same"
+reuse_case "" "" "extra-nextest:green@same,only@same"
+reuse_case "" "" "windowed-gate:red@same;hand-authored:red@same;keystone-smoke:red@same;keystone-tour:red@same"
+reuse_case "" "" "gate-arch:red@same;loro-suite:green@same,bare@same"
+reuse_case 1 1 "extra-nextest:green@same;windowed-gate:red@same"
+reuse_case "" 1 "extra-nextest:green@same;windowed-gate:green@same"
+read -ra track_names <<<"$("$integrate" --steps)"; track_names=("${track_names[@]:4}")
+reuse_case "" "" "$(printf '%s:green@same;' "${track_names[@]}")"
+states=(green green gone red bare skipped only) tips=(same same same other at change none)
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  hist=""
+  for name in "${track_names[@]}"; do
+    ((RANDOM % 2)) || continue
+    h=""; for ((i = 0; i <= RANDOM % 2; i++)); do h+="${h:+,}${states[RANDOM % 7]}@${tips[RANDOM % 7]}"; done
+    hist+="$name:$h;"
+  done
+  full=""; ((RANDOM % 4)) || full=1
+  rednow=""; ((RANDOM % 4)) || rednow=1
+  reuse_case "$full" "$rednow" "$hist"
+done
+
 echo "== each track alone"
 : > "$probe"
 rc=0; tracks_alone || rc=$?
@@ -919,7 +1047,7 @@ foreign_holds() {
 }
 # Checks a wait's output $1 against the hold log and the stub's refusals; prints "<invariant> <0|1> <detail>".
 check_wait() {
-  /usr/bin/python3 - "$1" "$hold_log" "$refusals" "$dummies" <<'PY'
+  python3 - "$1" "$hold_log" "$refusals" "$dummies" <<'PY'
 import calendar, collections, json, re, sys, time
 out, log, refusals, dummies = sys.argv[1:]
 dummy = set(open(dummies).read().split())
@@ -1055,7 +1183,7 @@ expect "a rerun of a gate with no record on this checkout exits 2 (got $rc)" [ "
 echo "== a rerun under another RUSTFLAGS than its gate"
 cp "$record" target/gate-logs/g9-cargo-calls.jsonl
 in_rstubs RUSTFLAGS=-Cdebuginfo=0 "$integrate" rerun g9 "$tip" g1.integrate.20261110T000000Z >/dev/null 2>&1 || true
-rc=0; /usr/bin/python3 "$here/check-compile-shape.py" target/gate-logs/g9-cargo-calls.jsonl >"$scratch/shape-g9.out" 2>&1 || rc=$?
+rc=0; python3 "$here/check-compile-shape.py" target/gate-logs/g9-cargo-calls.jsonl >"$scratch/shape-g9.out" 2>&1 || rc=$?
 expect "fails the timing gate's shape check (got $rc)" [ "$rc" = 1 ]
 expect "which names RUSTFLAGS" grep -q '^ENV DIFFERS: RUSTFLAGS ' "$scratch/shape-g9.out"
 

@@ -29,6 +29,11 @@
 # scripts/gate-timing.sh.
 # A full run starts itself under gate-step.sh's runner (GATE_FULL=1 unless
 # GATE_SELECT=1), which writes the gate-ends row that flow reads.
+# A run in a flow job whose caller set neither GATE_FULL nor GATE_SELECT reuses
+# the rows of its tip: a track step whose last full row on <tip> is green
+# (known reds only exit 0 too) does not run again; its log names that job and
+# its job log (`reused <job> <log>`) and its row is skipped with `reused_from`.
+# A red test step with failed ids runs on exactly those ids.
 # Exit 0: every step green. A red step before gate-compile stops the run with
 # its exit code; 9 = the checkout is not <tip>, 8 = free disk below the floor,
 # 2 = usage or a <tip> that is no full commit id.
@@ -52,6 +57,7 @@ read -ra STEPS <<<"${TRACKS[*]}"
 step_names() { echo fmt deny machete gate-compile "${STEPS[@]#*:}"; }
 if [ "${1:-}" = --steps ]; then step_names; exit; fi
 if [ -z "${GATE_RECORD:-}" ] && [ "${1:-}" != --track ] && [ "${1:-}" != rerun ]; then
+  if [ -n "${GATE_FULL:-}${GATE_SELECT:-}" ]; then export GATE_REUSE=; else export GATE_REUSE=1; fi
   [ "${GATE_SELECT:-}" = 1 ] || export GATE_FULL=1
   exec bash ~/.claude/skills/orchestrator/scripts/gate-step.sh run "$0" "$@"
 fi
@@ -78,17 +84,67 @@ selected() {
   [ "${GATE_SELECT:-}" = 1 ] && [ "${GATE_FULL:-}" != 1 ] || return 0
   awk -v s="$1" '$1 == s || $1 == "*" { f = 1 } END { exit !f }' "$GATE_SELECTED"
 }
+# A track whose every step is reused runs nothing: it needs no slot and no quiet hold.
 track_selected() {
   local entry
-  for entry in ${TRACKS[$1]}; do selected "${entry#*:}" && return; done
+  for entry in ${TRACKS[$1]}; do
+    selected "${entry#*:}" || continue
+    [ "${GATE_REUSE:-}" = 1 ] && [ "$(reuse "${entry%%:*}" "${entry#*:}" peek)" = reused ] || return 0
+  done
   return 1
 }
 # A step sees neither the record file of gate-step.sh's runner nor its temp folder.
 # Its row names the gate's job, also in a track that holds a slot under a job id of its own.
 # Returns the step's exit, which `step` under the runner only writes to the record.
 gate_step() {
-  FLOW_JOB_ID=${GATE_JOB_ID:-${FLOW_JOB_ID:-}} step "$1" "$2" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED TMPDIR="$GATE_STEP_TMP" "${@:3}" || return
-  [ -z "${GATE_RECORD:-}" ] || return "$(awk -v l="red [$1] $2 (exit " 'index($0, l) == 1 { rc = substr($0, length(l) + 1) + 0 } END { print rc + 0 }' "$GATE_RECORD")"
+  local n=$1 name=$2 how=run from="" log="" verdict
+  shift 2
+  if [ "${GATE_REUSE:-}" = 1 ]; then
+    verdict=$(reuse "$n" "$name") || return
+    read -r how from log <<<"$verdict"
+  fi
+  case $how in
+    reused) printf '== landing [%s]: %s reused ==\nreused %s %s\n' "$n" "$name" "$from" "$log"; return 0 ;;
+    gone) echo "reuse: the job log $log of $from is gone, so $name runs" ;;
+    narrow)
+      local -x GATE_ONLY_IDS
+      GATE_ONLY_IDS=$(python3 ~/.claude/skills/orchestrator/scripts/gate-rerun.py "$ROWS" "$from" "$name") || return
+      echo "reuse: $name runs only the failed tests of $from"
+      [ "$name" != windowed-gate ] || set -- env WINDOWED_GATE_UNITS="$GATE_ONLY_IDS" "$@" ;;
+  esac
+  FLOW_JOB_ID=${GATE_JOB_ID:-${FLOW_JOB_ID:-}} step "$n" "$name" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED TMPDIR="$GATE_STEP_TMP" "$@" || return
+  [ -z "${GATE_RECORD:-}" ] || return "$(awk -v l="red [$n] $name (exit " 'index($0, l) == 1 { rc = substr($0, length(l) + 1) + 0 } END { print rc + 0 }' "$GATE_RECORD")"
+}
+# How step $1 ($2) runs, from its last row on this tip that ran in full and was not skipped:
+# `reused <job> <log>` (and its reuse row written; with $3 = peek only `reused`), `gone <job> <log>`, `narrow <job>` or `run`.
+# Only a full commit id equals GATE_TIP, so rows of `@` or a change id never count.
+reuse() {
+  python3 - "$ROWS" "$GATE_TIP" "$1" "$2" "${GATE_JOB_LOG%/*}" "$GATE" "$GATE_CARDS" "$GATE_JOB_ID" "${3:-}" <<'PY'
+import datetime, json, os, sys
+rows_path, tip, n, name, jobs, gate, cards, job, peek = sys.argv[1:]
+rows = [json.loads(l) for l in open(rows_path) if l.strip()] if os.path.exists(rows_path) else []
+full = [r for r in rows if r.get("tip") == tip and r["name"] == name and not r.get("skipped") and "only" not in r]
+last = full[-1] if full else {}
+if not last.get("job"):
+    print("run")
+elif last["exit"] == 0:
+    log = f"{jobs}/{last['job']}.log"
+    if not os.path.exists(log):
+        print("gone", last["job"], log)
+        sys.exit()
+    if peek:
+        print("reused")
+        sys.exit()
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    row = {"gate": gate, "cards": cards, "step": int(n), "name": name, "start": now, "end": now, "skipped": True,
+           "reason": "reused", "reused_from": last["job"], "log": log, "job": job, "tip": tip}
+    open(rows_path, "a").write(json.dumps(row) + "\n")
+    print("reused", last["job"], log)
+elif last.get("failed") and name in ("keystone-smoke", "hand-authored", "extra-nextest", "keystone-tour", "windowed-gate"):
+    print("narrow", last["job"])
+else:
+    print("run")
+PY
 }
 track() {
   local entry n name rc
@@ -114,6 +170,7 @@ track() {
 
 # shellcheck source=/dev/null
 source ~/.claude/skills/orchestrator/scripts/gate-step.sh
+ROWS="$(dirname "${HOLON_BUILD_HOLD_LOG:-$HOME/.cache/holon-build/holds.jsonl}")/gate-steps.jsonl"
 # shellcheck disable=SC2046
 gate_steps $(step_names)
 [ "${1:-}" != --track ] || { track "$2"; exit; }
@@ -139,19 +196,18 @@ if [ "${1:-}" = rerun ]; then
   tip=$3 red_job=$4
   [ -s "target/gate-logs/$GATE-cargo-calls.jsonl" ] || { echo "NO GATE RECORD: target/gate-logs/$GATE-cargo-calls.jsonl"; exit 2; }
   gate_env
-  rows="$(dirname "${HOLON_BUILD_HOLD_LOG:-$HOME/.cache/holon-build/holds.jsonl}")/gate-steps.jsonl"
-  read -ra red <<<"$(/usr/bin/python3 -c 'import json, sys
+  read -ra red <<<"$(python3 -c 'import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 red = sorted((r["step"], r["name"]) for r in rows if r.get("job") == sys.argv[2] and not r.get("skipped") and r["exit"] != 0)
-print(" ".join(f"{n}:{name}" for n, name in red))' "$rows" "$red_job")"
-  [ "${#red[@]}" -gt 0 ] || { echo "RERUN REFUSED: no red step of the gate job $red_job in $rows"; exit 2; }
+print(" ".join(f"{n}:{name}" for n, name in red))' "$ROWS" "$red_job")"
+  [ "${#red[@]}" -gt 0 ] || { echo "RERUN REFUSED: no red step of the gate job $red_job in $ROWS"; exit 2; }
   declare -A ids
   for entry in "${red[@]}"; do
     name=${entry#*:}
     case $name in keystone-smoke | hand-authored | extra-nextest | keystone-tour | windowed-gate) ;;
       *) echo "RERUN REFUSED: step $name cannot be rerun"; exit 2 ;;
     esac
-    ids[$name]=$(/usr/bin/python3 ~/.claude/skills/orchestrator/scripts/gate-rerun.py "$rows" "$red_job" "$name") && [ -n "${ids[$name]}" ] \
+    ids[$name]=$(python3 ~/.claude/skills/orchestrator/scripts/gate-rerun.py "$ROWS" "$red_job" "$name") && [ -n "${ids[$name]}" ] \
       || { echo "RERUN REFUSED: red step $name of $red_job recorded no failed test ids"; exit 2; }
   done
   log=target/gate-logs/rerun-$(date -u +%Y%m%dT%H%M%SZ).log
@@ -176,8 +232,10 @@ fi
 
 [ "$#" -eq 3 ] || { echo "usage: $0 <gate-id> \"<cards>\" <tip>" >&2; exit 2; }
 [[ $3 =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || { echo "usage: <tip> is a full commit id, as flow's --tip names it, not '$3'" >&2; exit 2; }
-export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$ HOLON_BUILD_QUIET_HOLDER=$$ GATE_TIP=$3 GATE_JOB_ID=${FLOW_JOB_ID:-}
+export GATE=$1 GATE_CARDS=$2 HOLON_GATE_ID=$1 GATE_PID=$$ HOLON_BUILD_QUIET_HOLDER=$$ GATE_TIP=$3 GATE_JOB_ID=${FLOW_JOB_ID:-} GATE_JOB_LOG=${FLOW_JOB_LOG:-}
 tip=$3
+# A reused step's log is the job log of the job that ran it, next to this job's.
+[ -n "$GATE_JOB_LOG" ] || GATE_REUSE=
 
 gate_env
 DISK_FLOOR_GIB=$(just --justfile "$(dirname "$0")/../justfile" --evaluate GATE_DISK_FLOOR_GIB)
@@ -185,14 +243,17 @@ DISK_FLOOR_GIB=$(just --justfile "$(dirname "$0")/../justfile" --evaluate GATE_D
 : >"$HOLON_CARGO_RECORD"
 echo "gate-integrate.sh: $GATE (pid $$), tip $tip, cards: $GATE_CARDS"
 shape_env_header
+if [ "${GATE_REUSE:-}" = 1 ]; then echo "step reuse: on, from the rows of tip $tip in $ROWS"
+else echo "step reuse: off (GATE_FULL=1, GATE_SELECT=1 or no flow job log)"; fi
 
-/usr/bin/python3 "$(dirname "$0")/target-gc.py" target --mark
+python3 "$(dirname "$0")/target-gc.py" target --mark
 GATE_STEP_TMP=$(mktemp -d); export GATE_STEP_TMP
 trap 'rm -rf "$GATE_STEP_TMP"' EXIT
-gate_step 1 fmt cargo fmt --all -- --check
-gate_step 20 deny just deny
-gate_step 23 machete just machete
-gate_step 2 gate-compile just gate-compile
+# These always run: gate-compile writes the cargo record that gate-timing.sh checks.
+GATE_REUSE= gate_step 1 fmt cargo fmt --all -- --check
+GATE_REUSE= gate_step 20 deny just deny
+GATE_REUSE= gate_step 23 machete just machete
+GATE_REUSE= gate_step 2 gate-compile just gate-compile
 rm -f target/gate-logs/"$GATE"-step-*
 pids=()
 "$0" --track 0 & pids+=($!)
@@ -222,7 +283,7 @@ for entry in "${STEPS[@]}"; do
   else red=${red:-$rc}; fi
 done
 # A red half ends the gate here, so it prints the breach summary gate-timing.sh would print.
-[ -z "$fail$red$extra_red" ] || /usr/bin/python3 "$(dirname "$0")/timing-breaches.py" "$GATE" || echo "TIMING BREACHES NOT SUMMARIZED (exit $?)"
+[ -z "$fail$red$extra_red" ] || python3 "$(dirname "$0")/timing-breaches.py" "$GATE" || echo "TIMING BREACHES NOT SUMMARIZED (exit $?)"
 [ -z "$fail" ] || exit "$fail"
 if [ -n "$red$extra_red" ]; then
   [ "${GATE_FULL:-}" != 1 ] && [ "${GATE_SELECT:-}" != 1 ] || exit 0

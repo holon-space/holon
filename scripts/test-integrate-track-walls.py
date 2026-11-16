@@ -191,8 +191,13 @@ def a_partial_or_red_run_is_refused_naming_the_gate(m, rng):
     tracks, gate, track_records, rows, log, _, _ = draw_gate(rng)
     at_tip = tracks
     broken = rng.choice(["drop row", "red row", "red gate", "missing track record", "double row", "other layout",
-                         "other layout at tip"])
-    if broken == "drop row":
+                         "other layout at tip", "reused row"])
+    if broken == "reused row":
+        victim = rng.choice([r for r in rows if r["name"] not in PRE])
+        for k in ("wall_s", "exit", "load_start", "load_max"):
+            del victim[k]
+        victim |= {"skipped": True, "reason": "reused", "reused_from": "wY.integrate"}
+    elif broken == "drop row":
         victim = rng.choice([r for r in rows if r["name"] not in PRE])
         rows = [r for r in rows if r is not victim]
     elif broken == "red row":

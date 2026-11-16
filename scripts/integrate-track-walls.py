@@ -103,6 +103,8 @@ def read_run(gate, track_records, rows, log, tracks, layout_at):
         raise ValueError(f"{gid}: no job record of track(s) {missing} (unselected or older layout)")
     lo, hi = ts(gate["startedAt"]), ts(gate["endedAt"])
     mine = [r for r in rows if r["gate"] == gid and lo <= ts(r["start"]) <= hi]
+    if skipped := sorted(r["name"] for r in mine if r.get("skipped")):
+        raise ValueError(f"{gid}: skipped or reused step(s) {skipped}: no track wall of a full run")
     count = Counter(r["name"] for r in mine)
     absent = [s for t in tracks for s in t if count[s] == 0]
     twice = sorted(s for s, k in count.items() if k > 1)
