@@ -3,6 +3,7 @@ mod a_lagging_page_registry_keeps_the_page_header;
 mod a_retracted_page_root_keeps_the_page_header;
 mod asset_seed_header_pass_cost;
 mod delete_during_first_ingest;
+mod deleted_page_is_not_rewritten_from_a_stale_page_mirror;
 mod directory_companion_adoption;
 mod dotted_page_title_writeback;
 mod empty_file_is_not_a_document;
