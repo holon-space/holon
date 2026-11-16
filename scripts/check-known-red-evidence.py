@@ -11,8 +11,9 @@ with the workspace that held it.
   check-known-red-evidence.py --self-check        prove each rule fails a bad citation
   check-known-red-evidence.py --rows REGISTRY.md  print the `known-red` rows the classifier
                                                   reads, one per line: key, pattern, site,
-                                                  companions (separated by \x1f, so an empty
-                                                  cell stays a field)
+                                                  companions, then a payload and a site field
+                                                  per collateral pair (separated by \x1f, so
+                                                  an empty cell stays a field)
 
 An evidence citation is a backticked path that ends in an evidence extension or
 lies under a lane, scratch or temp location. Source paths (`.rs`, `.org`, ...)
@@ -41,7 +42,9 @@ directory: a rate verdict over runs whose logs never landed is no evidence. A
 
 A registry table whose header ends in `Companions` gives each row a last cell
 of `—` or a code span of comma-separated invariant ids, `inv-x/*` naming every
-view of `inv-x`. A `known-red` row must sit in such a table.
+view of `inv-x`, followed by zero or more collateral pairs
+`; collateral `<payload ERE>` at `<site ERE>``. A `known-red` row must sit in
+such a table.
 """
 
 import csv
@@ -71,6 +74,8 @@ NOT_A_PATH = re.compile(r"[\s\\^$()\[\]|*+?]")
 LINE_SPEC = re.compile(r"(?P<path>.+?)(?::(?P<lines>\d+(?:[-,]\d+)*)(?::\d+)?)?")
 QUOTES = re.compile(r"\s+quotes\s+$")
 COMPANION = re.compile(r"inv-[a-z0-9-]+(/([a-z0-9_]+|\*))?")
+COMPANIONS_CELL = re.compile(r"(?P<ids>—|`[^`]+`)(?P<pairs>(?:; collateral `[^`]+` at `[^`]+`)*)")
+COLLATERAL_PAIR = re.compile(r"; collateral `([^`]+)` at `([^`]+)`")
 
 
 def code_spans(line):
@@ -166,7 +171,7 @@ def check_citation(path, lines, snippet):
 
 
 def registry_rows(registry):
-    """Yield (lineno, key, status, pattern, site, companions) per registry row,
+    """Yield (lineno, key, status, pattern, site, companions, collateral) per registry row,
     or (lineno, key, error) for a row the registry grammar does not admit.
     """
     try:
@@ -187,15 +192,15 @@ def registry_rows(registry):
             # A site is one whitespace-free ERE; `—` leaves the row unpinned.
             if site == "—" or re.search(r"\s", site):
                 site = ""
-            cell = row["Companions"]
-            if cell == "—":
-                companions = []
-            else:
-                companions = [c.strip() for c in known_reds_table.unticked(cell).split(",")] if cell.startswith("`") and cell.endswith("`") else None
-                if not companions or not all(COMPANION.fullmatch(c) for c in companions):
-                    yield lineno, key, f"Companions cell {cell!r} is not `—` or a code span of invariant ids"
-                    continue
-            yield lineno, key, status, pattern, site, companions
+            cell = COMPANIONS_CELL.fullmatch(row["Companions"])
+            ids = cell and cell["ids"]
+            companions = [] if ids == "—" else ids and [c.strip() for c in known_reds_table.unticked(ids).split(",")]
+            if not cell or companions is None or ids != "—" and not all(COMPANION.fullmatch(c) for c in companions):
+                yield lineno, key, (f"Companions cell {row['Companions']!r} is not `—` or a code span of invariant ids, "
+                                    "each optionally followed by `; collateral `<payload ERE>` at `<site ERE>``")
+                continue
+            collateral = [(p.replace("&#124;", "|"), s.replace("&#124;", "|")) for p, s in COLLATERAL_PAIR.findall(cell["pairs"])]
+            yield lineno, key, status, pattern, site, companions, collateral
     except known_reds_table.HeaderError as e:
         yield e.lineno, "table header", str(e)
 
@@ -224,7 +229,7 @@ def lint(registry):
 def row_key_failures(registry, case_files):
     """One line per hand-authored case of `case_files` whose `known_red` value is not the key of a `known-red` row
     of `registry`. A line that is not blank, a `#` comment or a JSON object raises."""
-    keys = {row[1] for row in registry_rows(registry) if len(row) == 6 and row[2] == "known-red"}
+    keys = {row[1] for row in registry_rows(registry) if len(row) == 7 and row[2] == "known-red"}
     failures = []
     for file in case_files:
         where = file.relative_to(REPO) if file.is_relative_to(REPO) else file
@@ -332,6 +337,8 @@ def self_check():
         "a known-red row outside a companions table": ("| `k` | known-red | `p` | — | — |", 1),
         "a companion that is no invariant id": (f"{companions_header}{known_red} `inv-a, block_raw` |", 1),
         "a companions cell without a code span": (f"{companions_header}{known_red} inv-a |", 1),
+        "a known-red row with collateral pairs": (f"{companions_header}{known_red} —; collateral `^x$` at `/a\\.rs:1:2$`; collateral `^y$` at `/b\\.rs:3:4$` |", 0),
+        "a collateral pair without its site": (f"{companions_header}{known_red} `inv-a`; collateral `^x$` |", 1),
         "a row under a changed registry header": (f"{companions_header.replace('| Key |', '| **Key** |')}{known_red.replace('known-red', 'proposed')} — |", 1),
         "a table without registry columns": ("| Run | Summary line |\n| --- | --- |\n| r1 | `639 tests run` |", 0),
     }
@@ -393,9 +400,9 @@ def print_rows(registry):
         print(f"[known-red-evidence] {registry.name}:{lineno} [{key}] {error}", file=sys.stderr)
     if errors:
         return 1
-    for _, key, status, pattern, site, companions in rows:
+    for _, key, status, pattern, site, companions, collateral in rows:
         if status == "known-red":
-            print("\x1f".join([key, pattern, site, " ".join(companions)]))
+            print("\x1f".join([key, pattern, site, " ".join(companions), *(f for pair in collateral for f in pair)]))
     return 0
 
 

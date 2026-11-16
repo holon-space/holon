@@ -49,9 +49,9 @@ def kept_within(small, big, restated=()):
     Exit codes are not compared: a printed known red masks the "no panic
     signature" exit of a failed run, which is no panic.
     """
-    moved = Counter(p.msg for p in restated if p.kind == "novel")
+    moved = Counter(p.msg for p in restated if p.kind in ("novel", "collateral"))
     return (all(big.listed[k] + moved[k] >= n for k, n in small.listed.items())
-            and big.matched + sum(p.kind == "known" for p in restated) >= small.matched)
+            and big.matched + sum(p.kind in ("known", "row") for p in restated) >= small.matched)
 
 
 def show(v):
@@ -93,6 +93,8 @@ def kinds(runs, clean, mixed):
     k["a failing test's panic in a section beside a passing test's"] += any(
         r.shape == "libtest" and {t.status for t in r.tests} == {"ok", "FAILED"} and any(t.panics for t in r.tests if t.status == "ok") for r in runs)
     k["a head split after its ' ("] += any(re.match(r"thread '[^']+' \((?!\d+\) panicked)", line) for line in mixed.lines)
+    for what, n in logs.collateral_placements(clean).items():
+        k[what] += n
     for what in logs.DRAWN:
         k[what] += mixed.drawn[what]
     k["one binary's libtest sections twice in one log"] += sum(r.shape == "libtest" for r in runs) == 2 and runs[0].binary == runs[1].binary

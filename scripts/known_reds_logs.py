@@ -28,6 +28,7 @@ and message the text still states, and whether the panic's own test passed;
 EXAMPLES to <dir>/<name>.log and prints `<name>\t<exit>\t<line regex>`.
 """
 import re
+import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
@@ -38,6 +39,12 @@ INJECTED_MSG = "keystone boot fault: injected task panic"
 # The panic of the `ref-diverge-content` row, at the site the row names.
 KNOWN_SITE = "crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13"
 KNOWN_MSG = r'reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  field deltas (1):\n    block:a: content: sut=\"x\" ref=\"y\"\n")]'
+# The panic of the `loro-compaction-peer-trimmed-below-lacked` row, and the panics its collateral pairs name.
+ROW_SITE = "crates/holon-loro/tests/compacted_peer_receives_concurrent_edits.rs:787:5"
+ROW_MSG = 'generated (shrunk): Test failed: after Restart { peer: 0 }: ["peer 0 trimmed below VersionVector({1000: 2}), which peer 1 at VersionVector({1000: 1}) lacks"]'
+LORO = "/Users/u/.cargo/git/checkouts/loro-e88d0f38e94f7134/d302b15/crates/loro-internal/src"
+COLLATERAL = [(f"{LORO}/oplog/pending_changes.rs:338:62", "called `Result::unwrap()` on an `Err` value: ()"),
+              (f"{LORO}/sync.rs:34:31", "poisoned LoroMutex")]
 
 PASS_LABELS = ["PASS", "LEAK", "TMPASS", "TIMEOUT-PASS", "SLOW + LEAK", "SLOW+TMPASS"]
 # Each failing nextest label, short or long, with the long label the classifier prints.
@@ -92,7 +99,7 @@ LINE_AFTER_HEAD = [line for line in FOREIGN if line]
 
 @dataclass
 class Panic:
-    kind: str  # novel | known | injected
+    kind: str  # novel | known | injected | row (a row with collateral pairs) | collateral (a pair of that row)
     thread: str
     site: str
     msg: str
@@ -128,6 +135,8 @@ class Rendered:
     # Indexes into `panics` whose owner the text proves (a captured block, a
     # serial run's START to status) and whose status in that run passes.
     in_passing: set = field(default_factory=set)
+    # Indexes into `panics` whose owner the text proves, whatever its status.
+    proven: set = field(default_factory=set)
     failed: bool = False
     # Panics whose stated message is not their own, as drawn.
     restated: list = field(default_factory=list)
@@ -159,9 +168,13 @@ def word(rng, used):
 
 
 def draw_panic(rng, used, thread):
-    kind = rng.choices(["novel", "known", "injected"], [5, 3, 2])[0]
+    kind = rng.choices(["novel", "known", "injected", "row", "collateral"], [5, 3, 2, 2, 3])[0]
     if kind == "known":
         return Panic(kind, thread, KNOWN_SITE, KNOWN_MSG)
+    if kind == "row":
+        return Panic(kind, thread, ROW_SITE, ROW_MSG)
+    if kind == "collateral":
+        return Panic(kind, thread, *rng.choice(COLLATERAL))
     if kind == "injected":
         return Panic(kind, thread, INJECTED_SITE, INJECTED_MSG)
     site = f"crates/{word(rng, used)}/tests/{word(rng, used)}.rs:{rng.randint(1, 900)}:{rng.randint(1, 40)}"
@@ -189,6 +202,10 @@ def draw_test(rng, used, shape, name=None):
         panics.append(draw_panic(rng, used, name))
     for _ in range(rng.choice([0, 0, 1, 2]) if not panics else rng.choice([0, 0, 0, 1])):
         panics.append(draw_panic(rng, used, name if rng.random() < 0.85 else foreign_thread(rng, name)))
+    # A row's root cause sets off the panics its collateral pairs name, on its own thread or a worker.
+    if any(p.kind == "row" for p in panics) and rng.random() < 0.6:
+        for _ in range(rng.choice([1, 2])):
+            panics.insert(rng.randrange(len(panics) + 1), Panic("collateral", rng.choice([name, WORKER]), *rng.choice(COLLATERAL)))
     # shortcut: a libtest test fails here only by a novel panic of its own; a failure
     # without one reads as "no signature", which a printed known red masks. Draw it once the classifier attributes libtest failures.
     if status == "FAILED" and not any(p.kind == "novel" and p.thread == name for p in panics):
@@ -309,7 +326,9 @@ def located(rng, out, cut, before, p):
     A location with text glued behind it, or whose rest follows a verdict line,
     it keeps as written, with the next line as message.
     """
-    if not cut or rng.random() < 0.6:
+    # shortcut: a row's or a collateral pair's site ERE is anchored, so a cut would restate these as cross-family
+    # or novel; the other kinds cover cut locations.
+    if not cut or p.kind in ("row", "collateral") or rng.random() < 0.6:
         return [f"{before}panicked at {p.site}:", p.msg], p, 1
     where = rng.choice(DRAWN[:7])
     out.drawn[where] += 1
@@ -500,6 +519,8 @@ def render_body(t, scope, rng, interleave, out, indent="", cut=False, proven=Fal
             out.lines.append(indent + line if line else "")
         if interleave and not indent and open_ and rng.random() < 0.3:
             foreign(rng, out)
+    if proven:
+        out.proven.update(range(first, len(out.panics)))
     if proven and not cut and t.status in PASS_LABELS:
         out.in_passing.update(range(first, len(out.panics)))
 
@@ -557,6 +578,9 @@ def verdict(r):
     injected one. A failing status is a signature
     unless its label is FAIL / FAIL + LEAK and its owner printed a panic or an
     injected one.
+
+    A collateral panic is collateral, not novel, only when the text proves its
+    owner and that test instance printed a row panic and no novel one.
     """
     kept, dropped = [], set()
     for i, (scope, name, p) in enumerate(r.panics):
@@ -565,10 +589,14 @@ def verdict(r):
         elif i in r.by_name:
             dropped.add(name)
         else:
-            kept.append((scope, p))
+            kept.append((scope, p, i in r.proven))
+    clean = {scope for scope, p, proven in kept if proven and p.kind == "row"} - {
+        scope for scope, p, _ in kept if p.kind == "novel"}
+    demoted = [proven and scope in clean for scope, p, proven in kept]
     note = len(r.panics) - len(kept)
-    listed = Counter(p.msg for _, p in kept if p.kind == "novel")
-    matched = sum(p.kind == "known" for _, p in kept)
+    listed = Counter(p.msg for (_, p, _), d in zip(kept, demoted) if p.kind == "novel" or p.kind == "collateral" and not d)
+    matched = sum(p.kind in ("known", "row") for _, p, _ in kept)
+    kept = [(scope, p) for scope, p, _ in kept]
     sites = Counter(p.site for _, p in kept if p.kind != "injected")
     owners = {scope for scope, _ in kept}
     for inst, label in r.statuses:
@@ -580,6 +608,32 @@ def verdict(r):
     if novel + matched == 0 and r.failed:
         novel = 1  # "run failed but no panic signature was extracted"
     return Verdict(1 if novel else 0, novel, matched, listed, note, dropped, sites)
+
+
+PLACEMENTS = [
+    "a collateral panic beside its row's panic in a proven instance",
+    "a collateral panic in a proven instance without its row's panic",
+    "a collateral panic beside its row's panic and a novel panic",
+    "a collateral panic beside its row's panic in an unproven scope",
+]
+
+
+def collateral_placements(r):
+    """How many printed collateral panics of `r` stand in each of PLACEMENTS, which the scoping rule tells apart."""
+    printed = [(scope, p, i in r.proven) for i, (scope, _, p) in enumerate(r.panics) if i not in r.in_passing and i not in r.by_name]
+    rows = {scope for scope, p, _ in printed if p.kind == "row"}
+    novel = {scope for scope, p, _ in printed if p.kind == "novel"}
+    k = Counter(dict.fromkeys(PLACEMENTS, 0))
+    for scope, p, proven in printed:
+        if p.kind != "collateral":
+            continue
+        if not proven:
+            k[PLACEMENTS[3]] += scope in rows
+        elif scope not in rows:
+            k[PLACEMENTS[1]] += 1
+        else:
+            k[PLACEMENTS[2] if scope in novel else PLACEMENTS[0]] += 1
+    return k
 
 
 NOTE = re.compile(r"^\[known-reds\] NOTE: (\d+) panic\(s\) inside passing tests \(ignored\): (.+)$", re.M)
@@ -1113,13 +1167,49 @@ CAUGHT_MSG = 'slo probe: armed while clocks were pending on ["block:slo-probe-le
 # Parentheses as bracket expressions: grep reads `\(` as a group.
 NOTE_ONE = r"^\[known-reds\] NOTE: 1 panic[(]s[)] inside passing tests [(]ignored[)]: "
 
+COMPACTION_EXCERPT = Path(__file__).resolve().parent.parent / "docs/Testing/known-red-evidence/loro-compaction-peer-trimmed-below-lacked/collateral-panics-excerpt.log.zst"
+COMPACTION_UNIT = "holon-loro::main compacted_peer_receives_concurrent_edits::every_edit_reaches_every_peer_with_history_compaction"
+COMPACTION_PRIMARY = "    generated (shrunk): Test failed: after Restart { peer: 0 }:"
+
+
+def compaction_instance():
+    """The failing compaction test's nextest instance from a real run: 30 collateral panics around the row's primary."""
+    return subprocess.run(["zstd", "-dcq", str(COMPACTION_EXCERPT)], check=True, capture_output=True, text=True).stdout
+
+
+def compaction_without_primary(text):
+    lines = text.split("\n")
+    at = next(i for i, line in enumerate(lines) if line.startswith(COMPACTION_PRIMARY))
+    return "\n".join(lines[:at - 1] + lines[at + 1:])
+
+
+def compaction_beside_another_rows_primary(text):
+    lines = text.split("\n")
+    at = next(i for i, line in enumerate(lines) if line.startswith(COMPACTION_PRIMARY))
+    head = lines[at - 1].split(" panicked at ")[0]
+    return "\n".join(lines[:at - 1] + [f"{head} panicked at {KNOWN_SITE}:", "    " + KNOWN_MSG] + lines[at + 1:])
+
 
 def examples():
     """(name, log text, want exit, a regex one output line must match), in grep's and Python's common syntax."""
     gate = GATE
     nested, mistyped = "hand_authored_regressions::nested_unknown_wiring_field_is_loud", "hand_authored_regressions::mistyped_initial_state_key_is_loud"
     twin = W183.replace("running 19 tests", "running 20 tests").replace(W183_OK, W183_OK + W183_OK.replace("_loud - should panic", "_loudok")).replace("19 passed", "20 passed")
+    compaction = compaction_instance()
     return [
+        # The row's collateral pairs count only inside the instance whose primary matched the row.
+        ("compaction-collateral-beside-its-primary", compaction, 0,
+         r"^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic[(]s[)], 0 novel, 30 collateral [(]ignored[)][.]$"),
+        ("compaction-collateral-without-its-primary", compaction_without_primary(compaction), 1,
+         r"^\[known-reds\] FAIL: 30 novel panic[(]s[)]"),
+        ("compaction-collateral-beside-another-rows-primary", compaction_beside_another_rows_primary(compaction), 1,
+         r"^\[known-reds\] FAIL: 30 novel panic[(]s[)], 1 known-red"),
+        ("compaction-collateral-beside-a-novel-panic", compaction.replace(
+            "  stderr ───\n", "  stderr ───\n\n    thread 'tokio-rt-worker' (9) panicked at crates/x/src/y.rs:1:1:\n    novel defect zzz\n", 1), 1,
+         r"^\[known-reds\] FAIL: 31 novel panic[(]s[)], 1 known-red"),
+        ("compaction-collateral-in-another-instance", compaction + compaction_without_primary(compaction).replace(
+            COMPACTION_UNIT, COMPACTION_UNIT + "_twin"), 1,
+         r"^\[known-reds\] FAIL: 30 novel panic[(]s[)], 1 known-red"),
         # A passing should_panic test's head over four lines, its location cut after the file.
         ("w183-split-location", W183, 0, NOTE_ONE.replace("1 panic", "4 panic") + r".*" + nested),
         ("w183-split-location-failed", failed_instead(W183, W183_OK, nested, 19), 1, W183_MSG),

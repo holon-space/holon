@@ -20,7 +20,7 @@ def known_red_wording():
                            str(REPO / "docs/Testing/KeystoneKnownReds.md")], capture_output=True, text=True,
                           check=True).stdout
     for row in rows.splitlines():
-        key, pattern, site, _ = row.split("\x1f")
+        key, pattern, site, *_ = row.split("\x1f")
         if not site and re.fullmatch(r"[A-Za-z0-9 _'-]+", pattern) and not pattern.startswith("not classifier"):
             return pattern
     raise AssertionError("no unpinned known-red row with a literal pattern to plant")

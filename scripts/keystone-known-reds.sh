@@ -276,7 +276,9 @@ for log in "$@"; do
     # pattern names the test once; nextest also repeats status lines in its
     # closing summary, hence the dedup.
     #
-    # The injected boot-fault panic is counted into `injected`, not printed.
+    # The injected boot-fault panic is counted into `injected`, not printed. A
+    # panic line starts with its test instance when the text proves the owner
+    # (empty otherwise) and \035: the scope of a row's collateral pairs.
     sigs="$work/sigs"
     awk_verdict '
         # The thread name of panic head `line`, or "" when the text lost it,
@@ -467,7 +469,7 @@ for log in "$@"; do
             sub(/^ +/, "", msg)
             if (replay_case != "") { msg = msg "\037" replay_case "\037" declared[replay_case]; judged[replay_case] = 1 }
             if (loc == ENVIRON["INJECTED_SITE"] && msg == ENVIRON["INJECTED_PAYLOAD"]) injected++
-            else print loc "\t" msg
+            else print (certain ? owner : "") "\035" loc "\t" msg
         }
         # Location `head`, cut before its last colon, completed by the digits
         # and colons that end `line`; "" when they do not complete it.
@@ -649,7 +651,11 @@ for log in "$@"; do
     #
     # A panic is collateral (unwind noise from a thread tearing down after some
     # other panic) when its payload is an opaque `Any { .. }` or it originates
-    # in tracing-subscriber's span teardown, not in workspace code. Collateral
+    # in tracing-subscriber's span teardown, not in workspace code. It is also
+    # collateral when it matches a collateral pair of a row that another panic
+    # of its proven test instance matched, and no other signature of that
+    # instance is novel or cross-family; the first pass over the signatures
+    # finds those instances. Collateral
     # is reported but never counts toward novel/matched or the verdict. The
     # keystone's own sample-floor panic is reported through the sample verdict
     # below, and the hand-authored replay's closing report lists cases that
@@ -743,12 +749,92 @@ for log in "$@"; do
             for (i = 1; i <= nrows; i++) if (key[i] == k) return i
             return 0
         }
+        # Matches the violations of `norm` at `loc` against the rows: sets HIT[1..nhits],
+        # cross_hit, and novel_pieces (the violations neither a row nor a companion knows).
+        function match_rows(norm, loc,    n, i, j, h, g, ng, hit, nunmatched, invariant, at, cut, claimed, globs) {
+            n = split_violations(norm)
+            nhits = 0; cross_hit = 0; nunmatched = 0
+            split("", is_hit)
+            for (j = 1; j <= n; j++) {
+                hit = 0
+                for (i = 1; i <= nrows; i++) if (PIECE[j] ~ pat[i]) { hit = i; break }
+                if (hit && site[hit] != "" && loc !~ site[hit]) {
+                    if (!cross_hit) cross_hit = hit
+                } else if (hit) {
+                    if (!(hit in is_hit)) { is_hit[hit] = 1; HIT[++nhits] = hit }
+                } else UNMATCHED[++nunmatched] = PIECE[j]
+            }
+            novel_pieces = ""
+            for (j = 1; j <= nunmatched; j++) {
+                invariant = ""
+                if ((at = index(UNMATCHED[j], prefix_inv))) {
+                    invariant = substr(UNMATCHED[j], at + length(prefix_inv))
+                    if ((cut = index(invariant, "\""))) invariant = substr(invariant, 1, cut - 1)
+                }
+                claimed = 0
+                for (h = 1; h <= nhits; h++) {
+                    ng = split(comp[HIT[h]], globs, " ")
+                    for (g = 1; g <= ng; g++) if (invariant ~ glob_re(globs[g])) claimed = 1
+                }
+                if (!claimed) novel_pieces = novel_pieces substr(UNMATCHED[j], 1, 240) "\n"
+            }
+        }
+        # The row whose collateral pair the signature `norm` at `loc` matches, among
+        # the rows its instance `inst` matched; 0 when none or `inst` is not clean.
+        function collateral_row(inst, norm, loc,    i, k) {
+            if (inst == "" || (inst in unclean)) return 0
+            for (i = 1; i <= nrows; i++)
+                if ((inst SUBSEP i) in inst_hit)
+                    for (k = 1; k <= npairs[i]; k++)
+                        if (norm ~ pair_msg[i, k] && loc ~ pair_site[i, k]) return i
+            return 0
+        }
+        # Splits a signature line into INST, LOC and SIG.
+        function read_sig(line,    d, tab) {
+            d = index(line, "\035")
+            INST = d ? substr(line, 1, d - 1) : ""
+            line = substr(line, d + 1)
+            tab = index(line, "\t")
+            LOC = tab ? substr(line, 1, tab - 1) : line
+            SIG = tab ? substr(line, tab + 1) : ""
+        }
         BEGIN { FS = "\037"; prefix_inv = "diverged from the oracle: [(\"" }
-        FNR == NR {
-            if ($1 != "") { key[++nrows] = $1; pat[nrows] = $2; site[nrows] = $3; comp[nrows] = $4 }
+        FILENAME == rows_path {
+            if ($1 != "") {
+                key[++nrows] = $1; pat[nrows] = $2; site[nrows] = $3; comp[nrows] = $4
+                for (f = 5; f < NF; f += 2) { npairs[nrows]++; pair_msg[nrows, npairs[nrows]] = $f; pair_site[nrows, npairs[nrows]] = $(f + 1) }
+            }
             next
         }
+        FNR == 1 { sig_pass++ }
+        # First pass: which rows each proven instance matched, and whether any
+        # of its signatures (other than a fixed-rule collateral) is unknown.
+        sig_pass == 1 {
+            read_sig($0)
+            if (INST == "" || LOC == "note") next
+            sub(/^\t+/, "", SIG); sub(/\t+$/, "", SIG)
+            if (index(SIG, "\037")) { unclean[INST] = 1; next }
+            if (index(SIG, "Any { .. }") || LOC ~ /tracing-subscriber-.*sharded\.rs/) next
+            match_rows(normalize(SIG), LOC)
+            if (cross_hit || novel_pieces != "") { unknown_of[INST] = unknown_of[INST] LOC "\t" normalize(SIG) "\n" }
+            for (h = 1; h <= nhits; h++) inst_hit[INST, HIT[h]] = 1
+            next
+        }
+        # An instance is clean when each of its unknown signatures is a collateral
+        # pair of a row the instance matched.
+        sig_pass == 2 && !resolved {
+            resolved = 1
+            for (inst in unknown_of) {
+                nu = split(unknown_of[inst], unknown, "\n")
+                for (k = 1; k < nu; k++) {
+                    tab = index(unknown[k], "\t")
+                    if (!collateral_row(inst, substr(unknown[k], tab + 1), substr(unknown[k], 1, tab - 1))) { unclean[inst] = 1; break }
+                }
+            }
+        }
         {
+            read_sig($0)
+            $0 = LOC "\t" SIG
             tab = index($0, "\t")
             loc = tab ? substr($0, 1, tab - 1) : $0
             sig = tab ? substr($0, tab + 1) : ""
@@ -777,33 +863,11 @@ for log in "$@"; do
             } else if (index(sig, "Any { .. }") || loc ~ /tracing-subscriber-.*sharded\.rs/) {
                 class = "collateral"
                 collateral++
+            } else if (replay_case == "" && (crow = collateral_row(INST, norm, loc))) {
+                class = "collateral:" key[crow]
+                collateral++
             } else {
-                n = split_violations(norm)
-                nhits = 0; cross_hit = 0; nunmatched = 0
-                split("", is_hit)
-                for (j = 1; j <= n; j++) {
-                    hit = 0
-                    for (i = 1; i <= nrows; i++) if (PIECE[j] ~ pat[i]) { hit = i; break }
-                    if (hit && site[hit] != "" && loc !~ site[hit]) {
-                        if (!cross_hit) cross_hit = hit
-                    } else if (hit) {
-                        if (!(hit in is_hit)) { is_hit[hit] = 1; HIT[++nhits] = hit }
-                    } else UNMATCHED[++nunmatched] = PIECE[j]
-                }
-                novel_pieces = ""
-                for (j = 1; j <= nunmatched; j++) {
-                    invariant = ""
-                    if ((at = index(UNMATCHED[j], prefix_inv))) {
-                        invariant = substr(UNMATCHED[j], at + length(prefix_inv))
-                        if ((cut = index(invariant, "\""))) invariant = substr(invariant, 1, cut - 1)
-                    }
-                    claimed = 0
-                    for (h = 1; h <= nhits; h++) {
-                        ng = split(comp[HIT[h]], globs, " ")
-                        for (g = 1; g <= ng; g++) if (invariant ~ glob_re(globs[g])) claimed = 1
-                    }
-                    if (!claimed) novel_pieces = novel_pieces substr(UNMATCHED[j], 1, 240) "\n"
-                }
+                match_rows(norm, loc)
                 if (cross_hit) {
                     print "[known-reds] FAIL: cross-family match: " key[cross_hit] " at " loc
                     print "             The row" q "s wording matched, but it asserts from"
@@ -849,7 +913,7 @@ for log in "$@"; do
                 for (t = 1; t <= ntail; t++) print "  " tail[t]
             }
             print novel + 0, matched + 0, cross + 0, collateral + 0, green_declared + 0 >counts_out
-        }' q="'" novel_out="$work/novel" hits_out="$work/hits" counts_out="$work/counts" "$rows" "$sigs"
+        }' q="'" novel_out="$work/novel" hits_out="$work/hits" counts_out="$work/counts" rows_path="$rows" "$rows" "$sigs" "$sigs"
     read -r log_novel log_matched log_cross log_collateral log_green_declared <"$work/counts"
     novel=$((novel + log_novel))
     matched=$((matched + log_matched))
