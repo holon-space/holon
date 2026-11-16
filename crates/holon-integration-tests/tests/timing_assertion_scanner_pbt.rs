@@ -12,11 +12,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
+use proptest::strategy::ValueTree;
 use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
 
-/// The parts of the repository the scanner and its `check` half read.
+/// The parts of the repository the scanner and its `check` half read;
+/// `scanner_reads` holds the mirror to what the scanner really reads.
 const MIRRORED: &[&str] = &[
     "scripts",
     "docs",
@@ -39,6 +40,70 @@ fn repo_root() -> PathBuf {
     .expect("the repository root exists")
 }
 
+/// Loaded by the scanner's own interpreter through `PYTHONPATH`: appends each
+/// path the scanner opens or lists to `$TIMING_SCAN_READS`.
+const READS_HOOK: &str = r#"
+import os, sys
+_reads = open(os.environ["TIMING_SCAN_READS"], "a", buffering=1)
+def _record(event, args):
+    if event in ("open", "os.listdir", "os.scandir") and args and isinstance(args[0], (str, bytes, os.PathLike)):
+        _reads.write(os.path.abspath(os.fsdecode(args[0])) + "\n")
+sys.addaudithook(_record)
+"#;
+
+fn scan(dir: &Path, env: &[(&str, &Path)]) -> (i32, String) {
+    let out = Command::new("bash")
+        .arg("scripts/check-timing-assertions.sh")
+        .current_dir(dir)
+        .envs(env.iter().copied())
+        .output()
+        .expect("bash runs the scanner");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code().expect("the scanner exits"), text)
+}
+
+/// Scans the repository itself, which must pass, and returns every
+/// repository path the scanner opened or listed, relative to `root`.
+fn scanner_reads(root: &Path) -> Vec<String> {
+    let hook = tempfile::tempdir().expect("a temp dir");
+    std::fs::write(hook.path().join("sitecustomize.py"), READS_HOOK).expect("the hook is written");
+    let log = hook.path().join("reads.txt");
+    // An empty bytecode cache makes the interpreter open each module's source.
+    let pyc = hook.path().join("pyc");
+    let (code, out) = scan(
+        root,
+        &[
+            ("PYTHONPATH", hook.path()),
+            ("PYTHONPYCACHEPREFIX", &pyc),
+            ("TIMING_SCAN_READS", &log),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "the tree under test fails its own duration-assertion scanner before any \
+         generated file is added:\n{out}"
+    );
+    let prefix = format!("{}/", root.display());
+    let mut reads: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap_or_else(|e| panic!("the scanner's read log {} is readable: {e}", log.display()))
+        .lines()
+        .filter_map(|l| l.strip_prefix(&prefix))
+        .map(str::to_string)
+        .collect();
+    reads.sort();
+    reads.dedup();
+    assert!(
+        !reads.is_empty(),
+        "the scanner read no path under {}; the read hook did not load:\n{out}",
+        root.display()
+    );
+    reads
+}
+
 fn copy_tree(from: &Path, to: &Path) {
     let meta = std::fs::symlink_metadata(from).expect("a mirrored path exists");
     if meta.file_type().is_symlink() {
@@ -59,6 +124,18 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// The sorted directory names under `root/sub` that hold a `Cargo.toml`.
+fn packages(root: &Path, sub: &str) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(root.join(sub))
+        .unwrap_or_else(|e| panic!("{}: {e}", root.join(sub).display()))
+        .map(|e| e.expect("entry").path())
+        .filter(|p| p.join("Cargo.toml").is_file())
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
 struct Mirror {
     dir: tempfile::TempDir,
     crates: Vec<String>,
@@ -67,53 +144,39 @@ struct Mirror {
 }
 
 impl Mirror {
-    fn new() -> Self {
-        let root = repo_root();
+    fn new(root: &Path) -> Self {
         let dir = tempfile::tempdir().expect("a temp dir");
         for part in MIRRORED {
             copy_tree(&root.join(part), &dir.path().join(part));
         }
-        let names = |sub: &str| -> Vec<String> {
-            let mut v: Vec<String> = std::fs::read_dir(dir.path().join(sub))
-                .expect("the mirror has the directory")
-                .map(|e| e.expect("entry").path())
-                .filter(|p| p.join("Cargo.toml").is_file())
-                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-                .collect();
-            v.sort();
-            v
-        };
-        let crates = names("crates");
-        let frontends = names("frontends");
+        let crates = packages(dir.path(), "crates");
+        let frontends = packages(dir.path(), "frontends");
         let baseline = std::fs::read_to_string(dir.path().join(BASELINE))
             .expect("the mirror has the baseline");
-        let m = Mirror {
+        Mirror {
             dir,
             crates,
             frontends,
             baseline,
-        };
-        let (code, out) = m.scan();
-        assert_eq!(
-            code, 0,
-            "the tree under test fails its own duration-assertion scanner before any \
-             generated file is added:\n{out}"
-        );
-        m
+        }
     }
 
-    fn scan(&self) -> (i32, String) {
-        let out = Command::new("bash")
-            .arg("scripts/check-timing-assertions.sh")
-            .current_dir(self.dir.path())
-            .output()
-            .expect("bash runs the scanner");
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+    /// A scanner read the mirror misses would let a case pass on a tree the
+    /// scanner never sees.
+    fn assert_holds(&self, reads: &[String]) {
+        let missing: Vec<&String> = reads
+            .iter()
+            .filter(|r| !self.dir.path().join(r).exists())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the mirror misses paths the scanner reads in the repository:\n{}",
+            missing
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
         );
-        (out.status.code().expect("the scanner exits"), text)
     }
 
     /// Writes every probe, scans once, and restores the tree: one scan reads
@@ -148,7 +211,7 @@ impl Mirror {
         }
         let baseline_path = self.dir.path().join(BASELINE);
         std::fs::write(&baseline_path, b).unwrap();
-        let (code, out) = self.scan();
+        let (code, out) = scan(self.dir.path(), &[]);
         for file in files {
             std::fs::remove_file(file).unwrap();
         }
@@ -337,12 +400,15 @@ impl Probe {
 
     /// The one expected verdict: a raw small-duration comparison is refused
     /// with no row or a `timing` row; a `small` call is refused unless its row
-    /// is `timing` and it sits outside a test fn, which no owner key selects.
-    fn refused(&self) -> bool {
+    /// is `timing` and an owner selects it or it sits outside a test fn. The
+    /// owner table selects the whole `holon-gpui` package and no other probe.
+    fn refused(&self, m: &Mirror) -> bool {
         match self.measure {
             Measure::Raw { .. } => matches!(self.row, None | Some(RowClass::Timing)),
             Measure::Budget { .. } => {
-                self.row != Some(RowClass::Timing) || !matches!(self.place, Place::CrateSrcHelper)
+                let owned = self.path(m).starts_with("frontends/gpui/");
+                self.row != Some(RowClass::Timing)
+                    || !(owned || matches!(self.place, Place::CrateSrcHelper))
             }
             Measure::Count { .. } => false,
         }
@@ -507,6 +573,24 @@ fn known_escapes() -> Vec<Probe> {
     ]
 }
 
+/// A `timing` row on a `small` call in a package the owner table selects as a
+/// whole: the scanner accepts it.
+fn owned_by_package(frontends: &[String]) -> Probe {
+    Probe {
+        place: Place::FrontendTests,
+        pick: frontends
+            .iter()
+            .position(|n| n == "gpui")
+            .expect("the gpui frontend exists"),
+        stem: "owned_package".into(),
+        form: Form::AssertEqTrue,
+        measure: Measure::Budget {
+            value: "from_ms(gated)".into(),
+        },
+        row: Some(RowClass::Timing),
+    }
+}
+
 /// Gives each probe of one scan its own file name.
 fn numbered(probes: Vec<Probe>) -> Vec<Probe> {
     probes
@@ -525,9 +609,9 @@ fn judge(m: &Mirror, probes: &[Probe]) -> Result<(), TestCaseError> {
     let (code, out, shown) = m.scan_with(probes);
     let wrong: Vec<String> = probes
         .iter()
-        .filter(|p| out.contains(&p.path(m)) != p.refused())
+        .filter(|p| out.contains(&p.path(m)) != p.refused(m))
         .map(|p| {
-            let verdict = if p.refused() { "refuse" } else { "accept" };
+            let verdict = if p.refused(m) { "refuse" } else { "accept" };
             format!(
                 "must {verdict} {} (row {:?}):\n{}",
                 p.path(m),
@@ -543,7 +627,7 @@ fn judge(m: &Mirror, probes: &[Probe]) -> Result<(), TestCaseError> {
         code,
         out
     );
-    let want = i32::from(probes.iter().any(Probe::refused));
+    let want = i32::from(probes.iter().any(|p| p.refused(m)));
     prop_assert_eq!(
         code,
         want,
@@ -554,22 +638,50 @@ fn judge(m: &Mirror, probes: &[Probe]) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+/// Each probe set gets its own mirror and the scans run at once: a scan reads
+/// the whole tree, so four in a row do not fit the slot on a loaded machine.
+/// No shrinking: the verdict per file already names each misjudged probe.
 #[test]
 fn a_small_duration_comparison_outside_the_budget_type_is_refused_in_every_shape() {
-    let m = Mirror::new();
-    judge(&m, &numbered(known_escapes())).unwrap_or_else(|e| panic!("{e}"));
-    let mut runner = TestRunner::new(Config {
-        cases: 2,
-        // A shrink step costs a whole-tree scan; the verdict per file already
-        // names each probe the scanner misjudges.
-        max_shrink_iters: 0,
-        failure_persistence: None,
-        ..Config::default()
-    });
-    runner
-        .run(
-            &proptest::collection::vec(probe(), 8..=40).prop_map(numbered),
-            |ps| judge(&m, &ps),
+    let root = repo_root();
+    let mut runner = TestRunner::default();
+    let strategy = proptest::collection::vec(probe(), 8..=40).prop_map(numbered);
+    let mut fixed = known_escapes();
+    fixed.push(owned_by_package(&packages(&root, "frontends")));
+    let mut sets = vec![numbered(fixed)];
+    for _ in 0..2 {
+        sets.push(
+            strategy
+                .new_tree(&mut runner)
+                .expect("the probe strategy draws a case")
+                .current(),
+        );
+    }
+    let (reads, verdicts) = std::thread::scope(|s| {
+        let reads = s.spawn(|| scanner_reads(&root));
+        let judged: Vec<_> = sets
+            .iter()
+            .map(|probes| {
+                let root = &root;
+                s.spawn(move || {
+                    let m = Mirror::new(root);
+                    let verdict = judge(&m, probes);
+                    (m, verdict)
+                })
+            })
+            .collect();
+        (
+            reads.join().expect("the repository scan finishes"),
+            judged
+                .into_iter()
+                .map(|j| j.join().expect("a probe scan finishes"))
+                .collect::<Vec<_>>(),
         )
-        .unwrap_or_else(|e| panic!("{e}"));
+    });
+    for (m, _) in &verdicts {
+        m.assert_holds(&reads);
+    }
+    for (_, verdict) in verdicts {
+        verdict.unwrap_or_else(|e| panic!("{e}"));
+    }
 }
