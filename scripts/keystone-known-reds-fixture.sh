@@ -74,12 +74,13 @@ bless=0
 # Runs the classifier on logs `$4...` into file `$2`, leaving its exit code in
 # `code`. Its own error (exit 2, unless `$3` wants it) or a signal (above 128)
 # is no verdict, so it stops the fixture instead of reading as a changed one.
-# `classify_path` replaces PATH for the classifier alone.
+# `classify_path` replaces PATH for the classifier alone; `classifier` runs the
+# classifier of another tree.
 classify() {
     local label="$1" out="$2" want_code="$3"
     shift 3
     code=0
-    PATH="${classify_path:-$PATH}" "$repo_root/scripts/keystone-known-reds.sh" "$@" >"$out" 2>&1 || code=$?
+    PATH="${classify_path:-$PATH}" "${classifier:-$repo_root/scripts/keystone-known-reds.sh}" "$@" >"$out" 2>&1 || code=$?
     if { [ "$code" -eq 2 ] && [ "$want_code" -ne 2 ]; } || [ "$code" -gt 128 ]; then
         echo "[fixture] ERROR $label: classifier exit $code" >&2
         tail -20 "$out" | sed 's/^/          | /' >&2
@@ -1280,6 +1281,21 @@ for ((k = 1; k <= stub_calls; k++)); do
     STUB_FAIL_AT=$k classify_path="$stubs:$PATH" expect_outcome "stub/fails-call-$k-of-$stub_calls" 2 \
         '^\[known-reds\] ERROR: .* failed (exit [0-9]*); the log is not classified\.$' "${stub_logs[@]}"
 done
+
+# A registry the row parser refuses is a tool error (exit 2), never a verdict;
+# stderr names the refused cell. The broken tree shares this tree's scripts.
+broken="$work/broken-registry"
+mkdir -p "$broken/docs/Testing"
+ln -s "$repo_root/scripts" "$broken/scripts"
+ln -s "$repo_root/docs/Testing/known-red-evidence" "$broken/docs/Testing/known-red-evidence"
+sed -E '/^\| `read-model-never-seeded-sql-rows` \| known-red \|/s/\| — \|$/| `not-an-inv` |/' "$registry" >"$broken/docs/Testing/KeystoneKnownReds.md"
+if cmp -s "$registry" "$broken/docs/Testing/KeystoneKnownReds.md"; then
+    echo "[fixture] ERROR broken-registry: no known-red read-model-never-seeded-sql-rows row with Companions — to break" >&2
+    exit 2
+fi
+classifier="$broken/scripts/keystone-known-reds.sh" expect_outcome broken-registry/companions-cell 2 \
+    '\[read-model-never-seeded-sql-rows\] Companions cell .`not-an-inv`. is not' "${green_logs[0]}"
+
 if [ "$outcome_fail" -ne 0 ]; then
     echo ""
     echo "[fixture] FAIL: the classifier's outcome verdict changed. A green log read"
