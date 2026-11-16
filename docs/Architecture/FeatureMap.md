@@ -431,7 +431,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `shell-effect-stubborn-member-pid-race`
 - `shell-log-paths-plant-under-a-planted-file`
 - `shopping-mapping-cost-slo`
-- `shrinker-capmap-trigger-passed`
 - `slot-reconcile-props-before-rebuild-under-load`
 - `slot-withdrawn-last-claim-no-retraction`
 - `snapshot-boot-restored-boot-timeout-under-load`
