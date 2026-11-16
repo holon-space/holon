@@ -1557,6 +1557,8 @@ gate-arch:
     set -euo pipefail
     mkdir -p target/gate-logs
     just cargo-free-checks
+    # Calls `cargo nextest --help`, so it cannot sit among the cargo-free checks.
+    ./scripts/flow-checks/test-run-step-header.py 2>&1 | tee target/gate-logs/gate-arch-run-step-header.log
     # Reads `cargo metadata`, so it cannot sit among the cargo-free checks.
     ./scripts/test-select-tests-registry-data.py 2>&1 | tee target/gate-logs/gate-arch-select-tests-registry-data.log
     ./scripts/test-select-tests-dev-edges.py 2>&1 | tee target/gate-logs/gate-arch-select-tests-dev-edges.log

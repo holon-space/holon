@@ -6,6 +6,8 @@ The header is read with the lane check's own functions (`header`, `started`, `sa
 fixtures/run-step-header.txt is a run-step log with the three header lines, `echo` as the step.
 Generators: none — the input is one fixed header shape, so a fixed log and one live run assure it.
 The `keystone-smoke` step's timing mode has two inputs (caller sets it or not), so two live runs cover it.
+The test-thread cap has one input, FLOW_JOB_CORES, in three classes (unset, a positive integer, anything else),
+so fixed values of each class cover it; nextest's own `--help` names the thread count it resolved.
 """
 import importlib.util
 import os
@@ -48,7 +50,45 @@ def keystone_smoke_timing(caller):
     return out.splitlines()[-3]
 
 
+CAP_VARS = ("FLOW_JOB_CORES", "NEXTEST_TEST_THREADS", "RUST_TEST_THREADS")
+CAP_ERROR = "FLOW_JOB_CORES must be a positive integer"
+SHOW_CAP = """python3 -c 'import os; print("threads:", *(os.environ.get(v) for v in ("NEXTEST_TEST_THREADS", "RUST_TEST_THREADS")))'"""
+
+
+def run_step(line, cores, record):
+    """run-step.sh `line` under a slot's NEXTEST_TEST_THREADS=8 and FLOW_JOB_CORES=`cores` (None: unset)."""
+    env = {k: v for k, v in os.environ.items() if k not in CAP_VARS}
+    env |= {"BASE": BASE, "NEXTEST_TEST_THREADS": "8", "HOLON_CARGO_RECORD": record}
+    if cores is not None:
+        env["FLOW_JOB_CORES"] = cores
+    return subprocess.run([str(RUN_STEP), line], cwd=HERE, capture_output=True, text=True, env=env)
+
+
+def threads(step, cores, record):
+    p = run_step(f"{step}: {SHOW_CAP}", cores, record)
+    assert p.returncode == 0, (step, cores, p.stderr)
+    lines = p.stdout.splitlines()
+    return next(l for l in lines if l.startswith("threads: ")), f"shape env: NEXTEST_TEST_THREADS={cores or 8}" in lines
+
+
+def check_test_thread_cap(record):
+    for cores in ("1", "2", "16"):
+        for step in ("echo", "keystone-smoke"):
+            got, header = threads(step, cores, record)
+            assert got == f"threads: {cores} {cores}", (step, cores, got)
+            assert header, f"the log header names the cap {cores}"
+    p = run_step("nextest: --help", "2", record)
+    assert "[env: NEXTEST_TEST_THREADS=2]" in p.stdout, f"nextest resolves the cap: {p.stdout[-2000:]}"
+    assert threads("echo", None, record) == ("threads: 8 None", True), "no job: the slot's thread count, no cargo test cap"
+    for bad in ("", "0", "07", "x", "-2", "2.5", " 2"):
+        p = run_step("echo: echo ran", bad, record)
+        assert p.returncode == 1 and "ran" not in p.stdout.splitlines(), (bad, p.stdout)
+        assert f"{CAP_ERROR}, got '{bad}'" in p.stderr, (bad, p.stderr)
+
+
 def main():
+    with tempfile.TemporaryDirectory() as d:
+        check_test_thread_cap(os.path.join(d, "calls.jsonl"))
     assert keystone_smoke_timing({}) == "measure", "a keystone-smoke step runs in measure mode by default"
     assert keystone_smoke_timing({"HOLON_PBT_TIMING": "enforce"}) == "enforce", "the caller's mode wins"
     assert_l1_header(FIXTURE.read_text(), "fixture")

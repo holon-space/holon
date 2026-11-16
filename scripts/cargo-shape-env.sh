@@ -3,7 +3,8 @@
 # variable a build script reruns on rebuilds that crate and all above it.
 #   source scripts/cargo-shape-env.sh gate   the integration checkout: also pins
 #                                            HOLON_BUILD_SHA to @- (needs an empty @)
-#   source scripts/cargo-shape-env.sh lane   a lane: HOLON_BUILD_SHA stays unset
+#   source scripts/cargo-shape-env.sh lane   a lane: HOLON_BUILD_SHA stays unset; under FLOW_JOB_CORES=N the
+#                                            test runs (nextest, cargo test) run N tests at once
 # Both put scripts/cargo-shape first on PATH, so every cargo call is recorded in
 # $HOLON_CARGO_RECORD (default target/cargo-shape/calls.jsonl) for
 # scripts/check-compile-shape.py. `shape_env_header` prints the values for a log.
@@ -22,13 +23,20 @@ cargo_shape_env() {
       && [ -n "$HOLON_BUILD_SHA" ] || { echo "shape env: HOLON_BUILD_SHA: jj log -r @- failed" >&2; return 1; }
     export HOLON_BUILD_SHA
   fi
+  # A lane test run inside a flow job runs at most the job's core share of tests at once; no build script reads these.
+  if [ "$mode" = lane ] && [ -n "${FLOW_JOB_CORES+x}" ]; then
+    case $FLOW_JOB_CORES in
+      '' | *[!0-9]* | 0*) echo "shape env: FLOW_JOB_CORES must be a positive integer, got '$FLOW_JOB_CORES'" >&2; return 1 ;;
+    esac
+    export NEXTEST_TEST_THREADS=$FLOW_JOB_CORES RUST_TEST_THREADS=$FLOW_JOB_CORES
+  fi
   export HOLON_CARGO_RECORD=${HOLON_CARGO_RECORD:-$root/target/cargo-shape/calls.jsonl}
   case ":$PATH:" in *":$root/scripts/cargo-shape:"*) ;; *) export PATH="$root/scripts/cargo-shape:$PATH" ;; esac
 }
 
 shape_env_header() {
   local v names
-  for v in RUST_FONTCONFIG_DLOPEN HOLON_BUILD_SHA HOLON_BUILD_TIME RUSTFLAGS; do
+  for v in RUST_FONTCONFIG_DLOPEN HOLON_BUILD_SHA HOLON_BUILD_TIME RUSTFLAGS FLOW_JOB_CORES NEXTEST_TEST_THREADS RUST_TEST_THREADS; do
     if [ -n "${!v+x}" ]; then echo "shape env: $v=${!v}"; else echo "shape env: $v unset"; fi
   done
   # Names only: a CARGO_* value can be a registry token.
