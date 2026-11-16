@@ -3623,6 +3623,32 @@ mod tests {
         (TYPING_SHARE_Z.powi(2) * p * (1.0 - p) / tolerance.powi(2)).ceil() as usize
     }
 
+    /// The lane budget's draw count. Its floor is the same bound solved for
+    /// the floor, `f = p - z·sqrt(p(1-p)/n)` (n = 16 → 0.007): at least one
+    /// typed case, so the lane still catches typing collapsing to zero.
+    const TYPING_LANE_CASES: usize = 16;
+
+    /// The draw count and floor of the budget this run draws at.
+    fn typing_draw() -> (usize, f64) {
+        use crate::pbt::composed::case_budget::CaseBudget;
+
+        let (budget, cases, floor) = match CaseBudget::from_env() {
+            CaseBudget::Gate => ("gate", typing_cases(), MIN_SQLONLY_TYPING_CASE_SHARE),
+            CaseBudget::Lane => {
+                let n = TYPING_LANE_CASES;
+                let p = TYPING_SHARE_MEASURED;
+                let floor = p - TYPING_SHARE_Z * (p * (1.0 - p) / n as f64).sqrt();
+                assert!(floor > 0.0, "{n} lane cases leave no floor above zero");
+                ("lane", n, floor)
+            }
+        };
+        eprintln!(
+            "[pbt-budget] sqlonly_typing_share_meets_its_floor_beside_the_loro_control: \
+             {cases} cases, floor {floor:.3} (budget {budget})"
+        );
+        (cases, floor)
+    }
+
     /// Number of generated cases in which a drawn `TypeChars` actually
     /// CHANGED reference block content.
     fn committed_typing_cases(base: &ReferenceState, cases: usize) -> usize {
@@ -3693,7 +3719,7 @@ mod tests {
             !set_for_wiring(&wiring).has_projection(Projection::EditorState),
             "premise: this draw runs SqlOnly (SQL block-CRUD authority)"
         );
-        let cases = typing_cases();
+        let (cases, floor) = typing_draw();
         // Boots one composed SUT per wiring to read its real cap set (cached).
         let sql_cases = committed_typing_cases(&wide_e2e_ref_for(&wiring), cases);
         let loro_cases = committed_typing_cases(
@@ -3712,14 +3738,14 @@ mod tests {
         let loro_share = loro_cases as f64 / cases as f64;
         eprintln!(
             "[keystone-typing-share] SqlOnly {sql_cases}/{cases} ({sql_share:.3}) floor \
-             {MIN_SQLONLY_TYPING_CASE_SHARE:.3} | Loro control {loro_cases}/{cases} \
+             {floor:.3} | Loro control {loro_cases}/{cases} \
              ({loro_share:.3}) — cases that committed a typed edit into block content"
         );
         assert!(
-            sql_share >= MIN_SQLONLY_TYPING_CASE_SHARE,
+            sql_share >= floor,
             "SqlOnly TYPING coverage floor: only {sql_cases}/{cases} ({sql_share:.3}) \
              generated SqlOnly cases committed a typed edit into block content, below the \
-             {MIN_SQLONLY_TYPING_CASE_SHARE:.3} floor — the keystone cannot type with \
+             {floor:.3} floor — the keystone cannot type with \
              `crdt.enabled = false`, so no property covers its \
              editor→`set_field(\"content\")` write path"
         );

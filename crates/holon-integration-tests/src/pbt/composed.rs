@@ -30,6 +30,7 @@
 
 pub mod boot_fault;
 pub mod builder;
+pub mod case_budget;
 pub mod catalog;
 pub mod correspondences;
 pub mod first_divergent;

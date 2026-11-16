@@ -46,7 +46,7 @@ use proptest_state_machine::prop_state_machine;
 prop_state_machine! {
     #![proptest_config(proptest::test_runner::Config {
         // Bounded: each case boots TWO full_headless sessions.
-        cases: std::env::var("PROPTEST_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(8),
+        cases: holon_integration_tests::pbt::composed::case_budget::composed_cases("two_instance_composed_pbt", "PROPTEST_CASES", 3, 8),
         max_shrink_iters: 50,
         failure_persistence: None,
         .. proptest::test_runner::Config::default()
@@ -835,7 +835,7 @@ fn a_draw_that_exercised_nothing_still_judges_the_projection_lag() {
 
 proptest! {
     #![proptest_config(proptest::test_runner::Config {
-        cases: std::env::var("PAIR_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(24),
+        cases: holon_integration_tests::pbt::composed::case_budget::composed_cases("concurrent_two_writer_pair_converges", "PAIR_CASES", 8, 24),
         max_shrink_iters: 20,
         failure_persistence: None,
         .. proptest::test_runner::Config::default()
@@ -846,7 +846,7 @@ proptest! {
     ///
     /// It drew the receiver-projection stall in roughly one run of five until
     /// the projection grounded an UPDATE's `parent_id` and the run loop
-    /// re-drove a failed pass. Case count is `PAIR_CASES` (default 24).
+    /// re-drove a failed pass. Case count is `PAIR_CASES`, else the case budget.
     #[test]
     fn concurrent_two_writer_pair_converges(
         script in proptest::collection::vec(pair_step(), 1..7)
@@ -3128,7 +3128,7 @@ fn a_rebuilt_receiver_pairs_without_a_second_node_per_id_fixed_cases() {
 
 proptest! {
     #![proptest_config(proptest::test_runner::Config {
-        cases: std::env::var("REBUILT_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(6),
+        cases: holon_integration_tests::pbt::composed::case_budget::composed_cases("a_rebuilt_receiver_pairs_without_a_second_node_per_id", "REBUILT_CASES", 6, 6),
         max_shrink_iters: 20,
         failure_persistence: None,
         .. proptest::test_runner::Config::default()

@@ -8,6 +8,7 @@ Generators: none — the input is one fixed header shape, so a fixed log and one
 The `keystone-smoke` step's timing mode has two inputs (caller sets it or not), so two live runs cover it.
 The test-thread cap has one input, FLOW_JOB_CORES, in three classes (unset, a positive integer, anything else),
 so fixed values of each class cover it; nextest's own `--help` names the thread count it resolved.
+The case budget has one input, a caller's HOLON_PBT_BUDGET (unset or set), and the lane shape sets it either way.
 """
 import importlib.util
 import os
@@ -86,9 +87,23 @@ def check_test_thread_cap(record):
         assert f"{CAP_ERROR}, got '{bad}'" in p.stderr, (bad, p.stderr)
 
 
+def check_lane_budget(record):
+    for caller in (None, "gate"):
+        env = {k: v for k, v in os.environ.items() if k != "HOLON_PBT_BUDGET"}
+        env |= {"BASE": BASE, "HOLON_CARGO_RECORD": record}
+        if caller is not None:
+            env["HOLON_PBT_BUDGET"] = caller
+        p = subprocess.run([str(RUN_STEP), "echo: printenv HOLON_PBT_BUDGET"], cwd=HERE, capture_output=True,
+                           text=True, env=env)
+        lines = p.stdout.splitlines()
+        assert p.returncode == 0 and lines[-3] == "lane", (caller, p.stdout[-500:], p.stderr[-500:])
+        assert "shape env: HOLON_PBT_BUDGET=lane" in lines, "the log header names the lane budget"
+
+
 def main():
     with tempfile.TemporaryDirectory() as d:
         check_test_thread_cap(os.path.join(d, "calls.jsonl"))
+        check_lane_budget(os.path.join(d, "calls.jsonl"))
     assert keystone_smoke_timing({}) == "measure", "a keystone-smoke step runs in measure mode by default"
     assert keystone_smoke_timing({"HOLON_PBT_TIMING": "enforce"}) == "enforce", "the caller's mode wins"
     assert_l1_header(FIXTURE.read_text(), "fixture")

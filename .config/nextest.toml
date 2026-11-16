@@ -36,12 +36,14 @@ slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 [[profile.default.overrides]]
 filter = "binary_id(holon-integration-tests::integration) & test(/^two_instance_composed_pbt::/)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
+success-output = "final"  # the `[pbt-budget]` line: the case count the run drew
 
 # The typing-share floor steps its draws on the reference under two cap sets.
 # It must precede the module override below, which would match it first. The cap is twice its standalone time (scripts/check-timeout-margins.py).
 [[profile.default.overrides]]
 filter = "binary_id(holon-integration-tests) & test(=pbt::composed::wide_e2e::tests::sqlonly_typing_share_meets_its_floor_beside_the_loro_control)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
+success-output = "final"  # the `[pbt-budget]` line: the case count and floor the run drew
 
 # The slice PBTs live in the LIB test binary, which the binary() filters above
 # cannot name, so they inherited the 2 min default while legitimately running

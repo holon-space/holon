@@ -5,6 +5,8 @@
 #                                            HOLON_BUILD_SHA to @- (needs an empty @)
 #   source scripts/cargo-shape-env.sh lane   a lane: HOLON_BUILD_SHA stays unset; under FLOW_JOB_CORES=N the
 #                                            test runs (nextest, cargo test) run N tests at once
+# Both set HOLON_PBT_BUDGET to the mode: the slow composed-harness property tests draw fewer cases in a lane
+# (crates/holon-integration-tests/src/pbt/composed/case_budget.rs). No build script reads it.
 # Both put scripts/cargo-shape first on PATH, so every cargo call is recorded in
 # $HOLON_CARGO_RECORD (default target/cargo-shape/calls.jsonl) for
 # scripts/check-compile-shape.py. `shape_env_header` prints the values for a log.
@@ -30,13 +32,14 @@ cargo_shape_env() {
     esac
     export NEXTEST_TEST_THREADS=$FLOW_JOB_CORES RUST_TEST_THREADS=$FLOW_JOB_CORES
   fi
+  export HOLON_PBT_BUDGET=$mode
   export HOLON_CARGO_RECORD=${HOLON_CARGO_RECORD:-$root/target/cargo-shape/calls.jsonl}
   case ":$PATH:" in *":$root/scripts/cargo-shape:"*) ;; *) export PATH="$root/scripts/cargo-shape:$PATH" ;; esac
 }
 
 shape_env_header() {
   local v names
-  for v in RUST_FONTCONFIG_DLOPEN HOLON_BUILD_SHA HOLON_BUILD_TIME RUSTFLAGS FLOW_JOB_CORES NEXTEST_TEST_THREADS RUST_TEST_THREADS; do
+  for v in RUST_FONTCONFIG_DLOPEN HOLON_BUILD_SHA HOLON_BUILD_TIME RUSTFLAGS FLOW_JOB_CORES NEXTEST_TEST_THREADS RUST_TEST_THREADS HOLON_PBT_BUDGET; do
     if [ -n "${!v+x}" ]; then echo "shape env: $v=${!v}"; else echo "shape env: $v unset"; fi
   done
   # Names only: a CARGO_* value can be a registry token.
