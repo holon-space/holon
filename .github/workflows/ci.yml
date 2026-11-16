@@ -263,7 +263,7 @@ jobs:
 
       # (2) Execute the `di`-gated suites (not reached by the default workspace run).
       - name: Run di-gated holon-orgmode suites
-        run: cargo nextest run -p holon-orgmode --features di
+        run: cargo nextest run -p holon-orgmode --features di --no-tests=fail
 
       # (3) The `web-arm`-gated suite. Its one test is `#[ignore]` because it
       #     drives a real Chrome against a served dioxus-web `dist/` — a

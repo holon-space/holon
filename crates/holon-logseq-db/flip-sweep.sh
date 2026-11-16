@@ -442,7 +442,7 @@ echo "flip sweep: $COUNT flips, running [$FROM, $TO) in $PWD"
 # Every verdict below is a DIFFERENCE from this run, so a suite that is
 # already red makes the whole sweep meaningless — and a sweep killed partway
 # leaves exactly that state behind.
-BASELINE=$(cargo nextest run -p holon-logseq-db --no-fail-fast 2>&1)
+BASELINE=$(cargo nextest run -p holon-logseq-db --no-fail-fast --no-tests=fail 2>&1)
 if grep -qE '^ +FAIL \[|error: could not compile' <<<"$BASELINE"; then
     echo "BASELINE IS NOT GREEN — no flip verdict would mean anything:"
     grep -E '^ +FAIL \[|error: could not compile' <<<"$BASELINE" | sort -u | head
@@ -474,7 +474,7 @@ open(path, 'w').write(text.replace(flip['old'], flip['new']))" "$WORK/flips.json
         continue
     fi
 
-    OUT=$(cargo nextest run -p holon-logseq-db --no-fail-fast 2>&1)
+    OUT=$(cargo nextest run -p holon-logseq-db --no-fail-fast --no-tests=fail 2>&1)
     [ -n "${FLIP_SWEEP_DUMP:-}" ] && printf '%s' "$OUT" > "$FLIP_SWEEP_DUMP"
     cp "$WORK/aside" "$FILE"
     LIVE_FILE=

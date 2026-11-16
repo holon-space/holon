@@ -104,7 +104,7 @@ def main(argv):
     build_ws, units = args[0], args[1:]
     assert units, "test-command names no unit"
     selected, filt = scope_filter(units, scope) if scope else (units, [])
-    words = [f"CARGO_TARGET_DIR={build_ws}/target", "cargo", "nextest", "run"]
+    words = [f"CARGO_TARGET_DIR={build_ws}/target", "cargo", "nextest", "run", "--no-tests=fail"]
     words += [w for u in selected for w in ("-p", u)] + feature_args(selected) + filt + ["--no-fail-fast"]
     print("\n".join(words))
 

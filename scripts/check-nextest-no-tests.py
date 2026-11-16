@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Fail when a test-running `nextest run` in the justfile or under scripts/ does not pass `--no-tests=fail` once.
+"""Fail when a test-running nextest call in a tracked file does not pass `--no-tests=fail` once.
 
     scripts/check-nextest-no-tests.py [repo]          judge every call site; exit 1 names each offending call
     scripts/check-nextest-no-tests.py --list [repo]   print one `<kind> <name>` line per site with a judged call
 
-Reads the source, so it sees every call site, also those no gate step runs. Comments and Python docstrings are
-dropped first. Every other `nextest` ... `run` must be a call the check can read, or it fails as "cannot parse":
-- shell (recipes, *.sh, sh shebangs): a command whose words hold `nextest` directly followed by `run`;
+Reads the source of every file git lists in the tree (tracked, or new and not ignored), the justfile by its recipes,
+so it sees every call site, also those no gate step runs. A call is `nextest run` or `llvm-cov nextest`. Comments and
+Python docstrings are dropped first. Every other `nextest` ... `run` must be a call the check can read, or it fails as
+"cannot parse":
+- shell (recipes, *.sh, sh shebangs, *.yml steps): a command whose words hold `nextest` directly followed by `run`;
 - Python (*.py, python shebangs): a list or tuple literal holding the strings "nextest", "run" in a row;
+- Rust (*.rs): no "nextest" string literal at all;
 - any other file: no `nextest` ... `run` line at all.
 A call's literal arguments up to a bare `--` must hold `--no-tests=fail` exactly once; one with `--no-run` builds
 only. Expansions (`"$@"`, `{{FLAGS}}`, `*args`) are not read: their callers never pass `--no-tests`.
 """
 import ast
+import fnmatch
 import json
 import re
 import shlex
@@ -21,9 +25,20 @@ import sys
 from pathlib import Path
 
 FLAG = "--no-tests=fail"
-NEXTEST_RUN = re.compile(r"(?<![\w-])nextest(?![\w-]).*\brun\b")
+NEXTEST_RUN = re.compile(r"(?<![\w-])nextest(?![\w-]).*\brun\b|(?<![\w-])llvm-cov\s+nextest(?![\w-])")
+# The words before `nextest` that make `nextest` itself run the tests.
+RUNNERS = {"llvm-cov"}
 PUNCTUATION = ";&|()\n"
+# Path patterns (fnmatch: `*` also matches `/`) the check does not read.
 EXEMPT = {
+    "*.md": "prose; its commands are examples",
+    "*.txt": "logs and notes",
+    "*.tsv": "recorded runs",
+    "*.jsonl": "recorded runs",
+    "*.xml": "test reports",
+    ".gc/*": "generated agent tool state",
+    "report/*": "generated duplication report",
+    "\u2026/*": "one-off scripts nothing runs",
     "scripts/check-nextest-no-tests.py": "names the call shapes it judges",
     "scripts/test-check-nextest-no-tests.py": "plants calls without the flag",
     "scripts/test-no-tests-check-reach.py": "names the call shapes it looks for",
@@ -34,11 +49,15 @@ EXEMPT = {
     "scripts/test-lane-nextest.py": "planted selection lines",
     "scripts/check-red-logs.py": "patterns of red-log headers",
     "scripts/flow-checks/test-tests-cover-diff.py": "planted summaries",
-    "scripts/flow-checks/fixtures/owned-known-reds-summary.md": "fixture summary",
     "scripts/flow-checks/tests-cover-diff.py": "reads nextest summary lines, runs none",
     "scripts/keystone-known-reds-fixture.sh": "planted nextest logs",
     "scripts/test-target-gc.py": "planted call records",
     "scripts/lane-nextest.py": "its run refuses arguments without the flag (scripts/test-lane-nextest.py)",
+}
+# (path, an argument of the call) to its reason: that call may pass `--no-tests=pass` once instead.
+NO_TESTS_PASS = {
+    (".github/workflows/ci.yml", "test(/^web_arm_spike::/)"):
+        "its one test is ignored; the step before asserts the suite compiled",
 }
 
 
@@ -83,7 +102,9 @@ def shell_calls(text):
     calls = []
     for _, words, _ in statements:
         for i, w in enumerate(words):
-            if w == "nextest" and words[i + 1:i + 2] == ["run"]:
+            if w == "nextest" and i and words[i - 1] in RUNNERS:
+                calls.append(words[i + 1:])
+            elif w == "nextest" and words[i + 1:i + 2] == ["run"]:
                 calls.append(words[i + 2:])
             elif w == "nextest" and "run" in words[i + 1:]:
                 raise Unparsed(" ".join(words))
@@ -117,7 +138,9 @@ def python_calls(text):
                 continue
             seen.add(id(e))
             following = node.elts[i + 1:i + 2]
-            if following and string(following[0], "run"):
+            if i and any(string(node.elts[i - 1], r) for r in RUNNERS):
+                calls.append([a.value if string(a) else None for a in node.elts[i + 1:]])
+            elif following and string(following[0], "run"):
                 seen.add(id(following[0]))
                 calls.append([a.value if string(a) else None for a in node.elts[i + 2:]])
             elif following and not string(following[0]):
@@ -135,12 +158,22 @@ def raw_calls(text):
     return []
 
 
+def rust_calls(text):
+    hit = next((line for line in text.splitlines() if '"nextest"' in line and not line.lstrip().startswith("//")), None)
+    if hit is not None:
+        raise Unparsed(hit.strip()[:120])
+    return []
+
+
 def reader(path, text):
     first = text.split("\n", 1)[0]
     if path.suffix == ".py" or first.startswith("#!") and "python" in first:
         return python_calls
-    if path.suffix == ".sh" or first.startswith("#!") and re.search(r"\b(ba)?sh\b", first):
+    # shortcut: a workflow file is read as shell text, its YAML keys as words; a YAML parser if a key ever names a run.
+    if path.suffix in (".sh", ".yml", ".yaml") or first.startswith("#!") and re.search(r"\b(ba)?sh\b", first):
         return shell_calls
+    if path.suffix == ".rs":
+        return rust_calls
     return raw_calls
 
 
@@ -160,9 +193,13 @@ def recipes(repo):
     return out
 
 
-def script_files(repo):
-    return sorted(p for p in (repo / "scripts").rglob("*")
-                  if p.is_file() and not {"__pycache__", "target"} & set(p.relative_to(repo).parts))
+def tracked_files(repo):
+    """Path of every file git lists in the tree that names nextest, but the justfile and the exempt ones."""
+    listed = subprocess.run(["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                            capture_output=True, text=True, check=True).stdout
+    names = {n for n in listed.split("\0") if n and n != "justfile"}
+    return sorted(n for n in names if not any(fnmatch.fnmatchcase(n, e) for e in EXEMPT)
+                  and (repo / n).is_file() and b"nextest" in (repo / n).read_bytes())
 
 
 def sites(repo):
@@ -170,11 +207,9 @@ def sites(repo):
     found = []
     for name, (body, read) in recipes(repo).items():
         found.append(("recipe", name, read, body))
-    for p in script_files(repo):
-        name = p.relative_to(repo).as_posix()
-        if name not in EXEMPT:
-            text = p.read_text(errors="replace")
-            found.append(("script", name, reader(p, text), text))
+    for name in tracked_files(repo):
+        text = (repo / name).read_text(errors="replace")
+        found.append(("script", name, reader(Path(name), text), text))
     out = []
     for kind, name, read, text in found:
         try:
@@ -207,7 +242,9 @@ def main():
             print("NO-TESTS: %s %s cannot parse a nextest run: %s" % (kind, name, calls))
             continue
         for c in calls:
-            if [a for a in c if a is not None and a.startswith("--no-tests")] != [FLAG]:
+            given = [a for a in c if a is not None and a.startswith("--no-tests")]
+            may_pass = any(n == name and a in c for n, a in NO_TESTS_PASS)
+            if given != [FLAG] and not (may_pass and given == ["--no-tests=pass"]):
                 fails += 1
                 print("NO-TESTS: %s %s does not pass %s exactly once: %s" % (kind, name, FLAG,
                                                                              " ".join(a or "<expr>" for a in c)))

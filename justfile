@@ -1217,7 +1217,7 @@ analyze-crap:
         # Excluded:
         #   cucumber          — uses its own CLI, nextest can't enumerate it
         #   tui_ui_pbt        — process::exit on PBT failure aborts coverage write
-        cargo llvm-cov nextest --workspace --lcov --output-path lcov.info \
+        cargo llvm-cov nextest --workspace --no-tests=fail --lcov --output-path lcov.info \
             --ignore-run-fail \
             -E 'not (binary(cucumber) + binary(tui_ui_pbt))' 2>&1 \
             | tee target/gate-logs/holon-analyze-coverage.log
