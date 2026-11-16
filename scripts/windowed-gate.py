@@ -47,7 +47,14 @@ INVENTORY = "package(holon-gpui)"
 
 
 def default_jobs() -> int:
-    return max(1, min(4, (os.cpu_count() or 4) // 4))
+    """The host default, capped by the job's core share when $FLOW_JOB_CORES names one."""
+    host = max(1, min(4, (os.cpu_count() or 4) // 4))
+    cores = os.environ.get("FLOW_JOB_CORES")
+    if cores is None:
+        return host
+    if not cores.isascii() or not cores.isdigit() or cores.startswith("0"):
+        sys.exit(f"windowed-gate: FLOW_JOB_CORES must be a positive integer, got '{cores}'")
+    return min(host, int(cores))
 
 
 def build(features: str, log_dir: Path) -> list[str]:

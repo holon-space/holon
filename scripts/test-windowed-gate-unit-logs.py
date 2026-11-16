@@ -3,7 +3,9 @@
 - the `unit-log:` lines: one per log of every unit it leaves RED or HUNG (first run and rerun), each with the hash
   `shasum -a 256` gives for that file, and none for any other unit;
 - the failed ids in $GATE_IDS_FILE: one `failed <unit>` per unit left RED, and none at all when a unit is left HUNG;
-- `--unit` runs exactly the units it names.
+- `--unit` runs exactly the units it names;
+- the `jobs=` it starts with: the host default capped by $FLOW_JOB_CORES, unless `--jobs` or $WINDOWED_GATE_JOBS
+  names it; a $FLOW_JOB_CORES that is not a positive integer stops it with the name and the value.
 
 Run: `python3 scripts/test-windowed-gate-unit-logs.py` (CASES=<n>, SEED=<s>). The fixed examples run first.
 main() runs with the cargo calls and the ledger replaced: each unit's run writes a log and returns its drawn verdict.
@@ -32,7 +34,7 @@ def load_gate():
     return module
 
 
-def run_gate(plan, log_dir, selected=(), ids_file=None):
+def run_gate(plan, log_dir, selected=(), ids_file=None, argv=()):
     """Runs main() over `plan` ({unit: (first verdict, rerun verdict)}) with `--unit` per unit of `selected`;
     returns (exit, stdout, the units it ran)."""
     gate = load_gate()
@@ -51,7 +53,7 @@ def run_gate(plan, log_dir, selected=(), ids_file=None):
 
     gate.run_one = run_one
     out, err = io.StringIO(), io.StringIO()
-    sys.argv = ["windowed-gate.py", "--features", "x", "--log-dir", str(log_dir), *(a for u in selected for a in ("--unit", u))]
+    sys.argv = ["windowed-gate.py", "--features", "x", "--log-dir", str(log_dir), *(a for u in selected for a in ("--unit", u)), *argv]
     os.environ.pop("GATE_IDS_FILE", None)
     if ids_file:
         os.environ["GATE_IDS_FILE"] = str(ids_file)
@@ -87,6 +89,53 @@ def check(name, plan, selected=()):
     return bad
 
 
+JOBS = re.compile(r".*\bjobs=(\d+),.*")
+
+
+def started_jobs(cpus, env, argv=()):
+    """The `jobs=` main() starts with on a host of `cpus` cores under `env` (None unsets a variable)."""
+    saved = {k: os.environ.get(k) for k in env}
+    cpu_count = os.cpu_count
+    os.cpu_count = lambda: cpus
+    try:
+        for k, v in env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        with tempfile.TemporaryDirectory() as d:
+            _, out, _ = run_gate({"holon-gpui": ("PASS", "PASS")}, Path(d), argv=argv)
+    finally:
+        os.cpu_count = cpu_count
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return int(next(m[1] for line in out.splitlines() if (m := JOBS.fullmatch(line))))
+
+
+def check_jobs():
+    # Example list, not drawn: one integer variable with three classes (unset, positive, malformed).
+    for cpus in (2, 4, 8, 16, 64):
+        host = max(1, min(4, cpus // 4))
+        for cores in (None, "1", "2", "64"):
+            want = host if cores is None else max(1, min(host, int(cores)))
+            got = started_jobs(cpus, {"FLOW_JOB_CORES": cores, "WINDOWED_GATE_JOBS": None})
+            assert got == want, (cpus, cores, got, want)
+        assert started_jobs(cpus, {"FLOW_JOB_CORES": "2", "WINDOWED_GATE_JOBS": "7"}) == 7, cpus
+        assert started_jobs(cpus, {"FLOW_JOB_CORES": "2", "WINDOWED_GATE_JOBS": "7"}, ["--jobs", "5"]) == 5, cpus
+    print("[windowed-gate jobs] FLOW_JOB_CORES caps the host default; --jobs and WINDOWED_GATE_JOBS win: PASS")
+    for bad in ("", "x", "0", "01"):
+        try:
+            started_jobs(16, {"FLOW_JOB_CORES": bad, "WINDOWED_GATE_JOBS": None})
+        except SystemExit as e:
+            assert e.code not in (0, None) and "FLOW_JOB_CORES" in str(e.code) and f"'{bad}'" in str(e.code), (bad, e.code)
+        else:
+            raise AssertionError(f"FLOW_JOB_CORES={bad!r} started the gate")
+    print("[windowed-gate jobs] a malformed FLOW_JOB_CORES stops the gate with its name and value: PASS")
+
+
 FIXED = {
     "one red unit with a rerun beside a passing one": {"holon-gpui::main undo_windowed": ("RED", "RED"),
                                                        "holon-gpui::main chrome_windowed": ("PASS", "PASS")},
@@ -98,6 +147,7 @@ FIXED = {
 
 def main():
     rng = random.Random(int(os.environ.get("SEED", 0)))
+    check_jobs()
     for name, plan in FIXED.items():
         check(name, plan)
         print(f"[windowed-gate unit-log] {name}: PASS")
