@@ -2137,6 +2137,11 @@ mod tests {
     }
 
     proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
         /// A write transaction whose statements may fail on a duplicate key:
         /// a failed one leaves the connection out of the transaction and the
         /// table as it was before, and another connection can write next.
