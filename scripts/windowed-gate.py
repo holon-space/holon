@@ -64,7 +64,7 @@ def build(features: str, log_dir: Path) -> list[str]:
 
 
 def nextest_args(reuse: list[str], filt: str) -> list[str]:
-    return ["cargo", "nextest", "run", *reuse, "-E", filt, "--no-fail-fast",
+    return ["cargo", "nextest", "run", *reuse, "-E", filt, "--no-fail-fast", "--no-tests=fail",
             "--test-threads", "1", "--color", "never"]
 
 

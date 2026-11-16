@@ -211,9 +211,11 @@ def load_max(w, start, end, load_start):
 
 def nextest(test, *args):
     filt = f"binary_id({test.binary}) & test(={test.name})"
-    return ["cargo", "nextest", "run" if args else "list", "--workspace", "--features", CANON_FEATURES,
-            "--ignore-default-filter", "--profile", test.profile, "-E", filt,
-            *(["--run-ignored", "only"] if test.ignored else []), *args]
+    select = ["--workspace", "--features", CANON_FEATURES, "--ignore-default-filter", "--profile", test.profile,
+              "-E", filt, *(["--run-ignored", "only"] if test.ignored else [])]
+    if not args:
+        return ["cargo", "nextest", "list", *select]
+    return ["cargo", "nextest", "run", *select, "--no-tests=fail", *args]
 
 
 def run_once(w, key, test, adm, floor, p90):

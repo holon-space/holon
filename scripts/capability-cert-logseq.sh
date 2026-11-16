@@ -18,4 +18,4 @@ echo "report dir: $HOLON_CAPABILITY_REPORT_DIR"
 # fail-fast can pre-empt it — an opened boundary reds the certification first
 # and the alarm never runs.
 exec cargo nextest run -p holon-logseq-db -E 'binary_id(holon-logseq-db::main) & test(/^profile_certification::/)' \
-    --no-capture --no-fail-fast
+    --no-capture --no-fail-fast --no-tests=fail

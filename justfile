@@ -239,9 +239,7 @@ loro-suite:
     mkdir -p target/gate-logs
     L=target/gate-logs/loro-suite.log
     cargo nextest run {{CANON}} \
-        --test integration -E 'test(/^loro_suite::/)' --no-fail-fast 2>&1 | tee "$L"
-    grep -qE 'Summary \[.*\b[1-9][0-9]* tests run' "$L" \
-        || { echo "loro-suite: ran 0 tests — the filter or target is wrong"; exit 1; }
+        --test integration -E 'test(/^loro_suite::/)' --no-fail-fast --no-tests=fail 2>&1 | tee "$L"
 
 # LogSeq-DB write gate: the two round-trip legs that judge Holon's bytes with
 # LOGSEQ'S OWN validator and graph diff. They are `#[ignore]`d so a plain
@@ -818,7 +816,7 @@ latency-slo-gate *FLAGS:
     # `timing-gate` sets the mode of every timing step in one line.
     export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}
     cargo nextest run {{CANON}} --test integration -E 'test(/^latency_slo_gate::/)' --ignore-default-filter \
-        --no-capture --no-fail-fast {{FLAGS}} 2>&1 \
+        --no-capture --no-fail-fast --no-tests=fail {{FLAGS}} 2>&1 \
         | tee target/gate-logs/latency-slo-gate.log
 
 # Measure the atoms (Lamport-height deltas) the keystone's two Loro write legs
@@ -944,7 +942,7 @@ pbt-lib-slices:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo nextest run {{CANON}} --lib -E 'package(holon-integration-tests)' \
+    cargo nextest run {{CANON}} --lib -E 'package(holon-integration-tests)' --no-tests=fail \
         2>&1 | tee target/gate-logs/pbt-lib-slices.log
 
 # --- Mutation Testing -------------------------------------------------------
@@ -995,7 +993,7 @@ test:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo nextest run --workspace 2>&1 | tee target/gate-logs/holon-test.log
+    cargo nextest run --workspace --no-tests=fail 2>&1 | tee target/gate-logs/holon-test.log
 
 # Rot guard for the out-of-workspace wasi worker: `cargo check --workspace`
 # cannot see it, so an API change in holon-api compiles clean and breaks the
@@ -1537,6 +1535,8 @@ cargo-free-checks:
     { ./scripts/check-red-logs.py && ./scripts/check-red-logs.py --self-check; } \
         2>&1 | tee target/gate-logs/gate-arch-red-logs.log
     ./scripts/test-check-compile-shape.py 2>&1 | tee target/gate-logs/gate-arch-compile-shape.log
+    { ./scripts/check-nextest-no-tests.py && ./scripts/test-check-nextest-no-tests.py && ./scripts/test-no-tests-check-reach.py; } \
+        2>&1 | tee target/gate-logs/gate-arch-nextest-no-tests.log
     ./scripts/test-count-hash-folders.py 2>&1 | tee target/gate-logs/gate-arch-count-hash-folders.log
     ./scripts/test-integrate-track-walls.py 2>&1 | tee target/gate-logs/gate-arch-integrate-track-walls.log
     ./scripts/test-known-red-evidence-row-key.py 2>&1 | tee target/gate-logs/gate-arch-known-red-evidence-row-key.log
@@ -1566,7 +1566,7 @@ gate-arch:
     ./scripts/test-gate-integrate-tmpdir.py 2>&1 | tee target/gate-logs/gate-arch-gate-integrate-tmpdir.log
     # Asks jj for the tree id, so it cannot run in the cargo-free checks' copied tree.
     ./scripts/flow-checks/test-windowed-gate-logs.py 2>&1 | tee target/gate-logs/gate-arch-windowed-gate-logs.log
-    cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
+    cargo nextest run {{CANON}} --test architecture_rules --no-tests=fail 2>&1 | tee target/gate-logs/gate-arch.log
 
 # Tier 1 pre-commit gate: gate-integrity lints, defensive-code ratchet, typecheck.
 # The justfile guard runs FIRST and costs ~10ms: a never-fail recipe invalidates
@@ -1716,14 +1716,8 @@ timing-gate:
         'just org-deep-text-timing' \
       "the timing-critical nextest profile" \
         'L=target/gate-logs/timing-profile.log
-         cargo nextest run {{CANON}} --profile timing --no-fail-fast 2>&1 | tee "$L"
-         # A filter set that selects nothing reports `0 tests run` and exits 0,
-         # which would make the whole profile a green that proves nothing.
-         grep -qE "^ *Summary \[.*\] +[1-9][0-9]* tests? run" "$L" || {
-             echo "FAIL: --profile timing ran no tests. Its default-filter selects"
-             echo "nothing — run scripts/timing-split.py resolve to see which row."
-             exit 1
-         }' \
+         # Exit 4 means the default-filter selects nothing: scripts/timing-split.py resolve names the row.
+         cargo nextest run {{CANON}} --profile timing --no-fail-fast --no-tests=fail 2>&1 | tee "$L"' \
       "keystone smoke, latency rung" \
         'K=target/gate-logs/timing-gate-keystone.log
          just keystone-smoke 2>&1 | tee "$K"
@@ -1735,7 +1729,7 @@ timing-gate:
 # Builds every binary `timing-gate` runs, with the same cargo shapes, so the
 # quiet hold times tests and never a compile. Keep in step with `timing-gate`.
 timing-gate-build:
-    cargo nextest run {{CANON}} --no-run
+    cargo nextest run {{CANON}} --no-run --no-tests=fail
     cargo test {{CANON}} --no-run
     cargo test {{CANON}} --test deep_authored_text_never_aborts --no-run
 
@@ -1759,7 +1753,7 @@ load-tolerant-nextest *FLAGS:
     MARK=$(mktemp)
     trap 'kill $SAMPLER 2>/dev/null || true; rm -f "$MARK"' EXIT
     rc=0
-    cargo nextest run {{CANON}} --profile load-tolerant --no-fail-fast {{FLAGS}} \
+    cargo nextest run {{CANON}} --profile load-tolerant --no-fail-fast --no-tests=fail {{FLAGS}} \
         2>&1 | tee -a "$L" || rc=$?
     kill $SAMPLER 2>/dev/null || true
     ./scripts/check-target-leftovers.sh "$MARK" 2>&1 | tee -a "$L" || rc=1

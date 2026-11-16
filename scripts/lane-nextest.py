@@ -10,7 +10,8 @@ Both runs pass the nextest output through to stdout. `run` writes the red list t
 its path. It exits 0 when nextest passed or every red is on the known-reds list, else 1 with one `[lane-nextest]
 novel:` line per novel signature of the classifier's verdict. A nextest failure that is not only its reds (no test
 selected, a build error, a killed or cancelled nextest) exits with nextest's code. A classifier error is an error of
-`run` too. `rerun` refuses an empty or missing red list.
+`run` too. `rerun` refuses an empty or missing red list. Both refuse args that do not pass `--no-tests=fail` exactly
+once, as the printed `nextest:` line does: it beats a NEXTEST_NO_TESTS=pass in the environment.
 """
 import os
 import re
@@ -103,4 +104,6 @@ def rerun(args):
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in ("run", "rerun"):
         raise SystemExit(__doc__)
+    if [a for a in sys.argv[2:] if a.startswith("--no-tests")] != ["--no-tests=fail"]:
+        raise SystemExit(f"lane-nextest: the args {sys.argv[2:]} do not pass --no-tests=fail exactly once")
     sys.exit((run if sys.argv[1] == "run" else rerun)(sys.argv[2:]))

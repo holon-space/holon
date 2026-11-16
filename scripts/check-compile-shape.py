@@ -7,6 +7,8 @@ The record is what scripts/cargo-shape/cargo wrote. Exit 0 iff every compiling c
 1. has build options (BUILD_OPTIONS, reduced from its argv) equal to the justfile's CANON, and
 2. sees the same value of every recorded build-script variable as every other such call, with HOLON_BUILD_TIME unset,
 3. if it is a clippy call, has lint args (after `--`) equal to the justfile's CLIPPY_LINTS.
+Every `cargo nextest run`, EXCEPTIONS included, passes `--no-tests=fail` exactly once: the flag beats a
+NEXTEST_NO_TESTS=pass or warn in the environment, so an empty selection exits 4 instead of passing.
 A cargo call with other build options, another value of such a variable or another lint set makes cargo mint other
 unit hashes or rebuild a unit in place, so the gate compiles twice. Exit 1 names each offending call; an empty or missing record
 and an unknown cargo subcommand are failures too.
@@ -146,11 +148,24 @@ def lint_fails(calls, lints):
     return fails
 
 
+def no_tests_fails(calls):
+    """A NO-TESTS line for every `cargo nextest run` call whose `--no-tests` args are not exactly `--no-tests=fail`."""
+    fails = []
+    for call in calls:
+        sub, args = subcommand(call["argv"])
+        if sub != "nextest" or args[:1] not in (["run"], ["r"]):
+            continue
+        own = args[:args.index("--")] if "--" in args else args
+        if [a for a in own if a.startswith("--no-tests")] != ["--no-tests=fail"]:
+            fails.append("NO-TESTS: cargo %s does not pass --no-tests=fail exactly once" % shlex.join(call["argv"]))
+    return fails
+
+
 def judge(calls, want, lints):
-    """The failure lines for the recorded calls; empty iff the record is one shape."""
+    """The failure lines for the recorded calls; empty iff the record is one shape and every nextest run fails empty."""
     if not calls:
         return ["no cargo calls recorded"]
-    fails, judged = lint_fails(calls, lints), []
+    fails, judged = lint_fails(calls, lints) + no_tests_fails(calls), []
     for call in calls:
         argv = call["argv"]
         sub, args = subcommand(argv)

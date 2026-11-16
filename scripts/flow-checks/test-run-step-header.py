@@ -77,7 +77,7 @@ def check_test_thread_cap(record):
             got, header = threads(step, cores, record)
             assert got == f"threads: {cores} {cores}", (step, cores, got)
             assert header, f"the log header names the cap {cores}"
-    p = run_step("nextest: --help", "2", record)
+    p = run_step("nextest: --no-tests=fail --help", "2", record)
     assert "[env: NEXTEST_TEST_THREADS=2]" in p.stdout, f"nextest resolves the cap: {p.stdout[-2000:]}"
     assert threads("echo", None, record) == ("threads: 8 None", True), "no job: the slot's thread count, no cargo test cap"
     for bad in ("", "0", "07", "x", "-2", "2.5", " 2"):

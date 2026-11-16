@@ -7,6 +7,7 @@ The crate's tests t00..t07 run one at a time in name order; the env var PLAN giv
 `P` passes, `K` panics with the wording of a known-red row of docs/Testing/KeystoneKnownReds.md, `U` panics with a
 wording no row lists.
 Generators: the plan (each test P, K or U) and the run filter (a random subset of the tests excluded by `-E`).
+The nextest calls of each case see NEXTEST_NO_TESTS=pass, so a run that selects no test fails only through `--no-tests=fail`.
 Properties, per case: the run completes every filtered test with its planned outcome, exits non-zero iff a `U` ran
 and names a novel signature iff it did, its red list names exactly its red tests, and the rerun from that list runs
 exactly the listed tests with the same filter.
@@ -30,13 +31,14 @@ EXAMPLES = [("PPPUPPPP", set()), ("PKPPPKPP", set()), ("PPPPPPPP", set()), ("UPP
             ("KPKPUPPP", {"t02"}), ("PKKPKUPP", {"t01", "t02"}), ("KKKPPPPP", set()),
             ("PKUUPUPU", {"t07"}), ("PKPKPPPU", set()), ("PPPPPPPU", set()), ("PPUPKPPP", set()),
             ("PPPPPPPP", set(TESTS))]
+NO_TESTS = "--no-tests=fail"
 SUMMARY = re.compile(r"^ *Summary \[.*\] (\d+) tests? run: ")
 
 
 def nextest(root, out, mode, plan, excluded):
     expr = " | ".join(f"test(={t})" for t in sorted(excluded))
-    args = ["--test-threads", "1", "-E", f"not ({expr})" if expr else "all()"]
-    env = {**os.environ, "PLAN": plan, "LANE_NEXTEST_DIR": str(out)}
+    args = ["--test-threads", "1", NO_TESTS, "-E", f"not ({expr})" if expr else "all()"]
+    env = {**os.environ, "PLAN": plan, "LANE_NEXTEST_DIR": str(out), "NEXTEST_NO_TESTS": "pass"}
     r = subprocess.run([sys.executable, str(SCRIPT), mode, *args], cwd=root, env=env, capture_output=True, text=True)
     return r, ran_tests(r.stdout)
 
@@ -45,7 +47,6 @@ def check(root, out, plan, excluded, show):
     label = f"plan={plan} excluded={sorted(excluded)}"
     selected = [i for i, t in enumerate(TESTS) if t not in excluded]
     novel = any(plan[i] == "U" for i in selected)
-    # nextest exits non-zero when the filter selects no test; the run must not read that as green.
     failed = novel or not selected
     r, done = nextest(root, out, "run", plan, excluded)
     log = f"{label}\n{r.stdout}\n{r.stderr}"
@@ -54,13 +55,14 @@ def check(root, out, plan, excluded, show):
     want = [(TESTS[i], "PASS" if plan[i] == "P" else "FAIL") for i in selected]
     assert done == want, f"{log}\nran {done}, want {want}"
     assert (r.returncode != 0) == failed, f"{log}\nexit {r.returncode}"
+    assert selected or r.returncode == 4, f"{log}\nexit {r.returncode} for a run that selects no test, not 4"
     named = [l for l in r.stdout.splitlines() if l.startswith("[lane-nextest] novel: ")]
     assert bool(named) == novel and all(UNLISTED in l for l in named), f"{log}\nnovel lines {named}"
     reds = [t for t, s in done if s == "FAIL"]
     listed = [l.split(" ") for l in (out / "reds.txt").read_text().splitlines()]
     assert listed == [["fixture::main", t] for t in reds], f"{log}\nred list {listed}, want {reds}"
     if not reds:
-        rr = subprocess.run([sys.executable, str(SCRIPT), "rerun"], cwd=root, capture_output=True, text=True,
+        rr = subprocess.run([sys.executable, str(SCRIPT), "rerun", NO_TESTS], cwd=root, capture_output=True, text=True,
                             env={**os.environ, "LANE_NEXTEST_DIR": str(out)})
         assert rr.returncode != 0 and "no red tests" in rr.stderr, f"{log}\nrerun of an empty list: {rr}"
         return
@@ -104,7 +106,7 @@ def main():
         root.mkdir()
         fixture(root, known_red_wording())
         subprocess.run(["cargo", "build", "--tests", "--quiet"], cwd=root, check=True)
-        step = subprocess.run([str(REPO / "scripts/flow-checks/run-step.sh"), "nextest: --test-threads 1 -E 'all()'"],
+        step = subprocess.run([str(REPO / "scripts/flow-checks/run-step.sh"), "nextest: --test-threads 1 --no-tests=fail -E 'all()'"],
                               cwd=root, capture_output=True, text=True,
                               env={**os.environ, "BASE": "0" * 40, "PLAN": "PPPUPPPP", "SLEEP_AFTER_U": "3",
                                    "LANE_NEXTEST_DIR": str(out)})
@@ -113,6 +115,10 @@ def main():
         assert ran[:N] == [(t, "FAIL" if t == "t03" else "PASS") for t in TESTS], step
         assert (out / "reds.txt").read_text() == "fixture::main t03\n", step
         assert step.stdout.splitlines()[-1] == "exit: 1", step
+        for args in [[], ["-E", "all()"], [NO_TESTS, NO_TESTS], ["--no-tests=pass"], ["--no-tests", "fail"]]:
+            for mode in ("run", "rerun"):
+                r = subprocess.run([sys.executable, str(SCRIPT), mode, *args], cwd=root, capture_output=True, text=True)
+                assert r.returncode == 1 and "--no-tests=fail exactly once" in r.stderr, f"{mode} {args}: {r}"
         for k, (plan, excluded) in enumerate(EXAMPLES + generated):
             check(root, out, plan, excluded, k < len(EXAMPLES))
             print(f"ok plan={plan} excluded={sorted(excluded)}", flush=True)

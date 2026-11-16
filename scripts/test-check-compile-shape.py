@@ -10,6 +10,7 @@ Properties:
 - a call of CANON, spelt any way, plus any narrowing (`--test`, `--no-run`, nextest `--profile`, `-E`, test filters) passes;
 - one off-shape build option, or one shape-env value that differs from the other calls, or HOLON_BUILD_TIME set,
   or a clippy call with a lint set other than CLIPPY_LINTS, fails the check;
+- a nextest run without `--no-tests=fail`, with it twice, or with another `--no-tests` value fails the check;
 - with --unit-graph: the units of a narrowed call are a subset of the units of `cargo test CANON --no-run`.
 """
 import functools
@@ -33,6 +34,7 @@ OFF_SHAPE = [["-p", "holon-org-format"], ["--package=holon-api"], ["-pholon-core
              ["--features", "holon-gpui/chrome-trace"], ["-F", "holon-gpui/chrome-trace"],
              ["--no-default-features"], ["--all-features"], ["--release"], ["--exclude", "holon-gpui"],
              ["--config", "profile.dev.opt-level=1"], ["-r"], ["-Fholon-gpui/chrome-trace"]]
+NO_TESTS = "--no-tests=fail"
 STATIC_TESTS = ["integration", "deep_authored_text_never_aborts"]
 # Off-shape calls the check lets pass by its EXCEPTIONS list; a check that drops one refuses its case.
 EXCEPTED = [["run", "-p", "holon-gpui", "--features", "chrome-trace"],
@@ -112,6 +114,8 @@ def narrowing(rng, tests):
         args += ["--profile", rng.choice(["default", "load-tolerant", "timing"])]
     if nextest and rng.random() < 0.5:
         args += ["-E", "test(/%s/)" % rng.choice(["org_suite", "views", "a b"])]
+    if nextest:
+        args.insert(rng.choice(breaks(args)), NO_TESTS)
     if not nextest and rng.random() < 0.5:
         args += ["--", "--ignored", "--test-threads=1"]
     return words, args
@@ -159,6 +163,13 @@ def check_properties(check, rng, cases, tests):
         short = call(words, without_one_option(rng))
         assert verdict(check, want, [base, short]), "cargo %s passed" % shlex.join(short["argv"])
 
+        if words[0] == "nextest":
+            i = args.index(NO_TESTS)
+            other = rng.choice([args[:i] + args[i + 1:], args[:i] + [NO_TESTS] + args[i:],
+                                args[:i] + [rng.choice(["--no-tests=pass", "--no-tests=warn", "--no-tests=auto"])] + args[i + 1:]])
+            fails = verdict(check, want, [base, call(words, other)])
+            assert any(f.startswith("NO-TESTS: ") for f in fails), "cargo %s passed: %s" % (shlex.join(words + other), fails)
+
         name = rng.choice(sorted(ENV))
         other = rng.choice(["off", "", None, "1"] if ENV[name] is not None else ["on", ""])
         if other == ENV[name]:
@@ -182,9 +193,10 @@ def check_exclusions():
     planted = {
         "a recipe with its own feature": [call(["test"], [*canon, "--features", "holon-gpui/chrome-trace"])],
         "a call without RUST_FONTCONFIG_DLOPEN": [call(["test"], canon),
-                                                  call(["nextest", "run"], canon, RUST_FONTCONFIG_DLOPEN=None)],
+                                                  call(["nextest", "run"], [*canon, NO_TESTS], RUST_FONTCONFIG_DLOPEN=None)],
         "a second lint set": [call(["clippy"], [*canon, "--all-targets", "--", *clippy_lints()]),
                               call(["clippy"], [*canon, "--all-targets", "--", "-D", "warnings"])],
+        "a nextest run without --no-tests=fail": [call(["nextest", "run"], [*canon, "--profile", "timing"])],
         "an empty record": [],
         "a missing record": None,
     }
@@ -209,7 +221,7 @@ def unit_ids(words, args):
     """The identities of the units `cargo <words> <args>` would build; nextest builds what `cargo test` does.
     An identity is an int shared by all calls: a nested tuple would rehash its whole dependency tree per lookup."""
     build = []
-    skip = {"--profile": 1, "-E": 1, "--no-run": 0}
+    skip = {"--profile": 1, "-E": 1, "--no-run": 0, NO_TESTS: 0}
     i = 0
     while i < len(args) and args[i] != "--":
         if args[i] in skip:

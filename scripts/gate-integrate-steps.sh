@@ -15,7 +15,7 @@ only=()
 if [ -n "${GATE_ONLY_IDS:-}" ]; then while IFS= read -r id; do only+=("$id"); done <<<"$GATE_ONLY_IDS"; fi
 
 gate_nextest() {
-  HOLON_PBT_TIMING=measure cargo nextest run --profile load-tolerant --no-fail-fast "$@" --workspace --features "$PBT_FEATURES"
+  HOLON_PBT_TIMING=measure cargo nextest run --profile load-tolerant --no-fail-fast --no-tests=fail "$@" --workspace --features "$PBT_FEATURES"
 }
 cannot_rerun() { echo "$1: cannot rerun the id '$2'"; exit 2; }
 record_failed() {
@@ -70,10 +70,10 @@ extra_nextest() {
     set+="${set:+ | }(binary_id(=${BASH_REMATCH[1]}) & test(=${BASH_REMATCH[2]}))"
   done
   if [ -n "$set" ]; then
-    filter=(-E "$set" --no-tests=fail)
+    filter=(-E "$set")
   elif [ -n "${GATE_STEP_ARGS:-}" ]; then
     # The joined form keeps args that start with `-` from reading as nextest options.
-    filter=(--filterset="$GATE_STEP_ARGS" --no-tests=fail)
+    filter=(--filterset="$GATE_STEP_ARGS")
   fi
   mark=$(mktemp); trap 'rm -f "$mark"' EXIT
   if gate_nextest ${filter[@]+"${filter[@]}"} 2>&1 | tee "$log"; then :; else

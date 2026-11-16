@@ -191,7 +191,7 @@ expect "marks the target for the sweep" [ -f "$integ/target/.gc-mark" ]
 extra_runs=$(grep -E '^cargo nextest run .*--workspace .*--features [^ ]*holon-integration-tests/pbt' "$probe" || true)
 expect "runs one whole-workspace nextest with the integration features (got: ${extra_runs:-none})" [ "$(grep -c . <<<"$extra_runs")" = 1 ]
 extra_argv="${extra_runs%% | *}"
-expect "narrows that run by no filter or package (got: $extra_argv)" grep -qxE 'cargo nextest run --profile load-tolerant --no-fail-fast --workspace --features [^ ]*holon-integration-tests/pbt[^ ]*' <<<"$extra_argv"
+expect "narrows that run by no filter or package (got: $extra_argv)" grep -qxE 'cargo nextest run --profile load-tolerant --no-fail-fast --no-tests=fail --workspace --features [^ ]*holon-integration-tests/pbt[^ ]*' <<<"$extra_argv"
 
 echo "== the integrate run with a red org_suite test"
 rc=0; in_stubs STUB_RED_NEXTEST=1 "$integrate" g3 "1 2" "$tip" >"$scratch/integrate-org.out" 2>&1 || rc=$?
@@ -676,7 +676,7 @@ if complete and mutation == "none":
         fields = dict(f.split("=", 1) for f in rest)
         if call.startswith("cargo nextest run "):
             kinds.add("extra-nextest")
-            terms = set(re.search(r" -E (.*) --no-tests=fail ", call)[1].split(" | "))
+            terms = set(re.search(r" --no-tests=fail -E (.*) --workspace ", call)[1].split(" | "))
             ok = terms == {f"(binary_id(={i.split(' ')[0]}) & test(={i.split(' ')[1]}))" for i in want["extra-nextest"]}
         elif call.startswith("just hand-authored"):
             kinds.add("hand-authored")
@@ -1038,7 +1038,7 @@ rerun_case() {
   fi
   expect "$what: exits 0 (got $rc)" [ "$rc" = 0 ]
   expect "$what: runs the gate's nextest arm, narrowed to exactly those tests" \
-    [ "$(sed -n 's/^\(cargo nextest .*\) | timing=.*/\1/p' "$probe")" = "cargo nextest run --profile load-tolerant --no-fail-fast -E $filter --no-tests=fail --workspace --features $pbt" ]
+    [ "$(sed -n 's/^\(cargo nextest .*\) | timing=.*/\1/p' "$probe")" = "cargo nextest run --profile load-tolerant --no-fail-fast --no-tests=fail -E $filter --workspace --features $pbt" ]
   expect "$what: in the gate's shape" [ "$(shape_of <"$probe")" = "$gate_shape" ]
   expect "$what: appends its call to the gate's record" [ "$(($(wc -l <"$record")))" = $((calls + 1)) ]
 }
