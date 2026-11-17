@@ -491,6 +491,59 @@ mod tests {
         assert_eq!(reds.classify(&beside), None, "{beside}");
     }
 
+    /// Sibling-order verdicts under `block:journals` whose shape is not the
+    /// pasted copy's: an existing heading moved before the day page, and a
+    /// swap of the two older children.
+    fn journals_order_verdicts_of_other_defects() -> Vec<String> {
+        let head = "reconciled composed sequence diverged from the oracle: [";
+        let day = "block:368857d2-b6f5-4a8d-5c03-a6daedd2100f";
+        let arm = |inv: &str, quote: &dyn Fn(&str) -> String, r: &[&str], s: &[&str]| {
+            let list = |ids: &[&str]| {
+                ids.iter()
+                    .map(|id| quote(id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            format!(
+                "(\"{inv}\", \"[{inv}] sibling order diverges under parent block:journals.\\n  ref order: [{}]\\n  sut order: [{}]\")",
+                list(r),
+                list(s)
+            )
+        };
+        let live_quote = |id: &str| format!("EntityUri(\\\"{id}\\\")");
+        let loro_quote = |id: &str| format!("\\\"{id}\\\"");
+        let mut verdicts = Vec::new();
+        for moved in [
+            "block:c1",
+            "block:c2",
+            "block:fe-parent",
+            "block:fe-target",
+            "block:bulk-1-1",
+        ] {
+            let r = ["block:journals::auto-create", day, moved];
+            let s = ["block:journals::auto-create", moved, day];
+            let live = arm("inv-live-children-match-ref", &live_quote, &r, &s);
+            let loro = arm("inv-loro-children-match-ref", &loro_quote, &r, &s);
+            verdicts.push(format!("{head}{live}]"));
+            verdicts.push(format!("{head}{live}, {loro}]"));
+        }
+        let r = ["block:journals::auto-create", day];
+        let s = [day, "block:journals::auto-create"];
+        verdicts.push(format!(
+            "{head}{}]",
+            arm("inv-live-children-match-ref", &live_quote, &r, &s)
+        ));
+        verdicts
+    }
+
+    #[test]
+    fn a_journals_sibling_order_verdict_of_another_shape_stays_novel() {
+        let reds = KnownReds::load().expect("load registry");
+        for verdict in journals_order_verdicts_of_other_defects() {
+            assert_eq!(reds.classify(&verdict), None, "{verdict}");
+        }
+    }
+
     mod draw_sample_pbt {
         use std::cell::Cell;
         use std::cell::RefCell;
