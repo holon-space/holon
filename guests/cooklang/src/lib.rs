@@ -36,6 +36,8 @@ use holon_plugin_rows::Stream;
 use serde_json::Value;
 use serde_json::json;
 
+mod metadata;
+
 holon_abi_guest::holon_plugin!(parse_cook);
 
 /// The default dlmalloc coalesces and splits on nearly every free, which costs
@@ -91,7 +93,7 @@ fn parse_cook(input: &[u8], ctx: &[u8]) -> Result<String, String> {
         if key.eq_ignore_ascii_case("title") {
             continue;
         }
-        properties.push((key.to_string(), metadata_value_text(key, value)?));
+        properties.push((key.to_string(), metadata::value_text(key, value)?));
     }
     let course = properties
         .iter()
@@ -341,14 +343,30 @@ fn parse_recipe(source: &str) -> Result<Recipe, String> {
     Ok(recipe)
 }
 
+/// The number of leading lines the `---` fenced front matter occupies, fences
+/// included; 0 when the source has no terminated front matter.
+fn front_matter_lines(source: &str) -> usize {
+    let mut lines = source.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return 0;
+    }
+    lines
+        .position(|line| line.trim_end() == "---")
+        .map_or(0, |end| end + 2)
+}
+
 /// Refuse a component brace that never closes on its line.
 ///
 /// cooklang accepts `@flour{200%g` and SILENTLY drops the quantity — no error,
 /// no warning, an ingredient with no amount. Only an unclosed OPEN brace is
 /// refused: a surplus `}` is ordinary prose (`#pot{} and a } sign`) and must
 /// keep parsing.
+///
+/// The YAML front matter is not component syntax, and a flow map that wraps
+/// over lines legitimately leaves a `{` open at the end of a line.
 fn reject_unclosed_component_brace(source: &str) -> Result<(), String> {
-    for (n, line) in source.lines().enumerate() {
+    let skipped = front_matter_lines(source);
+    for (n, line) in source.lines().enumerate().skip(skipped) {
         let mut open_at: Option<usize> = None;
         for (col, ch) in line.char_indices() {
             match ch {
@@ -420,40 +438,6 @@ fn reject_swallowed_components(recipe: &Recipe) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// Render one recipe-metadata value as the text a property holds.
-///
-/// A sequence of scalars — standard cooklang `tags: [quick, vegan]` — joins to
-/// `"quick, vegan"`. Anything else has no single-column form, and per fail-loud
-/// policy is REFUSED by name rather than silently skipped.
-fn metadata_value_text(key: &str, value: &serde_yaml::Value) -> Result<String, String> {
-    match value {
-        serde_yaml::Value::String(s) => Ok(s.clone()),
-        serde_yaml::Value::Number(n) => Ok(n.to_string()),
-        serde_yaml::Value::Bool(b) => Ok(b.to_string()),
-        serde_yaml::Value::Sequence(items) => {
-            let mut parts = Vec::with_capacity(items.len());
-            for item in items {
-                match item {
-                    serde_yaml::Value::String(s) => parts.push(s.clone()),
-                    serde_yaml::Value::Number(n) => parts.push(n.to_string()),
-                    serde_yaml::Value::Bool(b) => parts.push(b.to_string()),
-                    other => {
-                        return Err(format!(
-                            "cooklang metadata {key:?}: list entry {other:?} is not a scalar and \
-                             has no single-column form"
-                        ));
-                    }
-                }
-            }
-            Ok(parts.join(", "))
-        }
-        other => Err(format!(
-            "cooklang metadata {key:?}: value {other:?} is neither a scalar nor a list of scalars \
-             and has no single-column form"
-        )),
-    }
 }
 
 fn blocks_of(recipe: &Recipe) -> Vec<BlockText> {

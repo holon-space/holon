@@ -204,3 +204,56 @@ pub fn big_recipe(steps: usize) -> String {
         .collect();
     render_recipe(Some("Large"), Some("dinner"), &shape)
 }
+
+const TEXT: &str = "\\PC{0,8}";
+
+/// A YAML front-matter value: scalars, lists and maps nested up to depth 4.
+/// A nested map key is occasionally not a string (a number or a list), which
+/// JSON cannot hold.
+pub fn yaml_value() -> impl Strategy<Value = serde_yaml::Value> {
+    use serde_yaml::Mapping;
+    use serde_yaml::Value as Yaml;
+
+    let leaf = prop_oneof![
+        Just(Yaml::Null),
+        any::<bool>().prop_map(Yaml::Bool),
+        any::<i64>().prop_map(|n| Yaml::Number(n.into())),
+        any::<u64>().prop_map(|n| Yaml::Number(n.into())),
+        (-1000i32..1000).prop_map(|n| Yaml::Number((f64::from(n) / 8.0).into())),
+        TEXT.prop_map(Yaml::String),
+        prop_oneof![
+            Just("12"),
+            Just("true"),
+            Just("1.50"),
+            Just("null"),
+            Just("")
+        ]
+        .prop_map(|s| Yaml::String(s.to_string())),
+        prop_oneof![Just(f64::NAN), Just(f64::INFINITY), Just(f64::NEG_INFINITY)]
+            .prop_map(|f| Yaml::Number(f.into())),
+    ];
+    leaf.prop_recursive(4, 24, 4, |inner| {
+        let key = prop_oneof![
+            9 => TEXT.prop_map(Yaml::String),
+            1 => any::<i32>().prop_map(|n| Yaml::Number(n.into())),
+            1 => proptest::collection::vec("[a-z]{1,3}".prop_map(Yaml::String), 1..3)
+                .prop_map(Yaml::Sequence),
+        ];
+        prop_oneof![
+            proptest::collection::vec(inner.clone(), 0..4).prop_map(Yaml::Sequence),
+            proptest::collection::vec((key, inner), 0..4)
+                .prop_map(|entries| Yaml::Mapping(entries.into_iter().collect::<Mapping>())),
+        ]
+    })
+}
+
+/// A recipe's front-matter map: string keys clear of cooklang's own metadata
+/// names, so the value alone decides what the plugin does.
+pub fn front_matter() -> impl Strategy<Value = serde_yaml::Mapping> {
+    proptest::collection::vec(("[a-z]{1,6}", yaml_value()), 1..5).prop_map(|entries| {
+        entries
+            .into_iter()
+            .map(|(key, value)| (serde_yaml::Value::String(format!("k_{key}")), value))
+            .collect()
+    })
+}

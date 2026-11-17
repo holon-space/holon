@@ -308,20 +308,30 @@ fn a_scalar_list_metadata_value_is_kept_not_dropped() {
 }
 
 #[test]
-fn an_unrepresentable_metadata_value_is_refused_by_name() {
-    let root = fixtures();
-    let path = root.join("nested.cook");
-    let content = "---\ntitle: Nested\nnutrition:\n  kcal: 200\n---\n\nBoil @water{1%l}.\n";
-    let msg = format!(
-        "{:#}",
-        support::bundled_cook_plugin()
-            .parse(&path, content, &EntityUri::no_parent(), &root)
-            .err()
-            .expect("a nested metadata value must be refused, not silently skipped")
+fn a_cookidoo_recipe_keeps_its_nested_fill_map() {
+    let r = parse("nested_fill_map.cook");
+    assert_eq!(
+        r.document.get_property_str("tm_fill_ml"),
+        Some(r#"{"bowl":1855}"#.to_string())
     );
+}
+
+#[test]
+fn a_nested_graph_keeps_its_source_key_order() {
+    let r = parse("wrapped_flow_map.cook");
+    let graph = r
+        .document
+        .get_property_str("graph")
+        .expect("graph property");
     assert!(
-        msg.contains("nutrition"),
-        "refusal must name the offending key: {msg}"
+        graph.starts_with(r#"{"entities":[{"id":"e1","label":"chopped onion"}"#),
+        "{graph}"
+    );
+    assert!(graph.contains(r#""params":{"duration_s":5,"cut_size":"fine","#));
+    assert!(
+        graph.contains(
+            r#""temp_c":120,"agitation":"gentle","device_settings":"5 min at 120 degrees""#
+        )
     );
 }
 
