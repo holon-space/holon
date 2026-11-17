@@ -123,7 +123,7 @@ reuse() {
 import datetime, json, os, sys
 rows_path, tip, n, name, jobs, gate, cards, job, peek = sys.argv[1:]
 rows = [json.loads(l) for l in open(rows_path) if l.strip()] if os.path.exists(rows_path) else []
-full = [r for r in rows if r.get("tip") == tip and r["name"] == name and not r.get("skipped") and "only" not in r]
+full = [r for r in rows if r.get("tip") == tip and r["name"] == name and r.get("full") and not r.get("skipped") and "only" not in r]
 last = full[-1] if full else {}
 if not last.get("job"):
     print("run")

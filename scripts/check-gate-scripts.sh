@@ -828,7 +828,8 @@ echo "== a plain integrate run reuses the steps its tip already passed"
 # flow job does (no GATE_FULL, no GATE_SELECT) or with GATE_FULL=1. A history is
 # "<step>:<state>@<tip>,...;..." oldest first:
 #   state  green (exit 0, as a step with known reds only) | gone (green, its job log deleted) |
-#          red (failed ids, for a test step) | bare (red without ids) | skipped | only (green on a narrowed id list)
+#          red (failed ids, for a test step) | bare (red without ids) | skipped | only (green on a narrowed id list) |
+#          sel (green in a selected run, not full: its row carries the selection's reason, not its filter set)
 #   tip    same | other (another commit) | at (`@`) | change (a change id) | none (no tip key)
 # The oracle: a step is reused iff GATE_FULL is off and its last full, not skipped row on the same commit
 # is green with its job log; it runs on exactly the failed ids iff that row is a red test step's with ids.
@@ -854,7 +855,8 @@ if mode == "seed":
             if state == "skipped":
                 row |= {"skipped": True, "reason": "not selected"}
             else:
-                row |= {"wall_s": 60.0, "exit": 1 if state in ("red", "bare") else 0, "cont": True, "full": True}
+                row |= {"wall_s": 60.0, "exit": 1 if state in ("red", "bare") else 0, "cont": True,
+                        **({"reason": "changed crates"} if state == "sel" else {"full": True})}
             if state == "red" and name in IDS:
                 row["failed"] = [IDS[name]]
             if state == "only":
@@ -868,7 +870,7 @@ out = open(f"{d}/out").read().splitlines()
 mine = [r for r in map(json.loads, open(rows_path)) if r.get("job") == job]
 def expected(name):
     """("reused", seed job) or ("run", ids or None)."""
-    counted = [(k, s) for k, (_, n, s, t) in enumerate(items) if n == name and t == "same" and s not in ("skipped", "only")]
+    counted = [(k, s) for k, (_, n, s, t) in enumerate(items) if n == name and t == "same" and s not in ("skipped", "only", "sel")]
     if full or not counted:
         return "run", None
     k, s = counted[-1]
@@ -932,18 +934,20 @@ reuse_case "" "" "extra-nextest:skipped@same"
 reuse_case "" "" "extra-nextest:green@same,skipped@same"
 reuse_case "" "" "extra-nextest:only@same"
 reuse_case "" "" "extra-nextest:green@same,only@same"
+reuse_case "" "" "extra-nextest:sel@same"
+reuse_case "" "" "extra-nextest:green@same,sel@same"
 reuse_case "" "" "windowed-gate:red@same;hand-authored:red@same;keystone-smoke:red@same;keystone-tour:red@same"
 reuse_case "" "" "gate-arch:red@same;loro-suite:green@same,bare@same"
 reuse_case 1 1 "extra-nextest:green@same;windowed-gate:red@same"
 reuse_case "" 1 "extra-nextest:green@same;windowed-gate:green@same"
 read -ra track_names <<<"$("$integrate" --steps)"; track_names=("${track_names[@]:4}")
 reuse_case "" "" "$(printf '%s:green@same;' "${track_names[@]}")"
-states=(green green gone red bare skipped only) tips=(same same same other at change none)
+states=(green green gone red bare skipped only sel) tips=(same same same other at change none)
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   hist=""
   for name in "${track_names[@]}"; do
     ((RANDOM % 2)) || continue
-    h=""; for ((i = 0; i <= RANDOM % 2; i++)); do h+="${h:+,}${states[RANDOM % 7]}@${tips[RANDOM % 7]}"; done
+    h=""; for ((i = 0; i <= RANDOM % 2; i++)); do h+="${h:+,}${states[RANDOM % 8]}@${tips[RANDOM % 7]}"; done
     hist+="$name:$h;"
   done
   full=""; ((RANDOM % 4)) || full=1
