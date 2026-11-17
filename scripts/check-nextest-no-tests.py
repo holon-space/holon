@@ -195,7 +195,8 @@ def recipes(repo):
 def tracked_files(repo):
     """Path of every tracked file that names nextest, but the justfile and the exempt ones. Untracked files are build
     output or local; which of them git ignores depends on the clone's local excludes. A jj workspace may have no .git,
-    and git would then list the index of a repo above it, so jj lists the files of its last snapshot."""
+    and git would then list the index of a repo above it, so jj lists the files of its last snapshot; a file written
+    after that snapshot is not judged."""
     if (repo / ".jj").is_dir():
         cmd = ["jj", "--ignore-working-copy", "-R", str(repo), "file", "list", "-r", "@", "-T", 'path ++ "\\0"']
     else:

@@ -295,6 +295,17 @@ def check_jj_workspace(sites):
                                                                                          in_jj.stdout, in_jj.stderr)
 
 
+def check_unlisted(sites):
+    """A tree whose VCS lists none of its files fails loud and names the listing; it never passes vacuously."""
+    for vcs in (["git", "init", "-q"], ["jj", "git", "init", "--no-colocate"]):
+        with tempfile.TemporaryDirectory() as d:
+            tree = Path(d) / "t"
+            subprocess.run([*vcs, str(tree)], check=True, capture_output=True)
+            write_tree(tree, sites)
+            out = subprocess.run([sys.executable, str(CHECK), str(tree)], capture_output=True, text=True)
+            assert out.returncode != 0 and "lists no file" in out.stderr, (vcs, sites, out.stdout, out.stderr)
+
+
 def main():
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 40
     seed = int(os.environ.get("SEED", random.randrange(2 ** 32)))
@@ -316,6 +327,10 @@ def main():
     check_jj_workspace([("script", "scripts/w.sh", [("sh", ["cargo nextest run --workspace"], False)])])
     for _ in range(cases // 4):
         check_jj_workspace(case(rng))
+    check_unlisted([("recipe", "t", [("sh", ["cargo nextest run --no-tests=fail"], False)]),
+                    ("script", "scripts/fixed.sh", [("sh", ["cargo nextest run --no-tests=fail"], False)])])
+    for _ in range(cases // 4):
+        check_unlisted(case(rng))
     print("ok: %d examples, %d cases" % (len(EXAMPLES), cases))
     return 0
 
