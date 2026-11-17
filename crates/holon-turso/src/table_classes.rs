@@ -87,6 +87,10 @@ const LOST: &[(&str, &str)] = &[
     ),
     ("advice_suppressed", "dismissed advice"),
     (
+        "type_declaration",
+        "the types declared at runtime under the SQL write authority",
+    ),
+    (
         "_holon_quarantine",
         "the record of which tables keep the rows of types Holon did not serve",
     ),

@@ -22,7 +22,9 @@
 //! append-only and [`TursoAdapter::teardown`] drops only the SQL artifacts, so
 //! `declare → teardown → declare` does NOT round-trip. Re-declaring therefore
 //! is refused, before any DDL, and cannot be recovered from. Undeclaring is the
-//! migrate primitive's job (OQ-5) and arrives with it.
+//! migrate primitive's job (OQ-5) and arrives with it. The write authority
+//! stores each declared definition beside the type's rows, and every later boot
+//! declares it again through the type admission seat.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -246,6 +248,45 @@ impl TypeWriteAuthority for SqlTypeWriteAuthority {
             .query(&format!("SELECT * FROM {table}"), HashMap::new())
             .await
             .map_err(|e| format!("reading {table}: {e}"))?)
+    }
+
+    async fn store_definition(&self, type_def: &TypeDefinition) -> Result<()> {
+        let definition = serde_json::to_string(type_def)
+            .map_err(|e| format!("serializing the definition of '{}': {e}", type_def.name))?;
+        self.0
+            .execute(
+                "INSERT OR REPLACE INTO type_declaration (name, definition) VALUES (?, ?)",
+                vec![
+                    turso::Value::Text(type_def.name.clone()),
+                    turso::Value::Text(definition),
+                ],
+            )
+            .await
+            .map_err(|e| format!("storing the definition of '{}': {e}", type_def.name))?;
+        Ok(())
+    }
+
+    async fn stored_definitions(&self) -> Result<Vec<TypeDefinition>> {
+        let rows = self
+            .0
+            .query(
+                "SELECT name, definition FROM type_declaration ORDER BY name",
+                HashMap::new(),
+            )
+            .await
+            .map_err(|e| format!("reading type_declaration: {e}"))?;
+        rows.iter()
+            .map(|row| {
+                let name = row.get("name").and_then(|v| v.as_string());
+                let definition = row
+                    .get("definition")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| format!("type_declaration row {name:?} has no definition"))?;
+                Ok(serde_json::from_str(definition).map_err(|e| {
+                    format!("type_declaration row {name:?} is not a TypeDefinition: {e}")
+                })?)
+            })
+            .collect()
     }
 }
 

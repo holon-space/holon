@@ -58,6 +58,7 @@ const BOOKKEEPING_TABLES: &[&str] = &[
     "operation",
     "sqlite_sequence",
     "sync_states",
+    "type_declaration",
     "undo_log",
     "watch_context",
 ];

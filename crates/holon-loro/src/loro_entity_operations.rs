@@ -40,6 +40,10 @@ use crate::write_origin::WriteOrigin;
 /// The prefix of a type's root map in the Global doc.
 pub const ENTITY_ROOT_PREFIX: &str = "entity:";
 
+/// The root map that keeps the definition of each type declared at runtime,
+/// as TypeDefinition JSON keyed by name.
+pub const TYPE_DECLARATIONS_ROOT: &str = "type_declarations";
+
 /// The store's own tombstone key, for a type that declares no `soft_delete`.
 pub const TOMBSTONE_KEY: &str = "_deleted";
 
@@ -643,6 +647,56 @@ impl holon_core::TypeWriteAuthority for LoroTypeWriteAuthority {
                 .map(|stored| stored.fields)
                 .collect())
         })?)
+    }
+
+    async fn store_definition(&self, type_def: &TypeDefinition) -> Result<()> {
+        if let Some(mirrors) = self.mirror_authority(type_def)? {
+            return mirrors.store_definition(type_def).await;
+        }
+        let definition = serde_json::to_string(type_def)
+            .map_err(|e| format!("serializing the definition of '{}': {e}", type_def.name))?;
+        self.doc
+            .with_write(WriteOrigin::BlockOps, |txn| {
+                txn.get_map(TYPE_DECLARATIONS_ROOT)
+                    .insert(&type_def.name, definition)?;
+                Ok(())
+            })
+            .map_err(|e| format!("storing the definition of '{}': {e}", type_def.name))?;
+        Ok(())
+    }
+
+    async fn stored_definitions(&self) -> Result<Vec<TypeDefinition>> {
+        let stored: Vec<(String, String)> = self.doc.with_read(|doc| {
+            let mut stored = Vec::new();
+            if let Some(root) = held_root(doc, TYPE_DECLARATIONS_ROOT) {
+                root.for_each(|name, value| {
+                    let definition = match value {
+                        ValueOrContainer::Value(LoroValue::String(json)) => json.to_string(),
+                        other => panic!(
+                            "{TYPE_DECLARATIONS_ROOT}[{name:?}] holds {other:?}, not a JSON string"
+                        ),
+                    };
+                    stored.push((name.to_string(), definition));
+                });
+            }
+            Ok(stored)
+        })?;
+        let mut definitions = match &self.mirrors {
+            Some(mirrors) => mirrors.stored_definitions().await?,
+            None => Vec::new(),
+        };
+        definitions.extend(
+            stored
+                .into_iter()
+                .map(|(name, definition)| {
+                    serde_json::from_str::<TypeDefinition>(&definition).map_err(|e| {
+                        format!("{TYPE_DECLARATIONS_ROOT}[{name:?}] is not a TypeDefinition: {e}")
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        );
+        definitions.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(definitions)
     }
 }
 

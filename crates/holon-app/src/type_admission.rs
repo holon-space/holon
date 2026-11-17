@@ -143,12 +143,34 @@ pub fn sidecar_refusals(
     refusals_among(profiles, &type_defs)
 }
 
-/// Declare `type_def` only if [`admits`] says its homes can carry it.
-///
+/// Declare `type_def` only if [`admits`] says its homes can carry it, then
+/// store the definition with the authority, so every later boot declares it
+/// again ([`redeclare_stored_types`]).
+pub async fn declare_type_admitted(
+    profiles: &ProfileRegistry,
+    type_def: &TypeDefinition,
+    authority: &dyn holon_core::TypeWriteAuthority,
+    db_handle: &holon::storage::turso::DbHandle,
+    registry: &TypeRegistry,
+    dispatcher: &holon::api::operation_dispatcher::OperationDispatcher,
+) -> Result<TursoArtifacts> {
+    let artifacts = declare_admitted(
+        profiles, type_def, authority, db_handle, registry, dispatcher,
+    )
+    .await?;
+    authority.store_definition(type_def).await.map_err(|e| {
+        format!(
+            "'{}' is declared for this boot only: storing its definition failed: {e}",
+            type_def.name
+        )
+    })?;
+    Ok(artifacts)
+}
+
 /// Refusing BEFORE `declare_type` is load-bearing: declaration is one-way (a
 /// name, once registered, stays registered), so a refusal that ran afterwards
 /// would leave the type half-declared and unrecoverable.
-pub async fn declare_type_admitted(
+async fn declare_admitted(
     profiles: &ProfileRegistry,
     type_def: &TypeDefinition,
     authority: &dyn holon_core::TypeWriteAuthority,
@@ -162,6 +184,41 @@ pub async fn declare_type_admitted(
         type_def, authority, db_handle, registry, dispatcher,
     )
     .await
+}
+
+/// Declare again, through the admission seat, every type an earlier boot
+/// declared at runtime. A refused type does not stop the others; the error
+/// names each refused type and why, for the boot report.
+pub async fn redeclare_stored_types(
+    profiles: &ProfileRegistry,
+    authority: &dyn holon_core::TypeWriteAuthority,
+    db_handle: &holon::storage::turso::DbHandle,
+    registry: &TypeRegistry,
+    dispatcher: &holon::api::operation_dispatcher::OperationDispatcher,
+) -> std::result::Result<(), String> {
+    let stored = authority
+        .stored_definitions()
+        .await
+        .map_err(|e| format!("reading the stored type definitions failed: {e}"))?;
+    let mut refused = Vec::new();
+    for type_def in &stored {
+        if let Err(e) = declare_admitted(
+            profiles, type_def, authority, db_handle, registry, dispatcher,
+        )
+        .await
+        {
+            refused.push(format!("'{}': {e}", type_def.name));
+        }
+    }
+    if refused.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} stored type declaration(s) were not declared again; their rows stay stored but \
+         take no writes:\n  - {}",
+        refused.len(),
+        refused.join("\n  - ")
+    ))
 }
 
 /// The entity a type declaration acts on. Not a stored row anywhere — the
@@ -192,7 +249,8 @@ pub fn declare_type_descriptor() -> OperationDescriptor {
         display_name: "Declare a datatype".to_string(),
         description: "Declare a datatype from a TypeDefinition, refusing it when the home it \
                       names cannot carry what it declares (CV-E). NOT UNDOABLE: declaration is \
-                      one-way — a declared name stays declared for the life of the dispatcher."
+                      one-way — a declared name stays declared, and every later boot declares \
+                      it again."
             .to_string(),
         required_params: vec![OperationParam {
             name: "definition".to_string(),

@@ -63,6 +63,7 @@ impl SchemaModule for CoreSchemaModule {
             Resource::schema("clock"),
             Resource::schema("clock_reader"),
             Resource::schema("integration_cache"),
+            Resource::schema("type_declaration"),
         ]
     }
 
@@ -80,6 +81,14 @@ impl SchemaModule for CoreSchemaModule {
             (
                 "integration_cache",
                 ensure_integration_cache(db_handle).await,
+            ),
+            (
+                "type_declaration",
+                ensure_schema_sql(
+                    db_handle,
+                    include_str!("../sql/schema/type_declaration.sql"),
+                )
+                .await,
             ),
             ("block_raw", ensure_block_raw(db_handle).await),
         ];

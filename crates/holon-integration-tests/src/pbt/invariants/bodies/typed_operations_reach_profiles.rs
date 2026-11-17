@@ -44,16 +44,13 @@ where
             .map(String::from)
             .collect();
         for (type_name, _) in ref_.typed_entity_schemas() {
-            if let Err(surfaces) = operation_surfaces_agree(&crud, async || {
+            if let Err(disagree) = operation_surfaces_agree(&crud, async || {
                 sut.typed_entity_operation_surfaces(&type_name).await
             })
             .await
             {
                 return InvariantResult::Fail(format!(
-                    "[inv-typed-operations-reach-profiles] '{type_name}': a rendered row offers \
-                     different operations than the dispatcher accepts\n  dispatcher: {:?}\n  \
-                     profile:    {:?}\n  rerendered: {:?}",
-                    surfaces.dispatcher, surfaces.profile, surfaces.rerendered
+                    "[inv-typed-operations-reach-profiles] '{type_name}': {disagree}"
                 ));
             }
         }

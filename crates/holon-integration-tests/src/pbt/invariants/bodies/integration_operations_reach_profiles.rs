@@ -60,20 +60,15 @@ where
                     ref_.integration_connect_timing()
                 ));
             }
-            if let Err(surfaces) = operation_surfaces_agree(&required, async || {
+            if let Err(disagree) = operation_surfaces_agree(&required, async || {
                 sut.integration_operation_surfaces(entity).await
             })
             .await
             {
                 return InvariantResult::Fail(format!(
-                    "[inv-integration-operations-reach-profiles] '{entity}' (peer drawn {:?}): a \
-                     rendered row offers different operations than the dispatcher accepts \
-                     (required {required:?})\n  dispatcher: {:?}\n  profile:    {:?}\n  \
-                     rerendered: {:?}",
-                    ref_.integration_connect_timing(),
-                    surfaces.dispatcher,
-                    surfaces.profile,
-                    surfaces.rerendered
+                    "[inv-integration-operations-reach-profiles] '{entity}' (peer drawn {:?}): \
+                     {disagree}",
+                    ref_.integration_connect_timing()
                 ));
             }
         }

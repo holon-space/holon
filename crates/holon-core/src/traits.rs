@@ -906,6 +906,14 @@ pub trait TypeWriteAuthority: MaybeSendSync {
         &self,
         type_def: &holon_api::TypeDefinition,
     ) -> Result<Vec<holon_api::StorageEntity>>;
+
+    /// Keep `type_def` beside the rows this authority holds, so the next boot
+    /// can declare the type again. Storing a name again replaces its
+    /// definition.
+    async fn store_definition(&self, type_def: &holon_api::TypeDefinition) -> Result<()>;
+
+    /// Every definition [`Self::store_definition`] kept, by name.
+    async fn stored_definitions(&self) -> Result<Vec<holon_api::TypeDefinition>>;
 }
 
 /// The facts a guard may only learn from whatever ACCEPTED a write.
