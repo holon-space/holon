@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run one step line that scripts/select-tests.py printed and write its log to stdout:
 #   BASE=<lane base commit> scripts/flow-checks/run-step.sh '<step>: <args>' | tee target/<lane>/<step>.log
-# Line 1 is the step line verbatim, then the BASE:/TREE:/STARTED: header and the step's output; the last line is
+# Line 1 is the step line verbatim, then the BASE:/TREE:/STARTED: header (a `nextest` or `keystone-smoke` step adds the
+# `HOLON_PBT_TIMING=<mode>` line it runs with) and the step's output; the last line is
 # `exit: <code>`, and the script exits with that code. scripts/flow-checks/tests-cover-diff.py reads this shape.
 set -uo pipefail
 line=$1
@@ -12,6 +13,9 @@ echo "$line"
 echo "BASE: $BASE"
 echo "TREE: $(jj log -r @ --no-graph -T commit_id)"
 echo "STARTED: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+case $step in
+  nextest|keystone-smoke) export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}; echo "HOLON_PBT_TIMING=$HOLON_PBT_TIMING" ;;
+esac
 # shellcheck source=scripts/cargo-shape-env.sh
 source "$(dirname "$0")/../cargo-shape-env.sh" lane || { echo; echo "exit: 1"; exit 1; }
 shape_env_header
@@ -22,8 +26,8 @@ case $step in
     lints=$(just --justfile "$(dirname "$0")/../../justfile" --evaluate CLIPPY_LINTS) || { echo; echo "exit: 1"; exit 1; }
     # shellcheck disable=SC2086
     cargo clippy "$@" --all-targets -- $lints 2>&1 ;;
-  nextest) HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure} "$(dirname "$0")/../lane-nextest.py" run "$@" 2>&1 ;;
-  keystone-smoke) HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure} "$@" 2>&1 ;;
+  nextest) "$(dirname "$0")/../lane-nextest.py" run "$@" 2>&1 ;;
+  keystone-smoke) "$@" 2>&1 ;;
   *) "$@" 2>&1 ;;
 esac
 code=$?

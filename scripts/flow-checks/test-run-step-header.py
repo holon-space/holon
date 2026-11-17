@@ -4,6 +4,7 @@
 Run: `python3 scripts/flow-checks/test-run-step-header.py`. Exits non-zero on the first violation.
 The header is read with the lane check's own functions (`header`, `started`, `same_time`).
 fixtures/run-step-header.txt is a run-step log with the three header lines, `echo` as the step.
+A `nextest` or `keystone-smoke` log header holds `HOLON_PBT_TIMING=<mode>` (the mode its step ran with); other steps hold none.
 Generators: none — the input is one fixed header shape, so a fixed log and one live run assure it.
 The `keystone-smoke` step's timing mode has two inputs (caller sets it or not), so two live runs cover it.
 The test-thread cap has one input, FLOW_JOB_CORES, in three classes (unset, a positive integer, anything else),
@@ -53,6 +54,29 @@ def keystone_smoke_timing(caller):
     out = subprocess.run([str(RUN_STEP), "keystone-smoke: printenv HOLON_PBT_TIMING"], cwd=RUN_DIR,
                          capture_output=True, text=True, env={**env, **caller, "BASE": BASE}).stdout
     return out.splitlines()[-3]
+
+
+def check_timing_header():
+    for step in ("nextest", "keystone-smoke"):
+        for caller, want in (({}, "measure"), ({"HOLON_PBT_TIMING": "enforce"}, "enforce"),
+                             ({"HOLON_PBT_TIMING": ""}, ""), ({"HOLON_PBT_TIMING": "measure"}, "measure")):
+            env = {k: v for k, v in os.environ.items() if k != "HOLON_PBT_TIMING"}
+            out = subprocess.run([str(RUN_STEP), f"{step}: printenv HOLON_PBT_TIMING"], cwd=RUN_DIR, capture_output=True,
+                                 text=True, env={**env, **caller, "BASE": BASE}).stdout.splitlines()
+            assert out[3].startswith("STARTED: ") and out[4] == f"HOLON_PBT_TIMING={want}", (step, caller, out[:6])
+            assert step == "nextest" or out[-3] == want, (step, caller, "the header names the mode the step ran with", out[-4:])
+    with tempfile.TemporaryDirectory() as stubs:
+        cargo = Path(stubs) / "cargo"
+        cargo.write_text('#!/bin/sh\necho "cargo-stub timing=$HOLON_PBT_TIMING"\n')
+        cargo.chmod(0o755)
+        for caller, want in (({}, "measure"), ({"HOLON_PBT_TIMING": "enforce"}, "enforce")):
+            base_env = {k: v for k, v in os.environ.items() if k != "HOLON_PBT_TIMING"}
+            run_env = {**base_env, **caller, "BASE": BASE, "PATH": f"{stubs}:{os.environ['PATH']}"}
+            out = subprocess.run([str(RUN_STEP), "nextest: --no-tests=fail"], cwd=RUN_DIR, capture_output=True,
+                                 text=True, env=run_env).stdout.splitlines()
+            assert f"cargo-stub timing={want}" in out and f"HOLON_PBT_TIMING={want}" in out, (caller, out[-8:])
+    out = live_log().splitlines()
+    assert not any(l.startswith("HOLON_PBT_TIMING=") for l in out), "other steps carry no mode line"
 
 
 CAP_VARS = ("FLOW_JOB_CORES", "NEXTEST_TEST_THREADS", "RUST_TEST_THREADS")
@@ -108,6 +132,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         check_test_thread_cap(os.path.join(d, "calls.jsonl"))
         check_lane_budget(os.path.join(d, "calls.jsonl"))
+    check_timing_header()
     assert keystone_smoke_timing({}) == "measure", "a keystone-smoke step runs in measure mode by default"
     assert keystone_smoke_timing({"HOLON_PBT_TIMING": "enforce"}) == "enforce", "the caller's mode wins"
     assert_l1_header(FIXTURE.read_text(), "fixture")

@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parents[2]
 REAL_LOG = Path(__file__).resolve().parent / "fixtures/run-step-clippy.txt"
 # run() writes the repo's base commit for TREE_ID and its commit of another tree for OTHER_TREE_ID.
 TREE_ID, OTHER_TREE_ID = "e5d2c227" + "a" * 32, "0bad" + "f" * 36
-HEADER = f"BASE: 3936d83aba008d69cc09e73d1c5db883ed6b5ae4\nTREE: {TREE_ID}\n"
+HEADER = f"BASE: 3936d83aba008d69cc09e73d1c5db883ed6b5ae4\nTREE: {TREE_ID}\nHOLON_PBT_TIMING=measure\n"
 CLIPPY = "clippy: --workspace --features pbt"
 NEXTEST = "nextest: --workspace --features pbt -E 'package(holon) | package(holon-api)' --profile load-tolerant"
 NARROW = "nextest: --workspace --features pbt -E 'package(holon)' --profile load-tolerant"
@@ -239,6 +239,30 @@ def generated(cases):
         assert any(path in b and f"`{step}`" in b for b in check(stdout, spans, cut_judged, not_run)), \
             f"case {case}: {step} log ending {cut!r} judged known reds only passes"
     print(f"[tests-cover-diff] generated: {cases} cases PASS")
+
+
+def timing_modes(cases):
+    """Step kind x header mode: the check fails exactly the nextest and keystone-smoke logs without `measure` in the
+    header, and names the log and the value; a test's own output line `HOLON_PBT_TIMING=measure` never counts."""
+    checker = load_checker()
+    rng = random.Random(21)
+    kinds = ["nextest", "keystone-smoke", "clippy", "windowed", "echo"]
+    modes = ["measure", "enforce", "", "unset", None]
+    for case in range(cases):
+        kind, mode = rng.choice(kinds), rng.choice(modes)
+        line = f"{kind}: --workspace {rng.choice(['a', 'b'])}"
+        header = ["BASE: b", "TREE: t", "STARTED: 2026-10-31T17:00:00Z",
+                  *([] if mode is None else [f"HOLON_PBT_TIMING={mode}"])]
+        body = ["running", *(["HOLON_PBT_TIMING=measure"] if rng.random() < 0.5 else [])]
+        log = "\n".join([line, *header, *body, "", "exit: 0"])
+        path = f"target/r1/{kind}.log"
+        bad = checker.check(line + "\n", "", {path: log}, set(), tree_of=lambda c: "t", head="t")
+        want = kind in ("nextest", "keystone-smoke") and mode != "measure"
+        assert bool(bad) == want, f"case {case}: {kind} header {header} body {body}: {bad}"
+        if want:
+            found = "no HOLON_PBT_TIMING= line" if mode is None else f"HOLON_PBT_TIMING={mode}"
+            assert any(path in b and found in b for b in bad), f"case {case}: {bad}"
+    print(f"[tests-cover-diff] timing modes: {cases} cases PASS")
 
 
 def citation(rng):
@@ -686,7 +710,7 @@ def lane_files(rng, spec, commits):
     files, cites, extra, want = {}, [], [], []
 
     def log(path, line, body, tail, tree=base):
-        files[path] = f"{line}\nBASE: {base}\nTREE: {tree}\nSTARTED: 2026-11-09T05:15:49Z\n" + "".join(
+        files[path] = f"{line}\nBASE: {base}\nTREE: {tree}\nHOLON_PBT_TIMING=measure\nSTARTED: 2026-11-09T05:15:49Z\n" + "".join(
             b + "\n" for b in body) + f"\n{tail}\n"
         cites.append(path)
 
@@ -1253,7 +1277,7 @@ def static_citation_logs(rng, c):
             return GATE_ARCH_RED
         return [result_line(rng, t, rng.choice(STATUSES)) for t in tests] + [nextest_end_line(rng, 14, len(tests))]
     def log(first, commit, tests):
-        return "\n".join([first, "BASE: b", f"TREE: {commit}", "STARTED: 2026-11-14T08:03:10Z", *body(tests),
+        return "\n".join([first, "BASE: b", f"TREE: {commit}", "HOLON_PBT_TIMING=measure", "STARTED: 2026-11-14T08:03:10Z", *body(tests),
                           "exit: 1"])
     logs = {"target/r1/clippy.log": log("clippy: --workspace", "lane", []).replace("exit: 1", "exit: 0"),
             "target/base/step.log": log(line if c["base_line"] else line + " --profile other",
@@ -1741,6 +1765,7 @@ if __name__ == "__main__":
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 300
     generated(cases)
     citations(cases)
+    timing_modes(cases)
     result_pattern()
     stopped_runs(cases)
     complete_runs(cases)

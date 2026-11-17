@@ -42,6 +42,8 @@ A step ran when a cited log has the selected line as line 1, and one of these ho
     log must show the end of a complete run, else it is refused too, as its reds prove nothing about the tests it never
     ran: a log with nextest failing-test lines needs a `Summary [...] N tests run` line (`k/n tests run` with k < n is a
     cut run, in any log), and a log with windowed gate verdicts needs the gate's `windowed-gate: wall=` end line.
+A `nextest` or `keystone-smoke` log must carry the line `HOLON_PBT_TIMING=measure` in its header (the lines after line 1
+that are BASE:, TREE:, STARTED:, `shape env:` or that mode line); else it fails, whatever its exit, naming the value found.
 A static gate step (a name `bash <gate script> --steps` prints, `gate_step_names` of select-tests.py) that the
 selector does not print may carry an `accepted-base-red:` line too: every cited red log whose line 1 runs that step is
 then its lane log, compared as above with the base log of the same normalised line 1, and at least one is cited. A
@@ -162,6 +164,20 @@ def partition(chain):
     for _, paths in chain:
         (rows if st.registry_data_only(paths, st.REGISTRY_DATA) else code).update(paths)
     return sorted(code), sorted(rows)
+
+
+TIMED_STEPS = {"nextest", "keystone-smoke"}
+HEADER_LINE = re.compile(r"(BASE|TREE|STARTED): |shape env: |HOLON_PBT_TIMING=")
+
+
+def timing_mode(lines):
+    """The mode of the header's `HOLON_PBT_TIMING=<mode>` line, None without one; the step's own output is not read."""
+    for line in lines[1:]:
+        if not HEADER_LINE.match(line):
+            return None
+        if line.startswith("HOLON_PBT_TIMING="):
+            return line.split("=", 1)[1]
+    return None
 
 
 def norm(line):
@@ -516,6 +532,11 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
         line = norm(lines[0])
         if line not in selected[first]:
             bad.append(f"{path} runs `{lines[0]}`, the selector prints {sorted(selected[first])}")
+            continue
+        if first in TIMED_STEPS and (mode := timing_mode(lines)) != "measure":
+            found = "no HOLON_PBT_TIMING= line" if mode is None else f"HOLON_PBT_TIMING={mode}"
+            bad.append(f"{path} runs `{first}` without the header line `HOLON_PBT_TIMING=measure` ({found}); rerun the "
+                       f"step with scripts/flow-checks/run-step.sh and HOLON_PBT_TIMING unset or `measure`")
             continue
         if lines[-1] == EXIT_OK:
             ran.add(line)
