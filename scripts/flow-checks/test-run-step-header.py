@@ -4,7 +4,7 @@
 Run: `python3 scripts/flow-checks/test-run-step-header.py`. Exits non-zero on the first violation.
 The header is read with the lane check's own functions (`header`, `started`, `same_time`).
 fixtures/run-step-header.txt is a run-step log with the three header lines, `echo` as the step.
-A `nextest` or `keystone-smoke` log header holds `HOLON_PBT_TIMING=<mode>` (the mode its step ran with); other steps hold none.
+A `nextest`, `keystone-smoke` or `windowed` log header holds `HOLON_PBT_TIMING=<mode>` (the mode its step ran with); other steps hold none.
 Generators: none — the input is one fixed header shape, so a fixed log and one live run assure it.
 The `keystone-smoke` step's timing mode has two inputs (caller sets it or not), so two live runs cover it.
 The test-thread cap has one input, FLOW_JOB_CORES, in three classes (unset, a positive integer, anything else),
@@ -57,7 +57,7 @@ def keystone_smoke_timing(caller):
 
 
 def check_timing_header():
-    for step in ("nextest", "keystone-smoke"):
+    for step in ("nextest", "keystone-smoke", "windowed"):
         for caller, want in (({}, "measure"), ({"HOLON_PBT_TIMING": "enforce"}, "enforce"),
                              ({"HOLON_PBT_TIMING": ""}, ""), ({"HOLON_PBT_TIMING": "measure"}, "measure")):
             env = {k: v for k, v in os.environ.items() if k != "HOLON_PBT_TIMING"}

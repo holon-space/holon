@@ -498,6 +498,17 @@ def unit_judge(log, i=0):
     return judge_path(f"target/r1/unit-{Path(log).name}", i)
 
 
+def windowed_mode(o):
+    """The header mode of a windowed lane log: a drawn `mode` (None is no header line), else measure.
+    A red windowed log with another mode is refused for that alone, whatever else its logs show."""
+    return o.get("mode", "measure")
+
+
+def mode_refusal(path, mode):
+    found = "no HOLON_PBT_TIMING= line" if mode is None else f"HOLON_PBT_TIMING={mode}"
+    return [(path, "without the header line `HOLON_PBT_TIMING=measure`", found)] if mode != "measure" else []
+
+
 def unit_refusals(units, off, path):
     """The needles of each refusal of the windowed red path, from the drawn state; [] when the step counts as run.
     `units` None is a step log without gate verdicts."""
@@ -709,8 +720,9 @@ def lane_files(rng, spec, commits):
     base, child, other = commits
     files, cites, extra, want = {}, [], [], []
 
-    def log(path, line, body, tail, tree=base):
-        files[path] = f"{line}\nBASE: {base}\nTREE: {tree}\nHOLON_PBT_TIMING=measure\nSTARTED: 2026-11-09T05:15:49Z\n" + "".join(
+    def log(path, line, body, tail, tree=base, mode="measure"):
+        timing = "" if mode is None else f"HOLON_PBT_TIMING={mode}\n"
+        files[path] = f"{line}\nBASE: {base}\nTREE: {tree}\n{timing}STARTED: 2026-11-09T05:15:49Z\n" + "".join(
             b + "\n" for b in body) + f"\n{tail}\n"
         cites.append(path)
 
@@ -755,7 +767,12 @@ def lane_files(rng, spec, commits):
             body = gate_lines(units, o.get("off", 0), unit_files(units, log, files, {"base": base, "other": other}))
         else:
             body = gate_lines(units)
-        log(path, line, body, f"exit: {hand_exit(o['hand']) if 'hand' in o else rng.choice([1, 100, 101])}")
+        code = hand_exit(o["hand"]) if "hand" in o else rng.choice([1, 100, 101])
+        mode = windowed_mode(o) if step == "windowed" else "measure"
+        log(path, line, body, f"exit: {code}", mode=mode)
+        if code and mode != "measure":
+            want += mode_refusal(path, mode) + [not_run]
+            continue
         judge = o.get("classifier")
         stale = judge == 0 and not judged_on_tree(o)
         exits = JUDGE_EXITS[judge] if judge is not None else []
@@ -1512,9 +1529,9 @@ def red_unit(unit, first=("present", "ok"), rerun=("present", "ok")):
     return {"verdict": "RED", "logs": {logs[0]: first, logs[1]: rerun}}
 
 
-def windowed_step(units, off=0, classifier=1):
+def windowed_step(units, off=0, classifier=1, mode="measure"):
     """A red windowed step whose step-log classifier finds no panic in it (exit 1), as for every real gate log."""
-    o = {"kind": "red", "red": [], "nextest": False, "units": units, "off": off}
+    o = {"kind": "red", "red": [], "nextest": False, "units": units, "off": off, "mode": mode}
     return {**o, "classifier": classifier} if classifier is not None else o
 
 
@@ -1537,12 +1554,15 @@ WINDOWED_FIXED = {
     "a unit log classified twice, exit 0 then exit 1": windowed_step({UNDO: red_unit(UNDO, rerun=("present", "ok+red"))}),
     "a unit classifier log run on another tree": windowed_step({UNDO: red_unit(UNDO, rerun=("present", "stale"))}),
     "an end line that counts one red unit more": windowed_step({UNDO: red_unit(UNDO)}, off=1),
+    "a red windowed step run in enforce mode, every unit a known red": windowed_step(
+        {UNDO: red_unit(UNDO)}, mode="enforce"),
+    "a red windowed step with no mode line, every unit a known red": windowed_step({UNDO: red_unit(UNDO)}, mode=None),
     "a red unit without a rerun line, its one log a known red": windowed_step(
         {UNDO: {"verdict": "RED", "rerun": False, "logs": {unit_logs(UNDO, {"verdict": "RED", "rerun": False})[0]:
                                                              ("present", "ok")}}}),
 }
 # The words of each refusal of the windowed red path; a case with no refusal is accepted.
-VERDICT_CLASSES = {("FAIL lines",): "count", ("is HUNG",): "hung", ("does not exist",): "missing",
+VERDICT_CLASSES = {("without the header line",): "mode", ("FAIL lines",): "count", ("is HUNG",): "hung", ("does not exist",): "missing",
                    ("changed after",): "changed", ("no unit-log line",): "unlisted",
                    ("no cited classifier",): "uncited",
                    ("of unit", "`exit: 1`"): "novel", ("of unit", "checked tree"): "stale"}
@@ -1555,7 +1575,8 @@ def windowed_outcome(rng):
     if not units:
         units = {CHROME: {"verdict": "PASS"}}
     red = any(s["verdict"] == "RED" for s in units.values())
-    return windowed_step(units, rng.choice([0] * 8 + [1] + [-1] * red), rng.choice([None, 1, 1, 3]))
+    return windowed_step(units, rng.choice([0] * 8 + [1] + [-1] * red), rng.choice([None, 1, 1, 3]),
+                         rng.choice(["measure"] * 9 + ["enforce", "", None]))
 
 
 def windowed_units(cases):
@@ -1600,6 +1621,7 @@ def real_windowed_logs():
         lines = f.read_text().splitlines()
         fails, (red, hung) = checker.gate_failures(lines), checker.gate_counts(lines)
         assert len(fails) == red + hung and fails, (f.name, fails, red, hung)
+        assert checker.timing_mode(lines) == "measure", f.name
         reruns = checker.gate_reruns(lines)
         assert all(reruns[unit][1] == final for _, unit, final in fails), (f.name, fails, reruns)
         print(f"[tests-cover-diff] real windowed log {f.name}: {len(fails)} FAIL lines = RED={red} HUNG={hung}")

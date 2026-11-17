@@ -42,7 +42,7 @@ A step ran when a cited log has the selected line as line 1, and one of these ho
     log must show the end of a complete run, else it is refused too, as its reds prove nothing about the tests it never
     ran: a log with nextest failing-test lines needs a `Summary [...] N tests run` line (`k/n tests run` with k < n is a
     cut run, in any log), and a log with windowed gate verdicts needs the gate's `windowed-gate: wall=` end line.
-A `nextest` or `keystone-smoke` log must carry the line `HOLON_PBT_TIMING=measure` in its header (the lines after line 1
+A `nextest` or `keystone-smoke` log, and a red `windowed` log, must carry the line `HOLON_PBT_TIMING=measure` in its header (the lines after line 1
 that are BASE:, TREE:, STARTED:, `shape env:` or that mode line); else it fails, whatever its exit, naming the value found.
 A static gate step (a name `bash <gate script> --steps` prints, `gate_step_names` of select-tests.py) that the
 selector does not print may carry an `accepted-base-red:` line too: every cited red log whose line 1 runs that step is
@@ -180,6 +180,15 @@ def timing_mode(lines):
         if line.startswith("HOLON_PBT_TIMING="):
             return line.split("=", 1)[1]
     return None
+
+
+def mode_problem(step, path, lines):
+    """Why a timed step log does not show measure mode in its header; [] when it does."""
+    if (mode := timing_mode(lines)) == "measure":
+        return []
+    found = "no HOLON_PBT_TIMING= line" if mode is None else f"HOLON_PBT_TIMING={mode}"
+    return [f"{path} runs `{step}` without the header line `HOLON_PBT_TIMING=measure` ({found}); rerun the "
+            f"step with scripts/flow-checks/run-step.sh and HOLON_PBT_TIMING unset or `measure`"]
 
 
 def norm(line):
@@ -550,16 +559,17 @@ def check(selected_text, summary_text, logs, not_run, base=None, tree_of=git_tre
         if line not in selected[first]:
             bad.append(f"{path} runs `{lines[0]}`, the selector prints {sorted(selected[first])}")
             continue
-        if first in TIMED_STEPS and (mode := timing_mode(lines)) != "measure":
-            found = "no HOLON_PBT_TIMING= line" if mode is None else f"HOLON_PBT_TIMING={mode}"
-            bad.append(f"{path} runs `{first}` without the header line `HOLON_PBT_TIMING=measure` ({found}); rerun the "
-                       f"step with scripts/flow-checks/run-step.sh and HOLON_PBT_TIMING unset or `measure`")
+        if first in TIMED_STEPS and (problem := mode_problem(first, path, lines)):
+            bad += problem
             continue
         if lines[-1] == EXIT_OK:
             ran.add(line)
             continue
         if not EXIT_RED.fullmatch(lines[-1]):
             bad.append(f"{path} runs `{first}` but its last line is `{lines[-1]}`, not `exit: <code>`")
+            continue
+        if first == WINDOWED and (problem := mode_problem(first, path, lines)):
+            bad += problem
             continue
         judges = [c for c, target in sorted(classifiers.items()) if same_file(target, path)]
         verdicts = [problem for c in judges for problem in judged(c, split[c], f"{path} of step `{first}`", on_tree)]
