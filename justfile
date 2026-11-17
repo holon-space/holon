@@ -1832,7 +1832,7 @@ landing-gate:
     # runs 12 and 13 at any load and 14 under the quiet hold, because the
     # windowed paint waits go red on a loaded host.
     echo "== landing [12/17]: hand-authored regressions (latency measured) =="
-    just hand-authored
+    GATE=landing bash scripts/gate-integrate-steps.sh hand-authored
     echo "== landing [13/17]: projector-lag lock =="
     just projector-lag-lock
     echo "== landing [14/17]: windowed GPUI tests (latency measured) =="

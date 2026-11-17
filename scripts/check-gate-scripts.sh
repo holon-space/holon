@@ -1034,6 +1034,39 @@ expect "then runs its steps under its own hold" grep -qE "^timing-gate-steps \| 
 expect "not under the other job's hold" [ -z "$(grep "^timing-gate-steps | quiet=$other\$" "$probe")" ]
 expect "releases the hold" [ ! -e "$marker" ]
 
+echo "== the landing-gate recipe's hand-authored step on a green, a known-red, a novel-red and a stale-row tree"
+# The real recipe runs; `just` and `cargo` are the stubs, so every step but the hand-authored one is a probe line.
+# The classifier is a stub with the real one's two modes. Example-based: the inputs are the four outcome kinds of
+# the step, as in the integrate cases above.
+land="$scratch/land"
+mkdir -p "$land/scripts"
+cp "$here/gate-integrate-steps.sh" "$land/scripts/"
+cat > "$land/scripts/keystone-known-reds.sh" <<'EOF'
+#!/bin/sh
+[ "$1" != --stale ] || exit "${STUB_STALE:-0}"
+[ "${STUB_CLASSIFY:-}" != note ] || echo "PASS-WITH-NOTE (stub classifier)"
+EOF
+land_case() {
+  local rc=0
+  in_stubs "$@" "$real_just" --justfile "$here/../justfile" --working-directory "$land" landing-gate >"$scratch/land.out" 2>&1 || rc=$?
+  echo "$rc"
+}
+reached() { grep -qE 'landing \[13/17\]' "$scratch/land.out"; }
+rc=$(land_case)
+expect "green: exits 0 (got $rc)" [ "$rc" = 0 ]
+expect "green: reaches the end" grep -qx '== landing gate PASS ==' "$scratch/land.out"
+rc=$(land_case STUB_RED=hand-authored STUB_CLASSIFY=note)
+expect "known reds only: exits 0 (got $rc)" [ "$rc" = 0 ]
+expect "known reds only: says so" grep -qx 'hand-authored: pass-with-note (known reds only)' "$scratch/land.out"
+expect "known reds only: reaches the end" grep -qx '== landing gate PASS ==' "$scratch/land.out"
+rc=$(land_case STUB_RED=hand-authored)
+expect "a novel red: exits 11 (got $rc)" [ "$rc" = 11 ]
+expect "a novel red: names it" grep -qx 'HAND-AUTHORED NOVEL RED' "$scratch/land.out"
+expect "a novel red: stops before the next step" [ ! "$(reached && echo y)" ]
+rc=$(land_case STUB_STALE=2)
+expect "a green tree with a stale known-red row: exits 2 (got $rc)" [ "$rc" = 2 ]
+expect "a green tree with a stale known-red row: stops before the next step" [ ! "$(reached && echo y)" ]
+
 echo "== a quiet-hold wait behind foreign holds, of the quiet track and of the timing-gate recipe"
 hold_log="$home/.cache/holon-build/holds.jsonl" dummies="$scratch/dummies"
 # Takes the foreign holds in order, each "<seconds>:<release|die>", each for a fresh pid; stops at the
