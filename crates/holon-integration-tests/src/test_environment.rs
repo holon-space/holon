@@ -325,6 +325,8 @@ pub struct TestEnvironmentBuilder {
     /// Extensions whose reads are parked from boot until
     /// `org_fs.release_reads_with_extension(ext)`.
     held_read_extensions: Vec<String>,
+    /// A boot step made to fail before it runs.
+    boot_step_fault: Option<holon_pbt_core::BootStepFault>,
 }
 
 impl TestEnvironmentBuilder {
@@ -338,7 +340,14 @@ impl TestEnvironmentBuilder {
             clock: None,
             hold_initial_scan: false,
             held_read_extensions: Vec::new(),
+            boot_step_fault: None,
         }
+    }
+
+    /// Boot with `fault` armed, so its step fails before it runs.
+    pub fn with_boot_step_fault(mut self, fault: holon_pbt_core::BootStepFault) -> Self {
+        self.boot_step_fault = Some(fault);
+        self
     }
 
     /// Park the boot inside its initial vault scan until the test calls
@@ -485,6 +494,7 @@ impl TestEnvironmentBuilder {
         };
         let org_fs_for_di = org_fs.clone();
         let secret_namespace = config_dir.clone();
+        let boot_step_fault = self.boot_step_fault;
         let (session, backend_engine, (doc_store, reactive_engine, idle_signal, injector)) =
             holon_app::new_from_config_with_di(
                 holon_config,
@@ -500,6 +510,9 @@ impl TestEnvironmentBuilder {
                         &secret_namespace,
                     );
                     holon_mcp::di::register_debug_services(injector);
+                    if let Some(fault) = boot_step_fault {
+                        crate::pbt::composed::boot_fault::arm_boot_step_fault(fault, injector);
+                    }
                     Ok(())
                 },
                 move |injector| {
@@ -522,7 +535,9 @@ impl TestEnvironmentBuilder {
             .await?;
         let debug_services =
             holon_mcp::di::populate_debug_services(&injector, Some(reactive_engine.clone())).await;
-        let sync_handle = if enable_loro {
+        let sync_handle = if enable_loro
+            && boot_step_fault != Some(holon_pbt_core::BootStepFault::SyncController)
+        {
             Some(loro_sync_handle(&injector).await)
         } else {
             None

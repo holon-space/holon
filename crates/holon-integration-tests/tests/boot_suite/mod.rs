@@ -7,6 +7,7 @@
 mod boot_projector_gated_on_scan;
 mod boot_scan_bad_file_survives;
 mod boot_seed_outcome;
+mod boot_step_fault_degrades;
 mod cold_boot_share_disclosure;
 mod failed_ingest_disclosed_across_restarts;
 mod forward_edge_ingest_regression;

@@ -146,7 +146,7 @@ fn the_window_says_loading_until_the_layout_seed_lands() {
     let report = env.session().boot_report().clone();
     assert_eq!(
         report.in_background(),
-        vec![BootStep::SeedDefaultLayout],
+        vec![BootStep::SeedDefaultLayout, BootStep::PostReady],
         "precondition: the held scan keeps the layout seed in the background"
     );
 
@@ -168,7 +168,7 @@ fn the_window_says_loading_until_the_layout_seed_lands() {
     );
     assert_eq!(
         report.in_background(),
-        vec![BootStep::SeedDefaultLayout],
+        vec![BootStep::SeedDefaultLayout, BootStep::PostReady],
         "precondition: the placeholder was looked at while the seed was still pending"
     );
 

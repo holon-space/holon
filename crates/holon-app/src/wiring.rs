@@ -631,10 +631,12 @@ impl FrontendInjectorExt for Injector {
                             supervisor.start(engine.clone()).await;
                             disclosure.performed(BootStep::McpFdwTables);
                         }
-                        Err(_) => disclosure.absent_by_config(
-                            BootStep::McpFdwTables,
-                            "no MCP integration supervisor in this container",
-                        ),
+                        Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => disclosure
+                            .absent_by_config(
+                                BootStep::McpFdwTables,
+                                "no MCP integration supervisor in this container",
+                            ),
+                        Err(e) => disclosure.failed(BootStep::McpFdwTables, e),
                     }
                 }
                 .instrument(tracing::info_span!(
@@ -642,51 +644,58 @@ impl FrontendInjectorExt for Injector {
                 ))
                 .await;
 
-                let error_tracker: PublishErrorTracker = resolver
-                    .try_resolve::<PublishErrorTracker>()
-                    .map(|t| (*t).clone())
-                    .unwrap_or_else(|_| PublishErrorTracker::new());
-                disclosure.performed(BootStep::PublishErrorTracker);
+                // An unregistered tracker is the plain case; a fresh one then
+                // records this session's publish failures.
+                let error_tracker: PublishErrorTracker =
+                    match resolver.try_resolve::<PublishErrorTracker>() {
+                        Ok(tracker) => {
+                            disclosure.performed(BootStep::PublishErrorTracker);
+                            (*tracker).clone()
+                        }
+                        Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => {
+                            disclosure.performed(BootStep::PublishErrorTracker);
+                            PublishErrorTracker::new()
+                        }
+                        Err(e) => {
+                            disclosure.failed(BootStep::PublishErrorTracker, e);
+                            PublishErrorTracker::new()
+                        }
+                    };
                 #[cfg(not(target_arch = "wasm32"))]
                 let ready_signal: Option<
                     tokio::sync::watch::Receiver<Option<Result<(), String>>>,
-                > = resolver
-                    .try_resolve::<holon_orgmode::di::FileWatcherReadySignal>()
-                    .ok()
-                    .map(|s| (*s).clone().into_receiver());
-                #[cfg(not(target_arch = "wasm32"))]
-                if ready_signal.is_some() {
-                    disclosure.performed(BootStep::FileWatcherReadySignal);
-                } else {
-                    // No org module registered it — the vault-less configuration.
-                    disclosure.absent_by_config(
-                        BootStep::FileWatcherReadySignal,
-                        "no org file watcher in this configuration",
-                    );
-                }
+                > = match resolver.try_resolve::<holon_orgmode::di::FileWatcherReadySignal>() {
+                    Ok(signal) => {
+                        disclosure.performed(BootStep::FileWatcherReadySignal);
+                        Some((*signal).clone().into_receiver())
+                    }
+                    Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => {
+                        disclosure.absent_by_config(
+                            BootStep::FileWatcherReadySignal,
+                            "no org file watcher in this configuration",
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        disclosure.failed(BootStep::FileWatcherReadySignal, e);
+                        None
+                    }
+                };
 
                 // Transition DB to ready
                 async {
-                    if let Ok(db_handle_provider) = resolver.try_resolve::<dyn DbHandleProvider>() {
-                        let handle = db_handle_provider.handle();
-                        if let Err(e) = handle.transition_to_ready().await {
-                            // Names the boot step, because the ledger cannot see
-                            // WHY a step is unmarked: without this line the boot
-                            // report blames `transition-db-to-ready` on wiring
-                            // drift and sends the reader hunting a divergence
-                            // that is not there.
-                            tracing::error!(
-                                "boot [component=platform-capabilities]: step \
-                                 `transition-db-to-ready` FAILED at runtime: {e}. The DB actor is \
-                                 still in boot mode. This — not a divergence from the shared \
-                                 wiring — is why the boot report lists that step as skipped."
-                            );
-                        } else {
-                            // Records success, not the attempt: a DB left in
-                            // boot mode is a missing step, and the ledger says
-                            // so instead of reporting the transition as done.
-                            disclosure.performed(BootStep::TransitionDbToReady);
+                    match resolver.try_resolve::<dyn DbHandleProvider>() {
+                        Ok(db_handle_provider) => {
+                            match db_handle_provider.handle().transition_to_ready().await {
+                                Ok(()) => disclosure.performed(BootStep::TransitionDbToReady),
+                                Err(e) => disclosure.failed(
+                                    BootStep::TransitionDbToReady,
+                                    format!("the DB actor is still in boot mode: {e}"),
+                                ),
+                            }
                         }
+                        Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => {}
+                        Err(e) => disclosure.failed(BootStep::TransitionDbToReady, e),
                     }
                 }
                 .instrument(tracing::info_span!(
@@ -703,26 +712,39 @@ impl FrontendInjectorExt for Injector {
                 // and an empty section is then the truth.
                 #[cfg(not(target_arch = "wasm32"))]
                 async {
-                    if let Ok(vm) = resolver
+                    match resolver
                         .try_resolve::<crate::integrations_settings::IntegrationsSettingsVm>()
                     {
-                        std::sync::Arc::new(
-                            crate::integration_projection::IntegrationStateProjector::new(
-                                engine.db_handle().clone(),
-                                vm,
-                            ),
-                        )
-                        .start(
-                            resolver
+                        Ok(vm) => {
+                            let shutdown = resolver
                                 .resolve_async::<holon_api::lifecycle::SessionShutdown>()
+                                .await;
+                            let started = async {
+                                injected_step_failure(step_failure::INTEGRATION_STATE_PROJECTION)?;
+                                std::sync::Arc::new(
+                                    crate::integration_projection::IntegrationStateProjector::new(
+                                        engine.db_handle().clone(),
+                                        vm,
+                                    ),
+                                )
+                                .start(shutdown.as_ref())
                                 .await
-                                .as_ref(),
-                        )
-                        .await
-                        .expect(
-                            "boot [component=session stage=session-resolve]: \
-                             IntegrationStateProjector::start failed",
-                        );
+                            }
+                            .await;
+                            match started {
+                                Ok(()) => {
+                                    disclosure.performed(BootStep::IntegrationStateProjection)
+                                }
+                                Err(e) => disclosure
+                                    .failed(BootStep::IntegrationStateProjection, format!("{e:#}")),
+                            }
+                        }
+                        Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => disclosure
+                            .absent_by_config(
+                                BootStep::IntegrationStateProjection,
+                                "no integrations directory configured",
+                            ),
+                        Err(e) => disclosure.failed(BootStep::IntegrationStateProjection, e),
                     }
                 }
                 .instrument(tracing::info_span!(
@@ -737,13 +759,18 @@ impl FrontendInjectorExt for Injector {
                     let shutdown = resolver
                         .resolve_async::<holon_api::lifecycle::SessionShutdown>()
                         .await;
-                    holon::api::action_watcher::start_action_watchers(engine.clone(), shutdown)
-                        .await
-                        .expect(
-                            "boot [component=session stage=session-resolve]: \
-                             start_action_watchers failed",
-                        );
-                    disclosure.performed(BootStep::StartActionWatchers);
+                    let started = async {
+                        injected_step_failure(step_failure::START_ACTION_WATCHERS)?;
+                        holon::api::action_watcher::start_action_watchers(engine.clone(), shutdown)
+                            .await
+                    }
+                    .await;
+                    match started {
+                        Ok(()) => disclosure.performed(BootStep::StartActionWatchers),
+                        Err(e) => {
+                            disclosure.failed(BootStep::StartActionWatchers, format!("{e:#}"))
+                        }
+                    }
                 }
                 .instrument(tracing::info_span!(
                     "di.factory.FrontendSession.start_action_watchers"
@@ -767,6 +794,7 @@ impl FrontendInjectorExt for Injector {
                     let ready_signal_bg = ready_signal.clone();
                     let engine_bg = engine.clone();
                     let seed_step = disclosure.in_background(BootStep::SeedDefaultLayout);
+                    let post_ready_step = disclosure.in_background(BootStep::PostReady);
                     let seed_running = engine.layout_seed().begin();
                     let post_ready_work = async move {
                         match boot_seed(&resolver_bg, &engine_bg)
@@ -785,9 +813,14 @@ impl FrontendInjectorExt for Injector {
                             let scan_error: Option<String> = {
                                 let result = signal.wait_for(|v| v.is_some()).await.expect(
                                     "boot [component=org-sync stage=session-resolve]: \
-                                         FileWatcherReadySignal sender dropped",
+                                         FileWatcherReadySignal sender dropped unanswered, \
+                                         but the controller's Unanswered guard answers on \
+                                         every exit",
                                 );
-                                match result.as_ref().unwrap() {
+                                match result
+                                    .as_ref()
+                                    .expect("wait_for returned only once the outcome is Some")
+                                {
                                     Ok(()) => None,
                                     Err(msg) => Some(msg.clone()),
                                 }
@@ -811,19 +844,32 @@ impl FrontendInjectorExt for Injector {
                         // so deferred provider syncs run against an idle actor.
                         // Opened on EVERY path so a deferred sync always
                         // eventually runs (fail-loud: never a silent never-sync).
+                        let mut failures: Vec<String> = Vec::new();
                         match resolver_bg.try_resolve::<holon_core::SyncGate>() {
                             Ok(gate) => {
                                 gate.open();
                                 tracing::info!("[post_ready] org scan complete — sync gate opened");
                             }
-                            Err(e) => tracing::error!(
-                                "[post_ready] SyncGate failed to resolve — deferred MCP syncs \
-                                 will fall back to the 600s watchdog: {e}"
-                            ),
+                            Err(e) => failures.push(format!(
+                                "the sync gate did not resolve, so deferred MCP syncs fall back \
+                                 to the 600s watchdog: {e}"
+                            )),
                         }
-                        let _ = resolver_bg
+                        // Resolving starts the controller; a SqlOnly session has none.
+                        match resolver_bg
                             .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
-                            .await;
+                            .await
+                        {
+                            Ok(_) => {}
+                            Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => {}
+                            Err(e) => failures
+                                .push(format!("the Loro sync controller did not start: {e}")),
+                        }
+                        if failures.is_empty() {
+                            post_ready_step.performed();
+                        } else {
+                            post_ready_step.failed(failures.join("; "));
+                        }
                     }
                     .instrument(tracing::info_span!(
                         "di.factory.FrontendSession.post_ready",
@@ -840,7 +886,6 @@ impl FrontendInjectorExt for Injector {
                             .await
                             .spawn("boot-post-ready", post_ready_work);
                     }
-                    disclosure.performed(BootStep::PostReady);
                 }
 
                 let config_dir_val = resolver.resolve::<ConfigDir>();
@@ -998,14 +1043,26 @@ impl Module for HolonFrontendModule {
 /// over a vault the scan could not run on.
 #[cfg(not(target_arch = "wasm32"))]
 async fn boot_seed(resolver: &Injector, engine: &Arc<BackendEngine>) -> Result<(), String> {
-    let Some(gate) = resolver
-        .optional_resolve_async::<holon_orgmode::BootSeedGate>()
+    let seed = || async {
+        injected_step_failure(step_failure::SEED_DEFAULT_LAYOUT)?;
+        seed_and_project_default_layout(resolver, engine).await
+    };
+    let gate = match resolver
+        .try_resolve_async::<holon_orgmode::BootSeedGate>()
         .await
-    else {
-        seed_and_project_default_layout(resolver, engine)
-            .await
-            .expect("boot [component=session stage=session-resolve]: seed_default_layout failed");
-        return Ok(());
+    {
+        Ok(gate) => gate,
+        Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => {
+            return seed()
+                .await
+                .map_err(|e| format!("seed_default_layout failed: {e:#}"));
+        }
+        Err(e) => {
+            return Err(format!(
+                "the default layout was not seeded, because its boot seed gate did not \
+                 resolve: {e}"
+            ));
+        }
     };
     let answer = gate.seed_answer();
     let shutdown = resolver
@@ -1016,7 +1073,7 @@ async fn boot_seed(resolver: &Injector, engine: &Arc<BackendEngine>) -> Result<(
             "the default layout was not seeded, because the org initial scan could not run: \
              {scan}"
         )),
-        Ok(()) => seed_and_project_default_layout(resolver, engine)
+        Ok(()) => seed()
             .await
             .map_err(|e| format!("seed_default_layout failed: {e:#}")),
     };
@@ -1025,6 +1082,25 @@ async fn boot_seed(resolver: &Injector, engine: &Arc<BackendEngine>) -> Result<(
     }
     answer.send(outcome.clone());
     outcome
+}
+
+/// The points where a test makes a boot step fail before the step runs.
+pub mod step_failure {
+    pub const INTEGRATION_STATE_PROJECTION: &str = "integration_state_projection";
+    pub const START_ACTION_WATCHERS: &str = "start_action_watchers";
+    pub const SEED_DEFAULT_LAYOUT: &str = "seed_default_layout";
+}
+
+/// `Err` when a test armed `point`; a build without `crash-injection` has no
+/// such point.
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "crash-injection"), allow(unused_variables))]
+fn injected_step_failure(point: &'static str) -> Result<()> {
+    #[cfg(feature = "crash-injection")]
+    if holon_filesystem::crash_injection::fires(point) {
+        anyhow::bail!("[crash-injection] boot step `{point}` fails");
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

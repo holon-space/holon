@@ -13,9 +13,10 @@ autotests = false
 # depend on this crate — never the storage-agnostic layers.
 
 [features]
-# `kill_session`, the crash teardown the tests end a session with. A release
-# build has none.
-crash-injection = []
+# `kill_session`, the crash teardown the tests end a session with, and the
+# boot steps a test makes fail (`wiring::step_failure`). A release build has
+# none.
+crash-injection = ["holon-filesystem/crash-injection"]
 
 [dependencies]
 holon.workspace = true

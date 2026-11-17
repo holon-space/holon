@@ -52,3 +52,33 @@ pub fn any_boot_fault() -> BoxedStrategy<BootFault> {
     ]
     .boxed()
 }
+
+/// A boot step that fails from data or the environment. The app must boot
+/// without that part and name the step and its error in the boot report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum BootStepFault {
+    /// The integration-state mirror's first projection fails.
+    IntegrationProjection,
+    /// Subscribing the rule and action discovery fails.
+    ActionWatchers,
+    /// Seeding the default layout fails.
+    LayoutSeed,
+    /// The Loro sync controller's factory returns an error.
+    SyncController,
+    /// The MCP integration supervisor's factory returns an error.
+    IntegrationSupervisor,
+}
+
+impl BootStepFault {
+    pub const ALL: [BootStepFault; 5] = [
+        Self::IntegrationProjection,
+        Self::ActionWatchers,
+        Self::LayoutSeed,
+        Self::SyncController,
+        Self::IntegrationSupervisor,
+    ];
+}
+
+pub fn any_boot_step_fault() -> BoxedStrategy<BootStepFault> {
+    proptest::sample::select(BootStepFault::ALL.to_vec()).boxed()
+}

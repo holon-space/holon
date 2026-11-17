@@ -130,6 +130,9 @@ pub enum BootStep {
     McpIntegrations,
     /// Registering MCP-backed FDW tables + the matview hook on the engine.
     McpFdwTables,
+    /// Mirroring the integrations enablement store into `integration_state`,
+    /// which the seeded Integrations sidebar section queries.
+    IntegrationStateProjection,
     /// `PublishErrorTracker`, the session's publish-failure record.
     PublishErrorTracker,
     /// The org initial-scan readiness signal handed to the session.
@@ -154,7 +157,7 @@ pub enum BootStep {
 }
 
 impl BootStep {
-    pub const ALL: [BootStep; 14] = [
+    pub const ALL: [BootStep; 15] = [
         Self::ConsolidatorEpochGuard,
         Self::WritebackDisclosure,
         Self::ThemeAndPreferences,
@@ -162,6 +165,7 @@ impl BootStep {
         Self::OrgModeIngest,
         Self::McpIntegrations,
         Self::McpFdwTables,
+        Self::IntegrationStateProjection,
         Self::PublishErrorTracker,
         Self::FileWatcherReadySignal,
         Self::TransitionDbToReady,
@@ -183,7 +187,9 @@ impl BootStep {
             Self::ConsolidatorEpochGuard | Self::OrgModeIngest | Self::FileWatcherReadySignal => {
                 Some(PlatformCapability::Filesystem)
             }
-            Self::McpIntegrations | Self::McpFdwTables => Some(PlatformCapability::ProcessSpawn),
+            Self::McpIntegrations | Self::McpFdwTables | Self::IntegrationStateProjection => {
+                Some(PlatformCapability::ProcessSpawn)
+            }
             Self::WritebackDisclosure
             | Self::ThemeAndPreferences
             | Self::UiInfo
@@ -205,6 +211,7 @@ impl BootStep {
             Self::OrgModeIngest => "orgmode-ingest",
             Self::McpIntegrations => "mcp-integrations",
             Self::McpFdwTables => "mcp-fdw-tables",
+            Self::IntegrationStateProjection => "integration-state-projection",
             Self::PublishErrorTracker => "publish-error-tracker",
             Self::FileWatcherReadySignal => "file-watcher-ready-signal",
             Self::TransitionDbToReady => "transition-db-to-ready",
@@ -372,6 +379,12 @@ impl BootDisclosure {
         }
     }
 
+    /// Record that `step` ran and failed: the boot goes on without what the
+    /// step provides, and the report names the step with `why`.
+    pub fn failed(&self, step: BootStep, why: impl std::fmt::Display) {
+        record_failure(&mut self.lock(), step, why.to_string());
+    }
+
     /// Record that `step` runs in a task that may outlive the boot. The step
     /// counts as performed only when that task reports success through the
     /// returned handle; a failure, or a task that ends without reporting,
@@ -479,13 +492,18 @@ impl BackgroundStep {
         if !state.in_background.contains(&self.step) {
             return;
         }
-        tracing::error!(
-            "boot [component=platform-capabilities]: step `{}` FAILED: {why}",
-            self.step
-        );
-        state.failed.push((self.step, why));
+        record_failure(&mut state, self.step, why);
         state.end_background(self.step);
     }
+}
+
+fn record_failure(state: &mut State, step: BootStep, why: String) {
+    assert!(
+        !state.performed.contains(&step) && !state.failed.iter().any(|(s, _)| *s == step),
+        "boot step `{step}` recorded twice"
+    );
+    tracing::error!("boot [component=platform-capabilities]: step `{step}` FAILED: {why}");
+    state.failed.push((step, why));
 }
 
 impl Drop for BackgroundStep {
@@ -572,7 +590,11 @@ mod tests {
                 &report,
                 SkipReason::MissingCapability(PlatformCapability::ProcessSpawn)
             ),
-            vec![BootStep::McpIntegrations, BootStep::McpFdwTables]
+            vec![
+                BootStep::McpIntegrations,
+                BootStep::McpFdwTables,
+                BootStep::IntegrationStateProjection,
+            ]
         );
     }
 

@@ -90,3 +90,52 @@ pub fn boot_fault_strategy() -> proptest::strategy::BoxedStrategy<BootFault> {
         Err(_) => holon_pbt_core::any_boot_fault(),
     }
 }
+
+/// The error text an armed [`holon_pbt_core::BootStepFault`] fails its step
+/// with.
+pub fn boot_step_fault_error(fault: holon_pbt_core::BootStepFault) -> String {
+    use holon_app::wiring::step_failure;
+    use holon_pbt_core::BootStepFault;
+    let point = match fault {
+        BootStepFault::IntegrationProjection => step_failure::INTEGRATION_STATE_PROJECTION,
+        BootStepFault::ActionWatchers => step_failure::START_ACTION_WATCHERS,
+        BootStepFault::LayoutSeed => step_failure::SEED_DEFAULT_LAYOUT,
+        BootStepFault::SyncController => return INJECTED_FACTORY_ERROR.to_string(),
+        BootStepFault::IntegrationSupervisor => return INJECTED_FACTORY_ERROR.to_string(),
+    };
+    format!("[crash-injection] boot step `{point}` fails")
+}
+
+const INJECTED_FACTORY_ERROR: &str = "boot step fault: injected factory error";
+
+/// Arms `fault` on a container whose frontend is already registered (the
+/// boot's extra setup): a step fails at its injection point, a factory by
+/// override.
+pub fn arm_boot_step_fault(fault: holon_pbt_core::BootStepFault, injector: &fluxdi::Injector) {
+    use holon_app::wiring::step_failure;
+    use holon_filesystem::crash_injection::arm;
+    use holon_pbt_core::BootStepFault;
+    match fault {
+        BootStepFault::IntegrationProjection => arm(step_failure::INTEGRATION_STATE_PROJECTION),
+        BootStepFault::ActionWatchers => arm(step_failure::START_ACTION_WATCHERS),
+        BootStepFault::LayoutSeed => arm(step_failure::SEED_DEFAULT_LAYOUT),
+        BootStepFault::SyncController => {
+            injector.override_provider::<holon_loro::LoroSyncControllerHandle>(
+                fluxdi::Provider::root_try_async(|_| async {
+                    Err::<fluxdi::Shared<holon_loro::LoroSyncControllerHandle>, _>(
+                        INJECTED_FACTORY_ERROR,
+                    )
+                }),
+            );
+        }
+        BootStepFault::IntegrationSupervisor => {
+            injector.override_provider::<holon_app::IntegrationSupervisor>(
+                fluxdi::Provider::root_try_async(|_| async {
+                    Err::<fluxdi::Shared<holon_app::IntegrationSupervisor>, _>(
+                        INJECTED_FACTORY_ERROR,
+                    )
+                }),
+            );
+        }
+    }
+}
