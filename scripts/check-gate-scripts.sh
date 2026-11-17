@@ -1179,6 +1179,8 @@ for _ in 1 2 3 4 5 6 7 8; do
 done
 rc=0; in_rstubs "$integrate" rerun g0 "$tip" g1.integrate.20261110T000000Z >/dev/null 2>&1 || rc=$?
 expect "a rerun of a gate with no record on this checkout exits 2 (got $rc)" [ "$rc" = 2 ]
+rc=0; in_rstubs STUB_RED_NEXTEST=1 "$integrate" rerun g1 "$tip" g1.integrate.20261110T000000Z >/dev/null 2>&1 || rc=$?
+expect "a rerun whose nextest run is red again exits with the step's novel-red 12 (got $rc)" [ "$rc" = 12 ]
 
 echo "== a rerun under another RUSTFLAGS than its gate"
 cp "$record" target/gate-logs/g9-cargo-calls.jsonl
@@ -1233,6 +1235,10 @@ expect "@- off the tip exits 9 (got $rc)" [ "$rc" = 9 ]
 jj new --quiet "$tip"; printf 'stray\n' > stray
 rc=0; in_stubs "$timing" g1 "1 2" "$tip" >/dev/null 2>&1 || rc=$?
 expect "edits on top of the tip exit 9 (got $rc)" [ "$rc" = 9 ]
+: > "$probe"
+rc=0; in_rstubs "$integrate" rerun g1 "$tip" g1.integrate.20261110T000000Z >/dev/null 2>&1 || rc=$?
+expect "gate-integrate.sh rerun: edits on top of the tip exit 9 (got $rc)" [ "$rc" = 9 ]
+expect "gate-integrate.sh rerun with edits: before any cargo or just call" [ ! -s "$probe" ]
 
 echo "== a conflicting weave"
 make_repo conflict
