@@ -396,6 +396,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `iroh-reverse-leg-imports-nothing-at-owner`
 - `join-then-stale-second-join`
 - `journal-feed-main-panel-still-loading`
+- `journals-sibling-order-after-paste-copy`
 - `lib-type-chars-home-profile-derived`
 - `logseq-parity-caret-fold-lost-loro`
 - `logseq-parity-corpus-replay-load-timeout`

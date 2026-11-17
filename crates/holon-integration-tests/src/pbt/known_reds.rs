@@ -462,6 +462,35 @@ mod tests {
         assert_eq!(reds.classify(&cofired), None, "{cofired}");
     }
 
+    #[test]
+    fn a_journals_sibling_order_verdict_is_known_only_with_its_loro_twin_beside_it() {
+        let reds = KnownReds::load().expect("load registry");
+        let head = "reconciled composed sequence diverged from the oracle: [";
+        let live = r#"("inv-live-children-match-ref", "[inv-live-children-match-ref] sibling order diverges under parent block:journals.\n  ref order: [EntityUri(\"block:journals::auto-create\"), EntityUri(\"block:368857d2-b6f5-4a8d-5c03-a6daedd2100f\"), EntityUri(\"block:41924457-7118-4771-85c4-89225f20cd6a\")]\n  sut order: [EntityUri(\"block:journals::auto-create\"), EntityUri(\"block:41924457-7118-4771-85c4-89225f20cd6a\"), EntityUri(\"block:368857d2-b6f5-4a8d-5c03-a6daedd2100f\")]")"#;
+        let loro = r#"("inv-loro-children-match-ref", "[inv-loro-children-match-ref] sibling order diverges under parent block:journals.\n  ref order: [\"block:journals::auto-create\", \"block:368857d2-b6f5-4a8d-5c03-a6daedd2100f\", \"block:41924457-7118-4771-85c4-89225f20cd6a\"]\n  sut order: [\"block:journals::auto-create\", \"block:41924457-7118-4771-85c4-89225f20cd6a\", \"block:368857d2-b6f5-4a8d-5c03-a6daedd2100f\"]")"#;
+        let both = format!("{head}{live}, {loro}]");
+        assert_eq!(
+            reds.classify(&both),
+            Some("journals-sibling-order-after-paste-copy")
+        );
+        assert_eq!(
+            reds.classify(&format!("Test failed: {both}")),
+            Some("journals-sibling-order-after-paste-copy")
+        );
+        let alone = format!("{head}{live}]");
+        assert_eq!(
+            reds.classify(&alone),
+            Some("journals-sibling-order-after-paste-copy")
+        );
+        let loro_alone = format!("{head}{loro}]");
+        assert_eq!(reds.classify(&loro_alone), None, "{loro_alone}");
+        let other_parent = both.replace("parent block:journals", "parent block:archive");
+        assert_eq!(reds.classify(&other_parent), None, "{other_parent}");
+        let beside =
+            format!("{head}{live}, {loro}, (\"inv-no-orphan-blocks\", \"1 orphan block\")]");
+        assert_eq!(reds.classify(&beside), None, "{beside}");
+    }
+
     mod draw_sample_pbt {
         use std::cell::Cell;
         use std::cell::RefCell;
