@@ -244,6 +244,10 @@ def failing_tests(lines):
             if (m := RESULT.fullmatch(line)) and not PASSING.fullmatch(m.group(1))}
 
 
+# Gate-arch checks that run nextest: a FAIL verdict of one without a `Summary` line means no test ran.
+NEXTEST_CHECKS = frozenset({"architecture_rules"})
+
+
 def failed_checks(lines):
     """The name of every check with a `FAIL <name> (exit N)` verdict line."""
     return {m.group(1) for line in lines if (m := CHECK_FAIL.fullmatch(line))}
@@ -408,7 +412,7 @@ def stop_line(lines):
     ends = [(line.strip(), m) for line in lines if (m := NEXTEST_SUMMARY.search(line))]
     if cut := next((line for line, m in ends if m.group(1) and int(m.group(1)) < int(m.group(2))), None):
         return f"`{cut}`"
-    if failing_tests(lines) and not ends:
+    if (failing_tests(lines) or failed_checks(lines) & NEXTEST_CHECKS) and not ends:
         return "no nextest `Summary [...] N tests run` line"
     if gate_red_modules(lines) and not any(GATE_END in line for line in lines):
         return f"no `{GATE_END}...` end line"
