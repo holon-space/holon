@@ -770,15 +770,15 @@ def lane_files(rng, spec, commits):
         code = hand_exit(o["hand"]) if "hand" in o else rng.choice([1, 100, 101])
         mode = windowed_mode(o) if step == "windowed" else "measure"
         log(path, line, body, f"exit: {code}", mode=mode)
-        if code and mode != "measure":
-            want += mode_refusal(path, mode) + [not_run]
-            continue
         judge = o.get("classifier")
         stale = judge == 0 and not judged_on_tree(o)
         exits = JUDGE_EXITS[judge] if judge is not None else []
-        for i, code in enumerate(exits):
+        for i, judge_code in enumerate(exits):
             log(judge_path(f"target/r1/{step}", i), f"known-reds: scripts/keystone-known-reds.sh {path}", [],
-                f"exit: {code}", tree=other if stale else base)
+                f"exit: {judge_code}", tree=other if stale else base)
+        if code and mode != "measure":
+            want += mode_refusal(path, mode) + [not_run]
+            continue
         if judge == 0 and not stale:
             continue
         base_path = f"target/base/{step}.log"
@@ -1557,6 +1557,8 @@ WINDOWED_FIXED = {
     "a red windowed step run in enforce mode, every unit a known red": windowed_step(
         {UNDO: red_unit(UNDO)}, mode="enforce"),
     "a red windowed step with no mode line, every unit a known red": windowed_step({UNDO: red_unit(UNDO)}, mode=None),
+    "a red windowed step run in enforce mode, its step log classified exit 0": windowed_step(
+        {UNDO: red_unit(UNDO)}, classifier=0, mode="enforce"),
     "a red unit without a rerun line, its one log a known red": windowed_step(
         {UNDO: {"verdict": "RED", "rerun": False, "logs": {unit_logs(UNDO, {"verdict": "RED", "rerun": False})[0]:
                                                              ("present", "ok")}}}),
@@ -1575,7 +1577,7 @@ def windowed_outcome(rng):
     if not units:
         units = {CHROME: {"verdict": "PASS"}}
     red = any(s["verdict"] == "RED" for s in units.values())
-    return windowed_step(units, rng.choice([0] * 8 + [1] + [-1] * red), rng.choice([None, 1, 1, 3]),
+    return windowed_step(units, rng.choice([0] * 8 + [1] + [-1] * red), rng.choice([None, 0, 1, 1, 3]),
                          rng.choice(["measure"] * 9 + ["enforce", "", None]))
 
 
