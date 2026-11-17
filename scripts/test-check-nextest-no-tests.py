@@ -275,6 +275,26 @@ def check_compiled(sites):
                                                                                          after.stdout)
 
 
+def check_jj_workspace(sites):
+    """In a jj workspace without .git inside another git repo, the check judges the files jj tracks, as in a git
+    tree: git there would list the outer repo's index."""
+    with tempfile.TemporaryDirectory() as d:
+        outer = Path(d)
+        subprocess.run(["git", "init", "-q", str(outer)], check=True)
+        subprocess.run(["jj", "git", "init", "--no-colocate", str(outer / "main")], check=True, capture_output=True)
+        subprocess.run(["jj", "-R", str(outer / "main"), "workspace", "add", "--name", "ws", str(outer / "ws")],
+                       check=True, capture_output=True)
+        ws = outer / "ws"
+        write_tree(ws, sites)
+        subprocess.run(["jj", "-R", str(ws), "status"], check=True, capture_output=True)
+        in_jj = subprocess.run([sys.executable, str(CHECK), str(ws)], capture_output=True, text=True)
+        (outer / "git").mkdir()
+        write_tree(outer / "git", sites)
+        in_git = run_check(outer / "git")
+        assert (in_jj.returncode, in_jj.stdout) == (in_git.returncode, in_git.stdout), (sites, in_git.stdout,
+                                                                                         in_jj.stdout, in_jj.stderr)
+
+
 def main():
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 40
     seed = int(os.environ.get("SEED", random.randrange(2 ** 32)))
@@ -293,6 +313,9 @@ def main():
     check_compiled([("script", "scripts/fixed.py", [("py", ['["cargo", "nextest", "run", "--no-tests=fail"]'], False)])])
     for _ in range(cases // 2):
         check_compiled(case(rng))
+    check_jj_workspace([("script", "scripts/w.sh", [("sh", ["cargo nextest run --workspace"], False)])])
+    for _ in range(cases // 4):
+        check_jj_workspace(case(rng))
     print("ok: %d examples, %d cases" % (len(EXAMPLES), cases))
     return 0
 

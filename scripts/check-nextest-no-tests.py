@@ -194,10 +194,15 @@ def recipes(repo):
 
 def tracked_files(repo):
     """Path of every tracked file that names nextest, but the justfile and the exempt ones. Untracked files are build
-    output or local; which of them git ignores depends on the clone's local excludes."""
-    listed = subprocess.run(["git", "-C", str(repo), "ls-files", "-z", "--cached"],
-                            capture_output=True, text=True, check=True).stdout
-    names = {n for n in listed.split("\0") if n and n != "justfile"}
+    output or local; which of them git ignores depends on the clone's local excludes. A jj workspace may have no .git,
+    and git would then list the index of a repo above it, so jj lists the files of its last snapshot."""
+    if (repo / ".jj").is_dir():
+        cmd = ["jj", "--ignore-working-copy", "-R", str(repo), "file", "list", "-r", "@", "-T", 'path ++ "\\0"']
+    else:
+        cmd = ["git", "-C", str(repo), "ls-files", "-z", "--cached"]
+    listed = [n for n in subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.split("\0") if n]
+    assert listed, f"{' '.join(cmd)} lists no file in {repo}"
+    names = {n for n in listed if n != "justfile"}
     return sorted(n for n in names if not any(fnmatch.fnmatchcase(n, e) for e in EXEMPT)
                   and (repo / n).is_file() and b"nextest" in (repo / n).read_bytes())
 
