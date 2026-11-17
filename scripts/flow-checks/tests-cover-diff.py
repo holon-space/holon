@@ -105,6 +105,8 @@ PASSING = re.compile(r"(?:TRY \d+ )?(?:PASS|LEAK|START)")
 # unit, the rerun line of each re-run unit, the `unit-log:` line of each log of a RED or HUNG unit, and the end line.
 # A unit is a binary id, or a binary id and a module of the `main` binary.
 # shortcut: the windowed gate names its reds per unit only; compare test names once it prints them.
+# The gate-arch recipe's verdict of a check that exited non-zero, at the start of a line.
+CHECK_FAIL = re.compile(r"FAIL (\S+) \(exit (\d+)\)")
 GATE_FAIL = re.compile(r"\s*FAIL: (RED|HUNG) (.+?) \(log ([^)]+)\)(?: .*)?")
 GATE_RERUN = re.compile(r"[A-Z-]+ +(.+?)  rerun wall=\S+  logs=(\S+) (\S+)\s*")
 GATE_UNIT_LOG = re.compile(r"\s*unit-log: (.+) (\S+) sha256=([0-9a-f]{64})\s*")
@@ -240,6 +242,11 @@ def failing_tests(lines):
     """`<binary> <test>` of every nextest result line that is no pass."""
     return {f"{m.group(2)} {m.group(3)}" for line in lines
             if (m := RESULT.fullmatch(line)) and not PASSING.fullmatch(m.group(1))}
+
+
+def failed_checks(lines):
+    """The name of every check with a `FAIL <name> (exit N)` verdict line."""
+    return {m.group(1) for line in lines if (m := CHECK_FAIL.fullmatch(line))}
 
 
 def gate_failures(lines):
@@ -463,8 +470,14 @@ def base_red_problems(step, lane_path, lane_lines, base_path, logs, selected_lin
     if stop := stop_line(lane_lines):
         return [f"{lane_path} of step `{step}` stopped before all its tests ran ({stop}), so its reds prove "
                 f"nothing about the tests it never ran; {ACCEPTED} needs a full run"]
+    lane_checks = failed_checks(lane_lines)
+    if only := sorted(lane_checks - failed_checks(base)):
+        return [f"{lane_path} of step `{step}`: check {', '.join(only)} failed only in the lane, not in base log "
+                f"{base_path}"]
     lane_red, base_red, by_module = red_names(lane_lines, base)
     hand_red, unnamed, cut, skipped = hand_authored(lane_lines)
+    if not lane_red and hand_red is None and lane_checks:
+        return []
     if not lane_red and hand_red is not None:
         return hand_problems(step, lane_path, hand_red, unnamed, cut, skipped, base_path, base)
     if not lane_red:
