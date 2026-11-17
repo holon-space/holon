@@ -776,13 +776,9 @@ def lane_files(rng, spec, commits):
         for i, judge_code in enumerate(exits):
             log(judge_path(f"target/r1/{step}", i), f"known-reds: scripts/keystone-known-reds.sh {path}", [],
                 f"exit: {judge_code}", tree=other if stale else base)
-        if code and mode != "measure":
-            want += mode_refusal(path, mode) + [not_run]
-            continue
-        if judge == 0 and not stale:
-            continue
         base_path = f"target/base/{step}.log"
-        if "base" in o or "base_hand" in o:
+        has_base = "base" in o or "base_hand" in o
+        if has_base and not (judge == 0 and not stale):
             extra.append(f"- accepted-base-red: {step} {base_path} {o.get('acceptance', ACCEPT_URL)}")
             if "base_hand" in o:
                 base_body = hand_lines(rng, o["base_hand"])
@@ -792,6 +788,12 @@ def lane_files(rng, spec, commits):
                 base_body = gate_lines(failing_units(o["base"], o.get("base_hung", ())))
             log(base_path, o.get("base_line", line), base_body, "exit: 100",
                 tree={"base": base, "child": child, "other": other}[o.get("tree", "child")])
+        if code and mode != "measure":
+            want += mode_refusal(path, mode) + [not_run]
+            continue
+        if judge == 0 and not stale:
+            continue
+        if has_base:
             refusals = base_refusal(o, path, base_path, red)
             if not refusals:
                 continue
@@ -875,7 +877,8 @@ def judged_on_tree(o):
 
 def module_notes(spec):
     """How many accepted-base-red compares run at module level."""
-    return sum(1 for o in spec.values() if o["kind"] == "red" and not judged_on_tree(o) and "base" in o
+    return sum(1 for line, o in spec.items() if o["kind"] == "red" and not judged_on_tree(o) and "base" in o
+               and (line != WINDOWED or windowed_mode(o) == "measure")
                and not o.get("base_line") and o.get("tree") != "other" and o["red"] and by_module(o) and "hand" not in o
                and not (o.get("stopped") and o.get("nextest", True)))
 
@@ -918,6 +921,10 @@ STATIC = {
     "one windowed red module, red on the base": {
         "windowed: just windowed-gate": {"kind": "red", "red": ACTION_BAR[:1], "nextest": False, "tree": "base",
                                          "base": ACTION_BAR[:1], "base_nextest": False, "classifier": 1}},
+    "a windowed red module run in enforce mode, red on the base": {
+        "windowed: just windowed-gate": {"kind": "red", "red": ACTION_BAR[:1], "nextest": False, "tree": "base",
+                                         "base": ACTION_BAR[:1], "base_nextest": False, "classifier": 1,
+                                         "mode": "enforce"}},
     "a windowed red module only in the lane": {
         "windowed: just windowed-gate": {"kind": "red", "red": ACTION_BAR[:1] + LOOP[:1], "nextest": False,
                                          "base": ACTION_BAR, "base_nextest": False}},
@@ -1036,6 +1043,7 @@ def outcome(rng):
         o["base_hung"] = rng.sample(modules, rng.randint(0, 2))
     if rng.random() < 0.2:
         o["stopped"] = True
+    o["mode"] = rng.choice(["measure"] * 9 + ["enforce", "", None])
     if not o.get("nextest", True):
         o["units"] = gate_units(rng, sorted({module(t) for t in red}), o.get("hung", ()))
         o["off"] = rng.choice([0] * 8 + [1] + [-1] * any(s["verdict"] == "RED" for s in o["units"].values()))
