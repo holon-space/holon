@@ -16,6 +16,10 @@ ignore = [
     "RUSTSEC-2025-0052",  # bincode unmaintained (transitive)
     "RUSTSEC-2025-0141",  # async-std discontinued (transitive)
     "RUSTSEC-2024-0449",  # unsafe-libyaml unmaintained (via serde_yaml; migration: holon-space/holon-work#181)
+    # chrono / chrono-tz / humantime unmaintained; direct deps, migration to jiff planned
+    "RUSTSEC-2026-0543",  # chrono unmaintained
+    "RUSTSEC-2026-0555",  # chrono-tz unmaintained
+    "RUSTSEC-2026-0542",  # humantime unmaintained (wraps chrono)
     # proc-macro-error2 unmaintained, pulled in via gpui -> stacksafe-macro ->
     # stacksafe. No fix available upstream (author confirmed unmaintained,
     # recommends manyhow/proc-macro2-diagnostics as replacements — that's an
