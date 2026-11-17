@@ -1037,13 +1037,15 @@ expect "releases the hold" [ ! -e "$marker" ]
 echo "== a quiet-hold wait behind foreign holds, of the quiet track and of the timing-gate recipe"
 hold_log="$home/.cache/holon-build/holds.jsonl" dummies="$scratch/dummies"
 # Takes the foreign holds in order, each "<seconds>:<release|die>", each for a fresh pid; stops at the
-# first take refused (the waiter took the hold in a gap). Every pid goes to $dummies.
+# first take refused (the waiter took the hold in a gap). Every pid goes to $dummies. A hold's seconds
+# start at the waiter's first refused take, so a slow waiter start cannot outlive a short hold.
 foreign_holds() {
   local h p
   for h in "$@"; do
     sleep 300 & p=$!
     echo "$p" >> "$dummies"
     HOME="$home" "$orch/with-build-slot.sh" --quiet-hold "$p" 2>/dev/null || { kill "$p"; wait "$p" 2>/dev/null || true; return 0; }
+    until [ -s "$refusals" ]; do sleep 0.05; done
     sleep "${h%%:*}"
     [ "${h#*:}" = die ] || HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$p" 2>/dev/null
     kill "$p"; wait "$p" 2>/dev/null || true
