@@ -703,6 +703,33 @@ impl FrontendInjectorExt for Injector {
                 ))
                 .await;
 
+                // A type declared at runtime outlives its boot: its rows are
+                // stored, so it is declared again before any write can reach it.
+                async {
+                    let profiles = holon_capability::registry::shipped_profiles()
+                        .expect("the shipped capability profiles must parse");
+                    let authority = resolver
+                        .resolve_async::<dyn holon_core::TypeWriteAuthority>()
+                        .await;
+                    let registry = resolver.resolve::<holon_profiles::TypeRegistry>();
+                    match crate::type_admission::redeclare_stored_types(
+                        &profiles,
+                        authority.as_ref(),
+                        engine.db_handle(),
+                        &registry,
+                        &engine.get_dispatcher(),
+                    )
+                    .await
+                    {
+                        Ok(()) => disclosure.performed(BootStep::RedeclareStoredTypes),
+                        Err(why) => disclosure.failed(BootStep::RedeclareStoredTypes, why),
+                    }
+                }
+                .instrument(tracing::info_span!(
+                    "di.factory.FrontendSession.redeclare_stored_types"
+                ))
+                .await;
+
                 // Mirror the enablement store into `integration_state`, which
                 // the seeded left-sidebar Integrations section queries. Runs
                 // here rather than in the (lazily resolved) integration

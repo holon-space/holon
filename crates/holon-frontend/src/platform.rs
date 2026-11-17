@@ -140,6 +140,8 @@ pub enum BootStep {
     /// `DbHandle::transition_to_ready` — the actor stays in boot mode without
     /// it.
     TransitionDbToReady,
+    /// Declaring again every type an earlier boot declared at runtime.
+    RedeclareStoredTypes,
     /// Seeding the bundled default layout so the shell has something to render.
     SeedDefaultLayout,
     /// Rule/action discovery. Without it seeded rules never fire.
@@ -157,7 +159,7 @@ pub enum BootStep {
 }
 
 impl BootStep {
-    pub const ALL: [BootStep; 15] = [
+    pub const ALL: [BootStep; 16] = [
         Self::ConsolidatorEpochGuard,
         Self::WritebackDisclosure,
         Self::ThemeAndPreferences,
@@ -169,6 +171,7 @@ impl BootStep {
         Self::PublishErrorTracker,
         Self::FileWatcherReadySignal,
         Self::TransitionDbToReady,
+        Self::RedeclareStoredTypes,
         Self::SeedDefaultLayout,
         Self::StartActionWatchers,
         Self::RegistryLinkClassifier,
@@ -195,6 +198,7 @@ impl BootStep {
             | Self::UiInfo
             | Self::PublishErrorTracker
             | Self::TransitionDbToReady
+            | Self::RedeclareStoredTypes
             | Self::SeedDefaultLayout
             | Self::StartActionWatchers
             | Self::RegistryLinkClassifier
@@ -215,6 +219,7 @@ impl BootStep {
             Self::PublishErrorTracker => "publish-error-tracker",
             Self::FileWatcherReadySignal => "file-watcher-ready-signal",
             Self::TransitionDbToReady => "transition-db-to-ready",
+            Self::RedeclareStoredTypes => "redeclare-stored-types",
             Self::SeedDefaultLayout => "seed-default-layout",
             Self::StartActionWatchers => "start-action-watchers",
             Self::RegistryLinkClassifier => "registry-link-classifier",
@@ -570,6 +575,7 @@ mod tests {
                 BootStep::WritebackDisclosure,
                 BootStep::UiInfo,
                 BootStep::TransitionDbToReady,
+                BootStep::RedeclareStoredTypes,
                 BootStep::RegistryLinkClassifier,
                 BootStep::PostReady,
             ]

@@ -53,6 +53,7 @@ mod rebuild_views_discloses_while_it_runs;
 mod refused_profile_boots_degraded;
 mod rehome_entity_op;
 mod root_slot_pending_while_seeding;
+mod runtime_type_survives_restart;
 mod search_deep_script_query_does_not_overflow;
 mod search_union_all_latency;
 mod seed_copy_on_write;
