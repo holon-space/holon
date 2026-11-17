@@ -262,6 +262,19 @@ def check(sites):
         assert sorted(filter(None, listed)) == want, (sites, listed)
 
 
+def check_compiled(sites):
+    """Byte-compiling the tree's Python files, as running or importing them does, leaves the verdict as it was: the
+    generated files are no call sites."""
+    with tempfile.TemporaryDirectory() as d:
+        tree = Path(d)
+        write_tree(tree, sites)
+        before = run_check(tree)
+        subprocess.run([sys.executable, "-m", "compileall", "-q", str(tree)], check=True, capture_output=True)
+        after = subprocess.run([sys.executable, str(CHECK), str(tree)], capture_output=True, text=True)
+        assert (after.returncode, after.stdout) == (before.returncode, before.stdout), (sites, before.stdout,
+                                                                                         after.stdout)
+
+
 def main():
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 40
     seed = int(os.environ.get("SEED", random.randrange(2 ** 32)))
@@ -277,6 +290,9 @@ def main():
     check_commented("sh", ["cargo nextest run --workspace  # TODO pass --no-tests=fail"])
     for _ in range(cases):
         check_commented(*commented_call(rng))
+    check_compiled([("script", "scripts/fixed.py", [("py", ['["cargo", "nextest", "run", "--no-tests=fail"]'], False)])])
+    for _ in range(cases // 2):
+        check_compiled(case(rng))
     print("ok: %d examples, %d cases" % (len(EXAMPLES), cases))
     return 0
 

@@ -4,7 +4,7 @@
     scripts/check-nextest-no-tests.py [repo]          judge every call site; exit 1 names each offending call
     scripts/check-nextest-no-tests.py --list [repo]   print one `<kind> <name>` line per site with a judged call
 
-Reads the source of every file git lists in the tree (tracked, or new and not ignored), the justfile by its recipes,
+Reads the source of every tracked file (a jj working copy tracks its new files), the justfile by its recipes,
 so it sees every call site, also those no gate step runs. A call is `nextest run` or `llvm-cov nextest`. Comments and
 Python docstrings are dropped first. Every other `nextest` ... `run` must be a call the check can read, or it fails as
 "cannot parse":
@@ -38,7 +38,6 @@ EXEMPT = {
     "*.xml": "test reports",
     ".gc/*": "generated agent tool state",
     "report/*": "generated duplication report",
-    "\u2026/*": "one-off scripts nothing runs",
     "scripts/check-nextest-no-tests.py": "names the call shapes it judges",
     "scripts/test-check-nextest-no-tests.py": "plants calls without the flag",
     "scripts/test-no-tests-check-reach.py": "names the call shapes it looks for",
@@ -194,8 +193,9 @@ def recipes(repo):
 
 
 def tracked_files(repo):
-    """Path of every file git lists in the tree that names nextest, but the justfile and the exempt ones."""
-    listed = subprocess.run(["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+    """Path of every tracked file that names nextest, but the justfile and the exempt ones. Untracked files are build
+    output or local; which of them git ignores depends on the clone's local excludes."""
+    listed = subprocess.run(["git", "-C", str(repo), "ls-files", "-z", "--cached"],
                             capture_output=True, text=True, check=True).stdout
     names = {n for n in listed.split("\0") if n and n != "justfile"}
     return sorted(n for n in names if not any(fnmatch.fnmatchcase(n, e) for e in EXEMPT)
