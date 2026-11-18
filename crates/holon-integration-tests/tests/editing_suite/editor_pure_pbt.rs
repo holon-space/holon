@@ -69,6 +69,7 @@ use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
 use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use proptest_state_machine::ReferenceStateMachine;
@@ -453,6 +454,19 @@ impl RefFocus for EditorPureRef {
 impl RefGlobalFocus for EditorPureRef {
     fn global_focused_block(&self) -> Option<EntityUri> {
         None
+    }
+}
+
+/// The pure slice holds no read-only document.
+impl RefReadOnlyHomes for EditorPureRef {
+    fn read_only_homed_blocks(&self) -> BTreeSet<EntityUri> {
+        BTreeSet::new()
+    }
+    fn refuses_creation_under(&self, _: &EntityUri) -> bool {
+        false
+    }
+    fn read_only_page_titles(&self) -> BTreeMap<EntityUri, String> {
+        BTreeMap::new()
     }
 }
 

@@ -47,6 +47,9 @@ pub enum Reason {
     FocusedInNoContentUpdate,
     FocusedInLayoutBlocks,
     FocusedNotDescendantOfFocusRoot,
+    /// The target is homed in a read-only file: the write tier refuses every
+    /// edit to it and every block created under it.
+    ReadOnlyHome,
     NoFocusableBlocks,
     SidebarFocusNotRendered,
     /// The LeftSidebar drawer is collapsed, so its page entries aren't
@@ -225,6 +228,7 @@ impl Reason {
             | Reason::FocusedInNoContentUpdate
             | Reason::FocusedInLayoutBlocks
             | Reason::FocusedNotDescendantOfFocusRoot
+            | Reason::ReadOnlyHome
             | Reason::NoFocusableBlocks
             | Reason::SidebarFocusNotRendered
             | Reason::LeftSidebarDrawerClosed

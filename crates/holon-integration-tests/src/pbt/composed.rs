@@ -133,6 +133,10 @@ pub mod seed_primitives;
 
 /// Boots a keystone case from a restored copy of a finished first boot.
 pub mod snapshot_boot;
+/// Fixed keystone cases run through the generator's own filter before the
+/// random draws.
+#[cfg(any(test, feature = "pbt"))]
+pub mod static_examples;
 /// THE SWAP slice (`WideE2E`) + its helpers — the composed `general_e2e`
 /// machinery, relocated here from `frontend_slice/structural_pbt.rs`'s
 /// `cfg(test)` mod and `pbt`-gated so the `tests/` integration test

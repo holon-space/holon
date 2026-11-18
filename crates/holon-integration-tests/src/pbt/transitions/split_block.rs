@@ -24,6 +24,7 @@ use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutDriver;
 use holon_pbt_core::capabilities::SutLayout;
@@ -166,7 +167,9 @@ pub struct SplitBlock {
 
 // ── Capability-bound free functions (Phase 3) ─────────────────────
 
-pub fn split_block_preconditions<R: RefBlockTree + RefEditorMirror + RefLifecycle>(
+pub fn split_block_preconditions<
+    R: RefBlockTree + RefEditorMirror + RefLifecycle + RefReadOnlyHomes,
+>(
     block_id: &EntityUri,
     position: usize,
     state: &R,
@@ -207,6 +210,12 @@ pub fn split_block_preconditions<R: RefBlockTree + RefEditorMirror + RefLifecycl
         !state.is_layout_block(block_id),
         Reason::FocusedInLayoutBlocks,
     ));
+    // The write tier refuses the split; the refusal itself is drawn by
+    // `AttemptReadOnlyEdit`.
+    checks.push(check(
+        !state.read_only_homed_blocks().contains(block_id),
+        Reason::ReadOnlyHome,
+    ));
     checks.push(check(
         state.is_descendant_of_any(block_id, &focus_roots),
         Reason::FocusedNotDescendantOfFocusRoot,
@@ -217,7 +226,9 @@ pub fn split_block_preconditions<R: RefBlockTree + RefEditorMirror + RefLifecycl
         .map(|_| ())
 }
 
-pub fn split_block_weighted_generator<R: RefBlockTree + RefEditorMirror + RefLifecycle>(
+pub fn split_block_weighted_generator<
+    R: RefBlockTree + RefEditorMirror + RefLifecycle + RefReadOnlyHomes,
+>(
     state: &R,
 ) -> Validated<(u32, BoxedStrategy<SplitBlock>), Reason> {
     let mut candidates: Vec<(EntityUri, usize)> = vec![];
@@ -303,7 +314,9 @@ pub fn split_block_apply_to_ref<
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl<R: RefBlockTree + RefEditorMirror + RefLifecycle> TransitionFactory<R> for SplitBlock {
+impl<R: RefBlockTree + RefEditorMirror + RefLifecycle + RefReadOnlyHomes> TransitionFactory<R>
+    for SplitBlock
+{
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         // Single-sourced from the `cap_transition!` below — cannot drift with the
         // `S: SutBlockTreeWrite` dispatch bound (both come from the one cap token).
@@ -316,8 +329,15 @@ impl<R: RefBlockTree + RefEditorMirror + RefLifecycle> TransitionFactory<R> for 
     }
 }
 
-impl<R: RefBlockTree + RefBlockTreeMut + RefFocusMut + RefEditorMirrorMut + RefFocus + RefLifecycle>
-    TransitionRef<R> for SplitBlock
+impl<
+    R: RefBlockTree
+        + RefBlockTreeMut
+        + RefFocusMut
+        + RefEditorMirrorMut
+        + RefFocus
+        + RefLifecycle
+        + RefReadOnlyHomes,
+> TransitionRef<R> for SplitBlock
 {
     type Reason = Reason;
 
@@ -332,6 +352,7 @@ impl<R: RefBlockTree + RefBlockTreeMut + RefFocusMut + RefEditorMirrorMut + RefF
 
 crate::cap_transition! {
     SplitBlock: SutBlockTreeWrite,
+    where R: [ RefReadOnlyHomes ],
     |me, _state, sut| {
         sut.apply_split_block(&me.block_id, me.position).await;
     }

@@ -32,6 +32,7 @@ use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::live_mcp::LiveMcpE2E;
 use holon_integration_tests::pbt::composed::live_mcp::WideE2ELiveMcpMachine;
 use holon_integration_tests::pbt::composed::live_mcp::capture_live_cap_set;
+use holon_integration_tests::pbt::composed::static_examples::keystone_static_examples;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
 use holon_integration_tests::pbt::known_reds::KnownReds;
@@ -82,6 +83,16 @@ fn general_e2e_composed_pbt() {
     };
     config.rng_seed = RngSeed::Fixed(seed);
     eprintln!("keystone seed: {seed}");
+
+    for example in keystone_static_examples() {
+        eprintln!("[static example] running {}", example.name);
+        <ComposedSut<WideE2E> as StateMachineTest>::test_sequential(
+            config.clone(),
+            example.initial_state,
+            example.transitions,
+            None,
+        );
+    }
 
     let strategy = <WideE2EMachine as ReferenceStateMachine>::sequential_strategy(1..40);
     let known_reds = KnownReds::load().expect("known-reds registry");
