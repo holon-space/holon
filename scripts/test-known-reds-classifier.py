@@ -184,6 +184,27 @@ def stale_location_failures(work, rng):
     return failures
 
 
+def path_spelling_location_failures(work, rng):
+    """A STALE report names the input path byte for byte, whatever characters the path holds."""
+    pinned, key = logs.pinned_test()
+    parts = ["plain", "sp ace", "q'uote", "back\\tslash", "two\\\\back", "nl\\nesc", "dollar$x"]
+    names = ["back\\tslash"] + ["-".join(rng.sample(parts, rng.randrange(1, 3))) for _ in range(6)]
+    failures = []
+    for i, name in enumerate(names):
+        units = [f"holon-x::main a::case_{c}" for c in rng.sample("bcdefg", rng.randrange(1, 4))]
+        units.insert(rng.randrange(len(units) + 1), pinned)
+        text = logs.green_run(*units)
+        for capture, body in (("raw", text), ("job", logs.job_capture(text, rng))):
+            log = work / f"spelling-{i}" / name / f"{capture}.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(body)
+            out = subprocess.run([CLASSIFIER, log], capture_output=True, text=True).stdout
+            want = f"[known-reds] STALE: {key}: its test {pinned} passed at {log}:{units.index(pinned) + 2}."
+            if want not in out.splitlines():
+                failures.append(f"path spelling {name!r}, {capture} capture: want the line {want!r}, got:\n{out}")
+    return failures
+
+
 def broken_table_failures(work):
     """A table row that names no known-red row, or a test listed twice, stops the classifier with exit 2."""
     repo = CLASSIFIER.resolve().parent.parent
@@ -222,7 +243,7 @@ def main():
             if code != want_exit or not re.search(line, out, re.M):
                 failed += 1
                 print(f"example {name}: want exit {want_exit} and a line matching {line!r}, got exit {code}:\n{out}")
-        for failure in stale_only_failures(work) + broken_table_failures(work) + stale_location_failures(work, rng):
+        for failure in stale_only_failures(work) + broken_table_failures(work) + stale_location_failures(work, rng) + path_spelling_location_failures(work, rng):
             failed += 1
             print(failure)
         print(f"drawn with seed {seed} ({cases} cases)")
