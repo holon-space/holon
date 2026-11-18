@@ -349,7 +349,14 @@ impl ScratchWithGuest {
 
 impl Drop for ScratchWithGuest {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            let msg = format!("failed to remove {}: {e}", self.0.display());
+            if std::thread::panicking() {
+                eprintln!("{msg}");
+            } else {
+                panic!("{msg}");
+            }
+        }
     }
 }
 
