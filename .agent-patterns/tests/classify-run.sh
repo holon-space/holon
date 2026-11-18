@@ -39,11 +39,11 @@ mklog() {
 }
 
 declare -A seen
-check() { # check <label> <want> <log> [any] : the keystone classifier exits 1 or 3 on red; `any` takes exit 0 for red too
+check() { # check <label> <want> <log> : every class, red included, is an answer: exit 0
   local got; got=$("$hook" classify-run "$3" 2>"$work/err"); local rc=$?
   seen[$2]=$((${seen[$2]:-0} + 1))
   local ok=0
-  case $2 in red) [ "$rc" -eq 1 ] || [ "$rc" -eq 3 ] || { [ "${4:-}" = any ] && [ "$rc" -eq 0 ]; } || ok=1 ;; *) [ "$rc" -eq 0 ] || ok=1 ;; esac
+  [ "$rc" -eq 0 ] || ok=1
   [ "$got" = "$2" ] && [ $ok -eq 0 ] || { echo "FAIL $1: want '$2', got '$got' (exit $rc)"; fail=1; return; }
   echo "ok $1"
 }
@@ -53,6 +53,15 @@ known() { echo "${registered[RANDOM % ${#registered[@]}]}"; }
 mklog "$work/g" ; check "static green" green "$work/g"
 mklog "$work/k" "${registered[0]}"; check "static one registered red" known-red-only "$work/k"
 mklog "$work/n" "$(novel)"; check "static new red" red "$work/n"
+# A novel failure ends the classifier with exit 1, an empty log with exit 3: both reach the hook as `red` and exit 0.
+"$root/scripts/keystone-known-reds.sh" --class "$work/n" >/dev/null 2>&1; [ $? -eq 1 ] || { echo "FAIL fixture: novel failure does not reach classifier exit 1"; fail=1; }
+: > "$work/empty"; "$root/scripts/keystone-known-reds.sh" --class "$work/empty" >/dev/null 2>&1; [ $? -eq 3 ] || { echo "FAIL fixture: empty log does not reach classifier exit 3"; fail=1; }
+check "static empty log" red "$work/empty"
+# No verdict (classifier exit 2): the hook exits non-zero and prints no word.
+stub=$work/stub; mkdir -p "$stub/.agent-patterns" "$stub/scripts"; cp "$hook" "$stub/.agent-patterns/hook"
+printf '#!/usr/bin/env bash\nexit 2\n' > "$stub/scripts/keystone-known-reds.sh"; chmod +x "$stub/scripts/keystone-known-reds.sh"
+got=$("$stub/.agent-patterns/hook" classify-run "$work/n" 2>/dev/null); rc=$?
+{ [ "$rc" -ne 0 ] && [ -z "$got" ]; } || { echo "FAIL no verdict: want non-zero and no word, got '$got' (exit $rc)"; fail=1; }
 check "static missing path" red "$work/absent.log"
 
 for ((i = 0; i < draws; i++)); do
@@ -80,12 +89,12 @@ scripts_log() {
   (cd "$t" && env "${envs[@]}" "${words[@]}") > "$f" 2>&1
 }
 scripts_log "$work/sg" 0 0; check "static scripts run green" green "$work/sg"
-scripts_log "$work/sr" 0 1; check "static scripts run with a failing file" red "$work/sr" any
+scripts_log "$work/sr" 0 1; check "static scripts run with a failing file" red "$work/sr"
 for ((i = 0; i < draws / 3; i++)); do
   codes=(); want=green; for ((j = RANDOM % 4; j >= 0; j--)); do c=$(( RANDOM % 3 == 0 ? RANDOM % 3 : 0 )); codes+=("$c"); [ "$c" = 0 ] || want=red; done
   scripts_log "$work/s$i" "${codes[@]}"
   if [ $((RANDOM % 4)) = 0 ]; then sed -i '' '/^Summary: /,$d' "$work/s$i"; want=red; fi
-  check "scripts draw $i (${codes[*]}, $want)" "$want" "$work/s$i" any
+  check "scripts draw $i (${codes[*]}, $want)" "$want" "$work/s$i"
 done
 
 for c in green known-red-only red; do [ "${seen[$c]:-0}" -gt 0 ] || { echo "FAIL generator: class $c never drawn"; fail=1; }; echo "drawn $c: ${seen[$c]:-0}"; done
