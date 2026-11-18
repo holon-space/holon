@@ -329,11 +329,34 @@ fn a_plugin_format_is_read_only_and_refuses_write_back() {
     assert!(verdict.is_err(), "a read-only format refuses write-back");
 }
 
+/// A folder owned by one test, holding its own copy of the guest; removed on
+/// drop.
+struct ScratchWithGuest(PathBuf);
+
+impl ScratchWithGuest {
+    fn new(test: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("holon-plugin-host-{test}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(fixtures().join("testkit.wasm"), dir.join("testkit.wasm")).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchWithGuest {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn a_sidecar_claiming_write_back_is_refused() {
-    let dir = std::env::temp_dir().join("holon-plugin-host-sidecar-tests");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(fixtures().join("testkit.wasm"), dir.join("testkit.wasm")).unwrap();
+    let scratch = ScratchWithGuest::new("a_sidecar_claiming_write_back");
+    let dir = scratch.path();
     let sidecar = dir.join("greedy.yaml");
     std::fs::write(
         &sidecar,
@@ -353,9 +376,8 @@ fn a_sidecar_claiming_write_back_is_refused() {
 /// rows' ids.
 #[test]
 fn a_sidecar_type_that_is_not_snake_case_is_refused() {
-    let dir = std::env::temp_dir().join("holon-plugin-host-sidecar-tests");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(fixtures().join("testkit.wasm"), dir.join("testkit.wasm")).unwrap();
+    let scratch = ScratchWithGuest::new("a_sidecar_type_not_snake_case");
+    let dir = scratch.path();
     for type_name in [
         "2nd thing",
         "holon.document",
@@ -385,9 +407,8 @@ fn a_sidecar_type_that_is_not_snake_case_is_refused() {
 
 #[test]
 fn a_row_id_other_than_the_declared_source_path_is_refused() {
-    let dir = std::env::temp_dir().join("holon-plugin-host-sidecar-tests");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(fixtures().join("testkit.wasm"), dir.join("testkit.wasm")).unwrap();
+    let scratch = ScratchWithGuest::new("a_row_id_other_than_source_path");
+    let dir = scratch.path();
     let sidecar = dir.join("keyed-by-path.yaml");
     std::fs::write(
         &sidecar,
