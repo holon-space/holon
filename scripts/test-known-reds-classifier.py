@@ -9,7 +9,8 @@ default 100; SEED=<s> replays a draw). The fixed examples run first. Properties:
 - P2: LC_ALL, TMPDIR and the working directory do not change the output;
 - P3: interleaving never moves a printed panic out of the output, except under
   the message a cut location leaves it;
-- P4: without the `--no-capture` marker no panic leaves the output.
+- P4: without the `--no-capture` marker no panic leaves the output;
+- P5: a flow job capture of the log (a timestamp before every line) gets the same verdict word and exit code as the raw capture.
 Before the CASES draws it checks base draws, drawn until each case of `kinds` below is reached at least once, so every case
 is checked in every run; it fails when ATTEMPTS draws leave a case unreached. Exits non-zero when a property fails; each failing
 log is printed as an EXAMPLES entry.
@@ -106,7 +107,21 @@ def kinds(runs, clean, mixed):
     return k
 
 
-def check_draw(work, clean, mixed):
+def class_word(log):
+    r = subprocess.run([str(CLASSIFIER), "--class", str(log)], capture_output=True, text=True)
+    return r.returncode, r.stdout
+
+
+def capture_failures(work, text, rng):
+    """P5: the verdict word and exit code do not depend on how the log was captured."""
+    raw, job = work / "raw.log", work / "job.log"
+    raw.write_text(text)
+    job.write_text(logs.job_capture(text, rng))
+    want, got = class_word(raw), class_word(job)
+    return [f"P5: raw capture {want}, job capture {got}"] if want != got else []
+
+
+def check_draw(work, clean, mixed, rng):
     """Failures of P1 to P4 on one draw rendered as `clean` and `mixed`; returns (failures, the log to report)."""
     f1, got_clean = check(work, clean.text, logs.verdict(clean), "clean")
     f2, got_mixed = check(work, mixed.text, logs.verdict(mixed), "interleaved")
@@ -119,6 +134,8 @@ def check_draw(work, clean, mixed):
         got_unmarked = stated(unmarked)
         if not kept_within(got_clean, got_unmarked):
             failures.append(f"P4: without the marker a panic left the output: {show(got_unmarked)}\n   with it {show(got_clean)}")
+    for text in (clean.text, mixed.text):
+        failures += capture_failures(work, text, rng)
     return failures, clean.text if f1 or failures[-1:] and failures[-1].startswith("P4") else mixed.text
 
 
@@ -203,7 +220,7 @@ def main():
         draws += [draw() for _ in range(cases)]
         for clean, mixed, k in draws:
             reached.update(k)
-            failures, text = check_draw(work, clean, mixed)
+            failures, text = check_draw(work, clean, mixed, rng)
             if failures:
                 failed += 1
                 report(text, failures)

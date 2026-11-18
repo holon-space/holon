@@ -1,0 +1,126 @@
+2026-11-18T06:10:01Z BASE: bec3508696f9a3b9d934ba509dc4838aed94ca5d
+2026-11-18T06:10:01Z TREE: 7fbbca3a9263320319f45dd6e1cad2a64ccaddb0
+2026-11-18T06:16:17Z [hand-authored regression] running case "wbs-an-empty-org-block-survives-write-back-and-a-crash-restart" (known red: crash-restore-window-not-disclosed, 6 transitions, Checkpoints({6}), Locks({"inv-block-content/block_raw", "inv-blocks-match-ref/org", "inv-conditions-match-ref", "inv-crash-restore-copies-match-ref"}))
+2026-11-18T06:16:17Z [2m2026-11-18T06:16:08.959959Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [2m2026-11-18T06:16:09.027811Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [dense-tools] embedded MCP server up in 3.818333ms
+2026-11-18T06:16:17Z Applying transition 6/6: CrashRestart(CrashRestart { doc: EntityUri("block:ref-doc-0"), retitle_while_down: None })
+2026-11-18T06:16:17Z [2m2026-11-18T06:16:10.446763Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [dense-tools] embedded MCP server up in 3.454625ms
+2026-11-18T06:16:17Z [2m2026-11-18T06:16:10.780434Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z thread 'hand_authored_regressions::hand_authored_keystone_regressions' (513819887) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:2289:5:
+2026-11-18T06:16:17Z reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 expected disclosure(s) are NOT in effect: [\"crash-restore-ambiguous on a subject whose final path component is `wbs.org`\"]. The transition's outcome happened and the user was never told, which from inside the store is indistinguishable from it having succeeded. Raised (governed kinds only): []"), ("inv-crash-restore-copies-match-ref", "wbs.org has 0 conflict copies where the model expects 1; no copy holds the merge base texts [[\"Buy milk\", \"\"]]. Copies: []")]
+2026-11-18T06:16:17Z authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); projection-sinks=Sql(block_raw,matview); org-writeback=on
+2026-11-18T06:16:17Z lowest MEASURED failing layer: org round-trip (inv-conditions-match-ref, inv-crash-restore-copies-match-ref) — NOT proven first-divergent: UNVERIFIED below it: viewmodel [absent from the run report], render [absent from the run report]; fully verified green below: store/CRDT, matview/SQL
+2026-11-18T06:16:17Z   ↳ wiring: crates/holon-integration-tests/src/pbt/composed/invariants/conditions_match_ref.rs; crates/holon-integration-tests/src/pbt/composed/invariants/crash_restore_copies_match_ref.rs
+2026-11-18T06:16:17Z [hand-authored regression] RED case "wbs-an-empty-org-block-survives-write-back-and-a-crash-restart"
+2026-11-18T06:16:17Z thread 'hand_authored_regressions::hand_authored_keystone_regressions' (513819887) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:147:5:
+2026-11-18T06:16:17Z hand-authored replay: 1 red case(s): ["wbs-an-empty-org-block-survives-write-back-and-a-crash-restart"]
+2026-11-18T06:16:17Z test hand_authored_regressions::hand_authored_keystone_regressions ... FAILED
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z failures:
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z failures:
+2026-11-18T06:16:17Z     hand_authored_regressions::hand_authored_keystone_regressions
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 648 filtered out; finished in 174.47s
+2026-11-18T06:16:17Z [hand-authored regression] running case "hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit" (known red: crash-restore-window-not-disclosed, 6 transitions, Checkpoints({6}), Locks({"inv-block-content/block_raw", "inv-blocks-match-ref/org", "inv-conditions-match-ref", "inv-crash-restore-copies-match-ref"}))
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:53.909116Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:53.968077Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z Applying transition 5/6: PressKey(PressKey { chord: KeyChord({Escape}) })
+2026-11-18T06:16:17Z [inv-sql-budget] PressKey: not judged — started from an unswept state
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z Applying transition 6/6: CrashRestart(CrashRestart { doc: EntityUri("block:ref-doc-0"), retitle_while_down: None })
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:55.381946Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [dense-tools] embedded MCP server up in 7.464542ms
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:55.858034Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z thread 'hand_authored_regressions::hand_authored_keystone_regressions' (513821406) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:2289:5:
+2026-11-18T06:16:17Z reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 expected disclosure(s) are NOT in effect: [\"crash-restore-ambiguous on a subject whose final path component is `hm4.org`\"]. The transition's outcome happened and the user was never told, which from inside the store is indistinguishable from it having succeeded. Raised (governed kinds only): []"), ("inv-crash-restore-copies-match-ref", "hm4.org has 0 conflict copies where the model expects 1; no copy holds the merge base texts [[\"Buy milk\", \"Call mom\"]]. Copies: []")]
+2026-11-18T06:16:17Z authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); projection-sinks=Sql(block_raw,matview); org-writeback=on
+2026-11-18T06:16:17Z lowest MEASURED failing layer: org round-trip (inv-conditions-match-ref, inv-crash-restore-copies-match-ref) — NOT proven first-divergent: UNVERIFIED below it: viewmodel [absent from the run report], render [absent from the run report]; fully verified green below: store/CRDT, matview/SQL
+2026-11-18T06:16:17Z   ↳ wiring: crates/holon-integration-tests/src/pbt/composed/invariants/conditions_match_ref.rs; crates/holon-integration-tests/src/pbt/composed/invariants/crash_restore_copies_match_ref.rs
+2026-11-18T06:16:17Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-11-18T06:16:17Z [hand-authored regression] running case "crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy" (known red: crash-restore-window-not-disclosed, 6 transitions, Checkpoints({6}), Locks({"inv-blocks-match-ref/org", "inv-conditions-match-ref", "inv-crash-restore-copies-match-ref"}))
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:59.380102Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:59.470058Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [2m2026-11-18T06:16:01.165283Z[0m [33m WARN[0m [2mholon_filesystem::file_sync_controller::writeback[0m[2m:[0m [FileSyncController] write-back not landed: org write-back to /privateTMP failed: injected failure between temp write and rename (in-memory): /privateTMP [3mpath[0m[2m=[0m/privateTMP
+2026-11-18T06:16:17Z [inv-sql-budget] Outdent: not judged — started from an unswept state
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z Applying transition 6/6: CrashRestart(CrashRestart { doc: EntityUri("block:ref-doc-0"), retitle_while_down: None })
+2026-11-18T06:16:17Z [2m2026-11-18T06:16:01.258810Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [2m2026-11-18T06:16:01.397802Z[0m [33m WARN[0m [2mholon_filesystem::file_sync_controller[0m[2m:[0m [FileSyncController] the file still holds a block Holon moved since the last sync; Holon's change stands [3mblock_id[0m[2m=[0mblock:crw-b [3mfile[0m[2m=[0m/privateTMP [3mchange[0m[2m=[0mmoved
+2026-11-18T06:16:17Z [dense-tools] embedded MCP server up in 4.223709ms
+2026-11-18T06:16:17Z [2m2026-11-18T06:16:01.699312Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z thread 'hand_authored_regressions::hand_authored_keystone_regressions' (513821406) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:2289:5:
+2026-11-18T06:16:17Z reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 expected disclosure(s) are NOT in effect: [\"crash-restore-ambiguous on a subject whose final path component is `crw.org`\"]. The transition's outcome happened and the user was never told, which from inside the store is indistinguishable from it having succeeded. Raised (governed kinds only): []"), ("inv-crash-restore-copies-match-ref", "crw.org has 0 conflict copies where the model expects 1; no copy holds the merge base texts [[\"Buy milk\", \"Call mom\"]]. Copies: []")]
+2026-11-18T06:16:17Z authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); projection-sinks=Sql(block_raw,matview); org-writeback=on
+2026-11-18T06:16:17Z lowest MEASURED failing layer: org round-trip (inv-conditions-match-ref, inv-crash-restore-copies-match-ref) — NOT proven first-divergent: UNVERIFIED below it: matview/SQL [absent from the run report], viewmodel [absent from the run report], render [absent from the run report]; fully verified green below: store/CRDT
+2026-11-18T06:16:17Z   ↳ wiring: crates/holon-integration-tests/src/pbt/composed/invariants/conditions_match_ref.rs; crates/holon-integration-tests/src/pbt/composed/invariants/crash_restore_copies_match_ref.rs
+2026-11-18T06:16:17Z [hand-authored regression] RED case "crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy"
+2026-11-18T06:16:17Z thread 'hand_authored_regressions::hand_authored_keystone_regressions' (513821406) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:147:5:
+2026-11-18T06:16:17Z hand-authored replay: 2 red case(s): ["hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit", "crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy"]
+2026-11-18T06:16:17Z test hand_authored_regressions::hand_authored_keystone_regressions ... FAILED
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z failures:
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z failures:
+2026-11-18T06:16:17Z     hand_authored_regressions::hand_authored_keystone_regressions
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 666 filtered out; finished in 169.47s
+2026-11-18T06:16:17Z [hand-authored regression] running case "hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot" (known red: crash-restore-window-not-disclosed, 4 transitions, Checkpoints({4}), Locks({"inv-blocks-match-ref/org", "inv-conditions-match-ref", "inv-crash-restore-copies-match-ref"}))
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:49.538107Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:49.597824Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [inv-sql-budget] StaleExternalRewrite: not judged — started from an unswept state
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z Applying transition 4/4: CrashRestart(CrashRestart { doc: EntityUri("block:ref-doc-0"), retitle_while_down: None })
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:50.785450Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [dense-tools] embedded MCP server up in 4.034375ms
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:51.193608Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z thread 'hand_authored_regressions::hand_authored_keystone_regressions' (513819038) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:2289:5:
+2026-11-18T06:16:17Z reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 expected disclosure(s) are NOT in effect: [\"crash-restore-ambiguous on a subject whose final path component is `hm4b.org`\"]. The transition's outcome happened and the user was never told, which from inside the store is indistinguishable from it having succeeded. Raised (governed kinds only): []"), ("inv-crash-restore-copies-match-ref", "hm4b.org has 0 conflict copies where the model expects 1; no copy holds the merge base texts [[\"Buy milk\", \"Call mom\"]]. Copies: []")]
+2026-11-18T06:16:17Z authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); projection-sinks=Sql(block_raw,matview); org-writeback=on
+2026-11-18T06:16:17Z lowest MEASURED failing layer: org round-trip (inv-conditions-match-ref, inv-crash-restore-copies-match-ref) — NOT proven first-divergent: UNVERIFIED below it: matview/SQL [absent from the run report], viewmodel [absent from the run report], render [absent from the run report]; fully verified green below: store/CRDT
+2026-11-18T06:16:17Z   ↳ wiring: crates/holon-integration-tests/src/pbt/composed/invariants/conditions_match_ref.rs; crates/holon-integration-tests/src/pbt/composed/invariants/crash_restore_copies_match_ref.rs
+2026-11-18T06:16:17Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-11-18T06:16:17Z [hand-authored regression] RED case "hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot"
+2026-11-18T06:16:17Z [hand-authored regression] running case "wbs-an-emptied-file-whose-removal-is-accepted-removes-its-blocks" (3 transitions, Checkpoints({3}), Locks({"inv-blocks-match-ref/org", "inv-conditions-match-ref"}))
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:51.302068Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:51.358426Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [dense-tools] embedded MCP server up in 9.594583ms
+2026-11-18T06:16:17Z [2m2026-11-18T06:15:51.877141Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+2026-11-18T06:16:17Z [RESEED-ORACLE] case summary: incremental=2 full=0 [] steady_leaks=0
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z Applying transition 1/3: WriteOrgFile(WriteOrgFile { filename: "wbs.org", blocks: [Block { id: EntityUri("block:wbsa-a"), parent_id: EntityUri("block:gen-placeholder"), tags: Tags({}), requires: [], advice_suppressed: [], contributes_to: [], content: "Buy milk", content_type: Text, source_language: None, source_name: None, properties: {"ID": String("wbsa-a")}, marks: None, collapsed: false, widget_only: false, block_type: None, created_at: 0, updated_at: 0 }, Block { id: EntityUri("block:wbsa-b"), parent_id: EntityUri("block:gen-placeholder"), tags: Tags({}), requires: [],
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z Applying transition 2/3: ExternalLineEdit(ExternalLineEdit { doc: EntityUri("block:ref-doc-0"), edit: Empty { whitespace: false } })
+2026-11-18T06:16:17Z [inv-sql-budget] ExternalLineEdit: not judged — started from an unswept state
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z [inv-sql-budget] EpochFlipRejected: not judged — started from an unswept state
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z Applying transition 4/4: SetTypedEntityField(SetTypedEntityField { type_name: "gen_1", id: "gen-1:gen-1-0", field: "aaa", value: "wombat" })
+2026-11-18T06:16:17Z [hand-authored regression] PASSED case "a-declared-type-survives-the-epoch-flip-reboot-under-loro"
+2026-11-18T06:16:17Z [shape reach] tagged-subtree edits admitted=4 refused=1 simulator comparisons=4 over 96 case(s) carrying a decision
+2026-11-18T06:16:17Z panic record: cannot write last-panic.json in TMP: No such file or directory (os error 2)
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z thread 'hand_authored_regressions::hand_authored_keystone_regressions' (513819038) panicked at crates/holon-integration-tests/tests/hand_authored_regressions.rs:147:5:
+2026-11-18T06:16:17Z hand-authored replay: 1 red case(s): ["hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot"]
+2026-11-18T06:16:17Z test hand_authored_regressions::hand_authored_keystone_regressions ... FAILED
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z failures:
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z failures:
+2026-11-18T06:16:17Z     hand_authored_regressions::hand_authored_keystone_regressions
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 666 filtered out; finished in 166.26s
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z error: test failed, to rerun pass `-p holon-integration-tests --test integration`
+2026-11-18T06:16:17Z HAND-AUTHORED RED: shard 0 exit 101, red cases: wbs-an-empty-org-block-survives-write-back-and-a-crash-restart, log: target/gate-logs/pbt-hand-authored-shard-0.log
+2026-11-18T06:16:17Z HAND-AUTHORED RED: shard 2 exit 101, red cases: hm4-a-crash-over-a-file-only-behind-its-store-keeps-the-stores-edit,crash-restore-a-file-equal-to-its-moved-merge-base-with-a-write-owed-is-disclosed-with-a-copy, log: target/gate-logs/pbt-hand-authored-shard-2.log
+2026-11-18T06:16:17Z HAND-AUTHORED RED: shard 3 exit 101, red cases: hm4-a-crash-over-an-id-less-file-re-stamps-its-ids-at-boot, log: target/gate-logs/pbt-hand-authored-shard-3.log
+2026-11-18T06:16:17Z error: recipe `hand-authored` failed with exit code 1
+2026-11-18T06:16:17Z 
+2026-11-18T06:16:17Z exit: 1

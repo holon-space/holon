@@ -1167,6 +1167,8 @@ CAUGHT_MSG = 'slo probe: armed while clocks were pending on ["block:slo-probe-le
 # Parentheses as bracket expressions: grep reads `\(` as a group.
 NOTE_ONE = r"^\[known-reds\] NOTE: 1 panic[(]s[)] inside passing tests [(]ignored[)]: "
 
+JOB_LOG_EXCERPT = Path(__file__).resolve().parent / "fixtures/job-log-crash-restore.txt"
+
 COMPACTION_EXCERPT = Path(__file__).resolve().parent.parent / "docs/Testing/known-red-evidence/loro-compaction-peer-trimmed-below-lacked/collateral-panics-excerpt.log.zst"
 COMPACTION_UNIT = "holon-loro::main compacted_peer_receives_concurrent_edits::every_edit_reaches_every_peer_with_history_compaction"
 COMPACTION_PRIMARY = "    generated (shrunk): Test failed: after Restart { peer: 0 }:"
@@ -1206,6 +1208,13 @@ def green_run(*units):
                      + [f"     Summary [   1.000s] {len(units)} tests run: {len(units)} passed, 0 skipped"]) + "\n"
 
 
+def job_capture(text, rng):
+    """`text` as a flow job log prints it: every line behind its own `YYYY-MM-DDTHH:MM:SSZ `."""
+    def stamp():
+        return f"2026-{rng.randrange(1, 13):02}-{rng.randrange(1, 29):02}T{rng.randrange(24):02}:{rng.randrange(60):02}:{rng.randrange(60):02}Z "
+    return "".join(stamp() + line for line in text.splitlines(keepends=True))
+
+
 def examples():
     """(name, log text, want exit, a regex one output line must match), in grep's and Python's common syntax."""
     gate = GATE
@@ -1216,6 +1225,9 @@ def examples():
     other = "holon-x::main a::case_b"
     green = r"^\[known-reds\] PASS: 1 green run[(]s[)], nothing to classify[.]$"
     return [
+        # A flow job log of four hand-authored cases that name a known red; its lines carry the job's timestamps.
+        ("job-log-crash-restore-cases", JOB_LOG_EXCERPT.read_text(), 0,
+         r"^WARN known-red [[]crash-restore-window-not-disclosed[]] x4$"),
         # A test that reproduces a deterministic known red passes: the row is stale, which a report says and the
         # verdict ignores.
         ("deterministic-row-test-passes", green_run(other, pinned), 0,

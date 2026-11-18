@@ -115,11 +115,20 @@ if [ "$class" -eq 1 ] || [ "$stale_only" -eq 1 ]; then
 fi
 trap 'rc=$?; [ "$class" -eq 0 ] || say_class "$rc"; [ "$stale_only" -eq 0 ] || { say_stale "$rc" && rc=0 || rc=$?; }; rm -rf "$work" || fail "rm -rf $work" "$?"; exit "$rc"' EXIT
 
+# A flow job log carries `YYYY-MM-DDTHH:MM:SSZ ` before every line of the run's
+# output; every extraction below is anchored on the run's own text, so each log
+# is read through this one filter. Lines without the prefix pass unchanged.
+strip_job_timestamp() {
+    sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z //'
+}
+
 # The input logs' `BASE:`/`TREE:` lines head the output, so a tee of it names
 # the tree it judged. An unreadable log is reported in the loop below.
+log_seq=0
 for log in "$@"; do
     [ -f "$log" ] && [ -r "$log" ] || continue
-    awk '/^BASE: / && !b { print; b = 1 } /^TREE: / && !t { print; t = 1 } b && t { exit }' "$log"
+    strip_job_timestamp <"$log" >"$work/log.$((++log_seq))"
+    awk '/^BASE: / && !b { print; b = 1 } /^TREE: / && !t { print; t = 1 } b && t { exit }' "$work/log.$log_seq"
 done | awk '!seen[$0]++'
 
 # Registry rows come from scripts/check-known-red-evidence.py, the one parser of
@@ -231,6 +240,7 @@ cross=0
 collateral=0
 in_passing=0
 sample_bad=0
+log_seq=0
 green=0
 green_declared=0
 indeterminate=0
@@ -246,6 +256,7 @@ for log in "$@"; do
         unreadable=$((unreadable + 1))
         continue
     fi
+    nlog="$work/log.$((++log_seq))"
 
     # A panic prints "thread '…' panicked at <file>:<line>:" and the message on
     # the NEXT line; that message line IS the signature. Proptest re-panics on
@@ -607,7 +618,7 @@ for log in "$@"; do
             print injected + 0, in_passing + 0 >injected_out
             if (!stopped)
                 for (c in red_case) if (!(c in judged)) print "-\tthe red case printed no panic\037" c "\037" declared[c]
-        }' q="'" open_mark="$(printf '\001')" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" dropped_out="$work/dropped" stale_out="$work/stale" "$log" "$log" >"$sigs"
+        }' q="'" open_mark="$(printf '\001')" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" dropped_out="$work/dropped" stale_out="$work/stale" "$nlog" "$nlog" >"$sigs"
 
     read -r log_injected log_in_passing <"$work/injected"
     in_passing=$((in_passing + log_in_passing))
@@ -621,7 +632,7 @@ for log in "$@"; do
     if [ -s "$sigs" ]; then
         outcome=failed
     else
-        outcome=$(log_outcome "$log")
+        outcome=$(log_outcome "$nlog")
     fi
 
     if [ "$outcome" = green ]; then
@@ -634,7 +645,7 @@ for log in "$@"; do
         echo "[known-reds] INDETERMINATE: $log — the log states no pass/fail"
         echo "               outcome (empty, truncated before any verdict, or not a"
         echo "               keystone run log). Tail:"
-        tail -20 "$log" | sed 's/^/               | /'
+        tail -20 "$nlog" | sed 's/^/               | /'
         indeterminate=$((indeterminate + 1))
         continue
     fi
@@ -642,7 +653,7 @@ for log in "$@"; do
     if [ ! -s "$sigs" ]; then
         echo "[known-reds] NOVEL: $log — run failed but no panic signature was extracted"
         echo "               (compile error or a new failure shape). Tail:"
-        tail -20 "$log" | sed 's/^/               | /'
+        tail -20 "$nlog" | sed 's/^/               | /'
         novel=$((novel + 1))
         continue
     fi
@@ -948,7 +959,7 @@ for log in "$@"; do
     collateral=$((collateral + log_collateral))
     green_declared=$((green_declared + log_green_declared))
 
-    check_sample "$log"
+    check_sample "$nlog"
 done
 echo ""
 
