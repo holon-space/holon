@@ -1257,15 +1257,28 @@ NO_RED_TAIL = [
     "test-select-tests-registry-data: 0 failure(s)", "Traceback (most recent call last):",
     '  File "./scripts/test-gate-integrate-tmpdir.py", line 169, in <module>', "    main()",
     "AssertionError: the job's TMPDIR outlived the job", "error: recipe `gate-arch` failed with exit code 1", ""]
-CHECKS = ["cargo-free-checks", "gate-arch-verdicts", "run-step-header", "select-tests-registry-data",
-          "architecture_rules"]
+# The scripts of `just cargo-free-checks` come first: their verdict lines precede the recipe's own.
+SCRIPTS = ["admission-sites-count", "known-reds-fixture", "fmt-check"]
+AGG, RUN_HEADER, REGISTRY, NEXTEST_CHECK = "cargo-free-checks", "run-step-header", "select-tests-registry-data", "architecture_rules"
+CHECKS = [*SCRIPTS, AGG, "gate-arch-verdicts", RUN_HEADER, REGISTRY, NEXTEST_CHECK]
 BUILD_ERROR_TAIL = ["error[E0425]: cannot find value `x` in this scope",
                     "error: could not compile `holon-architecture-tests` (test \"architecture_rules\") due to 1 previous error"]
 
 
-def check_verdicts(failed):
-    """The verdict line of each check of the gate-arch recipe: `FAIL <name> (exit N)` or `PASS <name>`."""
-    return [f"FAIL {c} (exit 1)" if c in failed else f"PASS {c}" for c in CHECKS]
+def units(checks):
+    """The checks that can be red on their own: the recipe's verdict only sums up its scripts."""
+    return set(checks) - {AGG}
+
+
+def check_verdicts(failed, noise=()):
+    """The lines of the gate-arch recipe: each check's output (`noise` lines go to the first script that is no
+    nextest check), then its verdict `FAIL <name> (exit N)` or `PASS <name>`. The recipe's verdict is red when
+    one of its scripts is."""
+    red = set(failed) | ({AGG} if set(SCRIPTS) & set(failed) else set())
+    return [line for c in CHECKS if c != NEXTEST_CHECK
+            for line in (*([f"stub {c} ran", *noise] if c == SCRIPTS[0] else []),
+                         f"FAIL {c} (exit 1)" if c in red else f"PASS {c}")]
+
 ARCH_TESTS = [f"holon-architecture-tests::architecture_rules {t}" for t in (
     "archlint_all_passes", "holon_frontend_does_not_depend_on_holon_loro",
     "latency_events_are_emitted_above_the_release_level_ceiling")]
@@ -1282,17 +1295,29 @@ STATIC_FIXED = {
     "a gate-arch log with no red check and no failing test": dict(kind="static", base_line=True, tree=True, lane=[],
                                                                   base=[], comparable=False, cited=True),
     "a gate-arch check red only in the lane, nextest reds equal to base": dict(
-        kind="static", base_line=True, tree=True, lane=ARCH_TESTS[:1], base=ARCH_TESTS[:1], lane_checks=[CHECKS[3]],
+        kind="static", base_line=True, tree=True, lane=ARCH_TESTS[:1], base=ARCH_TESTS[:1], lane_checks=[REGISTRY],
         base_checks=[], comparable=True, cited=True),
     "a gate-arch script check red in the lane and in base, nextest green": dict(
-        kind="static", base_line=True, tree=True, lane=[], base=[], lane_checks=[CHECKS[3]], base_checks=CHECKS[2:],
+        kind="static", base_line=True, tree=True, lane=[], base=[], lane_checks=[REGISTRY], base_checks=[RUN_HEADER, REGISTRY, NEXTEST_CHECK],
         comparable=True, cited=True),
     "a gate-arch nextest check red with no test run, base red on a test": dict(
-        kind="static", base_line=True, tree=True, lane=[], base=ARCH_TESTS[:1], lane_checks=[CHECKS[4]],
-        base_checks=[CHECKS[4]], no_run=True, comparable=True, cited=True),
+        kind="static", base_line=True, tree=True, lane=[], base=ARCH_TESTS[:1], lane_checks=[NEXTEST_CHECK],
+        base_checks=[NEXTEST_CHECK], no_run=True, comparable=True, cited=True),
     "an indented verdict-shaped line of a test's output, no check red in the lane": dict(
-        kind="static", base_line=True, tree=True, lane=ARCH_TESTS[:1], base=ARCH_TESTS[:1], lane_checks=[CHECKS[3]],
-        base_checks=[CHECKS[3]], noise=CHECKS[0], comparable=True, cited=True),
+        kind="static", base_line=True, tree=True, lane=ARCH_TESTS[:1], base=ARCH_TESTS[:1], lane_checks=[REGISTRY],
+        base_checks=[REGISTRY], noise=AGG, comparable=True, cited=True),
+    "a script red only in the lane next to a base red script of the same recipe": dict(
+        kind="static", base_line=True, tree=True, lane=[], base=[], lane_checks=[SCRIPTS[0], SCRIPTS[1]],
+        base_checks=[SCRIPTS[0]], comparable=True, cited=True),
+    "the same script red in the lane and in base": dict(
+        kind="static", base_line=True, tree=True, lane=[], base=[], lane_checks=[SCRIPTS[2]],
+        base_checks=SCRIPTS[1:], comparable=True, cited=True),
+    "the recipe's verdict red in the lane and in base, no script named": dict(
+        kind="static", base_line=True, tree=True, lane=[], base=[], lane_checks=[AGG], base_checks=[AGG, SCRIPTS[0]],
+        comparable=True, cited=True),
+    "a Summary-shaped line in a script's output, the nextest check ran no test": dict(
+        kind="static", base_line=True, tree=True, lane=[], base=ARCH_TESTS[:1], lane_checks=[SCRIPTS[0], NEXTEST_CHECK],
+        base_checks=[SCRIPTS[0], NEXTEST_CHECK], no_run=True, summary_noise=True, comparable=True, cited=True),
     "a gate-arch base log of another step line": dict(kind="static", base_line=False, tree=True, lane=[ARCH_TESTS[0]],
                                                       base=ARCH_TESTS, comparable=True, cited=True),
     "a gate-arch citation without a cited lane log": dict(kind="static", base_line=True, tree=True,
@@ -1310,13 +1335,13 @@ def static_citation(rng):
                          | set(rng.sample(CHECKS, rng.randint(0, 2))))
     if lane_checks and rng.random() < 0.5:
         lane = []
-    no_run = CHECKS[4] in lane_checks and rng.random() < 0.5
+    no_run = NEXTEST_CHECK in lane_checks and rng.random() < 0.5
     if no_run:
         lane = []
     noise = rng.choice([c for c in CHECKS if c not in lane_checks]) if rng.random() < 0.3 else None
     return dict(kind=rng.choice(["selected", "static", "unknown"]), base_line=rng.random() < 0.75,
                 tree=rng.random() < 0.75, lane=lane, base=base, lane_checks=lane_checks, base_checks=base_checks,
-                no_run=no_run, noise=noise,
+                no_run=no_run, noise=noise, summary_noise=no_run and rng.random() < 0.5,
                 comparable=rng.random() < 0.8, cited=rng.random() < 0.85)
 
 
@@ -1329,10 +1354,12 @@ def static_citation_logs(rng, c):
         if not c["comparable"]:
             return NO_RED_TAIL
         noise = [f"    FAIL {c['noise']} (exit 1)"] if lane and c.get("noise") else []
+        noise += [nextest_end_line(rng, 14, 0)] if lane and c.get("summary_noise") else []
+        verdict = lambda: f"FAIL {NEXTEST_CHECK} (exit 1)" if NEXTEST_CHECK in checks else f"PASS {NEXTEST_CHECK}"
         if lane and c.get("no_run"):
-            return check_verdicts(checks) + noise + BUILD_ERROR_TAIL
-        return (check_verdicts(checks) + noise + [result_line(rng, t, rng.choice(STATUSES)) for t in tests]
-                + [nextest_end_line(rng, 14, len(tests))])
+            return check_verdicts(checks, noise) + BUILD_ERROR_TAIL + [verdict()]
+        return (check_verdicts(checks, noise) + [result_line(rng, t, rng.choice(STATUSES)) for t in tests]
+                + [nextest_end_line(rng, 14, len(tests)), verdict()])
     def log(first, commit, tests, checks=(), lane=False):
         return "\n".join([first, "BASE: b", f"TREE: {commit}", "HOLON_PBT_TIMING=measure", "STARTED: 2026-11-14T08:03:10Z", *body(tests, checks, lane),
                           "exit: 1"])
@@ -1354,20 +1381,28 @@ def static_step_citations(cases):
     rng = random.Random(19)
     drawn = list(STATIC_FIXED.items()) + [(f"case {i}", static_citation(rng)) for i in range(cases)]
     kinds = Counter()
+    wrong = []
     for name, c in drawn:
         selected, summary, logs = static_citation_logs(rng, c)
         bad = checker.check(selected, summary, logs, set(), "b", tree_of={"b": "T", "bc": "T", "oc": "U"}.get,
                             static=STATIC_STEPS)
         accepted = (c["kind"] != "unknown" and c["base_line"] and c["tree"] and c["comparable"] and c["cited"]
-                    and set(c["lane"]) <= set(c["base"]) and set(c.get("lane_checks", [])) <= set(c.get("base_checks", []))
-                    and bool(c["lane"] or c.get("lane_checks")) and not c.get("no_run"))
-        assert (bad == []) == accepted, (name, c, bad)
+                    and set(c["lane"]) <= set(c["base"])
+                    and units(c.get("lane_checks", [])) <= units(c.get("base_checks", []))
+                    and bool(c["lane"] or units(c.get("lane_checks", []))) and not c.get("no_run"))
+        if (bad == []) != accepted:
+            wrong.append(f"{name}: {'accepted' if accepted else 'refused'} expected, got {bad or 'accepted'}")
+            continue
         kinds[f"{c['kind']} {'accepted' if accepted else 'refused'}"] += 1
         assert c["kind"] != "unknown" or any("which the selector does not print" in b for b in bad), (name, bad)
         compared = c["kind"] != "unknown" and c["cited"] and c["base_line"] and c["tree"]
         assert c["comparable"] or not compared or any("cannot compare" in b for b in bad), (name, bad)
+        extra = units(c.get("lane_checks", [])) - units(c.get("base_checks", []))
+        assert not (compared and c["comparable"] and extra and not c.get("no_run")) or all(
+            e in " ".join(bad) for e in extra), (name, extra, bad)
         if name in STATIC_FIXED:
             print(f"[tests-cover-diff] {name}: {'accepted' if accepted else 'refused'} as expected")
+    assert not wrong, "static step citations judged wrongly:\n" + "\n".join(f"FAIL case {w}" for w in wrong)
     assert all(kinds[k] for k in ("selected accepted", "selected refused", "static accepted", "static refused",
                                   "unknown refused")), kinds
     print(f"[tests-cover-diff] static step citations: {cases} cases PASS; per step kind {dict(kinds)}")

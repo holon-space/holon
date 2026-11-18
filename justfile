@@ -1509,41 +1509,65 @@ check-web-arm:
         2>&1 | tee target/gate-logs/check-web-arm.log
 
 # The gate's checks that read the tree and build nothing (about 60 s): gate-arch
-# and the landing gate's feature-map step run them. No cargo command belongs
-# here: scripts/test-cargo-free-checks.py fails on one.
+# and the landing gate's feature-map step run them. The only cargo command
+# allowed here is `cargo fmt` (it reads the tree and builds nothing): any other
+# fails scripts/test-cargo-free-checks.py.
+# Every script runs and prints one `PASS <name>` or `FAIL <name> (exit N)` line.
 cargo-free-checks:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    ./scripts/test-admission-sites-count.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites-count.log
-    ./scripts/test-check-target-leftovers.sh 2>&1 | tee target/gate-logs/gate-arch-check-target-leftovers.log
-    ./scripts/check-admission-sites.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites.log
-    ./scripts/check-regression-descriptions.sh 2>&1 | tee target/gate-logs/gate-arch-regression-descriptions.log
+    failed=""
+    # check <name> <log> <command...>: the exit is the command's, or tee's when only tee failed.
+    check() {
+        local name=$1 log=$2 st rc
+        shift 2
+        set +e
+        "$@" 2>&1 | tee "$log"
+        st=("${PIPESTATUS[@]}")
+        set -e
+        rc=${st[0]}
+        [ "$rc" -ne 0 ] || rc=${st[1]}
+        if [ "$rc" -eq 0 ]; then
+            echo "PASS $name"
+        else
+            echo "FAIL $name (exit $rc)"
+            failed+=" $name"
+        fi
+    }
+    with_self_check() { "$@" && "$1" --self-check; }
+    nextest_no_tests() {
+        ./scripts/check-nextest-no-tests.py && ./scripts/test-check-nextest-no-tests.py && ./scripts/test-no-tests-check-reach.py
+    }
+    check admission-sites-count target/gate-logs/gate-arch-admission-sites-count.log ./scripts/test-admission-sites-count.sh
+    check check-target-leftovers target/gate-logs/gate-arch-check-target-leftovers.log ./scripts/test-check-target-leftovers.sh
+    check admission-sites target/gate-logs/gate-arch-admission-sites.log ./scripts/check-admission-sites.sh
+    check regression-descriptions target/gate-logs/gate-arch-regression-descriptions.log ./scripts/check-regression-descriptions.sh
     # The duration-assertion ratchet, the generated nextest split, the timing
     # gate's verdict pin and the long tests' timeout margins. All read the tree
     # only, so they belong here rather than past the build.
-    ./scripts/check-timing-assertions.sh 2>&1 | tee target/gate-logs/gate-arch-timing-assertions.log
-    ./scripts/check-timing-gate-verdict.sh 2>&1 | tee target/gate-logs/gate-arch-timing-gate-verdict.log
-    { ./scripts/check-timeout-margins.py && ./scripts/check-timeout-margins.py --self-check; } \
-        2>&1 | tee target/gate-logs/gate-arch-timeout-margins.log
-    { ./scripts/check-known-red-evidence.py && ./scripts/check-known-red-evidence.py --self-check; } \
-        2>&1 | tee target/gate-logs/gate-arch-known-red-evidence.log
-    ./scripts/keystone-known-reds-fixture.sh 2>&1 | tee target/gate-logs/gate-arch-known-reds-fixture.log
-    { ./scripts/check-adr-net-names.py && ./scripts/check-adr-net-names.py --self-check; } \
-        2>&1 | tee target/gate-logs/gate-arch-adr-net-names.log
-    { ./scripts/check-red-logs.py && ./scripts/check-red-logs.py --self-check; } \
-        2>&1 | tee target/gate-logs/gate-arch-red-logs.log
-    ./scripts/test-check-compile-shape.py 2>&1 | tee target/gate-logs/gate-arch-compile-shape.log
-    { ./scripts/check-nextest-no-tests.py && ./scripts/test-check-nextest-no-tests.py && ./scripts/test-no-tests-check-reach.py; } \
-        2>&1 | tee target/gate-logs/gate-arch-nextest-no-tests.log
-    ./scripts/test-count-hash-folders.py 2>&1 | tee target/gate-logs/gate-arch-count-hash-folders.log
-    ./scripts/test-integrate-track-walls.py 2>&1 | tee target/gate-logs/gate-arch-integrate-track-walls.log
-    ./scripts/test-known-red-evidence-row-key.py 2>&1 | tee target/gate-logs/gate-arch-known-red-evidence-row-key.log
-    ./scripts/test-known-red-gate-load.py 2>&1 | tee target/gate-logs/gate-arch-known-red-gate-load.log
-    /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
+    check timing-assertions target/gate-logs/gate-arch-timing-assertions.log ./scripts/check-timing-assertions.sh
+    check timing-gate-verdict target/gate-logs/gate-arch-timing-gate-verdict.log ./scripts/check-timing-gate-verdict.sh
+    check timeout-margins target/gate-logs/gate-arch-timeout-margins.log with_self_check ./scripts/check-timeout-margins.py
+    check known-red-evidence target/gate-logs/gate-arch-known-red-evidence.log with_self_check ./scripts/check-known-red-evidence.py
+    check known-reds-fixture target/gate-logs/gate-arch-known-reds-fixture.log ./scripts/keystone-known-reds-fixture.sh
+    check adr-net-names target/gate-logs/gate-arch-adr-net-names.log with_self_check ./scripts/check-adr-net-names.py
+    check red-logs target/gate-logs/gate-arch-red-logs.log with_self_check ./scripts/check-red-logs.py
+    check compile-shape target/gate-logs/gate-arch-compile-shape.log ./scripts/test-check-compile-shape.py
+    check nextest-no-tests target/gate-logs/gate-arch-nextest-no-tests.log nextest_no_tests
+    check count-hash-folders target/gate-logs/gate-arch-count-hash-folders.log ./scripts/test-count-hash-folders.py
+    check integrate-track-walls target/gate-logs/gate-arch-integrate-track-walls.log ./scripts/test-integrate-track-walls.py
+    check known-red-evidence-row-key target/gate-logs/gate-arch-known-red-evidence-row-key.log ./scripts/test-known-red-evidence-row-key.py
+    check known-red-gate-load target/gate-logs/gate-arch-known-red-gate-load.log ./scripts/test-known-red-gate-load.py
+    check featuremap target/gate-logs/landing-featuremap.log /usr/bin/python3 scripts/featuremap.py check
     # Keeps the deny.toml ignore of RUSTSEC-2026-0514 true.
-    { ./scripts/check-hickory-dnssec-off.py . {{DENY_OWN_LOCKS}} && ./scripts/check-hickory-dnssec-off.py --self-check; } \
-        2>&1 | tee target/gate-logs/gate-arch-hickory-dnssec-off.log
+    check hickory-dnssec-off target/gate-logs/gate-arch-hickory-dnssec-off.log \
+        with_self_check ./scripts/check-hickory-dnssec-off.py . {{DENY_OWN_LOCKS}}
+    check fmt-check target/gate-logs/gate-fmt-check.log cargo fmt --all -- --check
+    if [ -n "$failed" ]; then
+        echo "cargo-free-checks: red scripts:$failed"
+        exit 1
+    fi
 
 # Architecture rules (archlint + the Rust-side structural tests). Its own
 # package, so `cargo nextest run --workspace` was the only thing that ran it and

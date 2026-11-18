@@ -255,11 +255,26 @@ def failing_tests(lines):
 
 # Gate-arch checks that run nextest: a FAIL verdict of one without a `Summary` line means no test ran.
 NEXTEST_CHECKS = frozenset({"architecture_rules"})
+# Verdicts that only sum up the per-script verdicts printed before them: the script is the unit that can be red.
+AGGREGATE_CHECKS = frozenset({"cargo-free-checks"})
+CHECK_VERDICT = re.compile(r"PASS (\S+)|FAIL (\S+) \(exit \d+\)")
 
 
 def failed_checks(lines):
-    """The name of every check with a `FAIL <name> (exit N)` verdict line."""
-    return {m.group(1) for line in lines if (m := CHECK_FAIL.fullmatch(line))}
+    """The name of every script or check with a `FAIL <name> (exit N)` verdict line, but no aggregate verdict."""
+    return {m.group(1) for line in lines if (m := CHECK_FAIL.fullmatch(line))} - AGGREGATE_CHECKS
+
+
+def nextest_section(lines):
+    """What a gate-arch nextest check printed: the lines between the verdict line before its own and its own; the whole
+    log when it has no verdict line of a nextest check."""
+    previous = 0
+    for i, line in enumerate(lines):
+        if m := CHECK_VERDICT.fullmatch(line):
+            if (m.group(1) or m.group(2)) in NEXTEST_CHECKS:
+                return lines[previous:i]
+            previous = i + 1
+    return lines
 
 
 def gate_failures(lines):
@@ -418,7 +433,7 @@ def hand_problems(step, lane_path, lane_red, unnamed, cut, skipped, base_path, b
 def stop_line(lines):
     """Why a nextest or windowed gate log does not show the end of a complete run, or None when it does: a nextest
     log needs a `Summary [...] N tests run` line, not `k/n` with k < n; a gate log needs its end line."""
-    ends = [(line.strip(), m) for line in lines if (m := NEXTEST_SUMMARY.search(line))]
+    ends = [(line.strip(), m) for line in nextest_section(lines) if (m := NEXTEST_SUMMARY.search(line))]
     if cut := next((line for line, m in ends if m.group(1) and int(m.group(1)) < int(m.group(2))), None):
         return f"`{cut}`"
     if (failing_tests(lines) or failed_checks(lines) & NEXTEST_CHECKS) and not ends:
