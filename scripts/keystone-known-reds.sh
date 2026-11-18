@@ -408,7 +408,7 @@ for log in "$@"; do
         }
         function unknown_label(label) {
             stopped = 1
-            printf "[known-reds] UNKNOWN nextest status label \"%s\" at %s:%d — the classifier cannot read this run.\n", label, FILENAME, FNR >"/dev/stderr"
+            printf "[known-reds] UNKNOWN nextest status label \"%s\" at %s:%d — the classifier cannot read this run.\n", label, src, FNR >"/dev/stderr"
             exit 3
         }
         # The long label of a failing status, short or long form.
@@ -543,7 +543,7 @@ for log in "$@"; do
                 o = outcome(LABEL)
                 track_status(o, inst)
                 if (o == "pass" || o == "fail") { n_status[inst]++; status_line[inst, n_status[inst]] = FNR; status_is[inst, n_status[inst]] = o }
-                if (o == "pass" && (UNIT in pinned) && !(UNIT in stale)) { stale[UNIT] = 1; print pinned[UNIT] "\t" UNIT "\t" FILENAME ":" FNR >>stale_out }
+                if (o == "pass" && (UNIT in pinned) && !(UNIT in stale)) { stale[UNIT] = 1; print pinned[UNIT] "\t" UNIT "\t" src ":" FNR >>stale_out }
                 if (LABEL ~ /^FLAKY / || (LABEL ~ /^TRY / && o == "pass")) passed[inst] = 1
                 else if (LABEL ~ /^FLKY-FL /) flaky_failed[inst] = 1
                 else if (LABEL ~ /^TRY [0-9]+ / && o == "fail" && try_of(LABEL) + 0 > last_try[inst] + 0) last_try[inst] = try_of(LABEL)
@@ -618,7 +618,7 @@ for log in "$@"; do
             print injected + 0, in_passing + 0 >injected_out
             if (!stopped)
                 for (c in red_case) if (!(c in judged)) print "-\tthe red case printed no panic\037" c "\037" declared[c]
-        }' q="'" open_mark="$(printf '\001')" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" dropped_out="$work/dropped" stale_out="$work/stale" "$nlog" "$nlog" >"$sigs"
+        }' q="'" src="$log" open_mark="$(printf '\001')" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" injected_out="$work/injected" dropped_out="$work/dropped" stale_out="$work/stale" "$nlog" "$nlog" >"$sigs"
 
     read -r log_injected log_in_passing <"$work/injected"
     in_passing=$((in_passing + log_in_passing))

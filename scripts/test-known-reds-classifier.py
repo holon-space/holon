@@ -153,6 +153,37 @@ def stale_only_failures(work):
     return failures
 
 
+def stale_location_failures(work, rng):
+    """STALE and UNKNOWN-label reports locate the line in the log they were handed, under either capture."""
+    pinned, key = logs.pinned_test()
+    failures = []
+    for i in range(8):
+        units = [f"holon-x::main a::case_{c}" for c in rng.sample("bcdefg", rng.randrange(1, 4))]
+        units.insert(rng.randrange(len(units) + 1), pinned)
+        text = logs.green_run(*units)
+        for capture, body in (("raw", text), ("job", logs.job_capture(text, rng))):
+            log = work / f"stale-location-{i}-{capture}.log"
+            log.write_text(body)
+            out = subprocess.run([CLASSIFIER, log], capture_output=True, text=True).stdout
+            want = f"[known-reds] STALE: {key}: its test {pinned} passed at {log}:{units.index(pinned) + 2}."
+            if want not in out.splitlines():
+                failures.append(f"stale location, {capture} capture: want the line {want!r}, got:\n{out}")
+
+            bad = logs.green_run(*units).splitlines()
+            at = rng.randrange(1, len(bad) - 1)
+            bad.insert(at, logs.status_line("BOGUS", 1, len(units), units[0]))
+            body = "\n".join(bad) + "\n"
+            if capture == "job":
+                body = logs.job_capture(body, rng)
+            log = work / f"unknown-location-{i}-{capture}.log"
+            log.write_text(body)
+            err = subprocess.run([CLASSIFIER, log], capture_output=True, text=True).stderr
+            want = f'UNKNOWN nextest status label "BOGUS" at {log}:{at + 1} '
+            if want not in err:
+                failures.append(f"unknown label location, {capture} capture: want {want!r}, got:\n{err}")
+    return failures
+
+
 def broken_table_failures(work):
     """A table row that names no known-red row, or a test listed twice, stops the classifier with exit 2."""
     repo = CLASSIFIER.resolve().parent.parent
@@ -191,7 +222,7 @@ def main():
             if code != want_exit or not re.search(line, out, re.M):
                 failed += 1
                 print(f"example {name}: want exit {want_exit} and a line matching {line!r}, got exit {code}:\n{out}")
-        for failure in stale_only_failures(work) + broken_table_failures(work):
+        for failure in stale_only_failures(work) + broken_table_failures(work) + stale_location_failures(work, rng):
             failed += 1
             print(failure)
         print(f"drawn with seed {seed} ({cases} cases)")
