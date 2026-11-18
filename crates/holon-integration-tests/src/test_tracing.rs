@@ -456,6 +456,18 @@ fn route_span(span: SpanData) {
     }
 }
 
+/// Span names of the per-case timing tree of the hand-authored replay.
+pub const CASE_SPAN_NAMES: [&str; 4] = ["hand_authored_case", "boot", "body", "check"];
+
+/// Every finished [`CASE_SPAN_NAMES`] span of the process, kept outside the
+/// scope windows because the SUT resets those between transitions.
+static CASE_SPANS: Mutex<Vec<SpanData>> = Mutex::new(Vec::new());
+
+/// The spans of [`CASE_SPAN_NAMES`] finished so far in this process.
+pub fn case_spans() -> Vec<SpanData> {
+    CASE_SPANS.lock().expect("case span log poisoned").clone()
+}
+
 /// Spans this process could attribute to no test scope, cumulative. Non-zero
 /// means some window measured LESS than the work it drove — disclosed by the
 /// budget report so an under-measurement is never silent.
@@ -491,6 +503,12 @@ impl opentelemetry_sdk::trace::SpanProcessor for ScopeRoutingProcessor {
     }
 
     fn on_end(&self, span: SpanData) {
+        if CASE_SPAN_NAMES.contains(&span.name.as_ref()) {
+            CASE_SPANS
+                .lock()
+                .expect("case span log poisoned")
+                .push(span.clone());
+        }
         route_span(span);
     }
 

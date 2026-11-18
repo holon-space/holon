@@ -340,28 +340,41 @@ impl LockedReplay for ComposedSut<WideE2E> {
 /// `checkpoints`: a hand-authored case locks one known bug, and the random
 /// keystone judges the rest.
 pub fn replay<M: LockedReplay>(
+    case: &str,
+    wiring: &str,
     mut ref_state: <M::Reference as ReferenceStateMachine>::State,
     transitions: Vec<<M::Reference as ReferenceStateMachine>::Transition>,
     checkpoints: &Checkpoints,
     locks: &Locks,
     boot: Boot,
 ) {
+    // The subscriber that records the spans below exists only once the collector
+    // does.
+    crate::test_tracing::SpanCollector::global();
     let scope = locks.scope();
+    let case_span = tracing::info_span!("hand_authored_case", case, wiring);
+    let _case = case_span.enter();
     let mut engaged = BTreeSet::new();
     let total = transitions.len();
-    let mut sut = M::init_replay(&ref_state, boot);
+    let mut sut = tracing::info_span!("boot").in_scope(|| M::init_replay(&ref_state, boot));
     if checkpoints.after(0) {
-        engaged.extend(M::check_locked(&sut, &ref_state, &scope));
+        engaged.extend(
+            tracing::info_span!("check").in_scope(|| M::check_locked(&sut, &ref_state, &scope)),
+        );
     }
     for (ix, transition) in transitions.into_iter().enumerate() {
         eprintln!("\nApplying transition {}/{total}: {transition:?}", ix + 1);
         ref_state = M::Reference::apply(ref_state, &transition);
-        sut = M::apply(sut, &ref_state, transition);
+        sut = tracing::info_span!("body").in_scope(|| M::apply(sut, &ref_state, transition));
         if checkpoints.after(ix + 1) {
-            engaged.extend(M::check_locked(&sut, &ref_state, &scope));
+            engaged.extend(
+                tracing::info_span!("check").in_scope(|| M::check_locked(&sut, &ref_state, &scope)),
+            );
         }
     }
-    engaged.extend(M::teardown_locked(sut, ref_state, &scope));
+    engaged.extend(
+        tracing::info_span!("check").in_scope(|| M::teardown_locked(sut, ref_state, &scope)),
+    );
     let unengaged: Vec<&String> = locks
         .ids()
         .iter()
@@ -543,7 +556,7 @@ pub fn load_replay_cases() -> Vec<ReplayCase> {
     };
 
     if skip.is_empty() {
-        return cases;
+        return keep_shard(cases);
     }
     let mut skipped = 0usize;
     let kept: Vec<ReplayCase> = cases
@@ -566,5 +579,162 @@ pub fn load_replay_cases() -> Vec<ReplayCase> {
         "[hand-authored regression] {skipped} case(s) SKIPPED via {SKIP_FILTER_ENV} \
          \u{2014} coverage is NOT full (see docs/Testing/BugFunnel.md)"
     );
-    kept
+    keep_shard(kept)
+}
+
+/// How long one replayed case spent booting, applying and checking, read from
+/// its `hand_authored_case` span tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseTiming {
+    pub case: String,
+    pub wiring: String,
+    pub boot: std::time::Duration,
+    pub body: std::time::Duration,
+    pub check: std::time::Duration,
+}
+
+/// One [`CaseTiming`] per `hand_authored_case` span finished in this process.
+pub fn case_timings() -> Vec<CaseTiming> {
+    use opentelemetry::trace::SpanId;
+    let spans = crate::test_tracing::case_spans();
+    let attr = |span: &opentelemetry_sdk::trace::SpanData, key: &str| {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .unwrap_or_else(|| panic!("case span lacks `{key}`"))
+            .value
+            .to_string()
+    };
+    let took = |span: &opentelemetry_sdk::trace::SpanData| {
+        span.end_time
+            .duration_since(span.start_time)
+            .expect("span ends after it starts")
+    };
+    spans
+        .iter()
+        .filter(|s| s.name == "hand_authored_case")
+        .map(|case| {
+            let id: SpanId = case.span_context.span_id();
+            let sum = |name: &str| -> std::time::Duration {
+                spans
+                    .iter()
+                    .filter(|s| s.name == name && s.parent_span_id == id)
+                    .map(took)
+                    .sum()
+            };
+            CaseTiming {
+                case: attr(case, "case"),
+                wiring: attr(case, "wiring"),
+                boot: sum("boot"),
+                body: sum("body"),
+                check: sum("check"),
+            }
+        })
+        .collect()
+}
+
+/// Per-case and per-wiring boot/body/check totals, one line each.
+pub fn timing_report(timings: &[CaseTiming]) -> String {
+    use std::collections::BTreeMap;
+    let ms = |d: std::time::Duration| d.as_millis();
+    let mut out = String::new();
+    let mut per_wiring: BTreeMap<&str, (usize, [std::time::Duration; 3])> = BTreeMap::new();
+    for t in timings {
+        out += &format!(
+            "[hand-authored timing] case {:?}: boot {} ms, body {} ms, check {} ms\n",
+            t.case,
+            ms(t.boot),
+            ms(t.body),
+            ms(t.check)
+        );
+        let entry = per_wiring.entry(&t.wiring).or_default();
+        entry.0 += 1;
+        entry.1[0] += t.boot;
+        entry.1[1] += t.body;
+        entry.1[2] += t.check;
+    }
+    for (wiring, (n, [boot, body, check])) in per_wiring {
+        out += &format!(
+            "[hand-authored timing] wiring {wiring}: {n} case(s), boot {} ms, body {} ms, check {} ms\n",
+            ms(boot),
+            ms(body),
+            ms(check)
+        );
+    }
+    out
+}
+
+/// Env var `k/n`: this process replays shard `k` of `n` of the cases left
+/// after the case and skip filters.
+pub const SHARD_ENV: &str = "HOLON_HAND_AUTHORED_SHARD";
+
+/// The shard of each key, `0..shards`: every key lands in exactly one shard,
+/// largest key group first onto the lightest shard.
+pub fn deal_to_shards<K: Eq + std::hash::Hash + ToString>(keys: &[K], shards: usize) -> Vec<usize> {
+    assert!(shards > 0, "cannot deal cases to zero shards");
+    let mut groups: Vec<(String, &K, Vec<usize>)> = Vec::new();
+    let mut at: std::collections::HashMap<&K, usize> = std::collections::HashMap::new();
+    for (ix, key) in keys.iter().enumerate() {
+        let g = *at.entry(key).or_insert_with(|| {
+            groups.push((key.to_string(), key, Vec::new()));
+            groups.len() - 1
+        });
+        groups[g].2.push(ix);
+    }
+    groups.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then_with(|| a.0.cmp(&b.0)));
+    let mut load = vec![0usize; shards];
+    let mut dealt = vec![0usize; keys.len()];
+    for (_, _, members) in groups {
+        let lightest = (0..shards).min_by_key(|k| load[*k]).expect("shards > 0");
+        load[lightest] += members.len();
+        for ix in members {
+            dealt[ix] = lightest;
+        }
+    }
+    dealt
+}
+
+/// The `ReferenceState` a case replays from; the wiring key of the case is
+/// read off this state.
+pub fn case_reference_state(case: &HandAuthoredCase) -> ReferenceState {
+    let provenance = format!("hand-authored regression case {:?}", case.name);
+    match case.initial_state.clone() {
+        Some(pinned) => pinned.into_reference_state(&provenance),
+        None => crate::pbt::composed::wide_e2e::wide_e2e_ref(),
+    }
+}
+
+/// The key of the boot template a case restores from; equal keys share one
+/// template build.
+pub fn wiring_key(case: &HandAuthoredCase) -> snapshot_boot::BootKey {
+    snapshot_boot::BootKey::of(&case_reference_state(case))
+}
+
+fn shard_spec() -> Option<(usize, usize)> {
+    let spec = match std::env::var(SHARD_ENV) {
+        Ok(spec) => spec,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(e) => panic!("{SHARD_ENV} is set but unreadable: {e}"),
+    };
+    let parsed = spec
+        .split_once('/')
+        .and_then(|(k, n)| Some((k.parse::<usize>().ok()?, n.parse::<usize>().ok()?)));
+    match parsed {
+        Some((k, n)) if k < n => Some((k, n)),
+        _ => panic!("{SHARD_ENV} must be `k/n` with k < n, got {spec:?}"),
+    }
+}
+
+fn keep_shard(cases: Vec<ReplayCase>) -> Vec<ReplayCase> {
+    let Some((shard, shards)) = shard_spec() else {
+        return cases;
+    };
+    let keys: Vec<snapshot_boot::BootKey> = cases.iter().map(|c| wiring_key(&c.case)).collect();
+    let dealt = deal_to_shards(&keys, shards);
+    cases
+        .into_iter()
+        .zip(dealt)
+        .filter(|(_, k)| *k == shard)
+        .map(|(c, _)| c)
+        .collect()
 }

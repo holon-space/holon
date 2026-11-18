@@ -76,6 +76,7 @@ use std::collections::BTreeSet;
 use std::panic::AssertUnwindSafe;
 
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
+use holon_integration_tests::pbt::composed::snapshot_boot;
 use holon_integration_tests::pbt::composed::span_metrics::ComposedBudget;
 use holon_integration_tests::pbt::composed::span_metrics::ComposedSpanMetrics;
 use holon_integration_tests::pbt::composed::span_metrics::SutMetricsLifecycle;
@@ -89,11 +90,14 @@ use holon_integration_tests::pbt::hand_authored::HandAuthoredCase;
 use holon_integration_tests::pbt::hand_authored::LockedReplay;
 use holon_integration_tests::pbt::hand_authored::Locks;
 use holon_integration_tests::pbt::hand_authored::ReplayCase;
+use holon_integration_tests::pbt::hand_authored::case_reference_state;
+use holon_integration_tests::pbt::hand_authored::case_timings;
 use holon_integration_tests::pbt::hand_authored::load_replay_cases;
 use holon_integration_tests::pbt::hand_authored::parse_case;
 use holon_integration_tests::pbt::hand_authored::parse_replay_case;
 use holon_integration_tests::pbt::hand_authored::replay;
 use holon_integration_tests::pbt::hand_authored::sidecar_path;
+use holon_integration_tests::pbt::hand_authored::timing_report;
 use holon_integration_tests::pbt::invariants::bodies::shape_sim_matches_authority;
 use holon_integration_tests::pbt::reference_state::ReferenceState;
 use holon_integration_tests::pbt::transitions::E2ETransition;
@@ -143,6 +147,7 @@ fn hand_authored_keystone_regressions() {
             }
         }
     }
+    eprint!("{}", timing_report(&case_timings()));
     shape_sim_matches_authority::report_reach();
     assert!(
         red.is_empty(),
@@ -156,10 +161,7 @@ fn replay_case(case: HandAuthoredCase, checkpoints: &Checkpoints, locks: &Locks,
     // without one the base is `HOLON_PBT_FORCE_FULL=1`'s `full_headless`
     // wiring, so `init_test` boots the full Turso + frontend SUT.
     let provenance = format!("hand-authored regression case {:?}", case.name);
-    let initial_state = match case.initial_state {
-        Some(pinned) => pinned.into_reference_state(&provenance),
-        None => wide_e2e_ref(),
-    };
+    let initial_state = case_reference_state(&case);
     // `wide_e2e_ref_for` is NOT pure: `HOLON_FOLDER_COMPANION_SEED` makes it
     // seed extra blocks and `PBT_MUTABLE_TEXT` changes the reference's
     // editor semantics, so a byte-identical `initial_state` still yields
@@ -174,7 +176,16 @@ fn replay_case(case: HandAuthoredCase, checkpoints: &Checkpoints, locks: &Locks,
              starting state differs from the one this case pins:\n{report}"
         );
     }
-    replay::<ComposedSut<WideE2E>>(initial_state, case.transitions, checkpoints, locks, boot);
+    let wiring = snapshot_boot::BootKey::of(&initial_state).to_string();
+    replay::<ComposedSut<WideE2E>>(
+        &case.name,
+        &wiring,
+        initial_state,
+        case.transitions,
+        checkpoints,
+        locks,
+        boot,
+    );
 }
 
 /// PARKED pin — echo-loop `BlockToPage` embedded-page child render-leak
@@ -379,6 +390,8 @@ fn sweeps_of_replay(line: &str) -> Vec<usize> {
     } = parse_replay_case(std::path::Path::new("<inline>"), 1, line);
     SWEPT.with(|swept| swept.borrow_mut().clear());
     replay::<CountingSut>(
+        &case.name,
+        "stub",
         0,
         vec![(); case.transitions.len()],
         &checkpoints,
@@ -479,7 +492,15 @@ fn judged_windows_start_swept_and_only_pre_sweeps_do_not() {
         checkpoints, locks, ..
     } = parse_replay_case(std::path::Path::new("<inline>"), 1, &line);
     STARTED_SWEPT.with(|log| log.borrow_mut().clear());
-    replay::<BudgetWindowSut>(0, vec![(); 6], &checkpoints, &locks, Boot::Fresh);
+    replay::<BudgetWindowSut>(
+        "n",
+        "stub",
+        0,
+        vec![(); 6],
+        &checkpoints,
+        &locks,
+        Boot::Fresh,
+    );
     assert_eq!(
         STARTED_SWEPT.with(|log| log.take()),
         vec![(1, false), (2, true), (5, false), (6, true)]
@@ -562,5 +583,167 @@ fn a_lock_skipped_at_every_checkpoint_is_refused() {
         1,
         r#"{"name": "n", "locks": ["inv-x"], "transitions": []}"#,
     );
-    replay::<VacuousSut>(0, Vec::new(), &checkpoints, &locks, Boot::Fresh);
+    replay::<VacuousSut>(
+        "n",
+        "stub",
+        0,
+        Vec::new(),
+        &checkpoints,
+        &locks,
+        Boot::Fresh,
+    );
+}
+
+/// Two replayed cases each report one timing row carrying their wiring label,
+/// readable after the SUT reset its own window.
+#[test]
+fn each_replayed_case_reports_boot_body_check_spans() {
+    let line = |name: &str| {
+        format!(
+            r#"{{"name": "{name}", "locks": ["inv-x"], "transitions": [{{"CreateBlockUnderFocus": {{"content": "c", "id": "block:c"}}}}]}}"#
+        )
+    };
+    let names = ["span-report-case-a", "span-report-case-b"];
+    for name in names {
+        let ReplayCase {
+            case,
+            checkpoints,
+            locks,
+            ..
+        } = parse_replay_case(std::path::Path::new("<inline>"), 1, &line(name));
+        replay::<CountingSut>(
+            &case.name,
+            "span-report-wiring",
+            0,
+            vec![(); case.transitions.len()],
+            &checkpoints,
+            &locks,
+            Boot::Fresh,
+        );
+    }
+    let timings = case_timings();
+    for name in names {
+        let mine: Vec<_> = timings.iter().filter(|t| t.case == name).collect();
+        assert_eq!(mine.len(), 1, "one timing for {name}, got {timings:?}");
+        assert_eq!(mine[0].wiring, "span-report-wiring");
+    }
+}
+
+mod deal {
+    use holon_integration_tests::pbt::hand_authored::deal_to_shards;
+    use holon_integration_tests::pbt::hand_authored::load_cases;
+    use holon_integration_tests::pbt::hand_authored::wiring_key;
+    use proptest::prelude::*;
+
+    fn assert_deal(keys: &[u8], shards: usize) {
+        let dealt = deal_to_shards(keys, shards);
+        assert_eq!(dealt.len(), keys.len(), "every case is dealt exactly once");
+        assert!(dealt.iter().all(|k| *k < shards));
+        let mut shard_of_key = std::collections::HashMap::new();
+        for (key, shard) in keys.iter().zip(&dealt) {
+            assert_eq!(
+                shard_of_key.entry(key).or_insert(*shard),
+                shard,
+                "wiring {key} is split over two shards"
+            );
+        }
+        let mut size = vec![0usize; shards];
+        for shard in &dealt {
+            size[*shard] += 1;
+        }
+        let largest_group = keys
+            .iter()
+            .map(|k| keys.iter().filter(|o| *o == k).count())
+            .max()
+            .unwrap_or(0);
+        let spread = size.iter().max().unwrap() - size.iter().min().unwrap();
+        assert!(
+            spread <= largest_group,
+            "shard sizes {size:?} differ by more than the largest wiring group {largest_group}"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn shards_partition_the_cases_by_wiring(
+            keys in proptest::collection::vec(0u8..12, 0..80),
+            shards in 1usize..=8,
+        ) {
+            assert_deal(&keys, shards);
+        }
+    }
+
+    /// The real corpus: every case keeps its wiring in one shard, at every
+    /// shard count the recipe may use.
+    #[test]
+    fn the_keystone_corpus_is_dealt_by_wiring() {
+        let keys: Vec<String> = load_cases()
+            .iter()
+            .map(|c| wiring_key(c).to_string())
+            .collect();
+        assert!(!keys.is_empty());
+        for shards in 1..=8 {
+            let dealt = deal_to_shards(&keys, shards);
+            let mut seen = std::collections::HashMap::new();
+            for (key, shard) in keys.iter().zip(&dealt) {
+                assert_eq!(seen.entry(key).or_insert(*shard), shard);
+            }
+        }
+    }
+}
+
+proptest::proptest! {
+    /// Each replayed case's `hand_authored_case` span has exactly one `boot`
+    /// child, one `body` child per transition and at least one `check` child.
+    #[test]
+    fn every_case_span_holds_its_boot_body_and_check_children(
+        transitions in 1usize..6,
+        cases in 1usize..4,
+    ) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let create = r#"{"CreateBlockUnderFocus": {"content": "c", "id": "block:c"}}"#;
+        let body = vec![create; transitions].join(", ");
+        let mut names = Vec::new();
+        for _ in 0..cases {
+            let name = format!(
+                "span-children-{}",
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            );
+            let line = format!(r#"{{"name": "{name}", "locks": ["inv-x"], "transitions": [{body}]}}"#);
+            let ReplayCase { case, checkpoints, locks, .. } =
+                parse_replay_case(std::path::Path::new("<inline>"), 1, &line);
+            replay::<CountingSut>(
+                &case.name,
+                "span-children-wiring",
+                0,
+                vec![(); case.transitions.len()],
+                &checkpoints,
+                &locks,
+                Boot::Fresh,
+            );
+            names.push(name);
+        }
+        let spans = holon_integration_tests::test_tracing::case_spans();
+        for name in &names {
+            let case_span = spans
+                .iter()
+                .find(|s| {
+                    s.name == "hand_authored_case"
+                        && s.attributes.iter().any(|kv| {
+                            kv.key.as_str() == "case" && kv.value.to_string() == *name
+                        })
+                })
+                .unwrap_or_else(|| panic!("no case span for {name}"));
+            let id = case_span.span_context.span_id();
+            let children = |child: &str| {
+                spans
+                    .iter()
+                    .filter(|s| s.name == child && s.parent_span_id == id)
+                    .count()
+            };
+            proptest::prop_assert_eq!(children("boot"), 1, "boot children of {}", name);
+            proptest::prop_assert_eq!(children("body"), transitions, "body children of {}", name);
+            proptest::prop_assert!(children("check") >= 1, "check children of {}", name);
+        }
+    }
 }

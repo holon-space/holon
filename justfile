@@ -325,18 +325,17 @@ hand-authored *FLAGS:
             -- --nocapture {{FLAGS}} 2>&1 | tee -a "$L"
     else
         cargo test {{CANON}} --test integration --no-run 2>&1 | tee -a "$L"
-        # Four processes, cases dealt round-robin. Shard 0 also runs the module's
+        # Four processes; the replay deals the cases to them by boot template, so
+        # each wiring boots cold in one shard. Shard 0 also runs the module's
         # other tests; the rest run only the replay.
-        shards=$(/usr/bin/python3 -c 'import json, sys; names = [json.loads(l)["name"] for l in open(sys.argv[1]) if l.strip() and not l.lstrip().startswith("#")]; print("\n".join(",".join(names[k::4]) for k in range(4)))' \
-            crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl)
-        pids=() k=0
-        while IFS= read -r cases; do
+        pids=()
+        for k in 0 1 2 3; do
             filter=(hand_authored_regressions::); [ "$k" = 0 ] || filter=(--exact hand_authored_regressions::hand_authored_keystone_regressions)
-            HOLON_HAND_AUTHORED_CASE=$cases cargo test \
+            HOLON_HAND_AUTHORED_SHARD=$k/4 cargo test \
                 {{CANON}} --test integration \
                 -- --nocapture "${filter[@]}" > "target/gate-logs/pbt-hand-authored-shard-$k.log" 2>&1 &
-            pids+=($!) k=$((k+1))
-        done <<< "$shards"
+            pids+=($!)
+        done
         reds=()
         for k in "${!pids[@]}"; do
             S=target/gate-logs/pbt-hand-authored-shard-$k.log

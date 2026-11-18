@@ -339,7 +339,7 @@ def generated_block():
         "# Everything else, at whatever load the lanes produce: the complement of",
         "# the timing set, minus the binaries that have a recipe of their own",
         "# (`OWN_RECIPE_OWNERS` in scripts/timing-split.py). Dropping that second",
-        "# term would silently start running the 119-case hand-authored replay",
+        "# term would silently start running the full hand-authored replay",
         "# inside the wide sweep, without its skip list.",
         "[profile.load-tolerant]",
         f'default-filter = "not ({f}) & not ({OWN_RECIPE_BINARIES})"',
