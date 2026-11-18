@@ -1071,14 +1071,20 @@ echo "== a quiet-hold wait behind foreign holds, of the quiet track and of the t
 hold_log="$home/.cache/holon-build/holds.jsonl" dummies="$scratch/dummies"
 # Takes the foreign holds in order, each "<seconds>:<release|die>", each for a fresh pid; stops at the
 # first take refused (the waiter took the hold in a gap). Every pid goes to $dummies. A hold's seconds
-# start at the waiter's first refused take, so a slow waiter start cannot outlive a short hold.
+# start at the waiter's first refused take, so a slow waiter start cannot outlive a short hold; a
+# waiter with no refused take within $take_deadline_s seconds fails the call.
+take_deadline_s=60
 foreign_holds() {
-  local h p
+  local h p deadline
   for h in "$@"; do
     sleep 300 & p=$!
     echo "$p" >> "$dummies"
     HOME="$home" "$orch/with-build-slot.sh" --quiet-hold "$p" 2>/dev/null || { kill "$p"; wait "$p" 2>/dev/null || true; return 0; }
-    until [ -s "$refusals" ]; do sleep 0.05; done
+    deadline=$((SECONDS + take_deadline_s))
+    until [ -s "$refusals" ]; do
+      [ "$SECONDS" -lt "$deadline" ] || { kill "$p"; wait "$p" 2>/dev/null || true; echo "no waiter took the quiet hold within $take_deadline_s s of the hold of pid $p"; return 1; }
+      sleep 0.05
+    done
     sleep "${h%%:*}"
     [ "${h#*:}" = die ] || HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$p" 2>/dev/null
     kill "$p"; wait "$p" 2>/dev/null || true
@@ -1108,7 +1114,7 @@ print("I3", int(all(abs(int(e[0]) - (own["ts"] - refused[0])) <= 1 for e in ends
 print("I4", int(all(n == 1 for n in any_held.values())), f"held-by lines per pid {dict(any_held)}")
 PY
 }
-# One wait of caller $1 (track | recipe) behind the foreign holds $2...
+# One wait of caller $1 (track | recipe | none, which runs no waiter) behind the foreign holds $2...
 wait_case() {
   local caller=$1 rc=0 driver="" inv ok detail; shift
   local what="$caller behind [$*]"
@@ -1119,19 +1125,27 @@ wait_case() {
   fi
   if [ "$caller" = track ]; then
     in_stubs GATE=g4 GATE_CARDS="1 2" GATE_PID=$$ GATE_SEAT_ASKED_AT="$(date +%s)" "$integrate" --track 1 >"$scratch/wait.out" 2>&1 || rc=$?
-  else
+  elif [ "$caller" = recipe ]; then
     in_stubs "$real_just" --justfile "$here/../justfile" --working-directory "$recipe" timing-gate >"$scratch/wait.out" 2>&1 || rc=$?
+  else
+    : > "$scratch/wait.out"
   fi
-  [ -z "$driver" ] || wait "$driver"
+  [ -z "$driver" ] || expect "$what: a waiter took the quiet hold" wait "$driver"
   [ ! -e "$marker" ] || HOME="$home" "$orch/with-build-slot.sh" --quiet-release "$(cat "$marker")" 2>/dev/null
   expect "$what: exits 0 (got $rc)" [ "$rc" = 0 ]
-  while read -r inv ok detail; do expect "$what: $inv ($detail)" [ "$ok" = 1 ]; done < <(check_wait "$scratch/wait.out")
+  local checked=0
+  check_wait "$scratch/wait.out" >"$scratch/invariants.out" 2>/dev/null || checked=$?
+  expect "$what: the invariants were checked (exit $checked)" [ "$checked" = 0 ]
+  while read -r inv ok detail; do expect "$what: $inv ($detail)" [ "$ok" = 1 ]; done <"$scratch/invariants.out"
 }
 for caller in track recipe; do
   wait_case "$caller"
   wait_case "$caller" 1:release
   wait_case "$caller" 0.7:die 1:release
 done
+echo "== a waiter that never takes the quiet hold fails the case"
+never=$( (take_deadline_s=1; wait_case none 1:release) 2>&1 ) || true
+expect "a waiter that never takes the hold: the case names it" grep -qx 'FAIL: none behind \[1:release\]: a waiter took the quiet hold' <<<"$never"
 ends=(release die) callers=(track recipe)
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   holds=() n=$((RANDOM % 4))
