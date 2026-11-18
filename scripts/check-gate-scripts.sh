@@ -1146,6 +1146,15 @@ done
 echo "== a waiter that never takes the quiet hold fails the case"
 never=$( (take_deadline_s=1; wait_case none 1:release) 2>&1 ) || true
 expect "a waiter that never takes the hold: the case names it" grep -qx 'FAIL: none behind \[1:release\]: a waiter took the quiet hold' <<<"$never"
+echo "== a wait whose invariants cannot be read fails the case"
+# A wait with no own take, behind zero to two foreign holds: check_wait finds no take of its own.
+no_own_take_case() {
+  local ends=(release die) holds=() n=$((RANDOM % 3)) i out
+  for ((i = 0; i < n; i++)); do holds+=("1:${ends[RANDOM % 2]}"); done
+  out=$( (take_deadline_s=1; wait_case none ${holds[@]+"${holds[@]}"}) 2>&1 ) || true
+  expect "a wait with no own take [${holds[*]}]: the case says its invariants were not checked" grep -qE '^FAIL: none behind \[.*\]: the invariants were checked' <<<"$out"
+}
+for _ in 1 2 3 4 5 6; do no_own_take_case; done
 ends=(release die) callers=(track recipe)
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   holds=() n=$((RANDOM % 4))
