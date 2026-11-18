@@ -11,6 +11,7 @@ mod cross_medium_caps;
 mod dogfood_recorded_replay;
 mod gherkin_negative_replay;
 mod gpui_mcp_replay;
+mod invariant_doc_links;
 mod holon_rule_runtime_discovery_prod_session;
 mod live_self_check_suite;
 mod logseq_parity_replay;

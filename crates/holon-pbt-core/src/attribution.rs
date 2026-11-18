@@ -70,6 +70,7 @@ pub enum Position {
 pub struct Attribution {
     position: Position,
     wiring: &'static str,
+    checks: &'static [&'static str],
 }
 
 impl Attribution {
@@ -79,6 +80,7 @@ impl Attribution {
         Self {
             position: Position::Layer(layer),
             wiring,
+            checks: &[],
         }
     }
 
@@ -88,7 +90,14 @@ impl Attribution {
         Self {
             position: Position::CrossCutting,
             wiring,
+            checks: &[],
         }
+    }
+
+    /// The doc clauses the invariant checks, each `docs/<path>.md#<slug>`.
+    pub const fn checks(mut self, clauses: &'static [&'static str]) -> Self {
+        self.checks = clauses;
+        self
     }
 
     /// `None` for a cross-cutting guard — it has no place in the ordering.
@@ -101,5 +110,9 @@ impl Attribution {
 
     pub fn wiring(&self) -> &'static str {
         self.wiring
+    }
+
+    pub fn checked_clauses(&self) -> &'static [&'static str] {
+        self.checks
     }
 }

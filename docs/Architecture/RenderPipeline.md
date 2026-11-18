@@ -85,6 +85,9 @@ Query results flow into `ReactiveView` (a self-managing reactive collection back
 
 #### Core Types
 
+<a id="resolved-operations"></a>
+A stored profile holds no operations. Operations are injected at resolve time from the entity's registered operations and appear only on the resolved `RenderProfile`.
+
 ```rust
 // Location: crates/holon-api/src/entity_profile.rs
 pub struct EntityProfile {

@@ -21,6 +21,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
             sut_absent: Vec::new(),
             ref_present: vec![CapId::of::<dyn RefIntegrationConnect>()],
         },
-        Attribution::at(Layer::Projection, file!()),
+        Attribution::at(Layer::Projection, file!())
+            .checks(&["docs/Architecture/RenderPipeline.md#resolved-operations"]),
     ))
 }
