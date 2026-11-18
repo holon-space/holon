@@ -1186,6 +1186,43 @@ else
     echo "[fixture] ok outcome/replay/undeclared-green-prints-no-note"
 fi
 
+# The snapshot-boot restore verdict is known only in the case that names its
+# row, at any line of snapshot_boot.rs; any other panic of that case is novel.
+boot_row=snapshot-boot-restore-differs-from-first-restore
+boot_case=watch-matview-retains-outdent-intermediate-row
+boot_payload="[snapshot boot] the restore differs from its template's first restore: 5 item(s) differ:"
+replay_site=crates/holon-integration-tests/src/pbt/composed/snapshot_boot.rs:556:9 \
+    replay_log "$boot_case" "$boot_row" "$boot_payload" >"$work/replay-restore-differs.log"
+expect_outcome replay/restore-differs-is-known 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/replay-restore-differs.log"
+replay_site=crates/holon-integration-tests/src/pbt/composed/snapshot_boot.rs:556:9 \
+    replay_log "$boot_case" "$boot_row" 'the restore differs from the oracle' >"$work/replay-restore-other-panic.log"
+expect_outcome replay/restore-other-panic-stays-novel 1 "^\[known-reds\] FAIL: case \"$boot_case\" matches no row; it names $boot_row" \
+    "$work/replay-restore-other-panic.log"
+replay_site=crates/holon-integration-tests/src/pbt/composed/snapshot_boot.rs:556:9 \
+    replay_log other-case '' "$boot_payload" >"$work/replay-restore-other-case.log"
+expect_outcome replay/restore-differs-in-an-unnamed-case-stays-novel 1 '^\[known-reds\] FAIL: case "other-case" matches '"$boot_row"'; it names no row' \
+    "$work/replay-restore-other-case.log"
+
+# The same verdict from a test outside the replay harness names no case, so no
+# row is bound to it: each such test's log stays novel.
+restore_differs_outside_its_case_log() {
+    local test="$1"
+    {
+        printf '%s\n' '     Running tests/snapshot_boot_pbt.rs (target/debug/deps/snapshot_boot_pbt-0000000000000001)' '' 'running 1 test'
+        printf "thread '%s' (1) panicked at crates/holon-integration-tests/src/pbt/composed/snapshot_boot.rs:177:5:\n" "$test"
+        printf '%s\n' "$boot_payload"
+        printf '%s\n' "test $test ... FAILED" \
+            'test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.73s'
+    } >"$work/restore-differs-outside-$test.log"
+}
+for test in a_restored_boot_observes_what_a_fresh_boot_observes a_restore_does_not_see_the_cases_before_it \
+    general_e2e_composed_pbt; do
+    restore_differs_outside_its_case_log "$test"
+    expect_outcome "replay/restore-differs-outside-the-replay-stays-novel/$test" 1 \
+        '^\[known-reds\] FAIL: 1 novel panic(s), 0 known-red' "$work/restore-differs-outside-$test.log"
+done
+
 # A row whose site is a file at any line holds after a line move in that file.
 renamed_payload='reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 expected disclosure(s) are NOT in effect: [\"edit-refused-read-only-format on a subject whose final path component is `moved-recipe-1.cook`\"]. The transition'"'"'s outcome happened and the user was never told, which from inside the store is indistinguishable from it having succeeded. Raised (governed kinds only): [RaisedCondition { subject: \"cooklang\", kind: \"vault-ingest-failed\", files: [\"moved-recipe-0.cook\", \"moved-recipe-1.cook\"], count: Some(2), message: None }]")]'
 replay_site=crates/holon-integration-tests/src/pbt/composed/harness.rs:2231:5 \

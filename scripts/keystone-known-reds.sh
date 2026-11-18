@@ -53,6 +53,8 @@
 # known only when it matches exactly the row the case names (`known_red`), so
 # one row never covers another case; a red case without a panic is novel.
 # A case that names a row and runs green prints a NOTE line, not a failure.
+# A row some case names matches nothing outside a replay log: no other log
+# attributes a panic to a case, so such a panic stays novel.
 #
 # A panic inside a passing test is no failure either: the
 # `NOTE: N panic(s) inside passing tests (ignored): <tests>` line counts it and
@@ -141,6 +143,8 @@ python3 "$repo_root/scripts/check-known-red-evidence.py" --rows "$registry" >"$r
 if [ ! -s "$rows" ]; then
     echo "[known-reds] registry has no known-red rows — every failure is novel."
 fi
+bound="$work/bound"
+python3 "$repo_root/scripts/check-known-red-evidence.py" --bound >"$bound"
 tests="$work/tests"
 python3 "$repo_root/scripts/check-known-red-evidence.py" --tests "$registry" >"$tests"
 
@@ -779,7 +783,7 @@ for log in "$@"; do
             split("", is_hit)
             for (j = 1; j <= n; j++) {
                 hit = 0
-                for (i = 1; i <= nrows; i++) if (PIECE[j] ~ pat[i]) { hit = i; break }
+                for (i = 1; i <= nrows; i++) if (PIECE[j] ~ pat[i] && !(replay_case == "" && (key[i] in bound))) { hit = i; break }
                 if (hit && site[hit] != "" && loc !~ site[hit]) {
                     if (!cross_hit) cross_hit = hit
                 } else if (hit) {
@@ -821,6 +825,7 @@ for log in "$@"; do
             SIG = tab ? substr(line, tab + 1) : ""
         }
         BEGIN { FS = "\037"; prefix_inv = "diverged from the oracle: [(\"" }
+        FILENAME == bound_path { bound[$0] = 1; next }
         FILENAME == rows_path {
             if ($1 != "") {
                 key[++nrows] = $1; pat[nrows] = $2; site[nrows] = $3; comp[nrows] = $4
@@ -935,7 +940,7 @@ for log in "$@"; do
                 for (t = 1; t <= ntail; t++) print "  " tail[t]
             }
             print novel + 0, matched + 0, cross + 0, collateral + 0, green_declared + 0 >counts_out
-        }' q="'" novel_out="$work/novel" hits_out="$work/hits" counts_out="$work/counts" rows_path="$rows" "$rows" "$sigs" "$sigs"
+        }' q="'" novel_out="$work/novel" hits_out="$work/hits" counts_out="$work/counts" rows_path="$rows" bound_path="$bound" "$bound" "$rows" "$sigs" "$sigs"
     read -r log_novel log_matched log_cross log_collateral log_green_declared <"$work/counts"
     novel=$((novel + log_novel))
     matched=$((matched + log_matched))

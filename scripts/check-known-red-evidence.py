@@ -14,6 +14,7 @@ with the workspace that held it.
                                                   companions, then a payload and a site field
                                                   per collateral pair (separated by \x1f, so
                                                   an empty cell stays a field)
+  check-known-red-evidence.py --bound            print the row keys some hand-authored case names, one per line
   check-known-red-evidence.py --tests REGISTRY.md print each line of the `Test | Registry key` table as
                                                   the nextest test id and the row key, separated by \x1f
 
@@ -259,11 +260,9 @@ def lint(registry):
     return failures
 
 
-def row_key_failures(registry, case_files):
-    """One line per hand-authored case of `case_files` whose `known_red` value is not the key of a `known-red` row
-    of `registry`. A line that is not blank, a `#` comment or a JSON object raises."""
-    keys = {row[1] for row in registry_rows(registry) if len(row) == 7 and row[2] == "known-red"}
-    failures = []
+def hand_authored_cases(case_files):
+    """Yield (where, lineno, case) per hand-authored case of `case_files`. A line that is not blank, a `#` comment or a
+    JSON object raises."""
     for file in case_files:
         where = file.relative_to(REPO) if file.is_relative_to(REPO) else file
         for lineno, line in enumerate(file.read_text().splitlines(), 1):
@@ -276,17 +275,26 @@ def row_key_failures(registry, case_files):
                 raise ValueError(f"{where}:{lineno}: a hand-authored case is not JSON: {e}") from e
             if not isinstance(case, dict):
                 raise ValueError(f"{where}:{lineno}: a hand-authored case is not a JSON object: {line}")
-            if "known_red" not in case:
-                continue
-            if "name" not in case:
+            if "known_red" in case and "name" not in case:
                 raise ValueError(f"{where}:{lineno}: a hand-authored case has no name: {line}")
-            key = case["known_red"]
-            if not isinstance(key, str) or not key:
-                failures.append(f"{where}:{lineno}: case {case['name']} has known_red {json.dumps(key)},"
-                                f" which is not a row key")
-            elif key not in keys:
-                failures.append(f"{where}:{lineno}: case {case['name']} names row {key},"
-                                f" which the registry has no known-red row for")
+            yield where, lineno, case
+
+
+def row_key_failures(registry, case_files):
+    """One line per hand-authored case of `case_files` whose `known_red` value is not the key of a `known-red` row
+    of `registry`."""
+    keys = {row[1] for row in registry_rows(registry) if len(row) == 7 and row[2] == "known-red"}
+    failures = []
+    for where, lineno, case in hand_authored_cases(case_files):
+        if "known_red" not in case:
+            continue
+        key = case["known_red"]
+        if not isinstance(key, str) or not key:
+            failures.append(f"{where}:{lineno}: case {case['name']} has known_red {json.dumps(key)},"
+                            f" which is not a row key")
+        elif key not in keys:
+            failures.append(f"{where}:{lineno}: case {case['name']} names row {key},"
+                            f" which the registry has no known-red row for")
     return failures
 
 
@@ -457,6 +465,13 @@ def print_rows(registry):
     return 0
 
 
+def print_bound():
+    """The row keys some hand-authored case names: a panic matches such a row only inside that case's replay."""
+    for key in sorted({case["known_red"] for _, _, case in hand_authored_cases(DEFAULT_CASE_FILES) if "known_red" in case}):
+        print(key)
+    return 0
+
+
 def tests_failures(registry):
     """The failures that make `--tests` refuse `registry`; a registry without the table is one of them."""
     if not any(line.startswith("|") and known_reds_table.split(line) == TEST_TABLE_HEADER
@@ -481,6 +496,8 @@ def main(argv):
         return print_rows(Path(argv[1]))
     if len(argv) == 2 and argv[0] == "--tests":
         return print_tests(Path(argv[1]))
+    if argv == ["--bound"]:
+        return print_bound()
     if argv == ["--self-check"]:
         wrong = self_check()
         if wrong:
