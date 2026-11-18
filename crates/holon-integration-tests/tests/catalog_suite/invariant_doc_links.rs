@@ -160,7 +160,7 @@ fn every_invariant_doc_link_resolves() {
         unnamed.len(),
         unnamed.keys().cloned().collect::<Vec<_>>().join("\n"),
     );
-    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("invariant-doc-links-report.txt");
+    let out = std::env::temp_dir().join("invariant-doc-links-report.txt");
     std::fs::write(&out, &report).unwrap();
     println!("{report}(written to {})", out.display());
 }
@@ -174,6 +174,24 @@ fn a_link_to_a_missing_slug_fails_naming_invariant_and_link() {
     let failures = broken_links(&repo_root(), &planted);
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert!(failures[0].contains("inv-planted") && failures[0].contains("#no-such-slug"));
+
+    let planted_root = tempfile::tempdir().unwrap();
+    let root = planted_root.path();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(
+        root.join("docs/Dup.md"),
+        "<a id=\"twice\"></a>\n# A\n<a id=\"twice\"></a>\n",
+    )
+    .unwrap();
+    let dup_link = vec![("inv-dup".to_string(), vec!["docs/Dup.md#twice"])];
+    let failures = broken_links(root, &dup_link);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].contains("inv-dup") && failures[0].contains("2 anchors"));
+    let files = BTreeSet::from(["docs/Dup.md"]);
+    assert_eq!(
+        duplicate_slugs(root, &files),
+        vec!["docs/Dup.md: duplicate anchor `twice`".to_string()]
+    );
 }
 
 mod grammar {
