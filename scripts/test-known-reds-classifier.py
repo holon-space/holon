@@ -10,6 +10,7 @@ default 100; SEED=<s> replays a draw). The fixed examples run first. Properties:
 - P3: interleaving never moves a printed panic out of the output, except under
   the message a cut location leaves it;
 - P4: without the `--no-capture` marker no panic leaves the output;
+- P6: when several registry rows match one panic, the first row that accepts its site is named, else the first row is cross-family (synthetic registry in a copied tree);
 - P5: a flow job capture of the log (a timestamp before every line) gets the same verdict word and exit code as the raw capture.
 Before the CASES draws it checks base draws, drawn until each case of `kinds` below is reached at least once, so every case
 is checked in every run; it fails when ATTEMPTS draws leave a case unreached. Exits non-zero when a property fails; each failing
@@ -228,6 +229,29 @@ def broken_table_failures(work):
     return failures
 
 
+def twin_failures(work, rng, cases):
+    """P6: when several rows match one panic, the verdict is the first row that accepts its site, else cross-family on the first row.
+
+    The real registry has no such pair, so each case runs the classifier on a copy of the tree whose registry
+    holds the case's two rows ahead of all others.
+    """
+    repo = CLASSIFIER.resolve().parent.parent
+    registry = (repo / "docs/Testing/KeystoneKnownReds.md").read_text()
+    failures = []
+    for i, (name, rows, text, want_exit, line) in enumerate(logs.twin_examples() + [logs.twin_case(rng) for _ in range(cases)]):
+        tree = work / f"twin-{i}"
+        (tree / "docs/Testing").mkdir(parents=True)
+        (tree / "scripts").symlink_to(repo / "scripts")
+        (tree / "docs/Testing/known-red-evidence").symlink_to(repo / "docs/Testing/known-red-evidence")
+        (tree / "docs/Testing/KeystoneKnownReds.md").write_text(logs.registry_with(registry, rows))
+        log = tree / "case.log"
+        log.write_text(text)
+        out = subprocess.run([tree / "scripts/keystone-known-reds.sh", log], capture_output=True, text=True)
+        if out.returncode != want_exit or not re.search(line, out.stdout, re.M):
+            failures.append(f"P6 {name}: want exit {want_exit} and a line matching {line!r}, rows {rows}, got exit {out.returncode}:\n{out.stdout}{out.stderr}\n  log:\n{text}")
+    return failures
+
+
 def main():
     seed = int(os.environ.get("SEED", random.randrange(1 << 30)))
     cases = int(os.environ.get("CASES", 100))
@@ -243,7 +267,7 @@ def main():
             if code != want_exit or not re.search(line, out, re.M):
                 failed += 1
                 print(f"example {name}: want exit {want_exit} and a line matching {line!r}, got exit {code}:\n{out}")
-        for failure in stale_only_failures(work) + broken_table_failures(work) + stale_location_failures(work, rng) + path_spelling_location_failures(work, rng):
+        for failure in stale_only_failures(work) + broken_table_failures(work) + stale_location_failures(work, rng) + path_spelling_location_failures(work, rng) + twin_failures(work, rng, cases):
             failed += 1
             print(failure)
         print(f"drawn with seed {seed} ({cases} cases)")

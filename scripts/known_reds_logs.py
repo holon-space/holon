@@ -27,6 +27,7 @@ and message the text still states, and whether the panic's own test passed;
 `python3 scripts/known_reds_logs.py write-examples <dir>` writes each of
 EXAMPLES to <dir>/<name>.log and prints `<name>\t<exit>\t<line regex>`.
 """
+import random
 import re
 import subprocess
 import sys
@@ -1389,6 +1390,60 @@ error: test run failed
             "     Summary [   1.000s] 1 test run: 1 passed, 0 skipped",
         ]) + "\n", 1, r"^ *1 FAIL [+] LEAK: holon-x::main a::case_b$"),
     ]
+
+
+TWIN_PATTERN = "^twin defect [a-z ]+$"
+REGISTRY_HEADER = ("| Key | Status | Match pattern | Site | Signature | Evidence | Task | Owner | Companions |\n"
+                   "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
+
+
+def twin_case(rng):
+    """(name, rows, log text, want exit, a regex one output line must match) for a panic that two registry rows match.
+
+    A row is (key, site ERE or "" for no site anchor). The verdict names the first row that accepts the panic's site
+    in registry order; when none does, the first row, as a cross-family match.
+    """
+    used = set()
+    crate, other, stem = word(rng, used), word(rng, used), word(rng, used)
+    site, at = f"crates/{crate}/src/{stem}.rs", f"{rng.randint(1, 900)}:{rng.randint(1, 40)}"
+    accepting = rf"^crates/{crate}/src/{stem}\.rs:[0-9]+:[0-9]+$"
+    missing = rf"^crates/{other}/src/{stem}\.rs:[0-9]+:[0-9]+$"
+    first, second = f"twin-{word(rng, used)}", f"twin-{word(rng, used)}"
+    name, sites, owed = rng.choice([
+        ("twin", (missing, accepting), second),
+        ("twin-no-site-first", ("", missing), first),
+        ("twin-accepting-both", (accepting, accepting), first),
+        ("twin-both-wrong-site", (missing, missing), None),
+    ])
+    unit = f"holon-{crate}::main {stem}::case"
+    log = "\n".join([
+        SERIAL_MARKER, "    Starting 1 test across 1 binary", status_line("START", 1, 1, unit), "", "running 1 test",
+        f"thread '{stem}::case' (12) panicked at {site}:{at}:", "twin defect " + word(rng, used),
+        f"test {stem}::case ... FAILED", status_line("FAIL", 1, 1, unit),
+        "     Summary [   1.000s] 1 test run: 0 passed, 1 failed, 0 skipped", status_line("FAIL", 1, 1, unit), "error: test run failed",
+    ]) + "\n"
+    rows = [(first, sites[0]), (second, sites[1])]
+    if owed:
+        return name, rows, log, 0, rf"^WARN known-red \[{owed}\] x1$"
+    return name, rows, log, 1, rf"^\[known-reds\] FAIL: cross-family match: {first} at {site}:{at}$"
+
+
+def twin_examples():
+    """One fixed case of each `twin_case` name, as (name, rows, log, exit, line)."""
+    rng = random.Random(0)
+    cases = {}
+    while len(cases) < 4:
+        case = twin_case(rng)
+        cases.setdefault(case[0], case)
+    return [cases[k] for k in sorted(cases)]
+
+
+def registry_with(registry_text, rows):
+    """`registry_text` with the known-red `rows` ahead of the first row of its first Key table."""
+    assert REGISTRY_HEADER in registry_text
+    dash = "—"
+    added = "".join(f"| `{k}` | known-red | `{TWIN_PATTERN}` | {f'`{s}`' if s else dash} | twin | twin | #0 | #0 | {dash} |\n" for k, s in rows)
+    return registry_text.replace(REGISTRY_HEADER, REGISTRY_HEADER + added, 1)
 
 
 def main(argv):

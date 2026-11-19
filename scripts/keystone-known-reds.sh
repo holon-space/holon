@@ -788,17 +788,21 @@ for log in "$@"; do
         }
         # Matches the violations of `norm` at `loc` against the rows: sets HIT[1..nhits],
         # cross_hit, and novel_pieces (the violations neither a row nor a companion knows).
-        function match_rows(norm, loc,    n, i, j, h, g, ng, hit, nunmatched, invariant, at, cut, claimed, globs) {
+        function match_rows(norm, loc,    n, i, j, h, g, ng, hit, wrong_site, nunmatched, invariant, at, cut, claimed, globs) {
             n = split_violations(norm)
             nhits = 0; cross_hit = 0; nunmatched = 0
             split("", is_hit)
             for (j = 1; j <= n; j++) {
-                hit = 0
-                for (i = 1; i <= nrows; i++) if (PIECE[j] ~ pat[i] && !(replay_case == "" && (key[i] in bound))) { hit = i; break }
-                if (hit && site[hit] != "" && loc !~ site[hit]) {
-                    if (!cross_hit) cross_hit = hit
-                } else if (hit) {
+                hit = 0; wrong_site = 0
+                for (i = 1; i <= nrows; i++) {
+                    if (!(PIECE[j] ~ pat[i]) || (replay_case == "" && (key[i] in bound))) continue
+                    if (site[i] == "" || loc ~ site[i]) { hit = i; break }
+                    if (!wrong_site) wrong_site = i
+                }
+                if (hit) {
                     if (!(hit in is_hit)) { is_hit[hit] = 1; HIT[++nhits] = hit }
+                } else if (wrong_site) {
+                    if (!cross_hit) cross_hit = wrong_site
                 } else UNMATCHED[++nunmatched] = PIECE[j]
             }
             novel_pieces = ""
