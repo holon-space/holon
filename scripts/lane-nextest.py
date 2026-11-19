@@ -5,7 +5,9 @@
                                                     whole run judged by scripts/keystone-known-reds.sh
     scripts/lane-nextest.py rerun <nextest args>    the same args, `-E` narrowed to the tests of the red list
 
-Both runs pass the nextest output through to stdout. `run` writes the red list to $LANE_NEXTEST_DIR/reds.txt
+Both runs pass the nextest output through to stdout. A line counts as nextest's own (a status line, the closing
+summary, a cancel line) only at the column nextest prints it; a test's captured output, which nextest indents,
+cannot add a red or end the run. `run` writes the red list to $LANE_NEXTEST_DIR/reds.txt
 (default target/lane-nextest/), one `<binary id> <test name>` line per red test, known reds included, and prints
 its path. It exits 0 when nextest passed or every red is on the known-reds list, else 1 with one `[lane-nextest]
 novel:` line per novel signature of the classifier's verdict. A nextest failure that is not only its reds (no test
@@ -25,11 +27,12 @@ CLASSIFIER = REPO / "scripts" / "keystone-known-reds.sh"
 # `cargo` under the shape env of scripts/cargo-shape-env.sh, so a run and its rerun build one shape.
 CARGO = ["bash", "-c", 'source "$0" lane && exec cargo "$@"', str(REPO / "scripts" / "cargo-shape-env.sh")]
 # nextest right-aligns its status label in 12 columns: `        FAIL [   0.004s] (2/5) crate::bin some::test`.
-STATUS = re.compile(r"^ *([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\[[0-9]+/[0-9]+\] )?(?:\([^)]*\) )?(\S+) (\S+)$")
+# A line whose label sits elsewhere is output a test printed (nextest indents that by 4 columns), see `at_column`.
+STATUS = re.compile(r"^( *)([A-Z][A-Z0-9 +/-]*?) \[[^]]*\] (?:\[[0-9]+/[0-9]+\] )?(?:\([^)]*\) )?(\S+) (\S+)$")
 NOT_RED = re.compile(r"^(?:TRY [0-9]+ )?(?:START|SLOW|TRMNTG|TERMINATING|PASS|LEAK|TMPASS|TIMEOUT-PASS|SLOW \+ LEAK"
                      r"|SLOW\+TMPASS|SKIP|FLAKY [0-9]+/[0-9]+|SETUP|SETUP SLOW|SETUP PASS|SETUP LEAK|SETUP TMPASS)$")
-END_OF_RUN = re.compile(r"^ *(?:Summary|Cancelling|Canceling) ")
-CANCELLED = re.compile(r"^ *(?:Cancelling|Canceling) ")
+END_OF_RUN = re.compile(r"^(?: {5}Summary| {2}Cancelling| {3}Canceling) ")
+CANCELLED = re.compile(r"^(?: {2}Cancelling| {3}Canceling) ")
 # The classifier's line of a signature that no known-reds row covers: the run's first signature, or a later one.
 NOVEL = re.compile(r"^(?:PRIMARY: |  )(\[(?:novel|cross-family:).*)")
 # nextest's exit code when some tests failed; a cancelled run exits with it too, so `run` also reads the cancel line.
@@ -40,10 +43,17 @@ def out_dir():
     return Path(os.environ.get("LANE_NEXTEST_DIR", "target/lane-nextest"))
 
 
+def at_column(indent, label):
+    """Whether `label` after `indent` spaces is where nextest puts it: its right edge at column 12 (longer labels at 0)."""
+    return len(indent) == max(12 - len(label), 0)
+
+
 def red_of(line):
     """`(binary id, test name)` when `line` is a nextest status line of a red test, else None."""
     m = STATUS.match(line)
-    return None if m is None or NOT_RED.match(m.group(1)) else (m.group(2), m.group(3))
+    if m is None or not at_column(m.group(1), m.group(2)) or NOT_RED.match(m.group(2)):
+        return None
+    return m.group(3), m.group(4)
 
 
 def run(args):

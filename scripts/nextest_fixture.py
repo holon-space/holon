@@ -2,6 +2,7 @@
 
 The env var PLAN gives each test's outcome: `P` passes, `K` panics with the wording of a known-red row of
 docs/Testing/KeystoneKnownReds.md, `U` panics with a wording no row lists, `X` kills nextest, `S` interrupts it.
+`C` and `D` print the lines of the env var CAPTURE first, then fail like `K` (`C`) or pass (`D`).
 """
 import re
 import subprocess
@@ -12,7 +13,21 @@ REPO = Path(__file__).resolve().parent.parent
 N = 8
 TESTS = [f"t{i:02}" for i in range(N)]
 UNLISTED = "planted red outside the known-reds list"
-STATUS = re.compile(r"^ *([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\([^)]*\) )?\S+ (t\d\d)$")
+STATUS = re.compile(r"^( *)([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\([^)]*\) )?\S+ (t\d\d)$")
+# nextest indents the output a test captured by this many columns.
+CAPTURE_INDENT = 4
+# Lines a test can print that imitate nextest's own: the label and the pool of captured lines.
+POOL = [("Summary", "Summary [ 0.1s] 1 test run: 1 passed"), ("Cancelling", "Cancelling due to test failure"),
+        ("FAIL", "FAIL [ 0.001s] (1/1) other::bin ghost")]
+
+
+def forges(label, indent):
+    """True when a captured line that starts with `label` after `indent` spaces reads as nextest's own line."""
+    return indent + CAPTURE_INDENT + len(label) == 12
+
+
+def captured_line(pool_index, indent):
+    return " " * indent + POOL[pool_index][1]
 
 
 def known_red_wording():
@@ -39,9 +54,15 @@ def fixture(root, wording):
         let secs = std::env::var("SLEEP_AFTER_U").map_or(0, |s| s.parse().unwrap());
         std::thread::sleep(std::time::Duration::from_secs(secs));
     }}
+    let capture = || std::env::var("CAPTURE").unwrap().lines().for_each(|l| println!("{{l}}"));
     match &plan[i..=i] {{
         "P" => {{}}
         "K" => panic!("{wording}"),
+        "C" => {{
+            capture();
+            panic!("{wording}")
+        }}
+        "D" => capture(),
         "U" => panic!("{UNLISTED}"),
         "X" => {{
             let nextest = std::os::unix::process::parent_id().to_string();
@@ -63,8 +84,13 @@ def fixture(root, wording):
 
 
 def ran_tests(output):
-    """(test, status) per nextest status line of `output`, in order, up to its closing summary."""
+    """(test, status) per nextest status line of `output`, in order, up to its closing summary.
+
+    A line counts only at nextest's own column, so a test's captured output (indented by CAPTURE_INDENT) cannot
+    end the run early or add a test.
+    """
     lines = output.splitlines()
     # nextest repeats the red status lines in its closing summary.
-    end = next((i for i, l in enumerate(lines) if re.match(r"^ *(Summary|Cancelling|Canceling) ", l)), len(lines))
-    return [(t, s) for t, s in (m.groups()[::-1] for m in map(STATUS.match, lines[:end]) if m)]
+    end = next((i for i, l in enumerate(lines) if re.match(r" {5}Summary ", l)), len(lines))
+    found = (m.groups() for m in map(STATUS.match, lines[:end]) if m)
+    return [(t, s) for indent, s, t in found if len(indent) + len(s) == 12]
