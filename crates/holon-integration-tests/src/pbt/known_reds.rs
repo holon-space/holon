@@ -150,12 +150,25 @@ impl KnownReds {
 
     fn row_for(&self, panic_message: &str) -> Option<&KnownRedRow> {
         let first = panic_message.lines().next().unwrap_or_default();
+        // Mirrors `normalize` in scripts/keystone-known-reds.sh: proptest's
+        // one-line `Test failed: <reason>.` reads as the bare reason.
+        let first = first
+            .strip_prefix("Test failed: ")
+            .and_then(|reason| reason.strip_suffix('.'))
+            .unwrap_or(first);
         let mut sig = first.to_string();
         for (re, to) in &self.normalizers {
             sig = re.replace_all(&sig, *to).into_owned();
         }
         self.rows.iter().find(|row| row.wording.is_match(&sig))
     }
+}
+
+/// The signature of a run that failed with `reason`: the first line of
+/// proptest's own report of it, the line the log classifier reads.
+pub fn failure_signature(reason: &str) -> String {
+    let report = TestError::<()>::Fail(reason.to_owned().into(), ()).to_string();
+    report.lines().next().unwrap_or_default().to_string()
 }
 
 /// One run of a keystone-shaped PBT: the runner (its `Display` is proptest's
@@ -375,6 +388,108 @@ mod tests {
         );
     }
 
+    /// (raw line, the line after the classifier's payload normalizers).
+    const SIGNATURE_LINES: &[(&str, &str)] = &[
+        (
+            "the org file does not hold the text",
+            "the org file does not hold the text",
+        ),
+        ("a sentence that ends.", "a sentence that ends."),
+        (
+            "block 0b1c2d3e-aaaa-bbbb-cccc-0123456789ab moved.",
+            "block <uuid> moved.",
+        ),
+        ("Id(3) lost", "Id(N) lost"),
+        ("", ""),
+        ("split-7 left.", "split-N left."),
+    ];
+
+    /// The verdict of scripts/keystone-known-reds.sh on a log whose report
+    /// line 1 is proptest's for a reason of these lines, spelled from its
+    /// `normalize`: a report line `Test failed: X.` reads as `X`.
+    fn shell_reading(lines: &[usize]) -> String {
+        let first = SIGNATURE_LINES[lines[0]].1;
+        if lines.len() == 1 {
+            first.to_string()
+        } else if let Some(bare) = first.strip_suffix('.') {
+            bare.to_string()
+        } else {
+            format!("Test failed: {first}")
+        }
+    }
+
+    /// A registry with one row per reading a drawn reason can take, each
+    /// anchored on the whole normalized line.
+    fn signature_registry() -> (KnownReds, BTreeMap<String, String>) {
+        let mut keys = BTreeMap::new();
+        for (_, norm) in SIGNATURE_LINES {
+            for form in [
+                norm.to_string(),
+                norm.strip_suffix('.').unwrap_or(norm).to_string(),
+                format!("Test failed: {norm}"),
+            ] {
+                let next = format!("row-{}", keys.len());
+                keys.entry(form).or_insert(next);
+            }
+        }
+        let text: String = keys
+            .iter()
+            .map(|(form, key)| {
+                format!(
+                    "| `{key}` | known-red | `^{}$` | — |\n",
+                    regex::escape(form)
+                )
+            })
+            .collect();
+        let reds = KnownReds::parse(&text, PathBuf::from("drawn.md")).expect("drawn registry");
+        (reds, keys)
+    }
+
+    /// The in-process signature of a reason is proptest's report line 1, and
+    /// the registry reads it as the log classifier reads that report.
+    fn signature_agrees_with_the_log_reading(lines: &[usize]) -> Result<(), String> {
+        let reason = lines
+            .iter()
+            .map(|&i| SIGNATURE_LINES[i].0)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report = format!("{}", TestError::<()>::Fail(reason.clone().into(), ()));
+        let line_one = report.lines().next().unwrap_or_default();
+        let signature = failure_signature(&reason);
+        if signature != line_one {
+            return Err(format!(
+                "reason {reason:?}: signature {signature:?} is not proptest's line 1 {line_one:?}"
+            ));
+        }
+        let (reds, keys) = signature_registry();
+        let want = keys[&shell_reading(lines)].as_str();
+        match reds.classify(&signature) {
+            Some(got) if got == want => Ok(()),
+            got => Err(format!(
+                "reason {reason:?}, signature {signature:?}: classified {got:?}, the log reading {:?} is {want}",
+                shell_reading(lines)
+            )),
+        }
+    }
+
+    #[test]
+    fn signature_examples_agree_with_the_log_reading() {
+        let failed: Vec<String> = [&[0][..], &[1], &[1, 0], &[0, 3], &[2, 4, 0], &[4], &[4, 0]]
+            .into_iter()
+            .filter_map(|lines| signature_agrees_with_the_log_reading(lines).err())
+            .collect();
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_drawn_reason_signs_as_the_log_classifier_reads_it(
+            lines in proptest::collection::vec(0..SIGNATURE_LINES.len(), 1..=4),
+        ) {
+            signature_agrees_with_the_log_reading(&lines).map_err(TestCaseError::fail)?;
+        }
+    }
+
     #[test]
     fn a_draw_that_ended_on_a_novel_panic_is_still_an_attempted_draw() {
         let mut tally = SampleTally::default();
@@ -474,7 +589,7 @@ mod tests {
             Some("journals-sibling-order-after-paste-copy")
         );
         assert_eq!(
-            reds.classify(&format!("Test failed: {both}")),
+            reds.classify(&failure_signature(&both)),
             Some("journals-sibling-order-after-paste-copy")
         );
         let alone = format!("{head}{live}]");

@@ -56,6 +56,7 @@ use holon_integration_tests::pbt::dense_text::row_text_edit;
 use holon_integration_tests::pbt::known_reds::KnownReds;
 use holon_integration_tests::pbt::known_reds::SampleTally;
 use holon_integration_tests::pbt::known_reds::completed_floor;
+use holon_integration_tests::pbt::known_reds::failure_signature;
 use holon_integration_tests::pbt::reference_state::ReferenceState;
 use holon_integration_tests::pbt::transitions::E2ETransition;
 use holon_integration_tests::pbt::transitions::WriteOrgFile;
@@ -2120,7 +2121,7 @@ fn draw_verdict(
             tally.borrow_mut().note_completed();
             Ok(Some(outcome))
         }
-        Err(broken) => match known_reds.classify(&format!("Test failed: {broken}")) {
+        Err(broken) => match known_reds.classify(&failure_signature(&broken)) {
             Some(key) => {
                 tally.borrow_mut().note_known_red(key);
                 eprintln!("[known-red {key}] draw spent, run continued:\n{broken}");
