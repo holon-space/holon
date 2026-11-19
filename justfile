@@ -1551,6 +1551,7 @@ cargo-free-checks:
     check timeout-margins target/gate-logs/gate-arch-timeout-margins.log with_self_check ./scripts/check-timeout-margins.py
     check known-red-evidence target/gate-logs/gate-arch-known-red-evidence.log with_self_check ./scripts/check-known-red-evidence.py
     check known-reds-fixture target/gate-logs/gate-arch-known-reds-fixture.log ./scripts/keystone-known-reds-fixture.sh
+    check known-reds-property-checks target/gate-logs/gate-arch-known-reds-property-checks.log ./scripts/known-reds-property-checks.py
     check adr-net-names target/gate-logs/gate-arch-adr-net-names.log with_self_check ./scripts/check-adr-net-names.py
     check red-logs target/gate-logs/gate-arch-red-logs.log with_self_check ./scripts/check-red-logs.py
     check compile-shape target/gate-logs/gate-arch-compile-shape.log ./scripts/test-check-compile-shape.py

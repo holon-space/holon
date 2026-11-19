@@ -4,13 +4,15 @@
 Run: `python3 scripts/test-cargo-free-checks.py` (CASES=<n> draws n rows, default 2).
 It works in a copy of this tree whose `cargo` is a stub that records each call:
 - the unchanged tree passes the recipe, which prints one PASS line per script and calls no cargo
-  subcommand but `fmt` (it reads the tree and builds nothing);
+  subcommand but `fmt` (it reads the tree and builds nothing), and the known-reds property check's
+  output names its seed and its classifier draw count;
 - a known-red row whose slug FeatureMap.md does not list fails the recipe with the feature-map drift
   named, a FAIL line for that script alone, and every other script still run (scripts/test-gate-arch-verdicts.py
   shows that a red cargo-free-checks fails `just gate-arch`);
 - only the exact subcommand `fmt` passes `forbidden_cargo`, whatever else is drawn.
 Exits non-zero when a property fails; each failing row is printed as an EXAMPLES entry.
 """
+import importlib.util
 import os
 import random
 import re
@@ -23,6 +25,10 @@ from pathlib import Path
 from jj_read import tree_files
 
 REPO = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("property_checks", REPO / "scripts/known-reds-property-checks.py")
+property_checks = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(property_checks)
+PROPERTY_CHECK = "known-reds-property-checks"
 REGISTRY = Path("docs/Testing/KeystoneKnownReds.md")
 COMPANIONS_HEADER = re.compile(r"^\| Key \|.*\| Companions \|$")
 DRIFT = "docs/Architecture/FeatureMap.md has drifted"
@@ -138,6 +144,9 @@ def main():
             failures.append(f"the unchanged tree fails the recipe:\n{tail(out)}")
         if forbidden_cargo(called):
             failures.append(f"the recipe calls cargo: {called}")
+        drawn_line = re.search(rf"drawn with seed \d+ \({property_checks.CLASSIFIER_CASES} classifier cases", out)
+        if PROPERTY_CHECK not in passed or not drawn_line:
+            failures.append(f"the recipe does not pass {PROPERTY_CHECK} with its seed and draw count named:\n{tail(out)}")
 
         registry = tree / REGISTRY
         original = registry.read_text()

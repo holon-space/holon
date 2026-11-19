@@ -51,7 +51,7 @@ def gate_step(step):
 
 
 def lane_nextest(root, env):
-    out = subprocess.run([sys.executable, str(root / "scripts/lane-nextest.py"), "run"], cwd=root, capture_output=True,
+    out = subprocess.run([sys.executable, str(root / "scripts/lane-nextest.py"), "run", "--no-tests=fail"], cwd=root, capture_output=True,
                          text=True, env={**env, "LANE_NEXTEST_DIR": str(root / "target/lane-nextest")})
     return out.returncode, out.stdout, out.stderr
 

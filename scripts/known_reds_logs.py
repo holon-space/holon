@@ -1228,7 +1228,7 @@ def examples():
     return [
         # A flow job log of four hand-authored cases that name a known red; its lines carry the job's timestamps.
         ("job-log-crash-restore-cases", JOB_LOG_EXCERPT.read_text(), 0,
-         r"^WARN known-red [[]crash-restore-window-not-disclosed[]] x4$"),
+         r"^WARN known-red \[crash-restore-window-not-disclosed\] x4$"),
         # A test that reproduces a deterministic known red passes: the row is stale, which a report says and the
         # verdict ignores.
         ("deterministic-row-test-passes", green_run(other, pinned), 0,
@@ -1257,7 +1257,7 @@ def examples():
         # A passing should_panic test's head over four lines, its location cut after the file.
         ("w183-split-location", W183, 0, NOTE_ONE.replace("1 panic", "4 panic") + r".*" + nested),
         ("w183-split-location-failed", failed_instead(W183, W183_OK, nested, 19), 1, W183_MSG),
-        ("w183-split-location-failed-site", failed_instead(W183, W183_OK, nested, 19), 1, r"^PRIMARY: [[]novel[]] [^ ]* @ " + HA + r":1486:5: assertion"),
+        ("w183-split-location-failed-site", failed_instead(W183, W183_OK, nested, 19), 1, r"^PRIMARY: \[novel\] [^ ]* @ " + HA + r":1486:5: assertion"),
         # Without its ok line nothing proves the test passed.
         ("w183-split-location-unpaired", W183.replace(W183_OK, ""), 1, W183_MSG),
         # The glued `ok` makes the head's text end in two test names.
