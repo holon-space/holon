@@ -286,7 +286,7 @@ if int(rc) == 0:
 else:
     try:
         # (1,): flow's red_exits for a stage that declares none, as this repo's integrate stage does.
-        got, got_red = "accepted", sorted(ruled_red({"jobId": job, "exit": int(rc), "signal": None}, rows, ends, tip, (1,)))
+        got, got_red = "accepted", sorted(ruled_red({"jobId": job, "exit": int(rc), "signal": None}, rows, ends, tip, (1,), None))
     except Refused as e:
         got, got_red = "refused", str(e)
 print("judged", int((got, got_red if got == "accepted" else None) == (want, want_red)), f"want {want} {want_red}, got {got} {got_red} (exit {rc})")
@@ -661,7 +661,7 @@ expected = "accepted" if complete and hold == "cover" and when == "after" and mu
 
 def verdict(rerun):
     try:
-        accept(gate, rerun, rows, ends, [], tip, False, (1,))
+        accept(gate, rerun, rows, ends, [], tip, False, (1,), None)
         return "accepted", None
     except Refused as e:
         return "refused", str(e)
