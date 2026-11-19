@@ -8,23 +8,27 @@ The crate's tests t00..t07 run one at a time in name order; the env var PLAN giv
 wording no row lists, `C` prints the captured block and then fails like `K`, `D` prints it and passes.
 Generators: the plan (each test P, K, U, C or D), the run filter (a random subset of the tests excluded by `-E`), the
 captured block (1-3 lines of the pool of lines that imitate nextest's own, each indented 0-14 columns) and whether
-passing tests' output reaches the stream (`--success-output immediate`).
-A captured line that sits at the column nextest's own line of that label has (after nextest's own 4-column indent
-of captured output) is excluded by construction: the runner reads it as nextest's and this test does not claim
-otherwise. Everything else a test prints must change neither the red list nor where the run ends.
+passing tests' output reaches the stream (`--success-output immediate`). The pool is built from the runner's own
+pattern data (scripts/nextest_fixture.py): every passing label, the closing summary, both cancel spellings and a red
+label; a check asserts each of its lines matches its runner pattern at nextest's column.
+A red or end-of-run line that sits at the column nextest's own line of that label has (after nextest's own 4-column
+indent of captured output) is excluded by construction: the runner reads it as nextest's and this test does not claim
+otherwise. A passing line is drawn there too when only passing tests print the block: read as nextest's own, it is
+still no red (inside a red test's output the classifier would take it as nextest's own, so no red test prints it).
+Everything a test prints must change neither the red list nor where the run ends.
 The nextest calls of each case see NEXTEST_NO_TESTS=pass, so a run that selects no test fails only through `--no-tests=fail`.
 Properties, per case: the run completes every filtered test with its planned outcome, exits non-zero iff a `U` ran
 and names a novel signature iff it did, its red list names exactly its red tests, and the rerun from that list runs
 exactly the listed tests with the same filter.
 Fixed plans run first through the same properties: the orders of red kinds a run can end in (a novel red last, a
-novel red before a known one, no red) and earlier finds.
+novel red before a known one, no red) and earlier finds. Before them, nextest's own status lines as a loaded host
+labels them (a bare `LEAK` pass, a `FAIL + LEAK` red) run through the outcome reader.
 A run that reads a red prints the classifier's verdict file whole, as one block, so a step log holds it; a run with
 no red writes no verdict file and prints no verdict line.
 A `nextest:` step line of scripts/flow-checks/run-step.sh runs through scripts/lane-nextest.py, and runs on past a
 novel red whose later tests take seconds each. Its step log holds the verdict block below `TREE:`, and the classifier
 judges that step log as it judges the run's own stream log, for a novel red and for known reds only.
 """
-import importlib.util
 import os
 import random
 import re
@@ -33,27 +37,41 @@ import sys
 import tempfile
 from pathlib import Path
 
-from nextest_fixture import (CAPTURE_INDENT, N, POOL, REPO, TESTS, UNLISTED, captured_line, fixture, forges,
-                             known_red_wording, ran_tests)
+from nextest_fixture import (CAPTURE_INDENT, N, POOL, REPO, TESTS, UNLISTED, captured_line, drawable, fixture,
+                             known_red_wording, load_runner, ran_tests)
 
 SCRIPT = REPO / "scripts" / "lane-nextest.py"
+LOADED_HOST_LINES = [("        LEAK [   0.216s] (3/8) fixture::main t02", [("t02", "PASS")]),
+                     (" FAIL + LEAK [   0.216s] (3/8) fixture::main t02", [("t02", "FAIL")])]
 CLASSIFIER = REPO / "scripts" / "keystone-known-reds.sh"
 PLAIN = [("PPPUPPPP", set()), ("PKPPPKPP", set()), ("PPPPPPPP", set()), ("UPPPPPPP", {"t00"}),
          ("KPKPUPPP", {"t02"}), ("PKKPKUPP", {"t01", "t02"}), ("KKKPPPPP", set()),
          ("PKUUPUPU", {"t07"}), ("PKPKPPPU", set()), ("PPPPPPPU", set()), ("PPUPKPPP", set()),
          ("PPPPPPPP", set(TESTS))]
-ALL_POOL = [0, 1, 2]
+ALL_POOL = range(len(POOL))
 CAPTURE_COLUMNS = [0, 1, 4, 5, 8, 12]
-CAPTURE_PLANS = ["PCPUPPPP", "PCUPCPCP"]
-# Blocks of captured lines: the card's `    Summary` line, then every pool line at each static column.
-CARD_BLOCK = ["    " + POOL[0][1]]
-STATIC_BLOCKS = [[captured_line(p, k) for p in ALL_POOL if not forges(POOL[p][0], k)] for k in CAPTURE_COLUMNS]
+CAPTURE_PLANS = ["PCPUPPPP", "PCUPCPCP", "PDPUPDPP"]
+# Blocks of captured lines: a `    Summary` closing line, then every pool line at each static column.
+CARD_BLOCK = ["    Summary [ 0.1s] 1 test run: 1 passed"]
+
+
+def static_block(plan, k):
+    return [captured_line(p, k) for p in ALL_POOL if drawable(p, k, "C" in plan)]
+
+
+# Single captured lines, as the test prints them: both cancel spellings and a label too long to forge, then a passing
+# label at the column where it forges nextest's own (4 + 4 + len("PASS") == 12), which only a passing test prints.
+ARM_LINES = ["Canceling due to test failure", "Cancelling due to test failure",
+             "  TIMEOUT-PASS [ 0.001s] (1/1) other::bin ghost"]
+FORGED_PASS = "    PASS [ 0.001s] (1/1) other::bin ghost"
 # Case: (plan, excluded tests, captured block, passing tests' output on the stream).
 EXAMPLES = [(plan, excluded, [], False) for plan, excluded in PLAIN]
 EXAMPLES += [("PCPUPPPP", set(), CARD_BLOCK, False), ("PDPUPPPP", set(), CARD_BLOCK, True),
              ("PDPUPPPP", set(), CARD_BLOCK, False)]
-EXAMPLES += [(plan, set(), block, True) for block in STATIC_BLOCKS for plan in CAPTURE_PLANS]
-EXAMPLES += [("CCCCCCCC", {"t00", "t07"}, STATIC_BLOCKS[0], False)]
+EXAMPLES += [(plan, set(), static_block(plan, k), True) for k in CAPTURE_COLUMNS for plan in CAPTURE_PLANS]
+EXAMPLES += [("CCCCCCCC", {"t00", "t07"}, static_block("C", 0), False)]
+EXAMPLES += [("PCPUPPPP", set(), [line], False) for line in ARM_LINES]
+EXAMPLES += [("PDPUPPPP", set(), [line], True) for line in ARM_LINES + [FORGED_PASS]]
 NO_TESTS = "--no-tests=fail"
 SUMMARY = re.compile(r"^ {5}Summary \[.*\] (\d+) tests? run: ")
 
@@ -130,12 +148,12 @@ def check(root, out, case, show):
     assert summary == [str(len(reds))], f"{log}\nrerun summary {summary}\n{r.stdout}"
 
 
-def draw_block(rng):
-    """1-3 captured lines of the pool, each at a column that does not forge nextest's own line."""
+def draw_block(rng, plan):
+    """1-3 captured lines of the pool, each at a column where `drawable` allows it for `plan`."""
     block, size = [], rng.randint(1, 3)
     while len(block) < size:
         p, k = rng.choice(ALL_POOL), rng.randrange(15)
-        if not forges(POOL[p][0], k):
+        if drawable(p, k, "C" in plan):
             block.append(captured_line(p, k))
     return block
 
@@ -157,13 +175,6 @@ def draw_cancelled_plan(rng):
     return "".join(rng.choice("PK") for _ in range(i)) + "S" + "P" * (N - i - 1)
 
 
-def load_runner():
-    spec = importlib.util.spec_from_file_location("lane_nextest", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 PASSING_LABELS = ["START", "SLOW", "TRMNTG", "TERMINATING", "PASS", "LEAK", "TMPASS", "TIMEOUT-PASS", "SLOW + LEAK",
                   "SLOW+TMPASS", "SKIP", "FLAKY 2/3", "TRY 2 PASS", "SETUP", "SETUP SLOW", "SETUP PASS"]
 RED_LABELS = ["FAIL", "TIMEOUT", "SIGSEGV", "ABORT", "EXECFAIL", "LEAK-FAIL", "FAIL + LEAK", "TRY 2 FAIL",
@@ -180,6 +191,24 @@ def check_labels(rng):
             line = f"{' ' * indent}{label} [   0.004s] (2/5) other::bin t00"
             got = runner.red_of(line)
             assert got == (want if indent == right else None), f"{line!r}: red_of {got}, want {want} at column {right}"
+
+
+def check_pool_covers_runner():
+    """Every passing label, end-of-run word and the red label of the runner has a pool line its pattern matches at
+    nextest's own column."""
+    runner = load_runner()
+    by_label = {label: line for label, line, _ in POOL}
+    for label in [*runner.PASSING_LABELS, runner.RETRY_PREFIX + "PASS"]:
+        line = " " * max(12 - len(label), 0) + by_label[label]
+        m = runner.STATUS.match(line)
+        assert m and runner.at_column(m.group(1), m.group(2)) and runner.NOT_RED.match(m.group(2)), \
+            f"{line!r}: no passing status line at nextest's column"
+    for word, column in [runner.SUMMARY_WORD, *runner.CANCEL_WORDS]:
+        line = " " * column + by_label[word]
+        assert runner.END_OF_RUN.match(line), f"{line!r}: END_OF_RUN"
+        assert bool(runner.CANCELLED.match(line)) == (word != runner.SUMMARY_WORD[0]), f"{line!r}: CANCELLED"
+    line = " " * 8 + by_label["FAIL"]
+    assert runner.red_of(line) == ("other::bin", "ghost"), f"{line!r}: red_of"
 
 
 def check_end_of_run(rng):
@@ -202,8 +231,10 @@ def main():
     seed = int(os.environ.get("SEED", random.randrange(1 << 30)))
     print(f"seed {seed}", flush=True)
     rng = random.Random(seed)
-    generated = [("".join(rng.choice("PPKUCD") for _ in TESTS), draw_excluded(rng), draw_block(rng),
-                  rng.random() < 0.5) for _ in range(cases)]
+    for line, want in LOADED_HOST_LINES:
+        assert ran_tests(line) == want, f"{line!r}: ran_tests {ran_tests(line)}, want {want}"
+    plans =["".join(rng.choice("PPKUCD") for _ in TESTS) for _ in range(cases)]
+    generated = [(plan, draw_excluded(rng), draw_block(rng, plan), rng.random() < 0.5) for plan in plans]
     with tempfile.TemporaryDirectory() as tmp:
         root, out = Path(tmp) / "fixture", Path(tmp) / "out"
         root.mkdir()
@@ -243,6 +274,7 @@ def main():
             print(f"ok cancelled plan={plan}", flush=True)
     check_labels(rng)
     check_end_of_run(rng)
+    check_pool_covers_runner()
     print("ok")
 
 

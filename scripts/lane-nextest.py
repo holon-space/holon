@@ -30,10 +30,27 @@ CARGO = ["bash", "-c", 'source "$0" lane && exec cargo "$@"', str(REPO / "script
 # nextest right-aligns its status label in 12 columns: `        FAIL [   0.004s] (2/5) crate::bin some::test`.
 # A line whose label sits elsewhere is output a test printed (nextest indents that by 4 columns), see `at_column`.
 STATUS = re.compile(r"^( *)([A-Z][A-Z0-9 +/-]*?) \[[^]]*\] (?:\[[0-9]+/[0-9]+\] )?(?:\([^)]*\) )?(\S+) (\S+)$")
-NOT_RED = re.compile(r"^(?:TRY [0-9]+ )?(?:START|SLOW|TRMNTG|TERMINATING|PASS|LEAK|TMPASS|TIMEOUT-PASS|SLOW \+ LEAK"
-                     r"|SLOW\+TMPASS|SKIP|FLAKY [0-9]+/[0-9]+|SETUP|SETUP SLOW|SETUP PASS|SETUP LEAK|SETUP TMPASS)$")
-END_OF_RUN = re.compile(r"^(?: {5}Summary| {2}Cancelling| {3}Canceling) ")
-CANCELLED = re.compile(r"^(?: {2}Cancelling| {3}Canceling) ")
+# nextest's labels of a test that is not red. A number in a label stands for any number: `FLAKY 2/3` is `FLAKY n/m`.
+PASSING_LABELS = ["START", "SLOW", "TRMNTG", "TERMINATING", "PASS", "LEAK", "TMPASS", "TIMEOUT-PASS", "SLOW + LEAK",
+                  "SLOW+TMPASS", "SKIP", "FLAKY 2/3", "SETUP", "SETUP SLOW", "SETUP PASS", "SETUP LEAK", "SETUP TMPASS"]
+# The prefix of a retried test's label, before any label.
+RETRY_PREFIX = "TRY 2 "
+# The words of nextest's own lines that end the run, each with the column nextest prints it at.
+SUMMARY_WORD = ("Summary", 5)
+CANCEL_WORDS = [("Cancelling", 2), ("Canceling", 3)]
+
+
+def label_pattern(label):
+    return re.sub(r"[0-9]+", "[0-9]+", re.escape(label))
+
+
+def at_column_start(words):
+    return re.compile("^(?:" + "|".join(f" {{{column}}}{re.escape(word)}" for word, column in words) + ") ")
+
+
+NOT_RED = re.compile(f"^(?:{label_pattern(RETRY_PREFIX)})?(?:{'|'.join(map(label_pattern, PASSING_LABELS))})$")
+END_OF_RUN = at_column_start([SUMMARY_WORD, *CANCEL_WORDS])
+CANCELLED = at_column_start(CANCEL_WORDS)
 # The classifier's line of a signature that no known-reds row covers: the run's first signature, or a later one.
 NOVEL = re.compile(r"^(?:PRIMARY: |  )(\[(?:novel|cross-family:).*)")
 # nextest's exit code when some tests failed; a cancelled run exits with it too, so `run` also reads the cancel line.

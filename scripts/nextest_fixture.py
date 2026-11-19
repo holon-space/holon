@@ -4,6 +4,7 @@ The env var PLAN gives each test's outcome: `P` passes, `K` panics with the word
 docs/Testing/KeystoneKnownReds.md, `U` panics with a wording no row lists, `X` kills nextest, `S` interrupts it.
 `C` and `D` print the lines of the env var CAPTURE first, then fail like `K` (`C`) or pass (`D`).
 """
+import importlib.util
 import re
 import subprocess
 import sys
@@ -16,14 +17,34 @@ UNLISTED = "planted red outside the known-reds list"
 STATUS = re.compile(r"^( *)([A-Z][A-Z0-9 +/-]*?) +\[[^]]*\] (?:\([^)]*\) )?\S+ (t\d\d)$")
 # nextest indents the output a test captured by this many columns.
 CAPTURE_INDENT = 4
-# Lines a test can print that imitate nextest's own: the label and the pool of captured lines.
-POOL = [("Summary", "Summary [ 0.1s] 1 test run: 1 passed"), ("Cancelling", "Cancelling due to test failure"),
-        ("FAIL", "FAIL [ 0.001s] (1/1) other::bin ghost")]
+
+
+def load_runner():
+    spec = importlib.util.spec_from_file_location("lane_nextest", REPO / "scripts" / "lane-nextest.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+RUNNER = load_runner()
+GHOST = "[ 0.001s] (1/1) other::bin ghost"
+# Lines a test can print that imitate nextest's own, one per pattern of scripts/lane-nextest.py, built from its data:
+# (label, line, whether the runner reads the line as a passing status line).
+POOL = ([(word, f"{word} due to test failure", False) for word, _ in [RUNNER.SUMMARY_WORD, *RUNNER.CANCEL_WORDS]]
+        + [("FAIL", f"FAIL {GHOST}", False)]
+        + [(label, f"{label} {GHOST}", True) for label in [*RUNNER.PASSING_LABELS, RUNNER.RETRY_PREFIX + "PASS"]])
 
 
 def forges(label, indent):
     """True when a captured line that starts with `label` after `indent` spaces reads as nextest's own line."""
     return indent + CAPTURE_INDENT + len(label) == 12
+
+
+def drawable(pool_index, indent, red_prints):
+    """A red or end-of-run line never where it forges nextest's own; a passing line there only when no red test prints
+    it: inside a red test's output the classifier takes it as nextest's own and loses that test's panic."""
+    label, _, passing = POOL[pool_index]
+    return not forges(label, indent) or (passing and not red_prints)
 
 
 def captured_line(pool_index, indent):
@@ -93,5 +114,6 @@ def ran_tests(output):
     # nextest repeats the red status lines in its closing summary.
     end = next((i for i, l in enumerate(lines) if re.match(r" {5}Summary ", l)), len(lines))
     found = (m.groups() for m in map(STATUS.match, lines[:end]) if m)
-    # nextest adds ` + LEAK` to a test's label when the host is loaded enough to delay its output pipe's close.
-    return [(t, s.removesuffix(" + LEAK")) for indent, s, t in found if len(indent) + len(s) == 12]
+    # A loaded host delays a test's output pipe close: nextest then labels a pass `LEAK` and a fail `FAIL + LEAK`.
+    return [(t, "PASS" if s == "LEAK" else s.removesuffix(" + LEAK"))
+            for indent, s, t in found if len(indent) + len(s) == 12]
