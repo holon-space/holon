@@ -1333,6 +1333,11 @@ fi
 classifier="$broken/scripts/keystone-known-reds.sh" expect_outcome broken-registry/companions-cell 2 \
     '\[read-model-never-seeded-sql-rows\] Companions cell .`not-an-inv`. is not' "${green_logs[0]}"
 
+# Every site anchor rejects its row's own evidence panic moved to another site.
+python3 "$repo_root/scripts/known-reds-site-anchors.py" >"$work/site-anchors.txt" ||
+    { cat "$work/site-anchors.txt"; echo "[fixture] FAIL site-anchors" >&2; outcome_fail=1; }
+tail -1 "$work/site-anchors.txt"
+
 if [ "$outcome_fail" -ne 0 ]; then
     echo ""
     echo "[fixture] FAIL: the classifier's outcome verdict changed. A green log read"
