@@ -18,8 +18,11 @@ and names a novel signature iff it did, its red list names exactly its red tests
 exactly the listed tests with the same filter.
 Fixed plans run first through the same properties: the orders of red kinds a run can end in (a novel red last, a
 novel red before a known one, no red) and earlier finds.
+A run that reads a red prints the classifier's verdict file whole, as one block, so a step log holds it; a run with
+no red writes no verdict file and prints no verdict line.
 A `nextest:` step line of scripts/flow-checks/run-step.sh runs through scripts/lane-nextest.py, and runs on past a
-novel red whose later tests take seconds each.
+novel red whose later tests take seconds each. Its step log holds the verdict block below `TREE:`, and the classifier
+judges that step log as it judges the run's own stream log, for a novel red and for known reds only.
 """
 import importlib.util
 import os
@@ -34,6 +37,7 @@ from nextest_fixture import (CAPTURE_INDENT, N, POOL, REPO, TESTS, UNLISTED, cap
                              known_red_wording, ran_tests)
 
 SCRIPT = REPO / "scripts" / "lane-nextest.py"
+CLASSIFIER = REPO / "scripts" / "keystone-known-reds.sh"
 PLAIN = [("PPPUPPPP", set()), ("PKPPPKPP", set()), ("PPPPPPPP", set()), ("UPPPPPPP", {"t00"}),
          ("KPKPUPPP", {"t02"}), ("PKKPKUPP", {"t01", "t02"}), ("KKKPPPPP", set()),
          ("PKUUPUPU", {"t07"}), ("PKPKPPPU", set()), ("PPPPPPPU", set()), ("PPUPKPPP", set()),
@@ -65,6 +69,29 @@ def nextest(root, out, mode, plan, excluded, block=(), immediate=False):
     return r, ran_tests(r.stdout)
 
 
+def block_at(lines, block):
+    """The index where `block` starts as a contiguous run of `lines`, else None."""
+    return next((i for i in range(len(lines) - len(block) + 1) if lines[i:i + len(block)] == block), None)
+
+
+def check_verdict_printed(out, stdout, reds, log):
+    verdict = out / "verdict.log"
+    if reds:
+        block = verdict.read_text().splitlines()
+        assert block and block_at(stdout.splitlines(), block) is not None, \
+            f"{log}\nthe verdict file is not one block of stdout:\n{verdict.read_text()}"
+    else:
+        assert not verdict.exists(), f"{log}\na run with no red wrote {verdict}"
+        printed = [l for l in stdout.splitlines() if l.startswith("[known-reds]")]
+        assert all(l.startswith("[known-reds] STALE: ") for l in printed), f"{log}\nverdict lines of a green run {printed}"
+
+
+def judged(log):
+    """(exit, verdict word) of the classifier on `log`: the word of its last line."""
+    r = subprocess.run([str(CLASSIFIER), str(log)], capture_output=True, text=True)
+    return r.returncode, r.stdout.splitlines()[-1].removeprefix("[known-reds] ").split(":")[0]
+
+
 def check(root, out, case, show):
     plan, excluded, block, immediate = case
     label = f"plan={plan} excluded={sorted(excluded)} block={block} immediate={immediate}"
@@ -89,6 +116,7 @@ def check(root, out, case, show):
     listed = [l.split(" ") for l in (out / "reds.txt").read_text().splitlines()]
     assert ["other::bin", "ghost"] not in listed, f"{log}\nred list {listed} holds a test that never ran"
     assert listed == [["fixture::main", t] for t in reds], f"{log}\nred list {listed}, want {reds}"
+    check_verdict_printed(out, r.stdout, reds, log)
     if not reds:
         rr = subprocess.run([sys.executable, str(SCRIPT), "rerun", NO_TESTS], cwd=root, capture_output=True, text=True,
                             env={**os.environ, "LANE_NEXTEST_DIR": str(out)})
@@ -171,7 +199,9 @@ def check_killed(root, out, plan):
 
 def main():
     cases = int(sys.argv[1]) if len(sys.argv) > 1 else 24
-    rng = random.Random(int(os.environ.get("SEED", random.randrange(1 << 30))))
+    seed = int(os.environ.get("SEED", random.randrange(1 << 30)))
+    print(f"seed {seed}", flush=True)
+    rng = random.Random(seed)
     generated = [("".join(rng.choice("PPKUCD") for _ in TESTS), draw_excluded(rng), draw_block(rng),
                   rng.random() < 0.5) for _ in range(cases)]
     with tempfile.TemporaryDirectory() as tmp:
@@ -179,15 +209,25 @@ def main():
         root.mkdir()
         fixture(root, known_red_wording())
         subprocess.run(["cargo", "build", "--tests", "--quiet"], cwd=root, check=True)
-        step = subprocess.run([str(REPO / "scripts/flow-checks/run-step.sh"), "nextest: --test-threads 1 --no-tests=fail -E 'all()'"],
-                              cwd=root, capture_output=True, text=True,
-                              env={**os.environ, "BASE": "0" * 40, "PLAN": "PPPUPPPP", "SLEEP_AFTER_U": "3",
-                                   "LANE_NEXTEST_DIR": str(out)})
-        print(step.stdout)
-        ran = ran_tests(step.stdout)
-        assert ran[:N] == [(t, "FAIL" if t == "t03" else "PASS") for t in TESTS], step
-        assert (out / "reds.txt").read_text() == "fixture::main t03\n", step
-        assert step.stdout.splitlines()[-1] == "exit: 1", step
+        for plan, exit_line in [("PPPUPPPP", "exit: 1"), ("KPKPPPPP", "exit: 0")]:
+            step = subprocess.run([str(REPO / "scripts/flow-checks/run-step.sh"), "nextest: --test-threads 1 --no-tests=fail -E 'all()'"],
+                                  cwd=root, capture_output=True, text=True,
+                                  env={**os.environ, "BASE": "0" * 40, "PLAN": plan, "SLEEP_AFTER_U": "3",
+                                       "LANE_NEXTEST_DIR": str(out)})
+            print(step.stdout)
+            ran = ran_tests(step.stdout)
+            reds = [t for t, p in zip(TESTS, plan) if p != "P"]
+            assert ran[:N] == [(t, "FAIL" if t in reds else "PASS") for t in TESTS], step
+            assert (out / "reds.txt").read_text() == "".join(f"fixture::main {t}\n" for t in reds), step
+            lines = step.stdout.splitlines()
+            assert lines[-1] == exit_line, step
+            at = block_at(lines, (out / "verdict.log").read_text().splitlines())
+            tree = next(i for i, l in enumerate(lines) if l.startswith("TREE: "))
+            assert at is not None and tree < at, f"{step}\nthe verdict block is not in the step log below TREE:"
+            step_log = Path(tmp) / "step.log"
+            step_log.write_text(step.stdout)
+            assert judged(step_log) == judged(out / "stream.log"), \
+                f"{step}\nthe classifier judges the step log {judged(step_log)}, the stream log {judged(out / 'stream.log')}"
         for args in [[], ["-E", "all()"], [NO_TESTS, NO_TESTS], ["--no-tests=pass"], ["--no-tests", "fail"]]:
             for mode in ("run", "rerun"):
                 r = subprocess.run([sys.executable, str(SCRIPT), mode, *args], cwd=root, capture_output=True, text=True)

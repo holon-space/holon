@@ -12,7 +12,8 @@ cannot add a red or end the run. `run` writes the red list to $LANE_NEXTEST_DIR/
 its path. It exits 0 when nextest passed or every red is on the known-reds list, else 1 with one `[lane-nextest]
 novel:` line per novel signature of the classifier's verdict. A nextest failure that is not only its reds (no test
 selected, a build error, a killed or cancelled nextest) exits with nextest's code. A classifier error is an error of
-`run` too. `run` prints the classifier's `--stale` reports of the whole run. `rerun` refuses an empty or missing red
+`run` too. `run` prints the classifier's `--stale` reports of the whole run and, when it judges reds, the classifier's
+verdict verbatim (it is also in $LANE_NEXTEST_DIR/verdict.log). `rerun` refuses an empty or missing red
 list. Both refuse args that do not pass `--no-tests=fail` exactly once, as the printed `nextest:` line does: it beats
 a NEXTEST_NO_TESTS=pass in the environment.
 """
@@ -85,6 +86,7 @@ def run(args):
         return rc
     with open(verdict_log, "w") as f:
         verdict = subprocess.run([str(CLASSIFIER), str(stream_log)], stdout=f, stderr=subprocess.STDOUT).returncode
+    sys.stdout.write(verdict_log.read_text())
     if verdict not in (0, 1):
         raise SystemExit(f"run: {CLASSIFIER.name} exited {verdict}, the reds are not judged ({verdict_log})")
     if verdict == 1:
