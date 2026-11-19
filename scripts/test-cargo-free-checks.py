@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Property check of `just cargo-free-checks`, the gate checks that build nothing.
 
-Run: `python3 scripts/test-cargo-free-checks.py` (CASES=<n> draws n rows, default 2).
+Run: `scripts/python311 scripts/test-cargo-free-checks.py` (CASES=<n> draws n rows, default 2).
 It works in a copy of this tree whose `cargo` is a stub that records each call:
 - the unchanged tree passes the recipe, which prints one PASS line per script and calls no cargo
   subcommand but `fmt` (it reads the tree and builds nothing), and the known-reds property check's
@@ -9,7 +9,9 @@ It works in a copy of this tree whose `cargo` is a stub that records each call:
 - a known-red row whose slug FeatureMap.md does not list fails the recipe with the feature-map drift
   named, a FAIL line for that script alone, and every other script still run (scripts/test-gate-arch-verdicts.py
   shows that a red cargo-free-checks fails `just gate-arch`);
-- only the exact subcommand `fmt` passes `forbidden_cargo`, whatever else is drawn.
+- only the exact subcommand `fmt` passes `forbidden_cargo`, whatever else is drawn;
+- with an old first `python3` and a `python3.12` on PATH (stubs of scripts/python_stubs.py), the archlint baseline check
+  passes: it runs under the shared Python >= 3.11 picker, not its shebang. Other scripts may fail under that PATH.
 Exits non-zero when a property fails; each failing row is printed as an EXAMPLES entry.
 """
 import importlib.util
@@ -23,6 +25,9 @@ import tempfile
 from pathlib import Path
 
 from jj_read import tree_files
+from python_stubs import write_stubs
+
+assert sys.version_info >= (3, 11), f"the python3.12 stub runs scripts under this interpreter, running {sys.version}"
 
 REPO = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("property_checks", REPO / "scripts/known-reds-property-checks.py")
@@ -41,6 +46,9 @@ SLUG_HEAD = "abcdefghijklmnopqrstuvwxyz"
 SLUG_TAIL = SLUG_HEAD + "0123456789-"
 # (slug, Companions table index, row offset in that table), run before the drawn cases.
 EXAMPLES = [("a-new-known-red", 0, 0)]
+# The interpreters on PATH before the host's: the old ones shadow the newer host ones of the same name.
+OLD_PYTHON3 = {"python3": (3, 9), "python3.14": (3, 9), "python3.13": (3, 9), "python3.12": (3, 12)}
+PICKED_CHECK = "archlint-baseline"
 
 
 def copy_tree(dest):
@@ -147,6 +155,14 @@ def main():
         drawn_line = re.search(rf"drawn with seed \d+ \({property_checks.CLASSIFIER_CASES} classifier cases", out)
         if PROPERTY_CHECK not in passed or not drawn_line:
             failures.append(f"the recipe does not pass {PROPERTY_CHECK} with its seed and draw count named:\n{tail(out)}")
+
+        write_stubs(scratch / "pystubs", OLD_PYTHON3, scratch / "python-record")
+        old_env = {**env, "PATH": f"{scratch / 'pystubs'}:{env['PATH']}"}
+        rc, out, called = run(tree, old_env, calls, "cargo-free-checks")
+        passed, failed = verdicts(out)
+        print(f"old first python3: exit {rc}, failed {failed}")
+        if PICKED_CHECK not in passed:
+            failures.append(f"old first python3 beside a python3.12: no PASS {PICKED_CHECK}, failed {failed}\n{tail(out)}")
 
         registry = tree / REGISTRY
         original = registry.read_text()
