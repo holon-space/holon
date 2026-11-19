@@ -20,6 +20,7 @@ use std::time::Instant;
 use holon_api::EntityUri;
 use holon_api::Region;
 use holon_integration_tests::pbt::ReferenceState;
+use holon_integration_tests::pbt::composed::case_budget::cases_or;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
@@ -223,10 +224,7 @@ fn general_e2e_composed_pbt_windowed() {
         Some(sut)
     });
 
-    let cases: u32 = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4);
+    let cases: u32 = cases_or("PROPTEST_CASES", 4);
     let seq_max: usize = std::env::var("PBT_NUM_STEPS")
         .ok()
         .and_then(|s| s.parse().ok())

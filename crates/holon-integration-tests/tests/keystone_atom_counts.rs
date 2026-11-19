@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use holon_integration_tests::pbt::composed::case_budget::cases_or;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
@@ -83,10 +84,7 @@ fn keystone_atom_counts() {
     unsafe { std::env::set_var("HOLON_ATOM_COUNTS", "1") };
     assert!(atom_counts::enabled(), "recorder must be armed");
 
-    let cases: u32 = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(16);
+    let cases: u32 = cases_or("PROPTEST_CASES", 16);
 
     let mut config = proptest::test_runner::contextualize_config(Config {
         cases,

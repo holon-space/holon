@@ -19,6 +19,7 @@ use holon_api::EntityUri;
 use holon_api::Value;
 use holon_gpui::bridge_hold::hold_row_bridge;
 use holon_integration_tests::pbt::ReferenceState;
+use holon_integration_tests::pbt::composed::case_budget::cases_or;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
@@ -179,10 +180,7 @@ fn settle_waits_for_a_late_row_bridge() {
     let rows = initial.rendered_state_toggle_ids();
     assert!(!rows.is_empty(), "the booted window shows no block rows");
     let strategy = (prop::sample::select(rows), "[a-z]{3,8}( [a-z]{3,8})?");
-    let cases: u32 = std::env::var("PROPTEST_CASES")
-        .ok()
-        .map(|s| s.parse().expect("PROPTEST_CASES is a number"))
-        .unwrap_or(4);
+    let cases: u32 = cases_or("PROPTEST_CASES", 4);
     let mut runner = TestRunner::new(Config {
         cases,
         max_shrink_iters: 4,

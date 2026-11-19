@@ -55,6 +55,7 @@ use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
+use holon_integration_tests::pbt::composed::case_budget::cases_or;
 use holon_integration_tests::pbt::window_slice::seed::graft_undo_blur_pair;
 use holon_integration_tests::test_environment::TestEnvironment;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
@@ -127,10 +128,7 @@ fn arrow_walk_keeps_focus_on_the_reference_outline_neighbour() {
         .with_writer(std::io::stderr)
         .try_init();
 
-    let cases: u32 = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4);
+    let cases: u32 = cases_or("PROPTEST_CASES", 4);
 
     let mut runner = TestRunner::new(Config {
         cases,

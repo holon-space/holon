@@ -37,6 +37,7 @@ use holon_frontend::reactive_view_model::CollectionVariant;
 use holon_frontend::reactive_view_model::ReactiveViewModel;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_integration_tests::pbt::alphabet_coverage;
+use holon_integration_tests::pbt::composed::case_budget::cases_or;
 use holon_layout_testing::BlockTreeRegistry;
 use holon_layout_testing::BlockTreeThunk;
 use holon_layout_testing::BoundsSnapshot;
@@ -297,10 +298,7 @@ fn drive_case(
 #[gpui::test]
 fn deferred_live_blocks_paint_exactly_the_delivered_content(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
-    let cases: u32 = std::env::var("PROPTEST_CASES")
-        .ok()
-        .map(|s| s.parse().expect("PROPTEST_CASES is a number"))
-        .unwrap_or(16);
+    let cases: u32 = cases_or("PROPTEST_CASES", 16);
     let mut runner = TestRunner::new(Config {
         cases,
         ..Config::default()

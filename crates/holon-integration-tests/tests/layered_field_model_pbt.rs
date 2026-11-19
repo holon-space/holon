@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 use holon_api::block::Block;
+use holon_integration_tests::pbt::composed::case_budget::cases_or;
 use holon_integration_tests::pbt::layered_field::Device;
 use holon_integration_tests::pbt::layered_field::Intent;
 use holon_integration_tests::pbt::layered_field::LayeredField;
@@ -498,10 +499,7 @@ impl StateMachineTest for LayeredFieldTest {
 }
 
 fn config() -> Config {
-    let cases = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(16);
+    let cases = cases_or("PROPTEST_CASES", 16);
     Config {
         cases,
         max_shrink_iters: 200,

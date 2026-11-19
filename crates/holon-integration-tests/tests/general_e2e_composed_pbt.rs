@@ -28,6 +28,7 @@
 //! @pbt covers the-one-composed-convergence-PBT — random valid wiring over
 //! compose_sut, full invariant catalog per tick
 
+use holon_integration_tests::pbt::composed::case_budget::cases_or;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::live_mcp::LiveMcpE2E;
 use holon_integration_tests::pbt::composed::live_mcp::WideE2ELiveMcpMachine;
@@ -61,10 +62,7 @@ use proptest_state_machine::StateMachineTest;
 /// does NOT call `force_no_fork`, so neither does this.
 #[test]
 fn general_e2e_composed_pbt() {
-    let cases: u32 = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(16);
+    let cases: u32 = cases_or("PROPTEST_CASES", 16);
 
     let mut guard = RunResultGuard::new("keystone", cases);
 
@@ -193,10 +191,7 @@ fn general_e2e_composed_pbt_live_mcp() {
     // with no ambient runtime, and each case's `init_test` builds its own.
     capture_live_cap_set();
 
-    let cases = std::env::var("PROPTEST_CASES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
+    let cases = cases_or("PROPTEST_CASES", 8);
 
     let mut guard = RunResultGuard::new("keystone-live-mcp", cases);
 

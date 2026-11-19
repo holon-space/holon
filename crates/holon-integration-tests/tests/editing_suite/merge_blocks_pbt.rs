@@ -43,6 +43,7 @@ use holon_api::inline_mark::MarkSpan;
 use holon_api::inline_mark::marks_to_json;
 use holon_integration_tests::TestEnvironment;
 use holon_integration_tests::TestEnvironmentBuilder;
+use holon_integration_tests::pbt::composed::case_budget::cases_or;
 use proptest::prelude::*;
 
 const ROOT: &str = "11111111-0000-0000-0000-000000000001";
@@ -868,10 +869,7 @@ fn merge_blocks_undo_restores_order_after_identical_child_collapse() {
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: std::env::var("PROPTEST_CASES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(6),
+        cases: cases_or("PROPTEST_CASES", 6),
         max_shrink_iters: 32,
         failure_persistence: None,
         .. ProptestConfig::default()
