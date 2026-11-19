@@ -7,6 +7,7 @@
 //! pin a sequence the model once admitted wrongly, and stays a meaningful case
 //! once the model refuses it.
 
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::wiring::Wiring;
 use proptest_state_machine::ReferenceStateMachine;
 
@@ -32,7 +33,7 @@ pub fn keystone_static_examples() -> Vec<StaticExample> {
         r#"{"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}"#,
     )
     .expect("a valid wiring manifest");
-    vec![
+    let mut examples = vec![
         // The write tier refuses a split of a read-only recipe step, so the
         // deleted file's document must hold only what the file declared.
         example(
@@ -56,7 +57,38 @@ pub fn keystone_static_examples() -> Vec<StaticExample> {
                 DELETE_RECIPE,
             ],
         ),
-    ]
+    ];
+    examples.extend(enter_on_every_read_only_step());
+    examples
+}
+
+/// Enter in an editor on each block homed in a read-only file, then the
+/// recipe file is retired: the deleted document must hold only what it
+/// declared.
+fn enter_on_every_read_only_step() -> Vec<StaticExample> {
+    let ui: Wiring = serde_json::from_str(
+        r#"{"storage_adapters": ["Turso"], "sync_adapters": [], "actors": ["UI"]}"#,
+    )
+    .expect("a valid wiring manifest");
+    wide_e2e_ref_for(&ui)
+        .read_only_homed_blocks()
+        .into_iter()
+        .map(|block| {
+            let block = serde_json::to_string(&block).expect("an entity uri serializes");
+            let focus = format!(r#"{{"FocusEditableText": {{"block_id": {block}}}}}"#);
+            example(
+                "enter-on-a-read-only-step-leaves-the-deleted-recipe-nothing-undeclared",
+                &ui,
+                &[
+                    RECIPE_PAGE,
+                    &focus,
+                    r#"{"PressKey": {"chord": ["enter"]}}"#,
+                    BREAK_RECIPE,
+                    DELETE_RECIPE,
+                ],
+            )
+        })
+        .collect()
 }
 
 fn example(name: &'static str, wiring: &Wiring, transitions: &[&str]) -> StaticExample {

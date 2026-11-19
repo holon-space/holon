@@ -210,8 +210,8 @@ pub fn split_block_preconditions<
         !state.is_layout_block(block_id),
         Reason::FocusedInLayoutBlocks,
     ));
-    // The write tier refuses the split; the refusal itself is drawn by
-    // `AttemptReadOnlyEdit`.
+    // The write tier refuses the split, so the model never draws one; the
+    // Enter chord in `PressKey` is gated on the same set.
     checks.push(check(
         !state.read_only_homed_blocks().contains(block_id),
         Reason::ReadOnlyHome,

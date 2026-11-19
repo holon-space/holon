@@ -22,6 +22,7 @@ use holon_pbt_core::capabilities::RefEditorMirrorMut;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::capabilities::SutBlockInteract;
 use holon_pbt_core::capabilities::commit_active_editor_if_changed;
 use holon_pbt_core::validation::Reason;
@@ -54,7 +55,8 @@ impl<
         + RefBlockTree
         + RefBlockTreeMut
         + RefFocus
-        + RefFocusMut,
+        + RefFocusMut
+        + RefReadOnlyHomes,
 > TransitionFactory<R> for PressKey
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
@@ -79,7 +81,8 @@ impl<
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Verify preconditions hold. All structural gates are delegated to
         // preconditions().
-        let sample_chord = holon_api::KeyChord(std::iter::once(holon_api::Key::Enter).collect());
+        let sample_chord =
+            holon_api::KeyChord(std::iter::once(holon_api::Key::Backspace).collect());
         let app_check = PressKey {
             chord: sample_chord.clone(),
         }
@@ -119,6 +122,17 @@ impl<
             )),
         ];
 
+        let enter_refused = state
+            .active_editor_block()
+            .is_some_and(|id| state.read_only_homed_blocks().contains(&id));
+        let chord_strategy = if enter_refused {
+            Just(holon_api::KeyChord(
+                std::iter::once(holon_api::Key::Backspace).collect(),
+            ))
+            .boxed()
+        } else {
+            chord_strategy.boxed()
+        };
         let strat = chord_strategy.prop_map(|chord| PressKey { chord }).boxed();
         Validated::Good((pk_weight, strat))
     }
@@ -131,13 +145,23 @@ impl<
         + RefEditorMirror
         + RefEditorMirrorMut
         + RefBlockTree
-        + RefBlockTreeMut,
+        + RefBlockTreeMut
+        + RefReadOnlyHomes,
 > TransitionRef<R> for PressKey
 {
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
+        let enter_splits_read_only = self
+            .chord
+            .0
+            .iter()
+            .any(|k| matches!(k, holon_api::Key::Enter))
+            && state
+                .active_editor_block()
+                .is_some_and(|id| state.read_only_homed_blocks().contains(&id));
         let checks: Vec<Validated<(), Reason>> = vec![
+            check(!enter_splits_read_only, Reason::ReadOnlyHome),
             check(state.has_editor_buffer(), Reason::NoEditorBuffer),
             check(state.app_started(), Reason::AppNotStarted),
             check(state.is_properly_setup(), Reason::NotProperlySetup),
@@ -271,7 +295,7 @@ impl<
 
 crate::cap_transition! {
     PressKey: SutBlockInteract,
-    where R: [ RefLifecycle ],
+    where R: [ RefLifecycle + RefReadOnlyHomes ],
     |me, _state, sut| {
         sut.press_key(&me.chord).await;
     }

@@ -22,6 +22,7 @@ use holon_pbt_core::capabilities::RefFocusRoots;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefLayoutInteract;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::capabilities::SutBlockInteract;
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::check;
@@ -45,7 +46,13 @@ pub struct DragDropBlock {
 }
 
 impl<
-    R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefFocusRoots + RefLayout + RefLayoutInteract,
+    R: RefLifecycle
+        + RefBlockTree
+        + RefBlockTreeMut
+        + RefFocusRoots
+        + RefLayout
+        + RefLayoutInteract
+        + RefReadOnlyHomes,
 > TransitionFactory<R> for DragDropBlock
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
@@ -95,7 +102,13 @@ impl<
 }
 
 impl<
-    R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefFocusRoots + RefLayout + RefLayoutInteract,
+    R: RefLifecycle
+        + RefBlockTree
+        + RefBlockTreeMut
+        + RefFocusRoots
+        + RefLayout
+        + RefLayoutInteract
+        + RefReadOnlyHomes,
 > TransitionRef<R> for DragDropBlock
 {
     type Reason = Reason;
@@ -136,6 +149,13 @@ impl<
             Reason::FocusedIsNotSelf,
         ));
         checks.push(check(self.source != self.target, Reason::NoOpParentMove));
+        // `move_block` names both blocks, and the write tier refuses a write
+        // naming either.
+        checks.push(check(
+            !state.refuses_creation_under(&self.target)
+                && !state.read_only_homed_blocks().contains(&self.source),
+            Reason::ReadOnlyHome,
+        ));
 
         checks.push(check(
             state.is_text_block(&self.source),
@@ -203,7 +223,7 @@ impl<
 crate::cap_transition! {
     DragDropBlock: SutBlockInteract,
     where R: [
-        RefLifecycle + RefBlockTree + RefBlockTreeMut + RefFocusRoots + RefLayout + RefLayoutInteract
+        RefLifecycle + RefBlockTree + RefBlockTreeMut + RefFocusRoots + RefLayout + RefLayoutInteract + RefReadOnlyHomes
     ],
     |me, _state, sut| {
         sut.drag_drop_block(&me.source, &me.target).await;
