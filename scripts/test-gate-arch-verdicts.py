@@ -28,13 +28,14 @@ CHECKS = [
     ("select-tests-dev-edges", "scripts/test-select-tests-dev-edges.py", "gate-arch-select-tests-dev-edges.log"),
     ("gate-integrate-tmpdir", "scripts/test-gate-integrate-tmpdir.py", "gate-arch-gate-integrate-tmpdir.log"),
     ("windowed-gate-logs", "scripts/flow-checks/test-windowed-gate-logs.py", "gate-arch-windowed-gate-logs.log"),
+    ("windowed-gate-unit-logs", "scripts/test-windowed-gate-unit-logs.py", "gate-arch-windowed-gate-unit-logs.log"),
     ("architecture_rules", "cargo", "gate-arch.log"),
 ]
 NAMES = [name for name, _, _ in CHECKS]
 EXAMPLES = [
     set(),
     {"cargo-free-checks"},
-    {"run-step-header", "windowed-gate-logs"},
+    {"run-step-header", "windowed-gate-logs", "windowed-gate-unit-logs"},
     {"architecture_rules"},
     {"gate-integrate-tmpdir"},
 ]

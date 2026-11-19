@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Windowed GPUI gate: every holon-gpui test binary as its own process.
 
-Usage: scripts/windowed-gate.py --features <cargo features> --log-dir <dir>
+Usage: scripts/windowed-gate.py --features <cargo features> --log-dir <dir> --tree <40-hex commit id>
        [--jobs N] [--timeout SECONDS] [--unit UNIT ...]
 
 --unit (repeatable; default: the lines of $WINDOWED_GATE_UNITS) runs only those units; an
@@ -26,12 +26,14 @@ there; a HUNG unit names no test, so a run with one writes none.
 After the FAIL line of each RED or HUNG unit, one `unit-log: <unit> <log> sha256=<hex>` line per log of that unit
 (first run and rerun) records the log's hash when the gate ends; scripts/flow-checks/tests-cover-diff.py reads it.
 A run first deletes the unit logs and classifier files of earlier runs in its log dir, so the dir holds this run's only.
-Each unit log starts with the BASE:/TREE:/STARTED: header of scripts/flow-checks/run-step.sh; BASE is $BASE, else `(unset)`.
+Each unit log starts with the BASE:/TREE:/STARTED: header of scripts/flow-checks/run-step.sh; BASE is $BASE, else `(unset)`;
+TREE is the required `--tree` argument (the caller names the commit under test; the gate runs no VCS command for it).
 """
 import argparse
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -231,6 +233,12 @@ def record_and_report(results: list[dict], ledger: Path = LEDGER) -> None:
             print(f"  {n:>3}x {binary}")
 
 
+def commit_hex(text: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", text):
+        raise argparse.ArgumentTypeError(f"not a 40-hex commit id: {text!r}")
+    return text
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--features", required=True)
@@ -238,14 +246,14 @@ def main() -> int:
     ap.add_argument("--jobs", type=int, default=int(os.environ.get("WINDOWED_GATE_JOBS", default_jobs())))
     ap.add_argument("--timeout", type=int, default=int(os.environ.get("WINDOWED_GATE_TIMEOUT", 900)))
     ap.add_argument("--unit", action="append")
+    ap.add_argument("--tree", required=True, type=commit_hex)
     args = ap.parse_args()
     wanted = args.unit or [u for u in os.environ.get("WINDOWED_GATE_UNITS", "").splitlines() if u]
     args.log_dir.mkdir(parents=True, exist_ok=True)
     for old in [*args.log_dir.glob("*.log"), *args.log_dir.glob("*.classified")]:
         old.unlink()
     RUN["base"] = os.environ.get("BASE") or "(unset)"
-    RUN["tree"] = subprocess.run(["jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"], cwd=REPO, check=True,
-                                 stdout=subprocess.PIPE, text=True).stdout.strip()
+    RUN["tree"] = args.tree
 
     reuse = build(args.features, args.log_dir)
     binaries = inventory(reuse)

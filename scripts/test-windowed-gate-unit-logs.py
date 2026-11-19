@@ -23,6 +23,7 @@ from pathlib import Path
 
 GATE = Path(__file__).resolve().parent / "windowed-gate.py"
 UNIT_LOG = re.compile(r"  unit-log: (.+) (\S+) sha256=([0-9a-f]{64})")
+TREE = "0123456789abcdef0123456789abcdef01234567"
 FIRST = ["PASS", "KNOWN-RED", "RED", "HUNG"]
 RERUN = ["PASS", "KNOWN-RED", "RED", "HUNG"]
 
@@ -34,7 +35,7 @@ def load_gate():
     return module
 
 
-def run_gate(plan, log_dir, selected=(), ids_file=None, argv=()):
+def run_gate(plan, log_dir, selected=(), ids_file=None, argv=(), tree=TREE):
     """Runs main() over `plan` ({unit: (first verdict, rerun verdict)}) with `--unit` per unit of `selected`;
     returns (exit, stdout, the units it ran)."""
     gate = load_gate()
@@ -53,7 +54,8 @@ def run_gate(plan, log_dir, selected=(), ids_file=None, argv=()):
 
     gate.run_one = run_one
     out, err = io.StringIO(), io.StringIO()
-    sys.argv = ["windowed-gate.py", "--features", "x", "--log-dir", str(log_dir), *(a for u in selected for a in ("--unit", u)), *argv]
+    sys.argv = ["windowed-gate.py", "--features", "x", "--log-dir", str(log_dir), *(["--tree", tree] if tree else []),
+                *(a for u in selected for a in ("--unit", u)), *argv]
     os.environ.pop("GATE_IDS_FILE", None)
     if ids_file:
         os.environ["GATE_IDS_FILE"] = str(ids_file)
@@ -158,6 +160,15 @@ def main():
         code, out, ran = run_gate({"holon-gpui": ("PASS", "PASS")}, Path(d), ["holon-gpui::main gone"])
         assert (code, ran) == (2, set()) and "no such unit: holon-gpui::main gone" in out, (code, ran, out)
     print("[windowed-gate unit-log] an unknown --unit exits 2: PASS")
+    for bad in (None, "", "abc", TREE.upper()):
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                run_gate({"holon-gpui": ("PASS", "PASS")}, Path(d), tree=bad)
+            except SystemExit as e:
+                assert e.code == 2, (bad, e.code)
+            else:
+                raise AssertionError(f"--tree {bad!r} started the gate")
+    print("[windowed-gate unit-log] a missing or malformed --tree exits 2: PASS")
     cases, reds = int(os.environ.get("CASES", 40)), 0
     for case in range(cases):
         units = rng.sample(["holon-gpui", "holon-gpui::replay", *(f"holon-gpui::main m{i}_windowed" for i in range(5))],

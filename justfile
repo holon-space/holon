@@ -1610,6 +1610,7 @@ gate-arch:
     check gate-integrate-tmpdir target/gate-logs/gate-arch-gate-integrate-tmpdir.log ./scripts/test-gate-integrate-tmpdir.py
     # Asks jj for the tree id, so it cannot run in the cargo-free checks' copied tree.
     check windowed-gate-logs target/gate-logs/gate-arch-windowed-gate-logs.log ./scripts/flow-checks/test-windowed-gate-logs.py
+    check windowed-gate-unit-logs target/gate-logs/gate-arch-windowed-gate-unit-logs.log ./scripts/test-windowed-gate-unit-logs.py
     check architecture_rules target/gate-logs/gate-arch.log cargo nextest run {{CANON}} --test architecture_rules --no-tests=fail
     if [ -n "$failed" ]; then
         echo "gate-arch: red checks:$failed"
@@ -1684,10 +1685,12 @@ windowed-gate:
     # judges. Its paint waits still go red on a heavily loaded host, so
     # scripts/gate-integrate.sh runs it under the quiet hold.
     export HOLON_PBT_TIMING=${HOLON_PBT_TIMING-measure}
+    tree="$(jj log -r @ --no-graph -T commit_id)"
+    [ -n "$tree" ] || { echo "windowed-gate: jj gave no commit id for @" >&2; exit 1; }
     L=target/gate-logs/windowed-gate.log
     echo "HOLON_PBT_TIMING=$HOLON_PBT_TIMING" | tee "$L"
     /usr/bin/python3 scripts/windowed-gate.py --features {{CANON_FEATURES}} \
-        --log-dir target/gate-logs/windowed 2>&1 | tee -a "$L"
+        --log-dir target/gate-logs/windowed --tree "$tree" 2>&1 | tee -a "$L"
     # The per-binary logs hold the oracle output; the summary log does not.
     if [ "$HOLON_PBT_TIMING" = measure ]; then
         cat target/gate-logs/windowed/*.log >> "$L"
