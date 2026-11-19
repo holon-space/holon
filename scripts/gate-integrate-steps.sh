@@ -94,7 +94,7 @@ extra_nextest() {
   return $rc
 }
 keystone_tour() {
-  local log=target/gate-logs/$GATE-tour.log id tests=()
+  local log=target/gate-logs/$GATE-tour.log classified=target/gate-logs/$GATE-tour-classify.txt id tests=()
   for id in ${only[@]+"${only[@]}"}; do
     [[ $id =~ ^holon-integration-tests::integration\ (keystone_tour::[^\ ]+)$ ]] || cannot_rerun keystone-tour "$id"
     tests+=("${BASH_REMATCH[1]}")
@@ -102,7 +102,13 @@ keystone_tour() {
   [ "${#tests[@]}" = 0 ] || tests=(--exact "${tests[@]}")
   local rc=0
   just keystone-tour ${tests[@]+"${tests[@]}"} 2>&1 | tee "$log" || rc=$?
-  [ "$rc" = 0 ] || record_failed keystone-tour "$log"
+  [ "$rc" != 0 ] || { bash scripts/keystone-known-reds.sh --stale "$log" || exit 2; return 0; }
+  bash scripts/keystone-known-reds.sh "$log" | tee "$classified" || true
+  if grep -q '^\[known-reds\] PASS-WITH-NOTE' "$classified"; then
+    echo "keystone-tour: pass-with-note (known reds only)"
+    return 0
+  fi
+  record_failed keystone-tour "$log"
   return "$rc"
 }
 

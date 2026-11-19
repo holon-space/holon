@@ -77,7 +77,8 @@ def windowed(root, env):
 
 
 CALLERS = [("gate keystone-smoke", gate_step("keystone-smoke")), ("gate hand-authored", gate_step("hand-authored")),
-           ("gate extra-nextest", gate_step("extra-nextest")), ("lane-nextest", lane_nextest),
+           ("gate extra-nextest", gate_step("extra-nextest")), ("gate keystone-tour", gate_step("keystone-tour")),
+           ("lane-nextest", lane_nextest),
            ("windowed-gate", windowed)]
 
 
