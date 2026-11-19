@@ -93,4 +93,5 @@ def ran_tests(output):
     # nextest repeats the red status lines in its closing summary.
     end = next((i for i, l in enumerate(lines) if re.match(r" {5}Summary ", l)), len(lines))
     found = (m.groups() for m in map(STATUS.match, lines[:end]) if m)
-    return [(t, s) for indent, s, t in found if len(indent) + len(s) == 12]
+    # nextest adds ` + LEAK` to a test's label when the host is loaded enough to delay its output pipe's close.
+    return [(t, s.removesuffix(" + LEAK")) for indent, s, t in found if len(indent) + len(s) == 12]

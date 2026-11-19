@@ -895,8 +895,8 @@ def write_baseline(diags: list[dict]) -> None:
     BASELINE_FILE.write_text("\n".join(header + body) + "\n", encoding="utf-8")
 
 
-def split_by_baseline(diags: list[dict]) -> tuple[list[dict], list[dict], int]:
-    """Return (new_diags, baselined_diags, stale_count)."""
+def split_by_baseline(diags: list[dict]) -> tuple[list[dict], list[dict], list[str]]:
+    """Return (new_diags, baselined_diags, stale identities, one per unmatched baseline count, sorted)."""
     baseline = load_baseline()
     remaining = dict(baseline)
     new: list[dict] = []
@@ -908,7 +908,7 @@ def split_by_baseline(diags: list[dict]) -> tuple[list[dict], list[dict], int]:
             baselined.append(d)
         else:
             new.append(d)
-    stale = sum(c for c in remaining.values() if c > 0)
+    stale = sorted(ident for ident, c in remaining.items() for _ in range(max(c, 0)))
     return new, baselined, stale
 
 
@@ -935,6 +935,16 @@ def cmd_update_baseline() -> int:
     return 0
 
 
+def report_stale(stale: list[str]) -> None:
+    if not stale:
+        return
+    sys.stderr.write("".join(f"{ident}\n" for ident in stale))
+    sys.stderr.write(
+        f"archlint: baseline stale - the {len(stale)} entry(ies) above no longer fire; "
+        f"run ./archlint/archlint --update-baseline to ratchet down.\n"
+    )
+
+
 def cmd_all(fmt: str = "text") -> int:
     diags, nfiles = scan_all()
     new, baselined, stale = split_by_baseline(diags)
@@ -947,12 +957,8 @@ def cmd_all(fmt: str = "text") -> int:
             f"archlint: {len(baselined)} baselined violation(s) suppressed "
             f"(see {relpath(BASELINE_FILE)}), {len(new)} new violation(s).\n"
         )
-        if stale:
-            sys.stderr.write(
-                f"archlint: baseline stale - {stale} entry(ies) no longer fire; "
-                f"run ./archlint/archlint --update-baseline to ratchet down.\n"
-            )
-        return 2 if new else 0
+        report_stale(stale)
+        return 2 if new or stale else 0
 
     # text mode
     if new:
@@ -961,12 +967,8 @@ def cmd_all(fmt: str = "text") -> int:
         f"archlint: {len(baselined)} baselined violation(s) suppressed "
         f"(see {relpath(BASELINE_FILE)}), {len(new)} new violation(s).\n"
     )
-    if stale:
-        sys.stderr.write(
-            f"archlint: baseline stale - {stale} entry(ies) no longer fire; "
-            f"run ./archlint/archlint --update-baseline to ratchet down.\n"
-        )
-    return 2 if new else 0
+    report_stale(stale)
+    return 2 if new or stale else 0
 
 
 def cmd_discover() -> int:

@@ -17,8 +17,8 @@ archlint: 154 baselined violation(s) suppressed (see archlint/baseline.txt), 0 n
 - **Never grow the baseline.** New violations fail the gate — fix them, don't add to
   `baseline.txt`. `--update-baseline` is for ratcheting DOWN only.
 - After fixing a baselined violation, run `./archlint/archlint --update-baseline` to
-  drop it. A run that leaves entries no longer firing prints a **stale** nag:
-  `archlint: baseline stale - K entry(ies) no longer fire; run ./archlint/archlint --update-baseline to ratchet down.`
+  drop it. A run that leaves entries no longer firing prints each one (`rule<TAB>path<TAB>line`) and **fails**
+  (exit 2) until `--update-baseline` removes them.
 - Identity = `rule_id` + repo-relative path + whitespace-collapsed source line
   (NOT line number → survives line drift). Duplicates tracked by multiplicity.
 

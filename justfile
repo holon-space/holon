@@ -1559,6 +1559,7 @@ cargo-free-checks:
     check integrate-track-walls target/gate-logs/gate-arch-integrate-track-walls.log ./scripts/test-integrate-track-walls.py
     check known-red-evidence-row-key target/gate-logs/gate-arch-known-red-evidence-row-key.log ./scripts/test-known-red-evidence-row-key.py
     check known-red-gate-load target/gate-logs/gate-arch-known-red-gate-load.log ./scripts/test-known-red-gate-load.py
+    check archlint-baseline target/gate-logs/gate-arch-archlint-baseline.log ./scripts/test-archlint-baseline.py
     check featuremap target/gate-logs/landing-featuremap.log /usr/bin/python3 scripts/featuremap.py check
     # Keeps the deny.toml ignore of RUSTSEC-2026-0514 true.
     check hickory-dnssec-off target/gate-logs/gate-arch-hickory-dnssec-off.log \
