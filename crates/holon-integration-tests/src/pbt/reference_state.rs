@@ -2350,6 +2350,7 @@ impl ReferenceState {
         after_block_id: Option<&EntityUri>,
     ) {
         use holon_orgmode::models::OrgBlockExt;
+        self.assert_write_tier_accepts(&new_parent, "move under");
         self.domain
             .block_state
             .blocks
@@ -2448,6 +2449,7 @@ impl ReferenceState {
     /// 0`.
     pub fn split_block(&mut self, block_id: &EntityUri, position: usize) -> EntityUri {
         use holon_orgmode::models::OrgBlockExt;
+        self.assert_write_tier_accepts(block_id, "split");
 
         let original = self.domain.block_state.blocks.get(block_id).unwrap();
         let content = original.content.clone();
@@ -2764,6 +2766,17 @@ impl ReferenceState {
         self.rebuild_profile_tracking();
     }
 
+    /// Every model writer that creates, splits or moves a block calls this on
+    /// the blocks it touches: production's write tier refuses them, so a
+    /// transition that reaches here must have been refused by its precondition.
+    fn assert_write_tier_accepts(&self, id: &EntityUri, action: &str) {
+        assert!(
+            self.read_only.refusing_file(id).is_none(),
+            "model writer: cannot {action} {id}, which the write tier refuses; \
+             the transition's precondition must refuse it"
+        );
+    }
+
     /// Insert one text block under `parent` with `new_id`, WITHOUT pushing an
     /// undo snapshot and WITHOUT re-canonicalizing. The snapshot + recanon
     /// wrapper lives in the callers: `create_block_under_with_id` (one
@@ -2778,6 +2791,7 @@ impl ReferenceState {
     ) {
         use holon_orgmode::models::OrgBlockExt;
 
+        self.assert_write_tier_accepts(parent, "insert under");
         let mut new_block = Block::new_text(new_id.clone(), parent.clone(), content.to_string());
         let max_seq = self
             .domain
@@ -2881,6 +2895,8 @@ impl ReferenceState {
         use holon_api::inline_mark::MarkSpan;
         use holon_orgmode::models::OrgBlockExt;
 
+        self.assert_write_tier_accepts(origin, "convert to a page");
+        self.assert_write_tier_accepts(destination_parent, "create a page under");
         // RECOGNITION refusal (resolve-before-mint, ADR 0029): if `page_id` is
         // ALREADY held by a DIFFERENT-titled entity — the state a `RenamePage`
         // leaves (title changed, id preserved) — production REFUSES the convert

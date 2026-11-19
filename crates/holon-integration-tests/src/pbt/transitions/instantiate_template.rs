@@ -19,6 +19,7 @@ use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefBlockTreeMut;
 use holon_pbt_core::capabilities::RefLayoutMutate;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::check;
 use proptest::prelude::*;
@@ -80,7 +81,7 @@ impl InstantiateTemplate {
     /// out of the target set rather than import placement mechanics), and
     /// layout scaffolding. Shared by the generator and the precondition so
     /// replay gating agrees with generation.
-    fn target_candidates<R: RefBlockTree>(state: &R) -> Vec<EntityUri> {
+    fn target_candidates<R: RefBlockTree + RefReadOnlyHomes>(state: &R) -> Vec<EntityUri> {
         state
             .all_non_seed_block_ids()
             .into_iter()
@@ -89,12 +90,13 @@ impl InstantiateTemplate {
                     && !state.is_page_block(id)
                     && !state.is_no_content_update(id)
                     && !state.is_layout_block(id)
+                    && !state.refuses_creation_under(id)
             })
             .collect()
     }
 }
 
-impl<R: RefLifecycle + RefBlockTree + RefLayoutMutate> TransitionFactory<R>
+impl<R: RefLifecycle + RefBlockTree + RefLayoutMutate + RefReadOnlyHomes> TransitionFactory<R>
     for InstantiateTemplate
 {
     fn required_caps() -> Vec<holon_pbt_core::composition::CapId> {
@@ -118,8 +120,8 @@ impl<R: RefLifecycle + RefBlockTree + RefLayoutMutate> TransitionFactory<R>
     }
 }
 
-impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> TransitionRef<R>
-    for InstantiateTemplate
+impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate + RefReadOnlyHomes>
+    TransitionRef<R> for InstantiateTemplate
 {
     type Reason = Reason;
 
@@ -127,7 +129,7 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started(), Reason::AppNotStarted),
             check(
-                !Self::target_candidates(state).is_empty(),
+                Self::target_candidates(state).contains(&self.parent_id),
                 Reason::PreconditionFailed,
             ),
         ];
@@ -209,7 +211,7 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
 
 crate::cap_transition! {
     InstantiateTemplate: holon_pbt_core::capabilities::SutTemplateInstantiate,
-    where R: [ RefLifecycle + RefBlockTree ],
+    where R: [ RefLifecycle + RefBlockTree + RefReadOnlyHomes ],
     |me, _state, sut| {
         sut.instantiate_template(
             &EntityUri::from_raw(TPL_ROOT),

@@ -59,6 +59,7 @@ pub fn keystone_static_examples() -> Vec<StaticExample> {
         ),
     ];
     examples.extend(enter_on_every_read_only_step());
+    examples.extend(instantiate_under_every_read_only_home());
     examples
 }
 
@@ -86,6 +87,31 @@ fn enter_on_every_read_only_step() -> Vec<StaticExample> {
                     BREAK_RECIPE,
                     DELETE_RECIPE,
                 ],
+            )
+        })
+        .collect()
+}
+
+/// A template instantiated under each block homed in a read-only file, then
+/// the recipe file is retired: the deleted document must hold only what it
+/// declared.
+fn instantiate_under_every_read_only_home() -> Vec<StaticExample> {
+    let sql_only: Wiring = serde_json::from_str(
+        r#"{"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}"#,
+    )
+    .expect("a valid wiring manifest");
+    wide_e2e_ref_for(&sql_only)
+        .read_only_homed_blocks()
+        .into_iter()
+        .map(|block| {
+            let block = serde_json::to_string(&block).expect("an entity uri serializes");
+            let instantiate = format!(
+                r#"{{"InstantiateTemplate": {{"parent_id": {block}, "date": "abc", "mood": "def"}}}}"#
+            );
+            example(
+                "a-template-under-a-read-only-step-leaves-the-deleted-recipe-nothing-undeclared",
+                &sql_only,
+                &[RECIPE_PAGE, &instantiate, BREAK_RECIPE, DELETE_RECIPE],
             )
         })
         .collect()

@@ -22,6 +22,7 @@ use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
 use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::validation::Reason;
 use proptest::strategy::BoxedStrategy;
@@ -91,6 +92,7 @@ impl<
         + RefFocusMut
         + RefEditorMirrorMut
         + RefLifecycle
+        + RefReadOnlyHomes
         + Clone,
 > TransitionRef<R> for StructuralKeyBurst
 {
@@ -121,7 +123,7 @@ impl<
 
 crate::cap_transition! {
     StructuralKeyBurst: SutBlockTreeWrite,
-    where R: [ RefBlockTree + RefLifecycle ],
+    where R: [ RefBlockTree + RefLifecycle + RefReadOnlyHomes ],
     |me, _state, sut| {
         for key in &me.keys.0 {
             match key {

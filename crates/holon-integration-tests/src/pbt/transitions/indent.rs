@@ -25,6 +25,7 @@ use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusMut;
 use holon_pbt_core::capabilities::RefGlobalFocus;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::check;
@@ -47,7 +48,7 @@ pub struct Indent {
 
 // ── Capability-bound free functions (Phase 3) ─────────────────────
 
-pub fn indent_preconditions<R: RefBlockTree + RefLifecycle>(
+pub fn indent_preconditions<R: RefBlockTree + RefLifecycle + RefReadOnlyHomes>(
     block_id: &EntityUri,
     state: &R,
 ) -> Validated<(), Reason> {
@@ -81,13 +82,22 @@ pub fn indent_preconditions<R: RefBlockTree + RefLifecycle>(
         state.previous_sibling(block_id).is_some(),
         Reason::NoPreviousSibling,
     ));
+    // Production's write tier refuses the move when the block or its new parent
+    // is homed in a read-only file.
+    checks.push(check(
+        !state.read_only_homed_blocks().contains(block_id)
+            && state
+                .previous_sibling(block_id)
+                .is_none_or(|prev| !state.refuses_creation_under(&prev)),
+        Reason::ReadOnlyHome,
+    ));
     checks
         .into_iter()
         .collect::<Validated<Vec<()>, _>>()
         .map(|_| ())
 }
 
-pub fn indent_weighted_generator<R: RefBlockTree + RefLifecycle>(
+pub fn indent_weighted_generator<R: RefBlockTree + RefLifecycle + RefReadOnlyHomes>(
     state: &R,
 ) -> Validated<(u32, BoxedStrategy<Indent>), Reason> {
     let candidates: Vec<EntityUri> = state
@@ -127,7 +137,7 @@ pub fn indent_apply_to_ref<
 
 // ── E2E trait impls (delegate to _cap fns) ────────────────────────
 
-impl<R: RefBlockTree + RefLifecycle> TransitionFactory<R> for Indent {
+impl<R: RefBlockTree + RefLifecycle + RefReadOnlyHomes> TransitionFactory<R> for Indent {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         Self::declared_caps()
     }
@@ -145,7 +155,8 @@ impl<
         + RefGlobalFocus
         + RefFocusMut
         + RefEditorMirrorMut
-        + RefLifecycle,
+        + RefLifecycle
+        + RefReadOnlyHomes,
 > TransitionRef<R> for Indent
 {
     type Reason = Reason;
@@ -161,7 +172,7 @@ impl<
 
 crate::cap_transition! {
     Indent: SutBlockTreeWrite,
-    where R: [ RefBlockTree + RefLifecycle ],
+    where R: [ RefBlockTree + RefLifecycle + RefReadOnlyHomes ],
     |me, _state, sut| {
         sut.apply_indent(&me.block_id).await;
     }
