@@ -27,17 +27,28 @@ keep-work-failed|P-quiescent: WorkFailed.
 '
 
 fail=0
+# comm needs the order sort gives; a locale that ignores `-` and `_` would differ.
+export LC_ALL=C
 
-# Self-maintaining: a twin the test accepts but the table does not name would
-# be skipped silently — the rot this guard exists to prevent.
+# Self-maintaining, both ways: a lowering twin the table does not name would be
+# skipped silently (the rot this guard exists to prevent), and a table row whose
+# twin neither table holds would fail with an unrelated assert.
 names=crates/holon-net/tests/exec_support/twin_names.rs
 # rustfmt wraps long table rows, so match on the file without whitespace.
-named=$(tr -d '[:space:]' <"$names" | grep -oE '\("[a-z-]+",LowerTwin::' | grep -oE '"[a-z-]+"' | tr -d '"' | sort -u)
-[ -n "$named" ] || { echo "FAIL $names: no lowering twin name found"; exit 2; }
+# rows <prefix regex>: the names of the `("name", <prefix>::` table rows.
+rows() { tr -d '[:space:]' <"$names" | grep -oE "\\(\"[^\"]+\",$1::" | sed -E 's/^\("(.*)",.*$/\1/' | sort -u; }
+lowering=$(rows LowerTwin)
+[ -n "$lowering" ] || { echo "FAIL $names: no lowering twin name found"; exit 2; }
+known=$(rows '(Lower)?Twin')
 listed=$(printf '%s\n' "$TABLE" | sed -n 's/|.*//p' | grep . | sort -u)
-missing=$(comm -23 <(echo "$named") <(echo "$listed"))
+missing=$(comm -23 <(echo "$lowering") <(echo "$listed"))
 if [ -n "$missing" ]; then
     echo "FAIL $names names lowering twins the table does not name: $(echo "$missing" | tr '\n' ' ')"
+    fail=1
+fi
+unknown=$(comm -13 <(echo "$known") <(echo "$listed"))
+if [ -n "$unknown" ]; then
+    echo "FAIL the table names twins $names does not hold: $(echo "$unknown" | tr '\n' ' ')"
     fail=1
 fi
 
@@ -45,7 +56,7 @@ want=("$@")
 while IFS='|' read -r twin marker; do
     [ -n "$twin" ] || continue
     if [ "${#want[@]}" -gt 0 ]; then
-        printf '%s\n' "${want[@]}" | grep -qxF "$twin" || continue
+        printf '%s\n' "${want[@]}" | grep -qxF -- "$twin" || continue
     fi
     log="target/twin-own-red-$twin.log"
     UFT_LOWER_TWIN="$twin" cargo nextest run -p holon-net --features naive-twins \

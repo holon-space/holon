@@ -1566,6 +1566,7 @@ cargo-free-checks:
     check python311 target/gate-logs/gate-arch-python311.log ./scripts/python311 scripts/test-python311.py
     check archlint-baseline target/gate-logs/gate-arch-archlint-baseline.log ./scripts/python311 scripts/test-archlint-baseline.py
     check archlint-test-modules target/gate-logs/gate-arch-archlint-test-modules.log ./scripts/python311 scripts/test-archlint-test-modules.py
+    check twin-own-red-names target/gate-logs/gate-arch-twin-own-red-names.log ./scripts/python311 scripts/test-twin-own-red.py
     check featuremap target/gate-logs/landing-featuremap.log /usr/bin/python3 scripts/featuremap.py check
     check just-calls-once target/gate-logs/gate-arch-just-calls-once.log ./scripts/test-just-calls-once.py
     # Keeps the deny.toml ignore of RUSTSEC-2026-0514 true.
