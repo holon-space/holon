@@ -303,19 +303,19 @@ expect_outcome quick-open-fresh-slot-prepend 1 '^PRIMARY: \[novel\] .* @ fronten
 undo_evidence="$repo_root/docs/Testing/known-red-evidence/undo-prod-session-did-not-revert"
 for run in gate-extra-excerpt standalone-rerun-excerpt; do
     zstd -dq -o "$work/undo-did-not-revert-$run.log" "$undo_evidence/$run.log.zst"
-    expect_outcome "undo-did-not-revert/$run" 0 '^PRIMARY: \[known-red:undo-prod-session-did-not-revert\] .* @ crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring\.rs:184:9: ' \
+    expect_outcome "undo-did-not-revert/$run" 0 '^PRIMARY: \[known-red:undo-prod-session-did-not-revert\] .* @ crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring\.rs:186:9: ' \
         "$work/undo-did-not-revert-$run.log"
 done
 # The same assertion with the content gone, or reverted to other text, is another failure: novel.
 for case in 'none:None' 'other-text:Some("Journals reverted-elsewhere")'; do
     still=${case#*:}
     cat >"$work/undo-did-not-revert-other.log" <<EOT
-thread 'editing_suite::undo_prod_session_wiring::prod_session_wires_undo_and_mcp_shares_the_same_stack' (1713881406) panicked at crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring.rs:184:9:
+thread 'editing_suite::undo_prod_session_wiring::prod_session_wires_undo_and_mcp_shares_the_same_stack' (1713881406) panicked at crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring.rs:186:9:
 undo did not revert 'block:journals' to its original content 'Journals' (still: $still)
 test editing_suite::undo_prod_session_wiring::prod_session_wires_undo_and_mcp_shares_the_same_stack ... FAILED
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 641 filtered out; finished in 6.36s
 EOT
-    expect_outcome "undo-did-not-revert/still-${case%%:*}" 1 '^PRIMARY: \[novel\] .* @ crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring\.rs:184:9: ' \
+    expect_outcome "undo-did-not-revert/still-${case%%:*}" 1 '^PRIMARY: \[novel\] .* @ crates/holon-integration-tests/tests/editing_suite/undo_prod_session_wiring\.rs:186:9: ' \
         "$work/undo-did-not-revert-other.log"
 done
 # An unrelated failure of the same test stays novel.

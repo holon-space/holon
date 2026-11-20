@@ -41,7 +41,7 @@ INJECTED_MSG = "keystone boot fault: injected task panic"
 KNOWN_SITE = "crates/holon-integration-tests/src/pbt/composed/harness.rs:1574:13"
 KNOWN_MSG = r'reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  field deltas (1):\n    block:a: content: sut=\"x\" ref=\"y\"\n")]'
 # The panic of the `loro-compaction-peer-trimmed-below-lacked` row, and the panics its collateral pairs name.
-ROW_SITE = "crates/holon-loro/tests/compacted_peer_receives_concurrent_edits.rs:787:5"
+ROW_SITE = "crates/holon-loro/tests/compacted_peer_receives_concurrent_edits.rs:789:5"
 ROW_MSG = 'generated (shrunk): Test failed: after Restart { peer: 0 }: ["peer 0 trimmed below VersionVector({1000: 2}), which peer 1 at VersionVector({1000: 1}) lacks"]'
 LORO = "/Users/u/.cargo/git/checkouts/loro-e88d0f38e94f7134/d302b15/crates/loro-internal/src"
 COLLATERAL = [(f"{LORO}/oplog/pending_changes.rs:338:62", "called `Result::unwrap()` on an `Err` value: ()"),

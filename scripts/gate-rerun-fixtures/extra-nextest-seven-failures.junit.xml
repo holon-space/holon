@@ -61,7 +61,7 @@ failures:
             <system-err>[wide-e2e wiring] drawn: storage={Loro, Org, Markdown, Turso} sync={Todoist} actors={MCPServer, ActionEngine} -&gt; booted storage={Loro, Org, Markdown, Turso} projections={ViewModel, EditorState} editor</system-err>
         </testcase>
         <testcase name="catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay" classname="holon-integration-tests::integration" timestamp="2026-11-12T08:20:22.027+01:00" time="74.200">
-            <failure message="thread 'catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay' (83384256) panicked at crates/holon-integration-tests/src/pbt/fixtures/mod.rs:312:21" type="test failure with exit code 101">thread 'catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay' (83384256) panicked at crates/holon-integration-tests/src/pbt/fixtures/mod.rs:312:21:
+            <failure message="thread 'catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay' (83384256) panicked at crates/holon-integration-tests/src/pbt/fixtures/mod.rs:315:21" type="test failure with exit code 101">thread 'catalog_suite::logseq_parity_replay::logseq_parity_corpus_replay' (83384256) panicked at crates/holon-integration-tests/src/pbt/fixtures/mod.rs:315:21:
 [fixtures:gherkin "The slash menu's vocabulary is derived from the operation registry   # log:8"] step 5: [slash-menu] expected block "block</failure>
             <system-out>
 running 1 test
