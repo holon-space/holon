@@ -6748,19 +6748,25 @@ impl HolonMcpServer {
             })?;
         let fs = self.debug.org_filesystem();
         // Every arm passes the gate: an alias target comes from org files, which
-        // anyone who can write the vault controls.
-        let confine = |path: &std::path::Path| {
-            holon_filesystem::VaultPath::inside_canonical(&*fs, &root, path).map_err(|e| {
-                rmcp::ErrorData::invalid_params(format!("refusing to read '{doc_id}': {e:#}"), None)
-            })
+        // anyone who can write the vault controls. The refusal names the
+        // argument, never the path it resolved to.
+        let refuse = |e: holon_filesystem::CanonicalRefusal, subject: &str| {
+            rmcp::ErrorData::invalid_params(
+                format!("refusing to read '{doc_id}': {}", e.naming(subject)),
+                None,
+            )
+        };
+        let confine_alias = |path: &std::path::Path| {
+            holon_filesystem::VaultPath::inside_canonical(&*fs, &root, path)
+                .map_err(|e| refuse(e, "its file"))
         };
 
         if doc_arg_is_path(doc_id) {
             // An absolute argument replaces the root in `join`, so both kinds meet the
             // gate.
-            let full = root.join(doc_id);
-            if fs.exists(&full) {
-                return confine(&full);
+            match holon_filesystem::VaultPath::inside_canonical(&*fs, &root, &root.join(doc_id)) {
+                Err(e) if e.names_no_entry() => {}
+                verdict => return verdict.map_err(|e| refuse(e, "it")),
             }
         }
 
@@ -6770,12 +6776,12 @@ impl HolonMcpServer {
         if let Some(store) = self.current_loro_doc_store() {
             let store_read = store.read().await;
             if let Some(path) = store_read.resolve_alias_to_path(doc_id).await {
-                return confine(&path);
+                return confine_alias(&path);
             }
             if let Ok(uri) = doc_uri_from_arg(doc_id) {
                 if uri.as_str() != doc_id {
                     if let Some(path) = store_read.resolve_alias_to_path(uri.as_str()).await {
-                        return confine(&path);
+                        return confine_alias(&path);
                     }
                 }
             }
@@ -8533,9 +8539,9 @@ mod render_org_doc_id_tests {
         const OUTSIDE_ALIAS: &str = "0a7f51de-0000-4000-8000-00000000a11a";
 
         /// A temp dir holding the vault (`vault/`), a secret beside it, a
-        /// sibling whose name extends the vault's, and links out of and
-        /// within the vault. Every outside file carries `marker`, which
-        /// no output may contain.
+        /// sibling whose name extends the vault's, links out of and within
+        /// the vault, and a link beside it into it. Every outside file
+        /// carries `marker`, which no output may contain.
         struct EscapeFixture {
             base: tempfile::TempDir,
             marker: String,
@@ -8564,6 +8570,7 @@ mod render_org_doc_id_tests {
                     ("vault/file_link", "../outside/secret.org"),
                     ("vault/dir_link", "../outside"),
                     ("vault/inside_link", "./notes/a.org"),
+                    ("vault_link", "vault"),
                 ] {
                     std::os::unix::fs::symlink(target, fixture.at(link)).expect("create link");
                 }
@@ -8592,6 +8599,37 @@ mod render_org_doc_id_tests {
                     (meta.dev(), meta.ino())
                 })
                 .collect()
+            }
+
+            /// Whether `doc_id` reaches an entry strictly inside the vault, a
+            /// directory too: such an entry may be named as it resolves.
+            fn reaches_vault_entry(&self, doc_id: &str) -> bool {
+                use std::os::unix::fs::MetadataExt;
+                let mut inside = Vec::new();
+                let mut todo = vec![self.root()];
+                while let Some(dir) = todo.pop() {
+                    for entry in std::fs::read_dir(&dir).expect("read fixture dir") {
+                        let path = entry.expect("fixture dir entry").path();
+                        let meta = std::fs::symlink_metadata(&path).expect("fixture entry");
+                        if meta.file_type().is_symlink() {
+                            continue;
+                        }
+                        inside.push((meta.dev(), meta.ino()));
+                        if meta.is_dir() {
+                            todo.push(path);
+                        }
+                    }
+                }
+                let reached = if crate::tools::doc_arg_is_path(doc_id) {
+                    self.root().join(doc_id)
+                } else {
+                    match doc_id {
+                        DECLARED => self.at("vault/notes/a.org"),
+                        OUTSIDE_ALIAS => self.at("outside/secret.org"),
+                        _ => return false,
+                    }
+                };
+                std::fs::metadata(reached).is_ok_and(|m| inside.contains(&(m.dev(), m.ino())))
             }
 
             /// The file whose bytes `doc_id` may return: the one it names under
@@ -8725,7 +8763,52 @@ mod render_org_doc_id_tests {
             }
         }
 
-        /// The bytes of an outside file reach no answer, error or success.
+        /// Runs `check` on every example and fails naming each one that
+        /// failed, so one red run shows them all.
+        fn each_example(examples: &[String], check: impl Fn(&str)) {
+            let failed: Vec<&String> = examples
+                .iter()
+                .filter(|e| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(e))).is_err()
+                })
+                .collect();
+            assert!(failed.is_empty(), "failed examples: {failed:?}");
+        }
+
+        /// A refusal names only what the caller gave: with every `given`
+        /// spelling removed, longest first so a spelling inside another goes
+        /// with it, no path remains.
+        fn assert_names_only_given(text: &str, given: &[&str]) {
+            let mut given: Vec<&str> = given.iter().copied().filter(|g| !g.is_empty()).collect();
+            given.sort_by_key(|g| std::cmp::Reverse(g.len()));
+            let rest = given
+                .into_iter()
+                .fold(text.to_string(), |rest, g| rest.replace(g, ""));
+            assert!(
+                !rest.contains('/'),
+                "the refusal names a path the caller did not give: {text}"
+            );
+        }
+
+        /// `.` and `..` resolved by spelling alone.
+        fn spelled(path: &std::path::Path) -> PathBuf {
+            use std::path::Component;
+            path.components().fold(PathBuf::new(), |mut out, c| {
+                match c {
+                    Component::CurDir => {}
+                    Component::ParentDir => {
+                        out.pop();
+                    }
+                    other => out.push(other),
+                }
+                out
+            })
+        }
+
+        /// The bytes of an outside file reach no answer, error or success. A
+        /// refusal names only the argument and the vault root, and an
+        /// argument outside the vault as spelled is refused in the words a
+        /// missing path below it gets.
         #[test]
         fn confined_reads() {
             use proptest::prelude::*;
@@ -8741,12 +8824,47 @@ mod render_org_doc_id_tests {
                 .expect("canonical root")
                 .display()
                 .to_string();
+            let (refused, compared) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
             let check = |doc_id: &str| {
                 let (read, rendered) = runtime.block_on(read_and_render(&server, doc_id));
                 assert_confined(&fixture, doc_id, &read, &rendered);
+                if fixture.reaches_vault_entry(doc_id) {
+                    return;
+                }
+                refused.set(refused.get() + 1);
+                let full = fixture.root().join(doc_id);
+                let outside_as_spelled = crate::tools::doc_arg_is_path(doc_id)
+                    && ![&root, &canonical_root]
+                        .iter()
+                        .any(|r| spelled(&full).starts_with(spelled(std::path::Path::new(r))));
+                if outside_as_spelled {
+                    let missing = format!("{doc_id}/never-made");
+                    let (missing_read, missing_rendered) =
+                        runtime.block_on(read_and_render(&server, &missing));
+                    let alike = |arg: &str, out: &Result<String, String>| {
+                        out.as_ref()
+                            .expect_err("refused")
+                            .replace(&format!("'{arg}'"), "'<argument>'")
+                    };
+                    for (tool, out, missing_out) in [
+                        ("read_org_file", &read, &missing_read),
+                        ("render_org", &rendered, &missing_rendered),
+                    ] {
+                        assert_eq!(
+                            alike(doc_id, out),
+                            alike(&missing, missing_out),
+                            "{tool}: {doc_id:?} and the missing {missing:?} read apart"
+                        );
+                    }
+                    compared.set(compared.get() + 1);
+                }
+                for out in [&read, &rendered] {
+                    let text = out.as_ref().expect_err("reaches no vault entry");
+                    assert_names_only_given(text, &[doc_id, &root]);
+                }
             };
 
-            for doc_id in [
+            let examples = [
                 fixture.at("outside/secret.org").display().to_string(),
                 "../outside/secret.org".to_string(),
                 "dir_link/secret.org".to_string(),
@@ -8760,9 +8878,11 @@ mod render_org_doc_id_tests {
                 format!("{root}/{TITLE}.org"),
                 format!("{canonical_root}/notes/a.org"),
                 DECLARED.to_string(),
-            ] {
-                check(&doc_id);
-            }
+                "../outside/none.org".to_string(),
+                "notes/none.org".to_string(),
+                format!("{}/vault_link/notes/a.org", fixture.base.path().display()),
+            ];
+            each_example(&examples, |doc_id| check(doc_id));
 
             const SEGMENTS: &[&str] = &[
                 "notes",
@@ -8779,6 +8899,7 @@ mod render_org_doc_id_tests {
                 "outside",
                 "vault",
                 "vault-evil",
+                "vault_link",
                 "missing.org",
             ];
             let base = fixture.base.path().display().to_string();
@@ -8812,6 +8933,12 @@ mod render_org_doc_id_tests {
                     Ok(())
                 })
                 .expect("confined reads");
+            eprintln!(
+                "refused {} arguments, compared {} outside arguments with a missing one below",
+                refused.get(),
+                compared.get()
+            );
+            assert!(refused.get() > 0 && compared.get() > 0);
         }
 
         /// A session that syncs no org files has no root to confine a read to.

@@ -141,27 +141,33 @@ impl VaultPath {
         fs: &dyn crate::fs_port::FileSystem,
         root: &Path,
         path: &Path,
-    ) -> Result<Self> {
-        use anyhow::Context;
-
+    ) -> std::result::Result<Self, CanonicalRefusal> {
+        let refusal = |why| CanonicalRefusal {
+            path: path.to_path_buf(),
+            root: root.to_path_buf(),
+            why,
+        };
         let canonical_root = fs
             .canonicalize(root)
-            .with_context(|| format!("resolving the vault root '{}'", root.display()))?;
+            .map_err(|e| refusal(RefusalReason::RootUnresolvable(e)))?;
         // `realpath` resolves `..` and a trailing `/` past a link to a file,
         // spellings the kernel refuses to open.
         if !fs.exists(path) {
-            bail!("'{}' names no entry", path.display());
+            let normalized = lexically_normalize(path);
+            let under = |r: &Path| normalized != r && normalized.starts_with(r);
+            return Err(refusal(
+                if under(&lexically_normalize(root)) || under(&canonical_root) {
+                    RefusalReason::NamesNoEntry
+                } else {
+                    RefusalReason::Outside
+                },
+            ));
         }
         let canonical = fs
             .canonicalize(path)
-            .with_context(|| format!("resolving '{}'", path.display()))?;
+            .map_err(|e| refusal(RefusalReason::Unresolvable(e)))?;
         if canonical == canonical_root || !canonical.starts_with(&canonical_root) {
-            bail!(
-                "'{}' resolves to '{}', which lies OUTSIDE the vault root '{}'",
-                path.display(),
-                canonical.display(),
-                canonical_root.display()
-            );
+            return Err(refusal(RefusalReason::Outside));
         }
         Ok(Self(canonical))
     }
@@ -174,6 +180,61 @@ impl VaultPath {
         self.0
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Why [`VaultPath::inside_canonical`] refused a path. The text names only
+/// the path and the root as the caller spelled them: where a path resolves
+/// would tell the caller which host paths exist and where a link points.
+#[derive(Debug)]
+pub struct CanonicalRefusal {
+    path: PathBuf,
+    root: PathBuf,
+    why: RefusalReason,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+enum RefusalReason {
+    /// Missing, and inside the root as spelled.
+    NamesNoEntry,
+    /// Resolved outside the root, or missing and outside it as spelled, so
+    /// a missing and an existing outside path read alike.
+    Outside,
+    RootUnresolvable(std::io::Error),
+    Unresolvable(std::io::Error),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CanonicalRefusal {
+    pub fn names_no_entry(&self) -> bool {
+        matches!(self.why, RefusalReason::NamesNoEntry)
+    }
+
+    /// The refusal with `subject` standing for the path.
+    pub fn naming(&self, subject: &str) -> String {
+        let root = self.root.display();
+        match &self.why {
+            RefusalReason::NamesNoEntry => format!("{subject} names no entry"),
+            RefusalReason::Outside => {
+                format!("{subject} lies OUTSIDE the vault root '{root}'")
+            }
+            RefusalReason::RootUnresolvable(e) => {
+                format!("resolving the vault root '{root}': {e}")
+            }
+            RefusalReason::Unresolvable(e) => format!("resolving {subject}: {e}"),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for CanonicalRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.naming(&format!("'{}'", self.path.display())))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for CanonicalRefusal {}
 
 /// The dot-prefixed segment BELOW `root` that puts `path` out of the vault's
 /// reach, or `None` when the path is ingestable.
@@ -405,8 +466,8 @@ mod tests {
     }
 
     /// A vault, a sibling holding the secret, a sibling whose name extends
-    /// the vault's, and links that leave the vault, stay in it, or name its
-    /// root.
+    /// the vault's, links that leave the vault, stay in it, or name its root,
+    /// and a link beside the vault that leads into it.
     #[cfg(unix)]
     fn linked_vault() -> tempfile::TempDir {
         let base = tempfile::tempdir().expect("temp dir");
@@ -426,6 +487,7 @@ mod tests {
             ("vault/dir_link", "../outside"),
             ("vault/inside_link", "./notes/a.org"),
             ("vault/notes/root_link", ".."),
+            ("vault_link", "vault"),
         ] {
             std::os::unix::fs::symlink(target, at(link)).expect("create fixture link");
         }
@@ -470,12 +532,86 @@ mod tests {
         "outside",
         "vault",
         "vault-evil",
+        "vault_link",
         "missing.org",
     ];
 
     fn segment_path() -> impl proptest::strategy::Strategy<Value = String> {
         use proptest::prelude::*;
         prop::collection::vec(prop::sample::select(SEGMENTS), 0..5).prop_map(|s| s.join("/"))
+    }
+
+    /// Runs `check` on every example and fails naming each one that failed,
+    /// so one red run shows them all.
+    fn each_example<T: std::fmt::Debug>(examples: &[T], check: impl Fn(&T)) {
+        let failed: Vec<&T> = examples
+            .iter()
+            .filter(|e| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(e))).is_err()
+            })
+            .collect();
+        assert!(failed.is_empty(), "failed examples: {failed:?}");
+    }
+
+    /// A refusal names only what the caller gave: with every `given` spelling
+    /// removed, longest first so a spelling inside another goes with it, no
+    /// path remains.
+    fn assert_names_only_given(text: &str, given: &[String]) {
+        let mut given: Vec<&String> = given.iter().filter(|g| !g.is_empty()).collect();
+        given.sort_by_key(|g| std::cmp::Reverse(g.len()));
+        let rest = given
+            .into_iter()
+            .fold(text.to_string(), |rest, g| rest.replace(g.as_str(), ""));
+        assert!(
+            !rest.contains('/'),
+            "the refusal names a path the caller did not give: {text}"
+        );
+    }
+
+    /// `.` and `..` resolved by spelling alone, the oracle's own copy.
+    fn spelled(path: &Path) -> PathBuf {
+        path.components().fold(PathBuf::new(), |mut out, c| {
+            match c {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other),
+            }
+            out
+        })
+    }
+
+    /// A path outside the vault as spelled, refused, reads like a missing
+    /// path appended to it: the text tells nothing about what exists.
+    /// Returns whether the case was compared.
+    fn outside_reads_like_missing(
+        fs: &dyn crate::fs_port::FileSystem,
+        roots: &[&Path],
+        path: &Path,
+    ) -> bool {
+        let root = roots[0];
+        let spelled_path = spelled(path);
+        if roots.iter().any(|r| spelled_path.starts_with(spelled(r))) {
+            return false;
+        }
+        let Err(refused) = VaultPath::inside_canonical(fs, root, path) else {
+            return false;
+        };
+        let missing = path.join("never-made");
+        assert!(!fs.exists(&missing), "{}", missing.display());
+        let missing_refused = VaultPath::inside_canonical(fs, root, &missing)
+            .expect_err("a missing path outside the vault is refused");
+        let alike =
+            |p: &Path, text: String| text.replace(&format!("'{}'", p.display()), "'<argument>'");
+        assert_eq!(
+            alike(path, refused.to_string()),
+            alike(&missing, missing_refused.to_string()),
+            "'{}' and the missing '{}' read apart",
+            path.display(),
+            missing.display()
+        );
+        true
     }
 
     /// Over the real file system: a path is accepted exactly when the entry
@@ -494,6 +630,8 @@ mod tests {
         let canonical_base = std::fs::canonicalize(base.path()).expect("canonical base");
         let inside = inodes_inside(&root);
         let fs = crate::fs_port::RealFileSystem;
+        let canonical_root = canonical_base.join("vault");
+        let (refused, compared) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
 
         let check = |path: &Path| {
             let reached = match std::fs::metadata(path) {
@@ -518,17 +656,23 @@ mod tests {
                     assert_eq!((meta.dev(), meta.ino()), entry, "{}", path.display());
                 }
                 None => {
-                    assert!(
-                        verdict.is_err(),
-                        "'{}' reaches no vault entry but was accepted as {:?}",
-                        path.display(),
-                        verdict
+                    let e = verdict.expect_err(&format!(
+                        "'{}' reaches no vault entry but was accepted",
+                        path.display()
+                    ));
+                    refused.set(refused.get() + 1);
+                    if outside_reads_like_missing(&fs, &[&root, &canonical_root], path) {
+                        compared.set(compared.get() + 1);
+                    }
+                    assert_names_only_given(
+                        &e.to_string(),
+                        &[path.display().to_string(), root.display().to_string()],
                     );
                 }
             }
         };
 
-        for rel in [
+        let examples = [
             "../outside/secret.org",
             "dir_link/secret.org",
             "file_link",
@@ -540,13 +684,26 @@ mod tests {
             "inside_link/..",
             "notes/a.org",
             "../vault-evil/secret.org",
-        ] {
-            check(&root.join(rel));
-        }
-        check(&PathBuf::from(format!(
-            "{}-evil/secret.org",
-            root.display()
-        )));
+            "../outside/none.org",
+            "notes/none.org",
+            "../vault_link/notes/a.org",
+        ]
+        .map(|rel| root.join(rel));
+        each_example(
+            &[
+                &examples[..],
+                &[PathBuf::from(format!("{}-evil/secret.org", root.display()))],
+            ]
+            .concat(),
+            |path| check(path),
+        );
+        assert_eq!(
+            VaultPath::inside_canonical(&fs, &root, &root.join("notes/none.org"))
+                .expect_err("a missing path is refused")
+                .to_string(),
+            format!("'{}' names no entry", root.join("notes/none.org").display()),
+            "a missing path inside the vault keeps its own refusal"
+        );
 
         let prefixes = prop_oneof![
             Just(root.clone()),
@@ -560,6 +717,12 @@ mod tests {
                 Ok(())
             })
             .expect("inside_canonical property");
+        eprintln!(
+            "refused {} cases, compared {} outside cases with a missing sibling",
+            refused.get(),
+            compared.get()
+        );
+        assert!(refused.get() > 0 && compared.get() > 0);
     }
 
     /// The in-memory adapter holds no links, so only spelling can climb out:
@@ -588,6 +751,7 @@ mod tests {
         }
         let inside: [&Path; 2] = [Path::new("/vault/notes"), Path::new("/vault/notes/a.org")];
         let root = Path::new("/vault");
+        let (refused, compared) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
 
         let check = |path: &Path| {
             let mut reached = PathBuf::from("/");
@@ -607,18 +771,26 @@ mod tests {
                     reached.as_path()
                 );
             } else {
-                assert!(verdict.is_err(), "'{}' was accepted", path.display());
+                let e = verdict.expect_err(&format!("'{}' was accepted", path.display()));
+                refused.set(refused.get() + 1);
+                if outside_reads_like_missing(&fs, &[root], path) {
+                    compared.set(compared.get() + 1);
+                }
+                assert_names_only_given(
+                    &e.to_string(),
+                    &[path.display().to_string(), root.display().to_string()],
+                );
             }
         };
 
-        for path in [
+        let examples = [
             "/vault",
             "/vault/.",
             "/vault/notes/..",
             "/vault/../outside/secret.org",
-        ] {
-            check(Path::new(path));
-        }
+            "/vault/../outside/none.org",
+        ];
+        each_example(&examples, |path| check(Path::new(path)));
         let prefixes = prop_oneof![Just("/vault"), Just("/"), Just("/vault-evil")];
         proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(256))
             .run(&(prefixes, segment_path()), |(prefix, rel)| {
@@ -626,5 +798,11 @@ mod tests {
                 Ok(())
             })
             .expect("inside_canonical in-memory property");
+        eprintln!(
+            "refused {} cases, compared {} outside cases with a missing sibling",
+            refused.get(),
+            compared.get()
+        );
+        assert!(refused.get() > 0 && compared.get() > 0);
     }
 }

@@ -133,6 +133,8 @@ pub use sync_ports::nearest_page_ancestor;
 pub use sync_ports::page_at_position;
 #[cfg(not(target_arch = "wasm32"))]
 pub use vault_filter::VaultFilter;
+#[cfg(not(target_arch = "wasm32"))]
+pub use vault_path::CanonicalRefusal;
 pub use vault_path::PathCollisionKey;
 pub use vault_path::VaultPath;
 #[cfg(not(target_arch = "wasm32"))]

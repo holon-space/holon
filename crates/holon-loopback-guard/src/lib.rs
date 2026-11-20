@@ -284,7 +284,10 @@ mod tests {
                     prop::sample::select(vec![Method::GET, Method::POST]),
                     prop::option::of(named(port)),
                     prop::option::of(named(port)),
-                    prop::option::of((prop::sample::select(vec!["http://", "https://"]), named(port))),
+                    prop::option::of((
+                        prop::sample::select(vec!["http://", "https://"]),
+                        named(port),
+                    )),
                 )
             })
             .prop_map(|(bound, method, target, host, origin)| GuardCase {
@@ -297,12 +300,12 @@ mod tests {
     }
 
     async fn judge(case: &GuardCase) -> StatusCode {
-        let app = Router::new().fallback(|| async { "served" }).layer(
-            axum::middleware::from_fn_with_state(
+        let app = Router::new()
+            .route("/mcp", axum::routing::any(|| async { "served" }))
+            .layer(axum::middleware::from_fn_with_state(
                 AllowedAuthorities::for_bind(case.bound),
                 refuse_foreign_host_or_origin,
-            ),
-        );
+            ));
         let uri = match &case.target {
             Some(target) => format!("http://{}/mcp", target.authority),
             None => "/mcp".to_string(),
