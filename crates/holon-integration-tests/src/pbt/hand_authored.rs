@@ -293,6 +293,15 @@ pub trait LockedReplay: StateMachineTest {
         scope: &CheckScope,
     ) -> BTreeSet<&'static str>;
 
+    /// Fails with the swallowed problems the last transition logged
+    /// (`inv-no-observed-errors`, the same predicate the full catalog runs).
+    /// [`replay`] calls it after every transition that has no check, because
+    /// the next transition's start erases them.
+    fn judge_problems(
+        sut: &Self::SystemUnderTest,
+        ref_state: &<Self::Reference as ReferenceStateMachine>::State,
+    ) -> Result<(), String>;
+
     /// [`StateMachineTest::teardown`] with [`Self::check_locked`] as its check.
     fn teardown_locked(
         sut: Self::SystemUnderTest,
@@ -324,6 +333,10 @@ impl LockedReplay for ComposedSut<WideE2E> {
         scope: &CheckScope,
     ) -> BTreeSet<&'static str> {
         sut.check_scoped(ref_state, scope)
+    }
+
+    fn judge_problems(sut: &Self, ref_state: &ReferenceState) -> Result<(), String> {
+        sut.judge_problems(ref_state)
     }
 
     fn teardown_locked(
@@ -369,6 +382,11 @@ pub fn replay<M: LockedReplay>(
         if checkpoints.after(ix + 1) {
             engaged.extend(
                 tracing::info_span!("check").in_scope(|| M::check_locked(&sut, &ref_state, &scope)),
+            );
+        } else if let Err(problems) = M::judge_problems(&sut, &ref_state) {
+            panic!(
+                "[inv-no-observed-errors] after transition {}: {problems}",
+                ix + 1
             );
         }
     }

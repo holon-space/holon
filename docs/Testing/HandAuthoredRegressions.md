@@ -257,9 +257,14 @@ pre-sweeps.
 `[inv-sql-budget] <kind>: not judged — started from an unswept state`. All
 other checked invariants judge every sweep.
 
-**Trade-off:** a divergence at a transition that is not swept, and that a later
-transition heals, is not caught. Give `also_check_after` to every case whose
-bug shows mid-sequence and heals, and say why in its `description`.
+After every transition that runs no check, the replay still judges
+`inv-no-observed-errors` alone (the same predicate as in the catalog), because
+the next transition's start empties the problem sink. A logged ERROR or
+swallowed panic is therefore caught at any transition and the failure names it.
+
+**Trade-off:** every other divergence at a transition that is not swept, and
+that a later transition heals, is not caught. Give `also_check_after` to every
+case whose bug shows mid-sequence and heals, and say why in its `description`.
 
 `also_check_after` is parsed at load. These fail the load and name the case:
 

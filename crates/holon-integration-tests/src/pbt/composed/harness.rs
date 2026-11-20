@@ -534,6 +534,7 @@ pub trait ComposedSlice: 'static {
             unheld_history,
             scaffold_ids,
             ref_state,
+            true,
         )
         .await
     }
@@ -550,6 +551,7 @@ async fn catalog_report(
     unheld_history: usize,
     scaffold_ids: &BTreeSet<EntityUri>,
     ref_state: &ReferenceState,
+    freeze_budget_window: bool,
 ) -> RunReport {
     let map = resolver.lock().expect("resolver lock").clone();
     let mut resolved = ref_state.with_resolved_doc_uris(&map);
@@ -580,7 +582,9 @@ async fn catalog_report(
     // runner's `freeze_at_check_start`. No-op when no `SutMetricsLifecycle` is
     // present.
     #[cfg(feature = "otel-testing")]
-    if let Some(m) = caps.get::<dyn crate::pbt::composed::span_metrics::SutMetricsLifecycle>() {
+    if freeze_budget_window
+        && let Some(m) = caps.get::<dyn crate::pbt::composed::span_metrics::SutMetricsLifecycle>()
+    {
         m.freeze_for_check(resolved.get());
     }
     run_with_seeded_ref(catalog, caps, resolved).await
@@ -1870,6 +1874,7 @@ impl ComposedSut<super::wide_e2e::WideE2E> {
                 sut.unheld_history.by_current_database,
                 unmodeled,
                 ref_state,
+                true,
             ));
             report.ran.retain(|(id, _)| judged.contains(id.0));
             report.deselected.retain(|id| judged.contains(id.0));
@@ -1889,6 +1894,33 @@ impl ComposedSut<super::wide_e2e::WideE2E> {
             .filter(|(_, result)| !matches!(result, InvariantResult::Skipped(_)))
             .map(|(id, _)| id.0)
             .collect()
+    }
+
+    /// Judges only `inv-no-observed-errors`: whether the transition just
+    /// applied logged an error or swallowed a panic. Renders nothing, so it
+    /// leaves the SQL budget windows of the checks around it alone.
+    pub fn judge_problems(&self, ref_state: &ReferenceState) -> Result<(), String> {
+        let catalog = vec![super::invariants::observed_errors::wire()];
+        let report = self.rt.block_on(catalog_report(
+            &catalog,
+            &self.caps,
+            &self.resolver,
+            &self.burned,
+            &self.redo_burned,
+            self.unheld_history.by_current_database,
+            &self.unmodeled_ids(),
+            ref_state,
+            false,
+        ));
+        let id = super::observed_errors::InvNoObservedErrors::ID.0;
+        assert!(
+            report.ran_ids().contains(&id),
+            "this wiring does not select {id}, so it cannot judge a transition's problems"
+        );
+        match report.failures().as_slice() {
+            [] => Ok(()),
+            failures => Err(format!("{failures:?}")),
+        }
     }
 
     /// [`StateMachineTest::teardown`] with [`Self::check_scoped`] as the check.

@@ -75,8 +75,6 @@
 use std::collections::BTreeSet;
 use std::panic::AssertUnwindSafe;
 
-use crate::hand_authored_fakes::CountingRef;
-use crate::hand_authored_fakes::four_transition_case;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::snapshot_boot;
 use holon_integration_tests::pbt::composed::span_metrics::ComposedBudget;
@@ -105,6 +103,9 @@ use holon_integration_tests::pbt::transitions::E2ETransition;
 use holon_integration_tests::pbt::transitions::UndoLastMutation;
 use proptest::test_runner::Config;
 use proptest_state_machine::StateMachineTest;
+
+use crate::hand_authored_fakes::CountingRef;
+use crate::hand_authored_fakes::four_transition_case;
 
 /// Replay every hand-authored keystone regression through the production
 /// harness. A case that reproduces a live defect (or breaks an invariant) fails
@@ -303,6 +304,10 @@ impl StateMachineTest for CountingSut {
 
 /// Engages the inline cases' lock at every checkpoint.
 impl LockedReplay for CountingSut {
+    fn judge_problems(_: &(), _: &usize) -> Result<(), String> {
+        Ok(())
+    }
+
     fn check_locked(sut: &(), applied: &usize, _: &CheckScope) -> BTreeSet<&'static str> {
         Self::check_invariants(sut, applied);
         BTreeSet::from(["inv-x"])
@@ -398,6 +403,10 @@ impl StateMachineTest for BudgetWindowSut {
 }
 
 impl LockedReplay for BudgetWindowSut {
+    fn judge_problems(_: &ComposedSpanMetrics, _: &usize) -> Result<(), String> {
+        Ok(())
+    }
+
     fn check_locked(
         sut: &ComposedSpanMetrics,
         applied: &usize,
