@@ -14,6 +14,7 @@
 //! `Filter`, `Resource`, `StorageError`) live in `holon-core`, so a wiring
 //! without Turso need not depend on this crate at all (ADR 0004 Phase 9 — Turso
 //! is one of four storage adapters).
+#![recursion_limit = "256"]
 
 mod actor_watch;
 pub mod block_table_names;

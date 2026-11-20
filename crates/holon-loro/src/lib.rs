@@ -14,6 +14,7 @@
 //! crate.
 //!
 //! Re-exported into `holon::sync` so existing `holon::sync::*` paths resolve.
+#![recursion_limit = "256"]
 
 #[cfg(test)]
 mod batch_tag_probe;

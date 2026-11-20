@@ -30,7 +30,7 @@ env:
   # auto-overrides to that pin, so a looser value here (e.g. bare `nightly`)
   # installs components onto a toolchain cargo never runs — `cargo fmt` then
   # dies with "cargo-fmt is not installed for nightly-<date>".
-  RUST_VERSION: nightly-2026-08-16
+  RUST_VERSION: nightly-2026-11-12
 
 jobs:
   # Detect which parts of the codebase changed

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod boot_refusals;
 mod common;
 mod screenshot_painter;

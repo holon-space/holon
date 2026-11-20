@@ -4,6 +4,7 @@
 //!
 //! Terminal UI frontend — the MVVM **View** layer; its render functions build
 //! ratatui widgets from holon-frontend's `ReactiveViewModel`.
+#![recursion_limit = "256"]
 
 pub mod app_main;
 pub mod di;

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod advice_live_mcp_gate;
 mod attestation_counter_reader;
 mod attestation_oracle;

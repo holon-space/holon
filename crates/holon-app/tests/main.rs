@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod arc_affects_consistency;
 mod authority_place_reservation;
 mod backlinks_section_seed;

@@ -15,6 +15,7 @@
 //! Everything here needs BOTH `holon` and `holon-loro`; nothing in `holon`
 //! needs it back. Keeping it in its own crate is what lets `holon` compile in
 //! parallel with `holon-loro` instead of waiting for it.
+#![recursion_limit = "256"]
 
 pub mod event_infra_module;
 pub mod focus_roots_feed;

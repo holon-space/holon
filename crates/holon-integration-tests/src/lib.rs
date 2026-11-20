@@ -34,6 +34,7 @@
 //!
 //! This module provides reusable components for both property-based tests
 //! and Cucumber BDD tests.
+#![recursion_limit = "256"]
 
 pub mod assertions;
 pub mod debug_pause;

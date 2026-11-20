@@ -15,6 +15,7 @@
 //!
 //! Main orchestration crate: sync pipeline (Loro, OrgMode, Iroh), storage API,
 //! BackendEngine, and DI modules.
+#![recursion_limit = "256"]
 
 pub mod api;
 pub mod core;

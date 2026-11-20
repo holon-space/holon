@@ -10,6 +10,7 @@
 //! `harness = false`. Run with:
 //!   cargo test -p holon-gpui --features pbt --test gpui_gherkin_replay
 //! Override the feature with GHERKIN_FEATURE=/abs/path.feature.
+#![recursion_limit = "256"]
 
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;

@@ -16,6 +16,7 @@
 //! Minimizing is OPT-IN: without `HOLON_CAPTURE` this is a disclosed no-op, so
 //! the suite stays hermetic no matter what sits in the gitignored `.captures/`.
 //! Env: HOLON_MINIMIZE_SIGNATURE=<substr> (default inv-blocks-match-ref/loro).
+#![recursion_limit = "256"]
 
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;

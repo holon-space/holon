@@ -17,6 +17,7 @@
 //! `harness = false`. Run with:
 //!   cargo test -p holon-gpui --test gpui_sim_replay_capture --features pbt
 //! Override the capture with `HOLON_CAPTURE=/abs/path.json`.
+#![recursion_limit = "256"]
 
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;

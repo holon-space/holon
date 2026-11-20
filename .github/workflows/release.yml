@@ -33,7 +33,7 @@ env:
   # MUST equal rust-toolchain.toml's `channel`, like ci.yml's pin: every cargo
   # invocation auto-overrides to that pin, so a floating `nightly` here installs
   # components onto a toolchain cargo never runs.
-  RUST_VERSION: nightly-2026-08-16
+  RUST_VERSION: nightly-2026-11-12
   # Release-CI-only compile-speed lever (Martin 2026-07-27): more parallel
   # codegen units, marginally less cross-unit inlining. Local/dev builds and
   # the workspace profile (codegen-units = 4) are unaffected.
@@ -719,7 +719,7 @@ jobs:
           # libfontconfig at runtime). Mirrors frontends/gpui/justfile.
           RUST_FONTCONFIG_DLOPEN: on
         run: |
-          # rust-toolchain.toml pins nightly-2026-08-16; the dtolnay `targets:` input
+          # rust-toolchain.toml pins nightly-2026-11-12; the dtolnay `targets:` input
           # added the Android std to plain `nightly`, not the pin, so cargo ndk (on the
           # pinned toolchain) could not find std for aarch64-linux-android (E0463). Add
           # it to the active toolchain here, like the macOS job installs its targets.

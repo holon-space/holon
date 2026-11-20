@@ -67,6 +67,7 @@
 //!   --features tokio-console
 //! # then, in another shell:  tokio-console http://127.0.0.1:6669
 //! ```
+#![recursion_limit = "256"]
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -18,6 +18,7 @@
 //! - `HOLON_PBT_WEIGHTS=Indent:200,Outdent:200,Move*:50` — bias the strategy
 //!   aggregator toward (or away from) named transition variants. See
 //!   `crates/holon-integration-tests/src/pbt/transition_dispatch.rs`.
+#![recursion_limit = "256"]
 
 mod common;
 

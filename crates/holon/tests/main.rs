@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 #[cfg(feature = "test-helpers")]
 mod admission_footprint_sweep;
 #[cfg(feature = "test-helpers")]

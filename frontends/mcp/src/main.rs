@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::fs::OpenOptions;
 use std::net::SocketAddr;
 use std::path::PathBuf;

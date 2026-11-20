@@ -8,6 +8,7 @@
 //!
 //! MCP server runs on port 8523 (override with MCP_SERVER_PORT env var)
 //! so it can run alongside the real Holon app (port 8520).
+#![recursion_limit = "256"]
 
 use std::sync::Arc;
 

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod batch_rollback_guard;
 mod block_source_boundaries;
 mod compacted_peer_receives_concurrent_edits;

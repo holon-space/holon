@@ -15,6 +15,7 @@
 //!     --test gpui_capture_replay
 //! Replay is OPT-IN: without `HOLON_CAPTURE` this is a disclosed no-op, so the
 //! suite stays hermetic no matter what sits in the gitignored `.captures/`.
+#![recursion_limit = "256"]
 
 #[path = "pbt_harness/mod.rs"]
 mod pbt_harness;

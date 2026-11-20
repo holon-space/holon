@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod asks_tools;
 mod dense_patch_entity_links;
 mod dense_patch_exact;

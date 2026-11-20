@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod pbt_harness;
 mod support;
 mod test_init;

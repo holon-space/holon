@@ -29,6 +29,7 @@
 //! Only frontends that assemble backends depend on this crate (gpui, tui,
 //! mcp, integration tests) — never the storage-agnostic layers, and never
 //! the wasm frontends (which bring their own wiring).
+#![recursion_limit = "256"]
 
 pub mod boot_error;
 pub mod consolidator_epoch;
