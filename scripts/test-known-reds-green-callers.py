@@ -100,7 +100,9 @@ def main():
         for n, (case, units, broken, ok) in enumerate(cases):
             log = tmp / f"case-{n}.log"
             log.write_text(logs.green_run(*units))
-            env = {**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "STUB_LOG": str(log)}
+            # The fixture's cargo calls stay out of the caller's record: a gate checks that record's compile shape.
+            env = {**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "STUB_LOG": str(log),
+                   "HOLON_CARGO_RECORD": str(tmp / "cargo-calls.jsonl")}
             for m, (caller, run) in enumerate(CALLERS):
                 root = tmp / f"tree-{n}-{m}"
                 checkout(root, broken)
