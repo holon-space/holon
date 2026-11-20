@@ -20,10 +20,6 @@ use holon_conditions::ConditionKind;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
 use tracing::Instrument;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// A write whose WHERE counts an endless recursion, so it never finishes.
 const SPINNING_WRITE: &str = "UPDATE block SET parent_id = 'b' WHERE id = 'a' AND \
@@ -271,20 +267,18 @@ impl std::io::Write for Log {
     }
 }
 
-/// The subscriber is shaped like the app's: global, with the filter on the
-/// fmt layer.
+/// The fmt layer sees the watchdog thread's events, as the app's global
+/// subscriber does.
 #[test]
 fn the_stuck_report_is_logged_in_the_span_of_the_code_that_sent_the_command() {
     let log = Log::default();
     let writer = log.clone();
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .with_filter(EnvFilter::new("info")),
-        )
-        .init();
+    let _scope = crate::scoped_tracing::Scope::new(
+        "info",
+        tracing_subscriber::fmt::layer()
+            .with_writer(move || writer.clone())
+            .with_ansi(false),
+    );
     let slow = calibrate_slow_query();
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
@@ -304,13 +298,17 @@ fn the_stuck_report_is_logged_in_the_span_of_the_code_that_sent_the_command() {
     let text = String::from_utf8(log.0.lock().expect("log poisoned").clone()).expect("utf-8 log");
     let line = text
         .lines()
-        .find(|l| l.contains("ERROR") && l.contains("SQL actor stuck"))
-        .unwrap_or_else(|| panic!("no ERROR line for the stuck command in the log:\n{text}"));
+        .find(|l| {
+            l.contains("ERROR")
+                && l.contains("SQL actor stuck")
+                && l.contains("sender_of_the_slow_query")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no ERROR line for the stuck command carries the sender's span in the log:\n{text}"
+            )
+        });
     eprintln!("{line}");
-    assert!(
-        line.contains("sender_of_the_slow_query"),
-        "the ERROR line does not carry the sender's span: {line}"
-    );
     ManuallyDrop::into_inner(rt).shutdown_background();
 }
 

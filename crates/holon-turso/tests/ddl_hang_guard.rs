@@ -23,14 +23,37 @@ use std::time::Duration;
 use holon_turso::matview_manager::MatviewManager;
 use holon_turso::turso::TursoBackend;
 
+/// Sets a process env var and puts the previous value back on drop.
+struct EnvVar {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVar {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVar {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn watch_ddl_on_chained_matview_never_hangs() {
     // Short guard so a real hang is caught quickly; the outer assertion below
     // uses ~2× as a generous test-side ceiling.
     const GUARD_MS: u64 = 800;
-    unsafe {
-        std::env::set_var("HOLON_DDL_TIMEOUT_MS", GUARD_MS.to_string());
-    }
+    let _guard = EnvVar::set("HOLON_DDL_TIMEOUT_MS", &GUARD_MS.to_string());
 
     let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
     // Leak the backend so the actor stays alive for the test duration.

@@ -40,6 +40,7 @@ mod recursive_cte_shape_architecture;
 mod replace_into_matview_base;
 mod schema_catalog_boot;
 mod schema_source_ddl_lock;
+mod scoped_tracing;
 mod sidecar_views;
 mod sql_log_fields_carry_no_literals;
 mod stopped_commit_listener;

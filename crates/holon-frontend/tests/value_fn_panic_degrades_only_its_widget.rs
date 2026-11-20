@@ -1,8 +1,6 @@
 //! A render-DSL value function that panics while a widget's arguments are
 //! resolved degrades that widget alone: its siblings and its parent still
 //! build, and the run survives the panic.
-//!
-//! Own test binary: the panic hook is process-global.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Mutex;

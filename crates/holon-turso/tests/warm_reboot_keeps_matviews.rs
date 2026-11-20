@@ -23,7 +23,6 @@ use tracing::field::Field;
 use tracing::field::Visit;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::layer::Layer;
-use tracing_subscriber::layer::SubscriberExt;
 
 /// The object name of every `matview_ddl` event the actor emitted.
 #[derive(Clone, Default)]
@@ -217,8 +216,7 @@ fn rebuilt_views<'a>(ran: &'a [String], existing: &HashMap<String, String>) -> V
 #[tokio::test(flavor = "multi_thread")]
 async fn warm_reboot_rebuilds_no_matview_and_a_changed_base_rebuilds_its_dependents() {
     let ddl = DdlTargets::default();
-    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(ddl.clone()))
-        .expect("install the DDL recorder");
+    let _recorder = crate::scoped_tracing::Scope::new("trace", ddl.clone());
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("warm.db");

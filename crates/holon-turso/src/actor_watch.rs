@@ -1027,23 +1027,49 @@ mod tests {
         );
     }
 
+    static PANIC_ON_WATCHDOG_EVENT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     struct PanicOnWatchdogEvent;
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicOnWatchdogEvent {
         fn on_event(&self, _: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-            if std::thread::current().name() == Some("sql-actor-watchdog") {
+            if PANIC_ON_WATCHDOG_EVENT.load(std::sync::atomic::Ordering::SeqCst)
+                && std::thread::current().name() == Some("sql-actor-watchdog")
+            {
                 panic!("the subscriber panics on a watchdog event");
             }
         }
     }
 
+    /// The watchdog thread logs, so the subscriber must be global; it panics
+    /// only while this guard lives.
+    struct WatchdogLoggingPanics;
+
+    impl WatchdogLoggingPanics {
+        fn arm() -> Self {
+            use tracing_subscriber::layer::SubscriberExt;
+            static INSTALLED: std::sync::Once = std::sync::Once::new();
+            INSTALLED.call_once(|| {
+                tracing::subscriber::set_global_default(
+                    tracing_subscriber::registry().with(PanicOnWatchdogEvent),
+                )
+                .expect("no other test of this binary installs a global subscriber");
+            });
+            PANIC_ON_WATCHDOG_EVENT.store(true, std::sync::atomic::Ordering::SeqCst);
+            Self
+        }
+    }
+
+    impl Drop for WatchdogLoggingPanics {
+        fn drop(&mut self) {
+            PANIC_ON_WATCHDOG_EVENT.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     #[test]
     fn a_watchdog_whose_logging_panics_still_raises_every_condition() {
-        use tracing_subscriber::layer::SubscriberExt;
-        tracing::subscriber::set_global_default(
-            tracing_subscriber::registry().with(PanicOnWatchdogEvent),
-        )
-        .expect("nextest runs this test in a process of its own");
+        let _armed = WatchdogLoggingPanics::arm();
         let bus = Arc::new(ConditionBus::new());
         let (broken, _broken_tx) = watched_on(&bus);
         let (healthy, _healthy_tx) = watched_on(&bus);

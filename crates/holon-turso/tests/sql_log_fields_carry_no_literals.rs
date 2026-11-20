@@ -15,11 +15,9 @@ use std::sync::Mutex;
 
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::Layer;
 use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+
+use crate::scoped_tracing::Scope;
 
 /// Values a reader of the log must never see. Each is distinctive enough that a
 /// substring search cannot match the surrounding SQL code by accident.
@@ -57,24 +55,17 @@ impl Log {
 /// exposure belongs to the engine fork, and the production filter
 /// (`holon_gpui=info,holon=info,holon_tui=info`) leaves `turso_core` at the
 /// default ERROR, so only an explicit `RUST_LOG` turns it on.
-fn capture() -> Log {
+fn capture() -> (Scope, Log) {
     let log = Log::default();
     let writer = log.clone();
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .with_span_events(FmtSpan::NEW)
-                .with_filter(EnvFilter::new("holon_turso=trace")),
-        )
-        // Each nextest test owns its process, so this is the only subscriber
-        // there. Under `cargo test` a second call loses the race and reads an
-        // empty log — the callsites stay enabled, which is all the panic test
-        // needs.
-        .try_init()
-        .ok();
-    log
+    let scope = Scope::new(
+        "holon_turso=trace",
+        tracing_subscriber::fmt::layer()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_span_events(FmtSpan::NEW),
+    );
+    (scope, log)
 }
 
 async fn open() -> DbHandle {
@@ -87,7 +78,7 @@ async fn open() -> DbHandle {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_dbhandle_span_or_log_line_carries_a_sql_literal() {
-    let log = capture();
+    let (_scope, log) = capture();
     let handle = open().await;
 
     handle
@@ -168,7 +159,7 @@ async fn no_dbhandle_span_or_log_line_carries_a_sql_literal() {
 /// user content is what puts the character at that offset.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_multibyte_character_at_the_trace_boundary_does_not_panic() {
-    let _log = capture();
+    let (_scope, _log) = capture();
     let handle = open().await;
     handle
         .execute_ddl("CREATE TABLE wide (id TEXT PRIMARY KEY, body TEXT)")

@@ -390,18 +390,41 @@ fn panicking_call(
     }
 }
 
+type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>;
+
+/// Routes the panics of a case to its log and reports the rest, for as long as
+/// it lives. Dropping it puts a hook back that forwards to the one it replaced.
+struct CaseHook {
+    previous: PanicHook,
+}
+
+impl CaseHook {
+    fn install() -> Self {
+        let previous: PanicHook = Arc::from(std::panic::take_hook());
+        let report = previous.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            if !record_case_panic(info) {
+                SPAWNED_PANICS
+                    .lock()
+                    .expect("panic log")
+                    .push(info.to_string());
+                report(info);
+            }
+        }));
+        Self { previous }
+    }
+}
+
+impl Drop for CaseHook {
+    fn drop(&mut self) {
+        let previous = self.previous.clone();
+        std::panic::set_hook(Box::new(move |info| previous(info)));
+    }
+}
+
 #[test]
 fn every_builder_returns_a_view_model_for_any_authored_args() {
-    let report = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        if !record_case_panic(info) {
-            SPAWNED_PANICS
-                .lock()
-                .expect("panic log")
-                .push(info.to_string());
-            report(info);
-        }
-    }));
+    let _hook = CaseHook::install();
     let services: Arc<dyn BuilderServices> = Arc::new(StubBuilderServices::new());
     let (builders, shared) = arg_names_per_builder();
     let workers = std::thread::available_parallelism()

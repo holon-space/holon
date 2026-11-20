@@ -23,6 +23,7 @@ mod enabledness_query_production_cost;
 mod focus_on_new_block_under_lag;
 mod frontend_suite;
 mod general_e2e_composed_pbt;
+mod hand_authored_fakes;
 mod hand_authored_regressions;
 mod hop_step_cost;
 mod keystone_atom_counts;

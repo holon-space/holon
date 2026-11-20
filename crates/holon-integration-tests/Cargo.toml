@@ -231,5 +231,9 @@ name = "integration"
 path = "tests/main.rs"
 
 [[test]]
+name = "hand_authored_refusals"
+path = "tests/hand_authored_refusals.rs"
+
+[[test]]
 name = "snapshot_boot"
 path = "tests/snapshot_boot_pbt.rs"
