@@ -5622,6 +5622,7 @@ name = "holon-loopback-guard"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
+ "proptest 1.11.0",
  "tokio",
  "tower 0.5.3",
  "tracing",

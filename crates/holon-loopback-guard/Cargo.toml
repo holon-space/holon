@@ -16,5 +16,6 @@ tracing.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+proptest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { version = "0.5", features = ["util"] }
