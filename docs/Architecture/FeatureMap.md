@@ -412,6 +412,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `no-proptest-regressions-seed-file-under-load`
 - `open-tab-panel-keeps-empty-cursor-subtree`
 - `org-deep-text-ratio-under-load`
+- `org-writeback-stream-dies-at-delete-document`
 - `owner-heavy-indent-join-receiver-not-converged`
 - `pairing-conflict-badge-conflict-copy-content-unpainted`
 - `pairing-conflict-badge-long-copy-content-unpainted`

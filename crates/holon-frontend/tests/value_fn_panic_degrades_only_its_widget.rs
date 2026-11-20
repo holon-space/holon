@@ -3,9 +3,6 @@
 //! build, and the run survives the panic.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
-use std::sync::PoisonError;
 
 use holon_api::InterpValue;
 use holon_api::Value;
@@ -89,13 +86,6 @@ fn assert_one_error_naming_text_and_the_panic(errors: &[String], case: &str) {
     }
 }
 
-/// `install` keeps process-wide state, and the tests of this file share a
-/// process under `cargo test`.
-fn serial() -> MutexGuard<'static, ()> {
-    static SERIAL: Mutex<()> = Mutex::new(());
-    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 fn exploding() -> RenderExpr {
     call("text", vec![call("boom", vec![])])
 }
@@ -103,7 +93,7 @@ fn exploding() -> RenderExpr {
 /// Build `expr` with `boom` registered, on a fresh bus; the error and text
 /// nodes it builds to.
 fn build_on_a_fresh_bus(expr: &RenderExpr, case: &str) -> (Vec<String>, Vec<String>) {
-    let _serial = serial();
+    let _serial = crate::panic_record_serial::serial();
     let config = tempfile::tempdir().expect("a config dir");
     let _bus = panic_record::install(config.path());
     let mut interpreter = build_shadow_interpreter();
@@ -112,7 +102,7 @@ fn build_on_a_fresh_bus(expr: &RenderExpr, case: &str) -> (Vec<String>, Vec<Stri
 
     let nodes = built(&services, expr, case);
     assert!(
-        !config.path().join(panic_record::RECORD_FILE).exists(),
+        crate::panic_record_serial::own_record(config.path()).is_none(),
         "{case}: a caught and shown panic must not be disclosed again as a crash at the next start"
     );
     nodes

@@ -2,8 +2,6 @@
 //! becomes an error naming the builder, the panic message and where it
 //! panicked, and the panic shows on the condition bus now. It is not reported
 //! again as a crash of this run at the next start.
-//!
-//! Own test binary: the panic hook is process-global.
 
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
@@ -79,6 +77,7 @@ fn shown_panic(bus: &ConditionBus) -> Option<(String, String)> {
 
 #[test]
 fn a_panicking_builder_becomes_an_error_node_and_a_condition_shown_once() {
+    let _serial = crate::panic_record_serial::serial();
     let config = tempfile::tempdir().expect("a config dir");
     let bus = panic_record::install(config.path());
 
@@ -121,7 +120,7 @@ fn a_panicking_builder_becomes_an_error_node_and_a_condition_shown_once() {
         "the condition names where the builder panicked: {subject:?}"
     );
     assert!(
-        !config.path().join(panic_record::RECORD_FILE).exists(),
+        crate::panic_record_serial::own_record(config.path()).is_none(),
         "a caught and shown panic must not be disclosed again as a crash at the next start"
     );
 }

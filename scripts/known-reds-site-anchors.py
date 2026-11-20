@@ -40,6 +40,7 @@ EXEMPT = {
     "writeback-churning-file-stall-disclosed-twice": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "two-instance-viewmodel-stale-displayed-text": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "split-doc-root-setup-org-sync-under-load": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
+    "org-writeback-stream-dies-at-delete-document": 'its red does not reproduce and every red log predates the case naming the row, so the classifier binds no location',
 }
 # Rows that also pin one fixed target location, besides MOVED.
 STATIC = {

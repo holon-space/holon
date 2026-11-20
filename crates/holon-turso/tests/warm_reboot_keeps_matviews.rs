@@ -24,7 +24,11 @@ use tracing::field::Visit;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::layer::Layer;
 
-/// The object name of every `matview_ddl` event the actor emitted.
+/// The worker threads of this test's runtime, where its actors run. Other tests
+/// of this binary boot databases at the same time and emit the same events.
+const OWN_WORKERS: &str = "warm-reboot-workers";
+
+/// The object name of every `matview_ddl` event an actor of this test emitted.
 #[derive(Clone, Default)]
 struct DdlTargets(Arc<Mutex<Vec<String>>>);
 
@@ -54,7 +58,9 @@ impl Visit for LatencyFields {
 
 impl<S: tracing::Subscriber> Layer<S> for DdlTargets {
     fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-        if event.metadata().target() != "holon_latency" {
+        if event.metadata().target() != "holon_latency"
+            || std::thread::current().name() != Some(OWN_WORKERS)
+        {
             return;
         }
         let mut fields = LatencyFields::default();
@@ -213,8 +219,17 @@ fn rebuilt_views<'a>(ran: &'a [String], existing: &HashMap<String, String>) -> V
     rebuilt
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn warm_reboot_rebuilds_no_matview_and_a_changed_base_rebuilds_its_dependents() {
+#[test]
+fn warm_reboot_rebuilds_no_matview_and_a_changed_base_rebuilds_its_dependents() {
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_name(OWN_WORKERS)
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(warm_reboot_on_own_workers());
+}
+
+async fn warm_reboot_on_own_workers() {
     let ddl = DdlTargets::default();
     let _recorder = crate::scoped_tracing::Scope::new("trace", ddl.clone());
 

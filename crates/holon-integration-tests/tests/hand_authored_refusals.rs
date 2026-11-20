@@ -21,6 +21,8 @@ use holon_integration_tests::pbt::hand_authored::ReplayCase;
 use holon_integration_tests::pbt::hand_authored::parse_case;
 use holon_integration_tests::pbt::hand_authored::parse_replay_case;
 use holon_integration_tests::pbt::hand_authored::replay;
+use holon_pbt_core::capabilities::RefCopies;
+use holon_pbt_core::capabilities::WriteHeld;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantResult;
@@ -165,6 +167,27 @@ thread_local! {
     /// The transition (1-based) at which [`ProblemSut`] logs a problem; 0 logs none.
     static LOGS_AT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PROBLEM: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// The files whose write-back the reference of [`ProblemSut`] holds armed.
+    static HELD: std::cell::RefCell<BTreeSet<String>> = const { std::cell::RefCell::new(BTreeSet::new()) };
+}
+
+struct ArmedRef(BTreeSet<String>);
+
+impl RefCopies for ArmedRef {
+    fn model_copies(&self) -> Vec<holon_pbt_core::capabilities::ModelCopy> {
+        Vec::new()
+    }
+
+    fn write_held(&self) -> WriteHeld {
+        WriteHeld {
+            files: self.0.clone(),
+            blocks: BTreeSet::new(),
+        }
+    }
+
+    fn crash_restore_copies(&self) -> std::collections::BTreeMap<String, Vec<Vec<String>>> {
+        Default::default()
+    }
 }
 
 struct Logged(Vec<String>);
@@ -212,7 +235,12 @@ impl LockedReplay for ProblemSut {
         caps.insert(
             std::sync::Arc::new(Logged(sut.clone())) as std::sync::Arc<dyn ObservedProblems>
         );
-        match futures::executor::block_on(InvNoObservedErrors.check(&CapMap::new(), &caps)) {
+        let mut reference = CapMap::new();
+        reference.insert(
+            std::sync::Arc::new(ArmedRef(HELD.with_borrow(Clone::clone)))
+                as std::sync::Arc<dyn RefCopies>,
+        );
+        match futures::executor::block_on(InvNoObservedErrors.check(&reference, &caps)) {
             InvariantResult::Fail(message) => Err(message),
             _ => Ok(()),
         }
@@ -227,13 +255,17 @@ const REAL_PROBLEM: &str = "[ERROR] holon_core::store (crates/holon-core/src/sto
 const FILTERED_PROBLEM: &str = "[ERROR] iroh::socket::remote_map::remote_state \
     (/registry/iroh-1.4.1/src/socket/remote_map/remote_state.rs:723): \
     could not close last open path";
+const ARMED_REFUSAL: &str = "[ERROR] holon_org::writer (crates/holon-org/src/writer.rs:1): \
+    injected failure between temp write and rename (in-memory): /vault/held.org";
 
 /// Replays `n` transitions of which transition `logs_at` (1-based, 0 for none)
-/// logs `problem`; returns the replay's panic message, if any.
+/// logs `problem`, against a reference that holds `held` armed; returns the
+/// replay's panic message, if any.
 fn replay_message(
     n: usize,
     logs_at: usize,
     problem: &str,
+    held: &[&str],
     also_check_after: &BTreeSet<usize>,
     lock: &str,
 ) -> Option<String> {
@@ -258,6 +290,7 @@ fn replay_message(
     } = parse_replay_case(std::path::Path::new("<inline>"), 1, &line);
     LOGS_AT.set(logs_at);
     PROBLEM.set(problem.to_string());
+    HELD.set(held.iter().map(|f| f.to_string()).collect());
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
         replay::<ProblemSut>(
             &case.name,
@@ -279,7 +312,7 @@ fn replay_message(
 }
 
 fn assert_problem_judged(n: usize, p: usize, also_check_after: &BTreeSet<usize>, lock: &str) {
-    let message = replay_message(n, p, REAL_PROBLEM, also_check_after, lock)
+    let message = replay_message(n, p, REAL_PROBLEM, &[], also_check_after, lock)
         .unwrap_or_else(|| panic!("replay did not panic: n={n} p={p} also={also_check_after:?}"));
     assert!(
         message.contains("inv-no-observed-errors")
@@ -287,7 +320,7 @@ fn assert_problem_judged(n: usize, p: usize, also_check_after: &BTreeSet<usize>,
         "n={n} p={p} also={also_check_after:?}: {message}"
     );
     assert_eq!(
-        replay_message(n, 0, REAL_PROBLEM, also_check_after, lock),
+        replay_message(n, 0, REAL_PROBLEM, &[], also_check_after, lock),
         None,
         "a replay that logs nothing passes"
     );
@@ -309,9 +342,36 @@ fn a_problem_logged_at_a_transition_without_a_check_is_judged() {
 fn a_problem_the_invariant_filters_stays_green() {
     for p in 1..=3 {
         assert_eq!(
-            replay_message(3, p, FILTERED_PROBLEM, &BTreeSet::new(), "inv-x"),
+            replay_message(3, p, FILTERED_PROBLEM, &[], &BTreeSet::new(), "inv-x"),
             None
         );
+    }
+}
+
+#[test]
+fn a_write_the_reference_holds_armed_stays_green() {
+    for p in 1..=3 {
+        assert_eq!(
+            replay_message(
+                3,
+                p,
+                ARMED_REFUSAL,
+                &["held.org"],
+                &BTreeSet::new(),
+                "inv-x"
+            ),
+            None
+        );
+        let message = replay_message(
+            3,
+            p,
+            ARMED_REFUSAL,
+            &["other.org"],
+            &BTreeSet::new(),
+            "inv-x",
+        )
+        .expect("a refusal on a file the reference does not hold is judged");
+        assert!(message.contains("held.org"), "{message}");
     }
 }
 

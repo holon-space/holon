@@ -324,8 +324,7 @@ thread_local! {
 
 static SPAWNED_PANICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Logs a panic inside a case for that case; any other panic is reported as
-/// usual and also kept, since it may come from a task a builder spawned.
+/// Logs a panic inside a case for that case.
 fn record_case_panic(info: &std::panic::PanicHookInfo<'_>) -> bool {
     CASE_PANICS.with(|log| match log.borrow_mut().as_mut() {
         Some(log) => {
@@ -390,42 +389,46 @@ fn panicking_call(
     }
 }
 
-type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>;
+/// The one worker thread of the runtime the builders of a case spawn on. Other
+/// tests of this binary panic on purpose on other threads, so only a panic on
+/// this thread counts as a builder's spawned task panicking.
+const CASE_TASKS: &str = "every-builder-case-tasks";
 
-/// Routes the panics of a case to its log and reports the rest, for as long as
-/// it lives. Dropping it puts a hook back that forwards to the one it replaced.
-struct CaseHook {
-    previous: PanicHook,
-}
-
-impl CaseHook {
-    fn install() -> Self {
-        let previous: PanicHook = Arc::from(std::panic::take_hook());
-        let report = previous.clone();
+/// Logs case panics and spawned-task panics, then forwards every other panic
+/// to the hook it found. Installed once and never replaced: a hook restored
+/// while another test's hook sits above it would cut that hook off.
+fn route_case_panics() {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let report = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if !record_case_panic(info) {
+            if record_case_panic(info) {
+                return;
+            }
+            if std::thread::current().name() == Some(CASE_TASKS) {
                 SPAWNED_PANICS
                     .lock()
                     .expect("panic log")
                     .push(info.to_string());
-                report(info);
             }
+            report(info);
         }));
-        Self { previous }
-    }
-}
-
-impl Drop for CaseHook {
-    fn drop(&mut self) {
-        let previous = self.previous.clone();
-        std::panic::set_hook(Box::new(move |info| previous(info)));
-    }
+    });
 }
 
 #[test]
 fn every_builder_returns_a_view_model_for_any_authored_args() {
-    let _hook = CaseHook::install();
-    let services: Arc<dyn BuilderServices> = Arc::new(StubBuilderServices::new());
+    let _serial = crate::panic_record_serial::serial();
+    route_case_panics();
+    let case_tasks = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name(CASE_TASKS)
+        .enable_all()
+        .build()
+        .expect("case task runtime");
+    let services: Arc<dyn BuilderServices> = Arc::new(StubBuilderServices::with_handle(
+        case_tasks.handle().clone(),
+    ));
     let (builders, shared) = arg_names_per_builder();
     let workers = std::thread::available_parallelism()
         .expect("the host reports its parallelism")

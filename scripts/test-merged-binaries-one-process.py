@@ -8,8 +8,9 @@ A test binary that holds many modules is green only if no test leaves process-wi
 hides such a leak; `cargo test` runs one process and shows it. Property: for every drawn test order the
 binary is green.
 
-Each draw is a process run: `--test-threads=1 -Z unstable-options --shuffle-seed <s>`. The seed is
-printed; a red draw is replayed with `--seed <s> --draws 1 --target <name>`.
+Each draw is a process run: `--test-threads=<t> -Z unstable-options --shuffle-seed <s>`, with t drawn
+from {1, 2, 8}: concurrent tests share the process too. Seed and thread count are printed; a red draw is
+replayed with `--seed <S> --draws 1 --target <name>`.
 Static examples keep their order as an explicit list of test-name prefixes: the script draws seeds until the
 binary ran those tests in that order, and fails if no drawn seed produces it.
 
@@ -38,6 +39,9 @@ HAND = "hand_authored_regressions::"
 # prefixes; the binary must have run a test of each prefix, in that order.
 TARGETS = {
     "turso-main": ("holon-turso", "test", "main", [], {}, [[WARM, STUCK], [STUCK, WARM]]),
+    "turso-main-boots": ("holon-turso", "test", "main", [
+        WARM, "previous_engine_database_boots::", "views_of_another_engine_build::", "matview_point_read_index::"],
+        {}, []),
     "turso-lib": ("holon-turso", "lib", None, [], {}, []),
     "frontend-main": ("holon-frontend", "test", "main", [], {}, [[VALUE_FN, EVERY], [EVERY, VALUE_FN]]),
     "hand-authored-shard0": (
@@ -48,7 +52,7 @@ TARGETS = {
     "holon-app": ("holon-app", "test", None, [], {}, []),
 }
 # Targets of the default run: the binaries the lane keeps green. `holon` and `holon-app` are report-only.
-DEFAULT = ["turso-main", "turso-lib", "frontend-main", "hand-authored-shard0", "hand-authored-refusals"]
+DEFAULT = ["turso-main", "turso-main-boots", "turso-lib", "frontend-main", "hand-authored-shard0", "hand-authored-refusals"]
 
 
 def build():
@@ -75,9 +79,9 @@ def package_dirs():
     return {p["name"]: os.path.dirname(p["manifest_path"]) for p in meta["packages"]}
 
 
-def run(exe, pkgdir, filters, env, seed):
+def run(exe, pkgdir, filters, env, seed, threads=1):
     full_env = dict(os.environ, CARGO_MANIFEST_DIR=pkgdir, **env)
-    argv = [exe, "--test-threads=1", "-Z", "unstable-options", "--shuffle-seed", str(seed), "--nocapture", *filters]
+    argv = [exe, "--test-threads=%d" % threads, "-Z", "unstable-options", "--shuffle-seed", str(seed), "--nocapture", *filters]
     res = subprocess.run(argv, cwd=pkgdir, env=full_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return res.returncode, res.stdout
 
@@ -117,10 +121,11 @@ def main():
             continue
         for exe in found:
             for seed in [rng.randrange(2**32) for _ in range(args.draws)]:
-                code, out = run(exe, pkgdir, filters, env, seed)
-                print("%s %s shuffle-seed=%d exit=%d" % (name, os.path.basename(exe), seed, code), flush=True)
+                threads = rng.choice([1, 2, 8])
+                code, out = run(exe, pkgdir, filters, env, seed, threads)
+                print("%s %s shuffle-seed=%d threads=%d exit=%d" % (name, os.path.basename(exe), seed, threads, code), flush=True)
                 if code != 0:
-                    failures.append("%s shuffle-seed=%d" % (name, seed))
+                    failures.append("%s shuffle-seed=%d threads=%d" % (name, seed, threads))
                     print(out[-4000:])
             for prefixes in orders:
                 for seed in range(args.max_order_seeds):

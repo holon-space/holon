@@ -3,9 +3,6 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
-use std::sync::PoisonError;
 
 use holon_conditions::ConditionBus;
 use holon_conditions::ConditionKind;
@@ -66,13 +63,6 @@ fn boot_and_die(test_name: &str, config_dir: &Path, death: &str) {
     );
 }
 
-/// `install` keeps process-wide state, and the tests of this file share a
-/// process under `cargo test`.
-fn serial() -> MutexGuard<'static, ()> {
-    static SERIAL: Mutex<()> = Mutex::new(());
-    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 fn previous_run_messages(conditions: &ConditionBus) -> Vec<String> {
     conditions
         .current()
@@ -87,7 +77,7 @@ fn previous_run_messages(conditions: &ConditionBus) -> Vec<String> {
 #[test]
 fn a_panic_record_survives_a_later_boot_that_exits_before_its_bus() {
     die_before_the_bus();
-    let _serial = serial();
+    let _serial = crate::panic_record_serial::serial();
     let name = "a_panic_record_survives_a_later_boot_that_exits_before_its_bus";
     let dir = tempfile::tempdir().expect("temp config dir");
 
@@ -105,7 +95,7 @@ fn a_panic_record_survives_a_later_boot_that_exits_before_its_bus() {
 #[test]
 fn a_bus_that_no_frontend_drew_leaves_the_records_unshown() {
     die_before_the_bus();
-    let _serial = serial();
+    let _serial = crate::panic_record_serial::serial();
     let name = "a_bus_that_no_frontend_drew_leaves_the_records_unshown";
     let dir = tempfile::tempdir().expect("temp config dir");
 
@@ -124,7 +114,7 @@ fn a_bus_that_no_frontend_drew_leaves_the_records_unshown() {
 #[test]
 fn every_boot_that_died_before_its_bus_is_shown_by_the_next_bus() {
     die_before_the_bus();
-    let _serial = serial();
+    let _serial = crate::panic_record_serial::serial();
     let name = "every_boot_that_died_before_its_bus_is_shown_by_the_next_bus";
     let dir = tempfile::tempdir().expect("temp config dir");
 

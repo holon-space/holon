@@ -18,6 +18,7 @@ mod mutable_cross_thread_set;
 mod numeric_column_text;
 mod panic_record_boot_loop;
 mod panic_record_child_process;
+mod panic_record_serial;
 mod pending_question_render;
 mod prop_wait;
 mod render_binary_op_non_finite;
