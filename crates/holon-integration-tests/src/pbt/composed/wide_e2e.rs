@@ -3041,14 +3041,10 @@ mod tests {
     #[test]
     fn any_valid_wiring_draws_every_arm_over_n() {
         use proptest::strategy::ValueTree;
-        use proptest::test_runner::Config;
         use proptest::test_runner::TestRunner;
 
         let strategy = holon_pbt_core::any_valid_wiring();
-        let mut runner = TestRunner::new(Config {
-            cases: 1,
-            ..Config::default()
-        });
+        let mut runner = TestRunner::deterministic();
         let mut seen: BTreeSet<WiringComponent> = BTreeSet::new();
         // 2048 draws: at Turso's 0.20 inclusion prob the rarest arm still lands
         // hundreds of times — the floor is deterministic, not flaky.
