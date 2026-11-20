@@ -5,7 +5,7 @@ gap: ENVIRONMENT
 secondary: null
 status: OPEN
 summary: >-
-  `owner_heavy_indent_then_join_stalls_the_receiver_projection` reds about one run in thirteen
+  `owner_heavy_indent_then_join_stalls_the_receiver_projection` reds 1 run in 13
   on main (the receiver keeps a block the owner joined away), and a plain `cargo test` run of it
   has no time cap, so a hang there holds a slot for hours.
 ---
@@ -31,12 +31,18 @@ Two separate findings, measured on the `test` build profile (unoptimized + debug
   `2026-09-02-receiver-projection-stalls-after-one-failed-reconcile` is not established: the failed run's log holds no reconcile error line.
 - On base 9ce0dbde the test is green in 10 of 10 runs that started the test. An 11th run was killed by the outer 25 minute limit during
   compilation of a fresh tree, before the test started.
-- Host load was between 30 and 70 for all runs; load below 10 was not reached in 2 hours of waiting.
+- Host load was between 30 and 72 for all runs; load below 10 was not reached in 2 hours of waiting.
 
 ## Missing piece
 
-The red has no known cause and no registry row. The verifier's loop had no time cap. A fixed-script test that reds one run in thirteen
+The red has no known cause and no registry row. The verifier's loop had no time cap. A fixed-script test with 1 red in 13 runs
 cannot be told from a load effect with the 13 runs available, and a load-driven stall reads as non-convergence.
+
+Why ENVIRONMENT (litmus):
+- The hang: the gate runs the test under nextest with a 20 minute cap; the verifier ran it under a bare `cargo test` with none. The test and the code are the same; only the run environment differs.
+- The red: it appeared inside an automated nextest run, not in prod, and only under host load 30 to 72. Whether it is a logic defect or a load effect cannot be told until it reproduces at low load; until then it stays with the environment finding, OPEN.
+
+Parity work needed: every bounded run of this test goes through nextest (or any bare-cargo recipe gets the same outer cap), and the rate must be measured once at load below 10.
 
 ## Remedy
 
