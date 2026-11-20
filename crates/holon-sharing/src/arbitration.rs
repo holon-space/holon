@@ -227,7 +227,8 @@ pub fn arbitrate(entries: &[LogEntry]) -> Arbitration {
     }
 
     // Phase 2: cycle detection over VALID same-block edges of not-yet-malformed
-    // nodes (functional graph, out-degree ≤ 1). Any node on a cycle → malformed.
+    // nodes (functional graph, out-degree ≤ 1). Any node on a cycle →
+    // malformed.
     let edge: BTreeMap<&CrossingId, &CrossingId> = begins
         .iter()
         .filter_map(|(c, _)| {
@@ -253,7 +254,8 @@ pub fn arbitrate(entries: &[LogEntry]) -> Arbitration {
         })
         .collect();
 
-    // Phase 4: bucket every crossing (precedence malformed > superseded > live).
+    // Phase 4: bucket every crossing (precedence malformed > superseded >
+    // live).
     let mut out = Arbitration::default();
     let mut per_block: BTreeMap<&BlockId, Vec<(&Crossing, CrossingKey)>> = BTreeMap::new();
     for (c, key) in &begins {

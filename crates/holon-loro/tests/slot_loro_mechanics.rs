@@ -365,8 +365,8 @@ fn d_block_ids_are_random_never_content_derived() {
         assert_eq!(bytes.get_version_num(), 4, "(d) a block id is not UUID v4");
     }
 
-    // Content-derived would mean: equal content gives an equal id. Two mints for
-    // the same conceptual block do not.
+    // Content-derived would mean: equal content gives an equal id. Two mints
+    // for the same conceptual block do not.
     assert_ne!(
         MintedId::random().as_str(),
         MintedId::random().as_str(),

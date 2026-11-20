@@ -688,7 +688,8 @@ fn diff_verdict(
                     }
                 }
                 if !undeclared_columns.contains(&"sort_key".to_string()) {
-                    // sort_key is always minted, even when it equals the default.
+                    // sort_key is always minted, even when it equals the
+                    // default.
                     undeclared_columns.push("sort_key".to_string());
                 }
                 if row.is_page && attr(attrs, "is_page") != "1" {

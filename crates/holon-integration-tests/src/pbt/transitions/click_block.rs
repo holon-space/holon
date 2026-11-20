@@ -120,9 +120,10 @@ impl<R: RefLifecycle + RefBlockTree + RefFocus + RefNavHistory + RefLayoutMutate
         }
 
         // Main candidates: text blocks the user can edit (no bound click
-        // action — clicking places the editor cursor). `main_editable_descendants`
-        // already encodes content_type / non-page / non-layout / focusable
-        // / non-locked, which lines up with preconditions exactly.
+        // action — clicking places the editor cursor).
+        // `main_editable_descendants` already encodes content_type / non-page /
+        // non-layout / focusable / non-locked, which lines up with
+        // preconditions exactly.
         let main_candidates: Vec<EntityUri> = state.main_editable_descendants();
         if !main_candidates.is_empty() {
             arms.push((

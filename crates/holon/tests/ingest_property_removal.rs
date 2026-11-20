@@ -77,8 +77,9 @@ async fn ingest_sink() -> (Arc<BackendEngine>, Arc<SqlBlockOperations>) {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = tokio::runtime::Handle::current();
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread test
-                    // runtime; block_in_place makes the bridge deadlock-free.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread test runtime; block_in_place makes the
+                    // bridge deadlock-free.
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");

@@ -88,9 +88,9 @@ pub fn resize_window(
 struct SendApp(*const HeadlessAppContext);
 unsafe impl Send for SendApp {}
 impl SendApp {
-    // A `&self` accessor so a `move` closure captures the whole `SendApp` (Send)
-    // rather than disjoint-capturing the raw-pointer field (2021 edition),
-    // which would be !Send.
+    // A `&self` accessor so a `move` closure captures the whole `SendApp`
+    // (Send) rather than disjoint-capturing the raw-pointer field (2021
+    // edition), which would be !Send.
     fn app(&self) -> &HeadlessAppContext {
         unsafe { &*self.0 }
     }
@@ -200,8 +200,8 @@ pub fn with_windowed_wide_sut_live(
     let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
     let oracle = wide_e2e_ref();
 
-    // Boot the WIDE-seeded, driver-DEFERRED base (session/reactive surfaced for the
-    // window).
+    // Boot the WIDE-seeded, driver-DEFERRED base (session/reactive surfaced for
+    // the window).
     let (bundle, scaffold) =
         runtime.block_on(async { boot_and_seed_wide_windowed_base(&resolver, &oracle).await });
     let session = bundle
@@ -248,7 +248,8 @@ pub fn with_windowed_wide_sut_live(
     )
     .unwrap_or_else(|e| panic!("boot: {e}"));
 
-    // Build the live windowed driver + overlay its gesture caps onto the wide base.
+    // Build the live windowed driver + overlay its gesture caps onto the wide
+    // base.
     let interaction_tx = debug
         .interaction_tx
         .get()
@@ -268,9 +269,9 @@ pub fn with_windowed_wide_sut_live(
         .frontend
         .clone()
         .expect("full_headless → booted HeadlessFrontendComponent");
-    // Capture the settle handle (engine + frontend) before `bundle.caps` is moved,
-    // so the windowed per-apply settle converges CDC + Loro + org like the
-    // headless path.
+    // Capture the settle handle (engine + frontend) before `bundle.caps` is
+    // moved, so the windowed per-apply settle converges CDC + Loro + org like
+    // the headless path.
     let overlaid = overlay_windowed_caps(
         bundle.caps,
         frontend,
@@ -309,18 +310,18 @@ pub fn with_windowed_wide_sut_live(
         }
     });
 
-    // A dedicated runtime drives the apply/check leaf futures; the booted backend
-    // keeps running on `runtime`'s worker threads (kept alive by the outer
-    // Arc). The gpui thread is NOT runtime-entered, so `rt.block_on` inside the
-    // harness is legal here.
+    // A dedicated runtime drives the apply/check leaf futures; the booted
+    // backend keeps running on `runtime`'s worker threads (kept alive by the
+    // outer Arc). The gpui thread is NOT runtime-entered, so `rt.block_on`
+    // inside the harness is legal here.
     let composed_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("composed runtime");
 
-    // Assemble the windowed SUT (the initial page-root focus is already established
-    // on the base by `boot_and_seed_wide_windowed_base` via the engine's
-    // `dispatch_intent_sync`).
+    // Assemble the windowed SUT (the initial page-root focus is already
+    // established on the base by `boot_and_seed_wide_windowed_base` via the
+    // engine's `dispatch_intent_sync`).
     let sut = windowed_composed_sut(overlaid, handle, resolver, scaffold, composed_rt, settle);
 
     // Pixel-capture sink: enabled only when HOLON_CAPTURE_DIR is set. Created
@@ -343,10 +344,10 @@ pub fn with_windowed_wide_sut_live(
 
     // Teardown (see the 3b tests): release window entities, shut down, leak the
     // !Send app
-    // + the SUT (which transitively holds the session + the composed runtime) so no
-    //   Drop runs
-    // the gpui leak detector or shuts a runtime down in an async context. If the
-    // caller already consumed the SUT (`None`), only the app is leaked.
+    // + the SUT (which transitively holds the session + the composed runtime)
+    //   so no Drop runs
+    // the gpui leak detector or shuts a runtime down in an async context. If
+    // the caller already consumed the SUT (`None`), only the app is leaked.
     drop(rebind);
     app.update(|cx| cx.shutdown());
     app.run_until_parked();
@@ -387,9 +388,9 @@ pub fn replay_fixture_windowed(
 ) -> Result<(), Box<dyn std::any::Any + Send + 'static>> {
     let mut result: Result<(), Box<dyn std::any::Any + Send + 'static>> = Ok(());
     with_windowed_wide_sut(|sut, oracle, sink| {
-        // The composed windowed base is full_headless-wired; a capture recorded under a
-        // different wiring would replay against the wrong oracle — fail loud, don't
-        // fake.
+        // The composed windowed base is full_headless-wired; a capture recorded
+        // under a different wiring would replay against the wrong oracle — fail
+        // loud, don't fake.
         if let Some(recorded) = &fixture.wiring {
             assert_eq!(
                 *recorded, oracle.harness.wiring,
@@ -413,10 +414,11 @@ pub fn replay_fixture_windowed(
         })) {
             Ok(sut) => Some(sut),
             Err(payload) => {
-                // One failure frame before re-raising, so the flipbook ends on the
-                // frame that actually failed. The SUT was consumed and dropped inside
-                // the unwind (this thread is not runtime-entered, so its Drop is
-                // safe); teardown only leaks the app.
+                // One failure frame before re-raising, so the flipbook ends on
+                // the frame that actually failed. The SUT was consumed and
+                // dropped inside the unwind (this thread is not
+                // runtime-entered, so its Drop is safe); teardown only leaks
+                // the app.
                 sink.capture_fail("failure", "");
                 result = Err(payload);
                 None

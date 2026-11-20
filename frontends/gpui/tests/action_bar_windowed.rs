@@ -560,7 +560,8 @@ fn tapping_a_global_op_button_dispatches_it() {
         f.settle();
 
         // A param popup means the tap resolved nothing and asked the user which
-        // region they meant — the failure mode `bound_params` exists to prevent.
+        // region they meant — the failure mode `bound_params` exists to
+        // prevent.
         let popup_open = f
             .bounds
             .all_elements()

@@ -167,12 +167,12 @@ impl FileFormatAdapter for OrgFormatAdapter {
         // pre-first-headline body — is what write-back renders above the first
         // headline. Left unsynced, the persisted root keeps its
         // filename-derived name and carries no body, so every write-back
-        // deletes the user's root text and rewrites `#+TITLE:` to the file stem.
-        // Only the BODY half. A doc-root's first content line is its name, and
-        // `authoritative_name_chain` builds the file path from it — overwriting
-        // it with the `#+TITLE:` value would rename every file whose title
-        // differs from its stem. The title round-trips through `file_title`
-        // below instead.
+        // deletes the user's root text and rewrites `#+TITLE:` to the file
+        // stem. Only the BODY half. A doc-root's first content line is its
+        // name, and `authoritative_name_chain` builds the file path from it —
+        // overwriting it with the `#+TITLE:` value would rename every file
+        // whose title differs from its stem. The title round-trips through
+        // `file_title` below instead.
         let parsed_body = parsed
             .content
             .split_once('\n')
@@ -192,11 +192,11 @@ impl FileFormatAdapter for OrgFormatAdapter {
             persisted.set_file_title(parsed.file_title());
             changed = true;
         }
-        // The file-level `:PROPERTIES:` drawer and the marker recording that the
-        // file ALSO spelled its id as `#+ID:`. This is the only place parsed
-        // doc-root metadata reaches the persisted root, and write-back renders
-        // the PERSISTED root — so a drawer left out here is a drawer the very
-        // next write-back deletes from the user's file.
+        // The file-level `:PROPERTIES:` drawer and the marker recording that
+        // the file ALSO spelled its id as `#+ID:`. This is the only place
+        // parsed doc-root metadata reaches the persisted root, and write-back
+        // renders the PERSISTED root — so a drawer left out here is a drawer
+        // the very next write-back deletes from the user's file.
         let file_drawer = parsed
             .file_drawer()
             .expect("the parser writes a readable carrier");
@@ -351,8 +351,9 @@ mod tests {
             "child content materializes:\n{org}"
         );
 
-        // (b) re-parsing the materialized file detects it as a shared projection
-        // (the Inc 3 guard predicate), so it is never re-ingested as global intent.
+        // (b) re-parsing the materialized file detects it as a shared
+        // projection (the Inc 3 guard predicate), so it is never re-ingested as
+        // global intent.
         let reparsed = adapter
             .parse(&path, &org, &EntityUri::no_parent(), &root)
             .unwrap();

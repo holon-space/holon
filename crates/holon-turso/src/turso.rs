@@ -649,10 +649,10 @@ fn replace_write_target(sql: &str) -> Option<String> {
         }
         _ => return None,
     }
-    // The target is read from the TEXT, not from `rest`: `identifier_tokens` drops
-    // the `.` separator, so a qualified `main.navigation_cursor` arrives as two
-    // tokens and taking the one after `INTO` yields the SCHEMA (`main`) — a name
-    // that matches no table, which turns the guard off.
+    // The target is read from the TEXT, not from `rest`: `identifier_tokens`
+    // drops the `.` separator, so a qualified `main.navigation_cursor` arrives
+    // as two tokens and taking the one after `INTO` yields the SCHEMA (`main`)
+    // — a name that matches no table, which turns the guard off.
     target_after_into(&sql)
 }
 
@@ -1710,7 +1710,8 @@ pub(crate) fn value_to_turso_param(value: &Value) -> std::result::Result<turso::
         Value::Array(_) | Value::Object(_) => turso::Value::Text(value.to_json_string()?),
         Value::Null => turso::Value::Null,
         // Binding a removal as a parameter would write the deletion INTENT into
-        // a column. The sentinel is consumed by the property merge, never bound.
+        // a column. The sentinel is consumed by the property merge, never
+        // bound.
         Value::Removed(_) => panic!(
             "value_to_turso_param: Value::REMOVED is a write-leg removal instruction, not a \
              bindable value"
@@ -2585,7 +2586,8 @@ impl TursoBackend {
         let mut entity = StorageEntity::with_capacity(values.len());
 
         for (idx, value) in values.iter().enumerate() {
-            // Clone the shared column-name Arc; only the out-of-schema case allocates
+            // Clone the shared column-name Arc; only the out-of-schema case
+            // allocates
             let column_name = columns.get(idx).map(Arc::clone).unwrap_or_else(|| {
                 tracing::debug!(
                     "Warning: Column index {} exceeds schema length {}",
@@ -2687,7 +2689,8 @@ impl TursoBackend {
             }
         }
 
-        // Convert column names to Arc<str> once per event; rows below only Arc::clone
+        // Convert column names to Arc<str> once per event; rows below only
+        // Arc::clone
         let columns: Vec<Arc<str>> = event
             .columns
             .iter()
@@ -2869,9 +2872,10 @@ impl TursoBackend {
                         }
                     }
                     Err(e) => {
-                        // The delete still has to go out — withholding it leaves
-                        // a deleted row on screen — but keyed by rowid it matches
-                        // no widget, so the batch is disclosed as degraded.
+                        // The delete still has to go out — withholding it
+                        // leaves a deleted row on screen — but keyed by rowid
+                        // it matches no widget, so the batch is disclosed as
+                        // degraded.
                         note_parse_failure(
                             &mut parse_failures,
                             &event.relation_name,
@@ -2989,8 +2993,9 @@ impl TursoBackend {
                          continues.",
                         panic_message(&*panic_info)
                     );
-                    // If a panic left a transaction open, roll it back to prevent
-                    // the connection from being stuck (which silences CDC callbacks).
+                    // If a panic left a transaction open, roll it back to
+                    // prevent the connection from being stuck (which silences
+                    // CDC callbacks).
                     if !conn.is_autocommit().unwrap_or(true) {
                         tracing::error!(
                             "[TursoBackend::Actor] Connection stuck in transaction after panic, \
@@ -4709,7 +4714,8 @@ mod tests {
         handle.watch.poison();
 
         for attempt in 0..3 {
-            // A dead actor's queue closes only after the failed command's reply.
+            // A dead actor's queue closes only after the failed command's
+            // reply.
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let err = handle
                 .query("SELECT 1 AS one", HashMap::new())
@@ -4763,7 +4769,8 @@ mod tests {
             "INSERT INTO navigation_history (id) VALUES (1) ON CONFLICT(id) DO UPDATE SET id = \
              excluded.id",
             "INSERT INTO navigation_history (id) VALUES (1)",
-            // `UPDATE OR REPLACE` is an UPDATE, not the INSERT-side REPLACE path.
+            // `UPDATE OR REPLACE` is an UPDATE, not the INSERT-side REPLACE
+            // path.
             "UPDATE OR REPLACE navigation_history SET region = 'main'",
             "DELETE FROM navigation_history WHERE id = 1",
             "SELECT * FROM navigation_history",
@@ -5816,7 +5823,8 @@ mod integration_tests {
             }));
         }
 
-        // All queries should succeed (serialized by actor, no "database locked")
+        // All queries should succeed (serialized by actor, no "database
+        // locked")
         let mut success_count = 0;
         for query_handle in query_handles {
             match query_handle.await {
@@ -5977,7 +5985,8 @@ mod integration_tests {
             }));
         }
 
-        // All operations should succeed without "Database schema changed" errors
+        // All operations should succeed without "Database schema changed"
+        // errors
         let mut errors = Vec::new();
         for join_handle in dml_handles {
             match join_handle.await {

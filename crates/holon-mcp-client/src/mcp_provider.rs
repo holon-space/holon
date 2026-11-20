@@ -824,8 +824,8 @@ impl OperationProvider for McpOperationProvider {
                 }) {
                     WriteDecision::Allow => {
                         // always_run first attempt: take dispatch ownership by
-                        // inserting straight into `Dispatching`. A re-attempt on
-                        // an existing (in-flight / sent / unknown) intent is
+                        // inserting straight into `Dispatching`. A re-attempt
+                        // on an existing (in-flight / sent / unknown) intent is
                         // refused — never fire the effect twice.
                         let record =
                             self.pending_write_record(entity_name, op_name, &params, original_name);
@@ -1049,8 +1049,9 @@ tools:
         params.insert("id".into(), Value::String("123".to_string()));
         params.insert("content".into(), Value::String("New content".to_string()));
 
-        // We can't call build_undo_action directly without a full McpOperationProvider,
-        // so test via capture_old_state + UndoConfig logic
+        // We can't call build_undo_action directly without a full
+        // McpOperationProvider, so test via capture_old_state + UndoConfig
+        // logic
         let entity_reader = entity_readers.get("todoist_task").unwrap();
         let old_fields = entity_reader.get_fields("123").await.unwrap().unwrap();
 

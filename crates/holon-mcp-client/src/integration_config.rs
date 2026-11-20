@@ -631,8 +631,8 @@ impl IntegrationFileConfig {
     ) -> anyhow::Result<McpIntegrationConfig> {
         // Every `${VAR}` value is a secret by construction, so expansion and
         // registration are the same pass. The transport and the OAuth2 provider
-        // share this one `Redactor`, so a token minted mid-request joins the set
-        // that guards every message either of them emits.
+        // share this one `Redactor`, so a token minted mid-request joins the
+        // set that guards every message either of them emits.
         let redactor = Redactor::new();
         let sidecar_yaml = self.sidecar_yaml();
 
@@ -904,7 +904,8 @@ fn choose_content_for(
                         incompatibility(content, other.as_ref().err()),
                         entry.name,
                         // The remedy answers the defect the classifier found: a
-                        // file that parses needs a re-declaration, not a repair.
+                        // file that parses needs a re-declaration, not a
+                        // repair.
                         if other.is_err() {
                             format!(
                                 "Once it parses, it must also declare `schema_version: \
@@ -1093,8 +1094,8 @@ pub fn load_integration_configs(
     for entry in store.roster().entries() {
         let provider = entry.name.as_str();
         let files = installed.get(provider).map(Vec::as_slice).unwrap_or(&[]);
-        // Two files for a provider that RUNS disagree about what is running, and
-        // there is no rule that picks between them. Two for a provider that
+        // Two files for a provider that RUNS disagree about what is running,
+        // and there is no rule that picks between them. Two for a provider that
         // cannot run are handled below, where they are merely ignored.
         if files.len() > 1 {
             anyhow::bail!(
@@ -1776,7 +1777,8 @@ transport:
 
     #[test]
     fn static_token_env_var_is_expanded() {
-        // SAFETY: unique var name avoids clashing with other tests/process state.
+        // SAFETY: unique var name avoids clashing with other tests/process
+        // state.
         unsafe { std::env::set_var("HOLON_TEST_TODOIST_TOKEN", "secret-123") };
         let yaml = r#"
 transport:

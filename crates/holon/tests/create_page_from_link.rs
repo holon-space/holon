@@ -62,7 +62,8 @@ async fn block_engine() -> Arc<BackendEngine> {
                 let mut block_raw_type_def = Block::type_definition();
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread runtime.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread runtime.
                     tokio::runtime::Handle::current()
                         .block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
@@ -278,8 +279,8 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
         "X block content must be 'X'"
     );
 
-    // 5. Assert: the source block's dangling link is now healed (resolved_id = the
-    //    X page).
+    // 5. Assert: the source block's dangling link is now healed (resolved_id =
+    //    the X page).
     let resolved = link_resolved(handle, "src").await;
     assert_eq!(
         resolved.as_deref(),
@@ -876,11 +877,12 @@ async fn recreating_a_renamed_pages_old_name_yields_a_distinct_page() {
         "both the renamed page B and the new page A must exist; observed pages: {pages:?}"
     );
 
-    // The child was created under the page that is now titled "B". Asserting only
-    // that its parent is still `id_a` would pass VACUOUSLY under the defect: the
-    // collision leaves exactly one entity, so `parent == id_a` holds whether that
-    // entity is the surviving "B" or the clobbered "A". Assert on the parent's
-    // TITLE, which is what actually distinguishes the two worlds.
+    // The child was created under the page that is now titled "B". Asserting
+    // only that its parent is still `id_a` would pass VACUOUSLY under the
+    // defect: the collision leaves exactly one entity, so `parent == id_a`
+    // holds whether that entity is the surviving "B" or the clobbered "A".
+    // Assert on the parent's TITLE, which is what actually distinguishes the
+    // two worlds.
     let child_parent = block_parent(handle, "block:childOfA")
         .await
         .expect("child must still have a parent");

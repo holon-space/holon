@@ -50,9 +50,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 .filter_map(|pred| {
                     // Look for type bounds like `T: BlockEntity + Send + Sync`
                     if let syn::WherePredicate::Type(pred_type) = pred {
-                        // Replace the type parameter name (T) with E in the predicate
-                        // This is a simplified approach - we assume the first generic param is the
-                        // entity type
+                        // Replace the type parameter name (T) with E in the
+                        // predicate This is a simplified approach - we assume
+                        // the first generic param is the entity type
                         let mut new_pred = pred_type.clone();
                         // Replace T with E in the type path
                         if let syn::Type::Path(type_path) = &mut new_pred.bounded_ty
@@ -96,7 +96,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
         quote! { holon_core::UndoAction }
     };
 
-    // UnknownOperationError and Result: for external crates use holon_core root.
+    // UnknownOperationError and Result: for external crates use holon_core
+    // root.
     let unknown_op_error_path = if is_internal {
         quote! { crate::core::datasource::UnknownOperationError }
     } else {
@@ -162,7 +163,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         let param_name_lit = param_name.clone();
 
                         // Parse type hint with entity ID detection. A
-                        // contradiction among the attributes is a compile error.
+                        // contradiction among the attributes is a compile
+                        // error.
                         let type_hint_field =
                             match parse_param_type_hint(&param_name, &pat_type.attrs, &pat_type.ty)
                             {
@@ -246,7 +248,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 }
             };
 
-            // Extract affected fields from #[operation(affects = [...])] attribute
+            // Extract affected fields from #[operation(affects = [...])]
+            // attribute
             let affected_fields = extract_affected_fields(&method.attrs);
             let affected_fields_expr = if affected_fields.is_empty() {
                 quote! { vec![] }
@@ -297,7 +300,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 boundary_behavior_tokens(extract_boundary_behavior(&method.attrs));
 
             // Construct entity_name: if provider_name is set, use
-            // "{provider_name}.{operation_name}", otherwise use passed entity_name
+            // "{provider_name}.{operation_name}", otherwise use passed
+            // entity_name
             let entity_name_expr = if let Some(ref provider) = provider_name {
                 let provider_lit = provider.clone();
                 let operation_name_lit = name_lit.clone();
@@ -923,7 +927,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
         })
         .collect();
 
-    // Generate resolver function with trait bounds matching the dispatch function
+    // Generate resolver function with trait bounds matching the dispatch
+    // function
     let resolver_fn = if has_generics {
         quote! {
             /// All operations for this trait with resolved enum values

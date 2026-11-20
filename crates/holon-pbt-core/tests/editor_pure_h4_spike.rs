@@ -81,7 +81,8 @@ impl EditorPureRef {
                 is_text: false, // root is non-text
             },
         );
-        // Seed with one focusable text child so transitions have something to act on.
+        // Seed with one focusable text child so transitions have something to
+        // act on.
         let child_id = EntityUri::block("child0");
         blocks.insert(
             child_id.clone(),
@@ -274,7 +275,8 @@ impl RefBlockTreeMut for EditorPureRef {
 
     fn remint_block(
         &mut self,
-        // ALLOW(unused_param): trait signature requires old_id, unreachable arm below
+        // ALLOW(unused_param): trait signature requires old_id, unreachable arm
+        // below
         _old_id: &EntityUri,
     ) -> EntityUri {
         unimplemented!(

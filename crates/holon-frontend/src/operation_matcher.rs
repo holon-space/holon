@@ -374,14 +374,16 @@ mod tests {
         // every block's editor context, so the intent filter treated it as a
         // gesture-intent source and dropped EVERY op without an `id` mapping —
         // leaving the slash menu with only "Turn into page". The casualties are
-        // the REAL, macro-generated block ops (indent/outdent/move_up/move_down),
-        // which carry no `id` mapping. Intent filtering is meant for GESTURE
-        // params (tree_position, drop targets), never a universal column.
+        // the REAL, macro-generated block ops
+        // (indent/outdent/move_up/move_down), which carry no `id` mapping.
+        // Intent filtering is meant for GESTURE params (tree_position, drop
+        // targets), never a universal column.
         //
         // (The fully-real registry↔menu correspondence — feeding the resolved
         // block profile through `build_command_items` — lives in the holon-app
         // tier, which can reach the real convert descriptor; here we lock the
-        // pure filter against the real block-op descriptors it wrongly dropped.)
+        // pure filter against the real block-op descriptors it wrongly
+        // dropped.)
         let mut ops: Vec<OperationWiring> =
             holon_core::__operations_block_operations::block_operations(
                 "block", "block", "block", "id",

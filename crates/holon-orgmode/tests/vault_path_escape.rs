@@ -339,7 +339,8 @@ async fn husk_writeback_never_writes_outside_the_vault_root() {
         .await
         .expect("an underivable path must be a bounded skip, never crash the sync loop");
 
-    // Clean up before asserting so a red run leaves no litter next to the tmpdir.
+    // Clean up before asserting so a red run leaves no litter next to the
+    // tmpdir.
     let escaped = escape.exists();
     if escaped {
         let _ = std::fs::remove_file(&escape);

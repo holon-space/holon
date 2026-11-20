@@ -270,7 +270,8 @@ fn share_answers_follow_the_file_model() {
             assert_eq!(owning_page_id(loro, id).await, m, "Loro owning_page({id})");
             assert_eq!(owning_page_id(&sql, id).await, m, "SQL owning_page({id})");
         }
-        // Loro's mount stands for the shared root; SQL keeps the mount as a row.
+        // Loro's mount stands for the shared root; SQL keeps the mount as a
+        // row.
         assert_eq!(child_ids(loro, "block:shr-host").await, ["block:shr-gamma"]);
         assert_eq!(child_ids(loro, &m).await, ["block:shr-gamma-one"]);
         assert_eq!(child_ids(&sql, "block:shr-host").await, [m.as_str()]);

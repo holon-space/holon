@@ -88,7 +88,8 @@ async fn planted_computed_column_is_ivm_maintained_and_retracts() {
     let handle = setup().await;
 
     // Declaration -> Computation -> plan. `priority * 2` lowers to SQL, so the
-    // hybrid seat routes it to seat A (a planted matview column), NOT the stage.
+    // hybrid seat routes it to seat A (a planted matview column), NOT the
+    // stage.
     let plan = DerivedFieldPlan::plan(vec![DerivedField::new(
         FieldIdent::parse("boosted").expect("identifier"),
         Computation::Arith {
@@ -121,8 +122,8 @@ async fn planted_computed_column_is_ivm_maintained_and_retracts() {
         vec![("t1".to_string(), 6), ("t2".to_string(), 2)]
     );
 
-    // INPUT CHANGE: IVM recomputes only the affected row — the old derived value
-    // is replaced, never stacked.
+    // INPUT CHANGE: IVM recomputes only the affected row — the old derived
+    // value is replaced, never stacked.
     set_priority(&handle, "t1", 5).await;
     assert_eq!(
         read_boosted(&handle).await,

@@ -31,7 +31,8 @@ use holon_integration_tests::TestEnvironment;
 
 #[test]
 fn loro_memory_start_app_paints_and_tracks_churn() {
-    // The SUT owns its own runtime (mirrors the phased runner). A plain `#[test]`
+    // The SUT owns its own runtime (mirrors the phased runner). A plain
+    // `#[test]`
     // + `block_on` keeps the runtime's Drop on the main thread (dropping a
     // Runtime inside async context panics).
     let runtime = Arc::new(
@@ -53,8 +54,9 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
     // session with no engine + a reactive engine over `block_query`.
     env.start_app(false).await.expect("start_app (LoroMemory)");
     assert!(env.is_running(), "no-Turso session should be running");
-    // `block_query` is now total (present in both wirings); confirm the no-Turso
-    // session's source produces a snapshot rather than asserting mere presence.
+    // `block_query` is now total (present in both wirings); confirm the
+    // no-Turso session's source produces a snapshot rather than asserting mere
+    // presence.
     env.session()
         .block_query()
         .snapshot()

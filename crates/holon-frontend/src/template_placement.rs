@@ -249,7 +249,8 @@ mod tests {
 
     #[test]
     fn command_only_content_is_empty_after_strip() {
-        // Bullet whose ENTIRE content is the typed "/journal" → empty → in place.
+        // Bullet whose ENTIRE content is the typed "/journal" → empty → in
+        // place.
         let t = target("block:b", "/journal", Some("block:p")).without_typed_command(0, 8);
         assert_eq!(
             TemplatePlacement::decide(&t).unwrap(),
@@ -262,7 +263,8 @@ mod tests {
 
     #[test]
     fn real_content_survives_command_strip() {
-        // "Weekly sync" + "/journal" at byte 11 → real content remains → children.
+        // "Weekly sync" + "/journal" at byte 11 → real content remains →
+        // children.
         let t =
             target("block:b", "Weekly sync/journal", Some("block:p")).without_typed_command(11, 8);
         assert!(matches!(

@@ -170,8 +170,8 @@ impl QuerySource {
                 } else if q.contains("focus_roots") {
                     // Canonical prod keys (`Region::as_str()`): a focus SQL
                     // filters `navigation_history.region`, whose values are
-                    // exactly what `focus_pin` writes. Default to `Main` when no
-                    // region predicate is present.
+                    // exactly what `focus_pin` writes. Default to `Main` when
+                    // no region predicate is present.
                     let region = if q.contains("region = 'right_sidebar'") {
                         Region::RightSidebar
                     } else if q.contains("region = 'left_sidebar'") {

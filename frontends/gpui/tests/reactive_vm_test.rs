@@ -640,8 +640,8 @@ fn main() {
     run(
         "nested_collections_data_propagates_through_3_levels",
         |cx| {
-            // row(bold(text(col("content"))), row(badge(col("priority")), text(col("id"))))
-            // Level 0: row  (2 children)
+            // row(bold(text(col("content"))), row(badge(col("priority")),
+            // text(col("id")))) Level 0: row  (2 children)
             // Level 1: bold (1 child), row (2 children)
             // Level 2: text (leaf), badge (leaf), text (leaf)
             let nested_expr = expr(
@@ -705,7 +705,8 @@ fn main() {
 
     run("structural_change_at_nested_level", |cx| {
         // Start: row(text(col("content")))
-        // Then change to: row(row(text(col("content")), badge(col("priority"))))
+        // Then change to: row(row(text(col("content")),
+        // badge(col("priority"))))
         let initial = expr(
             "row",
             vec![positional_arg(expr(
@@ -1500,7 +1501,8 @@ fn main() {
         }
 
         let data = Arc::new(make_row("1", "Root", "high"));
-        // The expression has 2 positional args — expand should create 2 children
+        // The expression has 2 positional args — expand should create 2
+        // children
         let root_expr = expr(
             "row",
             vec![

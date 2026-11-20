@@ -94,9 +94,9 @@ async fn round_trip_through_loro() -> Result<bool> {
         .await
         .map_err(|e| anyhow::anyhow!("create_block: {:?}", e))?;
 
-    // Edge field shape: a multi-valued slug reference, expressed as Value::Array.
-    // This is the natural in-memory carrier — same as how an org parser would
-    // emit `:BLOCKED-BY: slug-b slug-c` after splitting.
+    // Edge field shape: a multi-valued slug reference, expressed as
+    // Value::Array. This is the natural in-memory carrier — same as how an org
+    // parser would emit `:BLOCKED-BY: slug-b slug-c` after splitting.
     let mut props = HashMap::new();
     props.insert(
         "blocked_by".to_string(),

@@ -109,7 +109,8 @@ fn structural_ops_on_a_placed_page_share_root_decide_on_its_mounts_parent() {
             .resolve::<dyn WriteAuthorityReads>();
         let authority = authority.as_ref();
 
-        // Host holds [note, sub, P]: the page above P is a page, so P can indent.
+        // Host holds [note, sub, P]: the page above P is a page, so P can
+        // indent.
         let sub_move = [
             ("id", SUB_ID),
             ("parent_id", HOST_ID),

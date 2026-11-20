@@ -74,8 +74,8 @@ where
         for (path, disk, _rendered) in sut.snapshot_org_render_pairs(&Default::default()).await {
             let root_id = file_root_id(&disk);
             for inlined in heading_drawer_ids(&disk) {
-                // The file's OWN doc-root (a page owning this very file) is not an
-                // inlined child heading — skip it.
+                // The file's OWN doc-root (a page owning this very file) is not
+                // an inlined child heading — skip it.
                 if root_id.as_deref() == Some(inlined.as_str()) {
                     continue;
                 }
@@ -137,7 +137,8 @@ mod tests {
             heading_drawer_ids(COMPANION_INLINING_A_PAGE),
             vec!["journal-2026-07-10".to_string()]
         );
-        // A page-file that is only its own bare doc-root has no heading drawers.
+        // A page-file that is only its own bare doc-root has no heading
+        // drawers.
         assert!(heading_drawer_ids("#+ID: journal-2026-07-10\n").is_empty());
     }
 }

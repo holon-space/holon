@@ -482,7 +482,8 @@ impl ShareUiState {
     /// never what makes room.
     pub fn push_toast(&mut self, toast: DegradedToast) {
         // A condition can arrive twice — once in a subscription's replayed
-        // `current`, once as a live `Raised` — so it upserts rather than stacks.
+        // `current`, once as a live `Raised` — so it upserts rather than
+        // stacks.
         if let Some(key) = toast.condition.clone() {
             if let Some(existing) = self
                 .toasts
@@ -492,7 +493,8 @@ impl ShareUiState {
                 *existing = toast;
                 return;
             }
-            // First, so no other toast can push the crash doorbell out of the window.
+            // First, so no other toast can push the crash doorbell out of the
+            // window.
             if is_previous_run(&toast) {
                 self.toasts.insert(0, toast);
             } else {
@@ -1065,8 +1067,8 @@ fn dispatch_undo_redo(
             let label = if is_redo { "redo" } else { "undo" };
             // The replay rewrote the store under the row that held focus at the
             // press. Its open editor is skipped by every convergence channel
-            // while focused, so without this its stale buffer survives — and the
-            // next keystroke commits it over the restored content.
+            // while focused, so without this its stale buffer survives — and
+            // the next keystroke commits it over the restored content.
             //
             // The outcome is BOUND, not dropped: `ReseedArm` is `#[must_use]`
             // precisely because discarding it is how a skipped re-seed becomes
@@ -1186,10 +1188,10 @@ pub fn render_overlays(
 ) -> Vec<AnyElement> {
     let mut overlays: Vec<AnyElement> = Vec::new();
 
-    // Pending connector-write approval panel (leases/read-write ruling, inc 4c).
-    // Built first, from clones, so the modal branches below can still consume
-    // `session`/`async_cx`/`share_state` by value. Pushed after the modals so it
-    // sits above content. Shows writes awaiting confirmation and
+    // Pending connector-write approval panel (leases/read-write ruling, inc
+    // 4c). Built first, from clones, so the modal branches below can still
+    // consume `session`/`async_cx`/`share_state` by value. Pushed after the
+    // modals so it sits above content. Shows writes awaiting confirmation and
     // disclosed outcome-unknown entries; both must be visible.
     let pending_panel: Option<AnyElement> = pending_store.as_ref().and_then(|store| {
         let rows: Vec<PendingWriteView> = store

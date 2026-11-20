@@ -44,8 +44,8 @@ impl BatchId {
 
     /// The batch the running task belongs to, if any.
     pub fn current() -> Option<Self> {
-        // ALLOW(ok): the only error is "not inside a scope", which is the `None`
-        // answer.
+        // ALLOW(ok): the only error is "not inside a scope", which is the
+        // `None` answer.
         CURRENT.try_with(|id| *id).ok()
     }
 }

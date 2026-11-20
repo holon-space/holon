@@ -713,8 +713,9 @@ impl EditorViewModel {
             EchoDecision::AdoptBaseline { seq } => {
                 // The echo is the SQL-canonicalized form of our OWN in-flight
                 // write (trailing whitespace trimmed on store). Keep the typed
-                // buffer; re-baseline change tracking to the canonical authority
-                // so a later blur diffs against SQL truth, not a stale baseline.
+                // buffer; re-baseline change tracking to the canonical
+                // authority so a later blur diffs against SQL truth, not a
+                // stale baseline.
                 self.advance_local_seq(seq);
                 self.rebaseline(new_value);
                 None
@@ -861,9 +862,9 @@ impl EditorViewModel {
             let is_the_restore = expected == current_line;
             self.restoring_to = None;
             if is_the_restore {
-                // Our own re-insertion coming back as a change event. Letting it
-                // reach `check_triggers` would re-open the menu on the `/` we
-                // just put back, undoing the user's Escape.
+                // Our own re-insertion coming back as a change event. Letting
+                // it reach `check_triggers` would re-open the menu on the `/`
+                // we just put back, undoing the user's Escape.
                 return EditorAction::None;
             }
         }
@@ -880,12 +881,13 @@ impl EditorViewModel {
                     return EditorAction::UpdatePopup;
                 }
                 _ => {
-                    // The edit crossed the anchor, so there is no longer a place
-                    // on this line where the command text belongs. End the phase
-                    // and say so, rather than reinserting it somewhere the user
-                    // never typed it. Backspace at the anchor does NOT land here
-                    // — the frontend intercepts that and cancels the phase with
-                    // a proper restore (`cancel_hidden_phase_at_anchor`).
+                    // The edit crossed the anchor, so there is no longer a
+                    // place on this line where the command text belongs. End
+                    // the phase and say so, rather than reinserting it
+                    // somewhere the user never typed it. Backspace at the
+                    // anchor does NOT land here — the frontend intercepts that
+                    // and cancels the phase with a proper restore
+                    // (`cancel_hidden_phase_at_anchor`).
                     tracing::warn!(
                         hidden = %hidden.text,
                         line = %current_line,
@@ -2054,7 +2056,8 @@ mod tests {
         use holon_core::cell::CellBacking;
         use holon_core::cell::LwwTextCellBacking;
 
-        // Shared backing store the "backend" (join_block's set_field) writes to.
+        // Shared backing store the "backend" (join_block's set_field) writes
+        // to.
         let store = Arc::new(Mutex::new("First manual block".to_string())); // pre-split (18)
         let read_store = store.clone();
         let backing = Arc::new(LwwTextCellBacking::new(
@@ -2376,7 +2379,8 @@ mod tests {
         assert!(vm.converge_from_data_sync("older", Some(5)).is_none());
         assert_eq!(vm.last_local_seq(), 10);
 
-        // In-sync echo of the current buffer → no directive, advances high-water.
+        // In-sync echo of the current buffer → no directive, advances
+        // high-water.
         assert!(vm.converge_from_data_sync("original", Some(12)).is_none());
         assert_eq!(vm.last_local_seq(), 12);
 
@@ -2412,9 +2416,9 @@ mod tests {
     #[test]
     fn the_committing_space_commits_the_raw_source() {
         let mut vm = test_controller();
-        // This document declares no `#+TODO:` line, so the parser's defaults ARE
-        // its vocabulary — stated explicitly, because an editor that has not
-        // resolved one classifies nothing (`Surface::Pending`).
+        // This document declares no `#+TODO:` line, so the parser's defaults
+        // ARE its vocabulary — stated explicitly, because an editor that has
+        // not resolved one classifies nothing (`Surface::Pending`).
         vm.set_task_vocabulary(holon_org_format::TaskKeywordVocabulary::default());
         let seed = vm.project_authority("TODO", &[], Some("TODO"));
         vm.set_buffer_from_authority(&seed, 0);

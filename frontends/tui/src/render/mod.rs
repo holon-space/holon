@@ -366,11 +366,13 @@ pub fn render_view_model(
             render_live_block(node, ctx, ops, start_row, start_col, max_width)
         }
         "selectable" => render_selectable(node, ctx, ops, start_row, start_col, max_width),
-        // Other transparent wrappers — recurse into existing children/collection/slot.
+        // Other transparent wrappers — recurse into existing
+        // children/collection/slot.
         "live_query" | "focusable" => {
             render_passthrough(node, ctx, ops, start_row, start_col, max_width)
         }
-        // Anything else: render children + collection if present, otherwise text.
+        // Anything else: render children + collection if present, otherwise
+        // text.
         _ => render_passthrough(node, ctx, ops, start_row, start_col, max_width),
     }
 }
@@ -415,9 +417,9 @@ fn render_live_block(
     // Per-row block registration happens at the `tree`/`outline` collection
     // boundary (see `render_collection_vertical`); per-row `render_entity()`
     // is inlined and no `live_block` wrapper survives. The 3 layout
-    // wrappers (`block:default-left-sidebar`, `…-main-panel`, `…-right-sidebar`)
-    // that DO hit this path are containers, not user-facing rows — skip
-    // registration.
+    // wrappers (`block:default-left-sidebar`, `…-main-panel`,
+    // `…-right-sidebar`) that DO hit this path are containers, not user-facing
+    // rows — skip registration.
     let _ = block_id_str;
     ctx.live_block_depth += 1;
     let rows = render_view_model(&inner, ctx, ops, start_row, start_col, max_width);
@@ -1037,9 +1039,9 @@ fn render_columns(
         return 1;
     }
 
-    // Upstream `CollectionVariant` switched from a closed enum (`Columns { gap }`)
-    // to an open struct keyed by `LayoutSpec::name`. Match the layout by name
-    // so we honour `gap` only on `columns(...)` collections; other shapes
+    // Upstream `CollectionVariant` switched from a closed enum (`Columns { gap
+    // }`) to an open struct keyed by `LayoutSpec::name`. Match the layout by
+    // name so we honour `gap` only on `columns(...)` collections; other shapes
     // (list, table, …) carry their own `gap` semantics that this site shouldn't
     // claim.
     let gap = node

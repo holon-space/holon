@@ -450,11 +450,12 @@ impl SqlOperationProvider {
     fn trimmed_content(value: &Value, is_source: bool) -> Value {
         match value {
             // SINGLE SOURCE OF TRUTH: the exact transform lives in
-            // `holon_api::content_canonical` so the GPUI editor's echo-suppression
-            // discriminator (`evaluate_data_sync_echo`) can recognize the
-            // canonicalized echo of its own write without the two definitions
-            // drifting (a drift would let the store canonicalize typed whitespace
-            // the editor then fails to recognize, deleting it from the buffer).
+            // `holon_api::content_canonical` so the GPUI editor's
+            // echo-suppression discriminator (`evaluate_data_sync_echo`) can
+            // recognize the canonicalized echo of its own write without the two
+            // definitions drifting (a drift would let the store canonicalize
+            // typed whitespace the editor then fails to recognize, deleting it
+            // from the buffer).
             Value::String(s) => Value::String(
                 holon_api::content_canonical::canonicalize_stored_content(s, is_source),
             ),
@@ -1277,9 +1278,11 @@ impl SqlOperationProvider {
         parent_id: &str,
     ) -> Box<dyn std::error::Error + Send + Sync> {
         Box::new(ParentNotFound {
-            // ALLOW(entity_uri_from_raw): SQL-op param string at the write boundary.
+            // ALLOW(entity_uri_from_raw): SQL-op param string at the write
+            // boundary.
             parent_id: EntityUri::from_raw(parent_id),
-            // ALLOW(entity_uri_from_raw): SQL-op param string at the write boundary.
+            // ALLOW(entity_uri_from_raw): SQL-op param string at the write
+            // boundary.
             child_id: EntityUri::from_raw(child_id),
         })
     }
@@ -1392,9 +1395,9 @@ impl SqlOperationProvider {
         params: &StorageEntity,
         held: Option<&StorageEntity>,
     ) -> Result<PreparedOp> {
-        // Ensure timestamps are present so the event payload is a complete Block.
-        // Without this, CacheEventSubscriber fails to deserialize: "missing field
-        // created_at".
+        // Ensure timestamps are present so the event payload is a complete
+        // Block. Without this, CacheEventSubscriber fails to deserialize:
+        // "missing field created_at".
         //
         // A re-create defaults NEITHER: a row that already exists was created
         // once, and re-stamping `created_at`/`updated_at` on a create that
@@ -1567,10 +1570,10 @@ impl SqlOperationProvider {
             .collect();
 
         if !extra_props.is_empty() {
-            // Read existing properties from DB and merge in Rust, then write the
-            // full JSON string back. Turso IVM can't track json_set() changes —
-            // it fires CDC with the OLD column value. Full replacement ensures
-            // IVM sees the actual new value.
+            // Read existing properties from DB and merge in Rust, then write
+            // the full JSON string back. Turso IVM can't track json_set()
+            // changes — it fires CDC with the OLD column value. Full
+            // replacement ensures IVM sees the actual new value.
             let select_props_sql = format!(
                 "SELECT properties, property_kinds FROM {} WHERE id = '{}'",
                 self.table_name,
@@ -2666,16 +2669,18 @@ impl SqlOperationProvider {
         let map = Self::properties_map(Some(donor))?;
         let mut out = Vec::new();
         for key in map.keys() {
-            // The donor's own merge provenance is NOT adopted: it names ids that
-            // redirect to the DONOR, and the merge re-points them by chain.
+            // The donor's own merge provenance is NOT adopted: it names ids
+            // that redirect to the DONOR, and the merge re-points them by
+            // chain.
             if key == merge_blocks_plan::MERGED_FROM_FIELD {
                 continue;
             }
-            // NEVER adopt the donor's identity. Copying its authored `:ID:` onto
-            // the survivor makes write-back render `:ID: <merged-away id>` — which
-            // re-creates the very split-root shape this operation exists to
-            // repair. Internal underscore-prefixed keys (`_provenance`) are the
-            // writer's own bookkeeping and are equally not the donor's to give.
+            // NEVER adopt the donor's identity. Copying its authored `:ID:`
+            // onto the survivor makes write-back render `:ID: <merged-away id>`
+            // — which re-creates the very split-root shape this operation
+            // exists to repair. Internal underscore-prefixed keys
+            // (`_provenance`) are the writer's own bookkeeping and are equally
+            // not the donor's to give.
             if key == "ID" || key.starts_with('_') {
                 continue;
             }
@@ -3601,10 +3606,11 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 self.require_write_route(field)?;
 
                 // Rich content write (text + marks as one Object) — the SQL
-                // mirror of the Loro `content=Object` path. Reached via undo/redo
-                // replay of a rich inverse; restores the exact (content, marks)
-                // pair atomically. Interactive content edits arrive as Strings
-                // and fall through to the split content + derived-marks path.
+                // mirror of the Loro `content=Object` path. Reached via
+                // undo/redo replay of a rich inverse; restores the exact
+                // (content, marks) pair atomically. Interactive content edits
+                // arrive as Strings and fall through to the split content +
+                // derived-marks path.
                 if field == "content"
                     && let Value::Object(obj) = raw_value
                 {
@@ -3615,7 +3621,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // content_type. The row read here answers BOTH the trimming
                 // question (source blocks preserve first-line whitespace
                 // verbatim) and, further down, the inverse's old value: no
-                // write to this row happens in between, so one read serves both.
+                // write to this row happens in between, so one read serves
+                // both.
                 let content_row = if field == "content" {
                     Some(self.read_content_row(id).await?)
                 } else {
@@ -3632,9 +3639,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 raw_value.reject_non_finite_float(field)?;
 
                 // A COLUMN has no "absent" state to return to: clearing one is
-                // `SET col = NULL`, which `Value::Null` already spells. Refusing
-                // here rather than lowering the sentinel keeps the two meanings
-                // from collapsing back into one.
+                // `SET col = NULL`, which `Value::Null` already spells.
+                // Refusing here rather than lowering the sentinel keeps the two
+                // meanings from collapsing back into one.
                 if value.is_removed() && self.write_schema.is_column(field) {
                     return Err(format!(
                         "set_field('{field}'): a column cannot take the removal sentinel — write \
@@ -3656,9 +3663,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // ones (route through prepare-style helper so set_field
                 // honours the same junction-table contract as create/update).
                 if let Some(descriptor) = self.edge_fields.get(field) {
-                    // Capture the CURRENT edge targets BEFORE the replace so the
-                    // inverse can restore them (edge writes are a whole-set
-                    // replace, so the inverse is just `set_field(field, old_set)`).
+                    // Capture the CURRENT edge targets BEFORE the replace so
+                    // the inverse can restore them (edge writes are a whole-set
+                    // replace, so the inverse is just `set_field(field,
+                    // old_set)`).
                     let old_targets: Vec<Value> = self
                         .capture_edges(id)
                         .await?
@@ -3703,10 +3711,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         .transaction(stmts)
                         .await
                         .map_err(|e| format!("Failed to execute edge-field SQL: {}", e))?;
-                    // Edge targets live in a junction table the staleness reader
-                    // (column-only) cannot fingerprint, so the precondition is
-                    // empty (single-writer safe); the inverse is still a real
-                    // whole-set restore.
+                    // Edge targets live in a junction table the staleness
+                    // reader (column-only) cannot fingerprint, so the
+                    // precondition is empty (single-writer safe); the inverse
+                    // is still a real whole-set restore.
                     let inverse = self.set_field_inverse(id, field, Value::Array(old_targets));
                     return Ok(OperationResult::new(Vec::new(), inverse));
                 }
@@ -3720,14 +3728,15 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     None => (self.read_field_old_value(id, field).await?, None),
                 };
 
-                // Editor echo-suppression ordering token. The gpui editor stamps
-                // `write_seq` on each content keystroke (holon_api::write_seq) so
-                // it can later drop stale/reordered CDC echoes of earlier
-                // keystrokes. Persisted alongside the field write in the SAME
-                // UPDATE so the row's content and its ordering token can never
-                // diverge. Absent (all non-editor writers) → the column keeps its
-                // prior value, so those writers' echoes carry `seq == last_local`
-                // and still converge (they change `content`, not `write_seq`).
+                // Editor echo-suppression ordering token. The gpui editor
+                // stamps `write_seq` on each content keystroke
+                // (holon_api::write_seq) so it can later drop stale/reordered
+                // CDC echoes of earlier keystrokes. Persisted alongside the
+                // field write in the SAME UPDATE so the row's content and its
+                // ordering token can never diverge. Absent (all non-editor
+                // writers) → the column keeps its prior value, so those
+                // writers' echoes carry `seq == last_local` and still converge
+                // (they change `content`, not `write_seq`).
                 let write_seq_pair = params
                     .get("write_seq")
                     .and_then(|v| v.as_i64())
@@ -3749,11 +3758,11 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     // describing a value the bag no longer holds, and the read
                     // boundary refuses such a row.
                     let entries = if value.is_removed() {
-                        // REMOVED means "delete this property" — a removal, not a
-                        // {"key": null} entry (a stored null is a different, real
-                        // value under D27.b). `task_state` removal also removes
-                        // its `task_state_category` sidecar (the pair invariant
-                        // `Block::set_task_state` establishes).
+                        // REMOVED means "delete this property" — a removal, not
+                        // a {"key": null} entry (a stored null is a different,
+                        // real value under D27.b). `task_state` removal also
+                        // removes its `task_state_category` sidecar (the pair
+                        // invariant `Block::set_task_state` establishes).
                         if field == "task_state" {
                             vec![
                                 BagEntry::remove("task_state"),
@@ -3873,12 +3882,13 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 }
 
                 // Inverse = set_field back to the pre-write value. Only COLUMN
-                // fields carry a staleness fingerprint: the reader reads columns
-                // only, so a `properties`-backed field (e.g. `task_state`) gets
-                // an empty precondition (single-writer safe) but still a real
-                // inverse. A `Value::REMOVED` old-value on a property drives the
-                // inverse `json_remove`, restoring "absent" faithfully; a
-                // `Value::Null` old-value restores the stored null.
+                // fields carry a staleness fingerprint: the reader reads
+                // columns only, so a `properties`-backed field (e.g.
+                // `task_state`) gets an empty precondition (single-writer safe)
+                // but still a real inverse. A `Value::REMOVED` old-value on a
+                // property drives the inverse `json_remove`, restoring "absent"
+                // faithfully; a `Value::Null` old-value restores the stored
+                // null.
                 let changes = if self.write_schema.is_column(field) {
                     vec![FieldDelta::new(
                         id.to_string(),
@@ -3913,12 +3923,12 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 };
                 Ok(OperationResult::new(changes, inverse))
             }
-            // One placement, one transaction. `OrderedBlockCrud` now reaches the
-            // concrete `place_row` directly with a TYPED `MintedPosition`, so
-            // this dispatchable arm carries NO sibling re-keys: it can only set
-            // the placed block's OWN `sort_key`. A `_order_rekeys` key in the
-            // params map is inert here — the writer never reads it (Ruling B).
-            // Not advertised in `operations()`.
+            // One placement, one transaction. `OrderedBlockCrud` now reaches
+            // the concrete `place_row` directly with a TYPED `MintedPosition`,
+            // so this dispatchable arm carries NO sibling re-keys: it can only
+            // set the placed block's OWN `sort_key`. A `_order_rekeys` key in
+            // the params map is inert here — the writer never reads it (Ruling
+            // B). Not advertised in `operations()`.
             "place" => {
                 let get = |key: &str| -> Result<String> {
                     params
@@ -3967,11 +3977,13 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     }
                 }
                 if let Some(prepared) = prepared {
-                    // Atomicity: an edge-field write is DELETE-then-INSERT (per-block
-                    // replace). In AUTOCOMMIT the Turso fork's deferred-FK check
-                    // fails loud but does NOT roll back the partial DELETE, so a
-                    // rejected INSERT would leave the junction half-cleared. Run row
-                    // + edge statements in ONE transaction — mirrors the create path
+                    // Atomicity: an edge-field write is DELETE-then-INSERT
+                    // (per-block replace). In AUTOCOMMIT the Turso fork's
+                    // deferred-FK check fails loud but does NOT roll back the
+                    // partial DELETE, so a rejected INSERT would leave the
+                    // junction half-cleared. Run row
+                    // + edge statements in ONE transaction — mirrors the create
+                    //   path
                     // — so any failure rolls the whole update back instead of
                     // leaving a torn edge set.
                     let stmts: Vec<(String, Vec<turso::Value>)> = prepared
@@ -3998,9 +4010,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // Capture the FULL row + edges BEFORE writing so a LEAF delete
                 // is identity-invertible (inverse = `create` with the same id,
                 // parent_id, sort_key, content, properties, edges — ADR 0024:
-                // never delete+create where identity can be preserved). A delete
-                // that CASCADES to descendants is declared irreversible for now:
-                // faithfully resurrecting an ordered subtree is a Wave-2 concern.
+                // never delete+create where identity can be preserved). A
+                // delete that CASCADES to descendants is declared irreversible
+                // for now: faithfully resurrecting an ordered subtree is a
+                // Wave-2 concern.
                 let captured = self.capture_row(&id).await?;
                 let cascades = match plan {
                     // A tombstone states a fact about the named row alone, so
@@ -4051,9 +4064,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                             "delete: target row absent (nothing to tombstone)",
                         ))
                     }
-                    // Forward fingerprint: the `id` column is absent post-delete
-                    // (present → its own value pre-delete), so an undo (`create`)
-                    // drops loudly if the row was resurrected under it.
+                    // Forward fingerprint: the `id` column is absent
+                    // post-delete (present → its own value pre-delete), so an
+                    // undo (`create`) drops loudly if the row was resurrected
+                    // under it.
                     (DeletePlan::Purge, Some(create_op)) => Ok(OperationResult::new(
                         vec![FieldDelta::new(
                             id.clone(),
@@ -4117,8 +4131,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     .await
             }
             "page_chain_plan" => {
-                // Read-only planner for the engine-level `create_page_from_link`
-                // compound, which creates `missing` through the write authority.
+                // Read-only planner for the engine-level
+                // `create_page_from_link` compound, which creates `missing`
+                // through the write authority.
                 use crate::core::page_chain_plan::PageChainPlan;
 
                 let target = params
@@ -4162,15 +4177,15 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 ))
             }
             "rewrite_link_resolution" => {
-                // Operation-level surface for the block→page transform's inbound
-                // link re-pointing (transform doc §backlinks, Option B): rewrite
-                // every `block_links` row currently resolved to `from` so it
-                // resolves to `to` instead (origin → new page P). The EXACT
-                // inverse captures the affected junction rows' prior
+                // Operation-level surface for the block→page transform's
+                // inbound link re-pointing (transform doc §backlinks, Option
+                // B): rewrite every `block_links` row currently resolved to
+                // `from` so it resolves to `to` instead (origin → new page P).
+                // The EXACT inverse captures the affected junction rows' prior
                 // (source_block_id, target, kind, resolved_id) tuples up front
                 // and restores each one — NOT a `to → from` swap, which would
-                // wrongly recapture rows that already pointed at `to` before the
-                // rewrite. Scoped to the transform's need; not a generic
+                // wrongly recapture rows that already pointed at `to` before
+                // the rewrite. Scoped to the transform's need; not a generic
                 // SQL-undo framework.
                 let from = params
                     .get("from")
@@ -4207,10 +4222,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // Inverse-only surface: replay the captured junction rows,
                 // restoring each PRIMARY KEY row's exact prior `resolved_id`.
                 // Only ever dispatched as `rewrite_link_resolution`'s inverse
-                // (undo); redo re-runs the forward `rewrite_link_resolution`, so
-                // this op needs no inverse of its own — `declared_irreversible`
-                // is the honest classification (and is ignored on inverse
-                // replay).
+                // (undo); redo re-runs the forward `rewrite_link_resolution`,
+                // so this op needs no inverse of its own —
+                // `declared_irreversible` is the honest classification (and is
+                // ignored on inverse replay).
                 let rows = match params.get("rows") {
                     Some(Value::Array(rows)) => rows.clone(),
                     other => {
@@ -4233,9 +4248,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 ))
             }
             "merge_blocks_plan" => {
-                // READ-ONLY planner for the engine-level `merge_blocks` compound.
-                // Every precondition is checked HERE, before the engine dispatches
-                // any constituent, so a refused merge leaves no partial state.
+                // READ-ONLY planner for the engine-level `merge_blocks`
+                // compound. Every precondition is checked HERE, before the
+                // engine dispatches any constituent, so a refused merge leaves
+                // no partial state.
                 use merge_blocks_plan::MergeBlocksPlan;
 
                 let side = |name: &str| -> Result<String> {
@@ -4263,9 +4279,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     .await?
                     .ok_or_else(|| format!("merge_blocks: duplicate '{duplicate_id}' not found"))?;
 
-                // Already merged away: the pair is settled, and re-merging would
-                // append a second provenance entry for an id that no longer names
-                // a live block.
+                // Already merged away: the pair is settled, and re-merging
+                // would append a second provenance entry for an id that no
+                // longer names a live block.
                 let already = self.follow_redirects(&duplicate_id).await?;
                 if already != duplicate_id {
                     return Err(format!(
@@ -4306,8 +4322,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 }
                 merged_children.extend(duplicate_children);
 
-                // Enrich each collapse with the reads the engine would otherwise
-                // have to make mid-merge, when the tree is already half-moved.
+                // Enrich each collapse with the reads the engine would
+                // otherwise have to make mid-merge, when the tree is already
+                // half-moved.
                 let mut dedupe_groups = Vec::new();
                 for (keeper, loser_ids) in merge_blocks_plan::plan_dedupe(&merged_children) {
                     let keeper_last_child = self
@@ -4365,7 +4382,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     merge_blocks_plan::parse_merged_from(raw.as_ref())?
                 };
 
-                // Tags union, canonical first so a Page tag on EITHER side lands.
+                // Tags union, canonical first so a Page tag on EITHER side
+                // lands.
                 let mut union_tags = self.read_block_tags(&canonical_id).await?;
                 for tag in self.read_block_tags(&duplicate_id).await? {
                     if !union_tags.contains(&tag) {
@@ -4373,8 +4391,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     }
                 }
 
-                // Properties: canonical wins every conflict, so only the keys it
-                // lacks are adopted from the duplicate.
+                // Properties: canonical wins every conflict, so only the keys
+                // it lacks are adopted from the duplicate.
                 let adopted_properties =
                     Self::properties_absent_from(&duplicate_properties, &canonical_properties)?;
 
@@ -4398,14 +4416,14 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 .with_response(plan.to_value()))
             }
             "block_to_page_plan" => {
-                // READ-ONLY planner for the engine-level `convert_block_to_page`
-                // compound (BlockToPageTransform Option B). Reads the origin's
-                // content+marks, its ordered children, and resolves (but does NOT
-                // create) the destination page chain — the engine executes each
-                // constituent write as an ordinary dispatched op so it collects
-                // the op-level inverse of each, assembling ONE composite
-                // `UndoEntry`. This op writes nothing, so it is honestly
-                // `declared_irreversible`.
+                // READ-ONLY planner for the engine-level
+                // `convert_block_to_page` compound (BlockToPageTransform Option
+                // B). Reads the origin's content+marks, its ordered children,
+                // and resolves (but does NOT create) the destination page chain
+                // — the engine executes each constituent write as an ordinary
+                // dispatched op so it collects the op-level inverse of each,
+                // assembling ONE composite `UndoEntry`. This op writes nothing,
+                // so it is honestly `declared_irreversible`.
                 use crate::core::block_to_page_plan::BlockToPagePlan;
 
                 let origin_id = params
@@ -4421,33 +4439,34 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         format!("block_to_page_plan: origin block '{origin_id}' not found")
                     })?;
 
-                // Fail loud: converting a page to a page is meaningless, and the
-                // no-pages-under-non-pages interim rule means the ORIGIN's own
-                // page-hood is not what we are establishing here (Option B mints a
-                // NEW page; the origin stays a non-page link).
+                // Fail loud: converting a page to a page is meaningless, and
+                // the no-pages-under-non-pages interim rule means the ORIGIN's
+                // own page-hood is not what we are establishing here (Option B
+                // mints a NEW page; the origin stays a non-page link).
                 if self.block_is_page(&origin_id).await? {
                     return Err(format!(
                         "block_to_page_plan: origin '{origin_id}' is already a page"
                     )
                     .into());
                 }
-                // The origin content is the page TITLE, and a page's title rides
-                // its FILENAME on disk (the vault convention: zero `.org` files
-                // carry `#+TITLE:`; the parser derives the title from the file
-                // stem and the PBT model normalizes on it). A TRAILING `/` (the
-                // slash-menu trigger still trailing at plan time, or a stray
-                // separator) is retained in the DB title but DROPPED by path
-                // normalization when the filename is formed — so an unsanitized
-                // title reingests DIVERGENT from what convert wrote. Sanitize the
-                // trailing `/` ONCE here (parse-don't-validate) so the page
-                // title, its deterministic id, AND its filename all agree.
-                // Interior `/` is left intact (namespace-meaningful; the
-                // page-hierarchy ruling is PARKED).
+                // The origin content is the page TITLE, and a page's title
+                // rides its FILENAME on disk (the vault convention: zero `.org`
+                // files carry `#+TITLE:`; the parser derives the title from the
+                // file stem and the PBT model normalizes on it). A TRAILING `/`
+                // (the slash-menu trigger still trailing at plan time, or a
+                // stray separator) is retained in the DB title but DROPPED by
+                // path normalization when the filename is formed — so an
+                // unsanitized title reingests DIVERGENT from what convert
+                // wrote. Sanitize the trailing `/` ONCE here
+                // (parse-don't-validate) so the page title, its deterministic
+                // id, AND its filename all agree. Interior `/` is left intact
+                // (namespace-meaningful; the page-hierarchy ruling is PARKED).
                 // Single-source the page-title sanitize (parse-don't-validate):
                 // the convert planner, the reference model, and the recognition
-                // step all funnel through `holon_api::sanitize_page_title`, so a
-                // trailing-slash title can never be recognized raw on one side and
-                // sanitized on the other (normalize_for_hash keeps '/').
+                // step all funnel through `holon_api::sanitize_page_title`, so
+                // a trailing-slash title can never be recognized raw on one
+                // side and sanitized on the other (normalize_for_hash keeps
+                // '/').
                 let raw_leaf = origin_content.trim();
                 let page_title = holon_api::sanitize_page_title(&origin_content).ok_or_else(|| {
                     format!(
@@ -4465,8 +4484,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     );
                 }
 
-                // Destination: an explicit `destination_path` (from the picker /
-                // MCP) wins; otherwise PRE-SELECT the origin's nearest page
+                // Destination: an explicit `destination_path` (from the picker
+                // / MCP) wins; otherwise PRE-SELECT the origin's nearest page
                 // ancestor (transform doc sub-ruling 3). No page ancestor ⇒ the
                 // vault root.
                 let destination_path =
@@ -4488,7 +4507,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // trailing at plan time) is never split into page-path segments
                 // (which would fail loud on an empty trailing segment, or
                 // silently mint phantom hierarchy). Only the `destination_path`
-                // is a real `/`-path, validated fail-loud inside `for_page_under`.
+                // is a real `/`-path, validated fail-loud inside
+                // `for_page_under`.
                 let page_id =
                     holon_api::link_parser::PageId::for_page_under(&destination_path, &page_title)?
                         .as_str()
@@ -4519,13 +4539,14 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // (ADR 0021/0022). A SINGLE per-row `INSERT OR IGNORE` against
                 // the junction's PRIMARY KEY (anchor_id, lesson_id): idempotent
                 // (a repeat dismiss is a PK-collision no-op) and inherently
-                // conflict-free — there is no read-then-write, so two concurrent
-                // dismissals cannot lose an update the way a whole-set
-                // capture-then-replace would. Wrapped in `db_handle.transaction`
-                // per the repo rule that block writes are transactional (even
-                // though this junction's FK is IMMEDIATE, not the deferred-FK
-                // autocommit-no-rollback hazard). This is intentionally NOT the
-                // Loro provider's semantics: `LoroBlockOperations::dismiss_advice`
+                // conflict-free — there is no read-then-write, so two
+                // concurrent dismissals cannot lose an update the way a
+                // whole-set capture-then-replace would. Wrapped in
+                // `db_handle.transaction` per the repo rule that block writes
+                // are transactional (even though this junction's FK is
+                // IMMEDIATE, not the deferred-FK autocommit-no-rollback
+                // hazard). This is intentionally NOT the Loro provider's
+                // semantics: `LoroBlockOperations::dismiss_advice`
                 // does a whole-array LWW replace over one meta key, so two
                 // concurrent Loro dismissals of different lessons CAN clobber —
                 // the SQL junction has no such limitation.
@@ -4624,9 +4645,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // `tags` is a junction field the column-only staleness reader
                 // cannot fingerprint, so deltas are `history_only`: recorded in
                 // history, excluded from the undo precondition. A no-op re-add
-                // reports a VACUOUS delta (old == new) so the engine journals no
-                // undo entry — undoing an idempotent re-add must never strip a
-                // tag that was already present.
+                // reports a VACUOUS delta (old == new) so the engine journals
+                // no undo entry — undoing an idempotent re-add must never strip
+                // a tag that was already present.
                 let changes = if affected >= 1 {
                     vec![FieldDelta::history_only(
                         id,
@@ -4759,17 +4780,17 @@ impl OriginTaggedWrites for SqlOperationProvider {
             })
             .collect();
 
-        // Phase 1: Prepare all operations (may involve async DB reads for delete
-        // cascade), collecting block_raw ROW statements separately from EDGE
-        // (junction) statements.
+        // Phase 1: Prepare all operations (may involve async DB reads for
+        // delete cascade), collecting block_raw ROW statements separately from
+        // EDGE (junction) statements.
         let mut row_sql: Vec<String> = Vec::new();
         let mut edge_sql: Vec<String> = Vec::new();
         let mut staged = StagedParents::default();
-        // Every id this batch UPDATEs and does not itself create or delete. An UPDATE
-        // whose row is missing changes nothing and reports nothing, so without
-        // this the sink can silently fall behind the projection's authority
-        // forever — the only way that state ends is a reseed, and nothing asks
-        // for one.
+        // Every id this batch UPDATEs and does not itself create or delete. An
+        // UPDATE whose row is missing changes nothing and reports nothing, so
+        // without this the sink can silently fall behind the projection's
+        // authority forever — the only way that state ends is a reseed, and
+        // nothing asks for one.
         let mut updated_ids: Vec<String> = Vec::new();
         let mut created_ids: HashSet<String> = HashSet::new();
         // Every id a delete in this batch removes, its cascaded descendants
@@ -4785,10 +4806,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
             } = op;
             // The op's TYPED position (Some only for a placement the projection
             // or ingest minted) injects the `sort_key` and returns the sibling
-            // re-key UPDATEs, into this batch's single transaction (D1). Re-keys
-            // NEVER arrive as a `params` map key — a peer property cannot become
-            // one (Ruling B). Collected before the prepare so a no-op `update`
-            // cannot drop them.
+            // re-key UPDATEs, into this batch's single transaction (D1).
+            // Re-keys NEVER arrive as a `params` map key — a peer property
+            // cannot become one (Ruling B). Collected before the prepare so a
+            // no-op `update` cannot drop them.
             //
             // A batched create is recognized FIRST (task #8): bulk org ingest
             // and the Loro→SQL projection both re-derive create-vs-update from
@@ -4885,11 +4906,12 @@ impl OriginTaggedWrites for SqlOperationProvider {
         }
 
         // Rows-then-edges: every `block_raw` row of the WHOLE batch is written
-        // before any junction row, so a junction's IMMEDIATE FK into `block_raw`
-        // always finds its target regardless of op-vec order. Row ordering among
-        // themselves is safe (deferred `parent_id` self-FK settles at COMMIT;
-        // junction cleanup on delete is `ON DELETE CASCADE`). This is the
-        // structural fix for the Face-A whole-batch rollback.
+        // before any junction row, so a junction's IMMEDIATE FK into
+        // `block_raw` always finds its target regardless of op-vec order. Row
+        // ordering among themselves is safe (deferred `parent_id` self-FK
+        // settles at COMMIT; junction cleanup on delete is `ON DELETE
+        // CASCADE`). This is the structural fix for the Face-A whole-batch
+        // rollback.
         let all_sql: Vec<_> = row_sql
             .into_iter()
             .chain(edge_sql)
@@ -5148,7 +5170,8 @@ mod create_id_tests {
 
         let mut params = StorageEntity::new();
         params.insert("content".into(), Value::String("hello world".to_string()));
-        // Deliberately no "id" — mirrors the creation-slot / action-watcher paths.
+        // Deliberately no "id" — mirrors the creation-slot / action-watcher
+        // paths.
         provider
             .execute_operation_with_origin(
                 &EntityName::new("block"),
@@ -5198,9 +5221,9 @@ mod delete_inverse_classification_tests {
         ) {
             db_handle.execute_ddl(stmt).await.expect("block_raw schema");
         }
-        // The `delete` cascade cleans up `block_links` (drop outbound, un-resolve
-        // inbound), so the table must exist. Reuse the canonical DDL via the
-        // schema module rather than a duplicated string literal.
+        // The `delete` cascade cleans up `block_links` (drop outbound,
+        // un-resolve inbound), so the table must exist. Reuse the canonical DDL
+        // via the schema module rather than a duplicated string literal.
         LinkSchemaModule
             .ensure_schema(&db_handle)
             .await
@@ -5608,7 +5631,8 @@ mod link_resolution_rewrite_tests {
         );
         assert_eq!(resolved_of(&db, "block:src4").await, Value::Null);
 
-        // Inverse shape: restore_link_resolution carrying the two captured rows.
+        // Inverse shape: restore_link_resolution carrying the two captured
+        // rows.
         let inverse = match &result.undo {
             UndoAction::Undo(op) => op.clone(),
             other => panic!("rewrite must be reversible, got {other:?}"),

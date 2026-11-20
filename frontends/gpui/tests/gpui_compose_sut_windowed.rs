@@ -56,11 +56,13 @@ use holon_integration_tests::pbt::window_slice::builders::WindowMountConvention;
 use holon_integration_tests::pbt::window_slice::builders::overlay_windowed_caps;
 use holon_integration_tests::pbt::window_slice::builders::window_layout;
 use holon_pbt_core::ComponentSet;
-// Caps must be in scope to read them through the `CapMap` (capmap_adapter forwards).
+// Caps must be in scope to read them through the `CapMap` (capmap_adapter
+// forwards).
 use holon_pbt_core::capabilities::{SutBackend, SutBlockInteract, SutDriver, SutLayout};
 use pbt_harness::sim_windowed_replay::SimUserDriver;
-// The wide windowed per-case boot/teardown helper (extracted to the shared harness so the
-// 4b generated-sequence loop reuses ONE copy — see `pbt_harness/windowed_wide.rs`).
+// The wide windowed per-case boot/teardown helper (extracted to the shared
+// harness so the 4b generated-sequence loop reuses ONE copy — see
+// `pbt_harness/windowed_wide.rs`).
 use pbt_harness::windowed_wide::with_windowed_wide_sut;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
@@ -92,9 +94,10 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
 
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
 
-    // Boot the DEFERRED-driver headless base (`full_headless`): everything a wide
-    // headless SUT has (backend / storage / editor / ViewModel caps + IdResolver
-    // reconcile) EXCEPT the gesture-driver rung, which a window would supply.
+    // Boot the DEFERRED-driver headless base (`full_headless`): everything a
+    // wide headless SUT has (backend / storage / editor / ViewModel caps +
+    // IdResolver reconcile) EXCEPT the gesture-driver rung, which a window
+    // would supply.
     let resolver: IdResolver = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
     let composed = runtime.block_on(async {
         compose_sut_windowed_base(&ComponentSet::full_headless(), &resolver).await
@@ -117,15 +120,16 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
         "compose_sut_windowed_base must DEFER the driver rung (no SutDriver in the base)",
     );
 
-    // (2) Backend caps present and reading the booted store (the boot seed doc).
+    // (2) Backend caps present and reading the booted store (the boot seed
+    // doc).
     let booted_blocks = runtime.block_on(async { composed.caps.block_raw_snapshot().await });
     assert!(
         !booted_blocks.is_empty(),
         "the deferred base must host SutBackend reading the booted block_raw store",
     );
 
-    // Attach a TestPlatform window over the SAME session + reactive engine — the
-    // window is a pure renderer; no session construction of its own.
+    // Attach a TestPlatform window over the SAME session + reactive engine —
+    // the window is a pure renderer; no session construction of its own.
     let bounds = BoundsRegistry::new();
     let nav = NavigationState::new();
     let _rebind = app
@@ -146,9 +150,9 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
 
     settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
-    // (3) SutLayout over the window reads real, non-degenerate geometry — proving
-    // the     window RENDERS compose_sut's session (the foundational Hard-B
-    // claim).
+    // (3) SutLayout over the window reads real, non-degenerate geometry —
+    // proving the     window RENDERS compose_sut's session (the foundational
+    // Hard-B claim).
     let geometry: Box<dyn GeometryProvider> = Box::new(bounds.clone());
     let capmap = window_layout(geometry);
     let via_capmap = runtime.block_on(async { capmap.rendered_elements().await });
@@ -173,9 +177,9 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
         booted_blocks.len(),
     );
 
-    // gpui teardown (mirror `gpui_window_slice.rs`): release the window entities,
-    // shut the app down, then leak the `!Send` HeadlessAppContext + the booted
-    // composition
+    // gpui teardown (mirror `gpui_window_slice.rs`): release the window
+    // entities, shut the app down, then leak the `!Send` HeadlessAppContext +
+    // the booted composition
     // so their Drops don't run the gpui leak detector / drop the session's
     // tokio runtime in async context. The process exits right after the test,
     // so the leak is inert.
@@ -188,8 +192,8 @@ fn window_renders_compose_sut_base_and_base_hosts_backend() {
 
 #[test]
 fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window() {
-    // Increment-3 sub-step 3a: runtime-exercise `overlay_windowed_caps` (until now
-    // only compile-verified). Onto the DEFERRED-driver
+    // Increment-3 sub-step 3a: runtime-exercise `overlay_windowed_caps` (until
+    // now only compile-verified). Onto the DEFERRED-driver
     // `compose_sut_windowed_base` CapMap it must INSERT the window's
     // `SutLayout` geometry + the live `SimUserDriver`-backed gesture caps while
     // the base's `SutBackend` survives — the full windowed CapMap the
@@ -256,9 +260,9 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
         interaction_tx,
     ));
 
-    // ★ Exercise the pure-insert overlay at runtime. Its internal fail-loud assert
-    // also confirms the base DEFERRED its driver (no SutDriver present) before
-    // inserting.
+    // ★ Exercise the pure-insert overlay at runtime. Its internal fail-loud
+    // assert also confirms the base DEFERRED its driver (no SutDriver present)
+    // before inserting.
     let geometry: Box<dyn GeometryProvider> = Box::new(bounds.clone());
     let frontend = composed
         .frontend
@@ -284,8 +288,8 @@ fn overlay_windowed_caps_composes_layout_backend_and_driver_over_a_live_window()
         overlaid.get::<dyn SutBlockInteract>().is_some(),
         "overlay_windowed_caps must INSERT the window SutBlockInteract gesture cap",
     );
-    // (2) SutLayout reads real geometry through the overlaid CapMap (window renders
-    // it).
+    // (2) SutLayout reads real geometry through the overlaid CapMap (window
+    // renders it).
     let elems = runtime.block_on(async { overlaid.rendered_elements().await });
     assert!(
         !elems.is_empty(),
@@ -344,16 +348,16 @@ fn windowed_composed_sut_drives_a_click_gesture_sequence_green() {
     // `ClickBlock` focuses a text child via the window's `SimUserDriver`
     // (`SutBlockInteract` -> click -> `set_focus`, which mirrors engine focus —
     // the faithful windowed focus path, unlike the raw `SutFocusWrite` write).
-    // Every tick re-checks the unified catalog. `ClickBlock` is non-minting, so the
-    // per-tick id-reconcile is a no-op. Proves the apply -> window-gesture ->
-    // settle -> check loop.
+    // Every tick re-checks the unified catalog. `ClickBlock` is non-minting, so
+    // the per-tick id-reconcile is a no-op. Proves the apply -> window-gesture
+    // -> settle -> check loop.
     with_windowed_wide_sut(|mut sut, oracle0, _sink| {
         // The initial frame must be green before we drive anything.
         ComposedSut::<WideE2E>::check_invariants(&sut, oracle0);
 
-        // c1 / c2 are the wide working-tree text leaves (`block:c1` / `block:c2`, under
-        // the seed page). Clicking a text child focuses it and opens its
-        // editor.
+        // c1 / c2 are the wide working-tree text leaves (`block:c1` /
+        // `block:c2`, under the seed page). Clicking a text child focuses it
+        // and opens its editor.
         let steps = [
             E2ETransition::ClickBlock(ClickBlock {
                 region: Region::Main,
@@ -388,15 +392,15 @@ fn windowed_composed_sut_drives_a_click_gesture_sequence_green() {
 
 #[test]
 fn windowed_composed_sut_replays_a_fixture_via_replay_steps_green() {
-    // ★ Increment 3b (sub-step iii): the capture/gherkin BRIDGE over the windowed
-    // SUT. Drive a fixture through `replay_steps` (the shared capture/.feature
-    // replay driver) — the windowed `ComposedSut<WideE2E>` already impls
-    // `FixtureAssertable`, so the SAME driver the headless composed keystone
-    // uses for deterministic regression/gherkin replays now runs over a live
-    // window. This is how captured windowed regressions + `.feature` files will
-    // steer the ONE PBT windowed. The fixture is post-boot only (no `StartApp`
-    // — the composed alphabet has none; the SUT is already booted by the
-    // harness), matching composed-keystone captures.
+    // ★ Increment 3b (sub-step iii): the capture/gherkin BRIDGE over the
+    // windowed SUT. Drive a fixture through `replay_steps` (the shared
+    // capture/.feature replay driver) — the windowed `ComposedSut<WideE2E>`
+    // already impls `FixtureAssertable`, so the SAME driver the headless
+    // composed keystone uses for deterministic regression/gherkin replays now
+    // runs over a live window. This is how captured windowed regressions +
+    // `.feature` files will steer the ONE PBT windowed. The fixture is
+    // post-boot only (no `StartApp` — the composed alphabet has none; the SUT
+    // is already booted by the harness), matching composed-keystone captures.
     with_windowed_wide_sut(|sut, oracle, _sink| {
         let steps = vec![
             FixtureStep::Action(E2ETransition::ClickBlock(ClickBlock {
@@ -453,8 +457,8 @@ fn windowed_split_then_clickblock_resolves_minted_id() {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(8);
-        // Chain: split `c1` first, then split each freshly-minted tail (it carries
-        // the "c1" content, so it stays a splittable text leaf).
+        // Chain: split `c1` first, then split each freshly-minted tail (it
+        // carries the "c1" content, so it stays a splittable text leaf).
         let mut target = EntityUri::block("c1");
         let mut landed = 0usize;
         for i in 0..iters {
@@ -480,8 +484,9 @@ fn windowed_split_then_clickblock_resolves_minted_id() {
                 "iter {i}: expected 1 minted split id, got {minted:?}"
             );
             let new_id = minted[0].clone();
-            // The regression probe: ClickBlock's FIRST act is `require_bounds` on the
-            // minted (synthetic) id — the exact precheck that false-failed pre-fix.
+            // The regression probe: ClickBlock's FIRST act is `require_bounds`
+            // on the minted (synthetic) id — the exact precheck that
+            // false-failed pre-fix.
             let click = E2ETransition::ClickBlock(ClickBlock {
                 region: Region::Main,
                 block_id: new_id.clone(),

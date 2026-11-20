@@ -160,7 +160,8 @@ pub fn marks_of(entity: &DataRow) -> Vec<MarkSpan> {
 
     let mut marks = match marks_from_json(raw) {
         Ok(marks) => marks,
-        // ALLOW(degraded_render): surfaced at ERROR below, never swallowed (D27.a)
+        // ALLOW(degraded_render): surfaced at ERROR below, never swallowed
+        // (D27.a)
         Err(e) => {
             tracing::error!(
                 block_id,

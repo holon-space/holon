@@ -360,7 +360,8 @@ async fn a_commit_at_the_read_seam_is_not_in_the_version_below_it() -> Result<()
         let doc = seam_doc.clone();
         *racer = Some(std::thread::spawn(move || {
             edit(&doc, b, "y")?;
-            // Refused when the edit lands after the read: the seam no longer waits.
+            // Refused when the edit lands after the read: the seam no longer
+            // waits.
             done.send(()).ok();
             Ok(())
         }));

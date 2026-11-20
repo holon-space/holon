@@ -48,10 +48,11 @@ pub struct FiringKey(String);
 
 impl FiringKey {
     pub fn from_row(row: &StorageEntity) -> Self {
-        // Internal columns (`_rowid`, watermarks) are excluded: they are not part
-        // of the semantic binding, and CDC delivers `_rowid` with a different
-        // Value type on the Created vs Updated path (Integer vs String), which
-        // would mint path-dependent ids and break cross-replica convergence.
+        // Internal columns (`_rowid`, watermarks) are excluded: they are not
+        // part of the semantic binding, and CDC delivers `_rowid` with a
+        // different Value type on the Created vs Updated path (Integer vs
+        // String), which would mint path-dependent ids and break cross-replica
+        // convergence.
         let mut entries: Vec<String> = row
             .iter()
             .filter(|(k, _)| !k.starts_with('_'))
@@ -83,9 +84,9 @@ impl OutputSlot {
 
 /// Mint the deterministic block id for one emitted effect of a rule firing.
 pub fn deterministic_block_id(rule: &RuleId, key: &FiringKey, slot: &OutputSlot) -> EntityUri {
-    // Unit separator between components keeps them unambiguous even if a rule id
-    // or firing key happens to contain the delimiter characters used inside a
-    // component (`=`, `\n`).
+    // Unit separator between components keeps them unambiguous even if a rule
+    // id or firing key happens to contain the delimiter characters used inside
+    // a component (`=`, `\n`).
     let name = format!("{}\x1f{}\x1f{}", rule.0, key.0, slot.0);
     let uuid = Uuid::new_v5(&HOLON_RULE_NAMESPACE, name.as_bytes());
     EntityUri::block(&uuid.to_string())

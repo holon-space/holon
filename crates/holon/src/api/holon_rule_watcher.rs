@@ -87,7 +87,8 @@ pub async fn start_holon_rule_watchers(
     let status = engine.rule_status().clone();
     shutdown.spawn(
         "holon-rule-discovery",
-        // ALLOW(admit-in-spawn): the watcher admits per row event, not at start.
+        // ALLOW(admit-in-spawn): the watcher admits per row event, not at
+        // start.
         run_discovery_loop(engine, status, discovery_stream, shutdown.clone()),
     );
     Ok(())
@@ -165,10 +166,11 @@ async fn start_rule(
         handle.abort();
     }
 
-    // Shape separation from the legacy pair-watcher: a `holon_rule` block that has
-    // a sibling trigger (`holon_sql`/`holon_prql`/`holon_gql`) is a query+action
-    // *pair*, owned by `action_watcher`. This single-block watcher must not touch
-    // it (no firing, no status), so the two never stomp one block's rule card.
+    // Shape separation from the legacy pair-watcher: a `holon_rule` block that
+    // has a sibling trigger (`holon_sql`/`holon_prql`/`holon_gql`) is a
+    // query+action *pair*, owned by `action_watcher`. This single-block watcher
+    // must not touch it (no firing, no status), so the two never stomp one
+    // block's rule card.
     match is_paired(engine, &block_id).await {
         Ok(true) => {
             engine.accepted_rules().set(
@@ -183,7 +185,8 @@ async fn start_rule(
         }
         Ok(false) => {}
         Err(e) => {
-            // An uncertain pairing check must not silently fire; surface it loud.
+            // An uncertain pairing check must not silently fire; surface it
+            // loud.
             tracing::error!("[holon_rule_watcher] {block_id} pairing check failed: {e:#}");
             status.set(
                 &block_id,
@@ -215,8 +218,8 @@ async fn start_rule(
     };
 
     // An operate rule carries a ratcheted `emit`. A guard-only rule (advice
-    // authored in the holon_rule language) has none — the advice reconciler owns
-    // it, so this watcher leaves it alone.
+    // authored in the holon_rule language) has none — the advice reconciler
+    // owns it, so this watcher leaves it alone.
     let emit = match rule.emit.clone() {
         Some(emit) => emit,
         None => {
@@ -302,8 +305,8 @@ async fn run_rule_watcher_inner(
 
     while let Some(batch) = binding_stream.next().await {
         for item in batch.inner.items {
-            // Ratcheted create: fire on the initial `Created` binding and on the
-            // day-rollover `Updated` (rowid-stable clock UPDATE). Both are
+            // Ratcheted create: fire on the initial `Created` binding and on
+            // the day-rollover `Updated` (rowid-stable clock UPDATE). Both are
             // idempotent via the fire-time inhibitor + deterministic id.
             match item.change {
                 Change::Created { data, .. } | Change::Updated { data, .. } => {
@@ -376,16 +379,16 @@ async fn fire_emit(
     // Deterministic effect id. Two shapes, both pure functions of stable inputs
     // (so replicas converge and a re-fire upserts the same id):
     //   - PAGE placement (`place: page(<root>)`): the id is the CANONICAL page
-    //     identity `PageId::for_path(<parent-page-path>/<content>)` — a name-based
-    //     UUIDv5 of the name-chain, IDENTICAL to the id org-ingest /
+    //     identity `PageId::for_path(<parent-page-path>/<content>)` — a
+    //     name-based UUIDv5 of the name-chain, IDENTICAL to the id org-ingest /
     //     `convert_block_to_page` assign to a page at this location. So a
-    //     `[[<parent-page-path>/<content>]]` wiki-link resolves to the very page
-    //     this rule mints (LogSeq-parity daily-note ruling 2026-07-19: date pages
-    //     stay nested under `journals`, e.g. `[[Journals/2026-07-19]]`). Bare-date
-    //     `[[2026-07-19]]` resolution is a SEPARATE page-alias feature, out of
-    //     scope.
-    //   - INLINE placement (`place: <root>`): the id stays a firing-keyed UUIDv5 of
-    //     (rule-id, firing-key, slot) (ADR 0024 P4).
+    //     `[[<parent-page-path>/<content>]]` wiki-link resolves to the very
+    //     page this rule mints (LogSeq-parity daily-note ruling 2026-07-19:
+    //     date pages stay nested under `journals`, e.g.
+    //     `[[Journals/2026-07-19]]`). Bare-date `[[2026-07-19]]` resolution is
+    //     a SEPARATE page-alias feature, out of scope.
+    //   - INLINE placement (`place: <root>`): the id stays a firing-keyed
+    //     UUIDv5 of (rule-id, firing-key, slot) (ADR 0024 P4).
     let id: String = if emit.place.is_page() {
         let parent_path = match page_path_of(engine, &parent_id).await {
             Ok(p) => p,
@@ -423,17 +426,20 @@ async fn fire_emit(
     };
 
     // RECOGNITION (resolve-before-mint, ADR 0029). The content-based inhibitor
-    // (`already_present`) above only sees a block whose CONTENT still equals the
-    // day name; it MISSES a page RENAMED away from the date that still holds this
-    // derived id. Recognize by the DERIVED ID against the id's current holder (a
-    // mode-correct `block_raw` read — the SAME source `already_present` uses — so
-    // it is correct whether Turso or Loro is the block-write authority):
-    //   - Collision (id held by a DIFFERENT normalized title = the renamed page):
-    //     refuse — skip idempotently, do NOT dispatch the create, so both the Turso
-    //     and Loro block-CRUD authorities take the same no-clobber path. A guard on
-    //     the SQL write alone can never reach this in Loro mode, where the create
-    //     lands in the Loro doc and only projects to `block_raw`.
-    //   - AlreadySatisfied: the id already holds this exact name — nothing to do.
+    // (`already_present`) above only sees a block whose CONTENT still equals
+    // the day name; it MISSES a page RENAMED away from the date that still
+    // holds this derived id. Recognize by the DERIVED ID against the id's
+    // current holder (a mode-correct `block_raw` read — the SAME source
+    // `already_present` uses — so it is correct whether Turso or Loro is the
+    // block-write authority):
+    //   - Collision (id held by a DIFFERENT normalized title = the renamed
+    //     page): refuse — skip idempotently, do NOT dispatch the create, so
+    //     both the Turso and Loro block-CRUD authorities take the same
+    //     no-clobber path. A guard on the SQL write alone can never reach this
+    //     in Loro mode, where the create lands in the Loro doc and only
+    //     projects to `block_raw`.
+    //   - AlreadySatisfied: the id already holds this exact name — nothing to
+    //     do.
     //   - Free / UnnamedPlaceholder: fall through and mint/create below.
     let holder_title = match current_title_of(engine, &id).await {
         Ok(t) => t,
@@ -446,7 +452,8 @@ async fn fire_emit(
             return;
         }
     };
-    // ALLOW(entity_uri_from_raw): `id` is a freshly derived, validated create id.
+    // ALLOW(entity_uri_from_raw): `id` is a freshly derived, validated create
+    // id.
     let derived_uri = holon_api::EntityUri::from_raw(&id);
     match holon_api::recognize_derived_id(&derived_uri, holder_title.as_deref(), &content) {
         holon_api::Recognition::Collision(collision) => {
@@ -474,10 +481,10 @@ async fn fire_emit(
     params.insert("id".into(), Value::String(id));
     params.insert("parent_id".into(), Value::String(parent_id));
     params.insert("content".into(), Value::String(content));
-    // Page-file placement (`place: page(<root>)`): tag the emitted block `Page` so
-    // the fileless-page sweep materializes it into its own `<name-chain>.org`
-    // (ADR 0024 §7.2). `tags` is the block_tags edge field; it must carry a
-    // `Value::Array`.
+    // Page-file placement (`place: page(<root>)`): tag the emitted block `Page`
+    // so the fileless-page sweep materializes it into its own
+    // `<name-chain>.org` (ADR 0024 §7.2). `tags` is the block_tags edge field;
+    // it must carry a `Value::Array`.
     if emit.place.is_page() {
         params.insert(
             "tags".into(),
@@ -502,14 +509,15 @@ async fn fire_emit(
         .await
     {
         let msg = format!("{e:#}");
-        // Interim identity-collision refusal (plan §5): the page this rule would
-        // create already exists under the deterministic id (e.g. today's journal
-        // was renamed, freeing the name but not the id). This is NOT an execution
-        // failure — treat it as an already-satisfied SKIP so a periodic
-        // autonomous rule (the journal tick) does not error-storm. Recognised by
-        // the stable marker in the message (the concrete `IdentityCollision`
-        // type is erased by the dispatch chain's string-enriching wrappers). Log
-        // ONCE: only when the status is not already `Skipped`.
+        // Interim identity-collision refusal (plan §5): the page this rule
+        // would create already exists under the deterministic id (e.g. today's
+        // journal was renamed, freeing the name but not the id). This is NOT an
+        // execution failure — treat it as an already-satisfied SKIP so a
+        // periodic autonomous rule (the journal tick) does not error-storm.
+        // Recognised by the stable marker in the message (the concrete
+        // `IdentityCollision` type is erased by the dispatch chain's
+        // string-enriching wrappers). Log ONCE: only when the status is not
+        // already `Skipped`.
         if msg.contains(holon_api::IDENTITY_COLLISION_MARKER) {
             let already_skipped =
                 matches!(status.get(rule_id.as_str()), Some(RuleStatus::Skipped(_)));
@@ -704,9 +712,9 @@ emit:
             module.with_operation_provider_factory(|backend| {
                 let db_handle =
                     tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
-                // Register the `tags` edge field so a page-file emission's `Page`
-                // tag lands in the `block_tags` junction (not folded into
-                // properties JSON), exactly like the prod schema module.
+                // Register the `tags` edge field so a page-file emission's
+                // `Page` tag lands in the `block_tags` junction (not folded
+                // into properties JSON), exactly like the prod schema module.
                 Arc::new(SqlOperationProvider::with_edge_fields(
                     db_handle,
                     BLOCK_WRITE_TABLE.to_string(),
@@ -963,9 +971,10 @@ emit:
         let children = journal_children(&engine).await;
         assert_eq!(children.len(), 1);
         let (_, props) = &children[0];
-        // The `_provenance` stamp records origin=rule and the firing transition id.
-        // Assert on the transition id (unambiguous) plus the rule origin tag,
-        // tolerant of the stored representation (JSON string vs decoded object).
+        // The `_provenance` stamp records origin=rule and the firing transition
+        // id. Assert on the transition id (unambiguous) plus the rule origin
+        // tag, tolerant of the stored representation (JSON string vs decoded
+        // object).
         assert!(
             props.contains("journals_rule") && props.contains("rule"),
             "rule-fired create must carry rule provenance (_provenance) in properties, got \
@@ -980,7 +989,8 @@ emit:
         let engine = block_engine().await;
         seed_journals_parent(&engine).await;
 
-        // A pre-existing journal for the day, created out-of-band with its own id.
+        // A pre-existing journal for the day, created out-of-band with its own
+        // id.
         let mut pre = StorageEntity::new();
         pre.insert(
             "id".into(),
@@ -1020,7 +1030,8 @@ emit:
     /// A malformed `holon_rule` body surfaces a LOUD ParseError, never silent.
     #[test]
     fn build_emit_types_are_constructible() {
-        // Guards the public Emit surface the watcher depends on stays constructible.
+        // Guards the public Emit surface the watcher depends on stays
+        // constructible.
         let emit = Emit {
             place: Place::parse("journals").unwrap(),
             name: NameTemplate::parse("{today}").unwrap(),

@@ -119,19 +119,19 @@ impl HolonNative {
             "the certification harness is not wired: an ordinary string on an unreserved key \
              must round-trip, got {control:?}"
         );
-        // The `set_field` route deliberately gets NO round-trip control, and the
-        // reason is a MEASUREMENT: an ordinary key written through it reads back
-        // `Absent` here, because `set_field` offers the write to the
+        // The `set_field` route deliberately gets NO round-trip control, and
+        // the reason is a MEASUREMENT: an ordinary key written through it reads
+        // back `Absent` here, because `set_field` offers the write to the
         // `BlockCellRegistry` first (sql_block_operations.rs:1052) and returns
         // `Ok` with no synchronous change once Loro takes it, while no outbound
         // projector runs in this wiring.
         //
         // That does not weaken the reserved-key probe, because the two outcomes
         // are already discriminable: a dead route answers `Ok` → `Absent`, and
-        // only a real refusal can answer `Refused` with the KEY and the OP named
-        // in its reason. The probe requires the latter, so it cannot be
-        // satisfied by silence. What it certifies is the ENGINE boundary — which
-        // is where the refusal lives and is wiring-independent — not this
+        // only a real refusal can answer `Refused` with the KEY and the OP
+        // named in its reason. The probe requires the latter, so it cannot be
+        // satisfied by silence. What it certifies is the ENGINE boundary —
+        // which is where the refusal lives and is wiring-independent — not this
         // wiring's storage leg.
         Ok(native)
     }
@@ -490,9 +490,10 @@ async fn block_engine() -> anyhow::Result<Arc<BackendEngine>> {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = Handle::current();
-                    // ALLOW(block_on): wrapped in `block_in_place`, which is what makes a
-                    // blocking wait legal on a multi-thread runtime thread (same contract as
-                    // the `blocking` helper above).
+                    // ALLOW(block_on): wrapped in `block_in_place`, which is
+                    // what makes a blocking wait legal on a multi-thread
+                    // runtime thread (same contract as the `blocking` helper
+                    // above).
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");

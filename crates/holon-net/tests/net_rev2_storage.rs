@@ -496,7 +496,8 @@ fn apply_storage_candidate() -> Transition {
                     out
                 }
                 "keep" => vec![Output::new("SecondaryStorage", s, token)],
-                // A store that serves in a slot, or is closed, has nothing to close.
+                // A store that serves in a slot, or is closed, has nothing to
+                // close.
                 "retire" if input.get("idle") == Some(&Value::Boolean(true)) => vec![],
                 "retire" => vec![Output::new("RetiringStorage", s, token)],
                 other => panic!("no candidate branch '{other}'"),
@@ -675,8 +676,8 @@ fn net() -> Spec {
                 bind!(|r, s| {
                     let provider = r.text("StandbyRequest", s, "provider")?;
                     let tries = int_at(r, "StandbyRequest", s, "tries")?;
-                    // The count travels in the request, so this transition needs
-                    // no read arc on `ProviderTries`.
+                    // The count travels in the request, so this transition
+                    // needs no read arc on `ProviderTries`.
                     (tries < MAX_TRIES).then(|| {
                         content(&[
                             ("provider", text(&provider)),
@@ -1022,8 +1023,8 @@ fn a_swap_that_cannot_apply_the_final_delta_fails_instead_of_releasing_the_hold(
     let (mut d, pair) = booted(
         Faults {
             definite_open_failures: 1,
-            // One commit per call: enough for the background batch, short of the
-            // final delta.
+            // One commit per call: enough for the background batch, short of
+            // the final delta.
             replay_cap_per_call: Some(1),
         },
         Faults::default(),
@@ -1247,7 +1248,8 @@ impl StateMachineTest for Test {
             );
         }
 
-        // one_writer: the two stores together took exactly the source's commits.
+        // one_writer: the two stores together took exactly the source's
+        // commits.
         let took = sut.pair.store(TURSO).writes() + sut.pair.store(LORO).writes();
         assert_eq!(
             took,

@@ -25,8 +25,8 @@ fn profile_active_generators_still_shrink_to_small() {
         "{}/profiles/martin-vault-2026-07-23.json",
         std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time")
     );
-    // SAFETY: set before any generator reads the cached profile; single-threaded
-    // at this point in this dedicated test binary.
+    // SAFETY: set before any generator reads the cached profile;
+    // single-threaded at this point in this dedicated test binary.
     unsafe {
         std::env::set_var("HOLON_PBT_SHAPE_PROFILE", profile_path);
     }

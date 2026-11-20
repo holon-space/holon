@@ -189,9 +189,9 @@ impl BlockWriteField {
             "block_type" => Ok(Self::BlockType),
             "tags" => Ok(Self::Tags),
             "task_state" => Ok(Self::TaskState),
-            // An operation-control key that slipped past the specific arms above
-            // (`_order_rekeys`, `_routing_*`) is an INSTRUCTION to the writer,
-            // never a property. Accepted as a `Property`, a
+            // An operation-control key that slipped past the specific arms
+            // above (`_order_rekeys`, `_routing_*`) is an INSTRUCTION to the
+            // writer, never a property. Accepted as a `Property`, a
             // `set_field(field="_order_rekeys", value=<object>)` would smuggle
             // the control key into the `properties` column in VALUE position,
             // where the key-position filter cannot see it and the Loro→SQL

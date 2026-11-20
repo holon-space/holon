@@ -109,7 +109,8 @@ impl Launch {
             .vault_root
             .unwrap_or_else(|| vault.path().to_path_buf());
 
-        // The pseudo-terminal starts at 0 x 0, below the size the TUI renders at.
+        // The pseudo-terminal starts at 0 x 0, below the size the TUI renders
+        // at.
         let shell = match self.launcher {
             Launcher::Exec => Some("stty rows 40 cols 120 && exec \"$0\" \"$@\""),
             Launcher::HupIgnoringShell => Some("trap '' HUP; stty rows 40 cols 120; \"$0\" \"$@\""),

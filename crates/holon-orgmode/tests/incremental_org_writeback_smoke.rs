@@ -569,8 +569,8 @@ async fn block_driven_writeback_vetoes_single_ungrounded_drop() {
         "precondition: b2 must be on disk; got {on_disk:?}"
     );
 
-    // The store loses b2. Force a reseed via a tags change on b1 so the render is
-    // b1/b3 — b2 dropped, delta is an Upsert (no delete op, no sibling →
+    // The store loses b2. Force a reseed via a tags change on b1 so the render
+    // is b1/b3 — b2 dropped, delta is an Upsert (no delete op, no sibling →
     // ungrounded).
     h.reader.set_blocks(vec![b1.clone(), b3.clone()]);
     let mut b1_tagged = b1.clone();
@@ -1177,7 +1177,8 @@ async fn childless_runtime_page_materializes_its_identity_file() {
         std::sync::Arc::new(holon_api::SystemClock),
     );
 
-    // The reactive per-block writeback fires with the page as the upserted block.
+    // The reactive per-block writeback fires with the page as the upserted
+    // block.
     controller
         .seed_holder_from_authority(&page_id)
         .await
@@ -1348,9 +1349,9 @@ async fn user_edit_materializes_virtual_seed_doc_copy_on_write() {
     // 2) Boot phase is over.
     h.controller.finish_boot_seeding();
 
-    // 3) RACE-FREE: a late boot-seed delta arriving after `boot_seeding` flipped
-    //    still renders == pristine, so it is NOT mistaken for a user edit — the doc
-    //    stays virtual (no file).
+    // 3) RACE-FREE: a late boot-seed delta arriving after `boot_seeding`
+    //    flipped still renders == pristine, so it is NOT mistaken for a user
+    //    edit — the doc stays virtual (no file).
     h.controller
         .seed_holder_from_authority(&h.doc.id)
         .await
@@ -1367,8 +1368,9 @@ async fn user_edit_materializes_virtual_seed_doc_copy_on_write() {
         h.path.display()
     );
 
-    // 4) USER EDIT: a real edit routed to the seed doc diverges from the pristine
-    //    baseline → copy-on-write materializes the file with the user's content.
+    // 4) USER EDIT: a real edit routed to the seed doc diverges from the
+    //    pristine baseline → copy-on-write materializes the file with the
+    //    user's content.
     let mut b2_edited = h.reader.blocks.lock().unwrap()[1].clone();
     b2_edited.content = "Layout B EDITED BY USER".to_string();
     h.reader.set_block(b2_edited.clone());
@@ -1390,10 +1392,10 @@ async fn user_edit_materializes_virtual_seed_doc_copy_on_write() {
         "the materialized file must carry the user's edit; got:\n{materialized}"
     );
 
-    // 5) FILE WINS (at this layer): the file now exists and is a normal tracked doc
-    //    — a subsequent identical edit keeps it on disk (no re-virtualizing, no
-    //    clobber). Its presence is the `default_org_exists` marker the seed
-    //    boundary reads to suppress re-seeding.
+    // 5) FILE WINS (at this layer): the file now exists and is a normal tracked
+    //    doc — a subsequent identical edit keeps it on disk (no
+    //    re-virtualizing, no clobber). Its presence is the `default_org_exists`
+    //    marker the seed boundary reads to suppress re-seeding.
     h.controller
         .seed_holder_from_authority(&h.doc.id)
         .await

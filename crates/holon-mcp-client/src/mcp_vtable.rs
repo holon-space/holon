@@ -708,7 +708,8 @@ impl McpForeignDataWrapper {
         let fetch_mode = if let Some(ref tool) = vtable_config.search_tool {
             // Tool-mode FK enumerations: one entry per filter_mapping column
             // that declares `enumerate_from`. The map is keyed by the owning
-            // tool-param name (matches the params dict built in fetch_via_tool).
+            // tool-param name (matches the params dict built in
+            // fetch_via_tool).
             let enumerations: HashMap<String, ResolvedEnumeration> = vtable_config
                 .filter_mapping
                 .values()
@@ -1599,8 +1600,8 @@ impl ForeignCursor for McpCursor {
             }
         };
 
-        // Convert JSON records to rows of Turso Values, aligned with schema column
-        // order. Per-column ColumnConfig (if any) drives `source_path`
+        // Convert JSON records to rows of Turso Values, aligned with schema
+        // column order. Per-column ColumnConfig (if any) drives `source_path`
         // resolution and optional JSON encoding for non-scalar values. Missing
         // fields → NULL.
         self.rows = records
@@ -1763,9 +1764,10 @@ fn run_enumeration(
                             Value::Numeric(turso_core::Numeric::Integer(i)) => i.to_string(),
                             Value::Numeric(turso_core::Numeric::Float(f)) => format!("{}", *f),
                             Value::Null => {
-                                // A NULL FK column for an FK enumeration is a data error,
-                                // not a fan-out target. Fail loud rather than silently
-                                // calling the tool with a missing param.
+                                // A NULL FK column for an FK enumeration is a
+                                // data error, not a fan-out target. Fail loud
+                                // rather than silently calling the tool with a
+                                // missing param.
                                 return Err(LimboError::ExtensionError(format!(
                                     "Enumeration '{}' produced NULL for column '{}' (tool param \
                                      '{}') — refusing to fan out with missing param",
@@ -2405,7 +2407,8 @@ fields:
             limit: None,
         };
         let r = ResolvedEnumeration::from_enumerate_from(&ef, "ignored", "gh_", "id");
-        // HashMap iteration order is nondeterministic, so check both possibilities.
+        // HashMap iteration order is nondeterministic, so check both
+        // possibilities.
         assert!(
             r.enumerate_sql == "SELECT owner, name FROM gh_repository"
                 || r.enumerate_sql == "SELECT name, owner FROM gh_repository",
@@ -2448,7 +2451,8 @@ filter_mapping:
     #[test]
     fn paired_enumeration_marks_both_params_non_required() {
         // Even with `required: true` on the YAML, paired-bound params must
-        // be non-required at the KeyColumn level — the enumeration supplies them.
+        // be non-required at the KeyColumn level — the enumeration supplies
+        // them.
         let yaml = r#"
 search_tool: list_issues
 extract_path: issues

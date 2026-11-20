@@ -109,7 +109,8 @@ fn turso_ivm_index_points_to_nonexistent_row() {
         );
 
         // This triggers the IVM cascade: UPDATE on block table → IVM recomputes
-        // blocks_with_paths (recursive CTE), events_view_block, watch_view_* matviews
+        // blocks_with_paths (recursive CTE), events_view_block, watch_view_*
+        // matviews
         let mut params = HashMap::new();
         params.insert(
             "id".to_string(),

@@ -343,7 +343,8 @@ where
                 // ALLOW(entity_uri_from_raw): id primary-key field from SQL row
                 Some(holon_api::Value::String(s)) => Some(holon_api::EntityUri::from_raw(s)),
                 Some(holon_api::Value::Integer(n)) => {
-                    // ALLOW(entity_uri_from_raw): id primary-key field from SQL row
+                    // ALLOW(entity_uri_from_raw): id primary-key field from SQL
+                    // row
                     Some(holon_api::EntityUri::from_raw(&n.to_string()))
                 }
                 _ => None,
@@ -387,10 +388,10 @@ where
             .expect("schema must have a primary_key field");
 
         // Spawn the ingestion task on the current runtime
-        // IMPORTANT: This must be called from an async context on a runtime that stays
-        // alive If called from a blocking thread with a temporary runtime, the
-        // task will be dropped when that runtime is dropped. The caller should
-        // ensure this is called from a persistent runtime.
+        // IMPORTANT: This must be called from an async context on a runtime
+        // that stays alive If called from a blocking thread with a temporary
+        // runtime, the task will be dropped when that runtime is dropped. The
+        // caller should ensure this is called from a persistent runtime.
         tokio::spawn(async move {
             let mut rx = rx;
             tracing::info!(
@@ -557,7 +558,8 @@ where
                             "change_count" = change_count,
                             "has_sync_token" = sync_token.is_some(),
                         );
-                        // Process all changes AND sync token in a single atomic transaction
+                        // Process all changes AND sync token in a single atomic
+                        // transaction
                         let applied = Self::apply_batch_to_cache_with_token(
                             &db_handle,
                             &type_def,
@@ -714,9 +716,9 @@ where
         }
     }
 
-    // Inner implementation of batch application with sync token (called by retry
-    // wrapper) Uses the database actor for batch transactions to ensure CDC and
-    // serialization
+    // Inner implementation of batch application with sync token (called by
+    // retry wrapper) Uses the database actor for batch transactions to ensure
+    // CDC and serialization
     #[tracing::instrument(
         name = "atomic_transaction",
         skip(db_handle, changes, sync_token),
@@ -777,9 +779,10 @@ where
         let quoted_columns = columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
 
         // Created events use INSERT OR IGNORE: if a row with the same id OR any
-        // other UNIQUE constraint (e.g., parent_id+name for documents) already exists,
-        // the insert is silently skipped. This handles the race where a document
-        // block is re-created with a new UUID while the old one still exists.
+        // other UNIQUE constraint (e.g., parent_id+name for documents) already
+        // exists, the insert is silently skipped. This handles the race where a
+        // document block is re-created with a new UUID while the old one still
+        // exists.
         let insert_ignore_sql = format!(
             "INSERT OR IGNORE INTO {} ({}) VALUES ({})",
             write_table(table_name),
@@ -1107,9 +1110,9 @@ where
         let type_def = self.type_def.clone();
         let table_name = type_def.name.clone();
 
-        // Subscribe to CDC broadcast and bridge to mpsc to fit the Stream trait.
-        // ALLOW(compatibility): the trait the bridge targets is named Stream; this
-        // is plain English usage, not a back-compat shim.
+        // Subscribe to CDC broadcast and bridge to mpsc to fit the Stream
+        // trait. ALLOW(compatibility): the trait the bridge targets is named
+        // Stream; this is plain English usage, not a back-compat shim.
         let mut broadcast_rx = self.db_handle.subscribe_row_changes();
         let (tx, rx) = tokio::sync::mpsc::channel(1024);
         tokio::spawn(async move {
@@ -1132,8 +1135,8 @@ where
         });
         let row_change_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-        // TODO: Option A - Filter stream for this table and convert RowChange to
-        // Change<StorageEntity> This is inefficient when multiple
+        // TODO: Option A - Filter stream for this table and convert RowChange
+        // to Change<StorageEntity> This is inefficient when multiple
         // QueryableCache instances share the same backend. Consider optimizing
         // to Option B (table-specific subscriptions) in the future.
         use holon_api::BatchWithMetadata;
@@ -1144,9 +1147,9 @@ where
 
         let table_name_clone = table_name.clone();
 
-        // Filter batches by relation_name in metadata, then flatten to individual
-        // RowChanges Use futures::stream::StreamExt for flat_map which has
-        // better trait implementations
+        // Filter batches by relation_name in metadata, then flatten to
+        // individual RowChanges Use futures::stream::StreamExt for flat_map
+        // which has better trait implementations
         let filtered_stream =
             row_change_stream.filter_map(move |batch: BatchWithMetadata<RowChange>| {
                 // Filter by relation_name in metadata
@@ -1203,11 +1206,13 @@ where
                     deleted_count
                 );
 
-                // Convert batch items into individual RowChanges and process them
+                // Convert batch items into individual RowChanges and process
+                // them
                 let mut results = Vec::new();
                 for row_change in batch.inner.items {
                     // Convert RowChange to Change<StorageEntity>
-                    // StorageEntity is HashMap<String, Value>, so we can use data directly
+                    // StorageEntity is HashMap<String, Value>, so we can use
+                    // data directly
                     let result = match row_change.change {
                         ChangeData::Created { data, origin } => {
                             Change::Created {
@@ -1233,9 +1238,10 @@ where
                             }
                         }
                         ChangeData::Deleted { id: _rowid, origin } => {
-                            // TODO: For deletes, we need the entity ID, not ROWID
-                            // This is a limitation - we may need to track entity_id separately
-                            // For now, use a placeholder - proper fix requires enhancing CDC system
+                            // TODO: For deletes, we need the entity ID, not
+                            // ROWID This is a limitation - we may need to track
+                            // entity_id separately For now, use a placeholder -
+                            // proper fix requires enhancing CDC system
                             Change::Deleted {
                                 id: format!("rowid_{}", _rowid), // Placeholder - not ideal
                                 origin,
@@ -1658,9 +1664,9 @@ mod tests {
         cache.upsert_to_cache(&task1).await.unwrap();
         cache.upsert_to_cache(&task2).await.unwrap();
 
-        // The old `Queryable::query(Predicate<T>)` path is gone; the SQL filter is
-        // now produced by `Computation::compile_sql` (disclosed) and fed to the
-        // actually-used `query_raw`.
+        // The old `Queryable::query(Predicate<T>)` path is gone; the SQL filter
+        // is now produced by `Computation::compile_sql` (disclosed) and fed to
+        // the actually-used `query_raw`.
         let frag = Computation::Predicate(Predicate::Gte {
             field: "priority".to_string(),
             value: Value::Integer(5),

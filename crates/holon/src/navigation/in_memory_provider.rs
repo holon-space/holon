@@ -185,9 +185,9 @@ impl OperationProvider for InMemoryNavigationProvider {
             // A Loro-only session has no multi-open set, so the nearest true
             // reading of "one more blank tab" is the region's home view.
             Ok(NavigationOp::NewTab) => self.focus(&region_key, None),
-            // Pin soft-close is Turso-only (it edits `navigation_history` rows);
-            // a Loro-only session has no such table, matching the pre-enum
-            // behavior of rejecting `close` here.
+            // Pin soft-close is Turso-only (it edits `navigation_history`
+            // rows); a Loro-only session has no such table, matching the
+            // pre-enum behavior of rejecting `close` here.
             Ok(NavigationOp::Close) => Err(format!(
                 "InMemoryNavigationProvider: '{}' is unsupported in Loro-only sessions",
                 NavigationOp::Close

@@ -282,7 +282,8 @@ fn case_strategy() -> impl Strategy<Value = Case> {
             }),
         ];
         (
-            // Weighted so that most cases start from a concurrent root on every peer.
+            // Weighted so that most cases start from a concurrent root on every
+            // peer.
             prop::collection::vec(prop::bool::weighted(0.8), peers),
             prop::collection::vec(op, 0..12),
         )
@@ -453,7 +454,8 @@ fn record_pairing(owner: &Peer, joiner: &Peer) -> Result<()> {
 /// production dialers do, and comes back as the dial's error.
 async fn sync(peers: &[Peer], from: usize, to: usize, cap: &CapabilitySecret) -> Result<()> {
     let alpn = make_alpn(ALPN_PREFIX, ROOT_CONTAINER_ID);
-    // A reference clone of the same doc, as the transport needs an owned handle.
+    // A reference clone of the same doc, as the transport needs an owned
+    // handle.
     let doc = peers[to].doc.with_read(|d| Ok(Arc::new(d.clone())))?;
     let versions = peers[to].store.peer_versions()?;
     let dialed = tokio::time::timeout(

@@ -122,11 +122,12 @@ const _: fn() = || {
 
 fn doc_org_files() -> Vec<(&'static str, &'static str)> {
     vec![
-        // doc0 carries a **stable-id** Text child block (`block:ref-block-0`) under
-        // its page (a `:PROPERTIES: :ID:` drawer pins the id, so it survives a boot
-        // re-parse deterministically). It is the pinnable `ContentType::Text`,
-        // non-page descendant of Main the `PinBlock` path needs — page docs alone
-        // yield `NoPinCandidates`. Verified by `headless_pin_block_right_sidebar_probe`.
+        // doc0 carries a **stable-id** Text child block (`block:ref-block-0`)
+        // under its page (a `:PROPERTIES: :ID:` drawer pins the id, so it
+        // survives a boot re-parse deterministically). It is the pinnable
+        // `ContentType::Text`, non-page descendant of Main the `PinBlock` path
+        // needs — page docs alone yield `NoPinCandidates`. Verified by
+        // `headless_pin_block_right_sidebar_probe`.
         (
             "doc0.org",
             "#+ID: ref-doc-0\n* Heading zero\n:PROPERTIES:\n:ID: ref-block-0\n:END:\nFirst \
@@ -196,16 +197,16 @@ fn navigation_ref() -> ReferenceState {
     let journals = EntityUri::parse(JOURNALS_ID).expect("valid journals id");
     let mut state = build_started_ref(&BTreeSet::new());
     navigate(journals.clone()).apply_to_ref(&mut state);
-    // Trim the back-stack to journals-only at cursor 0, MATCHING the headless SUT's
-    // boot history. `build_started_ref` seeds a `c1` focus (for editor
+    // Trim the back-stack to journals-only at cursor 0, MATCHING the headless
+    // SUT's boot history. `build_started_ref` seeds a `c1` focus (for editor
     // preconditions unused by this nav slice), so without this the ref carries
     // a `[None, c1, journals]` history (cursor 2) — a deeper back-stack than
     // the SUT's journals-only boot. A `NavigateBack` would then walk the ref
     // through `c1`/`None` entries the SUT never had, diverging
     // `current_focus`/`focus_roots` at the boundary. With the back-stack
     // trimmed, `can_go_back` is false at the seed (so back-nav only fires after
-    // a `NavigateFocus` builds real history) and every back lands on a focus the
-    // SUT also visited.
+    // a `NavigateFocus` builds real history) and every back lands on a focus
+    // the SUT also visited.
     let history = state
         .ui
         .tab
@@ -214,8 +215,8 @@ fn navigation_ref() -> ReferenceState {
         .or_default();
     history.entries = vec![Some(journals)];
     history.cursor = 0;
-    // Align the history-id counter with the SUT boot too (same `c1` root cause):
-    // the headless session assigns journals `navigation_history.id = 1`
+    // Align the history-id counter with the SUT boot too (same `c1` root
+    // cause): the headless session assigns journals `navigation_history.id = 1`
     // (AUTOINCREMENT) at boot, so the next pin gets id 2. `build_started_ref`'s
     // `c1` seed bumped the ref's `next_history_id` an extra time (journals got
     // id 2, next is 3) — a lockstep `PinBlock` would then predict id 3 while
@@ -331,11 +332,12 @@ impl ReferenceStateMachine for NavMachine {
     }
 
     fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
-        // `UnpinBlock` is state-dependent: its `history_id` is drawn from the pins the
-        // ref currently holds (so the id is always one the SUT also assigned — the
-        // risk-C alignment). When no sidebar pin is open it is simply not offered.
-        // `PinBlock` is likewise state-dependent: it shift+clicks a bullet, so it
-        // is offered only while Main renders one (see `pinnable_is_rendered`).
+        // `UnpinBlock` is state-dependent: its `history_id` is drawn from the
+        // pins the ref currently holds (so the id is always one the SUT also
+        // assigned — the risk-C alignment). When no sidebar pin is open it is
+        // simply not offered. `PinBlock` is likewise state-dependent: it
+        // shift+clicks a bullet, so it is offered only while Main renders one
+        // (see `pinnable_is_rendered`).
         let base = if pinnable_is_rendered(state) {
             prop_oneof![
                 3 => aggregate(),
@@ -366,11 +368,11 @@ impl ReferenceStateMachine for NavMachine {
         // (`pinnable_is_rendered`) — its own `block_state` precondition is
         // intentionally not gated here, see `aggregate`.
         // `NavigateBack`/`NavigateForward` are gated
-        // by their own `can_go_back`/`can_go_forward` — the ref's trimmed back-stack +
-        // idempotent `go_home` (see `navigation_ref` and `navigate_home`) match the
-        // SUT. `UnpinBlock` is shrink-gated: the `history_id` must STILL be an
-        // open pin (a shrink that drops the creating `PinBlock` invalidates
-        // it).
+        // by their own `can_go_back`/`can_go_forward` — the ref's trimmed
+        // back-stack + idempotent `go_home` (see `navigation_ref` and
+        // `navigate_home`) match the SUT. `UnpinBlock` is shrink-gated: the
+        // `history_id` must STILL be an open pin (a shrink that drops the
+        // creating `PinBlock` invalidates it).
         match transition {
             NavTransition::NavigateFocus(_) | NavTransition::NavigateHome(_) => true,
             NavTransition::PinBlock(_) => pinnable_is_rendered(state),

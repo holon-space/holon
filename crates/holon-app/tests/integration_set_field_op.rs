@@ -376,7 +376,8 @@ fn dispatching_begin_oauth_returns_before_the_flow_finishes() {
         )
         .await;
         // `begin_oauth`'s guard reads the mirror, which is also what renders
-        // the button — so the rung dispatches from the state a click comes from.
+        // the button — so the rung dispatches from the state a click comes
+        // from.
         project_mirror(&engine, vm.clone()).await;
         assert_eq!(
             mirror_column(&engine, "gcal", "config_status").await,

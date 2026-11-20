@@ -256,9 +256,10 @@ impl InvEmbeddedPageCollapsedLazy {
             }
 
             if ref_expanded {
-                // Expanded: descendants are allowed (the lazy live_query fired).
-                // Settle-tolerant — descendants may or may not have appeared yet.
-                // Consistency check: widget toggle should also report expanded.
+                // Expanded: descendants are allowed (the lazy live_query
+                // fired). Settle-tolerant — descendants may or may not have
+                // appeared yet. Consistency check: widget toggle should also
+                // report expanded.
                 if !toggle_expanded {
                     return InvariantResult::Fail(format!(
                         "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is expanded \
@@ -267,8 +268,8 @@ impl InvEmbeddedPageCollapsedLazy {
                     ));
                 }
             } else {
-                // Collapsed: widget toggle must report collapsed AND no descendants
-                // may appear in the panel.
+                // Collapsed: widget toggle must report collapsed AND no
+                // descendants may appear in the panel.
                 if toggle_expanded {
                     return InvariantResult::Fail(format!(
                         "[inv-embedded-page-collapsed-lazy] embedded page {page_str} is collapsed \

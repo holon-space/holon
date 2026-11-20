@@ -13,8 +13,8 @@ use holon_loro::loro_backend::LoroBackend;
 fn recorded_origins(doc: &LoroDocument) -> (Arc<Mutex<Vec<String>>>, loro::Subscription) {
     let origins: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let seen = origins.clone();
-    // ALLOW(loro_doc_escape): subscription registration; the callback never reads
-    // the doc.
+    // ALLOW(loro_doc_escape): subscription registration; the callback never
+    // reads the doc.
     let sub = doc.doc().subscribe_root(Arc::new(move |event| {
         seen.lock().unwrap().push(event.origin.to_string());
     }));

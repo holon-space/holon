@@ -283,8 +283,8 @@ pub async fn spawn_derived_field_reconciler(
         }
     }
 
-    // Drainer task: CDC stream → SidecarEvent → channel. No DB work here, so the
-    // broadcast receiver never lags behind slow writes.
+    // Drainer task: CDC stream → SidecarEvent → channel. No DB work here, so
+    // the broadcast receiver never lags behind slow writes.
     let mut stream = watch.stream;
     let drainer = tokio::spawn(async move {
         while let Some(batch) = stream.next().await {

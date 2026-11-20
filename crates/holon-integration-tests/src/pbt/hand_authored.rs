@@ -348,8 +348,8 @@ pub fn replay<M: LockedReplay>(
     locks: &Locks,
     boot: Boot,
 ) {
-    // The subscriber that records the spans below exists only once the collector
-    // does.
+    // The subscriber that records the spans below exists only once the
+    // collector does.
     crate::test_tracing::SpanCollector::global();
     let scope = locks.scope();
     let case_span = tracing::info_span!("hand_authored_case", case, wiring);
@@ -527,8 +527,9 @@ pub fn load_replay_cases() -> Vec<ReplayCase> {
 
     let known: Vec<&str> = cases.iter().map(|c| c.case.name.as_str()).collect();
 
-    // Quarantine (skip) filter. Validated against ALL parsed cases up front so a
-    // typo in the skip list is a hard error, never a silent quarantine-nothing.
+    // Quarantine (skip) filter. Validated against ALL parsed cases up front so
+    // a typo in the skip list is a hard error, never a silent
+    // quarantine-nothing.
     let skip = skip_filter();
     for name in &skip {
         assert!(

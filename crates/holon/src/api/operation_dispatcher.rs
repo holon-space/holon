@@ -1632,10 +1632,11 @@ impl OperationDispatcher {
                     op_name
                 );
 
-                // If no direct match, try inferring entity type from the `id` param's
-                // URI scheme. Rows from matviews/views carry the view name as entity_name
-                // (e.g. "focus_roots") but the actual entity provider is registered under
-                // the scheme (e.g. "block" from "block:xxx").
+                // If no direct match, try inferring entity type from the `id`
+                // param's URI scheme. Rows from matviews/views carry the view
+                // name as entity_name (e.g. "focus_roots") but the actual
+                // entity provider is registered under the scheme (e.g. "block"
+                // from "block:xxx").
                 let resolved_entity: String;
                 let resolved_entity_name: &str = if matching_ops.is_empty()
                     && let Some(scheme) =
@@ -1653,8 +1654,8 @@ impl OperationDispatcher {
                 };
                 tracing::Span::current().record("operation.resolved_entity", resolved_entity_name);
 
-                // The shape gate's admission key is the op AS DISPATCHED, before
-                // this dispatcher rewrites any param below.
+                // The shape gate's admission key is the op AS DISPATCHED,
+                // before this dispatcher rewrites any param below.
                 let judged_key = judged_key(op_name, &params);
 
                 // THE entity-reference seam: every id this operation names is
@@ -1716,34 +1717,37 @@ impl OperationDispatcher {
                     return Err(format!("intent boundary: {refusal}").into());
                 }
 
-                // Adopt inline org markup a human or agent JUST AUTHORED — the one
-                // boundary where `[[Page]]` / `*bold*` in `content` becomes a stripped
-                // label plus a mark set, so UI-authored text reaches storage in the
-                // same shape ingest produces (marks populated, `block_links` junction
-                // derived, backlinks live).
+                // Adopt inline org markup a human or agent JUST AUTHORED — the
+                // one boundary where `[[Page]]` / `*bold*` in `content` becomes
+                // a stripped label plus a mark set, so UI-authored text reaches
+                // storage in the same shape ingest produces (marks populated,
+                // `block_links` junction derived, backlinks live).
                 //
-                // Both write shapes are covered because a user reaches storage through
-                // both: `set_field("content")` when editing an existing block, and
-                // `create` when the creation slot commits a freshly typed line.
+                // Both write shapes are covered because a user reaches storage
+                // through both: `set_field("content")` when editing an existing
+                // block, and `create` when the creation slot commits a freshly
+                // typed line.
                 //
-                // Not reached by ingest at all: org ingest writes through the provider
-                // seam directly (`SqlBlockOperations::create_in_tree` →
-                // `execute_operation_with_origin`), and `split_block` goes through
-                // `BlockOperations` — neither passes this dispatcher.
+                // Not reached by ingest at all: org ingest writes through the
+                // provider seam directly (`SqlBlockOperations::create_in_tree`
+                // → `execute_operation_with_origin`), and `split_block` goes
+                // through `BlockOperations` — neither passes this dispatcher.
                 //
-                // The `marks` write is DERIVED and is decided further down, once the
-                // CRUD-authority provider is resolved, by comparing the extracted marks
-                // against the block's currently-stored marks (see
-                // `content_marks_followup`). That comparison — not this extraction — is
-                // what keeps the follow-up from firing spuriously.
+                // The `marks` write is DERIVED and is decided further down,
+                // once the CRUD-authority provider is resolved, by comparing
+                // the extracted marks against the block's currently-stored
+                // marks (see `content_marks_followup`). That comparison — not
+                // this extraction — is what keeps the follow-up from firing
+                // spuriously.
                 //
-                // This EDIT arm is NOT gated on `input`, unlike the `create` arm
-                // below, and undo replay is safe from it by SHAPE rather than by
-                // origin: a content inverse carries the prior text and marks as one
-                // `{text, marks}` Object (#22), and the `as_string()` match below
-                // takes String values only, so a replayed inverse never enters this
-                // arm and its restored bytes are never re-parsed. The rich write
-                // restores both columns itself; nothing here has to clear marks for
+                // This EDIT arm is NOT gated on `input`, unlike the `create`
+                // arm below, and undo replay is safe from it by SHAPE rather
+                // than by origin: a content inverse carries the prior text and
+                // marks as one `{text, marks}` Object (#22), and the
+                // `as_string()` match below takes String values only, so a
+                // replayed inverse never enters this arm and its restored bytes
+                // are never re-parsed. The rich write restores both columns
+                // itself; nothing here has to clear marks for
                 // it (`undo_link_add_restores_prior_pair`,
                 // `undo_of_a_content_edit_restores_raw_previous_bytes`).
                 let content_edit: Option<(String, String, Vec<holon_api::MarkSpan>)> =
@@ -1778,20 +1782,23 @@ impl OperationDispatcher {
                         None
                     };
 
-                // The create half of the same boundary: a block born from the creation
-                // slot carries the typed line raw, so without this a typed `[[Page]]`
-                // was stored verbatim with NULL marks and no junction row, and only the
-                // NEXT boot's file re-ingest adopted it — rewriting the user's stored
-                // text with no action of theirs.
+                // The create half of the same boundary: a block born from the
+                // creation slot carries the typed line raw, so without this a
+                // typed `[[Page]]` was stored verbatim with NULL marks and no
+                // junction row, and only the NEXT boot's file re-ingest adopted
+                // it — rewriting the user's stored text with no action of
+                // theirs.
                 //
-                // A caller that supplies its own `marks` already parsed and is left
-                // alone (`instantiate_template` re-enters the engine carrying the
-                // definition's spans). Extraction yielding NO marks likewise changes
-                // nothing — which keeps a link with no representable label (`[[   ]]`)
-                // as the author's bytes instead of erasing them, the same
-                // empty-adoption rule `canonicalize_adopted_links` holds on the render
-                // side. Marks ride along in the create params rather than a follow-up
-                // write: the junction is derived from them in the provider's create arm.
+                // A caller that supplies its own `marks` already parsed and is
+                // left alone (`instantiate_template` re-enters the engine
+                // carrying the definition's spans). Extraction yielding NO
+                // marks likewise changes nothing — which keeps a link with no
+                // representable label (`[[   ]]`) as the author's bytes instead
+                // of erasing them, the same empty-adoption rule
+                // `canonicalize_adopted_links` holds on the render side. Marks
+                // ride along in the create params rather than a follow-up
+                // write: the junction is derived from them in the provider's
+                // create arm.
                 if input == AuthoredInput::Live
                     && resolved_entity_name == "block"
                     && op_name == "create"
@@ -1861,8 +1868,8 @@ impl OperationDispatcher {
                     })
                     .ok_or_else(|| format!("No provider registered for entity: {}", entity_name))?;
 
-                // ADR 0028 C3 — THE boundary/authz seam, before the provider runs
-                // and before any I/O.
+                // ADR 0028 C3 — THE boundary/authz seam, before the provider
+                // runs and before any I/O.
                 self.enforce_boundary(&available_ops, resolved_entity_name, op_name, &params)?;
 
                 // ADR 0031 Increment 3 — THE declared-guard seam, current-state
@@ -1902,32 +1909,36 @@ impl OperationDispatcher {
 
                 // Links increment 3 — decide the DERIVED `marks` write for a
                 // content edit, BEFORE the content write lands (so we read the
-                // block's PRIOR stored state, not the value we are about to write).
+                // block's PRIOR stored state, not the value we are about to
+                // write).
                 //
-                // Contract (marks = truth, per links-ruling): fire the follow-up
-                // EXACTLY when the marks extracted from the new content differ from
-                // the block's currently-stored marks. It must NOT fire when the
-                // content commit carried no mark-relevant change, and must NEVER
-                // null a block's marks merely because the editor re-committed the
-                // already-stripped label without re-supplying markup.
+                // Contract (marks = truth, per links-ruling): fire the
+                // follow-up EXACTLY when the marks extracted from the new
+                // content differ from the block's currently-stored marks. It
+                // must NOT fire when the content commit carried no
+                // mark-relevant change, and must NEVER null a block's marks
+                // merely because the editor re-committed the already-stripped
+                // label without re-supplying markup.
                 //
                 // The over-dispatch bug (BugFunnel #66) fired a `marks = Null`
-                // follow-up on EVERY block `set_field("content")`. On the editor's
-                // blur/refocus re-commit — which sends back the stripped label with
-                // NO `[[…]]` syntax (SqlOnly hydrates `content` from the matview) —
-                // that nulled the real marks, replacing a live `[[link]]` with plain
-                // text (the LIVE bug). It also spuriously doubled the dispatch count
-                // on plain-text edits, inflating the undo replay tally.
+                // follow-up on EVERY block `set_field("content")`. On the
+                // editor's blur/refocus re-commit — which sends back the
+                // stripped label with NO `[[…]]` syntax (SqlOnly hydrates
+                // `content` from the matview) — that nulled the real marks,
+                // replacing a live `[[link]]` with plain text (the LIVE bug).
+                // It also spuriously doubled the dispatch count on plain-text
+                // edits, inflating the undo replay tally.
                 //
-                // - Readable provider (SQL or Loro CRUD authority): compare against ground
-                //   truth. Skip when the mark set is unchanged, and skip a null-producing
-                //   re-commit whose stripped label already equals the stored content (the blur
-                //   path). Otherwise dispatch — including a legitimate `marks = Null` when an
-                //   edit genuinely REMOVED the link (new label differs from the stored
-                //   content).
-                // - Unreadable provider (test stubs): fail safe — dispatch only when the new
-                //   content actually yields marks (a link was typed); never null on an unknown
-                //   prior state.
+                // - Readable provider (SQL or Loro CRUD authority): compare
+                //   against ground truth. Skip when the mark set is unchanged,
+                //   and skip a null-producing re-commit whose stripped label
+                //   already equals the stored content (the blur path).
+                //   Otherwise dispatch — including a legitimate `marks = Null`
+                //   when an edit genuinely REMOVED the link (new label differs
+                //   from the stored content).
+                // - Unreadable provider (test stubs): fail safe — dispatch only
+                //   when the new content actually yields marks (a link was
+                //   typed); never null on an unknown prior state.
                 let content_marks_followup: Option<(String, holon_api::Value)> =
                     if let Some((id, label, extracted)) = content_edit {
                         let marks_value = |marks: &[holon_api::MarkSpan]| {
@@ -1951,10 +1962,12 @@ impl OperationDispatcher {
                                         }
                                         _ => Vec::new(),
                                     };
-                                // Two independent skip-reasons (mark set unchanged; blur
-                                // re-commit with no marks and unchanged label) that both
-                                // resolve to `None` — kept separate, not merged, so each
-                                // guard stays legible against the comment above.
+                                // Two independent skip-reasons (mark set
+                                // unchanged; blur re-commit with no marks and
+                                // unchanged label) that both resolve to `None`
+                                // — kept separate, not merged, so each
+                                // guard stays legible against the comment
+                                // above.
                                 #[allow(clippy::if_same_then_else)]
                                 if extracted == stored_marks {
                                     None
@@ -1984,15 +1997,16 @@ impl OperationDispatcher {
                     .execute_operation(&resolved_entity_name_typed, op_name, params)
                     .await?;
 
-                // Links increment 3 — the marks write derived from a content edit.
-                // Routed straight through the same provider (not re-entering this
-                // dispatcher): marks are a DERIVED consequence of the content edit,
-                // so they must not spawn a second observer notification or a
-                // separate undo entry (one user edit = one undoable content step).
-                // In Loro mode this lands via `update_block_marked` (Peritext) and
-                // the outbound projector carries `marks` to SQL, deriving the
-                // junction in the `update` arm; in SqlOnly mode it hits
-                // `set_field("marks")` directly, deriving the junction there.
+                // Links increment 3 — the marks write derived from a content
+                // edit. Routed straight through the same provider (not
+                // re-entering this dispatcher): marks are a DERIVED consequence
+                // of the content edit, so they must not spawn a second observer
+                // notification or a separate undo entry (one user edit = one
+                // undoable content step). In Loro mode this lands via
+                // `update_block_marked` (Peritext) and the outbound projector
+                // carries `marks` to SQL, deriving the junction in the `update`
+                // arm; in SqlOnly mode it hits `set_field("marks")` directly,
+                // deriving the junction there.
                 if let Some((id, marks_value)) = content_marks_followup {
                     let mut marks_params = StorageEntity::new();
                     marks_params.insert("id".into(), holon_api::Value::String(id));
@@ -2057,7 +2071,8 @@ impl OperationDispatcher {
                     .await;
                 }
 
-                // Execute follow-up operations (e.g., editor_focus after split_block).
+                // Execute follow-up operations (e.g., editor_focus after
+                // split_block).
                 for follow_up in std::mem::take(&mut operation_result.follow_ups) {
                     let fu_entity = follow_up.entity_name.clone();
                     let fu_op = follow_up.op_name.clone();
@@ -2517,12 +2532,13 @@ impl OperationProvider for OperationDispatcher {
 
         // Registry-uniqueness invariant (fail-loud, debug/test builds): no two
         // providers may advertise the same (entity, op) EXCEPT the known,
-        // pre-existing structural-block-op overlap. The registry unions provider
-        // `operations()` WITHOUT dedup and dispatch is first-registered-wins, so
-        // a stray duplicate leaks a second identical slash-menu entry (BugFunnel
-        // N1 — 12 block CRUD ops listed twice in SqlOnly). This fix removes the
-        // N1 CRUD duplicate at its source (holon_core::OperationSubset in
-        // holon-app turso_seams); the assertion guards against it regressing.
+        // pre-existing structural-block-op overlap. The registry unions
+        // provider `operations()` WITHOUT dedup and dispatch is
+        // first-registered-wins, so a stray duplicate leaks a second identical
+        // slash-menu entry (BugFunnel N1 — 12 block CRUD ops listed twice in
+        // SqlOnly). This fix removes the N1 CRUD duplicate at its source
+        // (holon_core::OperationSubset in holon-app turso_seams); the assertion
+        // guards against it regressing.
         //
         // The STRUCTURAL block ops (indent/outdent/split/join/move…) are ALSO
         // double-advertised under Loro authority (SqlBlockOperations +
@@ -2570,9 +2586,9 @@ impl OperationProvider for OperationDispatcher {
                     return false;
                 }
 
-                // Special case: set_field is a generic operation that can update any field
-                // It only needs "id" from the query columns; "field" and "value" are runtime
-                // parameters
+                // Special case: set_field is a generic operation that can
+                // update any field It only needs "id" from the query columns;
+                // "field" and "value" are runtime parameters
                 if op.name == "set_field" {
                     // Only require "id" to be available
                     return op

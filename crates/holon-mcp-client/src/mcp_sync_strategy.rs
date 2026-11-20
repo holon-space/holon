@@ -478,14 +478,15 @@ pub fn match_uri_template(template: &str, uri: &str) -> Option<HashMap<String, S
                 // Find the next literal character(s) in the URI
 
                 if template_bytes[template_pos] == b'{' {
-                    // Next segment is also a param — shouldn't happen in practice,
-                    // but take a single path segment as the value
+                    // Next segment is also a param — shouldn't happen in
+                    // practice, but take a single path segment as the value
                     uri[uri_pos..]
                         .find('/')
                         .map(|i| uri_pos + i)
                         .unwrap_or(uri_bytes.len())
                 } else {
-                    // Find where the next literal segment starts in the template
+                    // Find where the next literal segment starts in the
+                    // template
                     let next_brace = template[template_pos..]
                         .find('{')
                         .map(|i| template_pos + i)

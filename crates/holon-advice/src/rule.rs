@@ -354,8 +354,8 @@ pub fn parse_advice_rule(yaml_content: &str) -> Result<AdviceRule, AdviceRulePar
         }
     })?;
     // Cross-field invariant (ADR 0023): the final display cap cannot exceed the
-    // retrieval width. Checked here, after per-field parse, because it spans two
-    // fields. When `n` is absent it defaults to `k`, so the invariant holds
+    // retrieval width. Checked here, after per-field parse, because it spans
+    // two fields. When `n` is absent it defaults to `k`, so the invariant holds
     // trivially.
     if let Some(n) = rule.n
         && rule.k.get() > n.get()

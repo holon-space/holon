@@ -344,8 +344,8 @@ impl Writer {
             // read back as an integer, turning a float into an int silently.
             TransitNode::Float(f) => self.scalar(format!("{ESC}d{}", f.get()), as_map_key),
             // A string whose first character is a Transit marker is escaped by
-            // doubling the marker, which is what the reader's `~~`/`~^`/`` ~` ``
-            // arm undoes.
+            // doubling the marker, which is what the reader's `~~`/`~^`/`` ~`
+            // `` arm undoes.
             TransitNode::Str(s) => {
                 let encoded = match s.chars().next() {
                     Some(ESC | SUB | RESERVED) => format!("{ESC}{s}"),
@@ -489,7 +489,8 @@ mod tests {
         );
         assert!(is_cacheable("~:kw", false));
 
-        // The plain key "hello" takes slot 0; the plain value "world" takes none.
+        // The plain key "hello" takes slot 0; the plain value "world" takes
+        // none.
         assert_eq!(
             dec(r#"["^ ","hello","world","^0","~i1"]"#),
             TransitNode::Map(vec![

@@ -315,7 +315,8 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     // Navigation 2: journals (no children — to mirror the seed=7 trace
-    // where ClickBlock(journals) produced inv-editable-text-has-draggable panic)
+    // where ClickBlock(journals) produced inv-editable-text-has-draggable
+    // panic)
     conn.execute(
         "INSERT INTO block (id, parent_id, content) VALUES ('journals', 'root', 'Journals')",
         (),

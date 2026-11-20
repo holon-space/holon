@@ -416,7 +416,8 @@ impl RestCallSurface {
                         self.safe_url(&url)
                     ))
                 })?;
-                // Wrap non-object bodies so a `sync.extract_path` can select them.
+                // Wrap non-object bodies so a `sync.extract_path` can select
+                // them.
                 match &call.result_key {
                     Some(key) => {
                         let mut obj = serde_json::Map::new();
@@ -434,8 +435,8 @@ impl RestCallSurface {
                         self.safe_url(&url)
                     ))
                 })?;
-                // A feed is inherently a collection; always wrap under the key so
-                // `sync.extract_path` can select it (default `entries`).
+                // A feed is inherently a collection; always wrap under the key
+                // so `sync.extract_path` can select it (default `entries`).
                 let key = call.result_key.as_deref().unwrap_or("entries");
                 let mut obj = serde_json::Map::new();
                 obj.insert(key.to_string(), serde_json::Value::Array(entries));
@@ -522,8 +523,8 @@ impl RestCallSurface {
                 } else {
                     provider.access_token().await?
                 };
-                // The bearer token lives only in this header — never in the URL,
-                // query, or any error string below.
+                // The bearer token lives only in this header — never in the
+                // URL, query, or any error string below.
                 req.header("Authorization", format!("Bearer {token}"))
             }
         };
@@ -1160,7 +1161,8 @@ mod tests {
         assert_eq!(e0["author"], "Ada");
         assert_eq!(e0["link"], "https://example.com/1");
         assert_eq!(e0["content"], "Body one");
-        // Second entry: no author/content — falls back to <summary>, link has no rel.
+        // Second entry: no author/content — falls back to <summary>, link has
+        // no rel.
         let e1 = &entries[1];
         assert_eq!(e1["content"], "Just a summary");
         assert_eq!(e1["link"], "https://example.com/2");

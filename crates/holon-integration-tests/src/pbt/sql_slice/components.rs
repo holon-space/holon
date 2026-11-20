@@ -341,11 +341,12 @@ impl CapProvider for SqlProjectionComponent {
         // one, so the check engages on whatever storage arm a draw wires
         // rather than silently deselecting.
         caps.insert(self.clone() as Arc<dyn crate::pbt::net_cap::SutDerivedNet>);
-        // Structural block-tree writes are NOT hand-rolled per component: they are
-        // the production `block` operations, so we register the reusable
+        // Structural block-tree writes are NOT hand-rolled per component: they
+        // are the production `block` operations, so we register the reusable
         // `OpDispatchWriter` over this component's `BackendEngine` (see
-        // `pbt::op_write_cap`). Any storage component holding an engine reuses the
-        // SAME `SutBlockTreeWrite` impl — no per-component forwarding boilerplate.
+        // `pbt::op_write_cap`). Any storage component holding an engine reuses
+        // the SAME `SutBlockTreeWrite` impl — no per-component forwarding
+        // boilerplate.
         caps.insert(Arc::new(crate::pbt::op_write_cap::OpDispatchWriter::new(
             self.engine.clone(),
         )) as Arc<dyn SutBlockTreeWrite>);

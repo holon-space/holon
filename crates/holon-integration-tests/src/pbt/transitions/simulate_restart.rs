@@ -50,8 +50,8 @@ impl<R: RefLifecycle + RefLayout> TransitionFactory<R> for SimulateRestart {
         // Turso-only: the re-ingest waits on the CDC accumulator via
         // `ctx.engine()`, so it needs the Turso wiring. (It does NOT reopen the
         // DB from disk — see the type-level doc comment; F9.) The no-Turso
-        // re-ingest story (rebuild the Loro container + re-ingest org) is out of
-        // scope for a1.
+        // re-ingest story (rebuild the Loro container + re-ingest org) is out
+        // of scope for a1.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {

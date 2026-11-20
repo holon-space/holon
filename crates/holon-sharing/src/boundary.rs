@@ -114,10 +114,10 @@ pub fn check_boundary(
         }
         BoundaryBehavior::PolicyEdit => BoundaryDecision::AllowPolicyEdit,
         BoundaryBehavior::IdentityOp => {
-            // Identity ops (rename/alias/merge) can silently move content across
-            // audiences via selector rebinding (review C3/H6). When they cross,
-            // they are crossing-shaped and enter the log; the widen bound is
-            // conservative (an identity rebind can only broaden).
+            // Identity ops (rename/alias/merge) can silently move content
+            // across audiences via selector rebinding (review C3/H6). When they
+            // cross, they are crossing-shaped and enter the log; the widen
+            // bound is conservative (an identity rebind can only broaden).
             if crosses {
                 BoundaryDecision::AllowCrossing {
                     widens_audience: true,

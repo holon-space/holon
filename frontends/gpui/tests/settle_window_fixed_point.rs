@@ -1340,8 +1340,8 @@ mod driver_hop {
                         }
                     ) =>
                 {
-                    // The hold stops every tokio task, so a late watcher is as legitimate a cause
-                    // as a late driver.
+                    // The hold stops every tokio task, so a late watcher is as
+                    // legitimate a cause as a late driver.
                     if t.owed.is_empty() {
                         Err(TestCaseError::fail(format!(
                             "{step}: the settle timed out while the tokio workers were held, yet \

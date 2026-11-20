@@ -72,7 +72,8 @@ async fn block_engine() -> Arc<BackendEngine> {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = tokio::runtime::Handle::current();
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread runtime.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread runtime.
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");
@@ -596,7 +597,8 @@ async fn assert_title_round_trips(origin_content: &str) {
         .expect("org render")
         .text;
 
-    // Lock the vehicle decision: the title rides the filename, NEVER `#+TITLE:`.
+    // Lock the vehicle decision: the title rides the filename, NEVER
+    // `#+TITLE:`.
     assert!(
         !rendered.contains("#+TITLE"),
         "page files carry the title in the FILENAME, not `#+TITLE:` (rendered: {rendered:?})"

@@ -171,8 +171,9 @@ impl InMemoryBlockStore {
 
     fn apply_create(&self, block: Block) {
         let mut store = self.blocks.write().unwrap();
-        // Find the document this block belongs to by checking if parent_id matches a
-        // doc key or if any existing block in a doc has this block's parent_id.
+        // Find the document this block belongs to by checking if parent_id
+        // matches a doc key or if any existing block in a doc has this block's
+        // parent_id.
         let doc_id = store
             .keys()
             .find(|k| {
@@ -397,7 +398,8 @@ fn block_from_params(params: &holon_api::StorageEntity) -> Block {
             Some(Value::Array(arr)) => Some(
                 arr.iter()
                     .map(|v| {
-                        // ALLOW(entity_uri_from_raw): edge params carry full URIs
+                        // ALLOW(entity_uri_from_raw): edge params carry full
+                        // URIs
                         EntityUri::from_raw(
                             v.as_string().expect("edge array element must be a string"),
                         )
@@ -558,7 +560,8 @@ fn simulate_sql_round_trip(
     for (key, value) in params.into_iter() {
         if key.as_ref() == "properties" {
             // Real provider merges; here we just take the param JSON as the
-            // existing-properties seed (params rarely contain a properties key).
+            // existing-properties seed (params rarely contain a properties
+            // key).
             continue;
         }
         if key.as_ref() == POSITION_AFTER_BLOCK_ID_PARAM
@@ -1298,8 +1301,8 @@ fn apply_text_mutation(org_text: &str, mutation: &TextMutation) -> Option<String
             }
             let hl = headlines.get(*headline_idx % headlines.len())?;
             let start = hl.line_idx;
-            // Find the end of this headline's section (next headline at same or higher
-            // level)
+            // Find the end of this headline's section (next headline at same or
+            // higher level)
             let end = headlines
                 .iter()
                 .find(|h| h.line_idx > start && h.level <= hl.level)
@@ -1978,7 +1981,8 @@ mod find_foreign_blocks_tests {
 
         let doc_uri = EntityUri::from_raw("block:doc-claude");
 
-        // All these blocks belong to doc:claude — none should be flagged as foreign
+        // All these blocks belong to doc:claude — none should be flagged as
+        // foreign
         let query_ids: Vec<EntityUri> = vec![
             EntityUri::from_raw("block:root"),
             EntityUri::from_raw("block:child-a"),
@@ -2919,7 +2923,8 @@ mod initial_scan_batched_barrier_tests {
             msg.contains("did not converge"),
             "expected a fail-loud convergence error, got: {msg}"
         );
-        // Even on failure the flag is cleared (take()), so no leak into runtime.
+        // Even on failure the flag is cleared (take()), so no leak into
+        // runtime.
         assert!(!controller.in_initial_scan());
     }
 
@@ -3160,7 +3165,8 @@ mod atomic_rename_tests {
         let moved = fx.root_dir.join("moved.org");
         tokio::fs::rename(&old, &moved).await.unwrap();
 
-        // Create(B) half, then a poll tick discovers A gone → on_file_deleted(A).
+        // Create(B) half, then a poll tick discovers A gone →
+        // on_file_deleted(A).
         let _ = fx.controller.on_file_changed(&moved).await.unwrap();
         fx.controller.poll_tracked_files().await.unwrap();
 
@@ -3437,8 +3443,8 @@ mod intermediate_ancestor_writeback_hole {
 
         // --- convert_block_to_page(M) EFFECT on the AUTHORITATIVE store ---
         // P_a bucket keeps A and M (M becomes a link to P_m, modeled as a plain
-        // block that stays put — the point is N and X LEAVE). P_m bucket gains a
-        // Page block, N (re-parented to P_m), and X (parent UNCHANGED = N).
+        // block that stays put — the point is N and X LEAVE). P_m bucket gains
+        // a Page block, N (re-parented to P_m), and X (parent UNCHANGED = N).
         let p_m = EntityUri::block("la-pm");
         let mut pm_page = Block::new_text(p_m.clone(), p_a.clone(), "Pm");
         pm_page.set_page(true);
@@ -3535,10 +3541,10 @@ mod intermediate_ancestor_writeback_hole {
             .await
             .unwrap();
 
-        // 1. The stale X edit — routed to the OLD document — drains. The gate skips it
-        //    (holder ≠ authority), so no write happens at all, which is a STRONGER
-        //    outcome than the old "render without X": the wrong file is never even
-        //    opened.
+        // 1. The stale X edit — routed to the OLD document — drains. The gate
+        //    skips it (holder ≠ authority), so no write happens at all, which
+        //    is a STRONGER outcome than the old "render without X": the wrong
+        //    file is never even opened.
         write_back(&mut fixture, &p_a, &x_edited)
             .await
             .expect("stale delta drain must succeed");
@@ -3553,8 +3559,9 @@ mod intermediate_ancestor_writeback_hole {
              omit X' would also satisfy a weaker contains-assertion."
         );
 
-        // 2. The retractions the re-home fans at the OLD document. After the last one
-        //    the holder agrees with the authority and the file is written exactly once.
+        // 2. The retractions the re-home fans at the OLD document. After the
+        //    last one the holder agrees with the authority and the file is
+        //    written exactly once.
         retract(&mut fixture, &p_a, &EntityUri::block("la-n"))
             .await
             .expect("retraction of N at the old doc");
@@ -3935,8 +3942,8 @@ mod intermediate_ancestor_writeback_hole {
             .await
             .expect_err("the ungrounded drop of X must veto and quarantine");
 
-        // 2. X comes back to the authority under P_a — the drop that vetoed is no
-        //    longer a drop at all, so the very next render is grounded.
+        // 2. X comes back to the authority under P_a — the drop that vetoed is
+        //    no longer a drop at all, so the very next render is grounded.
         let a = text_block("la-a", &p_a, "la-a-outer", 1, 0);
         let m = text_block("la-m", &a.id, "la-m-middle", 2, 0);
         let n = text_block("la-n", &m.id, "la-n-inner", 3, 0);

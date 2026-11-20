@@ -359,8 +359,9 @@ fn run_drain_test(sut: &ComposedSut<WideE2E>, test: DrainTest, delay_ms: u64) ->
                 }
                 Step::Wait { until } => {
                     // Not a tokio timer: the SUT's workers starve the runtime's
-                    // timers by up to ~200 ms, which would make the driver late.
-                    // `block_on` runs on no worker, so blocking it stalls nothing.
+                    // timers by up to ~200 ms, which would make the driver
+                    // late. `block_on` runs on no worker, so blocking it stalls
+                    // nothing.
                     std::thread::sleep(until.saturating_duration_since(now).min(DRAIN_POLL));
                 }
                 Step::Done => break,
@@ -891,9 +892,9 @@ fn latency_slo_rung_a_facade_clock_in_flight_does_not_alter_a_ui_sample() {
         facade.report(),
     );
 
-    // 2. SUPERSESSION (D2). The facade clock on the SAME block closed with its own
-    //    sample rather than being deleted as a supersession of the UI one. Exactly
-    //    one: the probe clock on the unrelated block never delivers.
+    // 2. SUPERSESSION (D2). The facade clock on the SAME block closed with its
+    //    own sample rather than being deleted as a supersession of the UI one.
+    //    Exactly one: the probe clock on the unrelated block never delivers.
     //
     //    Checked before the eligibility assertion below on purpose. Existence
     //    is the more basic fact — a sample that was silently deleted cannot be

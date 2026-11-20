@@ -186,9 +186,10 @@ impl SutBlockTreeWrite for OpDispatchWriter {
     }
 
     async fn apply_join_block(&self, id: &EntityUri) {
-        // `join_block(id, position)` merges into the previous sibling; the cap trait
-        // carries no position, so position 0 is a documented default. Fails loud via
-        // `execute` if the op is genuinely dispatched and unregistered.
+        // `join_block(id, position)` merges into the previous sibling; the cap
+        // trait carries no position, so position 0 is a documented default.
+        // Fails loud via `execute` if the op is genuinely dispatched and
+        // unregistered.
         let mut params = self.id_only(id);
         params.insert("position".into(), Value::Integer(0));
         self.execute("join_block", params).await;
@@ -199,10 +200,11 @@ impl SutBlockTreeWrite for OpDispatchWriter {
     }
 
     async fn apply_outdent(&self, id: &EntityUri) {
-        // The dispatch floor sees the ADR 0028 D1 page-boundary refusal RAW (its
-        // keystroke twin below sees the same refusal through the driver). It is a
-        // modelled no-op, not a failure — see `is_page_boundary_outdent_refusal`.
-        // Any OTHER dispatch error stays fail-loud.
+        // The dispatch floor sees the ADR 0028 D1 page-boundary refusal RAW
+        // (its keystroke twin below sees the same refusal through the driver).
+        // It is a modelled no-op, not a failure — see
+        // `is_page_boundary_outdent_refusal`. Any OTHER dispatch error stays
+        // fail-loud.
         if let Err(e) = self.try_execute("outdent", self.id_only(id)).await {
             let msg = format!("{e:#}");
             assert!(
@@ -355,15 +357,16 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
     async fn apply_split_block(&self, id: &EntityUri, position: usize) {
         let resolved = self.resolve(id);
         self.focus_editor(&resolved, "SplitBlock").await;
-        // `position` is a byte offset; each `right` advances one CHAR. Convert against
-        // the block's live `MutableText` content cell (the pre-split text the caret
-        // walks — the same source `editor_live_text` reads). Populated by rendering, so
-        // it is present for any rendered text block (unlike `displayed_text`'s router
-        // cache, which is only warm for router-touched blocks).
+        // `position` is a byte offset; each `right` advances one CHAR. Convert
+        // against the block's live `MutableText` content cell (the pre-split
+        // text the caret walks — the same source `editor_live_text` reads).
+        // Populated by rendering, so it is present for any rendered text block
+        // (unlike `displayed_text`'s router cache, which is only warm for
+        // router-touched blocks).
         let services: &dyn BuilderServices = self.reactive.as_ref();
-        // Poll for the content cell: a freshly-created target (e.g. split-of-a-split)
-        // may still be landing its Loro `content_raw`. Fail loud at the deadline rather
-        // than convert against an absent cell.
+        // Poll for the content cell: a freshly-created target (e.g.
+        // split-of-a-split) may still be landing its Loro `content_raw`. Fail
+        // loud at the deadline rather than convert against an absent cell.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let text = loop {
             match services.editable_text(&resolved, "content") {
@@ -384,11 +387,12 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
             text.is_char_boundary(position),
             "[SplitBlock/keystroke] position {position} is not a char boundary of {text:?}"
         );
-        // `position` is a CONTENT byte while each `right` advances one character
-        // of the editable SURFACE — vault syntax, which carries the task keyword
-        // and every inline-markup delimiter the content column does not. The
-        // driver owns that projection; a count taken on `text` (the content
-        // cell) aims at the wrong glyph the moment the block carries a mark.
+        // `position` is a CONTENT byte while each `right` advances one
+        // character of the editable SURFACE — vault syntax, which carries the
+        // task keyword and every inline-markup delimiter the content column
+        // does not. The driver owns that projection; a count taken on `text`
+        // (the content cell) aims at the wrong glyph the moment the block
+        // carries a mark.
         let right_presses = self
             .driver
             .surface_chars_before_content(&resolved, position)
@@ -397,7 +401,8 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
                     "[SplitBlock/keystroke] cannot place the caret for content byte {position} on                      {resolved}: {e}"
                 )
             });
-        // Caret to `position`, then Enter → `HeadlessEditorMirror` splits at the caret.
+        // Caret to `position`, then Enter → `HeadlessEditorMirror` splits at
+        // the caret.
         self.key("home", &[], "SplitBlock").await;
         for _ in 0..right_presses {
             self.key("right", &[], "SplitBlock").await;
@@ -407,9 +412,9 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
 
     async fn apply_join_block(&self, id: &EntityUri) {
         let resolved = self.resolve(id);
-        // Backspace at caret 0 → `join_block` (merge into previous sibling) in the
-        // `HeadlessEditorMirror`. Focus the block, home to pin the caret at 0,
-        // Backspace.
+        // Backspace at caret 0 → `join_block` (merge into previous sibling) in
+        // the `HeadlessEditorMirror`. Focus the block, home to pin the caret at
+        // 0, Backspace.
         self.focus_editor(&resolved, "JoinBlock").await;
         self.key("home", &[], "JoinBlock").await;
         self.key("backspace", &[], "JoinBlock").await;
@@ -430,16 +435,16 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
         self.key("tab", &["shift"], "Outdent").await;
     }
 
-    // `move_up`/`move_down` are block-reorder ops with NO editor-mirror keystroke
-    // (they move siblings, they don't edit text). Prod binds them to a key
-    // chord (Alt+Up / Alt+Down, `reactive.rs` `key_bindings`), so they ride the
-    // SAME chord-resolution path the GPUI page-level chord pump uses —
+    // `move_up`/`move_down` are block-reorder ops with NO editor-mirror
+    // keystroke (they move siblings, they don't edit text). Prod binds them to
+    // a key chord (Alt+Up / Alt+Down, `reactive.rs` `key_bindings`), so they
+    // ride the SAME chord-resolution path the GPUI page-level chord pump uses —
     // `send_key_chord` clicks-to-focus then dispatches the chord through
     // `bubble_input` → `ExecuteOperation`. This is the C-3 mechanism-3 rebind:
     // the driver (headless `ReactiveEngineDriver` in the base,
-    // window `GpuiUserDriver`/`SimUserDriver` in the overlay) resolves the chord
-    // itself, so BOTH rungs exercise prod's chord→intent binding — no op left
-    // on op dispatch.
+    // window `GpuiUserDriver`/`SimUserDriver` in the overlay) resolves the
+    // chord itself, so BOTH rungs exercise prod's chord→intent binding — no op
+    // left on op dispatch.
     async fn apply_move_up(&self, id: &EntityUri) {
         let resolved = self.resolve(id);
         self.send_block_chord(&resolved, "move_up", "MoveBlockUp")

@@ -135,8 +135,8 @@ fn hand_authored_keystone_regressions() {
              {checkpoints:?}, {locks:?})",
             case.transitions.len()
         );
-        // The panic hook has already printed this case's panic block; catching it
-        // lets every later case be judged too.
+        // The panic hook has already printed this case's panic block; catching
+        // it lets every later case be judged too.
         match std::panic::catch_unwind(AssertUnwindSafe(|| {
             replay_case(case, &checkpoints, &locks, boot)
         })) {

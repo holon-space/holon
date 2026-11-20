@@ -57,7 +57,8 @@ const _: () = assert!(is_shared_tree_id(ROOT_CONTAINER_ID));
 
 impl SharedTreeId {
     pub fn new_random() -> Self {
-        // ALLOW(identity_minting): names a replication container, not an entity.
+        // ALLOW(identity_minting): names a replication container, not an
+        // entity.
         Self(uuid::Uuid::new_v4().to_string())
     }
 
@@ -251,8 +252,8 @@ pub fn extract_subtree(
     let tree = forked.get_tree(TREE_NAME);
 
     // Step 1: Reparent subtree to tree root.
-    // CRITICAL: LoroTree.delete() hides all descendants. If we delete the parent
-    // before reparenting, the subtree becomes invisible.
+    // CRITICAL: LoroTree.delete() hides all descendants. If we delete the
+    // parent before reparenting, the subtree becomes invisible.
     tree.mov(subtree_root, None::<TreeID>)
         .context("Failed to reparent subtree root to tree root")?;
     forked.commit();
@@ -296,8 +297,8 @@ pub fn extract_subtree(
         let _ = tree.delete(*node);
     }
     // Emptying leaves the root containers alive with their op history; purging
-    // removes them, which is what keeps a pruned sibling's style-op payloads out
-    // of the shallow snapshot.
+    // removes them, which is what keeps a pruned sibling's style-op payloads
+    // out of the shallow snapshot.
     crate::deleted_container_purge::purge_roots(&forked, &pruned_roots)?;
     forked.commit();
 
@@ -977,7 +978,8 @@ pub fn unmount(
     crate::deleted_container_purge::purge_roots(source_doc, &mount_roots)?;
 
     if let Some(shared_doc) = reintegrate_doc {
-        // Import the shared doc's updates to merge CRDT state (text edits, etc.)
+        // Import the shared doc's updates to merge CRDT state (text edits,
+        // etc.)
         let snapshot = shared_doc
             .export(ExportMode::Snapshot)
             .context("Failed to export shared doc for reintegration")?;
@@ -986,10 +988,10 @@ pub fn unmount(
             .context("Failed to import shared doc into source")?;
 
         // After import, the shared tree's nodes exist in the source doc but may
-        // be in "deleted" state (because share_subtree deleted them from source).
-        // The CRDT merge may or may not revive them depending on causal ordering.
-        // We explicitly move the shared roots to the mount's former parent to
-        // ensure they're visible in the tree.
+        // be in "deleted" state (because share_subtree deleted them from
+        // source). The CRDT merge may or may not revive them depending on
+        // causal ordering. We explicitly move the shared roots to the mount's
+        // former parent to ensure they're visible in the tree.
         let shared_tree = shared_doc.get_tree(TREE_NAME);
         let shared_roots = shared_tree.roots();
 
@@ -1140,9 +1142,9 @@ mod tests {
     fn none_retention_does_not_leak_sibling_content() {
         // B1 regression (docs/Reference/SUBTREE_SHARING.md): sharing a subtree
         // with retention=None must NOT ship the content/history of pruned
-        // sibling subtrees. A `Full` snapshot leaks it (the forked oplog retains
-        // deleted nodes' ops); `None` (shallow snapshot at current frontiers)
-        // must not.
+        // sibling subtrees. A `Full` snapshot leaks it (the forked oplog
+        // retains deleted nodes' ops); `None` (shallow snapshot at current
+        // frontiers) must not.
         const SECRET: &str = "TOP-SECRET-SIBLING-CONTENT-9c1f";
 
         let doc = LoroDoc::new();
@@ -1739,8 +1741,8 @@ mod tests {
             "error should disclose the broken-lineage reintegration failure, got: {msg}"
         );
 
-        // Fact 2: the collab edit did NOT merge back — divergence is real, and it
-        // is surfaced via the error above rather than hidden.
+        // Fact 2: the collab edit did NOT merge back — divergence is real, and
+        // it is surfaced via the error above rather than hidden.
         let tree = doc.get_tree(TREE_NAME);
         assert!(
             !read_text(&tree, block_b).contains("[COLLAB]"),

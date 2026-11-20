@@ -555,8 +555,9 @@ impl AppModel {
 
         for block_id in &needed {
             if !self.root_live_blocks.contains_key(block_id) {
-                // block_id string from LiveBlock nodes in the root ViewModel tree
-                // ALLOW(entity_uri_from_raw): block_id from LiveBlock nodes (boundary)
+                // block_id string from LiveBlock nodes in the root ViewModel
+                // tree ALLOW(entity_uri_from_raw): block_id from LiveBlock
+                // nodes (boundary)
                 let uri = holon_api::EntityUri::from_raw(block_id);
                 let services: Arc<dyn BuilderServices> = self.engine.clone();
                 let live_block = services.watch_live(&uri, services.clone());
@@ -1054,10 +1055,11 @@ impl Render for HolonApp {
             apply_holon_theme(&self.session, cx);
             self.applied_theme = desired_theme;
         }
-        // Reset main-panel scroll to the top when a page navigation lands in the
-        // main region (LogSeq parity, dogfood #5 row 146). `main_nav_generation`
-        // advances only on `navigation.focus`(region=main)/`go_home`, NOT on
-        // same-page block clicks, so mid-page editing keeps its scroll offset.
+        // Reset main-panel scroll to the top when a page navigation lands in
+        // the main region (LogSeq parity, dogfood #5 row 146).
+        // `main_nav_generation` advances only on
+        // `navigation.focus`(region=main)/`go_home`, NOT on same-page block
+        // clicks, so mid-page editing keeps its scroll offset.
         let main_nav_gen = self
             .app_model
             .read(cx)
@@ -1133,9 +1135,9 @@ impl Render for HolonApp {
                 let ui = self.app_model.read(cx).engine.ui_state();
                 (ui.focused_block(), ui.main_view_generation())
             };
-            // A dropped stale read asks to be retried: the generation bumps when
-            // the op is DISPATCHED, so the first read can beat the write to the
-            // database. Re-reading on the next frame lets it catch up.
+            // A dropped stale read asks to be retried: the generation bumps
+            // when the op is DISPATCHED, so the first read can beat the write
+            // to the database. Re-reading on the next frame lets it catch up.
             let recheck = self.tab_strip.read(cx).needs_recheck;
             if self.last_tab_strip_focus.as_ref() != Some(&key) || recheck {
                 self.last_tab_strip_focus = Some(key);
@@ -1180,8 +1182,8 @@ impl Render for HolonApp {
             )
         };
 
-        // Editor reconciliation is now handled by each LiveBlockView in its render().
-        // Shadow index is built in the signal callback.
+        // Editor reconciliation is now handled by each LiveBlockView in its
+        // render(). Shadow index is built in the signal callback.
 
         let local = {
             let root_refs = self.app_model.read(cx).root_live_blocks.clone();
@@ -1239,11 +1241,12 @@ impl Render for HolonApp {
         };
 
         // Root window fill. A flat single color reads as dull; instead paint a
-        // very subtle top→bottom luminance sweep DERIVED from the active theme's
-        // background token (hue/saturation preserved, so it tracks light and
-        // dark themes and any accent tint automatically). The spread is tiny
-        // (`BG_GRADIENT_LIGHTNESS_SPREAD`) — a hint of depth, never enough to
-        // change text contrast. Glass mode keeps its flat translucent fill.
+        // very subtle top→bottom luminance sweep DERIVED from the active
+        // theme's background token (hue/saturation preserved, so it tracks
+        // light and dark themes and any accent tint automatically). The spread
+        // is tiny (`BG_GRADIENT_LIGHTNESS_SPREAD`) — a hint of depth, never
+        // enough to change text contrast. Glass mode keeps its flat translucent
+        // fill.
         let page_background: gpui::Background = if glass {
             bg.into()
         } else {
@@ -1265,8 +1268,8 @@ impl Render for HolonApp {
         let text = theme.foreground;
 
         // Drawer (id, mode) pairs from static snapshot (simpler than walking
-        // reactive tree). Mode is needed so the toggle reads the same mode-aware
-        // default open state the drawer renders with.
+        // reactive tree). Mode is needed so the toggle reads the same
+        // mode-aware default open state the drawer renders with.
         let drawers = view_model.collect_drawers();
         let left_drawer = drawers.first().cloned();
         let right_drawer = if drawers.len() > 1 {
@@ -1931,10 +1934,10 @@ impl Render for HolonApp {
         }
 
         // Full-window capture surface for an in-progress sidebar drag-resize.
-        // Present ONLY while the handle is held (drag global active) so it never
-        // intercepts normal input; it tracks the cursor beyond the 12px grip and
-        // finalizes on release (persist width, or toggle if it was a plain
-        // click). Mounted here so it sits above the content it resizes.
+        // Present ONLY while the handle is held (drag global active) so it
+        // never intercepts normal input; it tracks the cursor beyond the 12px
+        // grip and finalizes on release (persist width, or toggle if it was a
+        // plain click). Mounted here so it sits above the content it resizes.
         if cx
             .try_global::<crate::render::builders::SidebarResizeState>()
             .is_some_and(|s| s.active.is_some())
@@ -2159,7 +2162,8 @@ impl RebindHandle {
             let mut items = Vec::new();
             user_driver::collect_collection_item_ids(tree, &mut items);
             lists.push((watcher, items));
-            // A nested live_query shell lives in the cache of the shell that renders it.
+            // A nested live_query shell lives in the cache of the shell that
+            // renders it.
             let cache = shell.entity_cache_clone();
             let mut nested = Vec::new();
             collect_live_query_shell_keys(tree, &mut nested);
@@ -2324,8 +2328,9 @@ impl RebindHandle {
     /// the window's current size, and request a repaint. Must run on the
     /// GPUI main thread (holds `cx: &mut App`).
     pub fn rebind(&self, session: Arc<FrontendSession>, engine: Arc<ReactiveEngine>, cx: &mut App) {
-        // Re-point the pump's engine and drop the stale panel shells *before* the
-        // render so scroll-into-view and the rebuilt tree both see the new engine.
+        // Re-point the pump's engine and drop the stale panel shells *before*
+        // the render so scroll-into-view and the rebuilt tree both see the new
+        // engine.
         *self.live_engine.write().unwrap() = engine.clone();
         self.entity_cache.write().unwrap().clear();
 
@@ -2339,9 +2344,10 @@ impl RebindHandle {
                 m.rebind(session, engine.clone(), vp, cx);
                 cx.notify();
             });
-            // The root-layout signal pump is bound to the *old* engine's stream;
-            // re-point it at the new engine so viewport / structural changes drive
-            // the rebound window (and the `if_space` breakpoint re-evaluates).
+            // The root-layout signal pump is bound to the *old* engine's
+            // stream; re-point it at the new engine so viewport / structural
+            // changes drive the rebound window (and the `if_space` breakpoint
+            // re-evaluates).
             spawn_root_layout_signal(app_model.clone(), engine.clone(), window, cx);
             spawn_boot_report_pump(app_model.clone(), session_for_close.clone(), window, cx);
             spawn_overlay_drawer_close(
@@ -2456,8 +2462,8 @@ fn spawn_root_layout_signal(
                 );
                 let _ = cx.update_window(wh, |_, _, cx| {
                     app_model.update(cx, |m, cx| {
-                        // Only the loop bound to the currently-active engine drives
-                        // the window; stale loops (prior rebinds) no-op.
+                        // Only the loop bound to the currently-active engine
+                        // drives the window; stale loops (prior rebinds) no-op.
                         if !Arc::ptr_eq(&m.engine, &engine) {
                             return;
                         }
@@ -2655,18 +2661,21 @@ fn launch_holon_window_impl(
         .ok()
         .and_then(|s| {
             let (w, h) = s.split_once('x')?;
-            // ALLOW(ok): dev env-var override; malformed value falls back to default bounds
+            // ALLOW(ok): dev env-var override; malformed value falls back to
+            // default bounds
             let w: f32 = w.trim().parse().ok()?;
-            // ALLOW(ok): dev env-var override; malformed value falls back to default bounds
+            // ALLOW(ok): dev env-var override; malformed value falls back to
+            // default bounds
             let h: f32 = h.trim().parse().ok()?;
             Some(gpui::Bounds {
                 origin: gpui::point(px(100.0), px(100.0)),
                 size: gpui::size(px(w), px(h)),
             })
         });
-    // Restore persisted window bounds for the real production window only. PBT /
-    // custom-title windows run against temp config dirs and set their own bounds,
-    // and the dev HOLON_INITIAL_WINDOW_SIZE override always wins when present.
+    // Restore persisted window bounds for the real production window only. PBT
+    // / custom-title windows run against temp config dirs and set their own
+    // bounds, and the dev HOLON_INITIAL_WINDOW_SIZE override always wins when
+    // present.
     let persisted_bounds = if custom_title.is_none() && env_bounds.is_none() {
         window_state::load(session.config_dir()).map(|state| {
             let displays = window_state::connected_displays(cx);
@@ -2868,7 +2877,8 @@ fn launch_holon_window_impl(
                 root_view: initial_root_view,
             };
             // Initial reconciliation — create root LiveBlockView entities.
-            // Each LiveBlockView manages its own child entities (editors, live queries).
+            // Each LiveBlockView manages its own child entities (editors, live
+            // queries).
             model.reconcile_root_live_blocks(cx);
             // Seed the initial viewport: push the window's current logical size
             // and scale factor into UiState and the root ReactiveView's space
@@ -3292,9 +3302,10 @@ fn launch_holon_window_impl(
     }
 
     // Wire the pending connector-write bus bridge (leases/read-write ruling,
-    // increment 4c). The shared store is installed as a GPUI global in `main.rs`
-    // from the DI-resolved handle; when MCP integrations are absent the global
-    // is missing and no bridge is spawned (no once_only writes are possible).
+    // increment 4c). The shared store is installed as a GPUI global in
+    // `main.rs` from the DI-resolved handle; when MCP integrations are absent
+    // the global is missing and no bridge is spawned (no once_only writes are
+    // possible).
     if let Some(pending) = cx.try_global::<share_ui::PendingWritesGlobal>().cloned() {
         let async_cx = cx.to_async();
         let pending_ui_entity = app_model.read(cx).share_ui.clone();
@@ -3466,9 +3477,9 @@ pub fn setup_interaction_pump(
     debug.interaction_tx.set(tx.clone()).ok();
 
     // Install the channel-based `UserDriver` so MCP tools can dispatch
-    // UI mutations through the same pipeline as click/key/scroll. The MCP-facing
-    // driver binds the *current* engine at install time (re-pointing it on rebind
-    // is out of scope — MCP isn't driven during minimization).
+    // UI mutations through the same pipeline as click/key/scroll. The
+    // MCP-facing driver binds the *current* engine at install time (re-pointing
+    // it on rebind is out of scope — MCP isn't driven during minimization).
     // Flush-on-read: the MCP driver reads geometry from a window that may have
     // gone idle after its last paint (iOS) — see `FlushOnReadGeometry`.
     let geometry: Arc<dyn holon_frontend::geometry::GeometryProvider> =
@@ -3490,8 +3501,8 @@ pub fn setup_interaction_pump(
                 if let holon_mcp::server::InteractionEvent::CaptureScreenshot = &cmd.event {
                     // Capture the last rendered frame off the swapchain via the
                     // platform's `render_to_image` (offscreen wgpu readback on
-                    // Android). Fail loud: a render/readback error is surfaced in
-                    // `detail`, never a blank image.
+                    // Android). Fail loud: a render/readback error is surfaced
+                    // in `detail`, never a blank image.
                     let captured =
                         cx.update_window(window_handle, |_, window, _cx| window.render_to_image());
                     let response = match captured {
@@ -3522,19 +3533,20 @@ pub fn setup_interaction_pump(
                     use holon_mcp::server::InteractionEvent;
                     match &cmd.event {
                         InteractionEvent::ForceFrame => {
-                            // `refresh()` marks dirty; `draw()` is what actually
-                            // produces the frame, and it does not care whether
-                            // the window is key, visible, or on this Space. The
-                            // returned token must clear the element arena before
-                            // the next draw.
+                            // `refresh()` marks dirty; `draw()` is what
+                            // actually produces the frame, and it does not care
+                            // whether the window is key, visible, or on this
+                            // Space. The returned token must clear the element
+                            // arena before the next draw.
                             window.refresh();
                             window.draw(cx).clear(cx);
                             Ok((true, None))
                         }
                         InteractionEvent::ScrollEntityIntoView { entity_id } => {
-                            // Read the *live* engine: after a rebind the window is
-                            // bound to a new engine, and scroll-into-view must look
-                            // up the entity in it, not the one captured at install.
+                            // Read the *live* engine: after a rebind the window
+                            // is bound to a new engine, and scroll-into-view
+                            // must look up the entity in it, not the one
+                            // captured at install.
                             let cur = engine_for_pump.read().unwrap().clone();
                             let scrolled = scroll_entity_into_view(
                                 entity_id,
@@ -3581,13 +3593,15 @@ pub fn setup_interaction_pump(
                             // key-focus contamination instead of masquerading
                             // as a UI bug.
                             let detail = if !window.is_window_active() {
-                                // NOT an input-delivery problem: dispatch_keystroke
-                                // never gates on key status (verified in gpui
-                                // source + empirically, 2026-06-11). The risk is
-                                // the deactivation BLUR: gpui re-renders with an
-                                // empty focus path, so a mid-typing blur re-seeds
-                                // the caret (displayed-text rotation face). Data
-                                // loss is prevented by commit-on-authority-move.
+                                // NOT an input-delivery problem:
+                                // dispatch_keystroke never gates on key status
+                                // (verified in gpui source + empirically,
+                                // 2026-06-11). The risk is the deactivation
+                                // BLUR: gpui re-renders with an empty focus
+                                // path, so a mid-typing blur re-seeds the caret
+                                // (displayed-text rotation face). Data
+                                // loss is prevented by
+                                // commit-on-authority-move.
                                 let msg = format!(
                                     "[interaction-pump] WINDOW-INACTIVE while dispatching {:?} — \
                                      input IS delivered, but deactivation blur may have re-seeded \
@@ -4093,10 +4107,10 @@ pub fn interaction_event_to_platform_inputs(
         | InteractionEvent::CaptureScreenshot
         | InteractionEvent::ForceFrame => {
             // Handled directly by the interaction pump's match arms
-            // (`scroll_entity_into_view` / `scroll_list_by` / `dispatch_insert_text`),
-            // not by synthesizing a platform input. Returning an empty vec keeps
-            // this fn's callers (which iterate inputs) a no-op for these
-            // variants.
+            // (`scroll_entity_into_view` / `scroll_list_by` /
+            // `dispatch_insert_text`), not by synthesizing a platform input.
+            // Returning an empty vec keeps this fn's callers (which iterate
+            // inputs) a no-op for these variants.
             vec![]
         }
     }

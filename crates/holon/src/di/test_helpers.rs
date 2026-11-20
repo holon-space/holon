@@ -241,11 +241,11 @@ impl Module for TestProviderModule {
         }
 
         // Register factory-based operation providers
-        // These receive the backend at creation time, matching how production code
-        // works
+        // These receive the backend at creation time, matching how production
+        // code works
         for factory in self.operation_provider_factories.lock().unwrap().drain(..) {
-            // Wrap the factory in a Mutex so we can move it into the closure and call it
-            // once
+            // Wrap the factory in a Mutex so we can move it into the closure
+            // and call it once
             let factory_mutex = std::sync::Mutex::new(Some(factory));
 
             injector.provide_into_set::<dyn OperationProvider>(Provider::root(move |resolver| {
@@ -285,9 +285,10 @@ impl Module for TestProviderModule {
             }));
         }
 
-        // Note: OperationModule is already registered by register_core_services.
-        // We don't need to register it again - the providers we just added will
-        // be collected when OperationDispatcher is resolved.
+        // Note: OperationModule is already registered by
+        // register_core_services. We don't need to register it again - the
+        // providers we just added will be collected when OperationDispatcher is
+        // resolved.
 
         Ok(())
     }

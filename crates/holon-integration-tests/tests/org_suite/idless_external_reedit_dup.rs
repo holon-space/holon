@@ -231,8 +231,8 @@ fn two_identical_idless_siblings_survive_reingest() {
         );
 
         // Re-write the pre-mint (ID-less) text: the two siblings must reconcile
-        // 1:1 onto their two minted twins — still exactly two, neither merged to
-        // one nor duplicated to four, with the same ids.
+        // 1:1 onto their two minted twins — still exactly two, neither merged
+        // to one nor duplicated to four, with the same ids.
         FileSystem::write(env.org_fs.as_ref(), &path, two.as_bytes())
             .await
             .expect("stale re-write");
@@ -295,7 +295,8 @@ fn shifted_identical_twins_preserve_identity() {
         );
 
         // A NEW headline is inserted ahead of the twins (still all ID-less):
-        // positions shift 0,1 → 1,2, defeating positional matching for the last.
+        // positions shift 0,1 → 1,2, defeating positional matching for the
+        // last.
         let shifted = format!("* Sprint kickoff\n* {DUP}\n* {DUP}\n");
         FileSystem::write(env.org_fs.as_ref(), &path, shifted.as_bytes())
             .await
@@ -365,9 +366,9 @@ fn swapped_identical_parents_keep_their_children() {
             "the two Item parents must be distinct blocks"
         );
 
-        // External reorder: SWAP the two parents (still all ID-less). Positional
-        // matching would map incoming-parent-0 (now carrying Beta) onto the
-        // store parent that had Alpha — re-homing the children.
+        // External reorder: SWAP the two parents (still all ID-less).
+        // Positional matching would map incoming-parent-0 (now carrying Beta)
+        // onto the store parent that had Alpha — re-homing the children.
         let swapped = "* Item\n** Beta\n* Item\n** Alpha\n".to_string();
         FileSystem::write(env.org_fs.as_ref(), &path, swapped.as_bytes())
             .await
@@ -422,7 +423,8 @@ fn genuinely_new_block_still_mints() {
         assert_eq!(keep_before.len(), 1, "one headline ingests as one block");
 
         // Append a brand-new ID-less headline alongside the (now ID-full) one,
-        // then re-write the whole file with BOTH still ID-less (stale re-write).
+        // then re-write the whole file with BOTH still ID-less (stale
+        // re-write).
         let two = format!("* {KEEP}\n* Brand new item\n");
         FileSystem::write(env.org_fs.as_ref(), &path, two.as_bytes())
             .await

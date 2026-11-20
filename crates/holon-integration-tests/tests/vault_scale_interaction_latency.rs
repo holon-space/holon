@@ -214,8 +214,8 @@ async fn block_count(env: &TestEnvironment) -> usize {
 /// content is readable in the projection sink. 1 ms polling: a 50 ms poll
 /// would quantize a 200 ms budget into four buckets.
 async fn set_field_visible(env: &TestEnvironment, id: &str, content: &str) -> Duration {
-    // ALLOW(entity_uri_from_raw): test-supplied bare org id entering the read-back
-    // query; `block_raw` stores the schemed form.
+    // ALLOW(entity_uri_from_raw): test-supplied bare org id entering the
+    // read-back query; `block_raw` stores the schemed form.
     let schemed = EntityUri::from_raw(id).to_string();
     let sql = format!("SELECT content FROM block_raw WHERE id = '{schemed}'");
     let t0 = Instant::now();

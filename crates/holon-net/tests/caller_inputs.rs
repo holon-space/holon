@@ -1570,7 +1570,8 @@ impl Machine {
                     Pick::Bogus(n) => AttemptId(*n),
                 };
                 let result = match result {
-                    // An effect result puts like a body: into Fifo non-pool places only.
+                    // An effect result puts like a body: into Fifo non-pool
+                    // places only.
                     ResultGen::Done(outs) => {
                         let into = self.net.output_places();
                         let outs = if into.is_empty() { &[][..] } else { &outs[..] };
@@ -1596,7 +1597,8 @@ impl Machine {
             } => {
                 let occurrence = self.picked_occurrence(occurrence);
                 let resolution = match resolution {
-                    // A verified result puts like a body: into Fifo non-pool places only.
+                    // A verified result puts like a body: into Fifo non-pool
+                    // places only.
                     ResolutionGen::Verify(outs) => {
                         let into = self.net.output_places();
                         let outs = if into.is_empty() { &[][..] } else { &outs[..] };
@@ -1684,8 +1686,8 @@ impl Machine {
             }
             Op::Asks => {
                 let exec = &self.exec;
-                // L7 refuses the firing of a work that binds the answer input, not
-                // its row.
+                // L7 refuses the firing of a work that binds the answer input,
+                // not its row.
                 let ghosts: BTreeSet<String> = self
                     .net
                     .work_names()

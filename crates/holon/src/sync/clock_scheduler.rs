@@ -291,7 +291,8 @@ pub async fn spawn_clock_scheduler(
         shutdown.spawn("clock-scheduler", async move {
             tokio::pin!(cancelled);
             let mut ticker = tokio::time::interval(interval);
-            // The immediate first tick is redundant with the boot seed above; skip it.
+            // The immediate first tick is redundant with the boot seed above;
+            // skip it.
             ticker.tick().await;
             loop {
                 // `biased`: a tick that fires alongside the shutdown must not
@@ -422,7 +423,8 @@ mod tests {
         let first = reconcile_clock(&handle, &clock).await.unwrap();
         assert!(matches!(first, ClockTick::Advanced { .. }));
 
-        // Watch the day value through a mirror matview (base tables never emit).
+        // Watch the day value through a mirror matview (base tables never
+        // emit).
         handle
             .execute_ddl(
                 "CREATE MATERIALIZED VIEW clock_mirror AS SELECT grain, today, epoch_day FROM \
@@ -556,7 +558,8 @@ mod tests {
         );
     }
 
-    // --- C6: fine grains + recurrence -----------------------------------------
+    // --- C6: fine grains + recurrence
+    // -----------------------------------------
 
     async fn hour_rows_query(handle: &DbHandle) -> usize {
         handle
@@ -890,8 +893,9 @@ mod tests {
         let scheduler = spawn_clock_scheduler(
             handle.clone(),
             Arc::new(clock.clone()) as Arc<dyn Clock>,
-            // Long interval: the ticking task must not fire inside the test window,
-            // so every observed write comes from subscribe/reconcile, not timing.
+            // Long interval: the ticking task must not fire inside the test
+            // window, so every observed write comes from subscribe/reconcile,
+            // not timing.
             Duration::from_secs(3600),
             &holon_api::lifecycle::SessionShutdown::new(),
         )
@@ -956,7 +960,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Walk four consecutive hours; the matview has a row exactly on even ticks.
+        // Walk four consecutive hours; the matview has a row exactly on even
+        // ticks.
         for h in 0..4i64 {
             clock.set(noon_utc_millis(2026, 7, 11) + h * 3_600_000);
             reconcile_grain(&handle, &clock, Grain::Hour).await.unwrap();

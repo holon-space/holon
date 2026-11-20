@@ -180,7 +180,8 @@ pub fn kill_token_groups(token: &str, limit: Duration) -> Result<(), String> {
         }
         for (_, pgid) in left {
             assert!(pgid > 1, "a token process names the group {pgid}");
-            // SAFETY: the group carries this case's token, so the test started it.
+            // SAFETY: the group carries this case's token, so the test started
+            // it.
             unsafe { libc::kill(-pgid, libc::SIGKILL) };
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -680,8 +681,8 @@ async fn serve(dir: &Path, rx: &mut tokio::sync::mpsc::UnboundedReceiver<Value>)
                 emit(json!({"ev": "dropped", "id": id}));
             }
             "reap" => {
-                // Blocks this task in `waitpid`: on a current-thread runtime the
-                // runner cannot reap the leader first.
+                // Blocks this task in `waitpid`: on a current-thread runtime
+                // the runner cannot reap the leader first.
                 let id = cmd["id"].as_u64().expect("a reap names a run");
                 let pid: Pgid = std::fs::read_to_string(dir.join("ctl").join(format!("{id}.pgid")))
                     .expect("a reaped run spawned its child")
@@ -744,7 +745,8 @@ impl Host {
         std::thread::spawn(move || {
             for line in std::io::BufReader::new(stdout).lines() {
                 let Ok(line) = line else { return };
-                // The harness prints the test's name on the line of the first event.
+                // The harness prints the test's name on the line of the first
+                // event.
                 if let Some((_, event)) = line.split_once(EVENT)
                     && tx
                         .send(serde_json::from_str(event).expect("an event is JSON"))
@@ -814,7 +816,8 @@ impl Host {
                     ));
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // The reader may still hold a last event of a host that died.
+                    // The reader may still hold a last event of a host that
+                    // died.
                     std::thread::sleep(Duration::from_millis(50));
                     return Err(format!("no {what}: {}", self.died()));
                 }

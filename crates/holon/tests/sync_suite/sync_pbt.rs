@@ -830,8 +830,8 @@ mod tests {
             // P-MARKS: every mark recorded in `expected_marks` must be
             // observable on the shared root text — by suffix range +
             // Loro key. Surfaces:
-            //   - shared docs not made by `styled_loro_doc` (mark API still applies but
-            //     ExpandType policy is wrong)
+            //   - shared docs not made by `styled_loro_doc` (mark API still
+            //     applies but ExpandType policy is wrong)
             //   - snapshot save/load not preserving Peritext deltas
             //   - sync paths dropping mark deltas
             //   - rehydration creating a fresh LoroDoc that loses marks
@@ -1231,7 +1231,8 @@ mod tests {
                         } else if ref_a.share_usable {
                             // B2: rehydrate re-mints the peer_id under a fresh
                             // generation so a stale snapshot can never reuse a
-                            // CRDT counter. Assert it changed, then re-baseline.
+                            // CRDT counter. Assert it changed, then
+                            // re-baseline.
                             let new_pid = a
                                 .manager_for_test()
                                 .get_doc(&shared_tree_id)
@@ -2341,7 +2342,8 @@ mod tests {
                             "the owner must be shallow for this probe"
                         );
 
-                        // The receiver's document is CREATED by the pairing payload.
+                        // The receiver's document is CREATED by the pairing
+                        // payload.
                         let doc_b = LoroDoc::new();
                         doc_b.set_peer_id(2).unwrap();
                         let bootstrap = export_like_iroh(doc_a, &doc_b.oplog_vv());
@@ -2354,7 +2356,8 @@ mod tests {
                             "the bootstrap payload did not carry the owner's tree"
                         );
 
-                        // The same concurrent structure + text as every other variant.
+                        // The same concurrent structure + text as every other
+                        // variant.
                         raw_create_under(doc_a, "p1", "a-new");
                         raw_append_text(&doc_b, "c1", " [B typed]");
                         raw_move(doc_a, "c2", "c1");

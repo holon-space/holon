@@ -41,9 +41,9 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionFactory<R> for MergeFro
     }
 
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        // Enumerate parameter space (peer indices) and let `preconditions` be the
-        // single source of truth for which ones are actually mergeable. Avoids
-        // duplicating the Loro / peer count checks across two sites.
+        // Enumerate parameter space (peer indices) and let `preconditions` be
+        // the single source of truth for which ones are actually mergeable.
+        // Avoids duplicating the Loro / peer count checks across two sites.
         let candidates: Vec<usize> = (0..state.peers_len())
             .filter(|peer_idx| {
                 MergeFromPeer {

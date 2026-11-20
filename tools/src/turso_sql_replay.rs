@@ -334,8 +334,8 @@ fn inline_positional_params(sql: &str, params_str: &str) -> String {
     )
     .unwrap();
 
-    // Walk through params string collecting values in order, handling standalone
-    // Null
+    // Walk through params string collecting values in order, handling
+    // standalone Null
     let mut values: Vec<(String, usize)> = Vec::new();
     let mut pos = 0;
     while pos < params_str.len() {
@@ -697,8 +697,8 @@ fn parse_replay_file(path: &str) -> anyhow::Result<Vec<Directive>> {
                 directives.push(Directive::Sql { tag, sql });
             }
             // Forms:
-            //   ROW-EXISTS <table> '<id>'   (single-quoted id; quoted to allow spaces)
-            //   ROW-ABSENT <table> '<id>'
+            //   ROW-EXISTS <table> '<id>'   (single-quoted id; quoted to allow
+            // spaces)   ROW-ABSENT <table> '<id>'
             //   ROW-COUNT  <table> <n>
             // Permissive whitespace; quotes optional for ids without spaces.
             let kind = parse_assert_directive(rest)
@@ -2100,7 +2100,8 @@ fn crashes_with_subprocess(
     // The caller decides whether per-DML matview diffing is necessary based
     // on a probe of the full trace (see `probe_needs_per_stmt_check`):
     //   - panic-style patterns / FINAL-detectable matview drift -> false
-    //     (subprocess runs plain replay; pattern is caught at FINAL or by panic)
+    //     (subprocess runs plain replay; pattern is caught at FINAL or by
+    //     panic)
     //   - intermittent mid-trace drift that self-heals -> true (subprocess runs
     //     --check-after-each --no-break-on-inconsistency, slow)
     //
@@ -2151,7 +2152,8 @@ fn crashes_with_subprocess(
     }
     spawn_scanner(stdout, needle.clone(), tx.clone());
     spawn_scanner(stderr, needle, tx.clone());
-    // Drop our own sender so `recv` returns Disconnected once both scanners exit.
+    // Drop our own sender so `recv` returns Disconnected once both scanners
+    // exit.
     drop(tx);
 
     // Hard ceiling slightly past the subprocess's own --max-secs, so we

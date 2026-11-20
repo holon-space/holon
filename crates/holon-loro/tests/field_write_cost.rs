@@ -108,8 +108,8 @@ async fn a_field_write_reads_a_number_of_nodes_constant_in_the_doc_size() {
         "a field write read {:.1} index nodes at N={LARGE}",
         large.nodes_visited_per_write
     );
-    // The minimum over many writes is the algorithmic cost; host load only adds to
-    // it.
+    // The minimum over many writes is the algorithmic cost; host load only adds
+    // to it.
     assert!(
         large.fastest_write < small.fastest_write * 5,
         "a field write grows with N: fastest {:?} at N={SMALL}, {:?} at N={LARGE}",

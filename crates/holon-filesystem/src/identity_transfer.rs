@@ -143,7 +143,8 @@ pub fn transfer_ids(
         match policy.pairing {
             PairStrategy::Positional => {
                 for (&b, &p) in hb.iter().zip(hp) {
-                    // Bound in order so a child later in the hunk sees its parent.
+                    // Bound in order so a child later in the hunk sees its
+                    // parent.
                     if fits(Structure::DepthAndParent, base, &base_parent, parsed, b, p) {
                         bind(parsed, b, p, BindSource::Hunk);
                     }
@@ -253,7 +254,8 @@ fn pair_similar(
     let mut pairs = Vec::new();
     let mut open_b: Vec<usize> = hb.to_vec();
     let mut open_p: Vec<usize> = hp.to_vec();
-    // Rounds, because a child can only agree on its parent once that parent paired.
+    // Rounds, because a child can only agree on its parent once that parent
+    // paired.
     loop {
         let mut score: HashMap<(usize, usize), f64> = HashMap::new();
         for &p in &open_p {

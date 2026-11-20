@@ -209,8 +209,8 @@ impl TransitionFactory<ReferenceState> for RemoteListSync {
                     ));
                 }
                 // The app names an item by its name, so a ticked entry and an
-                // active one of that name fold into one row rather than refusing
-                // the second. Only an active entry is duplicated.
+                // active one of that name fold into one row rather than
+                // refusing the second. Only an active entry is duplicated.
                 if !active.is_empty() {
                     // The later entry differs from the first in its amount, so
                     // a round that keeps the wrong one shows in the mirror.

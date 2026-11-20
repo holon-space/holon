@@ -103,7 +103,8 @@ impl TursoBlockQuerySource {
         // `SELECT *` so the injected parser sees every column (`source_name`,
         // `created_at`, the `properties` JSON carrying level/sequence/planning,
         // the json_group_array-hydrated `tags`/`requires`, …). `sort_key` is
-        // among them and drives the canonical sibling re-order at snapshot time.
+        // among them and drives the canonical sibling re-order at snapshot
+        // time.
         let blocks_sql = format!("SELECT * FROM {BLOCK_READ_TABLE}");
         let blocks_watch = engine.watch_view(&blocks_sql).await.map_err(to_boxed_err)?;
         let parse_for_mirror = Arc::clone(&parse_block);

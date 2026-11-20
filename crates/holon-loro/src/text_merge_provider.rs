@@ -409,8 +409,9 @@ mod tests {
 
     #[test]
     fn transient_3way_keeps_the_side_that_changed() {
-        // Non-conflict shapes still round-trip through the merger sanely, though
-        // the controller never calls it in these cases (it gates on both-changed):
+        // Non-conflict shapes still round-trip through the merger sanely,
+        // though the controller never calls it in these cases (it gates on
+        // both-changed):
         let merger = TransientLoroTextMerge::default();
         // only "theirs" changed (mine == base) → theirs.
         assert_eq!(
@@ -457,9 +458,9 @@ mod tests {
 
     #[test]
     fn loro_provider_returns_shared_mergeable_text() {
-        // A resolver backed by a real Loro doc: every call for the same id hands
-        // back the same shared container, so a write through one handle is
-        // visible through the next — that's the "shared" contract.
+        // A resolver backed by a real Loro doc: every call for the same id
+        // hands back the same shared container, so a write through one handle
+        // is visible through the next — that's the "shared" contract.
         let doc = Arc::new(LoroDoc::new());
         let resolver: LoroTextResolver = {
             let doc = doc.clone();

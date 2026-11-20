@@ -363,7 +363,8 @@ impl<R: Row> Host<R> {
         if let Some(error) = &self.stopped {
             return Err(error.clone());
         }
-        // ALLOW(catch_unwind): a panic stops the engine; then only the clock is used.
+        // ALLOW(catch_unwind): a panic stops the engine; then only the clock is
+        // used.
         let result = panic::catch_unwind(AssertUnwindSafe(|| handle(self)))
             .unwrap_or_else(|panic| Err(EngineError::Panicked(panic_message(&*panic))));
         if let Err(error) = &result {

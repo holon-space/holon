@@ -190,9 +190,9 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
     });
 
     // Empty HOME BEFORE anything reads it: the bundled gcal sidecar names
-    // `~/.config/holon/gcal-client-*`; on a machine that has them a consent flow
-    // could reach a real browser. `set_field` never opens a browser, but the
-    // section boot resolves the sidecar either way.
+    // `~/.config/holon/gcal-client-*`; on a machine that has them a consent
+    // flow could reach a real browser. `set_field` never opens a browser, but
+    // the section boot resolves the sidecar either way.
     let home = tempfile::tempdir().expect("tempdir for HOME");
     // SAFETY: single-threaded test binary (`--test-threads=1`), set before the
     // app boots and before any thread reads the environment.
@@ -247,8 +247,8 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
     click_at(&mut app, window, center_of(&gear), "gear");
     settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
-    // The multi-param button must be on screen; the whole test is about clicking
-    // it, so its absence is a harness failure, not a feature red.
+    // The multi-param button must be on screen; the whole test is about
+    // clicking it, so its absence is a harness failure, not a feature red.
     let set_field_btn = bounds.element_info(SET_FIELD_GCAL).unwrap_or_else(|| {
         panic!(
             "the integration row must paint its generic {SET_FIELD_GCAL:?} op_button; \
@@ -261,9 +261,10 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
         .expect("gcal has a row in the integration_state mirror");
     let target_enabled = if initial_enabled == 0 { 1 } else { 0 };
 
-    // The click. Today it PANICS inside `present_op` (feature missing); catch it
-    // so the red surfaces as a clean assertion failure carrying the fail-loud
-    // message, never a hang. Once the popup exists this settles with it painted.
+    // The click. Today it PANICS inside `present_op` (feature missing); catch
+    // it so the red surfaces as a clean assertion failure carrying the
+    // fail-loud message, never a hang. Once the popup exists this settles with
+    // it painted.
     let click_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         click_at(&mut app, window, center_of(&set_field_btn), "set_field");
         settle_frame(&app, &bounds, &engine, Duration::from_secs(10));
@@ -272,8 +273,8 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
     let popup_painted = painted_count(&bounds, PARAM_POPUP_TAG) > 0;
     let field_item_painted = bounds.element_info(FIELD_ITEM_ENABLED).is_some();
 
-    // Complete the popup only on the green path — pick the field, then the value
-    // opposite to the current one, then read the mirror back.
+    // Complete the popup only on the green path — pick the field, then the
+    // value opposite to the current one, then read the mirror back.
     let mut final_enabled = initial_enabled;
     if click_result.is_ok() && popup_painted {
         let field_item = bounds
@@ -302,7 +303,8 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
         });
         click_at(&mut app, window, center_of(&value_item), "value");
 
-        // Give the dispatch → store write → projector mirror chain time to land.
+        // Give the dispatch → store write → projector mirror chain time to
+        // land.
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
             settle_frame(&app, &bounds, &engine, Duration::from_secs(2));
@@ -478,9 +480,9 @@ fn outside_click_on_inert_space_closes_the_popup_without_dispatching() {
             "precondition: clicking set_field opens the popup"
         );
 
-        // Click INERT space on gcal's OWN row — its provider/status text, left of
-        // the state_toggle and of the op-button column, so NO op_button and no
-        // toggle is hit. That means no operation dispatch AND no structural
+        // Click INERT space on gcal's OWN row — its provider/status text, left
+        // of the state_toggle and of the op-button column, so NO op_button and
+        // no toggle is hit. That means no operation dispatch AND no structural
         // rebuild, so the ephemeral wipe cannot fire — the ONLY thing that can
         // close the popup here is its own `on_mouse_down_out`. This is the rung
         // that actually pins that handler (the two-row test below is closed by
@@ -524,9 +526,9 @@ fn escape_closes_the_param_popup_without_dispatching() {
             "precondition: clicking set_field opens the popup"
         );
 
-        // Escape must close it. Retry a few settles to absorb a focus-mount race;
-        // before the fix nothing consumes Escape, so the popup never closes and
-        // the loop simply runs out — the red.
+        // Escape must close it. Retry a few settles to absorb a focus-mount
+        // race; before the fix nothing consumes Escape, so the popup never
+        // closes and the loop simply runs out — the red.
         for _ in 0..5 {
             press_escape(app, window);
             settle_frame(app, bounds, engine, Duration::from_secs(2));
@@ -565,11 +567,12 @@ fn opening_a_second_rows_op_button_closes_the_first() {
 
         // Opening another row's op_button must never leave two popups stacked.
         // NOTE: in this windowed environment the first popup is closed by the
-        // ephemeral-cache WIPE on the structural rebuild that opening the second
-        // triggers — NOT by `on_mouse_down_out` (this rung stays green with that
-        // handler disabled; see the file header and
+        // ephemeral-cache WIPE on the structural rebuild that opening the
+        // second triggers — NOT by `on_mouse_down_out` (this rung stays green
+        // with that handler disabled; see the file header and
         // `outside_click_on_inert_space_...`, which pins the handler directly).
-        // It is kept as an end-to-end guard on the "never two stacked" invariant.
+        // It is kept as an end-to-end guard on the "never two stacked"
+        // invariant.
         let todoist_btn = bounds
             .element_info(SET_FIELD_TODOIST)
             .expect("todoist's set_field op_button must be painted");

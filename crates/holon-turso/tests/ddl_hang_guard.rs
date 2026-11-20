@@ -68,8 +68,8 @@ async fn watch_ddl_on_chained_matview_never_hangs() {
         .await
         .expect("create MV-A current_focus");
 
-    // MV-B chained on MV-A — this is the shape that can hang Turso IVM. Drive it
-    // through the real watch path (MatviewManager::watch → ensure_view →
+    // MV-B chained on MV-A — this is the shape that can hang Turso IVM. Drive
+    // it through the real watch path (MatviewManager::watch → ensure_view →
     // execute_ddl_with_deps), exactly as render_entity does in prod.
     let mgr = MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
     let chained_sql = "SELECT cf.region, cf.block_id, i.id AS root_id FROM current_focus AS cf \
@@ -92,7 +92,8 @@ async fn watch_ddl_on_chained_matview_never_hangs() {
             // This Turso build created the chained view fast — contract holds.
         }
         Err(e) => {
-            // Guard fired (or Turso rejected it). Contract holds: bounded, loud.
+            // Guard fired (or Turso rejected it). Contract holds: bounded,
+            // loud.
             let msg = format!("{e:?}");
             assert!(
                 !msg.is_empty(),

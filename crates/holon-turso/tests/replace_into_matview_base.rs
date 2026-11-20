@@ -316,7 +316,8 @@ async fn replace_with_unchanged_value_survives_the_following_deltas() {
         .expect("replace with unchanged value");
     assert_matview_equals_recompute(&handle, "cache_filtered", select, &cols, "the replace").await;
 
-    // A second unchanged replace: two replaces, four retractions, two insertions.
+    // A second unchanged replace: two replaces, four retractions, two
+    // insertions.
     handle
         .execute(
             "INSERT OR REPLACE INTO cache_row (id, grp, val) VALUES ('r1', 'g1', 'v1')",
@@ -344,7 +345,8 @@ async fn replace_with_unchanged_value_survives_the_following_deltas() {
     )
     .await;
 
-    // Updating the replaced row is the delta most likely to resolve a bad weight.
+    // Updating the replaced row is the delta most likely to resolve a bad
+    // weight.
     handle
         .execute("UPDATE cache_row SET val = 'v2' WHERE id = 'r1'", vec![])
         .await
@@ -1176,8 +1178,8 @@ async fn the_guard_is_not_fooled_by_comments_qualifiers_or_the_table_constraint_
         .await
         .expect_err("a schema-qualified target must not hide the table");
 
-    // Single-column TABLE-CONSTRAINT key. This IS a rowid alias, and reading the
-    // DDL string for the phrase "INTEGER PRIMARY KEY" misses it entirely —
+    // Single-column TABLE-CONSTRAINT key. This IS a rowid alias, and reading
+    // the DDL string for the phrase "INTEGER PRIMARY KEY" misses it entirely —
     // under-approximation, the unsafe direction.
     let handle = guarded_setup("id INTEGER, val TEXT, PRIMARY KEY (id)").await;
     handle

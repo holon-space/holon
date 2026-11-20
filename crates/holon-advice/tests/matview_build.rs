@@ -204,9 +204,10 @@ async fn bundled_rule_matview_builds_and_scores_correctly() {
     );
 
     // Re-reconcile must not error or hang. Whether it reports Unchanged vs
-    // Created depends on `reconcile_named_view`'s SQL normalizer matching Turso's
-    // canonicalized stored matview form (Turso rewrites complex join/aggregate
-    // SELECTs) — a `reconcile_named_view` concern, not advice synthesis.
+    // Created depends on `reconcile_named_view`'s SQL normalizer matching
+    // Turso's canonicalized stored matview form (Turso rewrites complex
+    // join/aggregate SELECTs) — a `reconcile_named_view` concern, not advice
+    // synthesis.
     let re = handle
         .query(
             "SELECT sql FROM sqlite_master WHERE name='advice_rule_lessons_for_tasks'",
@@ -618,7 +619,8 @@ async fn probe_multi_junction_fanout_fix_shapes() {
         .unwrap();
     assert_chained("-t1", "b1", &["t2", "t3", "t4"], &["b2", "r2"], &["x1"]).await;
 
-    // The production edge-field writer pattern: DELETE-all + re-INSERT in one txn.
+    // The production edge-field writer pattern: DELETE-all + re-INSERT in one
+    // txn.
     handle
         .transaction(vec![
             (

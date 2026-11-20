@@ -68,8 +68,8 @@ async fn the_header_pass_share_of_the_initial_scan() {
     } else {
         "release"
     };
-    // The scan's cost grows with the square of the file count, so a run picks its
-    // sizes.
+    // The scan's cost grows with the square of the file count, so a run picks
+    // its sizes.
     let sizes = std::env::var("HEADER_PASS_FILES").unwrap_or_else(|_| "1000,5000,20000".into());
     for files in sizes
         .split(',')

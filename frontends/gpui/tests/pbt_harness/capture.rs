@@ -77,7 +77,8 @@ impl FrameSink {
             return;
         };
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
-        // SAFETY: see module doc — single-thread, app pinned for the sink's life.
+        // SAFETY: see module doc — single-thread, app pinned for the sink's
+        // life.
         let app = unsafe { &mut *(self.app_ptr as *mut HeadlessAppContext) };
         let mut img = match app.capture_screenshot(self.window) {
             Ok(img) => img,

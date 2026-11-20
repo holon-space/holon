@@ -683,8 +683,8 @@ fn enrol(
     // Cross-origin contention is recorded as an EVENT here, on both sides, so
     // that it covers the whole overlap rather than two sampled instants:
     //   * this clock is contended if the other slot already has anything in it;
-    //   * every entry already pending in the other slot becomes contended, because
-    //     this clock now shares the pipeline with it.
+    //   * every entry already pending in the other slot becomes contended,
+    //     because this clock now shares the pipeline with it.
     // Between them, any overlap of two lives is caught by whichever clock
     // started second — including a foreign clock that opens and closes entirely
     // INSIDE this one's life, which is the common shape (facade spans are
@@ -877,8 +877,8 @@ fn block_row_pairs(c: &crate::Change<crate::StorageEntity>) -> Vec<(String, Opti
             .filter(|&s| s > 0)
             .map(WriteSeq::from_i64);
         let mut out = Vec::new();
-        // ALLOW(raw_row_id_column): key — the latency ledger keys on the id TEXT; it
-        // resolves no entity
+        // ALLOW(raw_row_id_column): key — the latency ledger keys on the id
+        // TEXT; it resolves no entity
         if let Some(id) = data.get("id").and_then(|v| v.as_string()) {
             out.push((id.to_string(), seq));
         }
@@ -963,8 +963,8 @@ pub fn rows_delivered<'a>(
         // counterpart of the harness-only `action_total` stage.
         // `in_flight` / `backlog` are what let a consumer tell a queued sample
         // from a quiet one. Without them `ms` conflates service time with queue
-        // wait, and an agent typing faster than a human turns a healthy pipeline
-        // into a wall of SLO banners (BugFunnel 2026-08-31).
+        // wait, and an agent typing faster than a human turns a healthy
+        // pipeline into a wall of SLO banners (BugFunnel 2026-08-31).
         tracing::info!(
             target: "holon_latency",
             stage = "e2e",
@@ -1122,11 +1122,12 @@ fn close_delivered<S: AsRef<str>>(
             // A delivered token nobody is waiting for is the STICKY row column,
             // not evidence about an op in flight: `write_seq` records the row's
             // last editor write and every later projection of that row repeats
-            // it. So it may not veto a tokenless entry's closure (rule 3) — that
-            // veto is what made split/indent/join unmeasurable on any block the
-            // user had ever typed into. A tokenful entry still waits for its own
-            // token unless the batch carried a genuinely tokenless row (rule 2),
-            // which is what keeps a stale no-op re-commit from stealing.
+            // it. So it may not veto a tokenless entry's closure (rule 3) —
+            // that veto is what made split/indent/join unmeasurable on any
+            // block the user had ever typed into. A tokenful entry still waits
+            // for its own token unless the batch carried a genuinely tokenless
+            // row (rule 2), which is what keeps a stale no-op re-commit from
+            // stealing.
             if let Some(i) = newest {
                 if has_tokenless || pending[i].observable.seq().is_none() {
                     winner = Some(i);

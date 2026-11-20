@@ -140,7 +140,8 @@ pub fn predict(t: &E2ETransition, post: &ReferenceState, stamp: Option<StampProb
             };
             typed_field_write(t, post)
         }
-        // No probe means the draw has no Loro log, so there is no height to check.
+        // No probe means the draw has no Loro log, so there is no height to
+        // check.
         Delta::Indent => indent(stamp?),
     })
 }

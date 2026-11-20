@@ -31,7 +31,8 @@ async fn automations_journal_matview_is_listed_and_projects_grouped_counts() {
         .await
         .expect("automations_journal matview");
 
-    // MCP `list_tables` reads sqlite_master — the matview must be visible at boot.
+    // MCP `list_tables` reads sqlite_master — the matview must be visible at
+    // boot.
     let listed = handle
         .query(
             "SELECT name FROM sqlite_master WHERE name = 'automations_journal'",

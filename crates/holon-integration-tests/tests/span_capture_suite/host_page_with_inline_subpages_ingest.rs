@@ -79,9 +79,9 @@ fn hand_written_page_inlining_page_tagged_children_de_inlines_instead_of_quarant
         env.settle().await;
 
         // The initial scan's own verdict — the value `holon-app` turns into the
-        // red degraded banner. A quarantined file reports here as a failed file,
-        // and that report is PERMANENT for the boot even though a later poll
-        // re-ingests the file cleanly.
+        // red degraded banner. A quarantined file reports here as a failed
+        // file, and that report is PERMANENT for the boot even though a later
+        // poll re-ingests the file cleanly.
         let scan_outcome = env
             .injector()
             .expect("injector")

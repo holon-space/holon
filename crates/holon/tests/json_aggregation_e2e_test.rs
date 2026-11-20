@@ -281,7 +281,8 @@ async fn test_production_todoist_query_via_backend_engine() -> Result<()> {
     setup_test_schema(&engine).await?;
     insert_test_data(&engine).await?;
 
-    // Load the actual production query (strip render directives for plain prqlc)
+    // Load the actual production query (strip render directives for plain
+    // prqlc)
     let raw_prql = include_str!("fixtures/todoist_hierarchy.prql");
     let prql = strip_render_directives(raw_prql);
     println!("Testing production query:\n{}\n", prql);
@@ -382,7 +383,8 @@ append (
     println!("json_object was automatically injected!");
 
     // SQL should NOT have SELECT * anymore - just SELECT data
-    // The JsonAggregationTransformer replaces Wildcard with just the data column
+    // The JsonAggregationTransformer replaces Wildcard with just the data
+    // column
     assert!(
         !sql.contains("SELECT\n  *"),
         "SQL should not contain SELECT * - should be replaced with json_object"
@@ -450,8 +452,9 @@ async fn test_json_aggregation_includes_derived_columns() -> Result<()> {
         .await?;
 
     // Query with DERIVED columns - NO EXPLICIT COLUMN LIST in select!
-    // The ColumnPreservationTransformer will convert these to `select { this.* }`
-    // Then JsonAggregationTransformer will inject json_object with all columns
+    // The ColumnPreservationTransformer will convert these to `select { this.*
+    // }` Then JsonAggregationTransformer will inject json_object with all
+    // columns
     let prql = r#"
 from projects
 derive { entity_name = "projects", display_name = name }
@@ -468,8 +471,8 @@ append (
     let sql = engine.compile_to_sql(prql, QueryLanguage::HolonPrql)?;
     println!("Generated SQL:\n{}\n", sql);
 
-    // The transformer emits `json_object(*)` over each branch CTE rather than an
-    // enumerated key list, so the derived columns are only observable in the
+    // The transformer emits `json_object(*)` over each branch CTE rather than
+    // an enumerated key list, so the derived columns are only observable in the
     // RESULT rows below — asserting them in the SQL text would pin the shape of
     // the emitted call instead of the behaviour it must deliver.
     assert!(
@@ -483,13 +486,14 @@ append (
         .await?;
     println!("Query executed with {} results", results.len());
 
-    // One projects row and one tasks row; without this an empty result set would
-    // pass the loop below with zero assertions executed.
+    // One projects row and one tasks row; without this an empty result set
+    // would pass the loop below with zero assertions executed.
     assert_eq!(results.len(), 2, "one row per appended branch");
 
     for (i, row) in results.iter().enumerate() {
         println!("Row {}: keys={:?}", i, row.keys().collect::<Vec<_>>());
-        // Both derived columns must survive `json_object(*)` and the flattening.
+        // Both derived columns must survive `json_object(*)` and the
+        // flattening.
         assert!(
             row.get("entity_name").is_some(),
             "Row should have entity_name from flattened data"
@@ -545,9 +549,9 @@ async fn test_json_aggregation_includes_all_base_columns() -> Result<()> {
     // Test that json_object includes all REFERENCED columns from each table
     //
     // IMPORTANT: PRQL's optimizer removes unreferenced columns from scope.
-    // `select { this.* }` means "all columns in scope", not "all table columns".
-    // To include base columns in the json_object, they must be explicitly
-    // referenced.
+    // `select { this.* }` means "all columns in scope", not "all table
+    // columns". To include base columns in the json_object, they must be
+    // explicitly referenced.
     //
     // This test uses explicit select statements with only the columns we want,
     // matching what users would write in practice.

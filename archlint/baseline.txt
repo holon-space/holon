@@ -54,7 +54,7 @@ loro_doc_escape	crates/holon-loro/src/loro_backend.rs	let f_before_child = doc.d
 loro_doc_escape	crates/holon-loro/src/loro_backend.rs	let raw = doc.doc();
 loro_doc_escape	crates/holon-loro/src/loro_backend.rs	let raw = doc.doc();
 loro_doc_escape	crates/holon-loro/src/loro_backend.rs	let raw = doc.doc();
-loro_doc_escape	crates/holon-sharing/src/registry_binding.rs	// registry.register_container("ledger", ledger.doc()) // no such method
+loro_doc_escape	crates/holon-sharing/src/registry_binding.rs	// registry.register_container("ledger", ledger.doc()) // no such
 no-underscore-params	crates/holon-api/src/identity_minting/tests.rs	async fn mint(&self, _input: IdentityInput) -> Result<MintedId, BoxError> {
 no-underscore-params	crates/holon-core/src/boundary_enforcer.rs	_behavior: &BoundaryBehavior,
 no-underscore-params	crates/holon-core/src/boundary_enforcer.rs	_op_name: &str,

@@ -58,7 +58,8 @@ impl<R: RefSharedView + RefSharedViewMut> TransitionFactory<R> for SharePage {
         )
         .map(|()| {
             // Heavy for the same reason as `ShareContainer`: a once-per-run
-            // event that must come early to leave ticks for the placement moves.
+            // event that must come early to leave ticks for the placement
+            // moves.
             (
                 30,
                 proptest::sample::select(pages)

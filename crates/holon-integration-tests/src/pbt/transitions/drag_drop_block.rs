@@ -123,21 +123,23 @@ impl<
             // main panel — the SUT's `drop_entity` grabs that node. Two
             // independent things must hold, both verified here:
             //
-            // 1. The active item template must *render* a draggable for the source's row. Render
-            //    it through the shadow interpreter and walk the tree (the default
-            //    `render_entity()` → block profile does; a custom render like `row(text(...))`
-            //    does not).
+            // 1. The active item template must *render* a draggable for the
+            //    source's row. Render it through the shadow interpreter and
+            //    walk the tree (the default `render_entity()` → block profile
+            //    does; a custom render like `row(text(...))` does not).
             check(
                 state.block_renders_draggable(&self.source),
                 Reason::SourceNotRendered,
             ),
-            // 2. The source must actually be in the active layout's query rendered set — evaluated
-            //    faithfully via `TestQuery::evaluate` (the default `focus_root` query, or the
-            //    recovered `QuerySource` of a user `index.org`). A `from children` layout surfaces
-            //    only the layout block's direct children; an all-blocks layout surfaces
-            //    everything. Combined with the draggable-template check above, this dissolves the
-            //    old "block in tree but not rendered" divergence without a blanket custom-layout
-            //    exclusion.
+            // 2. The source must actually be in the active layout's query
+            //    rendered set — evaluated faithfully via `TestQuery::evaluate`
+            //    (the default `focus_root` query, or the recovered
+            //    `QuerySource` of a user `index.org`). A `from children` layout
+            //    surfaces only the layout block's direct children; an
+            //    all-blocks layout surfaces everything. Combined with the
+            //    draggable-template check above, this dissolves the old "block
+            //    in tree but not rendered" divergence without a blanket
+            //    custom-layout exclusion.
             check(
                 state.main_rendered_block_ids().contains(&self.source),
                 Reason::SourceNotRendered,

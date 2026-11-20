@@ -56,15 +56,16 @@ impl RefLayout for ReferenceState {
 
     fn expected_visible_content_ids(&self, region: CapRegion) -> BTreeSet<EntityUri> {
         let focus_roots = self.rendered_focus_root(from_cap_region(region));
-        // A block is legitimately in the region's main panel iff it descends from
-        // the current focus root — regardless of how it renders. Per the fork-A
-        // program-rendering ruling (block_profile.yaml), source blocks are NOT
-        // display-hidden: a rule/program source renders as a `rule_card`, a plain
-        // source (e.g. python) renders as the `source`→`query_result` variant, and
-        // only the `holon_source` spacer(0) case is invisible. All of these are
-        // valid rows for the current root, so none are "stale". The former
-        // `content_type != Source` exclusion wrongly reported the visible plain-
-        // source row as stale; staleness is a cross-ROOT property, gated purely by
+        // A block is legitimately in the region's main panel iff it descends
+        // from the current focus root — regardless of how it renders. Per the
+        // fork-A program-rendering ruling (block_profile.yaml), source blocks
+        // are NOT display-hidden: a rule/program source renders as a
+        // `rule_card`, a plain source (e.g. python) renders as the
+        // `source`→`query_result` variant, and only the `holon_source`
+        // spacer(0) case is invisible. All of these are valid rows for the
+        // current root, so none are "stale". The former `content_type !=
+        // Source` exclusion wrongly reported the visible plain- source row as
+        // stale; staleness is a cross-ROOT property, gated purely by
         // `is_descendant_of_any(focus_roots)` here.
         self.domain
             .block_state
@@ -164,8 +165,8 @@ impl RefLayoutMutate for ReferenceState {
     fn apply_click_focus(&mut self, region: Region, block_id: &EntityUri) {
         use crate::pbt::ui_types::CursorPosition;
         use crate::pbt::ui_types::OpenPinEntry;
-        // A real click outside the active editor blurs it (real-editor-only commit
-        // via `blur_active_editor`). Same-block clicks don't blur.
+        // A real click outside the active editor blurs it (real-editor-only
+        // commit via `blur_active_editor`). Same-block clicks don't blur.
         if self
             .ui
             .tab
@@ -176,8 +177,8 @@ impl RefLayoutMutate for ReferenceState {
             self.blur_active_editor();
         }
         if self.predicts_navigation_focus(block_id, region) {
-            // Sidebar `selectable` → `navigation.focus(region=main)`: mirror the
-            // nav-history push (see navigate_focus.rs for rationale).
+            // Sidebar `selectable` → `navigation.focus(region=main)`: mirror
+            // the nav-history push (see navigate_focus.rs for rationale).
             let history = self
                 .ui
                 .tab
@@ -204,8 +205,8 @@ impl RefLayoutMutate for ReferenceState {
             self.ui.tab.focused_cursor.remove(&Region::Main);
             self.ui.tab.focused_block = Some(block_id.clone());
         } else {
-            // Editor focus only — the nav cursor is unchanged (ADR 0010: focus is
-            // in-memory state, set directly).
+            // Editor focus only — the nav cursor is unchanged (ADR 0010: focus
+            // is in-memory state, set directly).
             self.ui.tab.focused_block = Some(block_id.clone());
             self.ui
                 .tab
@@ -222,10 +223,11 @@ impl RefLayoutMutate for ReferenceState {
         use holon_pbt_core::types::Mutation;
         use holon_pbt_core::types::MutationEvent;
         use holon_pbt_core::types::MutationSource;
-        // Leaf-reversibility gate (same DeclaredIrreversible rule as join_block):
-        // the engine's block `delete` only produces a create-inverse for a leaf;
-        // a delete that CASCADES to descendants is declared irreversible. Snapshot
-        // only for leaves, else the ref undo stack desyncs from the engine's.
+        // Leaf-reversibility gate (same DeclaredIrreversible rule as
+        // join_block): the engine's block `delete` only produces a
+        // create-inverse for a leaf; a delete that CASCADES to descendants is
+        // declared irreversible. Snapshot only for leaves, else the ref undo
+        // stack desyncs from the engine's.
         if self.sorted_children_of(block_id).is_empty() {
             self.push_undo_snapshot();
         }
@@ -239,12 +241,13 @@ impl RefLayoutMutate for ReferenceState {
     }
 
     fn set_edge_field_value(&mut self, id: &EntityUri, update: &EdgeFieldUpdate) {
-        // A SetEdgeField is its own User-origin undo step: the engine journals a
-        // whole-set-restore inverse for the edge write (edge fields are always
-        // reversible — no leaf/cascade gate like delete), so the ref records a
-        // snapshot to keep its undo stack in correspondence with the SUT's. Omit
-        // it and a later UndoLastMutation pops mismatched steps (SUT retracts the
-        // edge; ref reaches past it to the prior mutation → block-count skew).
+        // A SetEdgeField is its own User-origin undo step: the engine journals
+        // a whole-set-restore inverse for the edge write (edge fields are
+        // always reversible — no leaf/cascade gate like delete), so the ref
+        // records a snapshot to keep its undo stack in correspondence with the
+        // SUT's. Omit it and a later UndoLastMutation pops mismatched steps
+        // (SUT retracts the edge; ref reaches past it to the prior mutation →
+        // block-count skew).
         self.push_undo_snapshot();
         let block = self
             .domain
@@ -389,9 +392,9 @@ impl ReferenceState {
     fn add_blocks_to_store(&mut self, doc_uri: &EntityUri, blocks: &[Block]) {
         for block in blocks {
             let mut block = block.clone();
-            // Mirror the org round-trip normalization `Mutation::apply_to` does.
-            // Parse order: tag split off the raw headline first, THEN mark
-            // extraction (see write_org_file ingest above).
+            // Mirror the org round-trip normalization `Mutation::apply_to`
+            // does. Parse order: tag split off the raw headline first, THEN
+            // mark extraction (see write_org_file ingest above).
             crate::pbt::types::apply_org_headline_tag_split(&mut block);
             let (content, marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
                 &block.content,

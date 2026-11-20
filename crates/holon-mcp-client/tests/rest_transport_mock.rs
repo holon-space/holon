@@ -604,8 +604,8 @@ async fn rest_transport_decodes_ics_feed_via_shared_sync_path() {
         "two weekly occurrences, one all-day and one UTC: {records:#?}"
     );
 
-    // All-day: a date-only start, an exclusive end, all_day = 1. The date is the
-    // one AS WRITTEN, which is why the fixture needs no zone for it.
+    // All-day: a date-only start, an exclusive end, all_day = 1. The date is
+    // the one AS WRITTEN, which is why the fixture needs no zone for it.
     let allday = record(&records, "allday-1@example.com").expect("the all-day event");
     assert_eq!(allday["all_day"], 1);
     assert_eq!(allday["start"], ics_day(3));
@@ -832,7 +832,8 @@ fn shipped_jsonplaceholder_sidecar_parses_as_rest() {
         } => {
             let call = manual.calls.get("list-posts").expect("list-posts declared");
             assert_eq!(call.url, "https://jsonplaceholder.typicode.com/posts");
-            // Shipped example sets no poll_interval → resolves to the 300s default.
+            // Shipped example sets no poll_interval → resolves to the 300s
+            // default.
             assert!(poll_interval.is_none());
         }
         other => panic!("expected rest transport, got {other:?}"),
@@ -1066,7 +1067,8 @@ impl EntityCache<DynamicEntity> for CountingCache {
     async fn apply_batch(
         &self,
         changes: &[Change<DynamicEntity>],
-        // ALLOW(unused_param): trait-required by EntityCache; test cache stores no token.
+        // ALLOW(unused_param): trait-required by EntityCache; test cache stores
+        // no token.
         _sync_token: Option<&SyncTokenUpdate>,
     ) -> holon_core::Result<()> {
         self.apply_batch_calls.fetch_add(1, SeqCst);

@@ -188,7 +188,8 @@ pub fn scan_inline(text: &str) -> InlineParse {
                     let name: String = s.src[s.i + 3..close].iter().collect();
                     if !name.trim().is_empty() {
                         push_tag(&mut s.tags, name.trim());
-                        // Preserve the literal source so the display text is lossless.
+                        // Preserve the literal source so the display text is
+                        // lossless.
                         let lit: String = s.src[s.i..close + 2].iter().collect();
                         s.push_str(&lit);
                         s.i = close + 2;
@@ -246,7 +247,8 @@ pub fn scan_inline(text: &str) -> InlineParse {
 
 fn split_wikilink(inner: &str) -> (String, String) {
     // `target|alias` (Obsidian/LogSeq alias). Label defaults to target, minus
-    // any `#heading` / `#^block` anchor, which is a resolution hint not display.
+    // any `#heading` / `#^block` anchor, which is a resolution hint not
+    // display.
     if let Some((t, a)) = inner.split_once('|') {
         (t.trim().to_string(), a.trim().to_string())
     } else {
@@ -274,7 +276,8 @@ fn md_link_target(url: &str) -> EntityRef {
     if u.starts_with("http://") || u.starts_with("https://") || u.starts_with("mailto:") {
         EntityRef::External { url: u.to_string() }
     } else {
-        // A relative markdown link into the vault — treat as a dangling name ref.
+        // A relative markdown link into the vault — treat as a dangling name
+        // ref.
         let name = u.trim_end_matches(".md").trim_end_matches(".org");
         EntityRef::Name {
             name: name.to_string(),

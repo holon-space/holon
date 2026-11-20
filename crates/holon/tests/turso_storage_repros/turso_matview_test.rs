@@ -184,8 +184,8 @@ async fn test_create_matview_separate_block_in_place() {
         });
     }
 
-    // Second block_in_place: Create view (simulates CacheEventSubscriber::start ->
-    // subscribe)
+    // Second block_in_place: Create view (simulates CacheEventSubscriber::start
+    // -> subscribe)
     {
         let backend_clone = Arc::clone(&backend);
         tokio::task::block_in_place(|| {
@@ -250,8 +250,8 @@ async fn test_create_matview_full_init_schema_pattern() {
         });
     }
 
-    // Second block_in_place: Create view (simulates CacheEventSubscriber::start ->
-    // subscribe)
+    // Second block_in_place: Create view (simulates CacheEventSubscriber::start
+    // -> subscribe)
     {
         let backend_clone = Arc::clone(&backend);
         tokio::task::block_in_place(|| {

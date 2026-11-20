@@ -321,7 +321,8 @@ impl RefBlockTreeMut for EditorPureRef {
         if at_start { id.clone() } else { new_id }
     }
 
-    // ALLOW(unused_param): trait signature requires old_id, unreachable arm below
+    // ALLOW(unused_param): trait signature requires old_id, unreachable arm
+    // below
     fn remint_block(&mut self, _old_id: &EntityUri) -> EntityUri {
         unimplemented!(
             "remint_block: only reachable via StaleExternalRewrite, which requires the composed \

@@ -18,8 +18,9 @@ use holon_api::timing_mode::TimingError;
 use holon_api::timing_mode::TimingMode;
 use holon_api::timing_mode::Unit;
 use holon_api::timing_mode::{self};
-// Budget formulas + inputs live in holon-pbt-core (Phase 1a Step 1); re-exported
-// so existing `crate::pbt::transition_budgets::…` import sites keep resolving.
+// Budget formulas + inputs live in holon-pbt-core (Phase 1a Step 1);
+// re-exported so existing `crate::pbt::transition_budgets::…` import sites keep
+// resolving.
 pub use holon_pbt_core::budget::{
     CACHE_EVENT_READS, CLICK_JITTER_TOLERANCE, CaretSeat, ExpectedSql, FocusRerender,
     JOURNAL_READS, MutationKind, NAV_DML_READS, NAV_RENDER_FAN_READS,
@@ -191,8 +192,8 @@ pub fn declared_complexity_class(
     transition: &crate::pbt::transitions::E2ETransition,
 ) -> crate::pbt::complexity_trend::ComplexityClass {
     use crate::pbt::complexity_trend::ComplexityClass;
-    // Small must stay > 0: several formulas divide or subtract on a cardinality,
-    // and a 0-sized "state" is not a state any run ever reaches.
+    // Small must stay > 0: several formulas divide or subtract on a
+    // cardinality, and a 0-sized "state" is not a state any run ever reaches.
     const SMALL: usize = 1;
     const LARGE: usize = 64;
     let open_tab_arms = FocusRerender::ALL.into_iter().flat_map(|departing| {
@@ -666,10 +667,10 @@ pub fn evaluate_in(
             }
             Severity::Error => Violation::Error(s.message.clone()),
             Severity::Pinned => {
-                // A pinned ceiling is a measured maximum enforced unconditionally,
-                // which only a deterministic metric can be. Pinning a wall clock
-                // would make `measure` unable to soften it and reintroduce the
-                // load flake this mode exists to remove.
+                // A pinned ceiling is a measured maximum enforced
+                // unconditionally, which only a deterministic metric can be.
+                // Pinning a wall clock would make `measure` unable to soften it
+                // and reintroduce the load flake this mode exists to remove.
                 assert!(
                     s.metric.deterministic(),
                     "{} is pinned but non-deterministic: a pinned ceiling must be a metric load \

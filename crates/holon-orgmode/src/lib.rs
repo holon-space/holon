@@ -76,8 +76,8 @@ pub use file_watcher::FileEvent;
 pub use file_watcher::VaultFileWatcher;
 pub use file_watcher::classify_change_to_event;
 // Core types
-// Note: Block is NOT re-exported here to avoid duplicate type issues with flutter_rust_bridge
-// Use holon_api::block::Block directly instead
+// Note: Block is NOT re-exported here to avoid duplicate type issues with
+// flutter_rust_bridge Use holon_api::block::Block directly instead
 pub use models::BlockResolver;
 pub use models::HashMapBlockResolver;
 pub use models::OrgBlockExt;
@@ -87,7 +87,8 @@ pub use models::SourceBlock;
 pub use models::ToOrg;
 pub use models::find_document_id;
 pub use models::get_block_file_path;
-// Extension traits for org-specific functionality (forwarded from holon-org-format)
+// Extension traits for org-specific functionality (forwarded from
+// holon-org-format)
 pub use models::org_props;
 pub use models::render_document_header;
 pub use org_renderer::OrgRenderer;

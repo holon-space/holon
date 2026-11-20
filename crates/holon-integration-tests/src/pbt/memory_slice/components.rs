@@ -261,11 +261,12 @@ impl SutBlockTreeWrite for MemoryBackendComponent {
             )
             .await
             .unwrap_or_else(|e| panic!("apply_split_block: create new block failed: {e}"));
-        // `create_block` appends to the end of the parent's children; relocate to
-        // the oracle's slot (`anchor` == None means first child). Skip for a
-        // virtual (`no_parent`/sentinel) parent — `MemoryBackend::move_block` rejects
-        // a virtual target, and top-level sibling order is not invariant-checked
-        // (the new block keeps the original's `no_parent` parent either way).
+        // `create_block` appends to the end of the parent's children; relocate
+        // to the oracle's slot (`anchor` == None means first child). Skip for a
+        // virtual (`no_parent`/sentinel) parent — `MemoryBackend::move_block`
+        // rejects a virtual target, and top-level sibling order is not
+        // invariant-checked (the new block keeps the original's `no_parent`
+        // parent either way).
         if !parent.is_no_parent() && !parent.is_sentinel() {
             self.move_block(&new_id, parent, anchor).await;
         }

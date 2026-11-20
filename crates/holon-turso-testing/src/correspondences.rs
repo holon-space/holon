@@ -225,8 +225,8 @@ fn check_block_id_set(label: &str, sut: &[Block], ref_: &[Block]) -> Result<(), 
     // data-loss direction — see `check_no_missing_ids`.
     check_no_missing_ids(label, &sut_ids, &ref_ids)?;
     // The spurious direction alone is filterable. Today `|_| true` admits every
-    // spurious id (no exclusion applied); a future keystone-wiring fork may pass
-    // a real predicate here — see `check_no_spurious_ids`.
+    // spurious id (no exclusion applied); a future keystone-wiring fork may
+    // pass a real predicate here — see `check_no_spurious_ids`.
     check_no_spurious_ids(label, &sut_ids, &ref_ids, |_| true)
 }
 
@@ -247,12 +247,13 @@ fn check_no_missing_ids(
     if missing.is_empty() {
         return Ok(());
     }
-    // FACTS ONLY — never assert a specific cause here. This message historically
-    // baked in a "forward `:REQUIRES:`/`:BLOCKED-BY:` target-FK abort" story as
-    // fact, which mislead multiple sessions for months (the keystone RED it fired
-    // on was actually a per-draw seed/oracle asymmetry, no edge fields involved).
-    // State only which ids are missing from which relation, plus a NEUTRAL triage
-    // hint listing candidate causes without privileging any.
+    // FACTS ONLY — never assert a specific cause here. This message
+    // historically baked in a "forward `:REQUIRES:`/`:BLOCKED-BY:` target-FK
+    // abort" story as fact, which mislead multiple sessions for months (the
+    // keystone RED it fired on was actually a per-draw seed/oracle asymmetry,
+    // no edge fields involved). State only which ids are missing from which
+    // relation, plus a NEUTRAL triage hint listing candidate causes without
+    // privileging any.
     Err(format!(
         "[{label}] INGEST DATA LOSS: {} reference-expected block id(s) present in the oracle but \
          absent from the SUT `{label}` relation, missing: {:?}. Common causes (verify, do not \
@@ -316,9 +317,10 @@ pub fn block_content() -> Correspondence<BlockContent> {
     Correspondence {
         ref_project: ref_block_content,
         stores: vec![
-            // Write-side `block_raw` snapshot via `SutBackend` — the pure-memory
-            // path (no Turso, no matview): the same capability portability that
-            // moved `inv-no-orphan-blocks` off `SutSqlProjection`.
+            // Write-side `block_raw` snapshot via `SutBackend` — the
+            // pure-memory path (no Turso, no matview): the same capability
+            // portability that moved `inv-no-orphan-blocks` off
+            // `SutSqlProjection`.
             StoreProjection {
                 id: "inv-block-content/block_raw",
                 attribution: Attribution::at(Layer::Projection, file!()),

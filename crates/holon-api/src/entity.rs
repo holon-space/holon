@@ -1139,8 +1139,8 @@ impl ChildPlacement {
             None => Ok(ChildPlacement::Last),
             Some(Value::Null) => Ok(ChildPlacement::First),
             Some(Value::String(after)) => {
-                // ALLOW(entity_uri_from_raw): a predecessor id from the StorageEntity params
-                // map
+                // ALLOW(entity_uri_from_raw): a predecessor id from the
+                // StorageEntity params map
                 Ok(ChildPlacement::After(crate::EntityUri::from_raw(after)))
             }
             Some(other) => Err(format!("'{key}' must be a block id or Null, got {other:?}").into()),

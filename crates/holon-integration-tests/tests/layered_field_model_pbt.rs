@@ -224,8 +224,8 @@ static SEED_BLOCKS: LazyLock<Vec<Block>> = LazyLock::new(|| {
         .iter()
         .find(|b| b.id.to_string() == "block:layered-own-src")
         .expect("the seed holds the named source block");
-    // A field left at its default cannot fail the equality below, so the fixture
-    // must author every one of them away from it.
+    // A field left at its default cannot fail the equality below, so the
+    // fixture must author every one of them away from it.
     assert!(page.tags.iter().any(|t| t == "home"), "{:?}", page.tags);
     assert!(page.properties.contains_key("AREA"));
     assert_eq!(page.requires.len(), 1);

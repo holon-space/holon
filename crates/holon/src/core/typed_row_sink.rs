@@ -119,7 +119,8 @@ impl TypedRowSink for DispatchingTypedRowSink {
             }
 
             // The dispatcher parses a param's references by its descriptor, and
-            // `rows` nests them, so each row is parsed as the create it amounts to.
+            // `rows` nests them, so each row is parsed as the create it amounts
+            // to.
             let dispatcher = self.dispatcher().await;
             for row in &owned.rows {
                 dispatcher

@@ -84,8 +84,9 @@ const UI_STATE_VARIABLES: &[&str] = &[
     "available_height_px",
     "available_width_physical_px",
     "available_height_physical_px",
-    // Global viewport default: emitted by UiState::context_for when no // ALLOW(fallback): comment
-    // describes default-context emission refinement has reached this block.
+    // Global viewport default: emitted by UiState::context_for when no //
+    // ALLOW(fallback): comment describes default-context emission refinement
+    // has reached this block.
     "viewport_width_px",
     "viewport_height_px",
     "viewport_width_physical_px",
@@ -358,11 +359,12 @@ impl ParsedProfile {
             variants,
             computed_fields,
             virtual_child: self.virtual_child,
-            // A YAML/org-source profile parsed standalone has no TypeDefinition,
-            // so no declared schema is known here — every missing required column
-            // is treated as expected heterogeneity (silent). The block profile's
-            // declared columns come from the type-def base it merges into (see
-            // `profile_from_type_def` + `build_cache` merge order).
+            // A YAML/org-source profile parsed standalone has no
+            // TypeDefinition, so no declared schema is known here — every
+            // missing required column is treated as expected heterogeneity
+            // (silent). The block profile's declared columns come from the
+            // type-def base it merges into (see `profile_from_type_def` +
+            // `build_cache` merge order).
             declared_columns: BTreeSet::new(),
             render_requirements: Default::default(),
         }
@@ -913,17 +915,17 @@ pub fn profile_from_type_def(
         .map(|(_, spec)| CompiledComputedField::typed(spec))
         .collect();
 
-    // Declared schema = the TypeDefinition's persistent field names. This is the
-    // O1 contract for type-aware binding: a required column MISSING from a row
-    // is a real projection gap (LOUD) iff it is one of these declared columns;
-    // otherwise (an optional property flattened from `properties`, or a UI-state
-    // variable) it is expected heterogeneity and stays silent.
+    // Declared schema = the TypeDefinition's persistent field names. This is
+    // the O1 contract for type-aware binding: a required column MISSING from a
+    // row is a real projection gap (LOUD) iff it is one of these declared
+    // columns; otherwise (an optional property flattened from `properties`, or
+    // a UI-state variable) it is expected heterogeneity and stays silent.
     //
-    // Only PERSISTENT fields — `persistent_fields()` excludes `Computed`-lifetime
-    // entries, which are the profile's OWN computed fields (is_program,
-    // is_rule_head, …) registered into the TypeDefinition. Those are NOT columns
-    // the projection carries; classifying them as declared would turn every
-    // unbound-sibling propagation into a false LOUD.
+    // Only PERSISTENT fields — `persistent_fields()` excludes
+    // `Computed`-lifetime entries, which are the profile's OWN computed fields
+    // (is_program, is_rule_head, …) registered into the TypeDefinition. Those
+    // are NOT columns the projection carries; classifying them as declared
+    // would turn every unbound-sibling propagation into a false LOUD.
     //
     // NOTE: `#[edge_field]` columns (e.g. block `tags`/`requires`) are marked
     // skip-serialization by the Entity derive, so they are NOT in `fields` and
@@ -1039,8 +1041,8 @@ pub fn build_lookup_engine(live_entities: &LiveEntities) -> RhaiEngine {
 fn register_entity_lookups(engine: &mut RhaiEngine, live_entities: &LiveEntities) {
     for (entity_name, live_data) in live_entities {
         let data = Arc::clone(live_data);
-        // Rhai identifiers use underscores; EntityName normalizes to hyphens for URI
-        // schemes.
+        // Rhai identifiers use underscores; EntityName normalizes to hyphens
+        // for URI schemes.
         let name = entity_name.as_str().replace('-', "_");
         engine.register_fn(&name, move |id: String| -> rhai::Dynamic {
             let items = data.read();
@@ -1082,7 +1084,8 @@ const RHAI_STDLIB_FREE_FNS: &[&str] = &[
     "tag",
     "set_tag",
     "hash",
-    // Collections & strings, free form (method form is excluded by the AST walk)
+    // Collections & strings, free form (method form is excluded by the AST
+    // walk)
     "len",
     "keys",
     "values",
@@ -1460,7 +1463,8 @@ impl ProfileResolver {
             profiles.insert(name, profile.clone());
         }
 
-        // Overlay org-based profiles (org wins via merge — higher priority overrides)
+        // Overlay org-based profiles (org wins via merge — higher priority
+        // overrides)
         for profile in items.values() {
             let filtered = Self::filter_profile(profile, ui_info);
             let name = filtered.entity_name.clone();
@@ -2099,7 +2103,8 @@ mod tests {
 
     #[test]
     fn a_backslash_inside_a_backtick_literal_is_not_an_escape() {
-        // Verbatim: the `\` is content, so the NEXT backtick closes the literal.
+        // Verbatim: the `\` is content, so the NEXT backtick closes the
+        // literal.
         let (data, ui) = split_condition("x == `a\\` && is_focused").unwrap();
         assert_eq!(data.as_deref(), Some("x == `a\\`"));
         assert_eq!(ui, Predicate::Var("is_focused".into()));
@@ -2216,7 +2221,8 @@ mod tests {
 
     #[test]
     fn a_top_level_statement_separator_beside_a_split_is_refused() {
-        // `a && b; c` evaluates to `c`; the split `a`, `b; c` would mean `a && c`.
+        // `a && b; c` evaluates to `c`; the split `a`, `b; c` would mean `a &&
+        // c`.
         assert_refused_naming("is_focused && is_task; x", "precedence");
     }
 
@@ -2833,7 +2839,8 @@ variants:
 
     #[test]
     fn rule_head_renders_rule_card() {
-        // A `holon_rule` head is program → routed to the rule card, never a query.
+        // A `holon_rule` head is program → routed to the rule card, never a
+        // query.
         let engine = engine_with_rule_parent("block:journal-auto-create");
         let row = source_row("block:rule", "block:journal-auto-create", "holon_rule");
         assert_eq!(variant_for(&row, &engine), "rule_card");
@@ -2841,10 +2848,10 @@ variants:
 
     #[test]
     fn trigger_sibling_renders_rule_card_not_query_result() {
-        // The `holon_sql` trigger sibling of a rule is program via the discovery
-        // join (clause b). Priority 0 wins over the `holon_source` spacer that its
-        // language would otherwise match — it renders the card, NOT a query result
-        // and NOT a hidden spacer.
+        // The `holon_sql` trigger sibling of a rule is program via the
+        // discovery join (clause b). Priority 0 wins over the `holon_source`
+        // spacer that its language would otherwise match — it renders the card,
+        // NOT a query result and NOT a hidden spacer.
         let engine = engine_with_rule_parent("block:journal-auto-create");
         let row = source_row("block:trigger", "block:journal-auto-create", "holon_sql");
         let variant = variant_for(&row, &engine);
@@ -2855,7 +2862,8 @@ variants:
     #[test]
     fn normal_holon_query_source_is_not_program() {
         // A holon_prql query source with NO rule sibling stays hidden machinery
-        // (the `holon_source` spacer) — it must NOT be diverted to the rule card.
+        // (the `holon_source` spacer) — it must NOT be diverted to the rule
+        // card.
         let engine = engine_with_rule_parent("block:journal-auto-create");
         let row = source_row("block:q", "block:journals", "holon_prql");
         let variant = variant_for(&row, &engine);
@@ -2865,8 +2873,9 @@ variants:
 
     #[test]
     fn plain_source_block_still_renders_query_result() {
-        // A non-holon source block (not machinery, not a rule) still renders as a
-        // query result — the `source` variant, gated on `!is_program`. No regression.
+        // A non-holon source block (not machinery, not a rule) still renders as
+        // a query result — the `source` variant, gated on `!is_program`. No
+        // regression.
         let engine = engine_with_rule_parent("block:journal-auto-create");
         let row = source_row("block:py", "block:page", "python");
         assert_eq!(variant_for(&row, &engine), "source");
@@ -2875,8 +2884,8 @@ variants:
     #[test]
     fn legacy_action_head_surfaces_deprecation_on_card() {
         // A retired `action`-language head is still program (rule card) and the
-        // deprecation is surfaced: `is_legacy_rule` is true so the card's `if_col`
-        // renders its loud error line.
+        // deprecation is surfaced: `is_legacy_rule` is true so the card's
+        // `if_col` renders its loud error line.
         let engine = engine_with_rule_parent("block:journal-auto-create");
         let row = source_row("block:legacy", "block:journal-auto-create", "action");
         let (profile, computed) = parse_entity_profile(BLOCK_PROFILE_YAML)
@@ -2940,9 +2949,10 @@ variants:
     fn entity_required_resolution_fails_loud_on_value_row() {
         use holon_api::ProfileResolving;
 
-        // Minimal resolver exercising the trait's DEFAULT `resolve_entity_required`
-        // (the contract seam). Entity rows resolve to a dummy profile; the value
-        // branch bails before ever calling `resolve_with_computed`.
+        // Minimal resolver exercising the trait's DEFAULT
+        // `resolve_entity_required` (the contract seam). Entity rows resolve to
+        // a dummy profile; the value branch bails before ever calling
+        // `resolve_with_computed`.
         struct MockResolver;
         impl ProfileResolving for MockResolver {
             fn resolve(&self, _: &HashMap<String, Value>) -> Arc<RenderProfile> {
@@ -3016,8 +3026,8 @@ variants:
                 "'{col}' must be a declared block column"
             );
         }
-        // task_state is an optional PROPERTY (flattened from `properties`), not a
-        // declared column → structurally-absent → silent.
+        // task_state is an optional PROPERTY (flattened from `properties`), not
+        // a declared column → structurally-absent → silent.
         assert!(
             !profile.declared_columns.contains("task_state"),
             "task_state is a property, must NOT be a declared column (else the \
@@ -3130,11 +3140,12 @@ variants:
         row.insert("source_language".into(), Value::Null);
 
         let (resolved, computed) = profile.resolve_with_computed(&row, &engine);
-        // Unbound computed fields surface as Null (row shape preserved), not errors.
+        // Unbound computed fields surface as Null (row shape preserved), not
+        // errors.
         assert_eq!(computed.get("is_task"), Some(&Value::Null));
         assert_eq!(computed.get("is_page_row"), Some(&Value::Null));
-        // A variant still resolves (no panic, no cascade abort); embedded_page —
-        // which ANDs the unbound is_page_row — is NOT selected.
+        // A variant still resolves (no panic, no cascade abort); embedded_page
+        // — which ANDs the unbound is_page_row — is NOT selected.
         let name = resolved.expect("a variant must resolve").name.clone();
         assert_ne!(name, "embedded_page");
         assert_ne!(name, "embedded_page_expanded");

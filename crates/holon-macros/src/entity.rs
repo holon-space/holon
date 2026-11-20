@@ -16,8 +16,8 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
         None => quote! { None },
     };
 
-    // Entity types come from holon_api, or from 'crate' when used within holon-api
-    // itself
+    // Entity types come from holon_api, or from 'crate' when used within
+    // holon-api itself
     let api_path = match &entity_attr.api_crate {
         Some(crate_name) if crate_name == "crate" => quote! { crate },
         Some(crate_name) => {
@@ -102,9 +102,10 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
         });
 
         // A field is excluded from the schema and the row round-trip (defaulted
-        // on read) when it is a junction-derived edge field. Serde-free entities
-        // mark these `#[edge_field]`; serde entities that also drop a DB column
-        // may use `#[serde(skip)]` (both meanings coincide for such fields).
+        // on read) when it is a junction-derived edge field. Serde-free
+        // entities mark these `#[edge_field]`; serde entities that also drop a
+        // DB column may use `#[serde(skip)]` (both meanings coincide for such
+        // fields).
         let skip_serialization = field.attrs.iter().any(|attr| {
             if attr.path().is_ident("edge_field") {
                 return true;

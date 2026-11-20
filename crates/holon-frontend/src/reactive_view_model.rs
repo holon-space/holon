@@ -956,7 +956,8 @@ impl ReactiveViewModel {
             render_ctx: fresh.render_ctx.clone(),
             interpret_fn: self.interpret_fn.clone(),
             subscriptions: Vec::new(),
-            // Occurrence is stable node identity — preserve across data updates.
+            // Occurrence is stable node identity — preserve across data
+            // updates.
             occurrence: self.occurrence.clone(),
         }
     }
@@ -1016,8 +1017,9 @@ impl ReactiveViewModel {
                         }));
                     } else {
                         // Children unchanged structurally — keep original Arc.
-                        // Still update slot and collection through interior mutability
-                        // so VMS, live_block, and other slot-bearing nodes see fresh content.
+                        // Still update slot and collection through interior
+                        // mutability so VMS, live_block, and other slot-bearing
+                        // nodes see fresh content.
                         if let (Some(old_slot), Some(fresh_slot)) =
                             (&old_child.slot, &fresh_child.slot)
                         {
@@ -1054,11 +1056,11 @@ impl ReactiveViewModel {
             }
         }
         match (
-            // ALLOW(raw_row_id_column): key — identity-preservation check across an update; the
-            // two values are compared, not parsed
+            // ALLOW(raw_row_id_column): key — identity-preservation check
+            // across an update; the two values are compared, not parsed
             old.data.lock_ref().get("id"),
-            // ALLOW(raw_row_id_column): key — identity-preservation check across an update; the
-            // two values are compared, not parsed
+            // ALLOW(raw_row_id_column): key — identity-preservation check
+            // across an update; the two values are compared, not parsed
             fresh.data.lock_ref().get("id"),
         ) {
             (Some(a), Some(b)) => a == b,
@@ -1074,8 +1076,8 @@ impl ReactiveViewModel {
             (Some(old_slot), Some(fresh_slot)) => {
                 // The slot root gets EXACTLY the child rules — identity match,
                 // in-place update, and the keep-the-original-Arc fast path that
-                // lets a live subscription outlive the rebuild — by running as a
-                // one-element list.
+                // lets a live subscription outlive the rebuild — by running as
+                // a one-element list.
                 let old_content = old_slot.content.get_cloned();
                 let fresh_content = fresh_slot.content.get_cloned();
                 let merged = Self::push_down_children(
@@ -1310,7 +1312,8 @@ impl ReactiveViewModel {
     fn to_view_kind(
         &self,
         expr: &RenderExpr,
-        // ALLOW(unused_param): retained for snapshot input shape; current code reads self.data
+        // ALLOW(unused_param): retained for snapshot input shape; current code
+        // reads self.data
         _data: &DataRow,
         resolve_block: Option<&dyn Fn(&EntityUri) -> ViewModel>,
     ) -> ViewKind {
@@ -1596,9 +1599,9 @@ impl ReactiveViewModel {
                     block_id: self.prop_str("block_id").unwrap_or_default(),
                     mode,
                     // The `drawer` builder always stamps `open` from the view
-                    // store; the mode default covers a node built without it and
-                    // means what `BuilderServices::drawer_open` means for an
-                    // untracked drawer.
+                    // store; the mode default covers a node built without it
+                    // and means what `BuilderServices::drawer_open` means for
+                    // an untracked drawer.
                     open: self
                         .prop_bool("open")
                         .unwrap_or_else(|| mode.default_open()),

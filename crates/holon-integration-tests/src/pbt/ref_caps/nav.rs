@@ -48,10 +48,10 @@ impl RefPinsMut for ReferenceState {
 
     fn upsert_open_pin(&mut self, region: Region, block_id: &EntityUri) {
         self.ui.tab.note_warm_focus_watchers();
-        // Move-to-top dedup, mirroring `provider.rs::focus_pin`: SELECT existing
-        // open `(region, block_id)`; UPDATE timestamp if found, else INSERT.
-        // Bumping `next_pin_ts` (not `next_history_id`) on the UPDATE path
-        // matches the no-INSERT path of `update_pin_timestamp.sql`.
+        // Move-to-top dedup, mirroring `provider.rs::focus_pin`: SELECT
+        // existing open `(region, block_id)`; UPDATE timestamp if found, else
+        // INSERT. Bumping `next_pin_ts` (not `next_history_id`) on the UPDATE
+        // path matches the no-INSERT path of `update_pin_timestamp.sql`.
         let added_ts_logical = self.ui.user.next_pin_ts;
         self.ui.user.next_pin_ts += 1;
 
@@ -189,10 +189,11 @@ impl RefNavHistoryMut for ReferenceState {
 
     fn nav_go_home(&mut self, region: Region) {
         self.ui.tab.note_warm_focus_watchers();
-        // Idempotent like same-target focus: when already home (current focus is
-        // `None`), prod's `focus(region, None)` writes NO new `navigation_history`
-        // / `open_pins` row. Pushing a duplicate would let `NavigateBack` walk back
-        // through phantom home entries the SUT never created.
+        // Idempotent like same-target focus: when already home (current focus
+        // is `None`), prod's `focus(region, None)` writes NO new
+        // `navigation_history` / `open_pins` row. Pushing a duplicate would let
+        // `NavigateBack` walk back through phantom home entries the SUT never
+        // created.
         let already_home = self.current_focus(region).is_none();
         if !already_home {
             let history = self.ui.tab.navigation_history.entry(region).or_default();
@@ -202,8 +203,8 @@ impl RefNavHistoryMut for ReferenceState {
 
             // `go_home` = `focus(region, None)`: close all open rows in region,
             // then insert a NULL-block_id home row. Kept in `open_pins` so
-            // `next_history_id` aligns with SQLite's AUTOINCREMENT; filtered out of
-            // `expected_focus_root_ids` (None block_id).
+            // `next_history_id` aligns with SQLite's AUTOINCREMENT; filtered
+            // out of `expected_focus_root_ids` (None block_id).
             let history_id = self.ui.tab.next_history_id;
             self.ui.tab.next_history_id += 1;
             let added_ts_logical = self.ui.user.next_pin_ts;
@@ -231,8 +232,9 @@ impl RefNavHistoryMut for ReferenceState {
         // `navigation.focus` on the active target writes no new history row.
         let already_focused = self.current_focus(region).as_ref() == Some(block_id);
 
-        // Budget model: the first navigation to a root creates its watch matviews;
-        // recorded pre-insert because the budget invariant only sees post-apply.
+        // Budget model: the first navigation to a root creates its watch
+        // matviews; recorded pre-insert because the budget invariant only sees
+        // post-apply.
         self.ui.tab.last_navigate_first_visit =
             self.ui.tab.seen_focus_targets.insert(block_id.clone());
 
@@ -242,9 +244,10 @@ impl RefNavHistoryMut for ReferenceState {
             history.entries.push(Some(block_id.clone()));
             history.cursor = history.entries.len() - 1;
 
-            // Mirror provider.rs `focus`: close all open rows in the region, then
-            // insert a new open row. `next_history_id` follows AUTOINCREMENT (INSERT
-            // only); a same-block re-focus inserts no row, so the counter holds.
+            // Mirror provider.rs `focus`: close all open rows in the region,
+            // then insert a new open row. `next_history_id` follows
+            // AUTOINCREMENT (INSERT only); a same-block re-focus inserts no
+            // row, so the counter holds.
             let history_id = self.ui.tab.next_history_id;
             self.ui.tab.next_history_id += 1;
             let added_ts_logical = self.ui.user.next_pin_ts;

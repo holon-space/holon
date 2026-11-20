@@ -172,7 +172,8 @@ mod tests {
             "no callback before sync"
         );
 
-        // sync_docs_direct: peer → primary should fire subscribe_root on primary
+        // sync_docs_direct: peer → primary should fire subscribe_root on
+        // primary
         holon_loro::multi_peer::sync_docs_direct(&primary, &peer);
 
         assert!(

@@ -615,8 +615,8 @@ mod tests {
 
     #[test]
     fn picks_the_most_upstream_layer() {
-        // A store divergence echoing up into projection + viewmodel: the verdict
-        // must name store/CRDT (the root), not the downstream echoes.
+        // A store divergence echoing up into projection + viewmodel: the
+        // verdict must name store/CRDT (the root), not the downstream echoes.
         let coverage = RunCoverage {
             measured: vec![
                 wired(

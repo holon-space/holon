@@ -114,11 +114,12 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
          mirror — got {seen:?}"
     );
 
-    // 2. THE RED. Whatever the registry decided must have LANDED. `Pending` means
-    //    the row did not exist when the registry tried to write, the refusal threw
-    //    the outcome away, and nothing ever retried — the live bug. Any other value
-    //    (including a connect failure) is a recorded outcome and therefore correct
-    //    here: this rung is about the status ARRIVING, not about which one it is.
+    // 2. THE RED. Whatever the registry decided must have LANDED. `Pending`
+    //    means the row did not exist when the registry tried to write, the
+    //    refusal threw the outcome away, and nothing ever retried — the live
+    //    bug. Any other value (including a connect failure) is a recorded
+    //    outcome and therefore correct here: this rung is about the status
+    //    ARRIVING, not about which one it is.
     let stuck: Vec<&(String, String)> = seen.iter().filter(|(_, s)| s == "Pending").collect();
     assert!(
         stuck.is_empty(),

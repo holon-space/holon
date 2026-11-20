@@ -303,26 +303,29 @@ impl RenamePairing {
                     out.push((to.clone(), FileChangeKind::Create));
                 } else {
                     // Self-contained pair; a concurrent pending is unrelated —
-                    // leave it intact (it pairs with its own `To` or times out).
+                    // leave it intact (it pairs with its own `To` or times
+                    // out).
                     out.push((to.clone(), FileChangeKind::Rename { from: from.clone() }));
                 }
             }
             RawFsSignal::RenameFrom(p) => {
                 if let Some(target) = crate::fs_port::atomic_temp_target(p) {
-                    // OUR write-back's source half. It must not become a pending
-                    // rename source, and — the whole point — it must not leave an
-                    // unrelated pending `From` exposed to its `To` half below.
+                    // OUR write-back's source half. It must not become a
+                    // pending rename source, and — the whole point — it must
+                    // not leave an unrelated pending `From` exposed to its `To`
+                    // half below.
                     self_replacements.push((target, now));
                 } else if is_relevant(p) {
-                    // A new source side. Supersede any existing pending, flushing
-                    // it as a Remove (a distinct file that moved and never paired
-                    // — safety-netted at the controller). Rare: one `mv` yields
-                    // exactly one source side.
+                    // A new source side. Supersede any existing pending,
+                    // flushing it as a Remove (a distinct file that moved and
+                    // never paired — safety-netted at the controller). Rare:
+                    // one `mv` yields exactly one source side.
                     Self::flush_pending(pending, &mut out);
                     *pending = Some((p.clone(), now));
-                    // A real rename is under way: its `To` may land on a file we
-                    // just wrote, and pairing that `To` matters more than
-                    // recognizing a replacement whose own `To` has already passed.
+                    // A real rename is under way: its `To` may land on a file
+                    // we just wrote, and pairing that `To` matters more than
+                    // recognizing a replacement whose own `To` has already
+                    // passed.
                     self_replacements.clear();
                 }
                 // Irrelevant source side: ignore, do NOT touch pending.
@@ -418,8 +421,8 @@ impl NotifyWatcher {
                         // Cheap extension relevance here; the full
                         // gitignore/VCS filter stays in the `VaultFileWatcher`
                         // bridge. This is enough to keep a foreign interposer
-                        // (lock file, byte-syncer temp) from disturbing a pending
-                        // rename `From`.
+                        // (lock file, byte-syncer temp) from disturbing a
+                        // pending rename `From`.
                         let emissions = pairing
                             .classify(signal, now, &|p: &Path| has_vault_ext(p, &extensions));
                         for (path, kind) in emissions {
@@ -525,8 +528,9 @@ mod tests {
 
     #[test]
     fn notify_any_maps_by_existence_then_pairs() {
-        // FSEvents: gone-side then present-side, both `Any`. The mapping resolves
-        // each `Any` to From/To via existence; the pairing then unifies them.
+        // FSEvents: gone-side then present-side, both `Any`. The mapping
+        // resolves each `Any` to From/To via existence; the pairing then
+        // unifies them.
         let gone = "/vault/a.org";
         let present = "/vault/b.org";
         let s0 = notify_event_to_signals(
@@ -620,9 +624,10 @@ mod tests {
 
     #[test]
     fn irrelevant_interposer_must_not_flush_pending() {
-        // REFUTATION RED->GREEN (verifier 2026-07-27): a byte-syncer / lock-file
-        // write between the two rename halves must NOT flush the pending `From`
-        // as a Remove — a flushed Remove cascade-deletes a live doc.
+        // REFUTATION RED->GREEN (verifier 2026-07-27): a byte-syncer /
+        // lock-file write between the two rename halves must NOT flush the
+        // pending `From` as a Remove — a flushed Remove cascade-deletes a live
+        // doc.
         let mut pairing = RenamePairing::new();
         let now = Instant::now();
         let gone = "/vault/a.org";
@@ -680,9 +685,9 @@ mod tests {
 
     #[test]
     fn lone_from_side_flushes_as_remove_on_timeout() {
-        // A move OUT of the watched root: source side, no partner. It is flushed
-        // as a disclosed Remove ONLY once it ages past the window — triggered by
-        // a later RELEVANT event.
+        // A move OUT of the watched root: source side, no partner. It is
+        // flushed as a disclosed Remove ONLY once it ages past the window —
+        // triggered by a later RELEVANT event.
         let mut pairing = RenamePairing::new();
         let t0 = Instant::now();
         let gone = "/vault/a.org";

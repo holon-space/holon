@@ -36,7 +36,8 @@ struct DeltaProvider {
 #[async_trait]
 impl OperationProvider for DeltaProvider {
     fn operations(&self) -> Vec<OperationDescriptor> {
-        // The engine's startup check requires the block CRUD trio to be present.
+        // The engine's startup check requires the block CRUD trio to be
+        // present.
         ["set_field", "create", "delete"]
             .into_iter()
             .map(|name| OperationDescriptor {
@@ -150,8 +151,9 @@ async fn query_history_sees_a_dispatched_op() {
     )
     .await
     .expect("seed row");
-    // Guarantee the C2b relation exists (boot-owned; ensured here so the test is
-    // robust to lazy resolution). Idempotent drop+recreate on the empty table.
+    // Guarantee the C2b relation exists (boot-owned; ensured here so the test
+    // is robust to lazy resolution). Idempotent drop+recreate on the empty
+    // table.
     HistorySchemaModule
         .ensure_schema(db)
         .await

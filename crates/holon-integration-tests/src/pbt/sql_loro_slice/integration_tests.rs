@@ -125,7 +125,8 @@ async fn sql_loro_slice_catches_task_state_divergence() {
     let sut = sql_loro_wide(sql, LoroBackendComponent::new(loro));
     // The re-anchored (F4) invariant compares BOTH SUT stores against
     // `RefTaskState`. Ref says `TODO` (matching SQL); Loro says `DONE`, so the
-    // Loro store diverges from the canonical task_state and the anchor catches it.
+    // Loro store diverges from the canonical task_state and the anchor catches
+    // it.
     let ref_ = ref_task_state(vec![(a.clone(), "TODO")]);
     let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 

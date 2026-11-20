@@ -133,8 +133,8 @@ fn split_block_stale_viewmodel_display_regression() {
     // The EXACT shrunk reproducing wiring the keystone landed on: storage
     // {Loro, Org, Turso}, no sync, actors {ActionEngine}. (NOT `full_headless`,
     // which additionally carries Markdown storage, Todoist sync, and the
-    // MCPServer actor — a richer component set whose different CDC/settle timing
-    // masks the reactive-consumer-drain race this seed exercises.)
+    // MCPServer actor — a richer component set whose different CDC/settle
+    // timing masks the reactive-consumer-drain race this seed exercises.)
     let wiring = Wiring::custom(
         [
             StorageAdapter::Loro,

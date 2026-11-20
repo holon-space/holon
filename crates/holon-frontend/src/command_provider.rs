@@ -281,9 +281,10 @@ impl CommandProvider {
             Value::String(placement.target_parent().to_string()),
         );
         // Manual invocation → fresh context_key so every instantiation is a new
-        // instance (rules pass their firing key instead, to converge on re-fire).
-        // `uuid` is a native-only dep (see Cargo.toml); on wasm (the browser
-        // worker) a process-monotonic counter gives an equally-fresh key.
+        // instance (rules pass their firing key instead, to converge on
+        // re-fire). `uuid` is a native-only dep (see Cargo.toml); on wasm (the
+        // browser worker) a process-monotonic counter gives an equally-fresh
+        // key.
         #[cfg(not(target_arch = "wasm32"))]
         let context_key = format!("manual:{}", uuid::Uuid::new_v4());
         #[cfg(target_arch = "wasm32")]
@@ -351,16 +352,17 @@ impl CommandProvider {
 
         // Presentation dedup (dogfood-round3 B1): the operation catalog is the
         // dispatcher's UNIONED provider set, advertised WITHOUT dedup (see
-        // `OperationDispatcher::operations` — structural block ops are knowingly
-        // double-advertised by `SqlBlockOperations` + `LoroBlockOperations`
-        // under Loro authority, tolerated by `STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST`).
-        // A duplicated op name would therefore render as two identical menu
-        // rows. Collapse to ONE entry per operation name, keeping the FIRST
-        // occurrence so the visible row corresponds to the same first-wins
-        // provider the dispatcher routes to — this is presentation-only, it does
-        // NOT touch dispatch (both registrations remain; `find_matched_operation`
-        // resolves independently). Keyed on the operation name (the `id`), never
-        // the label: two genuinely different ops may legitimately share a
+        // `OperationDispatcher::operations` — structural block ops are
+        // knowingly double-advertised by `SqlBlockOperations` +
+        // `LoroBlockOperations` under Loro authority, tolerated by
+        // `STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST`). A duplicated op name would
+        // therefore render as two identical menu rows. Collapse to ONE entry
+        // per operation name, keeping the FIRST occurrence so the visible row
+        // corresponds to the same first-wins provider the dispatcher routes to
+        // — this is presentation-only, it does NOT touch dispatch (both
+        // registrations remain; `find_matched_operation`
+        // resolves independently). Keyed on the operation name (the `id`),
+        // never the label: two genuinely different ops may legitimately share a
         // display label and must both survive.
         let mut seen_op_names = std::collections::HashSet::new();
         filtered
@@ -706,8 +708,8 @@ mod tests {
     #[test]
     fn builds_filtered_items() {
         let items = CommandProvider::build_command_items(&test_ops(), &context(), "");
-        // set_field needs 3 params, only id available → not fully matchable but still
-        // shows delete + embed_entity show
+        // set_field needs 3 params, only id available → not fully matchable but
+        // still shows delete + embed_entity show
         assert!(items.len() >= 2);
     }
 
@@ -908,8 +910,9 @@ mod tests {
 
     // The LIVE editor DataRow carries ONLY the block `id` — content/parent must
     // come from the resolver, not context_params. All picker tests build the
-    // id-only context to lock in that contract (they would have been RED against
-    // the old context_params-trusting code, which saw empty content and bailed).
+    // id-only context to lock in that contract (they would have been RED
+    // against the old context_params-trusting code, which saw empty content and
+    // bailed).
     fn live_ctx(id: &str) -> HashMap<String, Value> {
         ctx(&[("id", id)])
     }
@@ -988,8 +991,8 @@ mod tests {
 
     #[test]
     fn pick_template_without_resolver_fails_loud_not_silent_split() {
-        // No resolver wired → the pick must FAIL (visible), NOT return NotActive
-        // (which the editor maps to None → split_block fall-through).
+        // No resolver wired → the pick must FAIL (visible), NOT return
+        // NotActive (which the editor maps to None → split_block fall-through).
         let provider = CommandProvider::new(vec![], live_ctx("block:x"))
             .with_trigger_span(3, 1)
             .with_templates(templates());

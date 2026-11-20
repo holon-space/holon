@@ -396,9 +396,10 @@ impl GeometryDriver {
         let captured = config.backend.capture()?;
         let info = highlight_element.and_then(|id| self.geometry.element_info(id));
 
-        // Analyze screenshot for "mostly empty" UI — the ground truth for visible
-        // content. BoundsRegistry reports layout, not paint, and stale/clipped
-        // elements can linger there even when the window is visibly blank.
+        // Analyze screenshot for "mostly empty" UI — the ground truth for
+        // visible content. BoundsRegistry reports layout, not paint, and
+        // stale/clipped elements can linger there even when the window is
+        // visibly blank.
         let emptiness = analyze_screenshot_emptiness(&captured);
         if let Some(ref state) = self.visual_state {
             *state.lock().unwrap() = Some(emptiness);
@@ -614,8 +615,8 @@ pub(crate) fn save_screenshot(
     if let Some(info) = highlight {
         let (img_w, img_h) = (img.width(), img.height());
 
-        // xcap captures at physical pixel resolution — coordinates may need scaling.
-        // Detect scale: if image is ~2x the logical bounds, use 2x.
+        // xcap captures at physical pixel resolution — coordinates may need
+        // scaling. Detect scale: if image is ~2x the logical bounds, use 2x.
         let scale = if img_w > 2000 { 2.0_f32 } else { 1.0 };
         let x = (info.x * scale) as u32;
         let y = (info.y * scale) as u32;

@@ -71,10 +71,10 @@ fn watch_ui_emits_structure_event_for_block_with_query_source() {
             .await
             .expect("watch_ui should succeed for block with query source");
 
-        // The `source` view mode is the query-source-specific part of the render: it
-        // carries this block's own query text and language. A fixture language that is
-        // not a query language attaches no query source, and the block renders as a
-        // leaf instead.
+        // The `source` view mode is the query-source-specific part of the
+        // render: it carries this block's own query text and language. A
+        // fixture language that is not a query language attaches no query
+        // source, and the block renders as a leaf instead.
         let holon_api::render_types::RenderExpr::FunctionCall { name, args } = &render_expr else {
             panic!("expected a query-source render, got {render_expr:?}");
         };
@@ -159,7 +159,8 @@ fn watch_ui_emits_data_events_after_structure() {
             .await
             .unwrap_or_else(|hung| panic!("extra-1 block should sync: {hung}"));
 
-        // Wait for a Data event (the new block should appear in the query results)
+        // Wait for a Data event (the new block should appear in the query
+        // results)
         let deadline = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let event = watch.recv().await.expect("stream should stay open");
@@ -210,7 +211,8 @@ fn watch_ui_error_recovery_on_nonexistent_block() {
             .await
             .unwrap_or_else(|hung| panic!("placeholder should sync: {hung}"));
 
-        // Watch a block that doesn't exist yet — should get an error Structure event
+        // Watch a block that doesn't exist yet — should get an error Structure
+        // event
         let (error_render_expr, mut watch) = env
             .watch_ui_first_structure(&EntityUri::block("missing-block"))
             .await
@@ -288,7 +290,8 @@ fn a_just_created_blocks_first_render_is_not_the_missing_row_widget() {
             .await
             .expect("create newborn");
 
-        // Watch with NO wait for the row: the point is the render that races it.
+        // Watch with NO wait for the row: the point is the render that races
+        // it.
         let (first_render_expr, _watch) = env
             .watch_ui_first_structure(&EntityUri::block("newborn"))
             .await

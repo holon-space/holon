@@ -164,8 +164,8 @@ fn a_narrow_subscription_unbinds_the_declared_columns_it_omits() {
         collector.reset();
         holon_api::computed::reset_missing_declared_warnings();
 
-        // `id` alone resolves the block profile; every other declared column the
-        // profile's computed fields need is deliberately absent.
+        // `id` alone resolves the block profile; every other declared column
+        // the profile's computed fields need is deliberately absent.
         let _stream = holon_api::QueryEngine::watch_query(
             env.engine().as_ref(),
             "SELECT id, content FROM block_raw",

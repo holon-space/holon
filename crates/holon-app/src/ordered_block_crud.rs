@@ -165,9 +165,10 @@ impl OperationProvider for OrderedBlockCrud {
             // explicit position lands where its params place it among that
             // parent's children (`ChildPlacement::of_create`).
             "create" if !Self::carries_a_position(&params) => {
-                // A `sort_key` that is PRESENT but unusable is a caller bug, not
-                // the append contract. Minting over it would hide the bug, so it
-                // gets the same named refusal as any other unplaced create.
+                // A `sort_key` that is PRESENT but unusable is a caller bug,
+                // not the append contract. Minting over it would hide the bug,
+                // so it gets the same named refusal as any other unplaced
+                // create.
                 if params.contains_key("sort_key") {
                     return Err(Self::no_position(
                         &params,
@@ -182,8 +183,9 @@ impl OperationProvider for OrderedBlockCrud {
                     // #63: no key AND no parent to anchor against means this
                     // create has no position at all. Refuse rather than let the
                     // row land on the column's literal `DEFAULT 'A0'`, where it
-                    // reads back as positioned and ties with every other keyless
-                    // block until some later op happens to re-key the set.
+                    // reads back as positioned and ties with every other
+                    // keyless block until some later op happens to re-key the
+                    // set.
                     return Err(Self::no_position(
                         &params,
                         "it supplies no sort_key and no parent_id to mint one against",
@@ -216,9 +218,11 @@ impl OperationProvider for OrderedBlockCrud {
                         .execute_operation(entity_name, op_name, params)
                         .await;
                 };
-                // ALLOW(entity_uri_from_raw): op-dispatch id strings → EntityUri
+                // ALLOW(entity_uri_from_raw): op-dispatch id strings →
+                // EntityUri
                 let uri = EntityUri::from_raw(id);
-                // ALLOW(entity_uri_from_raw): op-dispatch id strings → EntityUri
+                // ALLOW(entity_uri_from_raw): op-dispatch id strings →
+                // EntityUri
                 let parent = EntityUri::from_raw(new_parent);
                 let position = self.append_key(&parent, Some(&uri)).await?;
                 // Parent + key + sibling re-keys are ONE placement in ONE
@@ -292,7 +296,8 @@ mod tests {
             .execute(
                 &format!(
                     // ALLOW(sole_block_writer): test fixture seeding rows the
-                    // decorator then reads as pre-existing siblings (#[cfg(test)]).
+                    // decorator then reads as pre-existing siblings
+                    // (#[cfg(test)]).
                     "INSERT INTO block_raw (id, parent_id, sort_key, content, content_type, \
                      created_at, updated_at) VALUES ('{id}', '{parent}', '{sort_key}', '{id}', \
                      'text', 0, 0)"

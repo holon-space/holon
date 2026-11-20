@@ -231,7 +231,8 @@ impl Fixture {
             interaction_tx,
         ));
 
-        // ALLOW(entity_uri_from_raw): the seed grafts this bare id; schemed here.
+        // ALLOW(entity_uri_from_raw): the seed grafts this bare id; schemed
+        // here.
         let target = EntityUri::from_raw(CHORD_TARGET_ID);
         let root_id = holon_api::root_layout_block_uri();
         Self {
@@ -679,8 +680,8 @@ fn typing_into_a_slot_creates_the_node_before_the_write() {
         "seating alone must create nothing — the node appears with the first character"
     );
 
-    // The premise assertion below names a boot that never warmed: without it, an
-    // unpainted destination reaches the 5 s wait and reports as a product
+    // The premise assertion below names a boot that never warmed: without it,
+    // an unpainted destination reaches the 5 s wait and reports as a product
     // failure. The wait stays; the assertion guards it.
     //
     // One failure in nine runs under load has been observed here, with

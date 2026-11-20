@@ -690,8 +690,8 @@ impl BuilderServices for TestServices {
         };
         // A static `list` COLLECTION — the shape production's streaming
         // `watch_query_live` hands back (query rows woven through the
-        // item_template). Rendering it through the real gpui list path gives the
-        // greedy `live_query` `ReactiveShell` a content-height inner, so it
+        // item_template). Rendering it through the real gpui list path gives
+        // the greedy `live_query` `ReactiveShell` a content-height inner, so it
         // reports real height (and the bounded accordion body caps it). A plain
         // `column` would collapse the `relative(1.0)` shell to 0.
         let row_count = self
@@ -717,7 +717,8 @@ impl BuilderServices for TestServices {
             structural_changes: Box::pin(futures::stream::pending()),
             watch_guard: None,
         };
-        // ALLOW(entity_uri_from_raw): synthetic canned-watcher key, no upstream URI
+        // ALLOW(entity_uri_from_raw): synthetic canned-watcher key, no upstream
+        // URI
         (EntityUri::from_raw(key), live_block)
     }
 

@@ -285,9 +285,9 @@ fn container_fixtures(truncate: bool) -> Fixtures {
         by_id.insert(b.id.clone(), b.clone());
     }
 
-    // `get_blocks(container)` returns the doc's blocks FLAT (the renderer rebuilds
-    // the tree from parent_id). Full = seed; truncated = the drop that de-inlined
-    // the prohibited subtree.
+    // `get_blocks(container)` returns the doc's blocks FLAT (the renderer
+    // rebuilds the tree from parent_id). Full = seed; truncated = the drop that
+    // de-inlined the prohibited subtree.
     let doc_blocks = if truncate {
         vec![leaf1, leaf2]
     } else {
@@ -492,9 +492,9 @@ async fn writeback_drop_of_prohibited_subtree_hard_vetoes_prod_name_chain() {
     );
 
     // 2) The store now returns ONLY the leaves — the prohibited subtree was
-    //    re-homed/de-inlined, so a re-render drops it. A fresh controller's guard
-    //    grounds the absent blocks via the REAL name_chain, which fails loud
-    //    (prohibited page under non-page `b1`) → UNRESOLVABLE → HARD VETO.
+    //    re-homed/de-inlined, so a re-render drops it. A fresh controller's
+    //    guard grounds the absent blocks via the REAL name_chain, which fails
+    //    loud (prohibited page under non-page `b1`) → UNRESOLVABLE → HARD VETO.
     let truncated = container_fixtures(true);
     let mut controller = build_controller(&truncated, vec![], root.clone());
     let veto = write_back(&mut controller, &truncated, &container, &leaf1).await;
@@ -563,8 +563,8 @@ async fn companion_deinline_of_child_page_content_is_not_vetoed_prod_page_only_s
     let child_path = root.join("Container").join("Child.org");
 
     // Seed the settled folder-companion on disk:
-    //  - Container.org (companion) still inlines the child page + its non-page body
-    //    — the pre-de-inline source about to be re-rendered.
+    //  - Container.org (companion) still inlines the child page + its non-page
+    //    body — the pre-de-inline source about to be re-rendered.
     //  - Container/Child.org (sibling) owns the de-inlined child subtree.
     std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -635,7 +635,8 @@ async fn companion_deinline_of_child_page_content_is_not_vetoed_prod_page_only_s
         result.err().map(|e| format!("{e:#}")),
     );
 
-    // No UNRESOLVABLE / name_chain-failed error was emitted — the storm is gone.
+    // No UNRESOLVABLE / name_chain-failed error was emitted — the storm is
+    // gone.
     let errors = cap.errors();
     assert!(
         !errors

@@ -224,8 +224,8 @@ impl LoroRefExt {
         }
     }
 
-    // ─── RefPeers read side (thin field reads; delegated from ref_caps/peers.rs)
-    // ──
+    // ─── RefPeers read side (thin field reads; delegated from
+    // ref_caps/peers.rs) ──
 
     pub fn peers_len(&self) -> usize {
         self.peers.len()

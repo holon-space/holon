@@ -169,9 +169,9 @@ impl Module for EventInfraModule {
                         Some(arc) => arc.clone() as Arc<dyn EntityCellRegistry>,
                         None => {
                             // SqlOnly mode: wire cells to the convergent block
-                            // feed (read + CDC signal) + the SQL set_field write
-                            // path so `live_field` presents the same cell surface
-                            // as Full (Loro) mode instead of erroring.
+                            // feed (read + CDC signal) + the SQL set_field
+                            // write path so `live_field` presents the same cell
+                            // surface as Full (Loro) mode instead of erroring.
                             let live = resolver.resolve_async::<BlockFeed>().await;
                             Arc::new(holon_core::SqlOnlyCellRegistry::wired(
                                 live.0.clone(),
@@ -207,10 +207,11 @@ impl Module for EventInfraModule {
             },
         ));
 
-        // Expose a shared BlockOrdering instance for consumers that need positional
-        // intent writes (FileSyncController, future markdown adapter, MCP).
-        // Uses the same SqlBlockOperations construction as the OperationProvider above,
-        // routing through the cell_registry for Loro vs SqlOnly mode.
+        // Expose a shared BlockOrdering instance for consumers that need
+        // positional intent writes (FileSyncController, future markdown
+        // adapter, MCP). Uses the same SqlBlockOperations construction as the
+        // OperationProvider above, routing through the cell_registry for Loro
+        // vs SqlOnly mode.
         injector.provide::<dyn BlockOrdering>(Provider::root_async(|resolver| async move {
             let db_handle_provider = resolver.resolve::<dyn DbHandleProvider>();
             let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
@@ -247,7 +248,8 @@ impl Module for EventInfraModule {
                 .with_cell_registry(cell_registry)
                 .with_capabilities(caps);
             // A create under a parent only the projection holds is refused
-            // against the same authority the OperationProvider above decides on.
+            // against the same authority the OperationProvider above decides
+            // on.
             let block_ops =
                 match holon_core::resolve_if_bound_async::<holon_loro::LoroBlockOperations>(
                     &resolver,

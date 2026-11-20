@@ -103,8 +103,8 @@ fn page_path_of<R: RefBlockTree>(state: &R, page: &EntityUri) -> Option<String> 
 /// backend.
 pub(crate) fn sanitize_page_leaf(content: &str) -> Option<String> {
     // Single-sourced: the canonical page-title sanitize lives in holon-api next
-    // to `recognize_derived_id` (ADR 0029) so the planner, this reference model,
-    // and the recognition step cannot drift on trailing-slash handling.
+    // to `recognize_derived_id` (ADR 0029) so the planner, this reference
+    // model, and the recognition step cannot drift on trailing-slash handling.
     holon_api::sanitize_page_title(content)
 }
 

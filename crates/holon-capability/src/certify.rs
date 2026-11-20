@@ -1697,11 +1697,11 @@ fn certify_misc(
             ));
         } else {
             match (declared, same) {
-                // `unordered` claims order is NOT modelled. If the authored order
-                // comes back exactly, the format models MORE than declared — an
-                // under-claim, and a prompt rather than silent confirmation, which
-                // is what the first version did and what made this arm
-                // unfalsifiable.
+                // `unordered` claims order is NOT modelled. If the authored
+                // order comes back exactly, the format models MORE than
+                // declared — an under-claim, and a prompt rather than silent
+                // confirmation, which is what the first version did and what
+                // made this arm unfalsifiable.
                 (SiblingOrder::Unordered, true) => report.prompts.push(TighteningPrompt {
                     profile: profile.id().clone(),
                     axis: Axis::Ordering,
@@ -2714,11 +2714,11 @@ mod tests {
     /// must not also excuse them — a marker that has gone stale is itself a
     /// finding, which is the point of `MarkedButDriven`.
     fn sloppy() -> SloppyStub {
-        // The leading newline ANCHORS the match to a 2-space `not_yet_certified`
-        // entry. Without it, `"  - x"` is a substring of the 4-space
-        // `enforced_by` entry `"    - x"` and the strip silently corrupts the
-        // enforcement map instead — which is exactly what it did on the first
-        // attempt, and the loud parse error is what caught it.
+        // The leading newline ANCHORS the match to a 2-space
+        // `not_yet_certified` entry. Without it, `"  - x"` is a substring of
+        // the 4-space `enforced_by` entry `"    - x"` and the strip silently
+        // corrupts the enforcement map instead — which is exactly what it did
+        // on the first attempt, and the loud parse error is what caught it.
         let yaml = crate::fixture::MINIMAL
             .replace("\n  - ordering_property_order\n", "\n")
             .replace("\n  - identity_carrier_disagreement\n", "\n");

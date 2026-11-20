@@ -314,9 +314,9 @@ impl gpui::Render for M2StickyView {
             .begin_pass(holon_frontend::render_epoch::EngineSeq::default());
 
         // Scroller: definite viewport comes from the `.relative().h(H)` root;
-        // `flex_1 + min_h_0 + overflow_y_scroll` makes it its own scroll region.
-        // Each section is a DIRECT child (wrapped transparently), so the
-        // ScrollHandle's `child_bounds` are per-section.
+        // `flex_1 + min_h_0 + overflow_y_scroll` makes it its own scroll
+        // region. Each section is a DIRECT child (wrapped transparently), so
+        // the ScrollHandle's `child_bounds` are per-section.
         let mut scroller = div()
             .id("m2-scroller")
             .flex_1()

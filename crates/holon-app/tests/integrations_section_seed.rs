@@ -374,8 +374,8 @@ fn every_bundled_integration_has_a_seeded_default_view() {
                 ));
             }
 
-            // A `live_query` interprets its item_template ONCE against the whole
-            // row set, so only a collection widget iterates it — a scalar
+            // A `live_query` interprets its item_template ONCE against the
+            // whole row set, so only a collection widget iterates it — a scalar
             // template renders ONE row and looks merely quiet.
             if !content.contains("list(#{item_template:") {
                 problems.push(format!(
@@ -453,7 +453,8 @@ fn deleted_integrations_section_does_not_resurrect_on_reseed() {
         let db_path = dir.path().join("fresh.db");
         let (engine, ordering) = fresh_engine(db_path).await;
 
-        // First (fresh) boot seeds the full layout incl. the integrations section.
+        // First (fresh) boot seeds the full layout incl. the integrations
+        // section.
         holon_app::seed_default_layout(&engine, ordering.clone(), false, false)
             .await
             .expect("first seed");

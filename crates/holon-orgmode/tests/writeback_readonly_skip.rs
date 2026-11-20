@@ -435,8 +435,8 @@ async fn readonly_writeback_resumes_after_reingest_clears_the_mark() {
          re-ingest (resume regression; on-disk = {on_disk:?})",
     );
 
-    // (5) last_projection was stamped by the resumed write: an IDENTICAL re-edit
-    //     renders == last and issues NO further write.
+    // (5) last_projection was stamped by the resumed write: an IDENTICAL
+    // re-edit     renders == last and issues NO further write.
     let after_resume = fs.write_attempts();
     let same = reader.blocks.lock().unwrap()[0].clone();
     write_back(&mut controller, &reader, &doc.id, &same)

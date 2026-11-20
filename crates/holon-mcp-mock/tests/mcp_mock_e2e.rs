@@ -111,7 +111,8 @@ async fn connect(
     }
     let mcp_config = cfg.into_mcp_config(
         "mock".to_string(),
-        // The mock sidecar declares no credential files; the root only has to exist.
+        // The mock sidecar declares no credential files; the root only has to
+        // exist.
         &holon_mcp_client::CredentialRoot::new("/tmp/holon-mcp-mock-config"),
     )?;
     let cache_factory = Arc::new(DbHandleCacheFactory::new(db.clone()));

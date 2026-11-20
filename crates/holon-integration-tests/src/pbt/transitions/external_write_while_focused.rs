@@ -158,10 +158,10 @@ impl<
 
     fn apply_to_ref(&self, state: &mut R) {
         // Same external bulk-add effect as `BulkExternalAdd`. Crucially,
-        // `bulk_add_blocks` does NOT touch `ui.tab.active_editor`, and it writes
-        // SIBLINGS rather than the focused block's own cell, so the editor's
-        // pending `in_memory_content` is PRESERVED. The SUT must match: the
-        // pending buffer survives the re-ingest.
+        // `bulk_add_blocks` does NOT touch `ui.tab.active_editor`, and it
+        // writes SIBLINGS rather than the focused block's own cell, so the
+        // editor's pending `in_memory_content` is PRESERVED. The SUT must
+        // match: the pending buffer survives the re-ingest.
         state.bulk_add_blocks(&self.doc_uri, &self.blocks);
     }
 }

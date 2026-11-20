@@ -627,8 +627,9 @@ fn stability_no_duplicate_blocks_after_ui_mutation() {
             .await
             .unwrap_or_else(|hung| panic!("{hung}"));
 
-        // UI update — this triggers FileSyncController → org file write → file watcher
-        // ReadDisk does not parse the echo: its hash equals the file's Base
+        // UI update — this triggers FileSyncController → org file write → file
+        // watcher ReadDisk does not parse the echo: its hash equals the file's
+        // Base
         env.update_block_content("block-1", "Updated A")
             .await
             .expect("update failed");

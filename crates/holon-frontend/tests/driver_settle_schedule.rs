@@ -849,7 +849,8 @@ impl Run {
                 let changed = !matches!(step, Step::ProfileRepublish);
                 for v in &mut self.views {
                     match v.spec.kind {
-                        // A republish of the same cache rebuilds too, but owes nothing.
+                        // A republish of the same cache rebuilds too, but owes
+                        // nothing.
                         Kind::Flat | Kind::Tree => v.touch(),
                         Kind::Grouped if changed && v.spec.template == Template::Entity => {
                             v.unjudged.get_or_insert(GROUPED_KEEPS_PROFILE);

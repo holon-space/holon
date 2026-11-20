@@ -139,7 +139,8 @@ pub fn check_advice_relation(exp: &AdviceExpectation, observed: &[String]) -> Re
         }
     }
 
-    // top-K boundary dominance: every observed score >= every non-observed score
+    // top-K boundary dominance: every observed score >= every non-observed
+    // score
     let min_observed = observed_scores.iter().copied().min();
     let max_dropped = exp
         .scored
@@ -175,7 +176,8 @@ where
         let root = sut.widget_tree_snapshot().await;
 
         // Gate: nothing rendered yet / renderer unavailable — no structure to
-        // assert on (same not-ready convention as the sibling ViewModel bodies).
+        // assert on (same not-ready convention as the sibling ViewModel
+        // bodies).
         if root.collect_entity_ids().is_empty() {
             return InvariantResult::Ok;
         }
@@ -200,11 +202,11 @@ where
             .collect();
 
         // ── Distinct candidate anchors, first-seen (render) order ───────────
-        // A single block id decorates ~7 nested nodes; collapse to one entry per
-        // id (mirroring `viewmodel_tree_virtual_slots`' effective-id dedup). Keep
-        // the first-seen node's kind for error context. Anchors never carry an
-        // occurrence stamp (that marks placed rows), and must be domain
-        // EntityUris that are not creation placeholders.
+        // A single block id decorates ~7 nested nodes; collapse to one entry
+        // per id (mirroring `viewmodel_tree_virtual_slots`' effective-id
+        // dedup). Keep the first-seen node's kind for error context. Anchors
+        // never carry an occurrence stamp (that marks placed rows), and must be
+        // domain EntityUris that are not creation placeholders.
         let mut anchors: Vec<(EntityUri, String)> = Vec::new();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for node in root.walk() {
@@ -228,8 +230,8 @@ where
         // ── Attribute + check per distinct anchor ───────────────────────────
         for (anchor_uri, kind) in &anchors {
             // Placed rows whose (lesson, anchor) suffix matches THIS anchor, in
-            // render order. The suffix is a one-way hash of (lesson, anchor), so
-            // each placed row matches at most one anchor.
+            // render order. The suffix is a one-way hash of (lesson, anchor),
+            // so each placed row matches at most one anchor.
             let observed: Vec<String> = placed
                 .iter()
                 .filter_map(|(lesson, suffix)| {

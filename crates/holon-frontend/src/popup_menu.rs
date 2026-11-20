@@ -188,8 +188,8 @@ impl PopupMenu {
         let filter_signal = self.filter.signal_cloned();
         let items_signal_vec = provider.candidates(Box::pin(filter_signal));
 
-        // Convert SignalVec → Signal<Vec<T>> so the frontend can snapshot on each
-        // change
+        // Convert SignalVec → Signal<Vec<T>> so the frontend can snapshot on
+        // each change
         let items_ref = self.items.clone();
         Box::pin(items_signal_vec.to_signal_cloned().map(move |items| {
             *items_ref.lock().unwrap() = items.clone();

@@ -745,7 +745,8 @@ fn spawn_projection_worker(
         ))
     })?;
     // ALLOW(loro_doc_escape): a subscription registration — the placement
-    // worker only listens for global commits; every read goes through `with_read`.
+    // worker only listens for global commits; every read goes through
+    // `with_read`.
     let global_raw = global_doc.doc();
     let projection = Arc::new(ShareProjection {
         mark: tokio::sync::Mutex::new(ProjectionMark {
@@ -1085,7 +1086,8 @@ impl LoroShareBackend {
             Value::Array(vec![Value::String(holon_api::block::PAGE_TAG.to_string())]),
         );
         // Custom properties — `SqlOperationProvider::prepare_create` packs
-        // any key not in the schema-derived block columns into the `properties` JSON.
+        // any key not in the schema-derived block columns into the `properties`
+        // JSON.
         params.insert(
             SHARE_ROLE_PROPERTY.into(),
             Value::String(SHARE_ROLE_MOUNT.to_string()),
@@ -1169,11 +1171,11 @@ impl LoroShareBackend {
         if ops.is_empty() {
             return Ok(());
         }
-        // Integrity guard (see `first_local_collision`): a shared doc must never
-        // project a block whose id shadows a LIVE local block. This runs at
-        // accept/re-project time; a collision means a hostile or corrupt shared
-        // doc, so reject the whole projection loudly rather than clobber local
-        // SQL rows.
+        // Integrity guard (see `first_local_collision`): a shared doc must
+        // never project a block whose id shadows a LIVE local block. This runs
+        // at accept/re-project time; a collision means a hostile or corrupt
+        // shared doc, so reject the whole projection loudly rather than clobber
+        // local SQL rows.
         if let Some(bad) = global
             .with_read(|d| Ok(first_local_collision(d, &ops)))
             .map_err(|e| err(format!("global-doc read for collision guard: {e:#}")))?
@@ -1838,7 +1840,8 @@ fn first_local_collision(global: &LoroDoc, ops: &[(String, StorageEntity)]) -> O
     for (_op, params) in ops {
         if let Some(Value::String(id)) = params.get("id") {
             // op id string is produced by block_to_params for the SQL op batch
-            // ALLOW(entity_uri_from_raw): canonical block URI from block_to_params
+            // ALLOW(entity_uri_from_raw): canonical block URI from
+            // block_to_params
             let uri = EntityUri::from_raw(id);
             if find_tree_id_by_stable_id(global, &uri).is_some() {
                 return Some(id.clone());
@@ -2089,13 +2092,14 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                         mount: mount_name(*mount, info),
                     }));
                 }
-                // Amendment A: the mount is a Page (Inc 2), so it must sit under a
-                // Page (or a root). Bubble the subtree's original parent to its
-                // nearest page ancestor — a no-op in the common case (sharing a
-                // page, or a block already under a page), so the mount stays in
-                // place; only a block shared under a non-page bubbles up. Using this
-                // `parent` for BOTH the SQL mount row and the Loro mount placement
-                // keeps the two stores aligned.
+                // Amendment A: the mount is a Page (Inc 2), so it must sit
+                // under a Page (or a root). Bubble the subtree's original
+                // parent to its nearest page ancestor — a no-op in the common
+                // case (sharing a page, or a block already under a page), so
+                // the mount stays in place; only a block shared under a
+                // non-page bubbles up. Using this `parent` for BOTH the SQL
+                // mount row and the Loro mount placement keeps the two stores
+                // aligned.
                 let parent = match parent_as_option(doc, tid) {
                     Some(ptid) => {
                         nearest_page_ancestor_tid(doc, ptid).map_err(anyhow::Error::msg)?
@@ -2103,10 +2107,10 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     None => None,
                 };
 
-                // The mount node replaces the shared subtree, so its SQL parent is
-                // the resolved page ancestor (from the parent node's STABLE_ID). A
-                // shared root with no page ancestor → the mount becomes a top-level
-                // block (`no_parent` sentinel).
+                // The mount node replaces the shared subtree, so its SQL parent
+                // is the resolved page ancestor (from the parent node's
+                // STABLE_ID). A shared root with no page ancestor → the mount
+                // becomes a top-level block (`no_parent` sentinel).
                 let mount_parent_uri = match parent {
                     Some(parent_tid) => {
                         let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
@@ -2220,10 +2224,11 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // so the global projection counts the moved rows as the share's and
         // keeps them in `block_raw`: no reader ever sees the page vanish.
         //   1. a BLOCK share projects its container row (an UPSERT; carries
-        //      `share-role`) — a page share has none, its page keeps its own row;
+        //      `share-role`) — a page share has none, its page keeps its own
+        //      row;
         //   2. flush the global projection — this acquires its project lock
-        //      (serializing with the background loop) and advances its base past the
-        //      prune, so no later pass diffs it again;
+        //      (serializing with the background loop) and advances its base
+        //      past the prune, so no later pass diffs it again;
         //   3. re-project the subtree as the LAST write.
         // Without the DI-wired projection (tests) there is no global loop, so
         // the flush is simply skipped.
@@ -2496,15 +2501,15 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     }
                     anyhow::bail!("parent block {parent_id} not found");
                 };
-                // Amendment A: the mount places a Page, so bubble the accept target
-                // to its nearest page ancestor — a no-op when the user targeted
-                // a page (the common case).
+                // Amendment A: the mount places a Page, so bubble the accept
+                // target to its nearest page ancestor — a no-op when the user
+                // targeted a page (the common case).
                 //
-                // H7 (ADR 0028): when the target has NO page ancestor, the mount
-                // would orphan at `no_parent` — present in SQL but invisible in
-                // the UI (dogfood N3, 2026-07-20). Attach it under the dedicated
-                // "Shared with me" recipient root instead, so accepted shares are
-                // always reachable and rendered.
+                // H7 (ADR 0028): when the target has NO page ancestor, the
+                // mount would orphan at `no_parent` — present in SQL but
+                // invisible in the UI (dogfood N3, 2026-07-20). Attach it under
+                // the dedicated "Shared with me" recipient root instead, so
+                // accepted shares are always reachable and rendered.
                 let page_parent_tid =
                     match nearest_page_ancestor_tid(doc, parent_tid).map_err(anyhow::Error::msg)? {
                         Some(p) => Some(p),
@@ -2553,7 +2558,8 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
 
         // H7: if the mount was parented under the "Shared with me" recipient
         // root, project that root row FIRST so the mount's SQL parent resolves
-        // to a rendered page (the UI reads SQL). Idempotent (the create is an UPSERT).
+        // to a rendered page (the UI reads SQL). Idempotent (the create is an
+        // UPSERT).
         if attached_to_shared_with_me {
             self.project_shared_with_me_root_to_sql().await?;
         }
@@ -2776,9 +2782,9 @@ impl LoroShareBackend {
             _ => None,
         };
 
-        // (1) Unregister the shared doc, so no write reaches it after `root` was
-        // checked. Keep the handle to enumerate the descendant block ids for SQL
-        // row deletion below.
+        // (1) Unregister the shared doc, so no write reaches it after `root`
+        // was checked. Keep the handle to enumerate the descendant block ids
+        // for SQL row deletion below.
         let shared_doc = self.unregister_shared_doc(&info, &handle, root)?;
 
         // (2) Drop the per-share workers. Dropping each handle aborts its
@@ -3733,7 +3739,8 @@ mod tests {
         recipient.import(&snapshot).unwrap();
         assert!(recipient.is_shallow(), "recipient doc must be shallow");
 
-        // Worker watermark == recipient's current frontiers == the shallow root.
+        // Worker watermark == recipient's current frontiers == the shallow
+        // root.
         let watermark = recipient.oplog_frontiers();
 
         // A remote op imports (a second node appears), advancing past the root.
@@ -3747,7 +3754,8 @@ mod tests {
         recipient.commit();
 
         // THE REGRESSION: forking the shallow recipient doc at the watermark.
-        // Before the loro fork this returned NotImplemented and the worker died.
+        // Before the loro fork this returned NotImplemented and the worker
+        // died.
         let fork = recipient
             .fork_at(&watermark)
             .expect("fork_at at/after the shallow root must succeed on a shallow recipient doc");
@@ -3840,7 +3848,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn share_rejects_non_block_uri() {
-        // Parse-don't-validate boundary: `share_subtree` requires a `block:` URI.
+        // Parse-don't-validate boundary: `share_subtree` requires a `block:`
+        // URI.
         let (backend, _dir) = make_backend();
         let err = backend
             .share_subtree("file:foo", "none".into())
@@ -3892,8 +3901,8 @@ mod tests {
         content: &str,
     ) {
         let collab = backend.global_doc().await.unwrap();
-        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-        // exists to observe.
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent
+        // writer exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
@@ -3922,8 +3931,8 @@ mod tests {
     ) {
         seed_block(backend, stable_id, parent_stable_id, content).await;
         let collab = backend.global_doc().await.unwrap();
-        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-        // exists to observe.
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent
+        // writer exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
@@ -3938,8 +3947,8 @@ mod tests {
 
     async fn read_text(backend: &LoroShareBackend, stable_id: &str) -> Option<String> {
         let collab = backend.global_doc().await.unwrap();
-        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-        // exists to observe.
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent
+        // writer exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let uri = EntityUri::block(stable_id);
@@ -4250,8 +4259,8 @@ mod tests {
         // through the unrouted global path would resolve nothing.
         let a_global = backend_a.global_doc().await.unwrap();
         assert!(
-            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer exists
-            // to observe.
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no
+            // concurrent writer exists to observe.
             find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
             "shared-child should be absent from A's global tree after the prune"
         );
@@ -4277,10 +4286,11 @@ mod tests {
             Some("ROUTED EDIT"),
             "write must land in A's shared doc"
         );
-        // Global doc still holds no shared-child node (nothing was created there).
+        // Global doc still holds no shared-child node (nothing was created
+        // there).
         assert!(
-            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer exists
-            // to observe.
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no
+            // concurrent writer exists to observe.
             find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-child")).is_none(),
             "the routed write must NOT resurrect shared-child in the global tree"
         );
@@ -4480,8 +4490,8 @@ mod tests {
         // NOT in A's global tree.
         let a_global = backend_a.global_doc().await.unwrap();
         assert!(
-            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer exists
-            // to observe.
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no
+            // concurrent writer exists to observe.
             find_tree_id_by_stable_id(&a_global.doc(), &EntityUri::block("shared-new-child"))
                 .is_none(),
             "shared child must not appear in the global tree"
@@ -4560,7 +4570,8 @@ mod tests {
 
         write_backend
             .create_block(
-                // ALLOW(entity_uri_from_raw): mount uri built from a TreeID above
+                // ALLOW(entity_uri_from_raw): mount uri built from a TreeID
+                // above
                 EntityUri::from_raw(&mount_uri),
                 holon_api::BlockContent::text("born under the mount"),
                 Some(EntityUri::block("mount-born-child")),
@@ -4644,7 +4655,8 @@ mod tests {
         use holon_api::repository::CoreOperations;
         let (backend_a, backend_b, write_backend, _stid, _da, _db) = share_setup().await;
 
-        // Seed a second child in the shared subtree (create under shared parent).
+        // Seed a second child in the shared subtree (create under shared
+        // parent).
         write_backend
             .create_block(
                 EntityUri::block("shared-parent"),
@@ -5686,8 +5698,8 @@ mod tests {
         // rehydrated roster needs the capability secret from the second.
         let backend_a = make_backend_at(&dir_a_path, test_credentials(keychain_a));
         let collab = backend_a.test_global_doc().await;
-        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-        // exists to observe.
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent
+        // writer exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let n = rehydrate_shared_trees(&backend_a, doc).await.unwrap();
@@ -5843,8 +5855,8 @@ mod tests {
         // rehydrated roster needs the capability secret from the second.
         let backend_a = make_backend_at(&dir_a_path, test_credentials(keychain_a));
         let collab = backend_a.test_global_doc().await;
-        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-        // exists to observe.
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent
+        // writer exists to observe.
         let doc_arc = collab.doc();
         let n = rehydrate_shared_trees(&backend_a, &doc_arc).await.unwrap();
         assert_eq!(n, 1, "A should rehydrate exactly 1 share");
@@ -6147,8 +6159,8 @@ mod tests {
         shared_tree_id: &str,
         parent: Option<TreeID>,
     ) -> ShareRoot {
-        // ALLOW(loro_doc_escape): single-threaded test setup; no concurrent writer
-        // exists to observe.
+        // ALLOW(loro_doc_escape): single-threaded test setup; no concurrent
+        // writer exists to observe.
         let doc = global.doc();
         let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
         let mount = shared_tree::create_mount_node(
@@ -6279,8 +6291,8 @@ mod tests {
             crate::loro_document::LoroDocument::new("collide-global".to_string()).unwrap(),
         );
         {
-            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-            // exists to observe.
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no
+            // concurrent writer exists to observe.
             let gdoc = global.doc();
             let tree = gdoc.get_tree(TREE_NAME);
             let node = tree.create(None::<TreeID>).unwrap();
@@ -6604,8 +6616,8 @@ mod tests {
 
         {
             let global = backend.global_doc().await.unwrap();
-            // ALLOW(loro_doc_escape): single-threaded test setup; no concurrent writer
-            // exists to observe.
+            // ALLOW(loro_doc_escape): single-threaded test setup; no concurrent
+            // writer exists to observe.
             let doc = global.doc();
             let tree = doc.get_tree(TREE_NAME);
             let node = shared_tree::create_mount_node(
@@ -6667,9 +6679,9 @@ mod tests {
         // Mount row projected as a PAGE (Inc 2) so the shared subtree owns a
         // dedicated org file. `shared-parent` is a plain BLOCK, so this is the
         // SYNTHETIC-CONTAINER case (D3): the mount is a synthetic page wrapping
-        // it. Amendment A: `root-a` is a non-page ROOT, so the mount-page cannot
-        // sit under it (no pages under non-pages) and has no page ancestor —
-        // it bubbles to the top (`no_parent`), NOT under `root-a`.
+        // it. Amendment A: `root-a` is a non-page ROOT, so the mount-page
+        // cannot sit under it (no pages under non-pages) and has no page
+        // ancestor — it bubbles to the top (`no_parent`), NOT under `root-a`.
         let mount = sql
             .get(&mount_id)
             .expect("mount row must be projected into SQL");
@@ -6865,8 +6877,8 @@ mod tests {
         // The page's `#+TODO` vocabulary, as org ingest stores it.
         {
             let global = backend_a.global_doc().await.unwrap();
-            // ALLOW(loro_doc_escape): single-threaded test setup; no concurrent writer
-            // exists to observe.
+            // ALLOW(loro_doc_escape): single-threaded test setup; no concurrent
+            // writer exists to observe.
             let doc = global.doc();
             let tid = find_tree_id_by_stable_id(&doc, &EntityUri::block("shared-page")).unwrap();
             doc.get_tree(crate::loro_backend::TREE_NAME)
@@ -8339,8 +8351,8 @@ mod tests {
         seed_page(&backend_a, "root-a", None, "Root A").await;
         seed_block(&backend_a, "shared-block", Some("root-a"), "Shared heading").await;
 
-        // B's accept target is a plain, NON-page top-level block: it has no page
-        // ancestor, so the mount would otherwise bubble to `no_parent`.
+        // B's accept target is a plain, NON-page top-level block: it has no
+        // page ancestor, so the mount would otherwise bubble to `no_parent`.
         seed_block(&backend_b, "host-b", None, "Host B").await;
 
         let ticket = {
@@ -8371,7 +8383,8 @@ mod tests {
 
         let shared_with_me_uri = block_uri_from_bare(SHARED_WITH_ME_ROOT_ID);
 
-        // (1) The mount attaches under the "Shared with me" root, NOT no_parent.
+        // (1) The mount attaches under the "Shared with me" root, NOT
+        // no_parent.
         let mount = sql_b.get(&mount_id).expect("mount row on acceptor");
         assert_eq!(
             mount.get("parent_id").and_then(|v| v.as_string()),
@@ -8415,7 +8428,8 @@ mod tests {
         let (backend_a, _dir_a) = make_backend();
         let (backend_b, sql_b, _dir_b) = make_backend_with_sql();
 
-        // A shares two independent blocks (each under a page, so sharing is legal).
+        // A shares two independent blocks (each under a page, so sharing is
+        // legal).
         seed_page(&backend_a, "root-a", None, "Root A").await;
         seed_block(&backend_a, "share-one", Some("root-a"), "Share one").await;
         seed_block(&backend_a, "share-two", Some("root-a"), "Share two").await;
@@ -8471,8 +8485,8 @@ mod tests {
         // Exactly ONE "Shared with me" node in B's global Loro tree.
         let loro_root_count = {
             let collab = backend_b.global_doc().await.unwrap();
-            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-            // exists to observe.
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no
+            // concurrent writer exists to observe.
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
             let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
@@ -8487,7 +8501,8 @@ mod tests {
             "exactly one 'Shared with me' root node must exist in the Loro tree, found {loro_root_count}"
         );
 
-        // Exactly ONE "Shared with me" row in SQL (keyed by id; assert present).
+        // Exactly ONE "Shared with me" row in SQL (keyed by id; assert
+        // present).
         let root = sql_b
             .get(&shared_with_me_uri)
             .expect("'Shared with me' root row must be projected");
@@ -8574,8 +8589,8 @@ mod tests {
         // Mount node removed from the global tree.
         {
             let collab = backend.global_doc().await.unwrap();
-            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-            // exists to observe.
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no
+            // concurrent writer exists to observe.
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
             let bare = mount_id.strip_prefix("block:").unwrap();
@@ -8632,8 +8647,8 @@ mod tests {
             .unwrap();
 
         let collab = backend.global_doc().await.unwrap();
-        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-        // exists to observe.
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent
+        // writer exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let bytes = doc
@@ -8670,8 +8685,8 @@ mod tests {
 
         {
             let collab = backend.global_doc().await.unwrap();
-            // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-            // exists to observe.
+            // ALLOW(loro_doc_escape): single-threaded test assertion; no
+            // concurrent writer exists to observe.
             let doc_arc = collab.doc();
             let doc = &*doc_arc;
             let bare = mount_id.strip_prefix("block:").unwrap();
@@ -8687,8 +8702,8 @@ mod tests {
         backend.unshare(&mount_id).await.unwrap();
 
         let collab = backend.global_doc().await.unwrap();
-        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent writer
-        // exists to observe.
+        // ALLOW(loro_doc_escape): single-threaded test assertion; no concurrent
+        // writer exists to observe.
         let doc_arc = collab.doc();
         let doc = &*doc_arc;
         let bytes = doc

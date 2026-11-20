@@ -1884,7 +1884,8 @@ mod tests {
 
     #[test]
     fn field_eq_is_two_valued_under_negation() {
-        // A property-eq that is missing must be *false* (not NULL) so `Not` agrees.
+        // A property-eq that is missing must be *false* (not NULL) so `Not`
+        // agrees.
         let g = Guard {
             subject: Subject::Block,
             body: Pattern::Not(Box::new(Pattern::Field {

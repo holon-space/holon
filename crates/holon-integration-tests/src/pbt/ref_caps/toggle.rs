@@ -125,7 +125,8 @@ impl holon_pbt_core::capabilities::RefTaskStateToggle for ReferenceState {
             .map(super::super::reference_state::block_to_data_row)
             .collect();
         let arc_rows: Vec<Arc<_>> = rows.into_iter().map(Arc::new).collect();
-        // ALLOW(pbt-sut-handle-frontend-simulation): generator-side render lookup
+        // ALLOW(pbt-sut-handle-frontend-simulation): generator-side render
+        // lookup
         let vm = holon_frontend::interpret_pure(&owned_render_expr, &arc_rows, self);
         vm.snapshot().state_toggle_block_ids().into_iter().collect()
     }

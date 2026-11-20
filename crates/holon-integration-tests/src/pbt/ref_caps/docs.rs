@@ -135,8 +135,8 @@ impl RefDocumentsMut for ReferenceState {
         }
 
         // Cascade-delete the page block + all descendants through the same
-        // `Mutation::Delete` machinery `ApplyMutation` uses (BFS over parent_id),
-        // then re-canonicalize exactly like apply_mutation does.
+        // `Mutation::Delete` machinery `ApplyMutation` uses (BFS over
+        // parent_id), then re-canonicalize exactly like apply_mutation does.
         let mutation = holon_pbt_core::types::Mutation::Delete {
             id: doc_uri.clone(),
         };
@@ -145,13 +145,13 @@ impl RefDocumentsMut for ReferenceState {
         crate::org_utils::assign_reference_sequences_canonical(&mut blocks);
         let surviving: std::collections::BTreeMap<EntityUri, Block> =
             blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
-        // The cascade removes the page block AND every descendant. Focus and the
-        // active-editor mirror must be cleared for ALL of them, not just the page
-        // (`clear_focus_if_deleted`'s contract: a deleted block closes its editor).
-        // Clearing only `doc_uri` left an ActiveEditor pinned to a descendant the
-        // ref had just deleted — a self-inconsistent oracle that made
-        // `inv-editor-text/mirror` compare that ghost editor's cached text against
-        // the SUT's (correctly empty) cell.
+        // The cascade removes the page block AND every descendant. Focus and
+        // the active-editor mirror must be cleared for ALL of them, not just
+        // the page (`clear_focus_if_deleted`'s contract: a deleted block closes
+        // its editor). Clearing only `doc_uri` left an ActiveEditor pinned to a
+        // descendant the ref had just deleted — a self-inconsistent oracle that
+        // made `inv-editor-text/mirror` compare that ghost editor's cached text
+        // against the SUT's (correctly empty) cell.
         let removed: Vec<EntityUri> = self
             .domain
             .block_state
@@ -174,19 +174,20 @@ impl RefDocumentsMut for ReferenceState {
 
         for id in &removed {
             self.clear_focus_if_deleted(id);
-            // The file is gone, so nothing here is file-backed any more — an undo
-            // must not resurrect it (`rematerialize_file_ingested`).
+            // The file is gone, so nothing here is file-backed any more — an
+            // undo must not resurrect it (`rematerialize_file_ingested`).
             self.files.ingest_origin_blocks.remove(id);
         }
     }
 
     fn rename_document(&mut self, old_file_name: &str, new_file_name: &str) {
-        // File-move spec: a document page's title FOLLOWS its file name. Resolve
-        // the doc by its OLD filename, re-point the filename, and retitle the
-        // page block to the NEW file stem. Production now matches this via the
-        // atomic Rename port: `FileSyncController::on_file_renamed` re-homes the
-        // doc and retitles the doc-root to the new stem (no delete window), so
-        // the SUT converges with this reference.
+        // File-move spec: a document page's title FOLLOWS its file name.
+        // Resolve the doc by its OLD filename, re-point the filename, and
+        // retitle the page block to the NEW file stem. Production now matches
+        // this via the atomic Rename port:
+        // `FileSyncController::on_file_renamed` re-homes the doc and retitles
+        // the doc-root to the new stem (no delete window), so the SUT converges
+        // with this reference.
         let doc_uri = self
             .files
             .documents
@@ -234,7 +235,8 @@ impl RefDocumentsMut for ReferenceState {
             .documents
             .insert(doc_uri.clone(), filename.to_string());
 
-        // Remove old content blocks from this document (re-writing the same file).
+        // Remove old content blocks from this document (re-writing the same
+        // file).
         let old_block_ids: Vec<EntityUri> = self
             .domain
             .block_state
@@ -260,16 +262,17 @@ impl RefDocumentsMut for ReferenceState {
             self.files.ingest_origin_blocks.remove(id);
         }
         // The page block and every block this pass parses out of the file are
-        // INGEST-origin: prod never journals them for undo, so they must survive
-        // an oracle snapshot restore (see `rematerialize_file_ingested`).
+        // INGEST-origin: prod never journals them for undo, so they must
+        // survive an oracle snapshot restore (see
+        // `rematerialize_file_ingested`).
         self.files.ingest_origin_blocks.insert(doc_uri.clone());
 
         // Add the page block (tags ⊇ ["Page"]) for this org file.
         let mut doc_block =
             Block::new_text(doc_uri.clone(), EntityUri::no_parent(), doc_name.clone());
         doc_block.set_page(true);
-        // Mirror the SUT parser: a `#+TODO:` header lands on the document block as
-        // the `todo_keywords` property.
+        // Mirror the SUT parser: a `#+TODO:` header lands on the document block
+        // as the `todo_keywords` property.
         if let Some(kw) = &todo_keywords {
             doc_block.set_todo_keywords(Some(kw.clone()));
         }
@@ -282,10 +285,11 @@ impl RefDocumentsMut for ReferenceState {
             .block_documents
             .insert(doc_uri.clone(), doc_uri.clone());
 
-        // Insert the generated blocks directly — no re-parsing. Top-level headings
-        // parented to `GEN_PLACEHOLDER` are remapped to the resolved doc uri; the
-        // `ID` renderer hint is stripped; layout classification is derived from each
-        // block's `source_language`, mirroring the org parser's index.org handling.
+        // Insert the generated blocks directly — no re-parsing. Top-level
+        // headings parented to `GEN_PLACEHOLDER` are remapped to the resolved
+        // doc uri; the `ID` renderer hint is stripped; layout classification is
+        // derived from each block's `source_language`, mirroring the org
+        // parser's index.org handling.
         let placeholder =
             EntityUri::block(crate::pbt::transitions::write_org_file::GEN_PLACEHOLDER);
         let is_index = filename == "index.org";

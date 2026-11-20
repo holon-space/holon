@@ -685,7 +685,8 @@ async fn a_held_database_whose_probe_fails_says_the_watch_stopped_and_why() {
     let booted = boot_with_crdt(dir.path(), HELD_DB_FILE, true).await;
     database_held_text(&booted).expect("the boot discloses the held database");
 
-    // A directory where the file was: the probe's open fails, and not as Locked.
+    // A directory where the file was: the probe's open fails, and not as
+    // Locked.
     std::fs::remove_file(&held).expect("unlink the held file");
     std::fs::create_dir(&held).expect("put a directory in its place");
     let error = holon_turso::db_open::is_held(&held)

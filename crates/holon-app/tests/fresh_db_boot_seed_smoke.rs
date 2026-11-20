@@ -83,18 +83,18 @@ async fn boot_fresh_db(
     // Build the engine through the SAME lazy-DI entry the gpui frontend uses
     // (`create_backend_engine_with_extras`), configuring the minimal SqlOnly
     // module set that `seed_default_layout` needs:
-    //   - `EventInfraModule` supplies `dyn BlockOrdering` (over the block matview)
-    //     which the seed drives, plus the STRUCTURAL block ops.
-    //   - a bare `SqlOperationProvider` for the `block` entity supplies the CRUD
-    //     ops (create / set_field / delete). EventInfraModule alone advertises only
-    //     structural ops, so the engine's operation-registry startup check rejects
-    //     the wiring without this — same fix the SqlOnly embedder
-    //     (frontends/holon-worker/src/lib.rs) applies.
-    // In this SqlOnly config `BlockOrdering::create_in_tree` returns false, so each
-    // seed block routes through `engine.execute_operation("block", "create", ..)` —
-    // the history-recording path that fired the regression. Resolving
-    // `dyn BlockOrdering` in the `extra_resolve` closure exercises the same graph
-    // the FrontendSession factory walks.
+    //   - `EventInfraModule` supplies `dyn BlockOrdering` (over the block
+    //     matview) which the seed drives, plus the STRUCTURAL block ops.
+    //   - a bare `SqlOperationProvider` for the `block` entity supplies the
+    //     CRUD ops (create / set_field / delete). EventInfraModule alone
+    //     advertises only structural ops, so the engine's operation-registry
+    //     startup check rejects the wiring without this — same fix the SqlOnly
+    //     embedder (frontends/holon-worker/src/lib.rs) applies.
+    // In this SqlOnly config `BlockOrdering::create_in_tree` returns false, so
+    // each seed block routes through `engine.execute_operation("block",
+    // "create", ..)` — the history-recording path that fired the regression.
+    // Resolving `dyn BlockOrdering` in the `extra_resolve` closure exercises
+    // the same graph the FrontendSession factory walks.
     holon::di::create_backend_engine_with_extras(
         db_path,
         holon::di::DatabaseRole::DurableStore,

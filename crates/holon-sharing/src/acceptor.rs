@@ -134,8 +134,8 @@ pub fn blob_canonical_bytes(env: &Envelope) -> Vec<u8> {
     hasher.update(env.auth.audience.as_bytes());
     hasher.update(env.auth.selector.as_bytes());
     hasher.update(&env.auth.epoch.to_le_bytes());
-    // The chain decides the subject, and the subject decides which capability is
-    // required — so it must be covered or the requirement is forgeable.
+    // The chain decides the subject, and the subject decides which capability
+    // is required — so it must be covered or the requirement is forgeable.
     hasher.update(&env.auth.chain);
     hasher.update(&env.payload);
     hasher.finalize().as_bytes().to_vec()
@@ -343,7 +343,8 @@ mod tests {
         ));
     }
 
-    // -- the reverse leg: a peer writing into the ADMITTER's store --------------
+    // -- the reverse leg: a peer writing into the ADMITTER's store
+    // --------------
 
     #[test]
     fn a_read_only_peers_write_into_the_owners_store_is_refused() {
@@ -384,8 +385,9 @@ mod tests {
 
     #[test]
     fn an_envelope_addressed_to_the_receiver_is_refused_by_the_owner() {
-        // The reverse-leg audience defect in one assertion: reusing the receiver
-        // as audience on a round the OWNER admits must authorize nothing.
+        // The reverse-leg audience defect in one assertion: reusing the
+        // receiver as audience on a round the OWNER admits must authorize
+        // nothing.
         let owner = Principal("owner".into());
         let clock = TestClock::new(1_000);
         let envelope = signed_envelope(
@@ -420,9 +422,9 @@ mod tests {
     #[test]
     fn a_write_cert_for_one_container_is_refused_on_another_containers_log() {
         // A peer legitimately shared into `holon_tree`, holding a GENUINE
-        // owner-issued read+write cert for it, presents that cert on a different
-        // container's log. No forgery: the capability is simply being spent on an
-        // object it was never granted over.
+        // owner-issued read+write cert for it, presents that cert on a
+        // different container's log. No forgery: the capability is simply being
+        // spent on an object it was never granted over.
         let owner = Principal("owner".into());
         let clock = TestClock::new(1_000);
         let mut envelope =
@@ -444,7 +446,8 @@ mod tests {
     #[test]
     fn a_cert_for_the_containers_own_selector_is_admitted() {
         // The positive half: the binding must not refuse the honest path, where
-        // the proof's selector and the envelope's container are the same object.
+        // the proof's selector and the envelope's container are the same
+        // object.
         let owner = Principal("owner".into());
         let clock = TestClock::new(1_000);
         let envelope = signed_envelope("owner", &granting("receiver", read_write(), 1_000, 10_000));
@@ -456,8 +459,8 @@ mod tests {
     fn a_swapped_in_more_capable_chain_refuses_on_signature() {
         // The chain decides the subject, and the subject decides the required
         // capability, so the chain must be covered by the canonical bytes: a
-        // relay upgrading read-only to read-write must not produce an admissible
-        // envelope.
+        // relay upgrading read-only to read-write must not produce an
+        // admissible envelope.
         let owner = Principal("owner".into());
         let clock = TestClock::new(1_000);
         let mut envelope = signed_envelope(
@@ -474,10 +477,10 @@ mod tests {
     #[test]
     fn a_chain_that_decodes_to_zero_certs_refuses_instead_of_panicking() {
         // Two bytes, `[]`, decode to a well-formed EMPTY cert list. The
-        // byte-level emptiness check does not catch it, and the subject is taken
-        // from the chain's last cert — so this reached the boundary with no
-        // cert, no key and no lease and panicked there. Only the container and
-        // the audience must match, and both are attacker-chosen.
+        // byte-level emptiness check does not catch it, and the subject is
+        // taken from the chain's last cert — so this reached the boundary with
+        // no cert, no key and no lease and panicked there. Only the container
+        // and the audience must match, and both are attacker-chosen.
         let owner = Principal("owner".into());
         let clock = TestClock::new(1_000);
         let mut envelope =

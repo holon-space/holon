@@ -124,10 +124,10 @@ impl BlockConsolidator {
         // derived single-writer projection. Tag the write `EventOrigin::Loro`.
         //
         // SECURITY (Ruling B, load-bearing): every projection op is built with
-        // `position: None`. The Loro tree owns each block's fractional index and
-        // the projection writes `sort_key` as an ordinary column from that
-        // index; it NEVER mints sibling re-keys. So an untrusted PEER block that
-        // carries an `_order_rekeys` property can never become a re-key
+        // `position: None`. The Loro tree owns each block's fractional index
+        // and the projection writes `sort_key` as an ordinary column from that
+        // index; it NEVER mints sibling re-keys. So an untrusted PEER block
+        // that carries an `_order_rekeys` property can never become a re-key
         // instruction to the SQL writer — the re-key channel is structurally
         // unreachable from this path, not merely filtered.
         let batch: Vec<holon_core::BatchOp> = ops

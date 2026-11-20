@@ -73,13 +73,13 @@ pub enum Value {
     Integer(i64),
     Float(#[serde(serialize_with = "serialize_finite_float")] f64),
     Boolean(bool),
-    // DateTime variant: stored as RFC3339 string for flutter_rust_bridge interop. //
-    // ALLOW(compatibility): FRB doesn't expose chrono::DateTime Use as_datetime() to get the
-    // parsed chrono::DateTime
+    // DateTime variant: stored as RFC3339 string for flutter_rust_bridge
+    // interop. // ALLOW(compatibility): FRB doesn't expose chrono::DateTime Use
+    // as_datetime() to get the parsed chrono::DateTime
     DateTime(String),
-    // Json variant: stored as String for flutter_rust_bridge interop. // ALLOW(compatibility):
-    // FRB doesn't expose serde_json::Value Use as_json_value() to get the parsed
-    // serde_json::Value
+    // Json variant: stored as String for flutter_rust_bridge interop. //
+    // ALLOW(compatibility): FRB doesn't expose serde_json::Value Use
+    // as_json_value() to get the parsed serde_json::Value
     Json(String),
     Array(Vec<Value>),
     Object(#[serde(deserialize_with = "deserialize_unmarked_object")] HashMap<String, Value>),
@@ -117,7 +117,8 @@ impl Value {
     /// flutter_rust_bridge:ignore
     pub fn as_json_value(&self) -> Option<serde_json::Value> {
         match self {
-            // ALLOW(ok) ALLOW(fallback): malformed Json variant returns None (FRB-shaped string)
+            // ALLOW(ok) ALLOW(fallback): malformed Json variant returns None
+            // (FRB-shaped string)
             Value::Json(s) => serde_json::from_str(s).ok(),
             _ => None,
         }
@@ -135,9 +136,9 @@ impl Value {
                 if let Some(i) = n.as_i64() {
                     Value::Integer(i)
                 } else if n.is_f64() {
-                    // `is_f64` rather than `as_f64`: the latter also answers for
-                    // an integer too large for `i64`, and rounding one into an
-                    // `f64` loses digits silently.
+                    // `is_f64` rather than `as_f64`: the latter also answers
+                    // for an integer too large for `i64`, and rounding one into
+                    // an `f64` loses digits silently.
                     Value::Float(n.as_f64().expect("is_f64 just answered"))
                 } else {
                     Value::Json(n.to_string())

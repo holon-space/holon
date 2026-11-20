@@ -453,7 +453,8 @@ fn extract_item_data(node: &ViewModel) -> Option<HashMap<String, Value>> {
         | ViewKind::Selectable { child }
         | ViewKind::Draggable { child, .. }
         | ViewKind::PieMenu { child, .. } => extract_item_data(child),
-        // Layout/container with children: try extracting from first leaf-like descendant
+        // Layout/container with children: try extracting from first leaf-like
+        // descendant
         ViewKind::Row { children, .. } | ViewKind::Column { children, .. } => {
             extract_from_children(&children.items)
         }

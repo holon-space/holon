@@ -1044,7 +1044,8 @@ impl ReactiveRowSet {
             let kind = match &change {
                 holon_api::Change::Created { data, .. } => format!(
                     "Created {}",
-                    // ALLOW(raw_row_id_column): label — row-lifecycle trace line
+                    // ALLOW(raw_row_id_column): label — row-lifecycle trace
+                    // line
                     data.get("id")
                         .and_then(|v| v.as_string())
                         .unwrap_or("<none>")
@@ -1062,7 +1063,8 @@ impl ReactiveRowSet {
             let detail = match &change {
                 holon_api::Change::Created { data, .. } => format!(
                     "Created id={}",
-                    // ALLOW(raw_row_id_column): label — row-lifecycle trace line
+                    // ALLOW(raw_row_id_column): label — row-lifecycle trace
+                    // line
                     data.get("id")
                         .and_then(|v| v.as_string())
                         .unwrap_or("<none>")
@@ -1095,7 +1097,8 @@ impl ReactiveRowSet {
                 let mut lock = self.data.lock_mut();
                 if let Some(existing) = lock.get(&key) {
                     // Defensive: a Created arriving for a row we already know
-                    // about — treat as Updated to avoid losing the cell identity.
+                    // about — treat as Updated to avoid losing the cell
+                    // identity.
                     existing.set_neq(row);
                 } else {
                     lock.insert_cloned(key, Mutable::new(row));
@@ -1521,13 +1524,14 @@ impl ReactiveRenderedRows {
                     != generation;
                 let mut snapshot_keys: Vec<EntityUri> = Vec::new();
                 for change in batch.inner.items {
-                    // UiEvent::Data carries Change<DataRow> (MapChange) for FFI compat,
-                    // but the data was enriched by forward_data_stream → enrich_batch
-                    // before being packed into the UiEvent.
+                    // UiEvent::Data carries Change<DataRow> (MapChange) for FFI
+                    // compat, but the data was enriched by forward_data_stream
+                    // → enrich_batch before being packed into the UiEvent.
                     //
-                    // Re-wrap via from_raw with no-op computed fields since enrichment
-                    // already happened. This is the ONE remaining seam — eliminating it
-                    // requires changing UiEvent::Data to carry EnrichedChange directly.
+                    // Re-wrap via from_raw with no-op computed fields since
+                    // enrichment already happened. This is the ONE remaining
+                    // seam — eliminating it requires changing UiEvent::Data to
+                    // carry EnrichedChange directly.
                     let enriched = change.map(|data| {
                         EnrichedRow::from_raw(data, |_| std::collections::HashMap::new())
                     });
@@ -1536,8 +1540,8 @@ impl ReactiveRenderedRows {
                             // Retain BOTH entity- and value-shaped rows: the
                             // snapshot key is the row's `RowIdentity` store key
                             // (content hash for id-less value rows), so an
-                            // aggregate / rule-trigger row is not dropped by the
-                            // post-snapshot `retain_keys`.
+                            // aggregate / rule-trigger row is not dropped by
+                            // the post-snapshot `retain_keys`.
                             snapshot_keys.push(holon_api::RowIdentity::of_row(data).to_store_key());
                         }
                     }
@@ -2232,8 +2236,8 @@ impl UiState {
     /// can tell the toggle actually rendered (fail-loud companion to
     /// [`Self::set_block_expanded_view`]).
     pub(crate) fn block_expanded_view(&self, target_id: &str) -> Option<bool> {
-        // Scheme-agnostic key, so a caller holding either spelling of a block id
-        // reaches the same entry. Node LOOKUP is not: `find_expand_toggle`
+        // Scheme-agnostic key, so a caller holding either spelling of a block
+        // id reaches the same entry. Node LOOKUP is not: `find_expand_toggle`
         // compares against the builder's schemed `target_id` prop verbatim.
         let key = target_id.strip_prefix("block:").unwrap_or(target_id);
         self.expanded_view_observed
@@ -2742,8 +2746,9 @@ impl ReactiveEngine {
             for (block_id, state) in states {
                 // Joined, not merely aborted: an abort only schedules
                 // cancellation, and the store closes as soon as this task
-                // returns. The join is also what drops the task's `WatchHandle`,
-                // whose `ActorAbortGuard` stops the rest of the pipeline.
+                // returns. The join is also what drops the task's
+                // `WatchHandle`, whose `ActorAbortGuard` stops the rest of the
+                // pipeline.
                 state.task.abort();
                 let _ = state.task.await;
                 tracing::debug!(%block_id, "session shutdown: UI watcher stopped");
@@ -2953,10 +2958,11 @@ impl ReactiveEngine {
         let ctx = RenderContext {
             data_rows: rows.into(),
             data_source: Some(results.clone()),
-            // Width-derived defaults (the accordion's collapse rule, `if_space`)
-            // resolve here too, so this path needs the same measured space
-            // `snapshot_resolved` reads. The structural signal re-fires on
-            // `viewport_generation`, so a resize re-interprets with the new one.
+            // Width-derived defaults (the accordion's collapse rule,
+            // `if_space`) resolve here too, so this path needs the same
+            // measured space `snapshot_resolved` reads. The structural signal
+            // re-fires on `viewport_generation`, so a resize re-interprets with
+            // the new one.
             available_space: services.viewport_snapshot(),
             context_entity: Some(block_id.to_string()),
             ..Default::default()
@@ -3013,7 +3019,8 @@ impl ReactiveEngine {
                 const { std::cell::RefCell::new(Vec::new()) };
         }
 
-        // Try to enter: fail if already visiting this block_id (cycle detected).
+        // Try to enter: fail if already visiting this block_id (cycle
+        // detected).
         let entered = VISITED.with(|v| {
             let mut set = v.borrow_mut();
             if set.contains(block_id) {
@@ -3200,7 +3207,8 @@ impl ReactiveEngine {
                 )
                 .with_context(|| format!("creating the slot's newborn {id}"))?;
             if created {
-                // Only a block that EXISTS can be reaped, and only now does one.
+                // Only a block that EXISTS can be reaped, and only now does
+                // one.
                 self.ui_state
                     .ephemeral_newborns
                     .record(affordance_id, id.clone());
@@ -3478,9 +3486,10 @@ impl ReactiveEngine {
             .await;
             match watched {
                 Ok(watch) => {
-                    // `_aborts` keeps the watcher's actor pipeline alive for as long
-                    // as this task holds the receiver — dropping the guard cancels
-                    // the merge_triggers actors, so it must outlive the recv loop.
+                    // `_aborts` keeps the watcher's actor pipeline alive for as
+                    // long as this task holds the receiver — dropping the guard
+                    // cancels the merge_triggers actors, so it must outlive the
+                    // recv loop.
                     let (mut event_rx, cmd_tx, _aborts) = watch.into_parts();
 
                     // Forward variant commands from engine → WatchHandle
@@ -3493,8 +3502,9 @@ impl ReactiveEngine {
                     });
 
                     while let Some(event) = event_rx.recv().await {
-                        // Diagnostic: log every UiEvent for default-main-panel so we can
-                        // see whether Data events arrive after focus changes.
+                        // Diagnostic: log every UiEvent for default-main-panel
+                        // so we can see whether Data events arrive after focus
+                        // changes.
                         if bid.as_str() == "block:default-main-panel" {
                             match &event {
                                 UiEvent::Structure {
@@ -3521,10 +3531,12 @@ impl ReactiveEngine {
                                          items={n}{}",
                                         if dropped { " DROPPED-stale-gen" } else { "" }
                                     );
-                                    // Per-change detail. Lets the next debugging session
-                                    // confirm whether the matview CDC layer surfaces an
-                                    // `Updated` for the modified block after split_block /
-                                    // set_field — see HANDOFF_TUI_RENDER.md "third pass".
+                                    // Per-change detail. Lets the next
+                                    // debugging session confirm whether the
+                                    // matview CDC layer surfaces an
+                                    // `Updated` for the modified block after
+                                    // split_block / set_field — see
+                                    // HANDOFF_TUI_RENDER.md "third pass".
                                     for (i, change) in batch.inner.items.iter().enumerate() {
                                         let snippet =
                                             |row: &holon_api::widget_spec::DataRow| -> String {
@@ -3586,10 +3598,10 @@ impl ReactiveEngine {
                                 }
                             }
                         }
-                        // Diagnostic for HANDOFF_DATA_CDC_SCOPE_LEAK.md: log each
-                        // row applied to a tracked block's row set so we can see
-                        // *which* data ids are flowing into which watcher.
-                        // Gated by HOLON_TRACE_BLOCK_DATA=<substring>.
+                        // Diagnostic for HANDOFF_DATA_CDC_SCOPE_LEAK.md: log
+                        // each row applied to a tracked block's row set so we
+                        // can see *which* data ids are flowing into which
+                        // watcher. Gated by HOLON_TRACE_BLOCK_DATA=<substring>.
                         if let Ok(needle) = std::env::var("HOLON_TRACE_BLOCK_DATA") {
                             if !needle.is_empty() && bid.as_str().contains(&needle) {
                                 if let UiEvent::Data {
@@ -3658,8 +3670,8 @@ impl ReactiveEngine {
                                     .snapshot_rows()
                                     .iter()
                                     .filter_map(|r| {
-                                        // ALLOW(raw_row_id_column): label — snapshot row ids for a
-                                        // trace line
+                                        // ALLOW(raw_row_id_column): label —
+                                        // snapshot row ids for a trace line
                                         r.get("id")
                                             .and_then(|v| v.as_string())
                                             .map(|s| s.to_string())
@@ -3805,8 +3817,8 @@ impl ReactiveEngine {
         render_expr: RenderExpr,
         query_context: Option<crate::QueryContext>,
     ) -> (EntityUri, Arc<ReactiveRenderedRows>) {
-        // ALLOW(entity_uri_from_raw): synthetic 'query:<hash>' registry cache key (no
-        // upstream EntityUri)
+        // ALLOW(entity_uri_from_raw): synthetic 'query:<hash>' registry cache
+        // key (no upstream EntityUri)
         let key = EntityUri::from_raw(&format!(
             "query:{}",
             hash_query(&query, lang, &query_context)
@@ -3824,19 +3836,20 @@ impl ReactiveEngine {
             state.refcount += 1;
             return (key, results);
         }
-        // Derived only when this key gets its watcher, never on a refcount bump:
-        // it costs a full query compile, and `key` hashes (query, lang, context)
-        // so the spec is invariant for the lifetime of the entry. Must precede
-        // the return — the caller builds the collection synchronously after, and
-        // the flat driver latches `sort_key.is_some()` at construction.
+        // Derived only when this key gets its watcher, never on a refcount
+        // bump: it costs a full query compile, and `key` hashes (query, lang,
+        // context) so the spec is invariant for the lifetime of the entry. Must
+        // precede the return — the caller builds the collection synchronously
+        // after, and the flat driver latches `sort_key.is_some()` at
+        // construction.
         results.set_ordering_spec(self.query_ordering_spec(&query, lang));
         // A query whose shape the IVM engine cannot maintain is served by eager
-        // re-execution (decided in the backend, either up-front by shape or as a
-        // backstop when a matview CREATE refuses). The backend stamps the
+        // re-execution (decided in the backend, either up-front by shape or as
+        // a backstop when a matview CREATE refuses). The backend stamps the
         // disclosure onto the batch metadata; the consumer loop below lifts it
-        // onto `results.set_degraded` so the render shows a degraded banner. One
-        // source of truth (the backend), so disclosure never disagrees with what
-        // is actually served.
+        // onto `results.set_degraded` so the render shows a degraded banner.
+        // One source of truth (the backend), so disclosure never disagrees with
+        // what is actually served.
         // The query prefix classifies a watcher offline (sidebar-shaped vs
         // main-panel-shaped SQL) when reading a memory profile.
         tracing::debug!(
@@ -3875,10 +3888,10 @@ impl ReactiveEngine {
                             let mut rx = stream.into_inner();
                             while let Some(batch) = rx.recv().await {
                                 let seq = batch.metadata.seq;
-                                // Lift a backend degraded-mode disclosure (eager
-                                // re-execution) onto the reactive state so the
-                                // render surfaces it. Idempotent: the backend
-                                // stamps it on every eager batch.
+                                // Lift a backend degraded-mode disclosure
+                                // (eager re-execution) onto the reactive state
+                                // so the render surfaces it. Idempotent: the
+                                // backend stamps it on every eager batch.
                                 if let Some(note) = &batch.metadata.degraded {
                                     if reactive.degraded().as_deref() != Some(note.as_str()) {
                                         reactive.set_degraded(note.clone());
@@ -3895,7 +3908,8 @@ impl ReactiveEngine {
                         Err(e) if e.downcast_ref::<holon_api::QueryRefused>().is_some() => {
                             tracing::warn!("watch_query refused: {e:#}");
                             reactive.set_error(format!("query refused: {e:#}"));
-                            // No batch will come: the error is what the drivers show.
+                            // No batch will come: the error is what the drivers
+                            // show.
                             reactive.delivered(0);
                             drop(subscription);
                             return;
@@ -4349,8 +4363,9 @@ impl BuilderServices for ReactiveEngine {
                             &op_name,
                             &response.response,
                         );
-                        // The delete succeeded: now it is safe to drop focus from the
-                        // gone block (a refused delete never reaches this arm).
+                        // The delete succeeded: now it is safe to drop focus
+                        // from the gone block (a refused delete never reaches
+                        // this arm).
                         if let Some(target) = &clear_focus_target {
                             clear_focus_after_delete(&focused_block, target);
                         }
@@ -4358,9 +4373,9 @@ impl BuilderServices for ReactiveEngine {
                     }
                     Err(e) => {
                         journal.settle(journal_seq, Err(format!("{e:#}")));
-                        // A refused/failed op writes nothing: retire its latency
-                        // entry so no later unrelated delivery for the row closes
-                        // it as a phantom sample.
+                        // A refused/failed op writes nothing: retire its
+                        // latency entry so no later unrelated delivery for the
+                        // row closes it as a phantom sample.
                         if let Some(target) = &latency_target {
                             holon_api::latency_e2e::interaction_failed(
                                 &op_name,
@@ -4368,10 +4383,11 @@ impl BuilderServices for ReactiveEngine {
                                 holon_api::latency_e2e::ClockOrigin::Ui,
                             );
                         }
-                        // Disclose the failed write: the UI already reflects the
-                        // user's gesture, so a dropped error would silently look
-                        // like success. Records + logs (PBT/monitoring seam) AND
-                        // routes the verbatim message to a CommandFailed toast.
+                        // Disclose the failed write: the UI already reflects
+                        // the user's gesture, so a dropped error would silently
+                        // look like success. Records + logs (PBT/monitoring
+                        // seam) AND routes the verbatim message to a
+                        // CommandFailed toast.
                         surface_op_failure(
                             session.error_tracker(),
                             &op_failure_sink,
@@ -4401,11 +4417,11 @@ impl BuilderServices for ReactiveEngine {
             return;
         }
         // op_button sites gather still-missing params through their own inline
-        // param-collection popup (`render/builders/op_button.rs`) and only reach
-        // `present_op` once every param is resolved, so a click never lands here
-        // unsatisfied. This stays as a fail-loud guard: a caller that hands
-        // `present_op` unresolved params has no collection UI, and a silent
-        // no-op would hide that gap.
+        // param-collection popup (`render/builders/op_button.rs`) and only
+        // reach `present_op` once every param is resolved, so a click never
+        // lands here unsatisfied. This stays as a fail-loud guard: a caller
+        // that hands `present_op` unresolved params has no collection UI, and a
+        // silent no-op would hide that gap.
         panic!(
             "present_op({}.{}): {} required param(s) unresolved and this call site has no \
              param-collection popup to gather them",
@@ -4415,8 +4431,8 @@ impl BuilderServices for ReactiveEngine {
         );
     }
 
-    // TODO: I've seen other `dispatch_intent...` methods. How do these relate to
-    // each other? Anything to DRY?
+    // TODO: I've seen other `dispatch_intent...` methods. How do these relate
+    // to each other? Anything to DRY?
     fn dispatch_intent_sync(
         &self,
         intent: crate::operations::OperationIntent,
@@ -4500,9 +4516,9 @@ impl BuilderServices for ReactiveEngine {
                     Ok(_) => entry.settle(Ok(())),
                     Err(e) => {
                         entry.settle(Err(format!("{e:#}")));
-                        // A refused/failed op writes nothing: retire its latency
-                        // entry so no later unrelated delivery for the row closes
-                        // it as a phantom sample.
+                        // A refused/failed op writes nothing: retire its
+                        // latency entry so no later unrelated delivery for the
+                        // row closes it as a phantom sample.
                         if let Some(target) = &latency_target {
                             holon_api::latency_e2e::interaction_failed(
                                 &op_name,
@@ -4523,7 +4539,8 @@ impl BuilderServices for ReactiveEngine {
                     ms = t_dispatch.elapsed().as_millis() as u64,
                     "holon_latency",
                 );
-                // Same in-process structural-focus projection as `dispatch_intent`.
+                // Same in-process structural-focus projection as
+                // `dispatch_intent`.
                 apply_structural_focus(&focused_block, &caret_seed, &op_name, &response.response);
                 if let Some(target) = &clear_focus_target {
                     clear_focus_after_delete(&focused_block, target);
@@ -4591,9 +4608,9 @@ impl BuilderServices for ReactiveEngine {
                     }
                     Err(e) => {
                         journal.settle(journal_seq, Err(format!("{e:#}")));
-                        // A refused/failed op writes nothing: retire its latency
-                        // entry so no later unrelated delivery for the row closes
-                        // it as a phantom sample.
+                        // A refused/failed op writes nothing: retire its
+                        // latency entry so no later unrelated delivery for the
+                        // row closes it as a phantom sample.
                         if let Some(target) = &latency_target {
                             holon_api::latency_e2e::interaction_failed(
                                 &op_name,
@@ -4601,8 +4618,9 @@ impl BuilderServices for ReactiveEngine {
                                 holon_api::latency_e2e::ClockOrigin::Ui,
                             );
                         }
-                        // Disclose the failed write (same seam as `dispatch_intent`);
-                        // the caller ALSO surfaces it as a visible toast.
+                        // Disclose the failed write (same seam as
+                        // `dispatch_intent`); the caller ALSO surfaces it as a
+                        // visible toast.
                         disclose_op_failure(
                             session.error_tracker(),
                             &format!("dispatch_intent_awaitable: {entity_name}.{op_name}"),
@@ -4695,11 +4713,12 @@ impl BuilderServices for ReactiveEngine {
         // stale task must NOT stomp the newer focus. (Resolved-link clicks
         // mirror focus synchronously and have no such window.)
         let focus_at_click = nav_handles.focused_block.get_cloned();
-        // User-visible surface for a refused create (fail-loud). Captured before
-        // the spawn because the task can't borrow `&self`. Without this a
-        // collision-refused create (interim identity policy §5) would only log,
-        // and the user clicking a dangling link whose page name is taken would
-        // see nothing open AND no error — indistinguishable from a dead link.
+        // User-visible surface for a refused create (fail-loud). Captured
+        // before the spawn because the task can't borrow `&self`. Without this
+        // a collision-refused create (interim identity policy §5) would only
+        // log, and the user clicking a dangling link whose page name is taken
+        // would see nothing open AND no error — indistinguishable from a dead
+        // link.
         let op_failure_sink = self.ui_state.op_failure_sink_handle();
         let journal = self.ui_state.dispatch_journal.clone();
         let journal_seq = journal.record(&crate::operations::OperationIntent::new(
@@ -4714,7 +4733,8 @@ impl BuilderServices for ReactiveEngine {
         ));
         let create = create_page_from_link(&session, &target);
         self.runtime_handle.spawn(async move {
-            // ALLOW(admit-in-spawn): the navigation follows the create it awaits.
+            // ALLOW(admit-in-spawn): the navigation follows the create it
+            // awaits.
             let followed = navigate_to_created_page(
                 &session,
                 &nav_handles,
@@ -5187,7 +5207,8 @@ impl BuilderServices for StubBuilderServices {
         // Not an error path: an unset id keeps the stub's documented "every
         // widget is explicit, open by default" semantics that its
         // gallery/layout consumers rely on.
-        // ALLOW(stub-widget-default): map miss is the documented default, not a failure
+        // ALLOW(stub-widget-default): map miss is the documented default, not a
+        // failure
         self.widget_states.get(id).cloned().unwrap_or_default()
     }
 
@@ -5367,10 +5388,10 @@ fn seat_caret_for_navigation(
             let block_id = intent.params.get("block_id").and_then(|v| v.as_string());
             // End-to-end latency: navigation is a first-class interaction.
             // Start the interaction clock keyed on the focused block; the
-            // `latency_e2e` correlator closes it (stage="e2e", action="navigate")
-            // when this block lands as the region's focus root — the delivery
-            // that IS the navigation. Block rows for the same id are a
-            // different observable and must never close it.
+            // `latency_e2e` correlator closes it (stage="e2e",
+            // action="navigate") when this block lands as the region's focus
+            // root — the delivery that IS the navigation. Block rows for the
+            // same id are a different observable and must never close it.
             if let Some(target) = block_id {
                 holon_api::latency_e2e::interaction_dispatched(
                     "navigate",
@@ -5383,9 +5404,10 @@ fn seat_caret_for_navigation(
             // (operation-intent ingest)
             let block_id = block_id.map(EntityUri::from_raw);
             // A page navigation into the main region resets main-panel scroll
-            // (LogSeq parity). Region-scoped so a right-sidebar pin (region=right)
-            // leaves the main scroll alone. An absent region defaults to main
-            // (the sidebar/journal nav actions all target region=main).
+            // (LogSeq parity). Region-scoped so a right-sidebar pin
+            // (region=right) leaves the main scroll alone. An absent region
+            // defaults to main (the sidebar/journal nav actions all target
+            // region=main).
             let region = intent
                 .params
                 .get("region")
@@ -5423,9 +5445,9 @@ fn seat_caret_for_navigation(
         // scroll). The view root does move, hence `main_view_generation`.
         //
         // `close` carries no region and names a row, not a cursor, so it bumps
-        // without knowing whether the cursor moved. Readers must therefore treat
-        // a bump as "the root MAY have moved" and compare the resolved root
-        // before acting on it (`breadcrumb::resolve_trail`).
+        // without knowing whether the cursor moved. Readers must therefore
+        // treat a bump as "the root MAY have moved" and compare the resolved
+        // root before acting on it (`breadcrumb::resolve_trail`).
         Ok(
             NavigationOp::FocusPin
             | NavigationOp::Close
@@ -5502,7 +5524,8 @@ fn focus_clear_on_delete_target(
 /// dispatch task that can't borrow `&UiState`.
 fn clear_focus_after_delete(focused_block: &Mutable<Option<EntityUri>>, target: &EntityUri) {
     if focused_block.get_cloned().as_ref() == Some(target) {
-        // ALLOW(direct_focus_mutation): clear focus of a deleted block (ref model)
+        // ALLOW(direct_focus_mutation): clear focus of a deleted block (ref
+        // model)
         focused_block.set(None);
     }
 }
@@ -5602,9 +5625,10 @@ fn apply_structural_focus(
         // GPUI editor re-seats from `grab_focus_and_seed_caret` in its focus
         // subscription. Suppressing the duplicate notification swallowed the
         // caret move, leaving the caret at end-of-text after Enter-at-start.
-        // Only `split_block` / `join_block` reach here (`structural_focus_target`
-        // returns `None` for every other op), so the extra notification is
-        // confined to the ops whose whole point is to move the caret.
+        // Only `split_block` / `join_block` reach here
+        // (`structural_focus_target` returns `None` for every other op), so the
+        // extra notification is confined to the ops whose whole point is to
+        // move the caret.
         focused_block.set(Some(block));
     }
 }
@@ -5716,7 +5740,8 @@ fn dangling_link_nav_target(
     match response {
         Some(holon_api::Value::String(leaf_id)) => {
             // Operation-result ingest boundary (as in structural_focus_target).
-            // ALLOW(entity_uri_from_raw): leaf page id from create_page_from_link response
+            // ALLOW(entity_uri_from_raw): leaf page id from
+            // create_page_from_link response
             let leaf = EntityUri::from_raw(leaf_id);
             Ok((leaf, region == "main"))
         }
@@ -5984,8 +6009,8 @@ mod tests {
         ));
         assert_eq!(ids(&rqr), vec!["block:a", "block:b"]);
 
-        // Generation 2 (query changed, e.g. layout swap): snapshot returns B + C.
-        // A must be dropped — it would otherwise live on as a ghost row.
+        // Generation 2 (query changed, e.g. layout swap): snapshot returns B +
+        // C. A must be dropped — it would otherwise live on as a ghost row.
         rqr.apply_event(structure_event(2));
         rqr.apply_event(data_event(
             2,
@@ -6600,7 +6625,8 @@ mod tests {
             focus_clear_on_delete_target(&ui, &focus_intent("set_field", "block:a")),
             None,
         );
-        // The explicit destructive-delete variants also target the focused block.
+        // The explicit destructive-delete variants also target the focused
+        // block.
         for op in ["delete", "delete_subtree", "delete_keep_children"] {
             assert_eq!(
                 focus_clear_on_delete_target(&ui, &focus_intent(op, "block:a")),
@@ -6620,7 +6646,8 @@ mod tests {
         let handle = Mutable::new(Some(a.clone()));
         clear_focus_after_delete(&handle, &a);
         assert_eq!(handle.get_cloned(), None);
-        // A concurrent focus move off the target wins: the stale clear is a no-op.
+        // A concurrent focus move off the target wins: the stale clear is a
+        // no-op.
         let handle = Mutable::new(Some(b.clone()));
         clear_focus_after_delete(&handle, &a);
         assert_eq!(handle.get_cloned(), Some(b));
@@ -7323,10 +7350,10 @@ mod tests {
         let services = StubBuilderServices::new();
         let tree = interpret_pure(&expr, &rows, &services);
 
-        // Expect a collection-backed node whose `items` MutableVec holds exactly
-        // three LiveBlock children — one per row. If this asserts length zero,
-        // the macro is routing snapshot-path calls through the Streaming arm
-        // by mistake (which has no items until a driver runs).
+        // Expect a collection-backed node whose `items` MutableVec holds
+        // exactly three LiveBlock children — one per row. If this asserts
+        // length zero, the macro is routing snapshot-path calls through the
+        // Streaming arm by mistake (which has no items until a driver runs).
         let view = tree
             .collection
             .as_ref()

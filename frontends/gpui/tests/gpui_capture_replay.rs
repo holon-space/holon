@@ -27,10 +27,11 @@ fn main() {
     if pbt_harness::handled_list_protocol("gpui_capture_replay") {
         return;
     }
-    // A capture is by construction a RECORDED FAILING sequence, and `.captures/`
-    // is gitignored — so replaying whatever happens to sit at a default path
-    // would flip the suite red from state version control cannot see. Replay is
-    // opt-in; an explicitly requested capture that is missing fails loud.
+    // A capture is by construction a RECORDED FAILING sequence, and
+    // `.captures/` is gitignored — so replaying whatever happens to sit at a
+    // default path would flip the suite red from state version control cannot
+    // see. Replay is opt-in; an explicitly requested capture that is missing
+    // fails loud.
     let Ok(path) = std::env::var("HOLON_CAPTURE") else {
         eprintln!(
             "[Holon Capture Replay] no capture requested; set HOLON_CAPTURE=<path> to replay"

@@ -651,11 +651,11 @@ impl BlockOrdering for SqlBlockOperations {
             return Ok(());
         }
         // SqlOnly idempotency guard: skip if current parent_id and predecessor
-        // already match the requested placement. Without this, new_child_anchor's
-        // neighbor scan includes the target itself as the next sibling, so
-        // gen_key_between mints a fresh sort_key on every call — causing a loop.
-        // Use uri.as_str() (full URI like "block:abc") for cache lookups — the
-        // DB stores full URIs, not bare IDs.
+        // already match the requested placement. Without this,
+        // new_child_anchor's neighbor scan includes the target itself as the
+        // next sibling, so gen_key_between mints a fresh sort_key on every call
+        // — causing a loop. Use uri.as_str() (full URI like "block:abc") for
+        // cache lookups — the DB stores full URIs, not bare IDs.
         {
             let current_block_opt = self.cache.get_by_id(uri.as_str()).await.map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> {
@@ -828,8 +828,8 @@ impl BlockOrdering for SqlBlockOperations {
                 .get("parent_id")
                 .and_then(|v| v.as_string())
                 .map(str::to_string);
-            // The ingest pairs a keyword with the category its file's ring gives
-            // it; the pair is written as ONE task_state write.
+            // The ingest pairs a keyword with the category its file's ring
+            // gives it; the pair is written as ONE task_state write.
             if let Some(keyword) = params.remove("task_state") {
                 let category = params.remove("task_state_category");
                 let write = match (&keyword, &category) {
@@ -868,13 +868,16 @@ impl BlockOrdering for SqlBlockOperations {
                 }
                 self.set_field(&id, &field, value).await?;
             }
-            // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
+            // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation
+            // params dict
             let block_uri = EntityUri::from_raw(&id);
             match (parent_id, after) {
                 (Some(parent), Some(after_id)) => {
-                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
+                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from
+                    // operation params dict
                     let parent_uri = EntityUri::from_raw(&parent);
-                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
+                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from
+                    // operation params dict
                     let after_uri = EntityUri::from_raw(&after_id);
                     self.place(&block_uri, &parent_uri, Some(&after_uri))
                         .await?;
@@ -895,22 +898,24 @@ impl BlockOrdering for SqlBlockOperations {
             };
             // SQL is the order owner: a freshly created block is born carrying
             // its real order key — minted between its file predecessor and the
-            // next sibling — so the create and its keying are a single write and
-            // the row is never observable at the default `"A0"`. This closes the
-            // create-default-then-rekey window that let a concurrent reader (or
-            // the PBT invariant) see a half-applied sibling order. Updates keep
-            // their key; position changes route through `place`.
+            // next sibling — so the create and its keying are a single write
+            // and the row is never observable at the default `"A0"`. This
+            // closes the create-default-then-rekey window that let a concurrent
+            // reader (or the PBT invariant) see a half-applied sibling order.
+            // Updates keep their key; position changes route through `place`.
             let position = if op == "create"
                 && let Some(parent) = params
                     .get("parent_id")
                     .and_then(|v| v.as_string())
                     .map(str::to_string)
             {
-                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
+                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from
+                // operation params dict
                 let parent_uri = EntityUri::from_raw(&parent);
                 let after_uri = after.as_deref().map(EntityUri::from_raw);
-                // The minted position (key + sibling re-keys) travels TYPED into
-                // create_row's transaction; never a `_order_rekeys` params key.
+                // The minted position (key + sibling re-keys) travels TYPED
+                // into create_row's transaction; never a `_order_rekeys` params
+                // key.
                 Some(
                     self.new_child_anchor(&parent_uri, after_uri.as_ref())
                         .await?,
@@ -957,7 +962,8 @@ impl BlockOrdering for SqlBlockOperations {
                 "delete_in_tree: missing 'id' param".into()
             },
         )?;
-        // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
+        // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation
+        // params dict
         let uri = EntityUri::from_raw(id);
         // A share's mount removed from its file, alone or with a block above
         // it, goes through the share's exit, as a delete of it does.
@@ -1079,10 +1085,11 @@ impl BlockOrdering for SqlBlockOperations {
                                 format!("apply_ingest_batch: cursor for {parent} vanished").into()
                             },
                         )?;
-                        // SqlOnly `Store` order owner — the sanctioned mint site
-                        // (Replication.md §5): batched form of `new_child_anchor`'s
-                        // append path with an in-memory per-parent cursor.
-                        // ALLOW(order_minting): SqlOnly order owner, batched mint.
+                        // SqlOnly `Store` order owner — the sanctioned mint
+                        // site (Replication.md §5): batched form of
+                        // `new_child_anchor`'s append path with an in-memory
+                        // per-parent cursor. ALLOW(order_minting): SqlOnly
+                        // order owner, batched mint.
                         let key = gen_key_between(cursor.as_deref(), None).map_err(
                             |e| -> Box<dyn std::error::Error + Send + Sync> {
                                 format!("apply_ingest_batch mint for {id}: {e:#}").into()
@@ -1227,7 +1234,8 @@ impl CrudOperations<Block> for SqlBlockOperations {
         // failed to resolve ("Block not found"), aborting the org scan's update
         // pass *before* the place loop ran (the BulkExternalAdd sibling-order
         // scramble, `inv-live-children-match-ref`).
-        // ALLOW(entity_uri_from_raw): set_field id &str from CrudOperations API surface
+        // ALLOW(entity_uri_from_raw): set_field id &str from CrudOperations API
+        // surface
         let uri = EntityUri::from_raw(id);
         let routed = self
             .cell_registry
@@ -1240,11 +1248,12 @@ impl CrudOperations<Block> for SqlBlockOperations {
                 }
             })?;
         if routed {
-            // The Loro outbound projector emits the SQL UPDATE and the resulting
-            // CDC event produces the FieldDelta; there is no synchronous change
-            // to surface here. This is the org-reingest / structural seam — user
-            // CRUD `set_field` (which needs an undo inverse) is served by the
-            // Loro CRUD authority (`LoroBlockOperations`) under Loro authority,
+            // The Loro outbound projector emits the SQL UPDATE and the
+            // resulting CDC event produces the FieldDelta; there is no
+            // synchronous change to surface here. This is the org-reingest /
+            // structural seam — user CRUD `set_field` (which needs an undo
+            // inverse) is served by the Loro CRUD authority
+            // (`LoroBlockOperations`) under Loro authority,
             // and by `SqlOperationProvider` in SqlOnly mode.
             return Ok(OperationResult::irreversible(Vec::new()));
         }
@@ -1311,11 +1320,12 @@ impl CrudOperations<Block> for SqlBlockOperations {
     }
 
     async fn delete(&self, id: &str) -> Result<OperationResult> {
-        // Fail-closed on NON-LEAF (destructive-delete ruling 2026-07-21): a bare
-        // `delete` NEVER cascades a subtree. The caller must opt in explicitly
-        // via `delete_subtree` or `delete_keep_children`. Mirrors the Loro
-        // authority's guard so both providers refuse identically.
-        // ALLOW(entity_uri_from_raw): op-dispatch id string → EntityUri at the edge
+        // Fail-closed on NON-LEAF (destructive-delete ruling 2026-07-21): a
+        // bare `delete` NEVER cascades a subtree. The caller must opt in
+        // explicitly via `delete_subtree` or `delete_keep_children`. Mirrors
+        // the Loro authority's guard so both providers refuse identically.
+        // ALLOW(entity_uri_from_raw): op-dispatch id string → EntityUri at the
+        // edge
         let uri = EntityUri::from_raw(id);
         let children = self.children_ordered(&uri).await?;
         if !children.is_empty() {
@@ -1927,7 +1937,8 @@ mod tests {
 
         // IDs stored in block_raw use full URI form (e.g. "block:test-a") so
         // EntityUri deserialization round-trips via QueryableCache.
-        // Sort keys use valid fractional-index format (hex strings); "a0" < "a1".
+        // Sort keys use valid fractional-index format (hex strings); "a0" <
+        // "a1".
         for (id, sort_key, content) in [
             (parent.as_str(), "V", "parent"),
             (a_id.as_str(), "a0", "A"),
@@ -1952,8 +1963,9 @@ mod tests {
         }
 
         // First placement: B is already after A (sort_key "a1" > "a0").
-        // The idempotency guard detects this via prev_sibling and skips the write.
-        // Pass full URI strings — place() compares against EntityUri::as_str().
+        // The idempotency guard detects this via prev_sibling and skips the
+        // write. Pass full URI strings — place() compares against
+        // EntityUri::as_str().
         ops.place(&b_id, &parent, Some(&a_id))
             .await
             .expect("place B after A (first call)");
@@ -2550,7 +2562,8 @@ mod tests {
             .await
             .expect("anchor the new half of a split after its origin");
         // The key is reachable only by consuming the position (typed) — the way
-        // production does when it hands the whole `MintedPosition` to the writer.
+        // production does when it hands the whole `MintedPosition` to the
+        // writer.
         let projected = apply_rekeys(ordered_siblings(&handle, "block:parent").await, &position);
         let (new_key, _rekeys) = position.into_parts();
 
@@ -2793,7 +2806,8 @@ mod tests {
 
         insert_raw(&handle, "block:parent", "sentinel:no_parent", "8180").await;
         insert_raw(&handle, "block:mine", "block:parent", "80").await;
-        // A root block under a DIFFERENT parent — nothing to do with the create.
+        // A root block under a DIFFERENT parent — nothing to do with the
+        // create.
         insert_raw(&handle, "block:victim", "sentinel:no_parent", "80").await;
 
         let mut fields: StorageEntity = std::collections::HashMap::new();
@@ -2811,7 +2825,8 @@ mod tests {
             holon_api::Value::String("text".to_string()),
         );
 
-        // A minted position whose re-key names a block under a DIFFERENT parent.
+        // A minted position whose re-key names a block under a DIFFERENT
+        // parent.
         let position = MintedPosition::new(
             "M0".to_string(),
             vec![("block:victim".to_string(), "ZZZZ".to_string())],

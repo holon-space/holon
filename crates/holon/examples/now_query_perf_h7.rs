@@ -403,7 +403,8 @@ async fn populate_edges(
             }
         }
         Scenario::HotDependents => {
-            // 100 dependents, each with 50-80 blockers. Plus background ~5% uniform.
+            // 100 dependents, each with 50-80 blockers. Plus background ~5%
+            // uniform.
             let dependents: Vec<usize> = (0..100).map(|i| i * (N_TASKS / 100) + 1).collect();
             for &d in &dependents {
                 let n = 50 + rng.random_range(0..30);

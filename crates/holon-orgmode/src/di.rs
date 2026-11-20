@@ -617,9 +617,9 @@ pub struct OrgModeConfig {
 
 impl OrgModeConfig {
     pub fn new(root_directory: PathBuf) -> Self {
-        // Canonicalize to resolve symlinks (e.g., /var -> /private/var on macOS)
-        // This ensures path comparisons work correctly when file watcher reports
-        // canonicalized paths
+        // Canonicalize to resolve symlinks (e.g., /var -> /private/var on
+        // macOS) This ensures path comparisons work correctly when file watcher
+        // reports canonicalized paths
         let root_directory = std::fs::canonicalize(&root_directory).unwrap_or(root_directory);
         Self {
             root_directory,
@@ -668,7 +668,8 @@ pub async fn seed_default_org_assets(
                 declared.insert(id);
             }
             Ok(None) => {}
-            // The scan that follows raises this file's error where the user sees it.
+            // The scan that follows raises this file's error where the user
+            // sees it.
             Err(e) => tracing::warn!(
                 file = %path.display(),
                 "the seed cannot read this file's `#+ID`, so it does not count as holding a \
@@ -900,9 +901,10 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 let formats_for_loop = formats.clone();
                 // The alias registrar (doc_id ↔ path) is a Loro-backed seam
                 // registered at the composition root — `dyn AliasRegistrar` in
-                // both the Turso container (app `wiring.rs`, off `LoroBlockOperations`)
-                // and the no-Turso/test container (`LoroAliasRegistrar` directly).
-                // Absent in SqlOnly mode; the controller then runs without it.
+                // both the Turso container (app `wiring.rs`, off
+                // `LoroBlockOperations`) and the no-Turso/test container
+                // (`LoroAliasRegistrar` directly). Absent in SqlOnly mode; the
+                // controller then runs without it.
                 let alias_registrar = resolver
                     .optional_resolve_async::<dyn AliasRegistrar>()
                     .await;
@@ -925,23 +927,25 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
 
                 // Disclosure seam for shared-subtree write-back gaps (Inc 1).
                 // Present in the app container (forwards to `ConditionBus`);
-                // absent in test/no-Turso containers — then shared-subtree edits
-                // that fail to materialize log at WARN instead of a banner.
+                // absent in test/no-Turso containers — then shared-subtree
+                // edits that fail to materialize log at WARN instead of a
+                // banner.
                 let share_disclosure = resolver
                     .optional_resolve_async::<dyn holon_filesystem::ShareWritebackDisclosure>()
                     .await;
 
                 // Disclosure seam for the write-back supervisor giving up.
-                // Absent in test/no-Turso containers → a spent restart budget is
-                // audible in the log only.
+                // Absent in test/no-Turso containers → a spent restart budget
+                // is audible in the log only.
                 let writeback_disclosure = resolver
                     .optional_resolve_async::<dyn holon_filesystem::WritebackDisclosure>()
                     .await;
 
                 // Authoritative mount registry (Inc 3): lets the ingest guard
-                // skip a shared-subtree projection file only when its page id is
-                // a real mount node (not a user-authored `share-role` drawer).
-                // Absent in test/SqlOnly containers → the guard never skips.
+                // skip a shared-subtree projection file only when its page id
+                // is a real mount node (not a user-authored `share-role`
+                // drawer). Absent in test/SqlOnly containers → the guard never
+                // skips.
                 let mount_registry = resolver
                     .optional_resolve_async::<dyn holon_filesystem::MountRegistry>()
                     .await;
@@ -976,10 +980,11 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .resolve_async::<holon_api::lifecycle::SessionShutdown>()
                     .await;
 
-                // Keep an authoritative-read handle for the feed resolver BEFORE
-                // the reader is moved into the controller: block routing must
-                // read the `Page` tag from the write authority (`block_raw`), not
-                // the lagging matview-backed feed (see `resolve_doc_for_block`).
+                // Keep an authoritative-read handle for the feed resolver
+                // BEFORE the reader is moved into the controller: block routing
+                // must read the `Page` tag from the write authority
+                // (`block_raw`), not the lagging matview-backed feed (see
+                // `resolve_doc_for_block`).
                 let feed_block_reader = block_reader.clone();
                 // The write-back holder's order authority. The same handle the
                 // controller writes through, so `prev` and the rendered sibling
@@ -1032,9 +1037,9 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 }
                 controller = controller.with_writeback_net(idle_signal.writeback_net.clone());
 
-                // Image bytes for `[[file:…]]` blocks, so an image synced from a
-                // peer materializes on disk. Absent in every container today →
-                // `materialize_images` / `ingest_images` stay no-ops.
+                // Image bytes for `[[file:…]]` blocks, so an image synced from
+                // a peer materializes on disk. Absent in every container today
+                // → `materialize_images` / `ingest_images` stay no-ops.
                 if let Some(images) = resolver
                     .optional_resolve_async::<dyn holon_filesystem::ImageDataProvider>()
                     .await
@@ -1110,30 +1115,32 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                             use holon_api::live_data::home_by::HomedDiff;
                             use holon_api::live_data::supervision::Supervised;
 
-                            // The initial snapshot fans out one `Upsert` per block.
-                            // Rendering each of them would be N per-block boot
-                            // renders, which destabilises the cold-boot matview (the
-                            // frontend's creation slot then resolves NO parent). So
-                            // snapshot blocks SEED the holder and one debounced bulk
-                            // pass renders them together; the set drains as the
-                            // snapshot is consumed, after which everything routes
+                            // The initial snapshot fans out one `Upsert` per
+                            // block. Rendering each of them would be N
+                            // per-block boot renders, which destabilises the
+                            // cold-boot matview (the frontend's creation slot
+                            // then resolves NO parent). So snapshot blocks SEED
+                            // the holder and one debounced bulk pass renders
+                            // them together; the set drains as the snapshot is
+                            // consumed, after which everything routes
                             // per block.
                             let mut snapshot_pending: std::collections::HashSet<String> =
                                 std::collections::HashSet::new();
 
-                            // `biased`: shutdown wins over a backlog. Draining the
-                            // rest would render documents off a store that is about
-                            // to close, which is the failure this ordering exists to
-                            // prevent.
+                            // `biased`: shutdown wins over a backlog. Draining
+                            // the rest would render documents off a store that
+                            // is about to close, which is the failure this
+                            // ordering exists to prevent.
                             while let Some(item) = tokio::select! {
                                 biased;
                                 () = writeback_cancel.cancelled() => None,
                                 item = supervised.recv() => item,
                             } {
-                                // The interaction that wrote this block, taken from
-                                // the feed rather than from the ambient span: this
-                                // task is spawned at container construction, so its
-                                // span is the process boot.
+                                // The interaction that wrote this block, taken
+                                // from the feed rather than from the ambient
+                                // span: this task is spawned at container
+                                // construction, so its span is the process
+                                // boot.
                                 let origins = match &item {
                                     Supervised::Diff(HomedDiff::Upsert { key, .. })
                                     | Supervised::Diff(HomedDiff::Remove { key, .. }) => {
@@ -1146,9 +1153,10 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                 let msg: Option<OrgRerender> = match item {
                                     Supervised::Reset => {
                                         snapshot_pending = feed.read().keys().cloned().collect();
-                                        // Drop the dead incarnation's derived state,
-                                        // then cover the incoming seed with one bulk
-                                        // render off the authority.
+                                        // Drop the dead incarnation's derived
+                                        // state, then cover the incoming seed
+                                        // with one bulk render off the
+                                        // authority.
                                         queued.queued(&OrgRerender::Reset);
                                         let _ =
                                             tx.send(RerenderMsg::unattributed(OrgRerender::Reset));
@@ -1164,14 +1172,14 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                         route_upsert(&doc, &value, prev.as_deref(), seeding)
                                     }
                                     Supervised::Diff(HomedDiff::Remove { doc, key }) => {
-                                        // The DEPARTURE. A retraction always lands
-                                        // before the matching `Upsert` at the new
-                                        // document, so the source document
-                                        // re-renders WITHOUT the block whether it
-                                        // was deleted or merely re-homed — one
-                                        // uniform path, and no authoritative
-                                        // presence-check that would short-circuit a
-                                        // move.
+                                        // The DEPARTURE. A retraction always
+                                        // lands before the matching `Upsert` at
+                                        // the new document, so the source
+                                        // document re-renders WITHOUT the block
+                                        // whether it was deleted or merely
+                                        // re-homed — one uniform path, and no
+                                        // authoritative presence-check that
+                                        // would short-circuit a move.
                                         snapshot_pending.remove(&key);
                                         route_remove(&doc, &key)
                                     }
@@ -1861,14 +1869,14 @@ async fn run_file_sync_controller(
             .await;
         let mut failures = Vec::new();
         // Boot ingest latency (Options 0+1): batch the per-file feed barrier.
-        // `begin_initial_scan` makes each `on_file_changed` buffer its feed-catch-up
-        // ids instead of paying an up-to-2s round-trip per file; `finish_initial_scan`
-        // below does ONE convergence wait over the union before `signal_ready`.
-        // `block_raw` is written synchronously per file, so the per-file
-        // `get_blocks` count-check + `ordering.children` propagation gate still
-        // cover intra-file correctness; only the sidebar-facing `block`-matview
-        // feed is deferred. Scoped to the initial scan — runtime edits keep the
-        // per-edit barrier.
+        // `begin_initial_scan` makes each `on_file_changed` buffer its
+        // feed-catch-up ids instead of paying an up-to-2s round-trip per file;
+        // `finish_initial_scan` below does ONE convergence wait over the union
+        // before `signal_ready`. `block_raw` is written synchronously per file,
+        // so the per-file `get_blocks` count-check + `ordering.children`
+        // propagation gate still cover intra-file correctness; only the
+        // sidebar-facing `block`-matview feed is deferred. Scoped to the
+        // initial scan — runtime edits keep the per-edit barrier.
         let files = preloaded.len();
         let t_scan = std::time::Instant::now();
         controller.begin_initial_scan();
@@ -1879,8 +1887,8 @@ async fn run_file_sync_controller(
         for (file_path, _content) in preloaded {
             ingest_at_boot(&mut controller, file_path, &mut failures).await;
         }
-        // ONE end-of-scan convergence wait (30s loud ceiling). A stall becomes a
-        // scan failure routed through the existing `signal_error` path below.
+        // ONE end-of-scan convergence wait (30s loud ceiling). A stall becomes
+        // a scan failure routed through the existing `signal_error` path below.
         // A file the scan refused is disclosed on its own and does not fail
         // the scan; a store that did not converge on the ingest does, since
         // the seed would then fill in blocks the files still own.
@@ -1925,11 +1933,11 @@ async fn run_file_sync_controller(
         }
         // Store-health sweep (BugFunnel row 295): repair title-less
         // (empty-content) `Page` doc-roots left by a broken convert/delete.
-        // UNCONDITIONAL, after the scan — the ingest byte-identity fast-path skips
-        // unchanged degraded files, so their heal cannot live in ingest; it is a
-        // separate store-health concern owned by this one sweep (which reaches the
-        // same heal implementation the file-watch path uses). Idempotent; a
-        // healthy vault writes nothing.
+        // UNCONDITIONAL, after the scan — the ingest byte-identity fast-path
+        // skips unchanged degraded files, so their heal cannot live in ingest;
+        // it is a separate store-health concern owned by this one sweep (which
+        // reaches the same heal implementation the file-watch path uses).
+        // Idempotent; a healthy vault writes nothing.
         if let Err(e) = controller.heal_title_less_doc_roots().await {
             error!(
                 "[OrgMode] title-less doc-root store-health sweep failed: {}",
@@ -2013,8 +2021,8 @@ async fn run_file_sync_controller(
                 .name("org-arm-watcher".into())
                 .spawn(move || {
                     let r = source_for_arm.arm(&dir_for_arm);
-                    // ALLOW(dropped-receiver): the controller shut down before the watch
-                    // registered.
+                    // ALLOW(dropped-receiver): the controller shut down before
+                    // the watch registered.
                     let _ = armed_tx.send((source_for_arm, r));
                 })
                 .expect("spawn the org watcher-arming thread");
@@ -2056,12 +2064,13 @@ async fn run_file_sync_controller(
     // Two periodic tickers backstop the notify-driven
     // `file_rx` path:
     //
-    // - `poll_tick` (100ms): re-stats every tracked `last_projection` entry. Cheap
-    //   — short-circuited by an `(mtime, size)` signature so unchanged files don't
-    //   read.
-    // - `discovery_tick` (2s): walks the full tree via `scan_directory` to pick up
-    //   files created during notify's unarmed window on macOS. Expensive (rebuilds
-    //   `ignore::WalkBuilder` gitignore DFAs) so deliberately infrequent.
+    // - `poll_tick` (100ms): re-stats every tracked `last_projection` entry.
+    //   Cheap — short-circuited by an `(mtime, size)` signature so unchanged
+    //   files don't read.
+    // - `discovery_tick` (2s): walks the full tree via `scan_directory` to pick
+    //   up files created during notify's unarmed window on macOS. Expensive
+    //   (rebuilds `ignore::WalkBuilder` gitignore DFAs) so deliberately
+    //   infrequent.
     //
     // Missed FSEvents now become a 100ms latency blip
     // for modifications and ≤2s for brand-new files.

@@ -365,14 +365,15 @@ impl BlockReader for CacheBlockReader {
                 Ok(Some(block))
             }
             // MISS: the id may have been merged away by `merge_blocks`. Consult
-            // the redirects and retry at the surviving identity. Deliberately on
-            // the miss path only — a hit never pays for this.
+            // the redirects and retry at the surviving identity. Deliberately
+            // on the miss path only — a hit never pays for this.
             None => match self.follow_merge_redirect(id).await? {
                 Some(surviving) => {
                     let block = Box::pin(self.get_block_authoritative(&surviving)).await?;
-                    // The redirect named a block that no longer exists: the merge
-                    // survivor was deleted, stranding every id merged into it.
-                    // Fail loud rather than report the id as simply absent.
+                    // The redirect named a block that no longer exists: the
+                    // merge survivor was deleted, stranding every id merged
+                    // into it. Fail loud rather than report the id as simply
+                    // absent.
                     match block {
                         Some(block) => Ok(Some(block)),
                         None => anyhow::bail!(
@@ -715,7 +716,8 @@ impl LiveDocumentManager {
         let matview_mgr =
             holon::sync::MatviewManager::new(db_handle, Arc::new(tokio::sync::Mutex::new(())));
 
-        // Match any block that has the "Page" tag in the block_tags junction table.
+        // Match any block that has the "Page" tag in the block_tags junction
+        // table.
         let watch_sql = format!(
             "SELECT b.* FROM {BLOCK_READ_TABLE} b JOIN block_tags bt ON bt.block_id = b.id WHERE \
              bt.tag = 'Page'"
@@ -769,15 +771,15 @@ impl LiveDocumentManager {
         // re-minted it.
         //
         // Two arms, mirroring the ingest path's `flush_pending_creates`. The
-        // `BlockOrdering` wired in BOTH modes is `SqlBlockOperations`; which arm
-        // answers depends on whether its cell registry claims the create:
+        // `BlockOrdering` wired in BOTH modes is `SqlBlockOperations`; which
+        // arm answers depends on whether its cell registry claims the create:
         //
-        // - Loro: the Loro cell registry persists the block (it owns the fractional
-        //   index) and reports `true`.
-        // - SqlOnly: no cell-routed create exists, the registry reports `false`, and
-        //   `update_in_tree` writes the row — minting the key via `new_child_anchor`
-        //   and landing it through `create_row`, so key and row share one transaction
-        //   and the row is never observable unkeyed.
+        // - Loro: the Loro cell registry persists the block (it owns the
+        //   fractional index) and reports `true`.
+        // - SqlOnly: no cell-routed create exists, the registry reports
+        //   `false`, and `update_in_tree` writes the row — minting the key via
+        //   `new_child_anchor` and landing it through `create_row`, so key and
+        //   row share one transaction and the row is never observable unkeyed.
         //
         // `create_row` is also what runs the ADR 0029 D1b identity gate
         // (`identity_minter().mint(CarriedId::from_stored(..))`), which refuses
@@ -1010,8 +1012,8 @@ impl Module for OrgModeModule {
         // File-sync seams (Turso backend). The no-Turso container registers the
         // Loro counterparts (LoroBlockReader / LoroDocumentManager); the
         // FileSyncStarted core resolves whichever the container provides,
-        // so it stays backend-blind per ADR 0004. `dyn BlockOrdering` is already
-        // provided (SqlBlockOperations via EventInfraModule).
+        // so it stays backend-blind per ADR 0004. `dyn BlockOrdering` is
+        // already provided (SqlBlockOperations via EventInfraModule).
         injector.provide::<dyn BlockReader>(Provider::root_async(|r| async move {
             let block_cache = r.resolve_async::<QueryableCache<Block>>().await;
             let mut reader = CacheBlockReader::new(block_cache);
@@ -1035,8 +1037,9 @@ impl Module for OrgModeModule {
         }));
 
         // Set up event bus wiring and background tasks.
-        // This factory resolves LoroBlockOperations if available (Loro enabled),
-        // otherwise creates a SqlOperationProvider for direct SQL block operations.
+        // This factory resolves LoroBlockOperations if available (Loro
+        // enabled), otherwise creates a SqlOperationProvider for direct SQL
+        // block operations.
         injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(move |resolver| {
             async move {
                 // ============================================================
@@ -1052,8 +1055,8 @@ impl Module for OrgModeModule {
 
                 // Resolve the block-CRUD authority — registered at the app
                 // composition root as the Loro provider when a CRDT backend is
-                // enabled, absent in SqlOnly. orgmode picks the authority without
-                // naming a concrete backend type.
+                // enabled, absent in SqlOnly. orgmode picks the authority
+                // without naming a concrete backend type.
                 let crud_authority: Option<Arc<CrudAuthority>> =
                     holon_core::resolve_if_bound::<CrudAuthority>(
                         &resolver,
@@ -1070,9 +1073,9 @@ impl Module for OrgModeModule {
                 let db_handle_provider = resolver.resolve::<dyn holon::di::DbHandleProvider>();
                 let db_handle = db_handle_provider.handle();
 
-                // FileSyncController writes through SQL ops; CacheBlockReader reads from
-                // QueryableCache which is also backed by the same Turso
-                // database, ensuring consistency.
+                // FileSyncController writes through SQL ops; CacheBlockReader
+                // reads from QueryableCache which is also backed by the same
+                // Turso database, ensuring consistency.
                 let sql_ops = Arc::new(holon::core::SqlOperationProvider::with_edge_fields(
                     db_handle.clone(),
                     BLOCK_WRITE_TABLE.to_string(),
@@ -1092,24 +1095,26 @@ impl Module for OrgModeModule {
 
                 // ============================================================
                 // PHASE 3: Spawn background tasks
-                // The DatabaseActor serializes all operations, eliminating race conditions
-                // between DDL and DML operations.
+                // The DatabaseActor serializes all operations, eliminating race
+                // conditions between DDL and DML operations.
                 // ============================================================
                 info!("[OrgMode] Phase 3: Spawning background tasks");
 
                 // Block writes go through FileSyncController → command_bus
-                // (`SqlOperationProvider`) → the `block_raw` table directly; the
-                // block cache and downstream sinks react via CDC / `LiveData<Block>`.
+                // (`SqlOperationProvider`) → the `block_raw` table directly;
+                // the block cache and downstream sinks react via CDC /
+                // `LiveData<Block>`.
 
                 // Option B: directory + file caches are fed DIRECTLY from the
-                // `OrgModeSyncProvider` change broadcast — the EventBus middleman
-                // (`OrgModeEventAdapter` → EventBus → `CacheEventSubscriber`) is
-                // gone. We subscribe to the broadcast HERE, *before* the initial
-                // sync task below runs, so the snapshot it emits is captured
-                // gap-free. (The old EventBus replay/cursor only existed because the
-                // adapter subscribed *after* sync — a fixable ordering bug, not an
-                // inherent need for a durable replay buffer. Batches are coarse
-                // `Vec<Change>` messages, so the broadcast buffer never lags.)
+                // `OrgModeSyncProvider` change broadcast — the EventBus
+                // middleman (`OrgModeEventAdapter` → EventBus →
+                // `CacheEventSubscriber`) is gone. We subscribe to the
+                // broadcast HERE, *before* the initial sync task below runs, so
+                // the snapshot it emits is captured gap-free. (The old EventBus
+                // replay/cursor only existed because the adapter subscribed
+                // *after* sync — a fixable ordering bug, not an inherent need
+                // for a durable replay buffer. Batches are coarse `Vec<Change>`
+                // messages, so the broadcast buffer never lags.)
                 {
                     let file_cache = resolver.resolve_async::<QueryableCache<File>>().await;
                     let mut file_rx = sync_provider.subscribe_files();
@@ -1132,10 +1137,11 @@ impl Module for OrgModeModule {
                 }
 
                 // Initial sync task
-                // The DatabaseActor serializes all operations, eliminating race conditions.
-                // The asset seed runs first, here and not on the boot path: it
-                // reads the vault, and the boot never waits on a vault read.
-                // The controller's initial scan waits on the same gate.
+                // The DatabaseActor serializes all operations, eliminating race
+                // conditions. The asset seed runs first, here and not on the
+                // boot path: it reads the vault, and the boot never waits on a
+                // vault read. The controller's initial scan waits on the same
+                // gate.
                 {
                     let sync_provider_clone = sync_provider.clone();
                     let seed_fs = resolver.resolve::<dyn holon_filesystem::FileSystem>();
@@ -1158,7 +1164,8 @@ impl Module for OrgModeModule {
                 }
 
                 // Loro ↔ command/event bus is wired by `LoroModule` via
-                // `LoroSyncControllerHandle`; see `crates/holon/src/sync/loro_module.rs`.
+                // `LoroSyncControllerHandle`; see
+                // `crates/holon/src/sync/loro_module.rs`.
 
                 // FileSyncController: backend-blind file ↔ block sync.
                 // Resolving FileSyncStarted (registered by
@@ -1201,10 +1208,10 @@ impl Module for OrgModeModule {
                         // bare `SqlOperationProvider` — it has no notion of
                         // sibling order, so an unwrapped `create` would leave
                         // `sort_key` on the column default and a re-parent
-                        // would carry the old parent's key over. `SqlBlockOperations`
-                        // built with its SqlOnly defaults IS that order owner;
-                        // `OrderedBlockCrud` routes the placement-changing
-                        // writes through it.
+                        // would carry the old parent's key over.
+                        // `SqlBlockOperations` built with its SqlOnly defaults
+                        // IS that order owner; `OrderedBlockCrud` routes the
+                        // placement-changing writes through it.
                         let block_cache = resolver.resolve_async::<QueryableCache<Block>>().await;
                         let order_owner =
                             Arc::new(SqlBlockOperations::new(sql_ops.clone(), block_cache));
@@ -1228,19 +1235,20 @@ impl Module for OrgModeModule {
         // planner over `block_raw`) and `rewrite_link_resolution` (rewrites the
         // SQL-side `block_links` junction). In SqlOnly mode the CRUD provider
         // above IS a `SqlOperationProvider`, so it already serves these; but
-        // under Loro authority the CRUD provider is `LoroBlockOperations`, which
-        // advertises neither — so without this registration `convert_block_to_page`
-        // dies at dispatch ("No provider registered ... block_to_page_plan") in
-        // full/Loro mode. Register a bare `SqlOperationProvider` LAST so the
-        // dispatcher's first-registered-wins routing (operation_dispatcher.rs)
-        // leaves block CRUD with `LoroBlockOperations` and structural ops with
-        // `SqlBlockOperations` (EventInfraModule): this provider wins ONLY the
-        // two ops nobody else advertises. Authority-safe under Loro: the planner
-        // only READS the Loro-projected `block_raw`, and `rewrite_link_resolution`
-        // writes only the `block_links` junction (a SQL-side projection, NOT
+        // under Loro authority the CRUD provider is `LoroBlockOperations`,
+        // which advertises neither — so without this registration
+        // `convert_block_to_page` dies at dispatch ("No provider registered ...
+        // block_to_page_plan") in full/Loro mode. Register a bare
+        // `SqlOperationProvider` LAST so the dispatcher's first-registered-wins
+        // routing (operation_dispatcher.rs) leaves block CRUD with
+        // `LoroBlockOperations` and structural ops with `SqlBlockOperations`
+        // (EventInfraModule): this provider wins ONLY the two ops nobody else
+        // advertises. Authority-safe under Loro: the planner only READS the
+        // Loro-projected `block_raw`, and `rewrite_link_resolution` writes only
+        // the `block_links` junction (a SQL-side projection, NOT
         // Loro-authoritative content), so no Loro authority is bypassed. In
-        // SqlOnly this provider is inert (the earlier CRUD provider already wins
-        // those ops on registration order).
+        // SqlOnly this provider is inert (the earlier CRUD provider already
+        // wins those ops on registration order).
         //
         // It advertises ONLY the link/page-transform ops via
         // `OperationSubset`, not the full block-op surface. A full

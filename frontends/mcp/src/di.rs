@@ -97,7 +97,8 @@ pub async fn debug_handles(
     crate::server::DebugHandlesCell {
         loro_sync_handle,
         org_idle_signal,
-        // `BlockQuerySource` is not a DI key; the session accessor is the only handle.
+        // `BlockQuerySource` is not a DI key; the session accessor is the only
+        // handle.
         block_query_source: Some(session.block_query().clone()),
         loro_doc_store,
         reactive_engine,

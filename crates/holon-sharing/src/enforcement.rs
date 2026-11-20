@@ -130,8 +130,8 @@ impl BoundaryEnforcer for PolicyOverlayEnforcer {
                 // The destination of these ops is derived from the tree by the
                 // drag / document-lifecycle layer (see `boundary`'s module
                 // docs), which owes this seam both endpoints. Judging the op
-                // with target := source would silently pass an audience-widening
-                // move, so refuse instead.
+                // with target := source would silently pass an
+                // audience-widening move, so refuse instead.
                 return Err(BoundaryRejection(format!(
                     "boundary check REJECTED op `{op_name}`: it is classified {behavior:?} (it \
                      can relocate a block) and its subject `{subject}` lives in shared container \

@@ -105,9 +105,9 @@ impl RowOrigin {
         match id.split_once(VIRTUAL_MARKER) {
             Some((scheme, parent_local)) if !scheme.is_empty() && !parent_local.is_empty() => {
                 // The "parent" is read from the row's own `id` column, so it is
-                // resolved by the one classifier: an id that merely CONTAINS the
-                // marker is not a creation slot, and the row binding answers for
-                // the value.
+                // resolved by the one classifier: an id that merely CONTAINS
+                // the marker is not a creation slot, and the row binding
+                // answers for the value.
                 match holon_api::row_id_of_str(&format!("{scheme}:{parent_local}")) {
                     holon_api::RowId::Entity(parent) => RowOrigin::CreationPlaceholder {
                         entity_type: scheme.to_string(),
@@ -307,22 +307,25 @@ pub fn resolve_creation_parent(
         [] => None,
         many => {
             // A multi-root forest. Two legitimate shapes reach here:
-            //  - a top-level-pages list (e.g. the Pages sidebar `WHERE tag='Page'`), whose
-            //    roots are parented to the `no_parent` sentinel; and
-            //  - a NESTED-PAGE forest, where a page is parented to another page that this
-            //    rowset filters out (BugFunnel #67: a subdir page-file
-            //    `Journals/2026-07-10.org` roots the date page under the `journals`
-            //    folder-page). CORRECTION (Fork B B1 senior review, 2026-07-13, Finding C):
-            //    `block:journals` IS itself a root `Page` (the `#+ID` of
-            //    `assets/default/Journals.org`). The real reason a nested date's parent can
-            //    still be absent from a `WHERE tag='Page'` rowset is a QUERY-SCOPE filter
-            //    (e.g. a per-folder or single-level listing) excluding the ancestor row,
-            //    not the ancestor lacking the tag. Per the links-ruling nested pages are a
-            //    REPRESENTABLE state (anchored by id), so a mixed forest — some roots at
-            //    the sentinel, some dangling to an absent-but-real (scope-filtered) parent
-            //    — is legal data, NOT a corrupt rowset. Per the 2026-07-13 page-hierarchy
-            //    interim ruling, a nested page's ancestors up to root must themselves all
-            //    be pages (or the root) — `journals` qualifies.
+            //  - a top-level-pages list (e.g. the Pages sidebar `WHERE
+            //    tag='Page'`), whose roots are parented to the `no_parent`
+            //    sentinel; and
+            //  - a NESTED-PAGE forest, where a page is parented to another page
+            //    that this rowset filters out (BugFunnel #67: a subdir
+            //    page-file `Journals/2026-07-10.org` roots the date page under
+            //    the `journals` folder-page). CORRECTION (Fork B B1 senior
+            //    review, 2026-07-13, Finding C): `block:journals` IS itself a
+            //    root `Page` (the `#+ID` of `assets/default/Journals.org`). The
+            //    real reason a nested date's parent can still be absent from a
+            //    `WHERE tag='Page'` rowset is a QUERY-SCOPE filter (e.g. a
+            //    per-folder or single-level listing) excluding the ancestor
+            //    row, not the ancestor lacking the tag. Per the links-ruling
+            //    nested pages are a REPRESENTABLE state (anchored by id), so a
+            //    mixed forest — some roots at the sentinel, some dangling to an
+            //    absent-but-real (scope-filtered) parent — is legal data, NOT a
+            //    corrupt rowset. Per the 2026-07-13 page-hierarchy interim
+            //    ruling, a nested page's ancestors up to root must themselves
+            //    all be pages (or the root) — `journals` qualifies.
             //
             // A read-only navigation list (`allow_root_creation = false`, e.g.
             // the sidebar) never offers a creation slot, so it does not need to
@@ -331,11 +334,12 @@ pub fn resolve_creation_parent(
             if !allow_root_creation {
                 return None;
             }
-            // Creation-enabled list (`creation_slot: true`): a new item is a NEW
-            // TOP-LEVEL PAGE, parented to the `no_parent` sentinel. This is only
-            // meaningful when the forest actually carries a top-level anchor (at
-            // least one sentinel-rooted row); mixed nested-page forests still
-            // resolve here as long as ONE root sits at the sentinel.
+            // Creation-enabled list (`creation_slot: true`): a new item is a
+            // NEW TOP-LEVEL PAGE, parented to the `no_parent` sentinel. This is
+            // only meaningful when the forest actually carries a top-level
+            // anchor (at least one sentinel-rooted row); mixed nested-page
+            // forests still resolve here as long as ONE root sits at the
+            // sentinel.
             let no_parent = EntityUri::no_parent();
             if many.iter().any(|r| {
                 data_row_parent_id(r)
@@ -347,20 +351,21 @@ pub fn resolve_creation_parent(
             // No `no_parent` anchor in a multi-root forest → offer NO creation
             // slot (`None`), the SAME disposition as the read-only multi-root
             // case above. This is NOT a malformed spec: the default
-            // `collection_profile` (assets/default/types/collection_profile.yaml)
-            // renders EVERY tree with `creation_slot: true`, so
-            // `allow_root_creation` does NOT imply a top-level-pages list. Any
-            // non-top-level focus subtree (e.g. `journals::action::0`'s children)
-            // legitimately reaches here with all roots dangling to
-            // scope-filtered / absent parents — and `resolve_creation_parent`
-            // runs on EVERY streaming signal tick (reactive_view.rs), so a
-            // transient boot-race intermediate (the ActionEngine action-watcher
-            // mints the journal day-block live, concurrent with the journals
-            // seed) also transits this shape. There is simply no top-level to
-            // anchor a new root under, so no slot is offered until the rowset is
-            // coherent; a genuine top-level-pages list still resolves via the
-            // sentinel anchor above. A phantom mis-parented slot is never
-            // created, and a PERSISTENT wrong-row wiring is still caught by the
+            // `collection_profile`
+            // (assets/default/types/collection_profile.yaml) renders EVERY tree
+            // with `creation_slot: true`, so `allow_root_creation` does NOT
+            // imply a top-level-pages list. Any non-top-level focus subtree
+            // (e.g. `journals::action::0`'s children) legitimately reaches here
+            // with all roots dangling to scope-filtered / absent parents — and
+            // `resolve_creation_parent` runs on EVERY streaming signal tick
+            // (reactive_view.rs), so a transient boot-race intermediate (the
+            // ActionEngine action-watcher mints the journal day-block live,
+            // concurrent with the journals seed) also transits this shape.
+            // There is simply no top-level to anchor a new root under, so no
+            // slot is offered until the rowset is coherent; a genuine
+            // top-level-pages list still resolves via the sentinel anchor
+            // above. A phantom mis-parented slot is never created, and a
+            // PERSISTENT wrong-row wiring is still caught by the
             // post-convergence view-model invariants (never silently degraded).
             None
         }

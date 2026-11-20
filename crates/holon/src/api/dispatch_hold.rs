@@ -148,8 +148,9 @@ impl DispatchHold {
     /// run that was spawned (not awaited) by the caller deterministic.
     pub async fn release(&self, expect_parked: usize, within: Duration) -> Result<()> {
         let mut parked = self.parked_count.subscribe();
-        // The `watch::Ref` that `wait_for` yields holds the channel's read lock,
-        // so it must be dropped before `send_replace` below takes the write lock.
+        // The `watch::Ref` that `wait_for` yields holds the channel's read
+        // lock, so it must be dropped before `send_replace` below takes the
+        // write lock.
         let reached = matches!(
             tokio::time::timeout(within, parked.wait_for(|n| *n >= expect_parked)).await,
             Ok(Ok(_))

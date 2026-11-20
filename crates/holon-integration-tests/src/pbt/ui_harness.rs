@@ -109,7 +109,8 @@ pub fn install_rejection_histogram_panic_hook() {
 /// hand-authored `keystone.jsonl` replay corpus, not an auto-written
 /// `*.proptest-regressions` file (see the shrunk failure's printed seed).
 pub fn standard_pbt_config(
-    // ALLOW(unused_param): kept for call-site stability; persistence is now file-less
+    // ALLOW(unused_param): kept for call-site stability; persistence is now
+    // file-less
     _slice_name: &str,
 ) -> proptest::test_runner::Config {
     use proptest::test_runner::Config;

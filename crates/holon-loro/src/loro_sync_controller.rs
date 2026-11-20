@@ -598,10 +598,11 @@ impl LoroSyncController {
 
     async fn run_loop(self, shutdown: Arc<SessionShutdown>) {
         info!("[LoroSyncController] Started outbound Loro→SQL reconcile loop");
-        // The only input is `wake` — fired by the Loro `subscribe_root` callback
-        // on every doc change (local writes, peer imports). Each wake drives one
-        // outbound reconcile. There is no SQL→Loro mirror and no inbound EventBus
-        // consumer; Loro is the authority and this loop is its sole projector.
+        // The only input is `wake` — fired by the Loro `subscribe_root`
+        // callback on every doc change (local writes, peer imports). Each wake
+        // drives one outbound reconcile. There is no SQL→Loro mirror and no
+        // inbound EventBus consumer; Loro is the authority and this loop is its
+        // sole projector.
         //
         // A wake is the ONLY input, so a pass that fails or comes back
         // incomplete gets no second chance on its own: without the bounded
@@ -1186,9 +1187,10 @@ impl LoroProjection {
 
         // Reason threaded to `emit_ops` if this pass reaches the full walk.
         // seeded+armed at entry → set at the specific fall-through site below.
-        // Not seeded/armed → cold boot, unless a prior pass recorded `sink_fail`
-        // when its incremental write failed and returned (taken here). `None`
-        // reaching the full walk is a logic error (fails loud via `.expect`).
+        // Not seeded/armed → cold boot, unless a prior pass recorded
+        // `sink_fail` when its incremental write failed and returned (taken
+        // here). `None` reaching the full walk is a logic error (fails loud via
+        // `.expect`).
         let mut full_reason: Option<FullReason> = if seeded {
             None
         } else {
@@ -1201,24 +1203,25 @@ impl LoroProjection {
             )
         };
 
-        // ── Incremental fast path — O(changed), event-driven, no checkout ─────
-        // The SOLE steady-state projector. Once seeded, drain the
+        // ── Incremental fast path — O(changed), event-driven, no checkout
+        // ───── The SOLE steady-state projector. Once seeded, drain the
         // pending-facts queue (populated by the `subscribe_root` callback via
         // `extract_pending_changes`) and read only the named nodes from the
-        // CURRENT tree. This replaces `doc.diff(last, current)`, which checked the
-        // shared live doc out (to `last`, then `current`, then restored) and raced
-        // concurrent readers — the root cause of the flaky `SplitBlock … Block not
-        // found`. The full walk below survives ONLY for cold-boot seeding,
-        // reseed-on-unsettled, and the unarmed/oversized-batch bootstrap.
-        // `armed` is deliberately NOT part of this gate. It gates DELETES (see
-        // the field's docs: "Creates/updates are never gated"), and the org
-        // initial scan runs entirely unarmed — `arm()` is called only after it
-        // finishes (crates/holon-orgmode/src/di.rs). Gating the fast path on it
-        // too made every one of the scan's per-file commits walk the whole
-        // accumulated tree, which is quadratic in vault size: measured 121 full
-        // `coldboot` walks for a 120-file boot, 110 s of `boot_ingest_total`.
-        // An unarmed batch that carries a delete still routes to the full walk
-        // below, so the delete gate itself is untouched.
+        // CURRENT tree. This replaces `doc.diff(last, current)`, which checked
+        // the shared live doc out (to `last`, then `current`, then restored)
+        // and raced concurrent readers — the root cause of the flaky
+        // `SplitBlock … Block not found`. The full walk below survives ONLY for
+        // cold-boot seeding, reseed-on-unsettled, and the
+        // unarmed/oversized-batch bootstrap. `armed` is deliberately NOT part
+        // of this gate. It gates DELETES (see the field's docs:
+        // "Creates/updates are never gated"), and the org initial scan runs
+        // entirely unarmed — `arm()` is called only after it finishes (crates/
+        // holon-orgmode/src/di.rs). Gating the fast path on it too made every
+        // one of the scan's per-file commits walk the whole accumulated tree,
+        // which is quadratic in vault size: measured 121 full `coldboot` walks
+        // for a 120-file boot, 110 s of `boot_ingest_total`. An unarmed batch
+        // that carries a delete still routes to the full walk below, so the
+        // delete gate itself is untouched.
         if seeded {
             // Drain the WHOLE queue first — never early-return while facts are
             // pending (that would silently drop a committed change).
@@ -1236,12 +1239,13 @@ impl LoroProjection {
                 return Ok(ProjectionPass::Converged);
             }
 
-            // Take the O(changed) path only for a bounded, event-supplied batch.
-            // An empty queue with a moved frontier (pre-subscription boot window,
-            // a filtered Checkout event, or a reseed-race) or an oversized batch
-            // (cold org-scan / bulk import — one snapshot beats diffing thousands
-            // of rows against `live`) routes to the full reseed below.
-            // Both routes are checkout-free, so neither can reintroduce the race.
+            // Take the O(changed) path only for a bounded, event-supplied
+            // batch. An empty queue with a moved frontier (pre-subscription
+            // boot window, a filtered Checkout event, or a reseed-race) or an
+            // oversized batch (cold org-scan / bulk import — one snapshot beats
+            // diffing thousands of rows against `live`) routes to the full
+            // reseed below. Both routes are checkout-free, so neither can
+            // reintroduce the race.
             let live_len = self.live.lock().unwrap().len();
             let facts = global_facts + layout_facts;
             let take_incremental = facts > 0 && facts <= INCREMENTAL_BATCH_MAX.max(live_len);
@@ -1249,14 +1253,14 @@ impl LoroProjection {
                 changed.extend(layout_changed);
                 settled &= layout_settled;
                 if settled {
-                    // Build ops + a STAGING plan WITHOUT mutating `live`. `live`
-                    // (the diff base) and `last_synced` advance only AFTER the sink
-                    // write succeeds — a failed apply (e.g. an FK reject that rolls
-                    // the whole batch back) must not advance the base, which would
-                    // silently drop the change; instead we reseed and retry.
-                    // A node that left the global tree into a loaded share is
-                    // moved, not deleted: its row belongs to the share's
-                    // projection, as on the full walk.
+                    // Build ops + a STAGING plan WITHOUT mutating `live`.
+                    // `live` (the diff base) and `last_synced` advance only
+                    // AFTER the sink write succeeds — a failed apply (e.g. an
+                    // FK reject that rolls the whole batch back) must not
+                    // advance the base, which would silently drop the change;
+                    // instead we reseed and retry. A node that left the global
+                    // tree into a loaded share is moved, not deleted: its row
+                    // belongs to the share's projection, as on the full walk.
                     let share_rows = if changed.iter().any(|(_, new)| new.is_none()) {
                         collab.with_read(|doc| {
                             registered_share_rows(doc, self.shared_trees.as_deref())
@@ -1268,8 +1272,9 @@ impl LoroProjection {
                         let live = self.live.lock().unwrap();
                         let before_len = live.len();
                         let mut ops: Vec<(String, holon_api::StorageEntity)> = Vec::new();
-                        // (id, Some(block)) = insert/update into `live`; (id, None)
-                        // = remove from `live`. Applied only on emit_ops success.
+                        // (id, Some(block)) = insert/update into `live`; (id,
+                        // None) = remove from `live`. Applied only on emit_ops
+                        // success.
                         let mut staging: Vec<(String, Option<SnapshotBlock>)> = Vec::new();
                         let mut creates = 0usize;
                         let mut deletes = 0usize;
@@ -1308,20 +1313,22 @@ impl LoroProjection {
                         }
                         let after_len = before_len + creates - deletes;
                         // Ungrounded-parent guard. Any op that names a
-                        // `block_raw.parent_id` whose row will not exist at COMMIT
-                        // trips the deferred self-FK and rolls the WHOLE batch back,
-                        // silently dropping every co-batched row. Two ways an
-                        // O(changed) batch produces one:
-                        //   * a CREATE whose ancestor changed in an earlier, already- drained
-                        //     interval, so it is missing from this batch; or
-                        //   * an UPDATE that re-parents a block onto a parent this batch (or an
-                        //     earlier one) DELETED — the cross-peer indent+join shape, where the
-                        //     join deletes the block a concurrently-indented node was re-parented
-                        //     under.
-                        // Neither may be emitted; fall through to the full reseed
-                        // below, which reads the WHOLE current tree against sink
-                        // truth. (Seed layout / `sentinel` non-`block:` parents are
-                        // always satisfiable.)
+                        // `block_raw.parent_id` whose row will not exist at
+                        // COMMIT trips the deferred self-FK and rolls the WHOLE
+                        // batch back, silently dropping every co-batched row.
+                        // Two ways an O(changed) batch produces one:
+                        //   * a CREATE whose ancestor changed in an earlier,
+                        //     already- drained interval, so it is missing from
+                        //     this batch; or
+                        //   * an UPDATE that re-parents a block onto a parent
+                        //     this batch (or an earlier one) DELETED — the
+                        //     cross-peer indent+join shape, where the join
+                        //     deletes the block a concurrently-indented node
+                        //     was re-parented under.
+                        // Neither may be emitted; fall through to the full
+                        // reseed below, which reads the WHOLE current tree
+                        // against sink truth. (Seed layout / `sentinel`
+                        // non-`block:` parents are always satisfiable.)
                         let has_orphan = {
                             let batch_created: std::collections::HashSet<&str> = ops
                                 .iter()
@@ -1377,18 +1384,19 @@ impl LoroProjection {
                         // second copy in the fast path.
                         full_reason = Some(FullReason::UnarmedDelete);
                     } else if has_orphan {
-                        // Do not commit an FK-doomed partial batch. Force the base
-                        // to be rebuilt from SINK TRUTH (`read_sql_snapshot`), not
-                        // the in-memory `live` diff base: `live` may itself have
-                        // drifted to hold the missing parent while `block_raw` does
-                        // not, in which case a reseed diffed against `live` would
-                        // re-omit the parent and FK-fail again. Clearing `seeded`
-                        // makes the reseed below diff the full tree against the
-                        // actual sink, so the parent's create is (re)emitted with
-                        // its subtree. (The reseed reads sink truth unconditionally
-                        // now, but clearing the flag keeps `seeded` honest — the
-                        // in-memory `live` base is not trustworthy until the reseed
-                        // re-establishes it.)
+                        // Do not commit an FK-doomed partial batch. Force the
+                        // base to be rebuilt from SINK TRUTH
+                        // (`read_sql_snapshot`), not the in-memory `live` diff
+                        // base: `live` may itself have drifted to hold the
+                        // missing parent while `block_raw` does not, in which
+                        // case a reseed diffed against `live` would re-omit the
+                        // parent and FK-fail again. Clearing `seeded` makes the
+                        // reseed below diff the full tree against the
+                        // actual sink, so the parent's create is (re)emitted
+                        // with its subtree. (The reseed reads sink truth
+                        // unconditionally now, but clearing the flag keeps
+                        // `seeded` honest — the in-memory `live` base is not
+                        // trustworthy until the reseed re-establishes it.)
                         self.seeded.store(false, Ordering::SeqCst);
                         full_reason = Some(FullReason::Orphan);
                         tracing::warn!(
@@ -1430,12 +1438,12 @@ impl LoroProjection {
                             }
                             Err(e) => {
                                 // The sink or sidecar write failed. Leave
-                                // `live`/`last_synced` untouched and force a full
-                                // reseed next pass so the base is rebuilt from truth
-                                // and the change retried — never silently dropped
-                                // (Q9: reseed, not requeue). Record the cause so
-                                // the next pass's full walk labels itself
-                                // `sink_fail`, not `coldboot`.
+                                // `live`/`last_synced` untouched and force a
+                                // full reseed next pass so the base is rebuilt
+                                // from truth and the change retried — never
+                                // silently dropped (Q9: reseed, not requeue).
+                                // Record the cause so the next pass's full walk
+                                // labels itself `sink_fail`, not `coldboot`.
                                 self.seeded.store(false, Ordering::SeqCst);
                                 *self.pending_reseed_reason.lock().unwrap() =
                                     Some(FullReason::SinkFail);
@@ -1452,7 +1460,8 @@ impl LoroProjection {
                 }
             } else {
                 // Not a bounded incremental batch: empty queue with a moved
-                // frontier, or an oversized batch (cold org-scan / bulk import).
+                // frontier, or an oversized batch (cold org-scan / bulk
+                // import).
                 full_reason = Some(if facts == 0 {
                     FullReason::EmptyPendingMovedFrontier
                 } else {
@@ -1464,21 +1473,22 @@ impl LoroProjection {
             // checkout).
         }
 
-        // ── Full walk — cold-boot seed / reseed-on-unsettled / bootstrap ONLY ──
-        // "after" = the full Loro authority snapshot. "before" = the ACTUAL SQL
-        // sink state (read fresh), NOT the in-memory `live` base. This path is the
-        // recovery/reseed path; it must reconcile the sink against Loro from
-        // GROUND TRUTH. Diffing against `live` here was a latent silent-drift trap:
-        // a reseed emits `diff(before, after)` but then sets `live = after`, so if
-        // `live` ever diverged from `block_raw` (e.g. `live` holding a parent whose
-        // sink row is absent), a `live`-based reseed would re-emit the delta
-        // relative to the drifted base — never re-creating the missing parent —
-        // while its descendants' creates FK-reject at COMMIT, wedging the projector
-        // in a permanent error/reseed storm (keystone forward-edge/BulkExternalAdd
-        // deferred-FK RED). Reading the sink makes every reseed converge
-        // `block_raw` → Loro and re-establishes `live == block_raw` on success.
-        // This path is not steady-state (cold boot / unsettled / orphan / oversized
-        // bootstrap), so the extra sink read is not on the hot path.
+        // ── Full walk — cold-boot seed / reseed-on-unsettled / bootstrap ONLY
+        // ── "after" = the full Loro authority snapshot. "before" = the ACTUAL
+        // SQL sink state (read fresh), NOT the in-memory `live` base. This path
+        // is the recovery/reseed path; it must reconcile the sink against Loro
+        // from GROUND TRUTH. Diffing against `live` here was a latent
+        // silent-drift trap: a reseed emits `diff(before, after)` but then sets
+        // `live = after`, so if `live` ever diverged from `block_raw` (e.g.
+        // `live` holding a parent whose sink row is absent), a `live`-based
+        // reseed would re-emit the delta relative to the drifted base — never
+        // re-creating the missing parent — while its descendants' creates
+        // FK-reject at COMMIT, wedging the projector in a permanent
+        // error/reseed storm (keystone forward-edge/BulkExternalAdd deferred-FK
+        // RED). Reading the sink makes every reseed converge `block_raw` → Loro
+        // and re-establishes `live == block_raw` on success. This path is not
+        // steady-state (cold boot / unsettled / orphan / oversized bootstrap),
+        // so the extra sink read is not on the hot path.
         let (mut after, mut after_settled, current) =
             self.read_full(&collab, &self.pending, CommitSource::LoroGlobal)?;
         let (layout_after, layout_settled, layout_current) =
@@ -1499,10 +1509,10 @@ impl LoroProjection {
         }
         let after = after;
         // A share's rows are written by that share's projection from its own
-        // doc, which this walk never reads; diffing them here would delete them.
-        // Which rows those are comes from the shares loaded right now, never
-        // from a row's `shared-tree-id` property, which any file can carry.
-        // Read AFTER the SQL snapshot: a share is registered and its doc
+        // doc, which this walk never reads; diffing them here would delete
+        // them. Which rows those are comes from the shares loaded right now,
+        // never from a row's `shared-tree-id` property, which any file can
+        // carry. Read AFTER the SQL snapshot: a share is registered and its doc
         // written before its projection writes a row, so every share row the
         // snapshot holds is named here.
         let sql_rows = self.read_sql_snapshot().await?;
@@ -1518,11 +1528,11 @@ impl LoroProjection {
 
         let mut ops = diff_snapshots_to_ops(&before, &after);
 
-        // Delete-pass gate. An unsettled snapshot withholds every delete: a live
-        // node was transiently meta-incomplete, so a still-live block looks
-        // deleted. An unarmed projection deletes only the rows of blocks Loro
-        // tombstoned; the sink's other rows are seed-layout rows Loro never held.
-        // Creates / updates always flow.
+        // Delete-pass gate. An unsettled snapshot withholds every delete: a
+        // live node was transiently meta-incomplete, so a still-live block
+        // looks deleted. An unarmed projection deletes only the rows of blocks
+        // Loro tombstoned; the sink's other rows are seed-layout rows Loro
+        // never held. Creates / updates always flow.
         let mut ungrounded = 0usize;
         if (!armed || !after_settled) && ops.iter().any(|(name, _)| name == "delete") {
             let deletable = if after_settled {
@@ -1550,18 +1560,20 @@ impl LoroProjection {
             }
         }
         // Orphan-create gate (UNCONDITIONAL, TRANSITIVE). A create whose parent
-        // `block_raw` row will not exist at COMMIT trips the deferred `parent_id`
-        // self-FK and rolls the whole batch back — losing every co-batched row.
-        // The parent is missing at COMMIT when it is neither in the sink base
-        // (`before`) nor emitted by this batch. Two ways this arises:
+        // `block_raw` row will not exist at COMMIT trips the deferred
+        // `parent_id` self-FK and rolls the whole batch back — losing every
+        // co-batched row. The parent is missing at COMMIT when it is neither in
+        // the sink base (`before`) nor emitted by this batch. Two ways this
+        // arises:
         //   * a torn (unsettled) walk withheld the parent from `after`; or
-        //   * a settled walk legitimately projects a child whose parent was dropped
-        //     from the sink base earlier and is not in this snapshot (the incremental
-        //     fast path funnels such a case here on purpose).
+        //   * a settled walk legitimately projects a child whose parent was
+        //     dropped from the sink base earlier and is not in this snapshot
+        //     (the incremental fast path funnels such a case here on purpose).
         // Crucially the check is TRANSITIVE: withholding an orphan parent must
-        // also withhold its descendants, or a grandchild whose parent is present
-        // in `after` (but itself withheld) FK-fails. `retain_grounded_creates`
-        // grounds each create in the sink + the closure of grounded creates.
+        // also withhold its descendants, or a grandchild whose parent is
+        // present in `after` (but itself withheld) FK-fails.
+        // `retain_grounded_creates` grounds each create in the sink + the
+        // closure of grounded creates.
         {
             let withheld = retain_grounded_creates(&mut ops, &before);
             if withheld > 0 {
@@ -1601,10 +1613,10 @@ impl LoroProjection {
             .expect("full reseed walk reached without a reason set")
             .as_str();
 
-        // Apply to the sink FIRST; commit the new base state only AFTER the write
-        // succeeds, so a failed apply (batch rollback) never advances `live` /
-        // `last_synced` ahead of the sink (silent drift). On failure the pass
-        // returns `Err` with the base untouched and retries next wake.
+        // Apply to the sink FIRST; commit the new base state only AFTER the
+        // write succeeds, so a failed apply (batch rollback) never advances
+        // `live` / `last_synced` ahead of the sink (silent drift). On failure
+        // the pass returns `Err` with the base untouched and retries next wake.
         let written = match self
             .emit_ops(
                 ops,
@@ -1630,14 +1642,14 @@ impl LoroProjection {
             return Err(e);
         }
 
-        // Seed / refresh the incremental state — only on a settled snapshot that
-        // reached the sink WHOLE — so the next pass can take the fast path (and
-        // so a later reseed diffs against `live`). Seeding `live = after` after
-        // withholding ops would record the withheld change as already projected:
-        // the next incremental pass would see no difference and the sink would
-        // keep the stale parent forever. Leaving `live` alone keeps the next
-        // pass on the full walk against sink truth, which is where the withheld
-        // op gets re-emitted.
+        // Seed / refresh the incremental state — only on a settled snapshot
+        // that reached the sink WHOLE — so the next pass can take the fast path
+        // (and so a later reseed diffs against `live`). Seeding `live = after`
+        // after withholding ops would record the withheld change as already
+        // projected: the next incremental pass would see no difference and the
+        // sink would keep the stale parent forever. Leaving `live` alone keeps
+        // the next pass on the full walk against sink truth, which is where the
+        // withheld op gets re-emitted.
         // Unseeded, the next pass cannot take the idle return, which would
         // feed this walk's commits without their rows in the read model.
         if ungrounded > 0 {
@@ -1838,18 +1850,19 @@ impl LoroProjection {
             .context("save the Loro document before the SQL sink reflects it")?;
 
         // FK-safe create ordering — the single write chokepoint's guarantee.
-        // The `block_raw.parent_id` self-FK is DEFERRABLE INITIALLY DEFERRED, but
-        // the Turso fork only *decrements* the deferred-FK counter on a parent-key
-        // UPDATE probe, never on a plain parent-row INSERT (see the fork's
-        // translate/fkeys.rs — both `emit_parent_key_change_probes` callers are
-        // UPDATE-path). So inserting a child row before its parent's INSERT
-        // increments the counter with no matching decrement, and the batch's
-        // COMMIT trips `deferred foreign key constraint failed on commit` even
-        // though the final row set is FK-consistent. The full reseed path already
-        // topo-sorts its creates (`diff_snapshots_to_ops`); the incremental fast
-        // path emitted `changed` in arbitrary HashMap order — the residual
-        // keystone deferred-FK RED. Ordering every batch parent-before-child here
-        // makes both paths safe regardless of how the op vec was built.
+        // The `block_raw.parent_id` self-FK is DEFERRABLE INITIALLY DEFERRED,
+        // but the Turso fork only *decrements* the deferred-FK counter on a
+        // parent-key UPDATE probe, never on a plain parent-row INSERT (see the
+        // fork's translate/fkeys.rs — both `emit_parent_key_change_probes`
+        // callers are UPDATE-path). So inserting a child row before its
+        // parent's INSERT increments the counter with no matching decrement,
+        // and the batch's COMMIT trips `deferred foreign key constraint failed
+        // on commit` even though the final row set is FK-consistent. The full
+        // reseed path already topo-sorts its creates (`diff_snapshots_to_ops`);
+        // the incremental fast path emitted `changed` in arbitrary HashMap
+        // order — the residual keystone deferred-FK RED. Ordering every batch
+        // parent-before-child here makes both paths safe regardless of how the
+        // op vec was built.
         let ops = fk_order_creates_parent_first(ops);
         if ops.is_empty() {
             // A pass that emits nothing still WALKED — a full walk read both
@@ -2712,9 +2725,9 @@ fn retain_grounded_creates(
     ops: &mut Vec<(String, holon_api::StorageEntity)>,
     before: &HashMap<String, SnapshotBlock>,
 ) -> usize {
-    // id -> parent_id for every create in the batch. A create with no `id` param
-    // is malformed; it is left in `ops` (grounded-by-default below) so the sink
-    // fails loudly on it rather than this gate hiding it.
+    // id -> parent_id for every create in the batch. A create with no `id`
+    // param is malformed; it is left in `ops` (grounded-by-default below) so
+    // the sink fails loudly on it rather than this gate hiding it.
     let create_parents: Vec<(String, String)> = ops
         .iter()
         .filter(|(name, _)| name == "create")
@@ -2725,8 +2738,9 @@ fn retain_grounded_creates(
         })
         .collect();
 
-    // A non-`block:` parent (seed layout / `sentinel` root) is always satisfiable;
-    // a parent already in the sink base is always a valid FK target.
+    // A non-`block:` parent (seed layout / `sentinel` root) is always
+    // satisfiable; a parent already in the sink base is always a valid FK
+    // target.
     let parent_satisfiable = |grounded: &std::collections::HashSet<String>, pid: &str| {
         !pid.starts_with("block:") || before.contains_key(pid) || grounded.contains(pid)
     };
@@ -2921,9 +2935,10 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
             Value::String(new.content_type.to_string()),
         );
     }
-    // Edge fields: emit each that changed. Iterating `EdgeField::ALL` keeps this
-    // diff in lockstep with `blocks_differ` — omitting a field here (the H12
-    // bug: `requires` compared in one but not the other) is unrepresentable.
+    // Edge fields: emit each that changed. Iterating `EdgeField::ALL` keeps
+    // this diff in lockstep with `blocks_differ` — omitting a field here (the
+    // H12 bug: `requires` compared in one but not the other) is
+    // unrepresentable.
     for field in EdgeField::ALL {
         if field.differs(old, new) {
             params.insert(field.column().into(), field.param_value(new));
@@ -2975,11 +2990,11 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
         for (k, v) in &new.properties {
             // Edge-typed fields live in junction tables and are emitted via
             // their dedicated Array params above — never as a flattened
-            // property. A stray edge key in `properties` (legacy data pollution)
-            // would otherwise reach SqlOperationProvider's edge partition as a
-            // non-Array and panic. Operation-control keys are peer-untrusted
-            // writer instructions, stripped for the same reason as in
-            // `block_to_params`. Mirrors the guard there.
+            // property. A stray edge key in `properties` (legacy data
+            // pollution) would otherwise reach SqlOperationProvider's edge
+            // partition as a non-Array and panic. Operation-control keys are
+            // peer-untrusted writer instructions, stripped for the same reason
+            // as in `block_to_params`. Mirrors the guard there.
             if EdgeField::is_edge_column(k) || holon_api::entity::is_operation_control_param(k) {
                 continue;
             }
@@ -2988,8 +3003,8 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
         // Emit the `Value::REMOVED` sentinel for every key present in `old` but
         // absent from `new`. Distinct from the `marks` / `source_language`
         // clears above: those are real COLUMNS taking a real SQL NULL, this is
-        // a property that must stop existing, `priority` included. Iterating only
-        // `new.properties` could not represent a deletion, so a property
+        // a property that must stop existing, `priority` included. Iterating
+        // only `new.properties` could not represent a deletion, so a property
         // removed in Loro left the stale value in SQL's `properties` JSON
         // forever (the base advances to `after`, so it is never re-diffed —
         // one-shot silent data loss). `prepare_update` removes the key on this
@@ -3018,7 +3033,8 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
     // representable field was emitted — the update decodes to zero typed ops
     // and trips the consolidator's `agrees_with_ops` divergence. Dump the two
     // blocks field-by-field so the asymmetric field is unambiguous.
-    // `id` + `updated_at` are always inserted; len == 2 ⟺ no representable field.
+    // `id` + `updated_at` are always inserted; len == 2 ⟺ no representable
+    // field.
     if params.len() == 2 {
         tracing::error!(
             "[block_diff_params] BOOKKEEPING-ONLY update for {} — blocks_differ true but no field \

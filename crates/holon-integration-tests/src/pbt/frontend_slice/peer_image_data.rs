@@ -26,8 +26,8 @@ impl ImageDataProvider for PeerImageData {
     async fn read_image_data(&self, block_id: &EntityUri) -> Result<Option<Vec<u8>>> {
         let key = block_id.to_string();
         let mut stored = self.stored.lock().expect("PeerImageData mutex poisoned");
-        // Deterministic per-block bytes, minted on first read: every image block
-        // in a run has bytes, as if its author had sent them.
+        // Deterministic per-block bytes, minted on first read: every image
+        // block in a run has bytes, as if its author had sent them.
         Ok(Some(
             stored
                 .entry(key.clone())

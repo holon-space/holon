@@ -284,7 +284,8 @@ pub use holon_lens::QuantityCell;
 pub use holon_lens::quantity;
 // The guard AST, the transition-arc vocabulary and the dynamic `Value` live in
 // the leaf crate `holon-pattern` (reachable from `holon-macros`, which parses
-// both declaration surfaces at expansion time); these are their canonical paths.
+// both declaration surfaces at expansion time); these are their canonical
+// paths.
 pub use holon_pattern::AmbiguousKind;
 pub use holon_pattern::NotJson;
 pub use holon_pattern::PropertyKinds;
@@ -311,8 +312,8 @@ pub use input_types::{Key, KeyChord};
 pub use interp_value::{
     InterpValue, Occurrence, OccurrenceId, ReactiveRowProvider, RowKey, ptr_identity,
 };
-// CompletionStateInfo is defined in holon-core and re-exported here for frontend use
-// The actual definition is in holon-core/src/traits.rs
+// CompletionStateInfo is defined in holon-core and re-exported here for
+// frontend use The actual definition is in holon-core/src/traits.rs
 
 // Re-export link search candidate
 pub use link_candidate::LinkCandidate;
@@ -369,8 +370,9 @@ pub use types::{
     Region, SourceLanguage, StateCategory, Tags, TaskState, TaskStateWrite, Timestamp, UiInfo,
 };
 // Re-export widget meta types
-// Note: StaticParam and WidgetMeta use &'static str which FRB wraps as unsized `str`.
-// They are marked flutter_rust_bridge:ignore but still need pub use for Rust macro codegen.
+// Note: StaticParam and WidgetMeta use &'static str which FRB wraps as unsized
+// `str`. They are marked flutter_rust_bridge:ignore but still need pub use for
+// Rust macro codegen.
 pub use widget_meta::{StaticParam, WidgetCategory, WidgetMeta};
 // Re-export widget spec types
 pub use widget_spec::{

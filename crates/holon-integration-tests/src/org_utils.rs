@@ -35,8 +35,8 @@ pub fn serialize_blocks_to_org_with_doc(
     doc_block: Option<&Block>,
 ) -> String {
     let mut root_blocks: Vec<&&Block> = blocks.iter().filter(|b| b.parent_id == *doc_uri).collect();
-    // Match production OrgRenderer sorting: section content (Source/Image) first,
-    // then sequence, then ID — via the one domain rule (ADR 0005).
+    // Match production OrgRenderer sorting: section content (Source/Image)
+    // first, then sequence, then ID — via the one domain rule (ADR 0005).
     root_blocks.sort_by(|a, b| {
         a.content_type
             .sibling_order_group()
@@ -82,8 +82,8 @@ pub fn serialize_block_recursive(
         .iter()
         .filter(|b| b.parent_id.as_raw_str() == block.id.as_str())
         .collect();
-    // Match production OrgRenderer sorting: section content (Source/Image) first,
-    // then sequence, then ID — via the one domain rule (ADR 0005).
+    // Match production OrgRenderer sorting: section content (Source/Image)
+    // first, then sequence, then ID — via the one domain rule (ADR 0005).
     children.sort_by(|a, b| {
         a.content_type
             .sibling_order_group()
@@ -169,9 +169,10 @@ pub fn assign_reference_sequences_canonical(blocks: &mut [Block]) {
         // Reproduce the store's post-round-trip sibling order: the renderer
         // hoists section content (Source/Image) ahead of headings (Text), and
         // the org parser additionally re-emits all Source blocks before all
-        // Image blocks (source loop precedes image loop in `process_headlines`).
-        // So the finer `parse_order_rank` (Source < Image < Text) is the primary
-        // key — NOT the coarse `sibling_order_group` — then sequence, then ID.
+        // Image blocks (source loop precedes image loop in
+        // `process_headlines`). So the finer `parse_order_rank` (Source < Image
+        // < Text) is the primary key — NOT the coarse `sibling_order_group` —
+        // then sequence, then ID.
         children.sort_by(|(a_id, a_rank, a_seq), (b_id, b_rank, b_seq)| {
             a_rank
                 .cmp(b_rank)

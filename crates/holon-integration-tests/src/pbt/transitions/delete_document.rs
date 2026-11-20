@@ -114,9 +114,9 @@ impl<R: RefLifecycle + RefDocumentsMut> TransitionRef<R> for DeleteDocument {
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        // The whole external-deletion reference effect (resolve uri, cascade-delete
-        // page + descendants, re-canonicalize, clear dangling focus) lives in
-        // `RefDocumentsMut::remove_document`.
+        // The whole external-deletion reference effect (resolve uri,
+        // cascade-delete page + descendants, re-canonicalize, clear dangling
+        // focus) lives in `RefDocumentsMut::remove_document`.
         state.remove_document(&self.file_name);
     }
 }

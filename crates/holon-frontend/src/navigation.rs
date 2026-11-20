@@ -636,8 +636,8 @@ mod tests {
 
     #[test]
     fn tree_nav_single_node_right_left_returns_none() {
-        // Leaf node with no children: Right returns None. Root with no parent: Left
-        // returns None.
+        // Leaf node with no children: Right returns None. Root with no parent:
+        // Left returns None.
         let dfs = vec![eu("solo")];
         let parents: HashMap<EntityUri, EntityUri> = HashMap::new();
         let nav = TreeNavigator::from_dfs_and_parents(dfs, parents);

@@ -79,8 +79,9 @@ async fn block_engine() -> Result<Arc<BackendEngine>> {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = Handle::current();
-                    // ALLOW(block_on): wrapped in `block_in_place`, which is what makes a
-                    // blocking wait legal on a multi-thread runtime thread.
+                    // ALLOW(block_on): wrapped in `block_in_place`, which is
+                    // what makes a blocking wait legal on a multi-thread
+                    // runtime thread.
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");

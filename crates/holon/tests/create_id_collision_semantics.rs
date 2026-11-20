@@ -47,7 +47,8 @@ async fn setup() -> (DbHandle, Arc<SqlOperationProvider>) {
     let (_backend, handle) = TursoBackend::new_in_memory()
         .await
         .expect("in-memory turso");
-    // The PRODUCTION core schema (block_raw + the `sentinel:no_parent` FK anchor).
+    // The PRODUCTION core schema (block_raw + the `sentinel:no_parent` FK
+    // anchor).
     CoreSchemaModule
         .ensure_schema(&handle)
         .await

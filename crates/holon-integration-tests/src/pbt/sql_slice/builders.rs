@@ -82,8 +82,8 @@ pub async fn new_sql_engine_with_structural_ops() -> Arc<BackendEngine> {
                 )) as Arc<dyn OperationProvider>
             },
         ));
-        // Structural provider (split_block / indent / outdent / move_up / move_down /
-        // join_block).
+        // Structural provider (split_block / indent / outdent / move_up /
+        // move_down / join_block).
         injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
             |resolver| async move {
                 let dbh = resolver.resolve::<dyn DbHandleProvider>();
@@ -95,8 +95,9 @@ pub async fn new_sql_engine_with_structural_ops() -> Arc<BackendEngine> {
                     BlockSchemaModule.edge_fields(),
                     std::sync::Arc::new(holon_api::SystemClock),
                 ));
-                // Point the cache at `block_raw` (not the `block` matview) so writes
-                // are immediately visible to the structural ops' ordering reads.
+                // Point the cache at `block_raw` (not the `block` matview) so
+                // writes are immediately visible to the structural ops'
+                // ordering reads.
                 let mut block_raw_type_def = Block::type_definition();
                 block_raw_type_def.name = "block_raw".to_string();
                 let cache = Arc::new(

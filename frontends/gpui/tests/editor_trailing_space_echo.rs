@@ -67,9 +67,9 @@ fn mount_editor(
     let row_id = "block:trailing-space-test".to_string();
     let row_id_for_view = row_id.clone();
 
-    // The window's first layer MUST be a `gpui_component::Root` (its render path
-    // reads window-level Root state), so wrap the real `EditorView` in a Root and
-    // smuggle the editor entity back out for assertions.
+    // The window's first layer MUST be a `gpui_component::Root` (its render
+    // path reads window-level Root state), so wrap the real `EditorView` in a
+    // Root and smuggle the editor entity back out for assertions.
     let slot: Rc<RefCell<Option<gpui::Entity<EditorView>>>> = Rc::new(RefCell::new(None));
     let slot_for_build = slot.clone();
     let (_root, vcx) = cx.add_window_view(move |window, cx| {

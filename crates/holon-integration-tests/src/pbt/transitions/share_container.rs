@@ -60,8 +60,9 @@ impl<R: RefSharedView + RefSharedViewMut> TransitionFactory<R> for ShareContaine
         };
         me.preconditions(state).map(|()| {
             // Heavy: a sequence that never shares can only ever exercise the
-            // negative (nothing-crosses) branch, and the share is a once-per-run
-            // event, so it must be reached early to leave ticks for a SyncNow.
+            // negative (nothing-crosses) branch, and the share is a
+            // once-per-run event, so it must be reached early to leave ticks
+            // for a SyncNow.
             (30, Just(me).boxed())
         })
     }
@@ -73,7 +74,8 @@ impl<R: RefSharedView + RefSharedViewMut> TransitionRef<R> for ShareContainer {
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
         // Once only: re-sharing an already-shared vault is a no-op that would
         // just burn ticks the sequence needs for syncing. Never after a
-        // per-page share: pairing refuses a receiver that holds a mount (D73.a).
+        // per-page share: pairing refuses a receiver that holds a mount
+        // (D73.a).
         let checks: Vec<Validated<(), Reason>> = vec![
             check(!state.is_shared(), Reason::VaultAlreadyShared),
             check(state.page_shares().is_empty(), Reason::PreconditionFailed),

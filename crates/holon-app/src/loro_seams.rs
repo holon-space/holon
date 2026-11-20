@@ -135,11 +135,11 @@ impl BlockReader for LoroBlockReader {
         &self,
         doc_id: &EntityUri,
     ) -> AnyhowResult<Vec<(EntityUri, EntityUri)>> {
-        // Honest, not a stub: the same subtree walk `get_blocks` does, reporting
-        // each node's real tree parent. The Loro tree has no projection to
-        // exploit — nodes carry their content inline — so this costs what
-        // `get_blocks` costs and simply drops the bodies. The saving that
-        // motivates this method is Turso-side.
+        // Honest, not a stub: the same subtree walk `get_blocks` does,
+        // reporting each node's real tree parent. The Loro tree has no
+        // projection to exploit — nodes carry their content inline — so this
+        // costs what `get_blocks` costs and simply drops the bodies. The saving
+        // that motivates this method is Turso-side.
         let mut out = Vec::new();
         self.collect_subtree(doc_id, &mut out).await?;
         Ok(out.into_iter().map(|b| (b.id, b.parent_id)).collect())
@@ -360,8 +360,8 @@ impl LoroBlockOrdering {
             .list_children(parent_id.as_str())
             .await
             .map_err(boxed)?;
-        // ALLOW(entity_uri_from_raw): ids from backend.list_children() (Vec<String>
-        // Loro output)
+        // ALLOW(entity_uri_from_raw): ids from backend.list_children()
+        // (Vec<String> Loro output)
         Ok(ids.iter().map(|s| EntityUri::from_raw(s)).collect())
     }
 
@@ -538,8 +538,8 @@ impl BlockOrdering for LoroBlockOrdering {
             BlockContent::text(content.clone().unwrap_or_default())
         };
 
-        // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
-        // HashMap<String,Value> bag
+        // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation
+        // param HashMap<String,Value> bag
         let block_uri = EntityUri::from_raw(&id);
         let exists = self.backend.get_block(&id).await.is_ok();
         if !exists {
@@ -548,8 +548,8 @@ impl BlockOrdering for LoroBlockOrdering {
                 .ok_or_else(|| boxed("update_in_tree: create requires a 'parent_id'"))?;
             self.backend
                 .create_block(
-                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
-                    // HashMap<String,Value> bag
+                    // ALLOW(entity_uri_from_raw): id/parent_id/after_id from
+                    // operation param HashMap<String,Value> bag
                     EntityUri::from_raw(&parent),
                     built_content,
                     Some(block_uri.clone()),
@@ -584,11 +584,11 @@ impl BlockOrdering for LoroBlockOrdering {
 
         match (parent_id, after) {
             (Some(parent), Some(after_id)) => {
-                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
-                // HashMap<String,Value> bag
+                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from
+                // operation param HashMap<String,Value> bag
                 let parent_uri = EntityUri::from_raw(&parent);
-                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
-                // HashMap<String,Value> bag
+                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from
+                // operation param HashMap<String,Value> bag
                 let after_uri = EntityUri::from_raw(&after_id);
                 self.place(&block_uri, &parent_uri, Some(&after_uri))
                     .await?;
@@ -596,8 +596,8 @@ impl BlockOrdering for LoroBlockOrdering {
             // No recorded predecessor: place as first child under the parent;
             // the org reconciler's disk-order replay finalises sibling order.
             (Some(parent), None) => {
-                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation param
-                // HashMap<String,Value> bag
+                // ALLOW(entity_uri_from_raw): id/parent_id/after_id from
+                // operation param HashMap<String,Value> bag
                 let parent_uri = EntityUri::from_raw(&parent);
                 self.place(&block_uri, &parent_uri, None).await?;
             }

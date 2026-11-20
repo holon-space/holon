@@ -65,8 +65,8 @@ impl KnownReds {
             }
             let key = cols[1].trim().trim_matches('`').trim();
             let status = cols[2].trim();
-            // A cell cannot hold a literal `|`; the registry writes alternation as
-            // `&#124;`.
+            // A cell cannot hold a literal `|`; the registry writes alternation
+            // as `&#124;`.
             let pattern = cols[3]
                 .trim()
                 .trim_matches('`')

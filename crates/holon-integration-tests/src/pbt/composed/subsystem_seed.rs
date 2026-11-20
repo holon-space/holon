@@ -41,7 +41,8 @@ use holon_pbt_core::composition::RunReport;
 use holon_pbt_core::composition::run_selected;
 
 // Fixed-id seeding primitives (`C1`, `fixed_ids`, `seed_ref_tree`) live in
-// `super::seed_primitives` so the windowed slice can share them in the `pbt` build.
+// `super::seed_primitives` so the windowed slice can share them in the `pbt`
+// build.
 use super::seed_primitives::{C1, fixed_ids, seed_ref_tree};
 use crate::pbt::invariants::registry::Subsystem;
 use crate::pbt::reference_capabilities::reference_state_ref_caps;
@@ -177,7 +178,8 @@ pub(crate) async fn run_with_seeded_ref(
     let arc: Resolved<Arc<ReferenceState>> = ref_state.map(Arc::new);
     // Keep a bare `Arc` clone for the off-executor final drop: `ref_caps` holds
     // its own `Arc` clones, so dropping it only decrements the refcount; this
-    // handle carries the last ref and drops the owned tokio `Runtime` off-thread.
+    // handle carries the last ref and drops the owned tokio `Runtime`
+    // off-thread.
     let drop_handle = arc.get().clone();
     let ref_caps = reference_state_ref_caps(arc);
     let report = run_selected(registry, sut, &ref_caps).await;
@@ -194,12 +196,13 @@ pub(crate) async fn run_with_seeded_ref(
 /// this state, so opening an editor for a `{Loro}`/`{}` config would let the
 /// editor transitions generate and then trip the editor-less-SUT panic.
 pub(crate) fn build_started_ref(subsystems: &BTreeSet<Subsystem>) -> ReferenceState {
-    // Model the REAL default-asset layout the booted `full_headless` SUT carries
-    // (the 9 `index.org` blocks + `journals` page shell + `__default__`), not the
-    // single phantom `started-ref-layout-query` that `started_reference_state`
-    // inserts — so `inv-watch-rows-match-ref` (which compares the full `from block`
-    // result set) sees the same blocks on both sides. The real `*::src::0` query
-    // blocks populate `layout_blocks.query_source_ids`, so `is_properly_setup()`
+    // Model the REAL default-asset layout the booted `full_headless` SUT
+    // carries (the 9 `index.org` blocks + `journals` page shell +
+    // `__default__`), not the single phantom `started-ref-layout-query` that
+    // `started_reference_state` inserts — so `inv-watch-rows-match-ref` (which
+    // compares the full `from block` result set) sees the same blocks on both
+    // sides. The real `*::src::0` query blocks populate
+    // `layout_blocks.query_source_ids`, so `is_properly_setup()`
     // (the `SetupWatch` precondition) stays true. Nav focus/history is left to
     // `structural_ref_wired`; the SUT boots fresh (no user index.org), so
     // `fresh=true`.
@@ -215,10 +218,11 @@ pub(crate) fn build_started_ref(subsystems: &BTreeSet<Subsystem>) -> ReferenceSt
         let c1 = fixed_ids().c1;
         let caret = C1.len();
         // Seed navigation focus on `c1` — this is what `current_focus(Main)`
-        // reads (the navigation history, not `focused_entity_id`), mirroring the
-        // production `NavigateFocus` apply: push a history row and advance the
-        // cursor. Without this the editor preconditions' `current_focus(Main)`
-        // check fails and no editor transition ever generates.
+        // reads (the navigation history, not `focused_entity_id`), mirroring
+        // the production `NavigateFocus` apply: push a history row and advance
+        // the cursor. Without this the editor preconditions'
+        // `current_focus(Main)` check fails and no editor transition ever
+        // generates.
         let history = state
             .ui
             .tab

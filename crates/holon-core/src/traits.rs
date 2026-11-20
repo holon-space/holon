@@ -1671,10 +1671,10 @@ where
         let maybe_parent: Option<T> = self.block_authoritative(parent_id).await?;
         let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
 
-        // ADR 0028 D1: outdenting a DIRECT PAGE CHILD would move the block out of
-        // its page container to the page's own level — escaping the page. That
-        // crossing is forbidden. Reject loudly (no structural change); the editor
-        // surfaces this as a user-visible CommandFailed toast.
+        // ADR 0028 D1: outdenting a DIRECT PAGE CHILD would move the block out
+        // of its page container to the page's own level — escaping the page.
+        // That crossing is forbidden. Reject loudly (no structural change); the
+        // editor surfaces this as a user-visible CommandFailed toast.
         //
         // Read the parent's page-ness from the WRITE authority, not `parent`
         // (deserialized from the lagging `block` matview): a seeded / nested
@@ -1713,11 +1713,13 @@ where
             .await?;
 
         // Return inverse: move_block back to old parent after old predecessor.
-        // We can't use indent_op here because indent now resolves the previous sibling
-        // dynamically, which wouldn't restore the exact original position.
+        // We can't use indent_op here because indent now resolves the previous
+        // sibling dynamically, which wouldn't restore the exact original
+        // position.
         use crate::__operations_block_operations;
 
-        // Entity name will be set by OperationProvider when operation is executed
+        // Entity name will be set by OperationProvider when operation is
+        // executed
         let old_pred_uri = old_predecessor;
         Ok(OperationResult::new(
             move_result.changes,
@@ -1821,18 +1823,19 @@ where
             .into());
         }
 
-        // Split content AND partition marks at the cursor. `split_content_marks`
-        // is the single source of truth shared with the keystone reference model:
-        // it applies the same whitespace trimming (left `trim_end`, right
-        // `trim_start`) AND partitions the mark set so a `[[link]]` / `*bold*`
-        // that lies left of the split stays on the retained block (in bounds),
-        // one that lies right moves to the new block rebased, and one that
-        // straddles the split degrades (link → plain text on both sides) or
-        // truncates (formatting → both sides). Before this, split wrote only
-        // `content`: the retained block kept STALE out-of-bounds marks and the
-        // new block got NULL marks, destroying links across a split (dogfood
-        // 2026-07-20). Marks are read off the fetched block, which comes from
-        // the same authority as `content_owned`.
+        // Split content AND partition marks at the cursor.
+        // `split_content_marks` is the single source of truth shared with the
+        // keystone reference model: it applies the same whitespace trimming
+        // (left `trim_end`, right `trim_start`) AND partitions the mark set so
+        // a `[[link]]` / `*bold*` that lies left of the split stays on the
+        // retained block (in bounds), one that lies right moves to the new
+        // block rebased, and one that straddles the split degrades (link →
+        // plain text on both sides) or truncates (formatting → both sides).
+        // Before this, split wrote only `content`: the retained block kept
+        // STALE out-of-bounds marks and the new block got NULL marks,
+        // destroying links across a split (dogfood 2026-07-20). Marks are read
+        // off the fetched block, which comes from the same authority as
+        // `content_owned`.
         let origin_marks: Vec<holon_api::MarkSpan> = block.marks().unwrap_or(&[]).to_vec();
         let holon_api::SplitContentMarks {
             left:
@@ -1850,9 +1853,10 @@ where
         // Identity follows the TEXT. At a position-0 split `id` keeps the whole
         // text — with its marks, the `block_links` backlink rows derived from
         // them, and every `:ID:`-addressed reference — and the minted id takes
-        // the EMPTY block inserted ABOVE. At any other position the prefix keeps
-        // `id` and the minted id takes the tail below it. Either way the block
-        // the reader still sees the referenced text in keeps the referenced id.
+        // the EMPTY block inserted ABOVE. At any other position the prefix
+        // keeps `id` and the minted id takes the tail below it. Either way the
+        // block the reader still sees the referenced text in keeps the
+        // referenced id.
         let at_start = position == 0;
         let (kept_content, kept_marks, minted_content, minted_marks) = if at_start {
             (content_after, right_marks, content_before, left_marks)
@@ -1862,13 +1866,13 @@ where
 
         // Generate new block ID. Mirror the rest of the system's URI
         // convention: SQL `block.id` stores the prefixed form (`block:UUID`)
-        // because `EntityUri::block(uuid)` serializes as `Value::String("block:UUID")`
-        // when blocks land via the parser / CDC. Storing a bare UUID here
-        // would create an id-format mismatch — every later
-        // `get_by_id`, `parent_id` lookup, and `EntityUri::try_from(Value)`
-        // round-trip would silently miss this block.
-        // SEAM(ADR 0029 Inc 5): this unique-random block-id mint is hand-
-        // formatted (D2 prohibition 2). It is NOT migrated to the
+        // because `EntityUri::block(uuid)` serializes as
+        // `Value::String("block:UUID")` when blocks land via the parser / CDC.
+        // Storing a bare UUID here would create an id-format mismatch — every
+        // later `get_by_id`, `parent_id` lookup, and
+        // `EntityUri::try_from(Value)` round-trip would silently miss this
+        // block. SEAM(ADR 0029 Inc 5): this unique-random block-id mint is
+        // hand- formatted (D2 prohibition 2). It is NOT migrated to the
         // `IdentityMinting` witness surface here because `split_block`
         // routes the create through the Loro cell registry when a Loro
         // backing is present — so migrating it touches Loro-side minting,
@@ -1983,8 +1987,8 @@ where
             new_block_fields.insert("collapsed".into(), Value::Boolean(false));
             new_block_fields.insert("widget_only".into(), Value::Boolean(false));
 
-            // Pre-mint the new block's position through the OrderKeyMinting seam
-            // (the SqlOnly Store order owner; the in-memory test substrate
+            // Pre-mint the new block's position through the OrderKeyMinting
+            // seam (the SqlOnly Store order owner; the in-memory test substrate
             // supplies one too), then hand it to `create_at` TYPED: `sort_key`
             // AND the sibling re-keys the key is expressed against, landing in
             // the create's OWN transaction (ADR 0030 D1/D4, amended). The
@@ -2002,13 +2006,13 @@ where
             let (_new_block_id, create_result) = self.create_at(new_block_fields, position).await?;
             changes.extend(create_result.changes);
         } else {
-            // Loro (cell) create path emits no FieldDelta of its own. Fingerprint
-            // the new block's post-split content so the split's inverse
-            // (`restore_join`, which DELETES this block) is dropped LOUDLY if the
-            // block was deleted or edited under a later undo — closing the
-            // stale-guard gap that let an undo-after-delete destroy unrelated
-            // blocks (BugFunnel dogfood #4). `content` is a projected column the
-            // `SqlUndoStateReader` can read.
+            // Loro (cell) create path emits no FieldDelta of its own.
+            // Fingerprint the new block's post-split content so the split's
+            // inverse (`restore_join`, which DELETES this block) is dropped
+            // LOUDLY if the block was deleted or edited under a later undo —
+            // closing the stale-guard gap that let an undo-after-delete destroy
+            // unrelated blocks (BugFunnel dogfood #4). `content` is a projected
+            // column the `SqlUndoStateReader` can read.
             changes.push(FieldDelta::new(
                 new_block_id.clone(),
                 "content",
@@ -2020,11 +2024,11 @@ where
         // Write the origin's half of the split. `set_field("content")`
         // is the single content-write seam: it routes through the cell registry
         // (Loro in Full mode) and falls back to a direct SQL write when no cell
-        // route exists (SqlOnly, synthetic test store, block not yet in the Loro
-        // tree). The value stays a plain String — the cell registry's content
-        // arm only accepts a String, and a Loro String content write already
-        // resets that block's Peritext marks, so marks are re-established by the
-        // dedicated `set_field("marks")` write below.
+        // route exists (SqlOnly, synthetic test store, block not yet in the
+        // Loro tree). The value stays a plain String — the cell registry's
+        // content arm only accepts a String, and a Loro String content write
+        // already resets that block's Peritext marks, so marks are
+        // re-established by the dedicated `set_field("marks")` write below.
         let content_result = self
             .set_field(id_str, "content", Value::String(kept_content))
             .await?;
@@ -2062,18 +2066,18 @@ where
         //
         // Inverse: collapse the split. `restore_join` deletes the minted block
         // and resets the origin's content to its EXACT pre-split value
-        // (`content_owned`, captured before the prefix/suffix whitespace trim) —
-        // so the untrimmed original is restored byte-for-byte, not the trimmed
-        // half. Its own returned inverse re-splits deterministically (same
-        // minted id, same slot — `restore_split` re-anchors on the minted
+        // (`content_owned`, captured before the prefix/suffix whitespace trim)
+        // — so the untrimmed original is restored byte-for-byte, not the
+        // trimmed half. Its own returned inverse re-splits deterministically
+        // (same minted id, same slot — `restore_split` re-anchors on the minted
         // block's recorded predecessor) so redo re-applies.
         use crate::__operations_block_operations;
         Ok(OperationResult::new(
             changes,
             __operations_block_operations::restore_join_op(
-                // OperationDispatcher overwrites this with the resolved entity_name
-                // (see operation_dispatcher.rs:588). Valid placeholder scheme so
-                // EntityName::new's debug-assert passes.
+                // OperationDispatcher overwrites this with the resolved
+                // entity_name (see operation_dispatcher.rs:588). Valid
+                // placeholder scheme so EntityName::new's debug-assert passes.
                 "placeholder",
                 id,
                 content_owned.clone(),
@@ -2313,10 +2317,11 @@ where
             reg.on_entity_deleted(&join_block_uri);
         }
 
-        // Inverse: re-split the merge. `restore_split` recreates the merged-away
-        // block at its recorded slot (after the merge target in the prev-sibling
-        // case, or as first child in the child→parent case) and resets the merge
-        // target's content to its EXACT pre-join value (`target_content`).
+        // Inverse: re-split the merge. `restore_split` recreates the
+        // merged-away block at its recorded slot (after the merge target in the
+        // prev-sibling case, or as first child in the child→parent case) and
+        // resets the merge target's content to its EXACT pre-join value
+        // (`target_content`).
         //
         // Only the leaf case is reversible: when the merged-away block had its
         // own children they were re-parented under the target, and this single
@@ -2342,7 +2347,8 @@ where
             };
             use crate::__operations_block_operations;
             UndoAction::Undo(__operations_block_operations::restore_split_op(
-                // OperationDispatcher overwrites this placeholder (see split_block).
+                // OperationDispatcher overwrites this placeholder (see
+                // split_block).
                 "placeholder",
                 &target_uri,
                 target_content.clone(),
@@ -2446,12 +2452,13 @@ where
         let mut changes = Vec::new();
         if !wrote_via_cell {
             // ALLOW(fallback): SqlOnly / synthetic store — no Loro authority.
-            // Pre-mint the restored block's position through the OrderKeyMinting
-            // seam (anchored after `after_id`, or FIRST when it is `None`) and
-            // hand it to `create_at` TYPED — sort_key AND any sibling re-keys, in
-            // the create's own transaction (ADR 0030 D1/D4, amended). A
-            // deterministic minter reproduces the original key byte-for-byte
-            // between the same neighbours; re-keys never ride a params key.
+            // Pre-mint the restored block's position through the
+            // OrderKeyMinting seam (anchored after `after_id`, or FIRST when it
+            // is `None`) and hand it to `create_at` TYPED — sort_key AND any
+            // sibling re-keys, in the create's own transaction (ADR 0030 D1/D4,
+            // amended). A deterministic minter reproduces the original key
+            // byte-for-byte between the same neighbours; re-keys never ride a
+            // params key.
             let minter = self.order_key_minter().ok_or_else(|| {
                 anyhow::anyhow!(
                     "restore_split's SqlOnly create path requires an OrderKeyMinting seam (the \
@@ -2664,9 +2671,9 @@ where
             self.move_block(id, &parent_uri, None).await?
         };
 
-        // Return inverse (move down - restore original position) using macro-generated
-        // helper Use move_block_op to restore exact old position (move_up_op is
-        // relative, not absolute)
+        // Return inverse (move down - restore original position) using
+        // macro-generated helper Use move_block_op to restore exact old
+        // position (move_up_op is relative, not absolute)
         use crate::__operations_block_operations;
 
         let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
@@ -2791,8 +2798,8 @@ where
             .move_block(id, &parent_uri, Some(&next_sibling_uri))
             .await?;
 
-        // Return inverse (move up - restore original position) using macro-generated
-        // helper
+        // Return inverse (move up - restore original position) using
+        // macro-generated helper
         use crate::__operations_block_operations;
 
         let old_pred_uri = old_predecessor.as_ref().map(|p| p.id().clone());
@@ -3022,8 +3029,8 @@ where
                 // Read through `stored_parent`, because `parent_id()` narrows
                 // the sentinel away to `None`.
                 let old_parent_uri = block.stored_parent();
-                // `is_no_parent` tests the SCHEME, so any `sentinel:` uri passes
-                // — harmless while `no_parent` is the only one minted.
+                // `is_no_parent` tests the SCHEME, so any `sentinel:` uri
+                // passes — harmless while `no_parent` is the only one minted.
                 if !old_parent_uri.is_block() && !old_parent_uri.is_no_parent() {
                     return Err(anyhow::anyhow!(
                         "move_block: block '{id_str}' hangs off '{old_parent_uri}', which is \
@@ -3052,11 +3059,11 @@ where
         //
         // The root sentinel is a legal destination that no read can resolve: it
         // is the FK anchor row, deliberately excluded from the `block` matview
-        // `get_by_id` reads, so looking it up would search the one relation that
-        // hides it. Its page-ness is a fact, not a lookup — the anchor is not a
-        // page — so it is supplied directly and the guard below still runs on
-        // it. The skip is keyed on that exact id: any other unresolvable
-        // destination must still fail.
+        // `get_by_id` reads, so looking it up would search the one relation
+        // that hides it. Its page-ness is a fact, not a lookup — the anchor is
+        // not a page — so it is supplied directly and the guard below still
+        // runs on it. The skip is keyed on that exact id: any other
+        // unresolvable destination must still fail.
         let parent_is_page = match prefetch.new_parent {
             Some(is_page) => is_page,
             None if *parent_id == EntityUri::no_parent() => false,
@@ -3075,21 +3082,21 @@ where
             }
         };
 
-        // No-pages-under-non-pages (interim ruling 2026-07-13, Fork B B1): a page
-        // block may only be reparented under another page (an org file nests only
-        // under an org file). Enforced HERE, at the single shared write chokepoint
-        // for every reparenting op — `move_block` itself plus `indent`/`outdent`/
-        // `move_up`/`move_down`, which all route through it — so both the SQL and
-        // Loro providers (each using this default `BlockOperations` impl) reject it
-        // identically. This is the WRITE-side guard; `name_chain` (writeback) is the
-        // downstream READ-side tripwire. Fail loud rather than let the prohibited
-        // topology land and surface deep in writeback.
-        // ADR 0031 Enforcement: declared EXCLUDED from the catalog's guard
-        // machinery. This judges the PROSPECTIVE parent of a move that has not
-        // happened; a declared guard reads the CURRENT world, where it is
-        // trivially false for exactly this move. Do not swap one for the other
-        // — the truth-table bridge proves agreement over a topology, not this
-        // substitution.
+        // No-pages-under-non-pages (interim ruling 2026-07-13, Fork B B1): a
+        // page block may only be reparented under another page (an org file
+        // nests only under an org file). Enforced HERE, at the single shared
+        // write chokepoint for every reparenting op — `move_block` itself plus
+        // `indent`/`outdent`/ `move_up`/`move_down`, which all route through it
+        // — so both the SQL and Loro providers (each using this default
+        // `BlockOperations` impl) reject it identically. This is the WRITE-side
+        // guard; `name_chain` (writeback) is the downstream READ-side tripwire.
+        // Fail loud rather than let the prohibited topology land and surface
+        // deep in writeback. ADR 0031 Enforcement: declared EXCLUDED from the
+        // catalog's guard machinery. This judges the PROSPECTIVE parent of a
+        // move that has not happened; a declared guard reads the CURRENT world,
+        // where it is trivially false for exactly this move. Do not swap one
+        // for the other — the truth-table bridge proves agreement over a
+        // topology, not this substitution.
         if crate::block_op_catalog::page_under_non_page_prohibited(
             moved_is_page,
             Some(parent_is_page),
@@ -3117,7 +3124,8 @@ where
         // Return inverse operation using macro-generated helper
         use crate::__operations_block_operations;
 
-        // Entity name will be set by OperationProvider when operation is executed
+        // Entity name will be set by OperationProvider when operation is
+        // executed
         Ok(OperationResult::new(
             changes,
             __operations_block_operations::move_block_op(

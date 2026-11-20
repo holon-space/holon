@@ -174,7 +174,8 @@ async fn test_matview_join_block_in_place() {
     let backend = Arc::new(RwLock::new(create_test_backend_at_path(&db_path).await));
 
     tokio::task::block_in_place(|| {
-        // ALLOW(block_on): test deliberately reproduces the sync/async bridge pattern
+        // ALLOW(block_on): test deliberately reproduces the sync/async bridge
+        // pattern
         tokio::runtime::Handle::current().block_on(async {
             let backend_guard = backend.read().await;
             let db = backend_guard.handle();

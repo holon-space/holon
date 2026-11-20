@@ -163,10 +163,10 @@ pub fn resolve_computed_fields_with_scope(
                     warn_missing_declared_column(name, col);
                 }
             }
-            // Do NOT push to scope — absence is the typed "unbound" value, which
-            // propagates to dependent fields and variant conditions (they see it
-            // missing, not as a `unit` that would type-error). Record Null in the
-            // OUTPUT context so consumers keep the field's shape.
+            // Do NOT push to scope — absence is the typed "unbound" value,
+            // which propagates to dependent fields and variant conditions (they
+            // see it missing, not as a `unit` that would type-error). Record
+            // Null in the OUTPUT context so consumers keep the field's shape.
             context.insert(name.clone(), Value::Null);
             outcomes.insert(name.clone(), Ok(()));
             continue;

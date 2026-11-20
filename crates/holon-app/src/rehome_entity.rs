@@ -135,7 +135,8 @@ impl RehomeEntityProvider {
             .map_err(|e| format!("{REHOME_ENTITY_OP}: locating `{id}`: {e}"))?
             .ok_or_else(|| format!("{REHOME_ENTITY_OP}: `{id}` is not a block the store holds"))?;
         let format = match placement.doc {
-            // A resolved document is an org file: that is Holon's only file leg.
+            // A resolved document is an org file: that is Holon's only file
+            // leg.
             DocHome::Resolved(_) => Some(DurableFormat::Org),
             // Neither absence names a file: one has no owner, the other has an
             // owner nothing can currently name.

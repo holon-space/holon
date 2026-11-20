@@ -428,7 +428,8 @@ impl QueryAst {
                 _ => pred_to_sql(filter),
             };
             // An all-aggregate filter renders no conjunct at all; emitting
-            // `WHERE` with nothing after it is the invalid-SQL case this avoids.
+            // `WHERE` with nothing after it is the invalid-SQL case this
+            // avoids.
             if !body.is_empty() {
                 sql.push_str("\nWHERE ");
                 sql.push_str(&body);

@@ -186,7 +186,8 @@ pub(crate) fn owed(progress: &Progress) -> Vec<Owed> {
                 value: format!("processed seq {}", org.processed),
             });
         } else if org.polled < org.changed {
-            // A poll pass reads disk after the queue drained: owed once ingest is.
+            // A poll pass reads disk after the queue drained: owed once ingest
+            // is.
             owed.push(Owed {
                 stage: "org-poll",
                 target: format!("a poll pass started after file change seq {}", org.changed),
@@ -236,7 +237,8 @@ impl EmittedChanges {
                     self.through
                         .fetch_max(change.seq, std::sync::atomic::Ordering::Relaxed);
                 }
-                // The retained changes are the newest, so their max covers the skipped ones.
+                // The retained changes are the newest, so their max covers the
+                // skipped ones.
                 Err(TryRecvError::Lagged(_)) => {}
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Closed) => {
@@ -400,7 +402,8 @@ pub(crate) async fn converge_signals(
         for o in &owing {
             *polls_owed_by_stage.entry(o.stage).or_default() += 1;
         }
-        // The loop's own poll tick would leave each such settle waiting out its period.
+        // The loop's own poll tick would leave each such settle waiting out its
+        // period.
         if let (Some(idle), Some(org)) = (&signals.org_idle, &now_progress.org)
             && owing.iter().any(|o| o.stage == "org-poll")
             && org.changed > poll_requested_for

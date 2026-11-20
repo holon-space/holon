@@ -468,12 +468,13 @@ impl SutBlockInteract for DriverInputComponent {
     async fn drag_drop_block(&self, source: &EntityUri, target: &EntityUri) {
         let (rs, rt) = (self.resolve(source), self.resolve(target));
         let (source, target) = (&rs, &rt);
-        // Single-shot bounds gate against the already-settled frame — the windowed
-        // `drop_entity` reads source+target geometry to synthesize the drag.
+        // Single-shot bounds gate against the already-settled frame — the
+        // windowed `drop_entity` reads source+target geometry to synthesize the
+        // drag.
         self.require_bounds(source, "DragDropBlock(source)");
         self.require_bounds(target, "DragDropBlock(target)");
-        // The screen `UserDriver` ignores the root arg (it drags by geometry); the
-        // layout root is the faithful value a headless driver would warm.
+        // The screen `UserDriver` ignores the root arg (it drags by geometry);
+        // the layout root is the faithful value a headless driver would warm.
         let root = holon_api::root_layout_block_uri();
         let dispatched = self
             .driver()
@@ -490,11 +491,11 @@ impl SutBlockInteract for DriverInputComponent {
         let resolved = self.resolve(block_id);
         let block_id = &resolved;
         // Real chevron flip: `UserDriver::set_block_expanded` synthesizes a
-        // click on the chevron registered under `expand_toggle_id_for(block_id)`,
-        // so the production `on_mouse_down` handler flips the row's view-local
-        // `expanded` Mutable — the same path a user's tap takes. (Previously
-        // `unimplemented!` because no UserDriver verb wrapped this view-local
-        // gesture.)
+        // click on the chevron registered under
+        // `expand_toggle_id_for(block_id)`, so the production `on_mouse_down`
+        // handler flips the row's view-local `expanded` Mutable — the same path
+        // a user's tap takes. (Previously `unimplemented!` because no
+        // UserDriver verb wrapped this view-local gesture.)
         self.driver()
             .set_block_expanded(block_id, true)
             .await
@@ -542,9 +543,10 @@ impl SutBlockInteract for DriverInputComponent {
             .unwrap_or_else(|e| {
                 panic!("[TriggerSlashCommand] focus did not propagate for {block_id}: {e}")
             });
-        // Headless: wait for the focused block's editor cell before the single-char
-        // `/` — a freshly-created block (e.g. a just-split target) may still be landing
-        // its Loro `content_raw`, which the `HeadlessEditorMirror` needs for `/`.
+        // Headless: wait for the focused block's editor cell before the
+        // single-char `/` — a freshly-created block (e.g. a just-split target)
+        // may still be landing its Loro `content_raw`, which the
+        // `HeadlessEditorMirror` needs for `/`.
         self.ensure_editor_ready(block_id, Duration::from_secs(2), "TriggerSlashCommand")
             .await
             .unwrap_or_else(|e| panic!("[TriggerSlashCommand] {e}"));
@@ -586,9 +588,10 @@ impl SutBlockInteract for DriverInputComponent {
     }
 
     async fn press_key(&self, chord: &holon_api::KeyChord) {
-        // Faithful port of `E2ESut::SutBlockInteract::press_key`: split the chord
-        // into modifiers + regular keys and forward each as a raw keystroke. The
-        // `ref_state`-dependent Enter-split post-action lives in the harness seam.
+        // Faithful port of `E2ESut::SutBlockInteract::press_key`: split the
+        // chord into modifiers + regular keys and forward each as a raw
+        // keystroke. The `ref_state`-dependent Enter-split post-action lives in
+        // the harness seam.
         use holon_api::Key;
         let driver = self.driver();
         let modifiers: Vec<String> = chord
@@ -623,9 +626,9 @@ impl SutBlockInteract for DriverInputComponent {
     }
 
     async fn click_at_element(&self, element_id: &str) {
-        // Faithful port of `E2ESut::click_at_element`: infer the region from the
-        // id prefix, unwrap a `<kind>::<uri>` geometry handle to its target block
-        // uri, and click through the production driver.
+        // Faithful port of `E2ESut::click_at_element`: infer the region from
+        // the id prefix, unwrap a `<kind>::<uri>` geometry handle to its target
+        // block uri, and click through the production driver.
         let region = if element_id.contains("left-sidebar") || element_id.contains("left_sidebar") {
             "left_sidebar"
         } else if element_id.contains("right-sidebar") || element_id.contains("right_sidebar") {
@@ -663,19 +666,20 @@ impl SutBlockInteract for DriverInputComponent {
             return;
         }
         // A drawer handle is NOT its panel block: clicking the block resolves
-        // the sidebar row's `navigation_focus` and degrades to bare focus, while
-        // the handle's production handler flips the drawer's open state. No
-        // medium here renders the handle widget, so drive the same write the
+        // the sidebar row's `navigation_focus` and degrades to bare focus,
+        // while the handle's production handler flips the drawer's open state.
+        // No medium here renders the handle widget, so drive the same write the
         // handler performs — the `expand_toggle`/`state_toggle` precedent.
         if kind == Some("drawer_toggle") {
             self.toggle_rendered_drawer(target).await;
             return;
         }
-        // A VMS button is a view-local closure in GPUI, never an `OperationIntent`,
-        // so nothing in the resolved tree answers it headlessly. Unwrapping the
-        // handle would yield `block:<id>::<mode>` — a syntactically valid URI no
-        // entity carries — and `click_entity` degrades an unresolvable target to
-        // bare focus, turning the switch into a silent no-op. Refuse instead.
+        // A VMS button is a view-local closure in GPUI, never an
+        // `OperationIntent`, so nothing in the resolved tree answers it
+        // headlessly. Unwrapping the handle would yield `block:<id>::<mode>` —
+        // a syntactically valid URI no entity carries — and `click_entity`
+        // degrades an unresolvable target to bare focus, turning the switch
+        // into a silent no-op. Refuse instead.
         if kind == Some("vms_button") {
             panic!(
                 "[click_at_element] {element_id:?} is a view_mode_switcher button, which the \
@@ -737,20 +741,21 @@ impl SutArrowNavigate for DriverInputComponent {
 
 impl CapProvider for DriverInputComponent {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
-        // `SutDriver` (the window-focus read) is a WINDOWED cap: its consumers are
-        // the windowed focus invariants (`inv-focus-matches-ref`,
-        // `inv-window-focus-matches-engine-focus`). The headless VM-rung build does
-        // NOT provide it — `engine_focused_block` is honestly `None` for a non-editor
-        // page block headless, so claiming the cap would select those windowed
-        // invariants over a focus signal they were never meant to read (faked cap).
+        // `SutDriver` (the window-focus read) is a WINDOWED cap: its consumers
+        // are the windowed focus invariants (`inv-focus-matches-ref`,
+        // `inv-window-focus-matches-engine-focus`). The headless VM-rung build
+        // does NOT provide it — `engine_focused_block` is honestly `None` for a
+        // non-editor page block headless, so claiming the cap would select
+        // those windowed invariants over a focus signal they were never meant
+        // to read (faked cap).
         if self.headless_driver.is_none() {
             caps.insert(self.clone() as Arc<dyn SutDriver>);
         }
-        // The input caps are provided ONLY when a real `UserDriver` is installed
-        // (the `window_input_wide` build, or the headless VM-rung build). A
-        // focus-only `window_focus_wide` component reads focus but cannot honestly
-        // drive, so it must not claim these caps — keeping its `cap_set()` (and the
-        // transition alphabet it would gate) unchanged.
+        // The input caps are provided ONLY when a real `UserDriver` is
+        // installed (the `window_input_wide` build, or the headless VM-rung
+        // build). A focus-only `window_focus_wide` component reads focus but
+        // cannot honestly drive, so it must not claim these caps — keeping its
+        // `cap_set()` (and the transition alphabet it would gate) unchanged.
         if self.driver.is_some() {
             caps.insert(self.clone() as Arc<dyn SutBlockInteract>);
             caps.insert(self as Arc<dyn SutArrowNavigate>);

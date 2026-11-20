@@ -533,7 +533,8 @@ mod tests {
     fn parenthesised_prose_is_not_a_link() {
         assert!(link_marks("((rate*(x)))").is_empty());
         assert!(link_marks("total ((a+b)) done").is_empty());
-        // The bracket form still admits a wiki name — only `((…)` is restricted.
+        // The bracket form still admits a wiki name — only `((…)` is
+        // restricted.
         assert_eq!(link_marks("see [[Project Beta]]").len(), 1);
     }
 

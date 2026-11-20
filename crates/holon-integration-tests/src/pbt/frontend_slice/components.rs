@@ -761,11 +761,12 @@ impl HeadlessFrontendComponent {
             }
             let Some(bare) = id else { continue };
             // Skip the `__default__` layout file (`index.org`): the session's
-            // `build_default_layout_blocks` writes it to disk at boot, but the org
-            // readers DELIBERATELY exclude it from the comparison surface (like
-            // `soak-*` docs and unlike `org_paths` user docs) — the ref models the
-            // layout as blocks, not as an org file, so parsing it back would drag
-            // the whole 3-column layout subtree into `/org` and false-diverge.
+            // `build_default_layout_blocks` writes it to disk at boot, but the
+            // org readers DELIBERATELY exclude it from the comparison surface
+            // (like `soak-*` docs and unlike `org_paths` user docs) — the ref
+            // models the layout as blocks, not as an org file, so parsing it
+            // back would drag the whole 3-column layout subtree into `/org` and
+            // false-diverge.
             if bare == default_doc_bare {
                 continue;
             }
@@ -1033,18 +1034,19 @@ impl HeadlessFrontendComponent {
             holon_filesystem::FileSystem::write(org_fs.as_ref(), &file_path, content.as_bytes())
                 .await
                 .expect("write seed org file");
-            // Scale-soak vault docs (`soak-*.org`) are background LOAD: written to disk
-            // (so the session's file-sync ingests them into the store — the whole point)
-            // but NOT tracked in `org_paths`. Tracking them would drag thousands of
-            // oracle-unknown blocks into the org readers (`SutOrgRead` /
-            // `SutOrgRender` / the external-mutation doc rewriter) and false-RED
-            // `inv-blocks-match-ref/org`. The org invariants keep the keystone-sized
-            // comparison surface; the soak load is exercised via store/CDC/Loro.
-            // A non-org seed file (the read-only `.cook` recipe) is written to
-            // the vault so the file-sync controller ingests it, but never
-            // tracked: the org readers (`SutOrgRead` / `SutOrgRender`) parse
-            // what they are handed AS org, and a cooklang file parsed as org is
-            // a divergence the fixture invented.
+            // Scale-soak vault docs (`soak-*.org`) are background LOAD: written
+            // to disk (so the session's file-sync ingests them into the store —
+            // the whole point) but NOT tracked in `org_paths`. Tracking them
+            // would drag thousands of oracle-unknown blocks into the org
+            // readers (`SutOrgRead` / `SutOrgRender` / the external-mutation
+            // doc rewriter) and false-RED `inv-blocks-match-ref/org`. The org
+            // invariants keep the keystone-sized comparison surface; the soak
+            // load is exercised via store/CDC/Loro. A non-org seed file (the
+            // read-only `.cook` recipe) is written to the vault so the
+            // file-sync controller ingests it, but never tracked: the org
+            // readers (`SutOrgRead` / `SutOrgRender`) parse what they are
+            // handed AS org, and a cooklang file parsed as org is a divergence
+            // the fixture invented.
             if !filename.starts_with("soak-") && filename.ends_with(".org") {
                 org_paths.push(file_path);
             }
@@ -1283,8 +1285,8 @@ impl HeadlessFrontendComponent {
         session_config.timings = params.timings.clone();
         let org_fs_for_di = org_fs.clone();
         let secret_namespace = config_dir.clone();
-        // Capture the DI injector (for `SutOrgRender`'s `QueryableCache<Block>` →
-        // `CacheBlockReader`, the production ordered doc-scoped read).
+        // Capture the DI injector (for `SutOrgRender`'s `QueryableCache<Block>`
+        // → `CacheBlockReader`, the production ordered doc-scoped read).
         let injector_slot: Arc<std::sync::OnceLock<fluxdi::Injector>> =
             Arc::new(std::sync::OnceLock::new());
         let injector_slot_c = injector_slot.clone();
@@ -1388,11 +1390,11 @@ impl HeadlessFrontendComponent {
         Self::await_layout_seed(&engine).await;
 
         if settle > Duration::ZERO {
-            // Boot settle: tolerate non-convergence (the result is dropped) — the
-            // sync controller / idle signal resolve on a spawned `post_ready_work`
-            // task, so a not-yet-wired signal at boot is expected, not a race. The
-            // per-transition composed settle, and `reboot`'s own convergence, are
-            // the ones that fail loud.
+            // Boot settle: tolerate non-convergence (the result is dropped) —
+            // the sync controller / idle signal resolve on a spawned
+            // `post_ready_work` task, so a not-yet-wired signal at boot is
+            // expected, not a race. The per-transition composed settle, and
+            // `reboot`'s own convergence, are the ones that fail loud.
             let _boot_converged = Self::converge_boot(
                 &engine,
                 injector_slot
@@ -1514,14 +1516,14 @@ impl HeadlessFrontendComponent {
             // Register the file's tracked doc id. A file WITH headline blocks
             // takes the doc id from the first block's `parent_id` (the doc root
             // the parser reconstructs from `#+ID:`). A file with ZERO headline
-            // blocks — a bare page-file like `<page>.org` = `#+ID: <page>\n`, the
-            // on-disk form of a page that owns its own file — must STILL be
+            // blocks — a bare page-file like `<page>.org` = `#+ID: <page>\n`,
+            // the on-disk form of a page that owns its own file — must STILL be
             // tracked: its doc root is `parsed.document.id`, and `SutOrgRender`
-            // has to surface it so the writeback oracles can observe that the page
-            // has its own file and that a folder companion de-inlined it (Fork B).
-            // Skipping zero-block files (the old behavior) made every page-file
-            // invisible to the org readers, so a companion could silently keep or
-            // drop it with no oracle able to see either.
+            // has to surface it so the writeback oracles can observe that the
+            // page has its own file and that a folder companion de-inlined it
+            // (Fork B). Skipping zero-block files (the old behavior) made every
+            // page-file invisible to the org readers, so a companion could
+            // silently keep or drop it with no oracle able to see either.
             let doc_id = parsed
                 .blocks
                 .first()
@@ -1630,8 +1632,8 @@ impl HeadlessFrontendComponent {
         self.invalidate_render_cache();
 
         // TAKE the boot out rather than cloning it: the replacement must be
-        // built while this component holds NO handle on the dead one, or the old
-        // ReactiveEngine / FrontendSession / file-sync tasks run against a
+        // built while this component holds NO handle on the dead one, or the
+        // old ReactiveEngine / FrontendSession / file-sync tasks run against a
         // shut-down `db_handle` for the whole second boot. The caller's own
         // clones (cap map, slice handle) are released before this is reached —
         // `composed::wide_e2e::reboot_wide` asserts that.
@@ -1813,10 +1815,10 @@ impl HeadlessFrontendComponent {
         );
 
         // A reboot must RE-OPEN the store, never re-seed it. If the second boot
-        // re-ingested the seed tree or re-minted pages, the block set would grow
-        // and every post-reboot oracle would be comparing against a doubled
-        // vault while still passing its own shape checks. Assert the identity
-        // here, where the two sets are both in hand.
+        // re-ingested the seed tree or re-minted pages, the block set would
+        // grow and every post-reboot oracle would be comparing against a
+        // doubled vault while still passing its own shape checks. Assert the
+        // identity here, where the two sets are both in hand.
         //
         // A crash restart is the exception: the boot legitimately re-ingests a
         // file that is behind its store, so what the block set becomes is the
@@ -2274,9 +2276,9 @@ impl HeadlessFrontendComponent {
     /// query pre-compiled at the transition boundary.
     fn register_watch_compiled(&self, query_id: &str, source: String, lang: QueryLanguage) {
         let services: Arc<dyn BuilderServices> = self.reactive();
-        // A `table` with no `item_template`: this seat keeps the watch guard and
-        // drops the tree, and the invariants over these watches read ROWS from
-        // the registry. Declaring `render_entity()` here would bind every
+        // A `table` with no `item_template`: this seat keeps the watch guard
+        // and drops the tree, and the invariants over these watches read ROWS
+        // from the registry. Declaring `render_entity()` here would bind every
         // generated projection to the block profile's full requirement
         // manifest, so a deliberately narrow generated SELECT would report a
         // gap no render can suffer.
@@ -2998,7 +3000,8 @@ fn inject_display_placed(mut snap: WidgetSnapshot) -> WidgetSnapshot {
     if !display_placed_active() {
         return snap;
     }
-    // The canonical block to display-place — always exists in the keystone seed.
+    // The canonical block to display-place — always exists in the keystone
+    // seed.
     let canonical_id = "block:parent";
     let anchor_id = "block:default-main-panel";
     let occ = holon_api::OccurrenceId::for_placement(
@@ -3056,11 +3059,11 @@ impl SutRenderer for HeadlessFrontendComponent {
 
     async fn widget_tree_snapshot(&self) -> WidgetSnapshot {
         // Per-tick memo (see `render_snapshot_cache` docs): when ARMED on the
-        // composed path, all snapshot-reading invariants in one check tick share
-        // ONE recompute. OFF by default, so every other consumer recomputes the
-        // snapshot exactly as before — no stale-frame risk. The composed harness
-        // clears the memo before each mutation, so an armed memo only ever holds
-        // settled state.
+        // composed path, all snapshot-reading invariants in one check tick
+        // share ONE recompute. OFF by default, so every other consumer
+        // recomputes the snapshot exactly as before — no stale-frame risk. The
+        // composed harness clears the memo before each mutation, so an armed
+        // memo only ever holds settled state.
         let armed = self
             .render_cache_enabled
             .load(std::sync::atomic::Ordering::Acquire);
@@ -3298,11 +3301,12 @@ impl holon_pbt_core::capabilities::SutSearch for HeadlessFrontendComponent {
 #[async_trait::async_trait(?Send)]
 impl SutBackend for HeadlessFrontendComponent {
     async fn live_block_snapshot(&self) -> Vec<Block> {
-        // The `inv-blocks-match-ref/matview` reader reads the `block` MATVIEW, which
-        // carries the `tags`/`requires` edge fields as `json_group_array` columns —
-        // NOT the base `block_raw` table (`all_blocks`), which has no `tags` column and
-        // would parse junction-only edge fields (e.g. a CreateDocument `Page` tag) as
-        // empty and falsely diverge from the reference.
+        // The `inv-blocks-match-ref/matview` reader reads the `block` MATVIEW,
+        // which carries the `tags`/`requires` edge fields as `json_group_array`
+        // columns — NOT the base `block_raw` table (`all_blocks`), which has no
+        // `tags` column and would parse junction-only edge fields (e.g. a
+        // CreateDocument `Page` tag) as empty and falsely diverge from the
+        // reference.
         let rows = self
             .engine()
             .db_handle()
@@ -3419,7 +3423,8 @@ impl SutViewSelection for HeadlessFrontendComponent {
     // (C-5 split, 2026-07-02) — the root-VM / emission invariants honestly
     // DESELECT here instead of running vacuously against honest-empty shadows.
     // `current_view` is real tracked state; `drain_vm_emissions` dies with
-    // `CachingProxy`. Only `headless_error_node_count` carries real teeth today.
+    // `CachingProxy`. Only `headless_error_node_count` carries real teeth
+    // today.
     async fn drain_vm_emissions(&mut self) -> Vec<String> {
         Vec::new()
     }
@@ -3459,12 +3464,12 @@ impl SutWatch for HeadlessFrontendComponent {
         let Some(key) = key else {
             return Vec::new();
         };
-        // Settle to a stable row count. A query watch clears `is_loading` (it has a
-        // render expr) BEFORE its spawned CDC pump task delivers the initial result
-        // batch from `session.watch_query`, so a single `!is_loading` read races to
-        // empty. Poll the snapshot to a fixed point instead (count unchanged for a
-        // few reads) — converges fast for an empty watch (0,0,0) and a populated one
-        // (…,N,N,N alike).
+        // Settle to a stable row count. A query watch clears `is_loading` (it
+        // has a render expr) BEFORE its spawned CDC pump task delivers the
+        // initial result batch from `session.watch_query`, so a single
+        // `!is_loading` read races to empty. Poll the snapshot to a fixed point
+        // instead (count unchanged for a few reads) — converges fast for an
+        // empty watch (0,0,0) and a populated one (…,N,N,N alike).
         let rqr = self.reactive().ensure_watching(&key);
         let deadline = tokio::time::Instant::now() + soak_deadline(Duration::from_secs(3));
         let mut last = usize::MAX;
@@ -3533,10 +3538,11 @@ impl SutOrgRead for HeadlessFrontendComponent {
         use holon_filesystem::FileSystem;
         use holon_orgmode::parser::parse_org_file;
 
-        // Boot org files PLUS any doc files created mid-run (`create_document` tracks
-        // them in `documents` but not the boot-fixed `org_paths`); without the union a
-        // `CreateDocument`+`BulkExternalAdd` doc's on-disk blocks are never read and
-        // `/org` false-diverges (oracle has them, SUT-org misses them).
+        // Boot org files PLUS any doc files created mid-run (`create_document`
+        // tracks them in `documents` but not the boot-fixed `org_paths`);
+        // without the union a `CreateDocument`+`BulkExternalAdd` doc's on-disk
+        // blocks are never read and `/org` false-diverges (oracle has them,
+        // SUT-org misses them).
         let mut paths: Vec<PathBuf> = self.org_paths().to_vec();
         for (_, p) in self.documents.lock().expect("documents lock").iter() {
             if !paths.contains(p) {
@@ -3545,13 +3551,14 @@ impl SutOrgRead for HeadlessFrontendComponent {
         }
         // Fork B: also parse page-files the writeback MATERIALIZED after boot
         // (a rule-minted journal date + its later-added children live in
-        // `Journals/{date}.org`, which is neither in `org_paths` nor `documents`).
-        // Without this the date page's children are invisible to `/org` and
-        // `inv-blocks-match-ref/org` false-diverges (oracle has them, SUT-org misses
-        // them) — the same disk scan `snapshot_org_render_pairs` uses. (The parse
-        // gives each child `parent_id = file_id`, the date page id, matching the
-        // ref; the doc-root itself is not in `result.blocks`, so its own parent is
-        // moot — no subdir-parent resolution needed.)
+        // `Journals/{date}.org`, which is neither in `org_paths` nor
+        // `documents`). Without this the date page's children are invisible to
+        // `/org` and `inv-blocks-match-ref/org` false-diverges (oracle has
+        // them, SUT-org misses them) — the same disk scan
+        // `snapshot_org_render_pairs` uses. (The parse gives each child
+        // `parent_id = file_id`, the date page id, matching the
+        // ref; the doc-root itself is not in `result.blocks`, so its own parent
+        // is moot — no subdir-parent resolution needed.)
         let tracked: std::collections::HashSet<PathBuf> = paths.iter().cloned().collect();
         for (_, path) in self.materialized_doc_files_absent_from(&tracked).await {
             paths.push(path);
@@ -3738,10 +3745,11 @@ impl SutOrgRender for HeadlessFrontendComponent {
         }
 
         // Fork B / LogSeq-parity: also render page-files the production
-        // `FileSyncController` MATERIALIZED reactively after boot (a rule-minted
-        // journal date + its later-added children, `convert_block_to_page`, the B2
-        // sweep) — NOT in the boot-tracked `documents` list but on the shared
-        // `org_fs`. Else `inv-every-page-has-its-own-file` / `inv-org-render-fixed-
+        // `FileSyncController` MATERIALIZED reactively after boot (a
+        // rule-minted journal date + its later-added children,
+        // `convert_block_to_page`, the B2 sweep) — NOT in the boot-tracked
+        // `documents` list but on the shared `org_fs`. Else
+        // `inv-every-page-has-its-own-file` / `inv-org-render-fixed-
         // point` false-RED a page that DOES own a file. Shared disk scan with
         // `org_block_snapshot`.
         for (doc_uri, path) in self
@@ -3799,24 +3807,26 @@ impl HeadlessFrontendComponent {
     /// (the HIGHEST-available rung when a window exists) while the headless
     /// base keeps its VM-rung `ReactiveEngineDriver`.
     pub(crate) async fn apply_navigate_focus_via(&self, driver: &dyn UserDriver, id: &EntityUri) {
-        // Focus is set by CLICKING the LeftSidebar entry through `driver` — the SAME
-        // way a real user (and E2ESut, and the sibling
+        // Focus is set by CLICKING the LeftSidebar entry through `driver` — the
+        // SAME way a real user (and E2ESut, and the sibling
         // `apply_focus_editable_text_via`) does it, NOT a synthesized
         // `navigation.focus` dispatch that skips the UI. The click-intent
-        // resolver dispatches the entry's bound `navigation.focus(region:"main")`
-        // action (find_click_intent -> apply_intent -> dispatch_intent), which
-        // mirrors focus into `engine.focused_block()` AND writes the SQL nav
-        // tables — so both the headless keystone (focus read deselected) and
-        // the WINDOWED SUT (window `SutDriver` reads `engine.focused_block()`)
-        // see a faithful, consistent focus. The generator
-        // restricts `NavigateFocus` to `Region::Main` on sidebar-listed pages, so the
-        // click always targets the `left_sidebar` entry.
+        // resolver dispatches the entry's bound
+        // `navigation.focus(region:"main")` action (find_click_intent ->
+        // apply_intent -> dispatch_intent), which mirrors focus into
+        // `engine.focused_block()` AND writes the SQL nav tables — so both the
+        // headless keystone (focus read deselected) and the WINDOWED SUT
+        // (window `SutDriver` reads `engine.focused_block()`) see a faithful,
+        // consistent focus. The generator restricts `NavigateFocus` to
+        // `Region::Main` on sidebar-listed pages, so the click always targets
+        // the `left_sidebar` entry.
         let id = self.resolve_id(id);
         // prod's `navigation.focus` is idempotent on the region's current
         // target: `NavigationProvider::focus` returns before writing anything,
         // so the click produces no CDC emission for the driver's barrier to
         // observe. Skip both — the reference model skips the same case in
-        // `NavigateFocus::apply_to_ref`, so the no-op is recorded on both sides.
+        // `NavigateFocus::apply_to_ref`, so the no-op is recorded on both
+        // sides.
         if self.current_main_focus().await.as_deref() == Some(id.as_str()) {
             tracing::debug!(
                 block_id = %id,
@@ -3825,9 +3835,9 @@ impl HeadlessFrontendComponent {
             return;
         }
         // Do not let the click outrun the async sidebar render: wait until the
-        // target's `navigation.focus` intent is actually bound, so `click_entity`
-        // dispatches the nav SQL write instead of silently falling through to an
-        // in-memory `set_focus`.
+        // target's `navigation.focus` intent is actually bound, so
+        // `click_entity` dispatches the nav SQL write instead of silently
+        // falling through to an in-memory `set_focus`.
         self.await_sidebar_nav_intent(&id).await;
         driver
             .click_entity(&id, "left_sidebar")
@@ -3860,13 +3870,14 @@ impl HeadlessFrontendComponent {
             )
         });
         // Inc 4: open the editor's VM seeded from authority even when the block
-        // was ALREADY focused (so `click_entity` skipped `seed_for_click`), e.g.
-        // a freshly-created block. Without this the VM is created lazily only on
-        // the first keystroke, and a focused-but-untyped editor falls back to
-        // the cell read — the VM read+converge path would be type-only. Seeds
-        // via the SAME concrete headless driver whose mirror `SutEditorMirrorRead`
-        // reads (self.driver()), not the passed `driver` (which may be a window
-        // driver in the windowed overlay, where the editor lives elsewhere).
+        // was ALREADY focused (so `click_entity` skipped `seed_for_click`),
+        // e.g. a freshly-created block. Without this the VM is created lazily
+        // only on the first keystroke, and a focused-but-untyped editor falls
+        // back to the cell read — the VM read+converge path would be type-only.
+        // Seeds via the SAME concrete headless driver whose mirror
+        // `SutEditorMirrorRead` reads (self.driver()), not the passed `driver`
+        // (which may be a window driver in the windowed overlay, where the
+        // editor lives elsewhere).
         self.driver_concrete().seed_focused_editor(id).await.unwrap_or_else(|e| {
             panic!("[SutFocusWrite::apply_focus_editable_text] seed editor VM for {id} failed: {e:#}")
         });
@@ -3934,9 +3945,10 @@ impl HeadlessFrontendComponent {
             .focused_block()
             .expect("[apply_move_cursor] no focused block — FocusEditableText must run first");
         // Same precedence `HeadlessEditorMirror::handle_keystroke` walks: the
-        // block's editor VM buffer is the authority, and it is the ONLY source in
-        // SqlOnly mode (no Loro cell, so `editable_text` is `Err` there and a
-        // blanket `unwrap_or_default` would convert every position against `""`).
+        // block's editor VM buffer is the authority, and it is the ONLY source
+        // in SqlOnly mode (no Loro cell, so `editable_text` is `Err` there and
+        // a blanket `unwrap_or_default` would convert every position against
+        // `""`).
         let text = self
             .driver_concrete()
             .editor_live_text(&block)
@@ -3975,11 +3987,12 @@ impl SutEditorMirrorRead for HeadlessFrontendComponent {
     }
 
     fn editor_live_text(&self, block_id: &EntityUri) -> Result<String, String> {
-        // Inc 4: the authority is the block's cell-free editor VM buffer owned by
-        // the driver's `HeadlessEditorMirror` (the pre-commit value keystrokes
-        // mutate, which after an own trailing-whitespace echo can legitimately
-        // diverge from the SQL-trimmed `block.content`). Fall back to the Loro
-        // MutableText for a focused-but-not-yet-opened editor (no VM yet).
+        // Inc 4: the authority is the block's cell-free editor VM buffer owned
+        // by the driver's `HeadlessEditorMirror` (the pre-commit value
+        // keystrokes mutate, which after an own trailing-whitespace echo can
+        // legitimately diverge from the SQL-trimmed `block.content`). Fall back
+        // to the Loro MutableText for a focused-but-not-yet-opened editor (no
+        // VM yet).
         if let Some(text) = self.driver_concrete().editor_live_text(block_id) {
             return Ok(text);
         }
@@ -4161,8 +4174,9 @@ impl SutAdviceMatview for HeadlessFrontendComponent {
             .collect();
         let mut out = Vec::new();
         for name in names {
-            // `name` came verbatim from sqlite_master, so it is a live identifier;
-            // interpolating it is sound (no user-controlled string reaches here).
+            // `name` came verbatim from sqlite_master, so it is a live
+            // identifier; interpolating it is sound (no user-controlled string
+            // reaches here).
             let rows = self
                 .sql_query(&format!(
                     "SELECT anchor_id, lesson_id, shared_tag_count FROM {name}"
@@ -4235,15 +4249,16 @@ impl SutMatviews for HeadlessFrontendComponent {
             {
                 continue;
             }
-            // Strip the `CREATE MATERIALIZED VIEW <name> AS ` prefix via the first
-            // case-insensitive ` AS ` — fail loud if the DDL shape is unexpected.
+            // Strip the `CREATE MATERIALIZED VIEW <name> AS ` prefix via the
+            // first case-insensitive ` AS ` — fail loud if the DDL shape is
+            // unexpected.
             let as_at = sql
                 .to_lowercase()
                 .find(" as ")
                 .expect("materialized view DDL must contain ' AS '");
             let select_sql = sql[as_at + 4..].to_string();
-            // Context-param / placeholder views are out of scope for Inc 1: skip
-            // WITH DISCLOSURE rather than mis-recompute (plan §1).
+            // Context-param / placeholder views are out of scope for Inc 1:
+            // skip WITH DISCLOSURE rather than mis-recompute (plan §1).
             if has_bind_placeholder(&select_sql) {
                 eprintln!(
                     "[inv-matview-consistent-with-recompute] SKIP view {name}: \
@@ -4792,16 +4807,17 @@ impl SutClockAdvance for HeadlessFrontendComponent {
         holon::sync::clock_scheduler::reconcile_clock(self.engine().db_handle(), clock.as_ref())
             .await
             .expect("reconcile_clock after advancing the injected clock");
-        // The journal auto-create action fires REACTIVELY off the clock-relation
-        // CDC (action_watcher → `block.create`), so the new day-block lands AFTER
-        // `reconcile_clock` returns. Settle the projections here, so
-        // (a) the block exists before this tick's invariants read it, and (b) the
-        // per-tick `converge_projections` that follows (which waits on the
-        // org-writeback idle signal) actually MATERIALIZES the new journal's
-        // `Journals/{date}.org` file — otherwise a rollover as the LAST transition
-        // races the writeback and `inv-every-page-has-its-own-file` reads a
-        // still-fileless page. A same-day re-tick (`days == 0`) is a no-op create,
-        // so this returns immediately.
+        // The journal auto-create action fires REACTIVELY off the
+        // clock-relation CDC (action_watcher → `block.create`), so the new
+        // day-block lands AFTER `reconcile_clock` returns. Settle the
+        // projections here, so (a) the block exists before this tick's
+        // invariants read it, and (b) the per-tick `converge_projections` that
+        // follows (which waits on the org-writeback idle signal) actually
+        // MATERIALIZES the new journal's `Journals/{date}.org` file — otherwise
+        // a rollover as the LAST transition races the writeback and
+        // `inv-every-page-has-its-own-file` reads a still-fileless page. A
+        // same-day re-tick (`days == 0`) is a no-op create, so this returns
+        // immediately.
         self.settle_projections("advance_clock_days").await;
         holon_api::CalendarDate::from_clock(clock.as_ref()).ymd()
     }
@@ -4905,11 +4921,12 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
             holon_api::Region::RightSidebar,
             "the block bullet's shift_action pins into the right sidebar only"
         );
-        // Resolve the oracle id → SUT-real id: the production `PinBlock` generator
-        // draws its target from the oracle's editable descendants, which after a
-        // `SplitBlock` include the synthetic `block::split-N`. Clicking a synthetic
-        // id would pin a GHOST (the matview's `focus_roots` would then hold
-        // the synthetic while the resolved oracle holds the real id → divergence).
+        // Resolve the oracle id → SUT-real id: the production `PinBlock`
+        // generator draws its target from the oracle's editable descendants,
+        // which after a `SplitBlock` include the synthetic `block::split-N`.
+        // Clicking a synthetic id would pin a GHOST (the matview's
+        // `focus_roots` would then hold the synthetic while the resolved oracle
+        // holds the real id → divergence).
         let resolved = self.resolve_id(block_id);
         self.driver_concrete()
             .click_entity_with_modifiers(
@@ -4972,8 +4989,9 @@ impl SutNavHistoryDrive for HeadlessFrontendComponent {
     }
 
     async fn unpin_block(&self, history_id: i64) {
-        // `close` takes only `history_id` (no region — provider handles it before
-        // region extraction). Pass `Main` as a placeholder; it is ignored.
+        // `close` takes only `history_id` (no region — provider handles it
+        // before region extraction). Pass `Main` as a placeholder; it is
+        // ignored.
         self.dispatch_navigation("close", holon_api::Region::Main, None, Some(history_id))
             .await;
     }
@@ -5029,11 +5047,11 @@ impl HeadlessFrontendComponent {
         let click_count = self.toggle_click_count(&id, new_state).await;
         let mut current = self.block_task_state(&id).await.unwrap_or_default();
         for n in 0..click_count {
-            // Click the `state_toggle` GLYPH (not a plain row click, which would
-            // just focus): `cycle_state_toggle` targets the widget's own
-            // `set_field` cycle dispatch — geometry hit-test on a window driver,
-            // resolved-tree intent on the headless driver, the `cycle_task_state`
-            // chord on the TUI.
+            // Click the `state_toggle` GLYPH (not a plain row click, which
+            // would just focus): `cycle_state_toggle` targets the widget's own
+            // `set_field` cycle dispatch — geometry hit-test on a window
+            // driver, resolved-tree intent on the headless driver, the
+            // `cycle_task_state` chord on the TUI.
             let verb = driver
                 .cycle_state_toggle(&id, "main")
                 .await
@@ -5299,10 +5317,10 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         // Fork B: also rewrite page-files the writeback MATERIALIZED after boot
         // (a rule-minted journal date page). Without this, an External mutation
         // that adds a child UNDER the date page never writes it to
-        // `Journals/{date}.org` (the page is not in `documents`), so the child is
-        // never ingested — SUT-arm INGEST DATA LOSS (the child present in the ref
-        // but absent from block_raw/sql/matview/loro). Excludes the `__default__`
-        // layout file (see `materialized_doc_files_absent_from`).
+        // `Journals/{date}.org` (the page is not in `documents`), so the child
+        // is never ingested — SUT-arm INGEST DATA LOSS (the child present in
+        // the ref but absent from block_raw/sql/matview/loro). Excludes the
+        // `__default__` layout file (see `materialized_doc_files_absent_from`).
         let tracked: std::collections::HashSet<PathBuf> =
             docs_snapshot.iter().map(|(_, p)| p.clone()).collect();
         docs_snapshot.extend(self.materialized_doc_files_absent_from(&tracked).await);
@@ -5343,12 +5361,13 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             .unwrap_or_else(|| {
                 panic!("[bulk_external_add] no file for doc {doc_uri} (resolved {resolved_doc})")
             });
-        // New blocks are born with their oracle ids (`block:bulk-N-i`) → write verbatim
-        // (matched born-equal). Only resolve parent refs to pre-existing entities (the
-        // doc); refs to sibling bulk-N-k stay (born too, present in `current`
-        // after this loop). Matview snapshot (not `all_blocks`) so the doc
-        // block's `Page` tag survives — see `apply_mutation` above for why
-        // block_raw's missing tags would wipe the tree.
+        // New blocks are born with their oracle ids (`block:bulk-N-i`) → write
+        // verbatim (matched born-equal). Only resolve parent refs to
+        // pre-existing entities (the doc); refs to sibling bulk-N-k stay (born
+        // too, present in `current` after this loop). Matview snapshot (not
+        // `all_blocks`) so the doc block's `Page` tag survives — see
+        // `apply_mutation` above for why block_raw's missing tags would wipe
+        // the tree.
         let mut current = self.live_block_snapshot().await;
         // Stamp real sibling order first (see `stamp_sequence_from_sort_key`);
         // the new bulk blocks below keep `sequence()==0` (front), matching the
@@ -5366,8 +5385,8 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         FileSystem::write(self.org_fs().as_ref(), &file_path, org.as_bytes())
             .await
             .unwrap_or_else(|e| panic!("[bulk_external_add] write {file_path:?} failed: {e:#}"));
-        // Every bulk block is written WITH its oracle id in the `:ID:` drawer, so
-        // the ingest must surface all of them under exactly those ids.
+        // Every bulk block is written WITH its oracle id in the `:ID:` drawer,
+        // so the ingest must surface all of them under exactly those ids.
         let expected: Vec<EntityUri> = blocks.iter().map(|b| b.id.clone()).collect();
         self.settle_until_ids_present(&expected, Duration::from_secs(5), "bulk_external_add")
             .await;
@@ -5542,12 +5561,12 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         let bare = self.resolve_id(block_id).id().to_string();
         let path = self.doc_file(copy_doc, SEAM).await;
         let disk = self.read_vault_file(&path, SEAM).await;
-        // The editor replaces whichever keyword the FILE's vocabulary admits, not
-        // only the three this transition can set: a headline headed by any other
-        // default keyword (CANCELLED, LATER, …) would otherwise keep it, folded
-        // into the title, and every further edit folds one more (issue #186).
-        // `candidates` only offers copies in a page that declares no `#+TODO:`,
-        // so the defaults ARE that vocabulary.
+        // The editor replaces whichever keyword the FILE's vocabulary admits,
+        // not only the three this transition can set: a headline headed by any
+        // other default keyword (CANCELLED, LATER, …) would otherwise keep it,
+        // folded into the title, and every further edit folds one more (issue
+        // #186). `candidates` only offers copies in a page that declares no
+        // `#+TODO:`, so the defaults ARE that vocabulary.
         let vocabulary = crate::pbt::generators::model_default_vocabulary().all_keywords();
         let keywords: Vec<&str> = vocabulary
             .iter()
@@ -6133,30 +6152,33 @@ impl SutBlockCreate for HeadlessFrontendComponent {
             // Explicit id (born-equal): no slot gesture exists, so the op-floor
             // dispatches `block.create{id, parent_id, content}` DIRECTLY under
             // `parent`. `parent` is the ORACLE focus root, so it must first be
-            // resolved into SUT id space — a CreateDocument-minted `block:ref-doc-N`
-            // doc page lives under a freshly-minted uuid (the empty doc file's
-            // watcher mint), never under the synthetic id. This mirrors
-            // `apply_navigate_focus_via`'s `self.resolve_id(id)`; without it the
-            // create dispatches under a non-existent `block:ref-doc-N` parent and
-            // the SUT rejects it ("parent block not found"). The `None` slot path
-            // below re-resolves the parent from its own live SUT rows, so it never
-            // hit this gap.
+            // resolved into SUT id space — a CreateDocument-minted
+            // `block:ref-doc-N` doc page lives under a freshly-minted uuid (the
+            // empty doc file's watcher mint), never under the synthetic id.
+            // This mirrors `apply_navigate_focus_via`'s `self.resolve_id(id)`;
+            // without it the create dispatches under a non-existent
+            // `block:ref-doc-N` parent and the SUT rejects it ("parent block
+            // not found"). The `None` slot path below re-resolves the parent
+            // from its own live SUT rows, so it never hit this gap.
             Some(uri) => {
                 let parent = self.resolve_id(parent);
-                // Remap totality (fail-loud, not best-effort): dispatch a born-equal
-                // create only under a parent the SUT REALLY holds. Verify EXISTENCE in
-                // `block_raw` rather than rejecting an id SCHEME — a `block:ref-doc-N`
-                // resolved parent is legitimate whenever the SUT ingested the doc page
-                // BORN-EQUAL: a `WriteOrgFile`-seeded doc pins `#+ID: ref-doc-N` into
-                // the file (see `write_org_file.rs`), so production's FileSyncController
-                // mints the page under that EXACT id and the per-tick reconcile
-                // self-maps `ref-doc-N -> ref-doc-N` (`harness.rs` born-equal arm). The
-                // SUT then genuinely owns `block:ref-doc-N`, and the create must
-                // dispatch. It is a bug only when the resolved id is an UNMAPPED
-                // identity fallthrough — a fresh-uuid `CreateDocument` doc whose real id
-                // was never reconciled — for which no such SUT row exists. Checking the
-                // row's existence admits the born-equal doc page (a real parent) and
-                // still refuses the genuinely-absent one, loud and named.
+                // Remap totality (fail-loud, not best-effort): dispatch a
+                // born-equal create only under a parent the SUT REALLY holds.
+                // Verify EXISTENCE in `block_raw` rather than rejecting an id
+                // SCHEME — a `block:ref-doc-N` resolved parent is legitimate
+                // whenever the SUT ingested the doc page BORN-EQUAL: a
+                // `WriteOrgFile`-seeded doc pins `#+ID: ref-doc-N` into
+                // the file (see `write_org_file.rs`), so production's
+                // FileSyncController mints the page under that EXACT id and the
+                // per-tick reconcile self-maps `ref-doc-N -> ref-doc-N`
+                // (`harness.rs` born-equal arm). The SUT then genuinely owns
+                // `block:ref-doc-N`, and the create must dispatch. It is a bug
+                // only when the resolved id is an UNMAPPED identity fallthrough
+                // — a fresh-uuid `CreateDocument` doc whose real id
+                // was never reconciled — for which no such SUT row exists.
+                // Checking the row's existence admits the born-equal doc page
+                // (a real parent) and still refuses the genuinely-absent one,
+                // loud and named.
                 let parent_exists = self.all_blocks().await.iter().any(|b| b.id == parent);
                 assert!(
                     parent_exists,
@@ -6170,9 +6192,10 @@ impl SutBlockCreate for HeadlessFrontendComponent {
                     .await
                     .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}"))
             }
-            // No id: drive the PRODUCTION creation-slot gesture EXACTLY as today —
-            // it re-resolves the parent from its own live rendered rowset (WP-E
-            // focus-root cross-check preserved) and mints via `block.create`.
+            // No id: drive the PRODUCTION creation-slot gesture EXACTLY as
+            // today — it re-resolves the parent from its own live rendered
+            // rowset (WP-E focus-root cross-check preserved) and mints via
+            // `block.create`.
             None => {
                 self.driver_concrete()
                     .commit_creation_slot(content)
@@ -6335,16 +6358,16 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
                 panic!("[SutAppLifecycle::create_document] write {file_name} failed: {e:#}")
             });
 
-        // Wait for the production `FileSyncController` watcher to ingest the new file
-        // and mint the doc block in `block_raw` (the convergence
+        // Wait for the production `FileSyncController` watcher to ingest the
+        // new file and mint the doc block in `block_raw` (the convergence
         // `TestContext::create_document` polls for via
         // `resolve_page_uri_by_name`). The doc block's title is the file stem —
-        // exactly what `CreateDocument::apply_to_ref` sets the oracle page's content to
-        // — so poll the `block_raw` snapshot for a block with that title. (NB:
-        // `is_page()` is false on these projected rows — page-ness is a
-        // `block_tags` Page tag, not a `Block` field post-projection — so match
-        // on title alone.) Self-contained: no `ref_state`, no resolver; the
-        // harness reconcile maps the minted id afterwards.
+        // exactly what `CreateDocument::apply_to_ref` sets the oracle page's
+        // content to — so poll the `block_raw` snapshot for a block with that
+        // title. (NB: `is_page()` is false on these projected rows — page-ness
+        // is a `block_tags` Page tag, not a `Block` field post-projection — so
+        // match on title alone.) Self-contained: no `ref_state`, no resolver;
+        // the harness reconcile maps the minted id afterwards.
         let stem = std::path::Path::new(file_name)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -6380,12 +6403,13 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
             self.converge(timeout, "SutAppLifecycle::create_document")
                 .await;
         };
-        // Track the new doc so a later `BulkExternalAdd` / External `ApplyMutation`
-        // targeting it resolves a file path. `doc_id` is the minted doc-page
-        // block (title == file stem) — the SAME real id the harness reconcile
-        // maps the oracle's `block:ref-doc-N` to (the single block minted by
-        // this ingest), so the seam lookup keyed on `resolve_id(...)`
-        // hits. Idempotent: skip if already tracked (re-create of the same file).
+        // Track the new doc so a later `BulkExternalAdd` / External
+        // `ApplyMutation` targeting it resolves a file path. `doc_id` is the
+        // minted doc-page block (title == file stem) — the SAME real id the
+        // harness reconcile maps the oracle's `block:ref-doc-N` to (the single
+        // block minted by this ingest), so the seam lookup keyed on
+        // `resolve_id(...)` hits. Idempotent: skip if already tracked
+        // (re-create of the same file).
         {
             let mut docs = self.documents.lock().expect("documents lock");
             if !docs.iter().any(|(u, _)| *u == doc_id) {
@@ -6453,14 +6477,14 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 
     async fn rename_document(&self, old_file_name: &str, new_file_name: &str) {
         use holon_filesystem::FileSystem;
-        // A user renames `A.org` -> `B.org`. The `FileChange` port now carries an
-        // ATOMIC `Rename { from }` kind (`change_source.rs`), and the in-memory
-        // fs's `rename` emits exactly that single event on `B` carrying `A` as
-        // `from`. The org sync loop routes it to
-        // `FileSyncController::on_file_renamed`, which re-homes the doc WITHOUT a
-        // delete-then-create window: the doc keeps its `#+ID:`, its file record /
-        // alias moves to `B`, and its page retitles to the new file stem (the
-        // file-move spec). No Remove(A) half fires, so the old
+        // A user renames `A.org` -> `B.org`. The `FileChange` port now carries
+        // an ATOMIC `Rename { from }` kind (`change_source.rs`), and the
+        // in-memory fs's `rename` emits exactly that single event on `B`
+        // carrying `A` as `from`. The org sync loop routes it to
+        // `FileSyncController::on_file_renamed`, which re-homes the doc WITHOUT
+        // a delete-then-create window: the doc keeps its `#+ID:`, its file
+        // record / alias moves to `B`, and its page retitles to the new file
+        // stem (the file-move spec). No Remove(A) half fires, so the old
         // `on_file_deleted` cascade-over-delete never triggers and the doc is
         // never double-homed — the atomic path both the reference and the SUT
         // now share, which un-parks the `doc-file-rename` keystone case.
@@ -6490,15 +6514,15 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
     }
 
     async fn concurrent_schema_init(&self) {
-        // Ported from the E2ESut/`SutHandle` impl: the regression this guards is the
-        // double-`ensure_navigation_schema` "database is locked" bug — sequential
-        // schema ops (each `query_and_watch` creates a matview) must NOT lock
-        // the DB. The test's only ASSERTION is the absence of a "database is
-        // locked" error; other errors (e.g. transient "Database schema changed"
-        // from concurrent IVM) are tolerated. `apply_to_ref` is a no-op, so
-        // this must not perturb the compared projections — the watches created
-        // here are anonymous (`None` query id), not the named watches
-        // `SutWatchRegister`/`inv-active-watches-match-ref` track.
+        // Ported from the E2ESut/`SutHandle` impl: the regression this guards
+        // is the double-`ensure_navigation_schema` "database is locked" bug —
+        // sequential schema ops (each `query_and_watch` creates a matview) must
+        // NOT lock the DB. The test's only ASSERTION is the absence of a
+        // "database is locked" error; other errors (e.g. transient "Database
+        // schema changed" from concurrent IVM) are tolerated. `apply_to_ref` is
+        // a no-op, so this must not perturb the compared projections — the
+        // watches created here are anonymous (`None` query id), not the named
+        // watches `SutWatchRegister`/`inv-active-watches-match-ref` track.
         let engine = self.engine();
         for i in 0..3 {
             let prql =
@@ -6618,8 +6642,8 @@ impl holon_pbt_core::capabilities::SutFixtureFs for HeadlessFrontendComponent {
             .unwrap_or(filename)
             .to_string();
         let timeout = Duration::from_secs(5);
-        // The ingest of one file grows with its size and marks the file's change
-        // processed only once the whole file landed.
+        // The ingest of one file grows with its size and marks the file's
+        // change processed only once the whole file landed.
         self.converge_until(
             crate::pbt::convergence::Patience::WhileProgressing {
                 stall: crate::pbt::composed::wide_e2e::BULK_SETTLE_STALL,
@@ -6719,7 +6743,8 @@ impl SutErrorLog for HeadlessFrontendComponent {
 // reached.
 #[async_trait::async_trait(?Send)]
 impl SutFocusWrite for HeadlessFrontendComponent {
-    // ALLOW(unused_param): region is fixed to main by the click-driven focus path
+    // ALLOW(unused_param): region is fixed to main by the click-driven focus
+    // path
     async fn apply_navigate_focus(&self, _region: CapRegion, id: &EntityUri) {
         self.apply_navigate_focus_via(self.driver().as_ref(), id)
             .await;
@@ -6799,51 +6824,54 @@ impl HeadlessFrontendComponent {
         caps.insert(self.clone() as Arc<dyn SutOrgRead>);
         // `SutAdviceMatview` — the SQL-level advice twin's SUT read. Selecting
         // `inv-advice-matview-matches-ref` here is intended (unlike
-        // `SutSqlProjection` below): the twin must run wherever the block matviews
-        // do so the driver-ladder localization (matview twin green vs weave red)
-        // holds. Pre-step-6 it observes no `advice_rule_%` matview.
+        // `SutSqlProjection` below): the twin must run wherever the block
+        // matviews do so the driver-ladder localization (matview twin green vs
+        // weave red) holds. Pre-step-6 it observes no `advice_rule_%` matview.
         caps.insert(self.clone() as Arc<dyn SutAdviceMatview>);
-        // `SutNavHistoryWrite` (go_home) — selection-neutral write cap (no invariant
-        // `Needs` it), it just lets the `NavigateHome` transition drive this component
-        // through `apply_to_sut(&mut CapMap)`. `SutSqlProjection` is deliberately NOT
-        // registered here (it would newly select `block_content_sql`); the navigation
-        // slice adds it on its own CapMap.
+        // `SutNavHistoryWrite` (go_home) — selection-neutral write cap (no
+        // invariant `Needs` it), it just lets the `NavigateHome` transition
+        // drive this component through `apply_to_sut(&mut CapMap)`.
+        // `SutSqlProjection` is deliberately NOT registered here (it would
+        // newly select `block_content_sql`); the navigation slice adds it on
+        // its own CapMap.
         caps.insert(self.clone() as Arc<dyn SutNavHistoryWrite>);
-        // `SutWatchRegister` (setup_watch) — same selection-neutral rationale: no
-        // invariant `Needs` a write cap; it lets the `SetupWatch` transition drive
-        // this component's production reactive watch surface through
-        // `apply_to_sut(&mut CapMap)` (SutHandle decomposition INC 3). The watch
-        // *read* cap (`SutWatch`) is already registered above, so a slice that
-        // also supplies `RefWatch` makes the B5 watch invariants bite over a
-        // composed-driven watch.
+        // `SutWatchRegister` (setup_watch) — same selection-neutral rationale:
+        // no invariant `Needs` a write cap; it lets the `SetupWatch` transition
+        // drive this component's production reactive watch surface through
+        // `apply_to_sut(&mut CapMap)` (SutHandle decomposition INC 3). The
+        // watch *read* cap (`SutWatch`) is already registered above, so a slice
+        // that also supplies `RefWatch` makes the B5 watch invariants bite over
+        // a composed-driven watch.
         caps.insert(self.clone() as Arc<dyn SutWatchRegister>);
         // A1 drive caps (E3 provider-gap port): `SutViewControl` (SwitchView),
         // `SutMcpEmit` (EmitMcpData), `SutHistoryWrite` (Undo/Redo). All
-        // selection-neutral write caps — no invariant `Needs` them; they let the
-        // corresponding transitions drive this component through
-        // `apply_to_sut(&mut CapMap)` on the path to retiring `E2ESut` as the SUT.
+        // selection-neutral write caps — no invariant `Needs` them; they let
+        // the corresponding transitions drive this component through
+        // `apply_to_sut(&mut CapMap)` on the path to retiring `E2ESut` as the
+        // SUT.
         caps.insert(self.clone() as Arc<dyn SutViewControl>);
         caps.insert(self.clone() as Arc<dyn SutMcpEmit>);
         caps.insert(self.clone() as Arc<dyn SutHistoryWrite>);
         // A2 nav-history drive cap (NavigateBack/Forward, PinBlock, UnpinBlock)
-        // over the production navigation provider ops via the headless session —
-        // same selection-neutral rationale (no invariant `Needs` it).
+        // over the production navigation provider ops via the headless session
+        // — same selection-neutral rationale (no invariant `Needs` it).
         caps.insert(self.clone() as Arc<dyn SutNavHistoryDrive>);
-        // `SutSeamMutate` over the live `FileSyncController`: the real composed home
-        // for `ApplyMutation`'s External (org) arm and `BulkExternalAdd`,
+        // `SutSeamMutate` over the live `FileSyncController`: the real composed
+        // home for `ApplyMutation`'s External (org) arm and `BulkExternalAdd`,
         // un-narrowing both onto any frontend CapMap. A write cap (no invariant
         // `Needs` it), safe here.
         caps.insert(self.clone() as Arc<dyn SutSeamMutate>);
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::SutWriteFaults>);
-        // `SutBlockCreate` (CreateBlockUnderFocus) — creation-slot gesture over this
-        // component's own `ReactiveEngineDriver` commit seam. A write cap (no invariant
-        // `Needs` it); its presence makes the WP-E creation-slot create cap-feasible on
-        // any frontend CapMap, so the transition auto-narrows to configs whose default
-        // layout renders the `creation_slot: true` collection.
+        // `SutBlockCreate` (CreateBlockUnderFocus) — creation-slot gesture over
+        // this component's own `ReactiveEngineDriver` commit seam. A write cap
+        // (no invariant `Needs` it); its presence makes the WP-E creation-slot
+        // create cap-feasible on any frontend CapMap, so the transition
+        // auto-narrows to configs whose default layout renders the
+        // `creation_slot: true` collection.
         caps.insert(self.clone() as Arc<dyn SutBlockCreate>);
-        // `SutAppLifecycle` (CreateDocument) — selection-neutral lifecycle cap (no
-        // invariant `Needs` it); lets the `CreateDocument` transition mint a doc
-        // through `apply_to_sut(&mut CapMap)`. Only `create_document` is
+        // `SutAppLifecycle` (CreateDocument) — selection-neutral lifecycle cap
+        // (no invariant `Needs` it); lets the `CreateDocument` transition mint
+        // a doc through `apply_to_sut(&mut CapMap)`. Only `create_document` is
         // realized; the other lifecycle methods fail loud (not in any composed
         // alphabet yet). This is the seam-rebuild entry point — the
         // synthetic→real doc-uri mapping is the harness's generic per-tick
@@ -6902,20 +6930,21 @@ impl HeadlessFrontendComponent {
         driver: Arc<dyn UserDriver>,
     ) {
         use crate::pbt::op_write_cap::OpDispatchWriter;
-        // `SutBlockTreeWrite`: the production keystroke pipeline over `driver` when a
-        // reconcile resolver is wired (the composed/windowed builder shares one so a
-        // split-minted id maps oracle→real). When no resolver is set — the fixed-id lib
-        // slices that build via `register` and never mint — fall back to the plain
-        // `OpDispatchWriter` dispatch floor (behaviour-identical to the former
-        // default), so `keystroke_writer_with`'s fail-loud resolver assert
-        // never trips here.
+        // `SutBlockTreeWrite`: the production keystroke pipeline over `driver`
+        // when a reconcile resolver is wired (the composed/windowed builder
+        // shares one so a split-minted id maps oracle→real). When no resolver
+        // is set — the fixed-id lib slices that build via `register` and never
+        // mint — fall back to the plain `OpDispatchWriter` dispatch floor
+        // (behaviour-identical to the former default), so
+        // `keystroke_writer_with`'s fail-loud resolver assert never trips here.
         //
         // `KeystrokeBlockTreeWriter::apply_split_block` converts its byte
-        // position to `right` presses against the block's editable `MutableText`,
-        // resolved through the `BlockCellRegistry` — which only the cell editor
-        // leg installs. So the dispatch leg (SqlOnly, and Loro under GPUI's
-        // no-cell wiring) takes the dispatch floor; advertising the keystroke
-        // writer there would fail mid-run with "no editable content cell".
+        // position to `right` presses against the block's editable
+        // `MutableText`, resolved through the `BlockCellRegistry` — which only
+        // the cell editor leg installs. So the dispatch leg (SqlOnly, and Loro
+        // under GPUI's no-cell wiring) takes the dispatch floor; advertising
+        // the keystroke writer there would fail mid-run with "no editable
+        // content cell".
         let cells_wired = self.reactive().cell_registry_wired();
         let block_tree: Arc<dyn SutBlockTreeWrite> = match self.resolver.get() {
             Some(_) if cells_wired => Arc::new(self.keystroke_writer_with(driver.clone())),
@@ -6934,15 +6963,16 @@ impl HeadlessFrontendComponent {
             None => Arc::new(OpDispatchWriter::new(self.engine())),
         };
         caps.insert(block_tree);
-        // `SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`: the driver-bound shim
-        // that delegates to the component's `*_via` bodies (sidebar-click
+        // `SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`: the driver-bound
+        // shim that delegates to the component's `*_via` bodies (sidebar-click
         // focus, editor keystrokes, `state_toggle` clicks) so the whole family
         // rides ONE driver. `SutEditorMirrorWrite` is hosted in BOTH storage
         // modes: a keystroke routes through `HeadlessEditorMirror`'s cell-free
-        // `EditorViewModel` → `vm_commit_edit` → `set_field("content")`, which is
-        // exactly the sink production GPUI uses when no Loro cell is attached
-        // (`crdt.enabled = false`, the SqlOnly opt-out). Withholding it here left
-        // that mode's typing path with zero keystone coverage (tasks #20/#52).
+        // `EditorViewModel` → `vm_commit_edit` → `set_field("content")`, which
+        // is exactly the sink production GPUI uses when no Loro cell is
+        // attached (`crdt.enabled = false`, the SqlOnly opt-out). Withholding
+        // it here left that mode's typing path with zero keystone coverage
+        // (tasks #20/#52).
         let shim = Arc::new(DriverBoundFrontendWrite::new(self.clone(), driver));
         caps.insert(shim.clone() as Arc<dyn SutFocusWrite>);
         caps.insert(shim.clone() as Arc<dyn SutEditorMirrorWrite>);
@@ -6974,7 +7004,8 @@ impl DriverBoundFrontendWrite {
 
 #[async_trait::async_trait(?Send)]
 impl SutFocusWrite for DriverBoundFrontendWrite {
-    // ALLOW(unused_param): region is fixed to main by the click-driven focus path
+    // ALLOW(unused_param): region is fixed to main by the click-driven focus
+    // path
     async fn apply_navigate_focus(&self, _region: CapRegion, id: &EntityUri) {
         self.base
             .apply_navigate_focus_via(self.driver.as_ref(), id)
@@ -7047,8 +7078,8 @@ mod tests {
         )
         .await;
 
-        // Readiness wait: the spawned start task first awaits `ready_signal`, then
-        // resolves the handle (`wiring.rs:350-362`). Poll up to ~2s.
+        // Readiness wait: the spawned start task first awaits `ready_signal`,
+        // then resolves the handle (`wiring.rs:350-362`). Poll up to ~2s.
         let mut handle = None;
         for _ in 0..40 {
             if let Some(h) = comp.loro_sync_handle() {
@@ -7064,9 +7095,10 @@ mod tests {
         );
         eprintln!("[A0-probe] sync controller handle resolved headless ✓");
 
-        // The Loro authority store the controller watches must be the cached/shared
-        // global doc (so a peer import into it wakes the controller). Two reads of
-        // `get_doc(Global)()` must return the SAME doc (not a fresh one each call).
+        // The Loro authority store the controller watches must be the
+        // cached/shared global doc (so a peer import into it wakes the
+        // controller). Two reads of `get_doc(Global)()` must return the SAME
+        // doc (not a fresh one each call).
         let store = comp
             .loro_doc_store()
             .expect("[A0-probe] loro_doc_store present when Loro on");
@@ -7086,18 +7118,20 @@ mod tests {
         eprintln!("[A0-probe] global doc is cached/shared ✓");
     }
 
-    // ── ADR 0024 §6 capstone: the AdvanceDay property as a directed test ──────
+    // ── ADR 0024 §6 capstone: the AdvanceDay property as a directed test
+    // ──────
     //
-    // Boots the real headless frontend over the FULL journal rule (trigger joins
-    // the `clock` relation, action is `holon_rule`) with an INJECTED fake clock,
-    // then drives day-rollover through `SutClockAdvance` and asserts the §6
-    // invariant directly: N advances spanning D distinct days ⇒ exactly D journal
-    // day-blocks (one per day, deterministic id), re-ticking the same day adds
-    // nothing, and each journal block is ordinary content (not program-marked).
-    // This exercises the whole prod path — injected clock → scheduler reconcile →
-    // clock CDC → journal trigger matview → action watcher → `block.create` with a
-    // WP2 deterministic id — so the composed generator rolling few AdvanceDay steps
-    // never leaves the property un-driven.
+    // Boots the real headless frontend over the FULL journal rule (trigger
+    // joins the `clock` relation, action is `holon_rule`) with an INJECTED fake
+    // clock, then drives day-rollover through `SutClockAdvance` and asserts the
+    // §6 invariant directly: N advances spanning D distinct days ⇒ exactly D
+    // journal day-blocks (one per day, deterministic id), re-ticking the same
+    // day adds nothing, and each journal block is ordinary content (not
+    // program-marked). This exercises the whole prod path — injected clock →
+    // scheduler reconcile → clock CDC → journal trigger matview → action
+    // watcher → `block.create` with a WP2 deterministic id — so the composed
+    // generator rolling few AdvanceDay steps never leaves the property
+    // un-driven.
 
     /// A fixed local-noon millis for `y-m-d`, timezone-robust (noon UTC lands
     /// on the same civil date from UTC-12..+12), so the boot day is
@@ -7118,8 +7152,9 @@ mod tests {
     async fn journal_day_children(comp: &HeadlessFrontendComponent) -> Vec<(String, String)> {
         // ORG/RENDER truth: a heading's text IS its `content` — the date the
         // action creates lands in the block's top-level `content` column (not a
-        // `name` property), so it renders as a non-empty row and org-round-trips
-        // to a `* <date>` headline (Bug-3 ORACLE fix). Read `content` here.
+        // `name` property), so it renders as a non-empty row and
+        // org-round-trips to a `* <date>` headline (Bug-3 ORACLE fix). Read
+        // `content` here.
         let rows = comp
             .engine()
             .db_handle()
@@ -7171,11 +7206,12 @@ mod tests {
         let clock = Arc::new(holon_api::TestClock::new(boot_ms));
         let boot_date = holon_api::CalendarDate::from_clock(clock.as_ref()).ymd();
 
-        // The journal auto-create RULE (trigger + action) is now seeded on every
-        // boot by prod's `build_default_layout_blocks` (dogfood #4 fix), so this
-        // test boots on a BARE `Journals.org` shell and exercises the SHIPPED
-        // programmatic rule — no disk rule org (which would double-seed the same
-        // `block:journals::{trigger,action}::0` ids under a second heading).
+        // The journal auto-create RULE (trigger + action) is now seeded on
+        // every boot by prod's `build_default_layout_blocks` (dogfood #4 fix),
+        // so this test boots on a BARE `Journals.org` shell and exercises the
+        // SHIPPED programmatic rule — no disk rule org (which would double-seed
+        // the same `block:journals::{trigger,action}::0` ids under a second
+        // heading).
         let comp = HeadlessFrontendComponent::new_with_clock(
             &[("Journals.org", "#+ID: journals\n")],
             Duration::from_millis(500),
@@ -7189,11 +7225,12 @@ mod tests {
         assert_eq!(boot_days[0].1, boot_date, "boot journal is the boot day");
         eprintln!("[advance-day] boot day journal: {boot_days:?}");
 
-        // ORACLE (Bug-3): the created journal block carries the date in `content`
-        // — org/render truth, a heading's text IS its content — so it renders as a
-        // NON-EMPTY row and org-round-trips to `* <date>`, with NO stray `name`
-        // property. `journal_day_children` already read `content`; assert the
-        // storage shape directly, then assert the production org render.
+        // ORACLE (Bug-3): the created journal block carries the date in
+        // `content` — org/render truth, a heading's text IS its content — so it
+        // renders as a NON-EMPTY row and org-round-trips to `* <date>`, with NO
+        // stray `name` property. `journal_day_children` already read `content`;
+        // assert the storage shape directly, then assert the production org
+        // render.
         let boot_id = boot_days[0].0.clone();
         let shape = comp
             .engine()
@@ -7226,14 +7263,14 @@ mod tests {
             "journal block must NOT carry a `name` property — Bug-3: the date belongs in content"
         );
 
-        // LogSeq-parity daily-note ruling (2026-07-19): the day-block is emitted as
-        // a PAGE-file child of the journals shell (`place: page(journals)`), so it
-        // is `Page`-tagged and DE-INLINED from the `Journals.org` companion (the
-        // `get_blocks` CTE excludes `Page`-tagged children). Assert the store tag +
-        // the companion de-inline. (Own-file materialization into
-        // `Journals/{date}.org` is asserted at the composed-keystone layer where the
-        // full writeback stack runs; this headless component exercises the store +
-        // companion-render facet.)
+        // LogSeq-parity daily-note ruling (2026-07-19): the day-block is
+        // emitted as a PAGE-file child of the journals shell (`place:
+        // page(journals)`), so it is `Page`-tagged and DE-INLINED from the
+        // `Journals.org` companion (the `get_blocks` CTE excludes `Page`-tagged
+        // children). Assert the store tag + the companion de-inline. (Own-file
+        // materialization into `Journals/{date}.org` is asserted at the
+        // composed-keystone layer where the full writeback stack runs; this
+        // headless component exercises the store + companion-render facet.)
         {
             use holon_pbt_core::capabilities::SutOrgRender;
             let tag_rows = comp
@@ -7270,14 +7307,15 @@ mod tests {
             );
         }
 
-        // WP2 / Fork A (LogSeq-parity daily-note ruling 2026-07-19): the day is a
-        // `Page` emitted via `place: page(journals)`, so its id is the CANONICAL
-        // page identity `PageId::for_path("Journals/<date>")` — a name-based UUIDv5
-        // of the name-chain, IDENTICAL to what org-ingest / `convert_block_to_page`
-        // / wiki-link resolution assign to a page nested under `journals`. So
-        // `[[Journals/<date>]]` resolves to the very page the rule mints. Reproduce
-        // it and assert it matches — the convergence-by-naming property (and the
-        // link-target-identity property) the whole capstone now rests on.
+        // WP2 / Fork A (LogSeq-parity daily-note ruling 2026-07-19): the day is
+        // a `Page` emitted via `place: page(journals)`, so its id is the
+        // CANONICAL page identity `PageId::for_path("Journals/<date>")` — a
+        // name-based UUIDv5 of the name-chain, IDENTICAL to what org-ingest /
+        // `convert_block_to_page` / wiki-link resolution assign to a page
+        // nested under `journals`. So `[[Journals/<date>]]` resolves to the
+        // very page the rule mints. Reproduce it and assert it matches — the
+        // convergence-by-naming property (and the link-target-identity
+        // property) the whole capstone now rests on.
         let expect_id_for = |date: &str| -> String {
             holon_api::link_parser::PageId::for_path(&format!("Journals/{date}"))
                 .expect("journal page path is well-formed")
@@ -7290,10 +7328,10 @@ mod tests {
             "boot journal page carries the canonical PageId::for_path(\"Journals/<date>\") id"
         );
 
-        // Journal day-blocks are ORDINARY content (WP3): not source/program blocks.
-        // The asset's display query and render legitimately live as source
-        // children of the page — exclude those ids; anything ELSE source-typed
-        // under journals is a rule output gone wrong.
+        // Journal day-blocks are ORDINARY content (WP3): not source/program
+        // blocks. The asset's display query and render legitimately live as
+        // source children of the page — exclude those ids; anything ELSE
+        // source-typed under journals is a rule output gone wrong.
         let display = crate::pbt::journals_asset::display_ids()
             .iter()
             .map(|id| format!("'{}'", id.as_str()))
@@ -7318,12 +7356,14 @@ mod tests {
 
         // (The boot day's id was already proven to equal the canonical
         // `PageId::for_path("Journals/<date>")` above — the deterministic,
-        // name-based, replica-convergent identity, NOT a random v4. Fork A: page
-        // ids are path-hashes, so the earlier UUIDv5-version-nibble proxy no longer
-        // applies; the `expect_id_for` equality is the direct convergence proof.)
+        // name-based, replica-convergent identity, NOT a random v4. Fork A:
+        // page ids are path-hashes, so the earlier UUIDv5-version-nibble proxy
+        // no longer applies; the `expect_id_for` equality is the direct
+        // convergence proof.)
 
-        // Advance one day: exactly one NEW journal appears, carrying the canonical
-        // `PageId::for_path("Journals/<next-date>")` id (deterministic by naming).
+        // Advance one day: exactly one NEW journal appears, carrying the
+        // canonical `PageId::for_path("Journals/<next-date>")` id
+        // (deterministic by naming).
         let d1 = comp.advance_clock_days(1).await;
         let after1 = wait_for_journal_days(&comp, 2, Duration::from_secs(10)).await;
         let d1_block = after1
@@ -7336,10 +7376,12 @@ mod tests {
             "day+1 journal page carries the canonical PageId::for_path id"
         );
 
-        // Re-tick the SAME day: idempotent — no new block (deterministic-id upsert).
+        // Re-tick the SAME day: idempotent — no new block (deterministic-id
+        // upsert).
         let d1_again = comp.advance_clock_days(0).await;
         assert_eq!(d1_again, d1, "re-tick stays on the same day");
-        // Give any (erroneous) re-fire a chance to land, then assert nothing grew.
+        // Give any (erroneous) re-fire a chance to land, then assert nothing
+        // grew.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let after_retick = journal_day_children(&comp).await;
         assert_eq!(
@@ -7448,8 +7490,8 @@ mod tests {
             !rows.is_empty()
         };
 
-        // Rename the journal page through the production `block.set_field(content)`
-        // op -- the exact op `RenamePage` drives.
+        // Rename the journal page through the production
+        // `block.set_field(content)` op -- the exact op `RenamePage` drives.
         let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
         params.insert("id".into(), Value::String(journal_id.clone()));
         params.insert("field".into(), Value::String("content".to_string()));
@@ -7481,9 +7523,9 @@ mod tests {
 
         // Re-fire TODAY's journal rule: roll the clock forward one day (creates
         // that day's journal) and back to the boot day. The return CDC
-        // re-evaluates `not block_exists("Journals/{boot day}")` -- now TRUE, the
-        // name was renamed away -- so the action re-creates that name at the
-        // SAME deterministic id the renamed page holds.
+        // re-evaluates `not block_exists("Journals/{boot day}")` -- now TRUE,
+        // the name was renamed away -- so the action re-creates that name at
+        // the SAME deterministic id the renamed page holds.
         let d1 = comp.advance_clock_days(1).await;
         eprintln!("[journal-clobber] rolled forward to {d1}");
         let d0 = comp.advance_clock_days(-1).await;
@@ -7506,14 +7548,14 @@ mod tests {
             page_tag_after,
             "sanity: the re-minted row is still Page-tagged (the clobber is title-only)"
         );
-        // SPEC: the rule is idempotent-by-name; re-firing it must NOT overwrite a
-        // page that merely CHANGED ITS NAME. GREEN under the interim identity
+        // SPEC: the rule is idempotent-by-name; re-firing it must NOT overwrite
+        // a page that merely CHANGED ITS NAME. GREEN under the interim identity
         // collision guard (plan §5): the re-fired `create` hits the derived id
         // still held by the renamed page, is REFUSED fail-loud
         // (`IdentityCollision`), and the rule watcher treats the refusal as a
         // benign skip (RuleStatus::Skipped, no ExecError storm) — so the title
-        // survives. Previously RED: prod's `ON CONFLICT(id) DO UPDATE` clobbered
-        // the renamed title back to the date.
+        // survives. Previously RED: prod's `ON CONFLICT(id) DO UPDATE`
+        // clobbered the renamed title back to the date.
         assert_eq!(
             title_after.as_deref(),
             Some("Renamed"),
@@ -7595,9 +7637,10 @@ mod tests {
             !rows.is_empty()
         };
 
-        // Rename the journal page through the production `block.set_field(content)`
-        // op -- the exact op `RenamePage` drives. Under Loro authority this lands
-        // in the Loro doc and projects to `block_raw`.
+        // Rename the journal page through the production
+        // `block.set_field(content)` op -- the exact op `RenamePage` drives.
+        // Under Loro authority this lands in the Loro doc and projects to
+        // `block_raw`.
         let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
         params.insert("id".into(), Value::String(journal_id.clone()));
         params.insert("field".into(), Value::String("content".to_string()));
@@ -7627,11 +7670,11 @@ mod tests {
             read_page_tag().await
         );
 
-        // Re-fire TODAY's journal rule: roll the clock forward one day and back to
-        // the boot day. The return CDC re-evaluates `not block_exists(
-        // "Journals/{boot day}")` -- now TRUE, the name was renamed away -- so the
-        // action re-creates that name at the SAME deterministic id the renamed
-        // page holds.
+        // Re-fire TODAY's journal rule: roll the clock forward one day and back
+        // to the boot day. The return CDC re-evaluates `not block_exists(
+        // "Journals/{boot day}")` -- now TRUE, the name was renamed away -- so
+        // the action re-creates that name at the SAME deterministic id the
+        // renamed page holds.
         let d1 = comp.advance_clock_days(1).await;
         eprintln!("[journal-clobber-loro] rolled forward to {d1}");
         let d0 = comp.advance_clock_days(-1).await;
@@ -7646,14 +7689,14 @@ mod tests {
              page_tag={page_tag_after}"
         );
 
-        // SPEC: the rule is idempotent-by-name; re-firing it must NOT overwrite a
-        // page that merely CHANGED ITS NAME. GREEN once the recognition seam
-        // refuses the re-mint at a mode-independent chokepoint (the derived id is
-        // still held by the renamed page, a DIFFERENT normalized title) and the
-        // rule watcher takes the existing `IdentityCollision`->Skipped path. RED
-        // today under Loro authority: the create lands in the Loro doc, bypassing
-        // the SqlOperationProvider guard, and clobbers the renamed title back to
-        // the date.
+        // SPEC: the rule is idempotent-by-name; re-firing it must NOT overwrite
+        // a page that merely CHANGED ITS NAME. GREEN once the recognition seam
+        // refuses the re-mint at a mode-independent chokepoint (the derived id
+        // is still held by the renamed page, a DIFFERENT normalized title) and
+        // the rule watcher takes the existing `IdentityCollision`->Skipped
+        // path. RED today under Loro authority: the create lands in the Loro
+        // doc, bypassing the SqlOperationProvider guard, and clobbers the
+        // renamed title back to the date.
         assert_eq!(
             title_after.as_deref(),
             Some("Renamed"),
@@ -7685,7 +7728,8 @@ mod tests {
         .await;
         let comp = Arc::new(comp);
 
-        // The boot journal DATE PAGE (own `Journals/{boot day}.org` materialized).
+        // The boot journal DATE PAGE (own `Journals/{boot day}.org`
+        // materialized).
         let boot_days = wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
         let page_id = boot_days[0].0.clone();
         assert_eq!(boot_days[0].1, boot_date);
@@ -7699,7 +7743,8 @@ mod tests {
         comp.settle().await;
 
         // DISK TRUTH: the child must be in the date page's OWN file, and the
-        // `Journals.org` companion must NOT swallow it (it is a child of a Page).
+        // `Journals.org` companion must NOT swallow it (it is a child of a
+        // Page).
         let pairs = comp.snapshot_org_render_pairs(&Default::default()).await;
         let (day_path, day_disk, _) = pairs
             .iter()
@@ -7725,13 +7770,14 @@ mod tests {
             );
         }
 
-        // The `/org` reader (binds `inv-blocks-match-ref/org`) must ALSO see the
-        // date page's CHILD — parsed from the materialized `Journals/{date}.org`
-        // with `parent_id = <date page id>`, matching the store/ref. This is the
-        // oracle-asymmetry half the verifier flagged: without the materialized-file
-        // union the child is invisible to `/org` and false-diverges. (The date
-        // page doc-ROOT is not in `parse_org_file`'s `result.blocks` — only its
-        // children — so it is not compared here.)
+        // The `/org` reader (binds `inv-blocks-match-ref/org`) must ALSO see
+        // the date page's CHILD — parsed from the materialized
+        // `Journals/{date}.org` with `parent_id = <date page id>`, matching the
+        // store/ref. This is the oracle-asymmetry half the verifier flagged:
+        // without the materialized-file union the child is invisible to `/org`
+        // and false-diverges. (The date page doc-ROOT is not in
+        // `parse_org_file`'s `result.blocks` — only its children — so it is not
+        // compared here.)
         use holon_pbt_core::capabilities::SutOrgRead;
         let org_blocks = comp
             .org_block_snapshot(&Default::default(), &Default::default())
@@ -7754,7 +7800,8 @@ mod tests {
             page_id,
             "the child parses UNDER the date page (its file_id), matching the store/ref"
         );
-        // The `__default__` layout file must NOT leak into `/org` (it is excluded).
+        // The `__default__` layout file must NOT leak into `/org` (it is
+        // excluded).
         assert!(
             !org_blocks
                 .iter()
@@ -7787,8 +7834,8 @@ mod tests {
         let root = std::path::Path::new("/tmp/jdp_diag");
         let path = root.join("Journals").join("2026-01-15.org");
 
-        // Both the TEST serializer and the PRODUCTION OrgRenderer agree — this is
-        // real org semantics, not a serializer bug.
+        // Both the TEST serializer and the PRODUCTION OrgRenderer agree — this
+        // is real org semantics, not a serializer bug.
         for (label, org) in [
             (
                 "test",
@@ -7822,8 +7869,9 @@ mod tests {
             );
         }
 
-        // The reference lens mirrors exactly this: apply it to a raw block and it
-        // must reach the same (empty content, tag) state the file round-trip does.
+        // The reference lens mirrors exactly this: apply it to a raw block and
+        // it must reach the same (empty content, tag) state the file round-trip
+        // does.
         let mut ref_block =
             Block::new_text(EntityUri::block("block-3"), page_id.clone(), ":PROPERTIES:");
         crate::pbt::types::apply_org_headline_tag_split(&mut ref_block);
@@ -7862,13 +7910,14 @@ mod tests {
         )
         .await;
 
-        // The rule fired on boot — the holon_rule_watcher IS the evaluator (rule live).
+        // The rule fired on boot — the holon_rule_watcher IS the evaluator
+        // (rule live).
         wait_for_journal_days(&comp, 1, Duration::from_secs(10)).await;
 
-        // Discover the single-block holon_rule (program machinery) and its parent =
-        // the `Journal Auto-Create` heading. The heading owns the rule block, so it
-        // is the block that would wrongly resolve a display query if the program
-        // machinery leaked onto the display path.
+        // Discover the single-block holon_rule (program machinery) and its
+        // parent = the `Journal Auto-Create` heading. The heading owns the rule
+        // block, so it is the block that would wrongly resolve a display query
+        // if the program machinery leaked onto the display path.
         let trigger_rows = comp
             .engine()
             .db_handle()
@@ -7888,13 +7937,14 @@ mod tests {
             .expect("the holon_rule block has a parent heading");
         let heading_uri = EntityUri::parse(&heading_id).expect("heading id parses");
 
-        // render_entity on the rule-machinery heading must NOT panic or fail: the
-        // single-block `holon_rule` is not a query language, so — unlike the retired
-        // `holon_sql` trigger — it can never be compiled into a display matview (the
-        // boot-critical `SELECT today` / id-less-row panic class, BugFunnel row 62).
-        // The rule stays live (the boot day-block above proves the holon_rule_watcher
-        // is the evaluator); its heading renders normally, the `holon_rule` source
-        // child excluded from the display collection like any source block.
+        // render_entity on the rule-machinery heading must NOT panic or fail:
+        // the single-block `holon_rule` is not a query language, so — unlike
+        // the retired `holon_sql` trigger — it can never be compiled into a
+        // display matview (the boot-critical `SELECT today` / id-less-row panic
+        // class, BugFunnel row 62). The rule stays live (the boot day-block
+        // above proves the holon_rule_watcher is the evaluator); its heading
+        // renders normally, the `holon_rule` source child excluded from the
+        // display collection like any source block.
         let result = comp
             .engine()
             .blocks()
@@ -7920,9 +7970,10 @@ mod tests {
     /// don't swallow the `execute_operation` error).
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_navigate_focus_updates_matview() {
-        // Two pinned-id page docs (`#+ID: <bare-id>`): production's parser adds the
-        // `block:` scheme at the boundary, so the doc blocks land at the exact ids
-        // the reference would mint — no doc-id remapping for this slice.
+        // Two pinned-id page docs (`#+ID: <bare-id>`): production's parser adds
+        // the `block:` scheme at the boundary, so the doc blocks land at the
+        // exact ids the reference would mint — no doc-id remapping for this
+        // slice.
         let doc0 = "#+ID: ref-doc-0\n* Doc zero heading\n";
         let doc1 = "#+ID: ref-doc-1\n* Doc one heading\n";
         let comp = HeadlessFrontendComponent::new(
@@ -7932,8 +7983,8 @@ mod tests {
         .await;
         let comp = Arc::new(comp);
 
-        // Discover the actual doc-block id for doc1 from `block_raw` (robust to the
-        // scheme the parser assigns) — this is the id we navigate focus to.
+        // Discover the actual doc-block id for doc1 from `block_raw` (robust to
+        // the scheme the parser assigns) — this is the id we navigate focus to.
         let rows = comp
             .engine()
             .db_handle()
@@ -7956,8 +8007,8 @@ mod tests {
             .clone();
 
         // Drive the REAL navigation op through the windowless session. This is
-        // fallible (`require_operation_engine`): assert the `Ok` explicitly — an
-        // operation-engine-less session firing here IS the make-or-break.
+        // fallible (`require_operation_engine`): assert the `Ok` explicitly —
+        // an operation-engine-less session firing here IS the make-or-break.
         let mut params = std::collections::HashMap::new();
         params.insert("region".to_string(), Value::String("main".to_string()));
         params.insert("block_id".to_string(), Value::String(target.clone()));
@@ -8026,7 +8077,8 @@ mod tests {
     /// fake the commit, surface it.
     #[tokio::test(flavor = "multi_thread")]
     async fn headless_type_chars_commits_to_block_raw() {
-        // The wide PBT's working tree: a seed page with three text-leaf children.
+        // The wide PBT's working tree: a seed page with three text-leaf
+        // children.
         const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
                                 parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* \
                                 c2\n:PROPERTIES:\n:ID: c2\n:END:\n";
@@ -8121,8 +8173,8 @@ mod tests {
         comp.apply_type_chars("A").await;
 
         // 2) Switch focus to a DISPLAY occurrence and re-open the editor there.
-        //    `set_focus_occurrence` is additive — it does NOT touch `focused_block`,
-        //    and the production focus path leaves it intact.
+        //    `set_focus_occurrence` is additive — it does NOT touch
+        //    `focused_block`, and the production focus path leaves it intact.
         comp.reactive().set_focus_occurrence(Some(1));
         comp.apply_focus_editable_text(&c1).await;
         assert_eq!(
@@ -8138,7 +8190,8 @@ mod tests {
         comp.apply_type_chars("B").await;
 
         // Both writes landed on the CANONICAL block, despite focus being on the
-        // display occurrence — editable_text resolves by block id, not occurrence.
+        // display occurrence — editable_text resolves by block id, not
+        // occurrence.
         let after = comp
             .sql_query(&c1_sql)
             .await
@@ -8189,9 +8242,9 @@ mod tests {
         .await;
         comp.await_main_pin_intent(&target).await;
 
-        // `focus_pin` (shift+click in production) — reachable headlessly with an
-        // observable matview effect. The bullet's `shift_action` pins into the
-        // RIGHT sidebar, so that is where the effect shows up.
+        // `focus_pin` (shift+click in production) — reachable headlessly with
+        // an observable matview effect. The bullet's `shift_action` pins into
+        // the RIGHT sidebar, so that is where the effect shows up.
         SutNavHistoryDrive::pin_block(&comp, holon_api::Region::RightSidebar, &target).await;
         let root_rows = comp
             .sql_query("SELECT region, root_id FROM focus_roots WHERE region = 'right_sidebar'")
@@ -8213,8 +8266,9 @@ mod tests {
         );
 
         // `go_back` / `go_forward` — the historically-doubted ops. Assert they
-        // dispatch headlessly without error (the cap `unwrap`s the op result, so a
-        // failure panics here). History *semantics* parity is deferred to Phase B.
+        // dispatch headlessly without error (the cap `unwrap`s the op result,
+        // so a failure panics here). History *semantics* parity is deferred to
+        // Phase B.
         SutNavHistoryDrive::navigate_back(&comp, holon_api::Region::Main).await;
         SutNavHistoryDrive::navigate_forward(&comp, holon_api::Region::Main).await;
         eprintln!("[nav-history-probe] go_back / go_forward dispatched headlessly without error");
@@ -8235,14 +8289,16 @@ mod tests {
         let comp =
             HeadlessFrontendComponent::new(&[("doc0.org", doc0)], Duration::from_millis(300)).await;
 
-        // Dump block_raw with content_type + parent so we can see what is pinnable.
+        // Dump block_raw with content_type + parent so we can see what is
+        // pinnable.
         let rows = comp
             .engine()
             .db_handle()
             .query(
-                // Exclude the `sentinel:no_parent` FK-anchor row (CoreSchemaModule
-                // seeds it for the parent FK; it is not a real block, and
-                // production's `block` matview drops it the same way).
+                // Exclude the `sentinel:no_parent` FK-anchor row
+                // (CoreSchemaModule seeds it for the parent FK; it is not a
+                // real block, and production's `block` matview drops it the
+                // same way).
                 "SELECT id, parent_id, content_type, content FROM block_raw WHERE id != \
                  'sentinel:no_parent'",
                 std::collections::HashMap::new(),
@@ -8266,8 +8322,8 @@ mod tests {
             );
         }
 
-        // Pick a Text, non-doc block (content_type text + has a parent that isn't
-        // no_parent).
+        // Pick a Text, non-doc block (content_type text + has a parent that
+        // isn't no_parent).
         let pinnable: Option<String> = rows
             .iter()
             .filter(|r| {
@@ -8293,8 +8349,9 @@ mod tests {
 
         // Focus Main on the containing doc first: `pin_block` shift+clicks the
         // bullet in the Main panel, and Main renders only the descendants of
-        // `focus_roots(main)`. Without this the bullet carries no `shift_action`
-        // and the click degrades to bare focus, exactly as it would in GPUI.
+        // `focus_roots(main)`. Without this the bullet carries no
+        // `shift_action` and the click degrades to bare focus, exactly as it
+        // would in GPUI.
         comp.dispatch_navigation(
             "focus",
             holon_api::Region::Main,
@@ -8304,10 +8361,10 @@ mod tests {
         .await;
         comp.await_main_pin_intent(&pin_uri).await;
 
-        // Dispatch focus_pin into the RIGHT sidebar (PinBlock's region) and assert it
-        // populates `focus_roots(right_sidebar)` headlessly — the make-or-break:
-        // inv-focus-roots reads this matview, and without a window it might never
-        // update.
+        // Dispatch focus_pin into the RIGHT sidebar (PinBlock's region) and
+        // assert it populates `focus_roots(right_sidebar)` headlessly — the
+        // make-or-break: inv-focus-roots reads this matview, and without a
+        // window it might never update.
         SutNavHistoryDrive::pin_block(&comp, holon_api::Region::RightSidebar, &pin_uri).await;
 
         let mut params = std::collections::HashMap::new();
@@ -8393,8 +8450,9 @@ mod tests {
         let after_fwd = current_focus_main(&comp).await;
         eprintln!("[back-fwd-probe] current_focus(main) after go_forward = {after_fwd:?}");
 
-        // The verdict. If these fail, headless back/forward do NOT mirror history
-        // semantics → keep NavigateBack/Forward out of the composed alphabet (E4).
+        // The verdict. If these fail, headless back/forward do NOT mirror
+        // history semantics → keep NavigateBack/Forward out of the composed
+        // alphabet (E4).
         assert_eq!(
             after_back.as_deref(),
             Some("block:ref-doc-0"),
@@ -8465,9 +8523,9 @@ mod tests {
             HeadlessFrontendComponent::new(&[("doc0.org", doc0)], Duration::from_millis(300)).await;
         let pin_uri = EntityUri::parse("block:ref-block-0").expect("pin id");
 
-        // Main renders only the descendants of `focus_roots(main)`, and the pin is
-        // the production shift+click on the bullet — so focus the containing doc
-        // and let its bullets stream in before clicking one.
+        // Main renders only the descendants of `focus_roots(main)`, and the pin
+        // is the production shift+click on the bullet — so focus the containing
+        // doc and let its bullets stream in before clicking one.
         comp.dispatch_navigation(
             "focus",
             holon_api::Region::Main,
@@ -8515,7 +8573,8 @@ mod tests {
             .expect("[unpin-probe] no right-sidebar pin row for ref-block-0 in navigation_history");
         eprintln!("[unpin-probe] SUT-assigned pin history_id = {pin_hid}");
 
-        // Unpin it via the cap (close(history_id)) and confirm focus_roots clears.
+        // Unpin it via the cap (close(history_id)) and confirm focus_roots
+        // clears.
         SutNavHistoryDrive::unpin_block(&comp, pin_hid).await;
 
         let mut params = std::collections::HashMap::new();
@@ -8753,9 +8812,9 @@ mod tests {
         let comp = Arc::new(comp);
         dump(&comp, "after-boot").await;
 
-        // Capture the booted scaffold ids (everything present BEFORE we seed the
-        // working tree) — these become the oracle's seed set so they filter out of
-        // the SUT-side id comparison.
+        // Capture the booted scaffold ids (everything present BEFORE we seed
+        // the working tree) — these become the oracle's seed set so they filter
+        // out of the SUT-side id comparison.
         let booted: BTreeSet<EntityUri> = comp
             .engine()
             .db_handle()
@@ -8772,8 +8831,9 @@ mod tests {
             })
             .collect();
 
-        // Seed the fixed parent/c1/c2 tree via the production create op — EXACTLY
-        // `spike::seed_sql` but over the headless component's real engine.
+        // Seed the fixed parent/c1/c2 tree via the production create op —
+        // EXACTLY `spike::seed_sql` but over the headless component's real
+        // engine.
         let ids = fixed_ids();
         let seeder = SqlProjectionComponent::new(comp.engine().clone());
         seeder
@@ -8784,9 +8844,9 @@ mod tests {
         comp.settle().await;
         dump(&comp, "after-seed").await;
 
-        // Build a MINIMAL structural capmap: the component as `SutBackend` + the
-        // resolver-sharing writer (so split-minted real ids reconcile). Mirror of
-        // `sql_structural_wide`, sourced from the headless component.
+        // Build a MINIMAL structural capmap: the component as `SutBackend` +
+        // the resolver-sharing writer (so split-minted real ids reconcile).
+        // Mirror of `sql_structural_wide`, sourced from the headless component.
         let resolver: IdResolver =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
         let mut caps = CapMap::new();
@@ -8809,9 +8869,10 @@ mod tests {
         // `block_documents` entry → compared every tick). Inject each booted
         // scaffold id as `block_documents[id]=no_parent` so it joins
         // `seed_block_ids()` and is filtered from the SUT-side id-set-exact
-        // `compare_block_subset`, reducing the comparison to {parent,c1,c2}(+split)
-        // on both sides. (Headless analog of E1 `SutOrgRead` seeding the oracle from
-        // booted blocks — the spike's bare engine has no scaffold to filter.)
+        // `compare_block_subset`, reducing the comparison to
+        // {parent,c1,c2}(+split) on both sides. (Headless analog of E1
+        // `SutOrgRead` seeding the oracle from booted blocks — the spike's bare
+        // engine has no scaffold to filter.)
         let scaffold_ids: BTreeSet<EntityUri> = booted
             .iter()
             .filter(|id| !is_synthetic_ref_id(id))
@@ -8850,8 +8911,9 @@ mod tests {
             );
         }
 
-        // (2) Drive a split through the CapMap (real uuid minted), reconcile the
-        // oracle's synthetic `block::split-N` against it, re-run the catalog.
+        // (2) Drive a split through the CapMap (real uuid minted), reconcile
+        // the oracle's synthetic `block::split-N` against it, re-run the
+        // catalog.
         use holon_pbt_core::TransitionImpl;
 
         use crate::pbt::transitions::SplitBlock;

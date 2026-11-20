@@ -85,17 +85,17 @@ where
         }
 
         // Clock anchor, SAFE direction: every journal the rule PRODUCED must be
-        // for a day the clock actually visited (boot + each rollover). A journal
-        // for an unvisited day is a real defect — a rollover minting the WRONG
-        // date, or a spurious extra fire. The CONVERSE (every visited day has a
-        // journal) is deliberately NOT asserted here: whether the rule fires is
-        // wiring-dependent (a `ViewModel`+Turso draw whose action pipeline is
-        // dormant produces none, yet `visited_days` still holds the boot day),
-        // and the block-comparison invariants already pin "SUT journals ==
-        // reference journals" for the wirings that DO fire — so completeness is
-        // covered there, and folding it in here would false-RED the dormant
-        // wirings. Canonical ids make "one per day" structural (the rule upserts
-        // the same id), so no separate duplicate check is needed.
+        // for a day the clock actually visited (boot + each rollover). A
+        // journal for an unvisited day is a real defect — a rollover minting
+        // the WRONG date, or a spurious extra fire. The CONVERSE (every visited
+        // day has a journal) is deliberately NOT asserted here: whether the
+        // rule fires is wiring-dependent (a `ViewModel`+Turso draw whose action
+        // pipeline is dormant produces none, yet `visited_days` still holds the
+        // boot day), and the block-comparison invariants already pin "SUT
+        // journals == reference journals" for the wirings that DO fire — so
+        // completeness is covered there, and folding it in here would false-RED
+        // the dormant wirings. Canonical ids make "one per day" structural (the
+        // rule upserts the same id), so no separate duplicate check is needed.
         let visited = ref_.visited_days();
         let spurious: Vec<&String> = sut_dates.difference(&visited).collect();
         if !spurious.is_empty() {

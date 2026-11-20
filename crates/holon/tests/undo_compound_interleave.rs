@@ -69,8 +69,9 @@ async fn block_engine() -> Arc<BackendEngine> {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = tokio::runtime::Handle::current();
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread test
-                    // runtime; block_in_place makes the bridge deadlock-free.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread test runtime; block_in_place makes the
+                    // bridge deadlock-free.
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");
@@ -161,7 +162,8 @@ fn type_into(engine: &Arc<BackendEngine>, id: &str) -> Vec<tokio::task::JoinHand
             let id = id.to_string();
             tokio::spawn(async move {
                 // Stagger inside the task so the caller can interleave a
-                // compound after the first few keystrokes are already in flight.
+                // compound after the first few keystrokes are already in
+                // flight.
                 tokio::time::sleep(std::time::Duration::from_millis(i as u64)).await;
                 let mut params: StorageEntity = HashMap::new();
                 params.insert("id".into(), Value::String(id));

@@ -232,9 +232,10 @@ impl crate::pbt::reference_state::ReferenceState {
             let after_blocks = self.file_blocks(&doc);
             let after = unsequenced(after_blocks.clone());
             // Canonical re-sequencing moves the sequences of untouched
-            // siblings, so only a block's other fields tell what the write changed.
-            // A written value the store already holds (an owed edit) changes
-            // the disk but not the store, so a written block of this file counts.
+            // siblings, so only a block's other fields tell what the write
+            // changed. A written value the store already holds (an owed edit)
+            // changes the disk but not the store, so a written block of this
+            // file counts.
             let changed: BTreeSet<&EntityUri> = before
                 .keys()
                 .chain(after.keys())
@@ -248,7 +249,8 @@ impl crate::pbt::reference_state::ReferenceState {
                     .into_iter()
                     .filter(|block| changed.contains(&block.id)),
             );
-            // The document's own siblings are other files, absent from its base.
+            // The document's own siblings are other files, absent from its
+            // base.
             let (mut tree, root): (Vec<Block>, Vec<Block>) = std::mem::take(&mut base.blocks)
                 .into_iter()
                 .partition(|block| block.id != doc);

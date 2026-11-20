@@ -412,9 +412,9 @@ mod tests {
     /// in the `properties` column.
     async fn insert_stamped_block(db: &crate::storage::DbHandle, id: &str, props_json: &str) {
         db.execute(
-            // Test-only substrate seeding — stands in for a real block create so
-            // `rebuild` has a `_provenance` stamp to recover; not a prod path.
-            // ALLOW(sole_block_writer): test-only substrate seeding.
+            // Test-only substrate seeding — stands in for a real block create
+            // so `rebuild` has a `_provenance` stamp to recover; not a prod
+            // path. ALLOW(sole_block_writer): test-only substrate seeding.
             "INSERT INTO block_raw (id, parent_id, properties) VALUES (?, 'sentinel:no_parent', ?)",
             vec![
                 turso::Value::Text(id.to_string()),
@@ -636,9 +636,10 @@ mod tests {
     #[tokio::test]
     async fn rebuild_recovers_create_provenance_subset_and_is_deterministic() {
         // Substrate rebuild (honest partial, C2 INC 4): drop the relation and
-        // replay ONLY what the block store durably preserves — the `_provenance`
-        // stamp per extant block, as one `create` event. Field-delta history is
-        // NOT recovered (disclosed by HistoryFidelity::Partial).
+        // replay ONLY what the block store durably preserves — the
+        // `_provenance` stamp per extant block, as one `create` event.
+        // Field-delta history is NOT recovered (disclosed by
+        // HistoryFidelity::Partial).
         let (_backend, db, store) = store_with_blocks().await;
 
         // Two stamped blocks: an agent create and a rule (postpone) authorship,
@@ -690,7 +691,8 @@ mod tests {
         assert_eq!(b[0].origin, "rule");
         assert_eq!(b[0].transition_id.as_deref(), Some("rule:postpone"));
 
-        // Deterministic ordering: recovered by (at_millis, id) → A (10) then B (40).
+        // Deterministic ordering: recovered by (at_millis, id) → A (10) then B
+        // (40).
         let all = store.query(&HistoryQuery::default()).await.unwrap();
         assert_eq!(
             all.len(),

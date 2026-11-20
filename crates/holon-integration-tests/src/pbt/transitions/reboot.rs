@@ -90,8 +90,8 @@ impl<R: RefLifecycle + RefLayout + RefReboot> TransitionFactory<R> for Reboot {
         // stops those tasks — only ending the process does — so closing this
         // needs a production change, not a harness one. Until then the random
         // alphabet stays unchanged and the gate is the reproducer.
-        // See `docs/Testing/bugfunnel/entries/2026-09-08-reboot-orphans-watcher-tasks.
-        // md`.
+        // See `docs/Testing/bugfunnel/entries/
+        // 2026-09-08-reboot-orphans-watcher-tasks. md`.
         let enabled = std::env::var("HOLON_PBT_REBOOT").is_ok();
         let checks: Vec<Validated<(), Reason>> = vec![
             check(enabled, Reason::PreconditionFailed),

@@ -446,7 +446,8 @@ mod concurrent_ddl_dml_tests {
 
         let handle = backend.handle();
 
-        // Spawn concurrent: DDL (create index) and DML (inserts) at the same time
+        // Spawn concurrent: DDL (create index) and DML (inserts) at the same
+        // time
         let h1 = handle.clone();
         let ddl_task = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;

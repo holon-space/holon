@@ -115,7 +115,8 @@ impl Delivery {
     ) -> u64 {
         let handed = predecessor.map_or(0, DeliveryCursor::sent);
         // shortcut: a batch the router hands to both cursors between these two
-        // loads is claimed one apply early; close it with a seq from the router.
+        // loads is claimed one apply early; close it with a seq from the
+        // router.
         if render.sent() > 0 || handed <= begun {
             return begun;
         }
@@ -440,11 +441,11 @@ async fn render_and_forward(
         predecessor,
     } = handover;
     let rendered = delivery.begin_render();
-    // Advice-rule status surface (ADR 0022 "rule blocks render their own status"):
-    // a rule block whose id carries a NON-Active status has its render replaced
-    // by the error surface, so parse errors and async DDL failures are visible
-    // in place (v1 replaces, like the existing render-failure path; over-cap
-    // banner comes later).
+    // Advice-rule status surface (ADR 0022 "rule blocks render their own
+    // status"): a rule block whose id carries a NON-Active status has its
+    // render replaced by the error surface, so parse errors and async DDL
+    // failures are visible in place (v1 replaces, like the existing
+    // render-failure path; over-cap banner comes later).
     if let Some(status) = engine.advice_status().get(block_id.as_str())
         && !status.is_active()
     {
@@ -506,8 +507,9 @@ async fn render_and_forward(
                 .is_some()
             {
                 // WARN, not ERROR: a block with no row is a watch STATE, not a
-                // failed render — the watcher discloses it with the same visible
-                // error widget and recovers on its own when a row appears.
+                // failed render — the watcher discloses it with the same
+                // visible error widget and recovers on its own when a row
+                // appears.
                 tracing::warn!(
                     block_id = %block_id,
                     "[UiWatcher] render_entity found no block row — nothing to render until one \
@@ -631,9 +633,9 @@ async fn forward_data_stream(
             &profile_resolver,
             &RenderRequirements::entity_dispatch(),
         );
-        // Convert Change<EnrichedRow> → Change<DataRow> at the UiEvent boundary.
-        // UiEvent::Data uses MapChange (= Change<DataRow>) — the FFI boundary requires
-        // this shape.
+        // Convert Change<EnrichedRow> → Change<DataRow> at the UiEvent
+        // boundary. UiEvent::Data uses MapChange (= Change<DataRow>) — the FFI
+        // boundary requires this shape.
         let map_changes: Vec<holon_api::MapChange> = enriched
             .into_iter()
             .map(|c| c.map(EnrichedRow::into_inner))
@@ -707,8 +709,8 @@ pub fn enrich_row(
     EnrichedRow::from_storage(data, |row| {
         // Computed fields only — do NOT resolve the render profile here. The
         // profile was discarded anyway, and resolving it evaluated UI-bearing
-        // variant conditions against this raw storage row (no UI-state bindings),
-        // emitting spurious `eval_bool_source` errors. See
+        // variant conditions against this raw storage row (no UI-state
+        // bindings), emitting spurious `eval_bool_source` errors. See
         // `ProfileResolving::resolve_computed_only`.
         resolver.resolve_computed_only(row, &renderer)
     })

@@ -136,7 +136,8 @@ impl Run {
                 let Some(content) = self.content(*file, *bytes) else {
                     return;
                 };
-                // Bytes equal to the disk's change nothing, so no ingest is owed.
+                // Bytes equal to the disk's change nothing, so no ingest is
+                // owed.
                 let changed = self.disk(*file).await != content;
                 self.env
                     .write_org_file(FILES[*file], &content)

@@ -651,7 +651,8 @@ async fn one_stale_block_refuses_the_whole_push_by_name() {
                 "the error must name the block that is actually stale"
             );
             // Both sides of the disagreement, because an error that says only
-            // "stale" leaves the reader to re-derive what LogSeq actually holds.
+            // "stale" leaves the reader to re-derive what LogSeq actually
+            // holds.
             assert_eq!(
                 expected, "what Holon wrongly believes LogSeq holds",
                 "the error must quote what the base recorded"

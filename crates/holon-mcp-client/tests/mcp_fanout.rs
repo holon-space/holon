@@ -362,7 +362,8 @@ filter_mapping:
 async fn where_provided_param_skips_enumeration() {
     let conn = open_memory_conn();
     execute_sql(&conn, "CREATE TABLE cc_session (id TEXT PRIMARY KEY)");
-    // Seed parent rows that would have triggered fan-out — they must be ignored.
+    // Seed parent rows that would have triggered fan-out — they must be
+    // ignored.
     execute_sql(
         &conn,
         "INSERT INTO cc_session(id) VALUES ('cc-session:s1'), ('cc-session:s2')",
@@ -1280,7 +1281,8 @@ fn claude_history_yaml_multi_project_shape() {
         "project must not declare a vtable (sync owns the cache table)"
     );
 
-    // session + task + agent fan out over project via enumerate_from on project_id.
+    // session + task + agent fan out over project via enumerate_from on
+    // project_id.
     for ent in ["session", "task", "agent"] {
         let e = cfg
             .sidecar()

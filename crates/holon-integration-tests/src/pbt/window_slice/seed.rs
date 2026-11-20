@@ -123,8 +123,8 @@ pub async fn graft_nested_query_block(env: &TestEnvironment) -> Result<()> {
     for i in 1..=NESTED_QUERY_ROW_COUNT {
         // Source-typed so the outline skips them: the ONLY place their content
         // can appear on screen is inside the nested widget under test. The
-        // language is deliberately neither a query nor a rule language, so these
-        // rows do not turn `nq-data` into a query owner of its own.
+        // language is deliberately neither a query nor a rule language, so
+        // these rows do not turn `nq-data` into a query owner of its own.
         env.create_source_block(
             &format!("nq-row-{i}"),
             NESTED_QUERY_DATA_ID,

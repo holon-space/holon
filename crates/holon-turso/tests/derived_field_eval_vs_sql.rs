@@ -127,8 +127,8 @@ async fn planted_sql_matches_eval() {
         ),
         // Integer-column / integer-literal → integer division (9 / 2 = 4).
         ("v_intcol", div(field("xi"), ilit(2))),
-        // REAL column / whole-float literal → the real column keeps affinity, so
-        // the fork gets this right: 5.0 / 2.0 = 2.5.
+        // REAL column / whole-float literal → the real column keeps affinity,
+        // so the fork gets this right: 5.0 / 2.0 = 2.5.
         ("v_realcol", div(field("xf"), flit(2.0))),
         // Fractional float literal keeps REAL affinity: 0.001 * 9 = 0.009.
         (
@@ -192,7 +192,8 @@ async fn concat_and_definedness_match_sqlite() {
         // Numeric-to-text coercion, both kinds.
         r#""n=" + n"#,
         r#""f=" + f"#,
-        // Whole float: `{:?}` keeps the decimal point, matching SQLite's REAL text.
+        // Whole float: `{:?}` keeps the decimal point, matching SQLite's REAL
+        // text.
         r#""fw=" + fw"#,
         // Definedness and the unit comparison, in isolation and conjoined.
         r#"if is_def_var("role") { role } else { email }"#,
@@ -572,7 +573,8 @@ async fn absent_field_divergence_is_documented() {
         .expect_err("eval must fail loud on a missing field");
     assert!(format!("{err}").contains("absent"));
 
-    // SQL side: json_extract of an absent key is NULL (the future Field binding).
+    // SQL side: json_extract of an absent key is NULL (the future Field
+    // binding).
     reconcile_named_view(
         &handle,
         "v_absent",

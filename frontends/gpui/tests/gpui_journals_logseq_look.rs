@@ -257,12 +257,12 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
     // steps produce the indexed deltas production sees:
     //   (1) midnight rollover: a day whose ID sorts LAST in block-id order (the
     //       upstream `MutableBTreeMap` key order) but whose CONTENT sorts FIRST
-    //       under the feed's `sortkey: "-content"` (date DESC). An in-place sort
-    //       of the shared `entries` mirror desynchronises it from upstream here.
-    //       Its position is LOAD-BEARING: pushing the feed down by one section
-    //       is what makes the EMPTY day the row the corrupted mirror destroys,
-    //       which is the half REQ5 can observe. Moving it below the empty day
-    //       makes REQ5 unable to go red at all (measured).
+    //       under the feed's `sortkey: "-content"` (date DESC). An in-place
+    // sort       of the shared `entries` mirror desynchronises it from upstream
+    // here.       Its position is LOAD-BEARING: pushing the feed down by one
+    // section       is what makes the EMPTY day the row the corrupted mirror
+    // destroys,       which is the half REQ5 can observe. Moving it below the
+    // empty day       makes REQ5 unable to go red at all (measured).
     //   (2) the org write-back leg: an `UpdateAt { index }` on that same row
     //       while the feed is live. Against a desynchronised mirror this writes
     //       one day's row over an unrelated entry — duplicating a date and
@@ -412,17 +412,18 @@ fn journals_logseq_look_heading_floor_and_empty_bullet() {
 
     // ── REQ3: LogSeq-faithful empty bullet — EMPTY day only ──────────────────
     // Martin's JRN-2 ruling: the trailing `block:__virtual:<day>` "type here"
-    // bullet affords ONLY on an EMPTY day (a fresh journal, nothing written yet);
-    // a NON-empty day shows no redundant trailing bullet (you add via its rows).
-    // Two hard assertions pin this from both sides, and together they are
-    // deterministic despite viewport-lazy materialisation:
+    // bullet affords ONLY on an EMPTY day (a fresh journal, nothing written
+    // yet); a NON-empty day shows no redundant trailing bullet (you add via its
+    // rows). Two hard assertions pin this from both sides, and together they
+    // are deterministic despite viewport-lazy materialisation:
     //   (a) the EMPTY day paints its bullet — the streaming provider must
     //       converge it onto the settled frame (its zero-row inner stream still
     //       drives the append; the atomic recompose in `AppendedRowsProvider`
     //       guarantees it). This is also the red-first for the resolve fix.
     //   (b) NO materialised NON-empty day paints a bullet — pins empty-only AND
     //       catches the dogfood-#3 last-item paint issue backwards (a non-empty
-    //       day must not emit a trailing slot into the virtualized list at all).
+    //       day must not emit a trailing slot into the virtualized list at
+    // all).
     assert!(
         slot_painted(&elements, &empty),
         "REQ3 (a) empty-day bullet: the EMPTY day {} must paint its `block:__virtual:<day>` \

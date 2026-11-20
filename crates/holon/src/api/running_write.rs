@@ -88,8 +88,8 @@ impl RunningWrite {
     }
 
     pub(crate) fn current() -> Option<Arc<RunningWrite>> {
-        // ALLOW(ok): the only error is "no running write in this task", which is
-        // `None`.
+        // ALLOW(ok): the only error is "no running write in this task", which
+        // is `None`.
         RUNNING_WRITE.try_with(Arc::clone).ok()
     }
 

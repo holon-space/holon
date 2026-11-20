@@ -227,8 +227,8 @@ fn test_platform_geometry_is_real_and_deterministic() {
     // `text` label is never remeasured within a boot — so the very first boot
     // records cold 1px labels while every later boot (warm cache) records the
     // real widths. No settle can wait this out: the frame is at rest. This is
-    // orthogonal to the layout-determinism the test asserts; discard one boot so
-    // all *measured* boots share a warm cache.
+    // orthogonal to the layout-determinism the test asserts; discard one boot
+    // so all *measured* boots share a warm cache.
     let _ = boot_and_snapshot(&runtime);
 
     let snaps: Vec<Snap> = (0..BOOTS).map(|_| boot_and_snapshot(&runtime)).collect();
@@ -257,9 +257,10 @@ fn test_platform_geometry_is_real_and_deterministic() {
         );
     }
 
-    // (2) DETERMINISTIC: all boots settled to identical geometry *shape* (widget
-    // types + pixel bounds) and identical structural entity-count. Entity UUIDs
-    // differ per boot (fresh vault) and are deliberately excluded — see `Geom`.
+    // (2) DETERMINISTIC: all boots settled to identical geometry *shape*
+    // (widget types + pixel bounds) and identical structural entity-count.
+    // Entity UUIDs differ per boot (fresh vault) and are deliberately excluded
+    // — see `Geom`.
     let first = &snaps[0];
     for (i, snap) in snaps.iter().enumerate().skip(1) {
         assert!(

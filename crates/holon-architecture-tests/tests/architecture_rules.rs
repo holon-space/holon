@@ -282,8 +282,8 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         1,
     ),
     ("crates/holon-loro-testing/src/sut_loro.rs", 1),
-    // +1: the layout doc's retained container handle, same cell-backing rationale
-    // as the global one.
+    // +1: the layout doc's retained container handle, same cell-backing
+    // rationale as the global one.
     ("crates/holon-loro/src/block_cell_registry.rs", 2),
     ("crates/holon-loro/src/container_registry.rs", 2),
     ("crates/holon-loro/src/deleted_container_purge.rs", 2),
@@ -292,7 +292,8 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // length of the sync.
     ("crates/holon-loro/src/device_pairing_op.rs", 2),
     ("crates/holon-loro/src/import_atomicity_probe.rs", 7),
-    // cfg(test) probe that measures raw-doc `revert_to` semantics on purpose (D146).
+    // cfg(test) probe that measures raw-doc `revert_to` semantics on purpose
+    // (D146).
     ("crates/holon-loro/src/revert_to_rollback_probe.rs", 7),
     // cfg(test) probe of tree-event delivery: subscription registration, and
     // raw-doc `checkout` / `revert_to` measured on purpose.
@@ -307,16 +308,17 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // tests' own commit-observing subscriber (`with_write` must be shown
     // reaching subscribers on the panic path).
     ("crates/holon-loro/src/loro_document.rs", 6),
-    // +1: the `rehydrate_over` test helper. `rehydrate_shared_trees` is async and
-    // so cannot run inside `with_read`'s synchronous closure — the same reason
-    // the one production caller below (`loro_module.rs`) carries an escape. The
-    // four restart tests share this single helper rather than each taking a raw
-    // doc; sealing it needs that function split into guarded reads around its
-    // awaits, which is the follow-up `loro_module.rs` already names.
+    // +1: the `rehydrate_over` test helper. `rehydrate_shared_trees` is async
+    // and so cannot run inside `with_read`'s synchronous closure — the same
+    // reason the one production caller below (`loro_module.rs`) carries an
+    // escape. The four restart tests share this single helper rather than each
+    // taking a raw doc; sealing it needs that function split into guarded reads
+    // around its awaits, which is the follow-up `loro_module.rs` already names.
     // +1: the share projection's global-doc commit subscription, which wakes it
     // when this device moves the mount that places the share (D198.a).
     // +2: tests planting a mount in the global doc, the way an accept does.
-    // +1: a test planting a page's `#+TODO` vocabulary, as org ingest stores it.
+    // +1: a test planting a page's `#+TODO` vocabulary, as org ingest stores
+    // it.
     ("crates/holon-loro/src/loro_share_backend.rs", 21),
     // +1: the layout doc's `subscribe_root` registration, same rationale as the
     // global doc's.
@@ -657,9 +659,10 @@ fn only_the_registry_hands_out_capability_profile_values() {
         // `holon-api` ships an unrelated `CapabilityProfile` (storage
         // degradation) that other crates re-export under that bare name, so
         // naming THIS crate is what puts a file in scope. A file reaching the
-        // type through a second-hop alias that never mentions `holon_capability`
-        // would slip past; no such alias exists today, and widening the scan to
-        // any `pub use` of the bare name matches the holon-api type instead.
+        // type through a second-hop alias that never mentions
+        // `holon_capability` would slip past; no such alias exists today, and
+        // widening the scan to any `pub use` of the bare name matches the
+        // holon-api type instead.
         if !src.contains("holon_capability") {
             continue;
         }
@@ -714,8 +717,8 @@ fn no_proptest_in_prod_graph() {
 
         // Presence signals:
         //  * an inverted tree rooted at `proptest v…` on stdout, or
-        //  * cargo's "specification `proptest` is ambiguous" — emitted only when >1
-        //    `proptest` source is reachable in this graph.
+        //  * cargo's "specification `proptest` is ambiguous" — emitted only
+        //    when >1 `proptest` source is reachable in this graph.
         // Absence signals (both fine): empty stdout with a "nothing to print"
         // warning, or "did not match any packages".
         let linked = stdout.contains("proptest v");

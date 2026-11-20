@@ -27,9 +27,9 @@ fn arb_token(id: String) -> impl Strategy<Value = YamlToken> {
         type_strategy,
         status_strategy,
         proptest::collection::btree_map(
-            // Prefixed so a generated attribute name can never collide with a Rhai
-            // keyword (e.g. `for`, `nil`), which would make `tok.<name>` in the
-            // generated objective fail to compile.
+            // Prefixed so a generated attribute name can never collide with a
+            // Rhai keyword (e.g. `for`, `nil`), which would make `tok.<name>`
+            // in the generated objective fail to compile.
             "[a-z]{3,6}".prop_map(|s| format!("attr_{s}")),
             -10.0f64..10.0,
             0..3,
@@ -77,7 +77,8 @@ fn arb_transition(
                     let postcond_strats: Vec<_> = (0..n)
                         .map(|_| proptest::option::of(proptest::sample::select(STATUSES)))
                         .collect();
-                    // 0 = exact match, 1 = placeholder ($status), 2 = numeric comparison
+                    // 0 = exact match, 1 = placeholder ($status), 2 = numeric
+                    // comparison
                     let precond_style_strats: Vec<_> = (0..n).map(|_| 0u8..=2u8).collect();
                     let n_creates = 0..=2usize;
                     (

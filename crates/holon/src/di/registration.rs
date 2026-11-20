@@ -248,8 +248,8 @@ async fn create_initialized_engine(
     engine.install_unserved_types(unserved);
 
     // Undo substrate: back the per-session undo stack with the replica DB
-    // (`undo_log` snapshot + live-state precondition reader) so history survives
-    // a restart and stale entries are dropped loudly at replay.
+    // (`undo_log` snapshot + live-state precondition reader) so history
+    // survives a restart and stale entries are dropped loudly at replay.
     engine
         .enable_undo_persistence(type_registry.clone())
         .await
@@ -263,11 +263,11 @@ async fn create_initialized_engine(
         .await
         .context("Failed to create local_ui_state table")?;
 
-    // Advice-rule reconciler (ADR 0022): discover `holon_advice_rule_yaml` blocks
-    // and keep their `advice_rule_{slug}` matviews synthesized/diffed/torn-down
-    // as the rule blocks are edited — the exact profile-resolver pattern, one
-    // view per *rule*. DDL runs off the CDC delivery path (see
-    // `spawn_advice_reconciler`).
+    // Advice-rule reconciler (ADR 0022): discover `holon_advice_rule_yaml`
+    // blocks and keep their `advice_rule_{slug}` matviews
+    // synthesized/diffed/torn-down as the rule blocks are edited — the exact
+    // profile-resolver pattern, one view per *rule*. DDL runs off the CDC
+    // delivery path (see `spawn_advice_reconciler`).
     let advice_status = holon_advice::AdviceRuleStatusHandle::new();
     match crate::sync::spawn_advice_reconciler(
         &matview_mgr,
@@ -284,8 +284,8 @@ async fn create_initialized_engine(
         ),
     }
 
-    // Clock scheduler (ADR 0024 P5, time-as-data): seed the `clock` day row from
-    // the injected wall clock and re-fire temporal-guard matviews on
+    // Clock scheduler (ADR 0024 P5, time-as-data): seed the `clock` day row
+    // from the injected wall clock and re-fire temporal-guard matviews on
     // day-rollover. Every embedder resolves through this shared path, so
     // spawning it here covers GPUI, iOS, dioxus-web worker, and headless tests.
     // The clock is the root's required `InjectedClock`: the real `SystemClock`
@@ -359,8 +359,8 @@ fn register_shared_services(
 
     register_condition_bus(injector, conditions);
 
-    // The tagged block shapes the dispatcher's shape gate keeps every Holon-side
-    // write inside (Model.md invariant 17).
+    // The tagged block shapes the dispatcher's shape gate keeps every
+    // Holon-side write inside (Model.md invariant 17).
     injector.provide::<holon_core::ShapeValidators>(Provider::root(|_| {
         Shared::new(holon_core::ShapeValidators::registered())
     }));
@@ -775,7 +775,8 @@ pub fn register_core_services_with_backend(
                 // BackendEngine::new wires TursoHistoryStore (C2b) over the raw
                 // db handle; `block_history` must exist before any engine op
                 // records history (lazy wirings never resolve this marker
-                // otherwise — fresh-db GPUI boot panicked in seed_default_layout).
+                // otherwise — fresh-db GPUI boot panicked in
+                // seed_default_layout).
                 let _history = inj.resolve_async::<DbReady<HistoryTables>>().await;
 
                 // REQUIRED (SEC-bound.a): every container binds this authority
@@ -921,9 +922,9 @@ mod bundled_gql_query_smoke {
             ),
         ];
 
-        // Any holon_gql block shipped in the default vault assets (future-proof:
-        // currently the panels ship as holon_sql, but if a GQL block is ever
-        // bundled it is auto-covered here).
+        // Any holon_gql block shipped in the default vault assets
+        // (future-proof: currently the panels ship as holon_sql, but if a GQL
+        // block is ever bundled it is auto-covered here).
         let index_org = include_str!("../../../../assets/default/index.org");
         for (i, body) in extract_gql_blocks(index_org).into_iter().enumerate() {
             corpus.push((format!("assets/default/index.org#gql[{i}]"), body));

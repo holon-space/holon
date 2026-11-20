@@ -212,9 +212,10 @@ impl LoroBlockOperations {
             .map_err(|e| format!("add_tag: block {id:?} not found: {e}"))?;
 
         // No-pages-under-non-pages (interim ruling 2026-07-13): marking a block
-        // Page turns it into a page, so its immediate parent must also be a page
-        // (or be `no_parent` — seed/root pages stay legal). The immediate-parent
-        // check suffices by induction: an existing tree already honours the rule.
+        // Page turns it into a page, so its immediate parent must also be a
+        // page (or be `no_parent` — seed/root pages stay legal). The
+        // immediate-parent check suffices by induction: an existing tree
+        // already honours the rule.
         if tag == holon_api::PAGE_TAG {
             let parent_is_page = match block.parent_id.as_block_id() {
                 Some(parent_id) => {
@@ -295,7 +296,8 @@ impl LoroBlockOperations {
 
         // Unmarking a Page whose direct children are themselves pages would
         // leave those children as pages under a non-page block. Reject loud
-        // (cascade-unmark is a surprising bulk mutation — deliberately not done).
+        // (cascade-unmark is a surprising bulk mutation — deliberately not
+        // done).
         if tag == holon_api::PAGE_TAG && block.is_page() {
             let child_ids = backend.list_children(id).await?;
             let children = backend.get_blocks(child_ids).await?;
@@ -428,10 +430,10 @@ impl holon_core::WriteAuthorityReads for LoroBlockOperations {
 #[async_trait]
 impl BlockQueryHelpers<Block> for LoroBlockOperations {
     async fn children_ordered(&self, parent_id: &EntityUri) -> Result<Vec<Block>> {
-        // Read child order straight from the Loro tree — its fractional index is
-        // the source of truth for sibling order (ADR 0005), even when Turso is
-        // also wired (the Turso `sort_key` column is only a projection of it).
-        // `list_children` returns child URIs in tree order; `get_blocks`
+        // Read child order straight from the Loro tree — its fractional index
+        // is the source of truth for sibling order (ADR 0005), even when Turso
+        // is also wired (the Turso `sort_key` column is only a projection of
+        // it). `list_children` returns child URIs in tree order; `get_blocks`
         // preserves that input order.
         let backend = self.get_backend("").await?;
         let child_ids = backend.list_children(parent_id.as_str()).await?;
@@ -547,14 +549,15 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // provably-correct inverse AND a staleness fingerprint (`changes`) for
         // the field being written. Two dogfood #4 data-integrity bugs traced
         // here:
-        //   * `task_state` writes (from `cycle_task_state`) had NO inverse, so the op
-        //     was `DeclaredIrreversible` → no undo entry was pushed → undo silently
-        //     consumed an unrelated entry (a "no-op" cycle undo).
-        //   * `content` writes returned EMPTY `changes`, so a `split_block` that
-        //     delegates here inherited an empty precondition — disabling the
-        //     stale-guard entirely and letting an undo-after-delete replay a stale
-        //     inverse that destroyed unrelated blocks (P1 data loss).
-        // Rich content (Object with marks) and mark-only edits stay irreversible.
+        //   * `task_state` writes (from `cycle_task_state`) had NO inverse, so
+        //     the op was `DeclaredIrreversible` → no undo entry was pushed →
+        //     undo silently consumed an unrelated entry (a "no-op" cycle undo).
+        //   * `content` writes returned EMPTY `changes`, so a `split_block`
+        //     that delegates here inherited an empty precondition — disabling
+        //     the stale-guard entirely and letting an undo-after-delete replay
+        //     a stale inverse that destroyed unrelated blocks (P1 data loss).
+        // Rich content (Object with marks) and mark-only edits stay
+        // irreversible.
         let prior = match backend.get_block(id).await {
             Ok(block) => block,
             Err(ApiError::BlockNotFound { .. }) => return not_held(block_uri),
@@ -575,10 +578,10 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 params.insert("field".to_string(), Value::String("content".to_string()));
                 params.insert("value".to_string(), old);
                 // `content` is a projected column the `SqlUndoStateReader` can
-                // read, so a real fingerprint arms the stale-guard: an undo that
-                // runs after the block was deleted/edited reads a divergent (or
-                // absent) value and is dropped loudly instead of replaying a
-                // stale inverse.
+                // read, so a real fingerprint arms the stale-guard: an undo
+                // that runs after the block was deleted/edited reads a
+                // divergent (or absent) value and is dropped loudly instead of
+                // replaying a stale inverse.
                 (
                     Some(block_op("set_field", params)),
                     vec![FieldDelta::new(
@@ -592,25 +595,26 @@ impl CrudOperations<Block> for LoroBlockOperations {
             "task_state" => {
                 let old = match prior.get_property_str("task_state") {
                     Some(s) => Value::String(s),
-                    // Absent before the write → the inverse must DELETE the key,
-                    // not pin a null-valued `task_state` on the block.
+                    // Absent before the write → the inverse must DELETE the
+                    // key, not pin a null-valued `task_state` on the block.
                     None => Value::REMOVED,
                 };
                 let mut params = HashMap::new();
                 params.insert("id".to_string(), Value::String(id.to_string()));
                 params.insert("field".to_string(), Value::String("task_state".to_string()));
                 params.insert("value".to_string(), old);
-                // `task_state` lives in the `properties` JSON blob, not a column,
-                // so the column-only reader can't fingerprint it — empty
-                // `changes` (single-writer safe). The inverse is still real, so
-                // a cycle now pushes an undoable entry.
+                // `task_state` lives in the `properties` JSON blob, not a
+                // column, so the column-only reader can't fingerprint it —
+                // empty `changes` (single-writer safe). The inverse is still
+                // real, so a cycle now pushes an undoable entry.
                 (Some(block_op("set_field", params)), Vec::new())
             }
             f if holon_api::EdgeField::is_edge_column(f) => {
-                // Edge fields are set-valued: a write is a whole-set replace, so
-                // the inverse restores the PRIOR full set. The junction is not a
-                // column the `SqlUndoStateReader` fingerprints, so `changes` is
-                // empty (single-writer safe) while the inverse is still real.
+                // Edge fields are set-valued: a write is a whole-set replace,
+                // so the inverse restores the PRIOR full set. The junction is
+                // not a column the `SqlUndoStateReader` fingerprints, so
+                // `changes` is empty (single-writer safe) while the inverse is
+                // still real.
                 let edge = holon_api::EdgeField::ALL
                     .iter()
                     .copied()
@@ -625,13 +629,14 @@ impl CrudOperations<Block> for LoroBlockOperations {
             "content" if matches!(value, Value::Object(_)) => {
                 // Rich content write (text + marks). The exact inverse restores
                 // BOTH prior text and prior marks atomically as one `content`
-                // Object value (see `rich_content_restore_value`). The `content`
-                // FieldDelta arms the stale-guard ONLY when the text actually
-                // changed: a marks-only edit under an Object write leaves the
-                // projected `content` column untouched, so a real delta would be
-                // vacuous (old == new) and the engine would refuse to journal the
-                // entry. In that case fall back to empty `changes`
-                // (single-writer-safe), matching the `marks` arm below.
+                // Object value (see `rich_content_restore_value`). The
+                // `content` FieldDelta arms the stale-guard ONLY when the text
+                // actually changed: a marks-only edit under an Object write
+                // leaves the projected `content` column untouched, so a real
+                // delta would be vacuous (old == new) and the engine would
+                // refuse to journal the entry. In that case fall back to empty
+                // `changes` (single-writer-safe), matching the `marks` arm
+                // below.
                 let prior_marks = prior.marks.clone().unwrap_or_default();
                 let old = rich_content_restore_value(&prior.content, &prior_marks);
                 let new_text = match &value {
@@ -659,12 +664,12 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 (Some(block_op("set_field", params)), changes)
             }
             "marks" => {
-                // Mark-only write: keep the text, replace the mark set. The exact
-                // inverse restores prior (text, marks) atomically via the same
-                // `content=Object` whole-set-restore path. The text never
-                // changes, so the projected `content` column can't fingerprint a
-                // marks-only edit — empty `changes` (single-writer-safe), while
-                // the inverse is still a real, provably-correct restore.
+                // Mark-only write: keep the text, replace the mark set. The
+                // exact inverse restores prior (text, marks) atomically via the
+                // same `content=Object` whole-set-restore path. The text never
+                // changes, so the projected `content` column can't fingerprint
+                // a marks-only edit — empty `changes` (single-writer-safe),
+                // while the inverse is still a real, provably-correct restore.
                 let prior_marks = prior.marks.clone().unwrap_or_default();
                 let old = rich_content_restore_value(&prior.content, &prior_marks);
                 let mut params = HashMap::new();
@@ -680,12 +685,13 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 // key). Capture the prior value for an EXACT inverse. A
                 // previously-ABSENT property inverts to a REMOVE
                 // (`Value::REMOVED`, routed back through the write arm's delete
-                // path), so undo of a first-time property write leaves the block
-                // genuinely property-free rather than pinning a null-valued
-                // key; a property that HELD a null inverts to that null. The
-                // properties blob is not a column the `SqlUndoStateReader`
-                // fingerprints, so `changes` stays empty (single-writer safe)
-                // while the inverse is a real, provably-correct restore.
+                // path), so undo of a first-time property write leaves the
+                // block genuinely property-free rather than pinning a
+                // null-valued key; a property that HELD a null inverts to that
+                // null. The properties blob is not a column the
+                // `SqlUndoStateReader` fingerprints, so `changes` stays empty
+                // (single-writer safe) while the inverse is a real,
+                // provably-correct restore.
                 let old = match field {
                     "block_type" => prior.block_type.clone().map(Value::from),
                     _ => prior.get_property(field),
@@ -710,7 +716,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
                             .await
                             .map_err(|e| format!("Failed to update content: {}", e))?;
                     }
-                    // Object { text, marks } ⇒ rich update; applies marks via Peritext.
+                    // Object { text, marks } ⇒ rich update; applies marks via
+                    // Peritext.
                     Value::Object(obj) => {
                         let text = obj
                             .get("text")
@@ -720,8 +727,9 @@ impl CrudOperations<Block> for LoroBlockOperations {
                                     .to_string()
                             })?
                             .to_string();
-                        // `obj` is a Value::Object payload (set_field caller serialized
-                        // marks as a JSON string), not a CDC row from the jsonb column.
+                        // `obj` is a Value::Object payload (set_field caller
+                        // serialized marks as a JSON string), not a CDC row
+                        // from the jsonb column.
                         let marks_json = obj
                             .get("marks")
                             // ALLOW(jsonb_as_string): payload field, not CDC row.
@@ -761,7 +769,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
                         .into());
                     }
                 };
-                // Read current text from the backend; update_block_marked rewrites both.
+                // Read current text from the backend; update_block_marked
+                // rewrites both.
                 let current = backend
                     .get_block(id)
                     .await
@@ -780,8 +789,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
             "sort_key" => {
                 // Sibling order is owned by `place()`/`tree.mov_after` and
                 // projected to SQL from the Loro fractional index — a block's
-                // `sort_key` is never written through `set_field`. Routing it to
-                // the meta `properties` map would silently drop it: the
+                // `sort_key` is never written through `set_field`. Routing it
+                // to the meta `properties` map would silently drop it: the
                 // Loro→SQL projector derives `sort_key` from
                 // `tree.fractional_index(node)` and ignores properties. Mirror
                 // `BlockCellRegistry::write_field`: fail loud so a positional
@@ -795,9 +804,10 @@ impl CrudOperations<Block> for LoroBlockOperations {
             }
             "parent_id" => {
                 // Reparenting is a structural tree move, not a meta property.
-                // The projector reads the parent from the tree (not properties),
-                // so a property write would be silently lost. Route to the
-                // backend's `tree.mov`, mirroring `BlockCellRegistry::write_field`.
+                // The projector reads the parent from the tree (not
+                // properties), so a property write would be silently lost.
+                // Route to the backend's `tree.mov`, mirroring
+                // `BlockCellRegistry::write_field`.
                 let new_parent = value.as_string().map(String::from).ok_or_else(|| {
                     format!("set_field(\"parent_id\"): expected String, got {value:?}")
                 })?;
@@ -808,11 +818,11 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     .map_err(|e| format!("set_field(\"parent_id\") for {id}: {e}"))?;
             }
             f if holon_api::EdgeField::is_edge_column(f) => {
-                // Set-valued edge field: write the tree node's dedicated meta key
-                // so the Loro→SQL projector reads it into the matching junction
-                // table. Routing it into `properties` (the `_` arm) would be
-                // silently lost — the junction never sees it. Generic over every
-                // `EdgeField` member (no per-field branch).
+                // Set-valued edge field: write the tree node's dedicated meta
+                // key so the Loro→SQL projector reads it into the matching
+                // junction table. Routing it into `properties` (the `_` arm)
+                // would be silently lost — the junction never sees it. Generic
+                // over every `EdgeField` member (no per-field branch).
                 let targets = edge_string_targets(&value, f)?;
                 holon_api::EdgeField::from_drawer_key(f)
                     .expect("is_edge_column matched an EdgeField")
@@ -858,10 +868,10 @@ impl CrudOperations<Block> for LoroBlockOperations {
             }
         }
 
-        // Propagation to downstream consumers is handled by `LoroSyncController`
-        // via `doc.subscribe_root`. `changes` is NOT a second write path (the
-        // dispatcher ignores it) — it feeds the engine's precondition
-        // fingerprint + history relation only.
+        // Propagation to downstream consumers is handled by
+        // `LoroSyncController` via `doc.subscribe_root`. `changes` is NOT a
+        // second write path (the dispatcher ignores it) — it feeds the engine's
+        // precondition fingerprint + history relation only.
         Ok(match undo {
             Some(op) => OperationResult::new(changes, op),
             None => OperationResult::irreversible(changes),
@@ -930,10 +940,10 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // A SEPARATE top-level `marks` param is the shape every non-inverse
         // producer of rich text emits — org/markdown ingest (`block_params.rs`)
         // and template instantiation (`plan_instantiation`, which remaps the
-        // definition's spans across `{{var}}` substitution). `SqlOperationProvider`
-        // honours it, so ignoring it here made the CRUD authority decide whether a
-        // block keeps its links and emphasis: under Loro every instantiated or
-        // ingested rich block was born plain.
+        // definition's spans across `{{var}}` substitution).
+        // `SqlOperationProvider` honours it, so ignoring it here made the CRUD
+        // authority decide whether a block keeps its links and emphasis: under
+        // Loro every instantiated or ingested rich block was born plain.
         let param_marks: Option<Vec<holon_api::MarkSpan>> = match fields.get("marks") {
             // ALLOW(jsonb_as_string): op param, not a CDC row.
             Some(Value::String(json)) => Some(
@@ -956,11 +966,12 @@ impl CrudOperations<Block> for LoroBlockOperations {
             (from_content, from_param) => from_content.or(from_param),
         };
 
-        // Marks are applied by Peritext AFTER the node exists, so an out-of-bounds
-        // span rejected down there would leave a half-created plain block behind.
-        // Reject it here instead — before any write — so an invalid create has
-        // exactly zero side effects. Offsets are Unicode-scalar, matching
-        // `canonicalize_marks_against` and `scalar_range_to_bytes`.
+        // Marks are applied by Peritext AFTER the node exists, so an
+        // out-of-bounds span rejected down there would leave a half-created
+        // plain block behind. Reject it here instead — before any write — so an
+        // invalid create has exactly zero side effects. Offsets are
+        // Unicode-scalar, matching `canonicalize_marks_against` and
+        // `scalar_range_to_bytes`.
         if let Some(marks) = &restore_marks {
             let len = content.chars().count();
             if let Some(bad) = marks.iter().find(|m| m.start > m.end || m.end > len) {
@@ -1025,8 +1036,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
 
         // Build the appropriate BlockContent based on content_type. Image must
         // map to the dedicated variant — otherwise the block is stored in Loro
-        // as `content_type = "text"` and the org `[[file:…]]` image classification
-        // is lost on the create round-trip.
+        // as `content_type = "text"` and the org `[[file:…]]` image
+        // classification is lost on the create round-trip.
         let block_content = match content_type {
             ContentType::Source => {
                 let lang = source_language.as_deref().unwrap_or("text");
@@ -1098,8 +1109,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .map_err(|e| format!("Failed to create block: {}", e))?
         };
 
-        // Set additional properties (excluding fields handled above and source block
-        // fields)
+        // Set additional properties (excluding fields handled above and source
+        // block fields)
         let mut props = HashMap::new();
         for (key, value) in &fields {
             if !create_handles_field(key.as_ref()) {
@@ -1120,8 +1131,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
         }
 
         // Apply the block's marks via Peritext over the just-written text —
-        // `create_block_with_properties` and `update_block` write raw text only,
-        // so a marked block would otherwise be born (or resurrect) plain.
+        // `create_block_with_properties` and `update_block` write raw text
+        // only, so a marked block would otherwise be born (or resurrect) plain.
         // `update_block_marked` rewrites text AND marks together.
         if let Some(marks) = &restore_marks {
             backend
@@ -1130,7 +1141,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .map_err(|e| format!("create: restore marks for {}: {e}", block.id))?;
         }
 
-        // `create_block_with_properties` appended the block, so `Last` needs no move.
+        // `create_block_with_properties` appended the block, so `Last` needs no
+        // move.
         let placement = holon_api::ChildPlacement::of_create(&fields)
             .map_err(|e| format!("create {}: {e}", block.id))?;
         if let Some(predecessor) = placement.anchor() {
@@ -1156,13 +1168,14 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 "id".to_string(),
                 Value::String(block_with_props.id.to_string()),
             );
-            // Emit the create as one `id` field delta (Null → minted id), exactly
-            // as the SqlOperationProvider create path does. This is what the
-            // engine's `record_history` chokepoint consumes to append a
-            // `block_history` op_group — without a delta the batch is empty and a
-            // Loro-consolidator create silently records NO history, so the C2
-            // `inv-history-records-all-creates` op-group floor is missed. The
-            // delta is non-vacuous (old != new), so undo journaling is unchanged.
+            // Emit the create as one `id` field delta (Null → minted id),
+            // exactly as the SqlOperationProvider create path does. This is
+            // what the engine's `record_history` chokepoint consumes to append
+            // a `block_history` op_group — without a delta the batch is empty
+            // and a Loro-consolidator create silently records NO history, so
+            // the C2 `inv-history-records-all-creates` op-group floor is
+            // missed. The delta is non-vacuous (old != new), so undo journaling
+            // is unchanged.
             OperationResult::new(
                 vec![FieldDelta::new(
                     block_with_props.id.to_string(),
@@ -1218,12 +1231,12 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // SAME sibling position (ADR 0024 — preserve identity, never
         // delete+recreate).
         //
-        // Fail-closed on NON-LEAF (destructive-delete ruling 2026-07-21): a bare
-        // `delete` NEVER cascades a subtree away silently. When the target has
-        // children the caller must opt in explicitly via `delete_subtree` (drop
-        // the whole subtree) or `delete_keep_children` (reparent the children
-        // first). This is the loud, fail-closed backstop that also protects the
-        // MCP/agent path — no caller can cascade by accident.
+        // Fail-closed on NON-LEAF (destructive-delete ruling 2026-07-21): a
+        // bare `delete` NEVER cascades a subtree away silently. When the target
+        // has children the caller must opt in explicitly via `delete_subtree`
+        // (drop the whole subtree) or `delete_keep_children` (reparent the
+        // children first). This is the loud, fail-closed backstop that also
+        // protects the MCP/agent path — no caller can cascade by accident.
         let block = match backend.get_block(id).await {
             Ok(block) => block,
             Err(ApiError::BlockNotFound { .. }) => return not_held(block_uri),
@@ -1414,8 +1427,8 @@ impl TaskOperations<Block> for LoroBlockOperations {
     }
 
     async fn set_state(&self, id: &str, state: String) -> Result<OperationResult> {
-        // The canonical task-state property key is `task_state` — the org parser
-        // (`block_params`), the SQL provider's `cycle_task_state`, and
+        // The canonical task-state property key is `task_state` — the org
+        // parser (`block_params`), the SQL provider's `cycle_task_state`, and
         // `Block::task_state()` all read/write `properties["task_state"]`.
         // Writing `"TODO"` here stored a stray property the cycle never read
         // back, so `cycle_task_state` (read `task_state`, write `TODO`) was a
@@ -1490,16 +1503,16 @@ impl MarkOperations<Block> for LoroBlockOperations {
         })?;
 
         let backend = self.find_doc_for_block(id).await?;
-        // Capture the EXACT prior rich content (text + FULL mark set) BEFORE the
-        // mark write. The inverse restores it atomically via the whole-set
-        // `content=Object` path (`update_block_marked`), which clears every mark
-        // over the whole range before re-applying — so undo restores the exact
-        // prior marks. A blind `remove_mark(range, key)` inverse would instead
-        // strip a PRE-EXISTING overlapping mark of the same key the user never
-        // touched (e.g. applying Bold over a sub-range of an existing Bold span,
-        // then undoing, must NOT punch a hole in the original span). Text is
-        // unchanged by a mark op, so `changes` stays empty (single-writer safe),
-        // matching the `set_field("marks")` arm.
+        // Capture the EXACT prior rich content (text + FULL mark set) BEFORE
+        // the mark write. The inverse restores it atomically via the whole-set
+        // `content=Object` path (`update_block_marked`), which clears every
+        // mark over the whole range before re-applying — so undo restores the
+        // exact prior marks. A blind `remove_mark(range, key)` inverse would
+        // instead strip a PRE-EXISTING overlapping mark of the same key the
+        // user never touched (e.g. applying Bold over a sub-range of an
+        // existing Bold span, then undoing, must NOT punch a hole in the
+        // original span). Text is unchanged by a mark op, so `changes` stays
+        // empty (single-writer safe), matching the `set_field("marks")` arm.
         let prior = backend
             .get_block(id)
             .await
@@ -1550,9 +1563,9 @@ impl MarkOperations<Block> for LoroBlockOperations {
         }
 
         let backend = self.find_doc_for_block(id).await?;
-        // Capture the EXACT prior rich content (text + FULL mark set) BEFORE the
-        // removal so the inverse restores the captured prior mark set for the
-        // affected range — atomically via the whole-set `content=Object`
+        // Capture the EXACT prior rich content (text + FULL mark set) BEFORE
+        // the removal so the inverse restores the captured prior mark set for
+        // the affected range — atomically via the whole-set `content=Object`
         // restore path. Symmetric to `apply_mark`; text is untouched so
         // `changes` stays empty (single-writer safe).
         let prior = backend
@@ -1587,7 +1600,8 @@ impl TextOperations<Block> for LoroBlockOperations {
             .map_err(|_| format!("insert_text: pos must be non-negative, got {pos}"))?;
         let backend = self.find_doc_for_block(id).await?;
         // Capture prior content so the projected `content` column can be
-        // fingerprinted (arms the undo stale-guard, same as set_field("content")).
+        // fingerprinted (arms the undo stale-guard, same as
+        // set_field("content")).
         let old_content = backend
             .get_block(id)
             .await
@@ -1603,8 +1617,8 @@ impl TextOperations<Block> for LoroBlockOperations {
             .map_err(|e| format!("insert_text: read post-insert content: {e}"))?
             .content;
         // Exact inverse: delete the range just inserted. LoroText positions are
-        // Unicode scalars, so the deleted length is the scalar count of `text` —
-        // the same unit `delete_text`'s `len` expects.
+        // Unicode scalars, so the deleted length is the scalar count of `text`
+        // — the same unit `delete_text`'s `len` expects.
         let inverse = block_op(
             "delete_text",
             HashMap::from([
@@ -1635,8 +1649,8 @@ impl TextOperations<Block> for LoroBlockOperations {
             .map_err(|_| format!("delete_text: len must be non-negative, got {len}"))?;
         let backend = self.find_doc_for_block(id).await?;
         // Capture the exact substring about to be deleted (Unicode-scalar range
-        // [pos, pos+len)) so the inverse can re-insert it verbatim. Char-indexed
-        // to match LoroText's scalar positions.
+        // [pos, pos+len)) so the inverse can re-insert it verbatim.
+        // Char-indexed to match LoroText's scalar positions.
         let old_content = backend
             .get_block(id)
             .await
@@ -1707,7 +1721,8 @@ impl OperationProvider for LoroBlockOperations {
         let short_name = Block::short_name().expect("Block must have short_name");
         let id_column = "id";
 
-        // Use resolver function for task_operations to resolve enum_from annotations
+        // Use resolver function for task_operations to resolve enum_from
+        // annotations
         let mut ops = __operations_task_operations::task_operations_with_resolver(
             self,
             entity_name,
@@ -1858,7 +1873,8 @@ impl OperationProvider for LoroBlockOperations {
         }
 
         // Advice dismissal (ADR 0021/0022): append-one RMW over the anchor's
-        // `advice_suppressed` set. Not a macro-trait op — dispatched by hand here.
+        // `advice_suppressed` set. Not a macro-trait op — dispatched by hand
+        // here.
         if op_name == "dismiss_advice" {
             return self.dismiss_advice(&params).await;
         }
@@ -2130,7 +2146,8 @@ mod advice_dismiss_tests {
                     "cycle's inverse must restore task_state, not content — got {:?}",
                     op.params
                 );
-                // Prior task_state was absent → inverse restores the REMOVED sentinel.
+                // Prior task_state was absent → inverse restores the REMOVED
+                // sentinel.
                 assert!(matches!(op.params.get("value"), Some(Value::Removed(_))));
             }
             other => panic!("cycle_task_state must be reversible, got {other:?}"),
@@ -2376,7 +2393,8 @@ mod advice_dismiss_tests {
         assert_eq!(after.content, "bold text");
         assert_eq!(after.marks, Some(vec![bold(0, 4)]));
 
-        // Inverse shape: set_field on `content`, an Object restoring prior text.
+        // Inverse shape: set_field on `content`, an Object restoring prior
+        // text.
         let inverse = match &result.undo {
             UndoAction::Undo(op) => op.clone(),
             other => panic!("rich content write must be reversible, got {other:?}"),
@@ -2839,8 +2857,8 @@ mod advice_dismiss_tests {
             .await
             .expect("save");
 
-        // Destructive-delete ruling 2026-07-21: a bare `delete` NEVER cascades a
-        // subtree — it fails loud and names the two explicit opt-in ops. The
+        // Destructive-delete ruling 2026-07-21: a bare `delete` NEVER cascades
+        // a subtree — it fails loud and names the two explicit opt-in ops. The
         // grandchild must still be present afterwards (no partial mutation).
         let err = ops
             .delete(&parent)
@@ -3472,7 +3490,8 @@ mod tag_op_tests {
             "got: {err}"
         );
 
-        // Seed page at no_parent → allowed; then child under the now-page parent.
+        // Seed page at no_parent → allowed; then child under the now-page
+        // parent.
         run(&ops, "add_tag", "block:parent", PAGE_TAG).await;
         assert!(
             tags_of(&backend, "block:parent")

@@ -22,8 +22,8 @@ pub fn wire() -> Box<dyn CapInvariant> {
         InvViewmodelDecompiledRowsMatchQuery,
         RunMode::Strict,
         Needs {
-            // `SutQueryResults` (the full-mode query engine) is required here so this
-            // full-mode twin is mutually exclusive with the degraded
+            // `SutQueryResults` (the full-mode query engine) is required here
+            // so this full-mode twin is mutually exclusive with the degraded
             // `inv-viewmodel-shows-source-when-no-query` twin (which selects on
             // `sut_absent: [SutQueryResults]`). Body unchanged.
             sut_present: vec![

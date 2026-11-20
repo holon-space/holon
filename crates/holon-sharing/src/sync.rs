@@ -155,15 +155,16 @@ pub async fn push_once(
         let log = ContainerLogId(container.id.clone());
         if !authorized {
             // No proof to attach ⇒ nothing leaves this device. The relay is
-            // untrusted store-and-forward, so an unprovable push would put state
-            // in front of it for no admissible reason.
+            // untrusted store-and-forward, so an unprovable push would put
+            // state in front of it for no admissible reason.
             report.unauthorized.push(log);
             continue;
         }
         let state = session.states.entry(log.clone()).or_default();
-        // ALLOW(loro_doc_escape): `doc` is re-read after the `transport.push` await
-        // (line below reads `doc.oplog_vv()` post-push) — it can't be confined to a
-        // single with_read/with_write scope without changing what vv gets recorded.
+        // ALLOW(loro_doc_escape): `doc` is re-read after the `transport.push`
+        // await (line below reads `doc.oplog_vv()` post-push) — it can't be
+        // confined to a single with_read/with_write scope without changing what
+        // vv gets recorded.
         let doc = container.doc.doc();
         doc.commit();
         let from = state.last_pushed.clone().unwrap_or_default();

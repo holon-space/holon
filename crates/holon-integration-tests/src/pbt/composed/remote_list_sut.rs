@@ -338,7 +338,8 @@ impl SutRemoteListSync for RemoteListSut {
 mod tests {
     use super::*;
 
-    // One fixed case, not a PBT: the claim is that the fall-through arm stays loud.
+    // One fixed case, not a PBT: the claim is that the fall-through arm stays
+    // loud.
     #[test]
     #[should_panic(expected = "a mirrored cell of an unexpected kind: Float(1.5)")]
     fn a_cell_kind_the_mirror_does_not_spell_stays_loud() {

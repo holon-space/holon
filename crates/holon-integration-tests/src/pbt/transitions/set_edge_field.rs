@@ -135,10 +135,10 @@ impl<
 
         // `tags` arm (never `Page` → `is_page` unchanged). Two sub-arms, 2:1
         // pool:random. The pool sub-arm draws DISTINCT tags from
-        // `ADVICE_TAG_POOL` (the same pool the advice-rule generator anchors on),
-        // making `task`/`lesson` tagging and hence advice tag-overlap reachable;
-        // the random sub-arm keeps arbitrary `[a-z]{3,6}` coverage, plus
-        // `decision`.
+        // `ADVICE_TAG_POOL` (the same pool the advice-rule generator anchors
+        // on), making `task`/`lesson` tagging and hence advice tag-overlap
+        // reachable; the random sub-arm keeps arbitrary `[a-z]{3,6}` coverage,
+        // plus `decision`.
         {
             let random_tags = (
                 proptest::sample::select(eligible.clone()),
@@ -164,7 +164,8 @@ impl<
             arms.push((1, prop_oneof![2 => pool_tags, 1 => random_tags].boxed()));
         }
 
-        // `requires` arm: a single dependency edge to a *distinct* existing block.
+        // `requires` arm: a single dependency edge to a *distinct* existing
+        // block.
         let n = eligible.len();
         if n >= 2 {
             let elig = eligible.clone();
@@ -207,11 +208,11 @@ impl<
 
             // Biased advice sub-arm (weight 2): when both a `task`-tagged and a
             // `lesson`-tagged eligible block exist, prefer subject = task,
-            // target(s) = lesson(s) — the exact shape a `lessons_for_tasks` rule
-            // suppresses, so suppression actually removes a woven row. Gated on
-            // carrier availability like the `n >= 2` gate. ~1 in 3 draws two
-            // distinct lessons: the edge set is REPLACED whole, so multi-element
-            // sets exercise the accumulate/replace semantics.
+            // target(s) = lesson(s) — the exact shape a `lessons_for_tasks`
+            // rule suppresses, so suppression actually removes a woven row.
+            // Gated on carrier availability like the `n >= 2` gate. ~1 in 3
+            // draws two distinct lessons: the edge set is REPLACED whole, so
+            // multi-element sets exercise the accumulate/replace semantics.
             let carriers = |tag: &str| -> Vec<EntityUri> {
                 eligible
                     .iter()
@@ -257,8 +258,9 @@ impl<
         }
 
         // Weight 4 (cf. ApplyMutation's conflict arm): the sole transition that
-        // exercises the edge-field MODIFY → Loro→SQL projection path, so it must
-        // fire reliably within the case budget, without dominating the alphabet.
+        // exercises the edge-field MODIFY → Loro→SQL projection path, so it
+        // must fire reliably within the case budget, without dominating the
+        // alphabet.
         Validated::Good((4, Union::new_weighted(arms).boxed()))
     }
 }

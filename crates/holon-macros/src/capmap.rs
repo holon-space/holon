@@ -89,14 +89,16 @@ pub fn capmap_adapter_impl(trait_def: ItemTrait) -> TokenStream {
             );
             quote! { unimplemented!(#msg) }
         } else if asyncness.is_some() {
-            // Async: keep the owned `Arc` alive across the await point by moving
-            // it into the future (the returned future's `'_` lifetime borrows
-            // `&self`, so an `expect_ref` borrow would work too, but the owned
-            // form is the proven path and needs no lifetime threading).
+            // Async: keep the owned `Arc` alive across the await point by
+            // moving it into the future (the returned future's `'_` lifetime
+            // borrows `&self`, so an `expect_ref` borrow would work too, but
+            // the owned form is the proven path and needs no lifetime
+            // threading).
             quote! { self.expect::<dyn #trait_name>().#name(#(#arg_idents),*).await }
         } else {
-            // Sync: borrow the provider rooted in `&self` so a method returning a
-            // borrow (`Option<&str>`, `&T`) doesn't dangle off a temporary `Arc`.
+            // Sync: borrow the provider rooted in `&self` so a method returning
+            // a borrow (`Option<&str>`, `&T`) doesn't dangle off a temporary
+            // `Arc`.
             quote! { self.expect_ref::<dyn #trait_name>().#name(#(#arg_idents),*) }
         };
 
@@ -112,10 +114,11 @@ pub fn capmap_adapter_impl(trait_def: ItemTrait) -> TokenStream {
     }
 
     // Only async traits need `#[async_trait(?Send)]` to become object-safe. A
-    // fully-sync cap (e.g. the reference-side `RefBackend`, whose methods return
-    // owned values) is already object-safe — wrapping it would force every
-    // existing plain `impl Trait for ConcreteRef` to carry the attribute too.
-    // Emit the attribute conditionally so one `#[capmap_adapter]` serves both.
+    // fully-sync cap (e.g. the reference-side `RefBackend`, whose methods
+    // return owned values) is already object-safe — wrapping it would force
+    // every existing plain `impl Trait for ConcreteRef` to carry the attribute
+    // too. Emit the attribute conditionally so one `#[capmap_adapter]` serves
+    // both.
     let has_async = trait_def
         .items
         .iter()

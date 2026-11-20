@@ -783,12 +783,13 @@ impl DispatchingOperationEngine {
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
         // D116.a: undo does NOT survive a restart. The CRDT's text-undo manager
-        // is rebuilt empty at every boot, so a text-epoch marker from a previous
-        // session stands for typing nothing can take back; and a journal half
-        // restored (operations kept, typing dropped) would replay out of the
-        // order the user worked in. Clearing the whole thing is the only shape
-        // that keeps ONE honest order. The previous session's snapshot is read
-        // ONLY to count what is being discarded, so the boot can disclose it.
+        // is rebuilt empty at every boot, so a text-epoch marker from a
+        // previous session stands for typing nothing can take back; and a
+        // journal half restored (operations kept, typing dropped) would replay
+        // out of the order the user worked in. Clearing the whole thing is the
+        // only shape that keeps ONE honest order. The previous session's
+        // snapshot is read ONLY to count what is being discarded, so the boot
+        // can disclose it.
         let discarded = match store.load().await? {
             Some(json) => serde_json::from_str::<UndoStack>(&json)
                 // An unreadable snapshot still means a previous session left
@@ -1470,10 +1471,10 @@ impl DispatchingOperationEngine {
         let replace_block = request.replace_block.clone();
         let root_id = plan.root_id;
 
-        // Composite undo (Inc3): the whole instantiation is ONE user gesture, so
-        // wrap the per-create fan-out (+ any empty→in-place delete) in ONE undo
-        // group. Each sub-op still runs the ordinary op path UNCHANGED — C2a
-        // provenance stamping, the C2b history relation, and per-op undo
+        // Composite undo (Inc3): the whole instantiation is ONE user gesture,
+        // so wrap the per-create fan-out (+ any empty→in-place delete) in ONE
+        // undo group. Each sub-op still runs the ordinary op path UNCHANGED —
+        // C2a provenance stamping, the C2b history relation, and per-op undo
         // classification all apply verbatim; only the undo PUSH is buffered, so
         // the N per-create entries collapse into ONE composite entry (inverse =
         // leaf-first deletes, so one undo removes every instance block). A
@@ -1505,7 +1506,8 @@ impl DispatchingOperationEngine {
             self.begin_undo_group().await;
             let fanout: Result<()> = async {
                 for create_params in creates {
-                    // A nested instantiate cannot occur: the plan only emits `create`.
+                    // A nested instantiate cannot occur: the plan only emits
+                    // `create`.
                     self.execute_nested(&block_entity, "create", create_params, origin.clone())
                         .await?;
                 }
@@ -1751,25 +1753,27 @@ impl DispatchingOperationEngine {
         let plan = BlockToPagePlan::from_value(&plan_value)
             .map_err(|e| anyhow::anyhow!("convert_block_to_page: {e}"))?;
 
-        // The window a test must be able to force: everything this compound read
-        // above is about to be rewritten below, and a competing write must not
-        // land here. Wide enough for a whole competing write.
+        // The window a test must be able to force: everything this compound
+        // read above is about to be rewritten below, and a competing write must
+        // not land here. Wide enough for a whole competing write.
         #[cfg(feature = "test-yield")]
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         // RECOGNITION (resolve-before-mint, ADR 0029): before materializing the
-        // destination page P, recognize whether `plan.page_id` is ALREADY held by
-        // a DIFFERENT-titled entity — the state a `RenamePage` leaves (title
-        // changed, id preserved). Minting P there would clobber the rename. Read
-        // the id's current holder from the live-state reader (the projected
-        // `block_raw` base table — mode-correct in BOTH Turso and Loro authority
-        // modes, the SAME source the journal rule's inhibitor reads) and REFUSE
-        // BEFORE dispatching any constituent, so no partial state is left. Free or
-        // same-title ids proceed (a fresh mint, or an idempotent upsert of
-        // unchanged content). The reference mirrors this refusal with the SAME
-        // `recognize_derived_id`; the SUT driver tolerates the `IdentityCollision`.
+        // destination page P, recognize whether `plan.page_id` is ALREADY held
+        // by a DIFFERENT-titled entity — the state a `RenamePage` leaves (title
+        // changed, id preserved). Minting P there would clobber the rename.
+        // Read the id's current holder from the live-state reader (the
+        // projected `block_raw` base table — mode-correct in BOTH Turso and
+        // Loro authority modes, the SAME source the journal rule's inhibitor
+        // reads) and REFUSE BEFORE dispatching any constituent, so no partial
+        // state is left. Free or same-title ids proceed (a fresh mint, or an
+        // idempotent upsert of unchanged content). The reference mirrors this
+        // refusal with the SAME `recognize_derived_id`; the SUT driver
+        // tolerates the `IdentityCollision`.
         if let Some(reader) = &self.reader {
-            // ALLOW(entity_uri_from_raw): plan.page_id is a derived PageId::for_path id.
+            // ALLOW(entity_uri_from_raw): plan.page_id is a derived
+            // PageId::for_path id.
             let page_uri = holon_api::EntityUri::from_raw(&plan.page_id);
             let holder_title = reader
                 .field_value(&page_uri, "content")
@@ -1795,10 +1799,12 @@ impl DispatchingOperationEngine {
         let declared_ring = source
             .filter(|_| ring != holon_org_format::TaskKeywordVocabulary::default())
             .and_then(|page| page.get_property(holon_org_format::org_props::TODO_KEYWORDS));
-        // ALLOW(entity_uri_from_raw): plan.page_id is a derived PageId::for_path id.
+        // ALLOW(entity_uri_from_raw): plan.page_id is a derived
+        // PageId::for_path id.
         let page = EntityUri::from_raw(&plan.page_id);
         for child in &plan.child_ids {
-            // ALLOW(entity_uri_from_raw): a child id the planner read from the store.
+            // ALLOW(entity_uri_from_raw): a child id the planner read from the
+            // store.
             let child = EntityUri::from_raw(child);
             self.refuse_move_into(CONVERT_BLOCK_TO_PAGE_OP, &child, Some(&page), &ring)
                 .await?;
@@ -1810,8 +1816,8 @@ impl DispatchingOperationEngine {
         // C1 must land before C2), and delete the hierarchy leaf→root.
         let page_tag = || Value::Array(vec![Value::String(PAGE_TAG.to_string())]);
 
-        // 2. Create any missing destination-hierarchy pages, root→leaf. Each is an
-        //    invertible `create` (inverse: delete).
+        // 2. Create any missing destination-hierarchy pages, root→leaf. Each is
+        //    an invertible `create` (inverse: delete).
         let mut seg_params = Vec::new();
         for seg in &plan.missing_segments {
             let mut p = StorageEntity::new();
@@ -1822,9 +1828,9 @@ impl DispatchingOperationEngine {
             seg_params.push(self.stamp_provenance("create", p, origin)?);
         }
 
-        // 3. Create the new page P, moving the origin's content (+ marks) onto it.
-        //    `create` inverse = delete(P) (leaf-exact: its children are re-homed BACK
-        //    before P is deleted on undo).
+        // 3. Create the new page P, moving the origin's content (+ marks) onto
+        //    it. `create` inverse = delete(P) (leaf-exact: its children are
+        //    re-homed BACK before P is deleted on undo).
         let mut pc = StorageEntity::new();
         pc.insert("id".into(), Value::String(plan.page_id.clone()));
         pc.insert("content".into(), Value::String(plan.page_title.clone()));
@@ -1844,9 +1850,9 @@ impl DispatchingOperationEngine {
         }
         let pc = self.stamp_provenance("create", pc, origin)?;
 
-        // 4. Re-home each child under P, preserving sibling order (after_block_id = the
-        //    previous child). move_block inverse restores the child's original parent +
-        //    predecessor exactly.
+        // 4. Re-home each child under P, preserving sibling order
+        //    (after_block_id = the previous child). move_block inverse restores
+        //    the child's original parent + predecessor exactly.
         let mut move_params = Vec::new();
         let mut prev: Option<String> = None;
         for child in &plan.child_ids {
@@ -1877,14 +1883,14 @@ impl DispatchingOperationEngine {
             prev = Some(child.clone());
         }
 
-        // 5. Leave a `[[P]]` link behind. The origin's TEXT is unchanged; only its
-        //    marks become the Link to P. A DIRECT `set_field(marks=…)` (not a
-        //    `content=Object` write, whose dispatcher-split marks follow-up drops the
-        //    marks inverse) yields the exact `set_field(marks=old)` inverse — so undo
-        //    restores the origin's original marks faithfully.
+        // 5. Leave a `[[P]]` link behind. The origin's TEXT is unchanged; only
+        //    its marks become the Link to P. A DIRECT `set_field(marks=…)` (not
+        //    a `content=Object` write, whose dispatcher-split marks follow-up
+        //    drops the marks inverse) yields the exact `set_field(marks=old)`
+        //    inverse — so undo restores the origin's original marks faithfully.
         //
-        //    The link covers the title text of the stored title line, when org can
-        //    hold it as a link (`linkable_title`).
+        //    The link covers the title text of the stored title line, when org
+        // can    hold it as a link (`linkable_title`).
         let link_marks: Vec<MarkSpan> =
             holon_org_format::parser::linkable_title(&plan.origin_content, &plan.origin_tags)
                 .map(|(start, label)| {
@@ -1975,9 +1981,9 @@ impl DispatchingOperationEngine {
 
         // Compose ONE undo entry. Redo re-executes the forward constituents in
         // order. Undo replays the STEPS in reverse: restore inbound links →
-        // restore origin marks (drops the link) → re-home children to origin (in
-        // FORWARD order, so predecessors land first) → delete P → delete the
-        // minted hierarchy leaf→root.
+        // restore origin marks (drops the link) → re-home children to origin
+        // (in FORWARD order, so predecessors land first) → delete P → delete
+        // the minted hierarchy leaf→root.
         if origin.is_user() {
             let mut inverse_ops: Vec<Operation> = Vec::new();
             inverse_ops.push(rewrite_inv);
@@ -1988,13 +1994,13 @@ impl DispatchingOperationEngine {
             inverse_ops.extend(seg_invs);
             // Staleness fingerprint: guard the LITERALLY-restored fields
             // (parent_id, content, marks, resolved link state) and EXCLUDE the
-            // derived order key `sort_key`. Structural ops RECOMPUTE it from the
-            // live tree rather than restoring the captured value, so its
+            // derived order key `sort_key`. Structural ops RECOMPUTE it from
+            // the live tree rather than restoring the captured value, so its
             // post-undo value is a function of the current sibling set, not the
-            // pre-op value — fingerprinting it makes a legitimate undo→redo trip
-            // spuriously "stale". (The moved blocks' parent_id — the field that
-            // actually defines the re-home — is still fingerprinted, so real
-            // external edits are caught.)
+            // pre-op value — fingerprinting it makes a legitimate undo→redo
+            // trip spuriously "stale". (The moved blocks' parent_id — the field
+            // that actually defines the re-home — is still fingerprinted, so
+            // real external edits are caught.)
             let fp_changes: Vec<FieldDelta> = all_changes
                 .iter()
                 .filter(|d| d.field != "sort_key")
@@ -2261,7 +2267,8 @@ impl DispatchingOperationEngine {
         let parent = stored.parent_id.clone();
         let destination = match change {
             DocumentChange::Parent(parent) if !is_page => {
-                // ALLOW(entity_uri_from_raw): the operation's own `parent_id` param.
+                // ALLOW(entity_uri_from_raw): the operation's own `parent_id`
+                // param.
                 Some(EntityUri::from_raw(&parent))
             }
             DocumentChange::Indent if !is_page => {
@@ -2413,7 +2420,8 @@ impl DispatchingOperationEngine {
         use holon_org_format::TaskKeywordVocabulary;
 
         let op = MERGE_BLOCKS_OP;
-        // ALLOW(entity_uri_from_raw): ids the merge planner read from the store.
+        // ALLOW(entity_uri_from_raw): ids the merge planner read from the
+        // store.
         let uri = |id: &str| EntityUri::from_raw(id);
         let canonical = uri(&plan.canonical_id);
         let (canonical_document, canonical_ring) =
@@ -2862,7 +2870,8 @@ impl DispatchingOperationEngine {
                          text, got {value}"
                     );
                 };
-                // An empty `:ID:` in the file drawer is authored text, not an identity.
+                // An empty `:ID:` in the file drawer is authored text, not an
+                // identity.
                 if file_drawer && text.is_empty() {
                     continue;
                 }
@@ -3131,8 +3140,8 @@ impl DispatchingOperationEngine {
         // has the SHAPE of a keyword — a state no other write path produces.
         let prior_keyword = self.stored_task_keyword(&id).await?;
         let clears_nothing = parsed.is_none() && prior_keyword.is_none();
-        // A task-state change is a change even when the content constituent is a
-        // no-op (`TODO ` on an empty block re-writes the same empty content).
+        // A task-state change is a change even when the content constituent is
+        // a no-op (`TODO ` on an empty block re-writes the same empty content).
         // The provider reports property writes without a field delta, so the
         // delta-only vacuity test would judge that gesture unundoable.
         let keyword_changed = prior_keyword.unwrap_or_default() != keyword;
@@ -3319,8 +3328,8 @@ impl DispatchingOperationEngine {
 
         let block = EntityName::new("block");
 
-        // 1. Plan (read-only). Every precondition is enforced here, so a refusal
-        //    happens before the first write.
+        // 1. Plan (read-only). Every precondition is enforced here, so a
+        //    refusal happens before the first write.
         let plan_result = self
             .dispatcher
             .execute_operation(&block, "merge_blocks_plan", params.clone())
@@ -3338,24 +3347,24 @@ impl DispatchingOperationEngine {
         #[cfg(feature = "test-yield")]
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        // Every constituent is planned first, so the shape gate judges the whole
-        // merge as ONE plan. Rows this merge REMOVES are collected too: their
-        // deltas must stay out of the staleness fingerprint, since the guard
-        // reads the field back from `block_raw` and a deleted row answers
+        // Every constituent is planned first, so the shape gate judges the
+        // whole merge as ONE plan. Rows this merge REMOVES are collected too:
+        // their deltas must stay out of the staleness fingerprint, since the
+        // guard reads the field back from `block_raw` and a deleted row answers
         // nothing.
         let mut steps: Vec<(MergeStep, &'static str, StorageEntity)> = Vec::new();
         let mut removed: Vec<String> = vec![plan.duplicate_id.clone()];
 
-        // 2. Content: the canonical wins. An empty canonical adopts the duplicate's
-        //    body; two differing bodies park the duplicate's as the canonical's FIRST
-        //    CHILD rather than dropping it.
+        // 2. Content: the canonical wins. An empty canonical adopts the
+        //    duplicate's body; two differing bodies park the duplicate's as the
+        //    canonical's FIRST CHILD rather than dropping it.
         //
         // Ordered BEFORE the moves and the dedupe so the parked body is an
         // ordinary child by the time collapsing runs — otherwise a parked body
-        // equal to an existing child would leave a normalized-equal pair behind.
-        // When its content ALREADY appears among the merged children, parking it
-        // would BE that duplicate, so it is not created: the content survives in
-        // the child that already carries it.
+        // equal to an existing child would leave a normalized-equal pair
+        // behind. When its content ALREADY appears among the merged children,
+        // parking it would BE that duplicate, so it is not created: the content
+        // survives in the child that already carries it.
         let canonical_norm = normalize_content(&plan.canonical_content);
         let duplicate_norm = normalize_content(&plan.duplicate_content);
         let body_already_present = plan
@@ -3390,18 +3399,19 @@ impl DispatchingOperationEngine {
             steps.push((MergeStep::Field, "create", cp));
         }
 
-        // 3. Move the duplicate's children under the canonical, appended after its last
-        //    existing child, order preserved.
+        // 3. Move the duplicate's children under the canonical, appended after
+        //    its last existing child, order preserved.
         //
-        // The children are moved in REVERSE document order, each anchored on the
-        // SAME `tail` — which lands them in their original order all the same,
-        // because each one is inserted just after the tail and thus ahead of the
-        // ones already moved. The reason to do it this way is the INVERSE:
-        // `move_block` captures the block's predecessor as it runs, so moving
-        // front-to-back strips each child's predecessor out of the source parent
-        // before the next one is captured, and every inverse degrades to "become
-        // the first child" — replaying them then reverses the siblings. Going
-        // back-to-front leaves each child's predecessor in place at capture time.
+        // The children are moved in REVERSE document order, each anchored on
+        // the SAME `tail` — which lands them in their original order all the
+        // same, because each one is inserted just after the tail and thus ahead
+        // of the ones already moved. The reason to do it this way is the
+        // INVERSE: `move_block` captures the block's predecessor as it runs, so
+        // moving front-to-back strips each child's predecessor out of the
+        // source parent before the next one is captured, and every inverse
+        // degrades to "become the first child" — replaying them then reverses
+        // the siblings. Going back-to-front leaves each child's predecessor in
+        // place at capture time.
         let own = plan.canonical_child_count as usize;
         let tail: Option<String> = plan
             .merged_children
@@ -3433,9 +3443,9 @@ impl DispatchingOperationEngine {
             steps.push((MergeStep::Move, "move_block", mp));
         }
 
-        // 4. One-level dedupe: each loser's children are re-homed under the keeper
-        //    BEFORE the loser is deleted behind its own redirect, so no subtree is ever
-        //    orphaned.
+        // 4. One-level dedupe: each loser's children are re-homed under the
+        //    keeper BEFORE the loser is deleted behind its own redirect, so no
+        //    subtree is ever orphaned.
         for group in &plan.dedupe_groups {
             let mut anchor: Option<String> = group.keeper_last_child.clone();
             let mut absorbed = group.keeper_merged_from.clone();
@@ -3487,8 +3497,8 @@ impl DispatchingOperationEngine {
             }
         }
 
-        // 5. Tags union (a Page tag on either side survives) and the properties the
-        //    canonical lacks.
+        // 5. Tags union (a Page tag on either side survives) and the properties
+        //    the canonical lacks.
         let mut tp = StorageEntity::new();
         tp.insert("id".into(), Value::String(plan.canonical_id.clone()));
         tp.insert("field".into(), Value::String("tags".into()));
@@ -3511,9 +3521,10 @@ impl DispatchingOperationEngine {
             steps.push((MergeStep::Field, "set_field", pp));
         }
 
-        // 6. Provenance + redirect in ONE write: `merged_from` is the replicated fact,
-        //    and `block_redirects` is re-derived from it at the SQL write boundary (so
-        //    undo's property removal retracts the redirect too).
+        // 6. Provenance + redirect in ONE write: `merged_from` is the
+        //    replicated fact, and `block_redirects` is re-derived from it at
+        //    the SQL write boundary (so undo's property removal retracts the
+        //    redirect too).
         let mut absorbed = plan.existing_merged_from.clone();
         absorbed.push((plan.duplicate_id.clone(), plan.merged_at));
         steps.push((
@@ -3546,8 +3557,9 @@ impl DispatchingOperationEngine {
             })
             .collect();
 
-        // Inverses are bucketed per STEP so undo can replay the steps in reverse,
-        // each bucket in strict LIFO of its own forward ops (see the assembly).
+        // Inverses are bucketed per STEP so undo can replay the steps in
+        // reverse, each bucket in strict LIFO of its own forward ops (see the
+        // assembly).
         let mut buckets = self
             .judged_run(&plan_ops, origin, async {
                 let mut buckets = MergeBuckets::default();
@@ -3598,11 +3610,11 @@ impl DispatchingOperationEngine {
             let mut inverse_ops: Vec<Operation> = vec![delete_inv, rewrite_inv, redirect_inv];
             field_invs.reverse();
             inverse_ops.extend(field_invs);
-            // Every bucket replays in strict LIFO of its forward ops: an inverse
-            // anchors on the tree as it stood just before its own op, so the ops
-            // after it must already have been undone. For the move buckets that
-            // means each move-back finds its predecessor restored, since the
-            // forward moves ran back-to-front.
+            // Every bucket replays in strict LIFO of its forward ops: an
+            // inverse anchors on the tree as it stood just before its own op,
+            // so the ops after it must already have been undone. For the move
+            // buckets that means each move-back finds its predecessor restored,
+            // since the forward moves ran back-to-front.
             dedupe_delete_invs.reverse();
             inverse_ops.extend(dedupe_delete_invs);
             dedupe_field_invs.reverse();
@@ -3612,8 +3624,8 @@ impl DispatchingOperationEngine {
             move_invs.reverse();
             inverse_ops.extend(move_invs);
             // Same rule as the block→page transform: fingerprint the literally
-            // restored fields, never the order key structural ops recompute from
-            // the live tree — and never a row this merge removes.
+            // restored fields, never the order key structural ops recompute
+            // from the live tree — and never a row this merge removes.
             let fp_changes: Vec<FieldDelta> = all_changes
                 .iter()
                 .filter(|d| d.field != "sort_key")
@@ -3763,9 +3775,10 @@ impl DispatchingOperationEngine {
             }],
             optional_params: vec![],
             // Resolve `target` from the focused block's `id` (the only key live
-            // context_params reliably carries), so a plain slash-menu click on a
-            // block turns THAT block into a page. `destination_path` is optional
-            // and defaults, backend-side, to the nearest page ancestor.
+            // context_params reliably carries), so a plain slash-menu click on
+            // a block turns THAT block into a page. `destination_path` is
+            // optional and defaults, backend-side, to the nearest page
+            // ancestor.
             param_mappings: vec![holon_api::render_types::ParamMapping {
                 from: "id".to_string(),
                 provides: vec!["target".to_string()],
@@ -3778,9 +3791,10 @@ impl DispatchingOperationEngine {
                     action_bar: false,
                 },
             },
-            // Restructures a block into a new page at the same placement, within
-            // the SAME replication container (C1 containers are replication
-            // units, not every page) — content stays in its current audience.
+            // Restructures a block into a new page at the same placement,
+            // within the SAME replication container (C1 containers are
+            // replication units, not every page) — content stays in its current
+            // audience.
             boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
@@ -3879,8 +3893,8 @@ impl DispatchingOperationEngine {
             menu_exposure: holon_api::MenuExposure::PickerBacked {
                 picker: holon_api::PickerKind::Template,
             },
-            // Deep-copies a template subtree under target_parent within the same
-            // container — never crosses an audience boundary.
+            // Deep-copies a template subtree under target_parent within the
+            // same container — never crosses an audience boundary.
             boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
@@ -4085,7 +4099,8 @@ impl DispatchingOperationEngine {
             )
         })?;
 
-        // ALLOW(entity_uri_from_raw): `proposal_id` is the operation's `id` param.
+        // ALLOW(entity_uri_from_raw): `proposal_id` is the operation's `id`
+        // param.
         let proposal_uri = holon_api::EntityUri::from_raw(&proposal_id);
         let properties = reader
             .field_value(&proposal_uri, "properties")
@@ -4564,8 +4579,8 @@ impl DispatchingOperationEngine {
                 .map(OpOutcome::proven);
         }
 
-        // Engine-level compound: block → page (Option B). Composed from ordinary
-        // invertible ops (create / move_block / set_field(marks) /
+        // Engine-level compound: block → page (Option B). Composed from
+        // ordinary invertible ops (create / move_block / set_field(marks) /
         // rewrite_link_resolution) whose op-level inverses assemble into ONE
         // composite `UndoEntry`. Intercepted here (like `instantiate_template`)
         // so undo/redo replay the CONSTITUENTS, never the compound name.
@@ -4618,11 +4633,11 @@ impl DispatchingOperationEngine {
                 .map(OpOutcome::proven);
         }
 
-        // Provenance stamping (ADR 0024 P8 / C2a): the dispatcher drops `origin`
-        // before the write, so this is the last place holding it. For authoring
-        // ops we inject a `_provenance` property into the params; it travels as
-        // ordinary block-field data down the existing write path and lands in
-        // `block_raw.properties`, with no provider edits.
+        // Provenance stamping (ADR 0024 P8 / C2a): the dispatcher drops
+        // `origin` before the write, so this is the last place holding it. For
+        // authoring ops we inject a `_provenance` property into the params; it
+        // travels as ordinary block-field data down the existing write path and
+        // lands in `block_raw.properties`, with no provider edits.
         let params = self.stamp_provenance(op_name, params, &origin)?;
         self.refuse_empty_question(entity_name, op_name, &params)
             .await?;
@@ -4640,12 +4655,12 @@ impl DispatchingOperationEngine {
             .await?;
 
         // Same reason, second consumer of the origin this method is the last to
-        // hold: whether `content` may carry raw org markup the author just typed
-        // (`[[Page]]`, `*bold*`) is a fact about PROVENANCE, so only here can it
-        // be stated. A human or an agent is authoring; a rule, a peer merge, and
-        // ingest are not. Undo/redo replay never passes through this method at
-        // all (`replay` dispatches straight to the dispatcher), so a stored
-        // inverse is byte-identity-preserving by construction.
+        // hold: whether `content` may carry raw org markup the author just
+        // typed (`[[Page]]`, `*bold*`) is a fact about PROVENANCE, so only here
+        // can it be stated. A human or an agent is authoring; a rule, a peer
+        // merge, and ingest are not. Undo/redo replay never passes through this
+        // method at all (`replay` dispatches straight to the dispatcher), so a
+        // stored inverse is byte-identity-preserving by construction.
         let input = match origin {
             OpOrigin::User | OpOrigin::Agent { .. } => AuthoredInput::Live,
             OpOrigin::Rule { .. } | OpOrigin::Sync | OpOrigin::Ingest => AuthoredInput::Verbatim,
@@ -4783,9 +4798,10 @@ impl DispatchingOperationEngine {
 
         // History relation (ADR 0024 P8 / C2b): append the op's field deltas to
         // the queryable op/effect stream. This is the append-only complement to
-        // the block `_provenance` stamp — it captures set_field/delete/etc. that
-        // the property stamp does not, and answers "postponed N times". Fails
-        // loud (the relation is rebuildable but errors are never swallowed).
+        // the block `_provenance` stamp — it captures set_field/delete/etc.
+        // that the property stamp does not, and answers "postponed N times".
+        // Fails loud (the relation is rebuildable but errors are never
+        // swallowed).
         if let Some(history) = &self.history {
             self.record_history(
                 history.as_ref(),
@@ -4932,11 +4948,11 @@ impl OperationEngine for DispatchingOperationEngine {
 
         let mut changes = Vec::new();
         // Partial-failure discipline (Inc1): a composite entry replays N
-        // inverses in order. On the FIRST failure, stop and fail loud naming the
-        // failing inverse index — never silently swallow a half-applied undo.
-        // (The already-replayed inverses are NOT rolled back; the entry stays on
-        // the undo stack, un-committed, so the loud error is the single source of
-        // truth about the partial state.)
+        // inverses in order. On the FIRST failure, stop and fail loud naming
+        // the failing inverse index — never silently swallow a half-applied
+        // undo. (The already-replayed inverses are NOT rolled back; the entry
+        // stays on the undo stack, un-committed, so the loud error is the
+        // single source of truth about the partial state.)
         let inverse_count = entry.inverse_ops().len();
         let replay_all = async {
             for (idx, op) in entry.inverse_ops().iter().enumerate() {
@@ -5398,8 +5414,8 @@ mod instantiate_template_tests {
         // The whole gesture is gone after that one undo (Inc3 composite group).
         // Before Inc3 this was RED: instantiate pushed N per-create entries, so
         // one undo removed only the last-pushed CHILD and the instance ROOT
-        // survived. The Inc3 begin/end_undo_group collapse makes one undo remove
-        // ALL instance blocks (inverse = leaf-first deletes).
+        // survived. The Inc3 begin/end_undo_group collapse makes one undo
+        // remove ALL instance blocks (inverse = leaf-first deletes).
         let after = remaining_instance_blocks(&engine).await;
         assert!(
             after.is_empty(),

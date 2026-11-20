@@ -58,10 +58,10 @@ where
         let boot = sut.receiver_boot_block_ids().await;
         let witness = sut.sync_witness().await;
         // Basis for "what must have arrived": what the LAST round could carry —
-        // not the owner's live set. A block created after that round has not been
-        // offered to the receiver yet. On the negative branch the live set IS the
-        // right basis: any owner-exclusive id on the receiver is a leak whenever
-        // it appeared.
+        // not the owner's live set. A block created after that round has not
+        // been offered to the receiver yet. On the negative branch the live set
+        // IS the right basis: any owner-exclusive id on the receiver is a leak
+        // whenever it appeared.
         let expects_convergence = ref_.is_shared() && ref_.owner_to_receiver_rounds() > 0;
         let owner = if expects_convergence {
             sut.owner_block_ids_at_last_round().await

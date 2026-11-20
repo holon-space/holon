@@ -204,9 +204,10 @@ pub fn order_by_sort_spec(order_by: &str) -> Option<String> {
     // (`lower(b.title)`) still fails the plain-column check below.
     let column = column.rsplit('.').next().expect("rsplit yields one part");
 
-    // Only `"` and `` ` `` quote an IDENTIFIER. A single-quoted term is a string
-    // literal, so it keeps its quotes here and falls into the warn-and-decline
-    // branch below instead of being read as a column of that name.
+    // Only `"` and `` ` `` quote an IDENTIFIER. A single-quoted term is a
+    // string literal, so it keeps its quotes here and falls into the
+    // warn-and-decline branch below instead of being read as a column of that
+    // name.
     let column = column.trim_matches('"').trim_matches('`');
     if column.is_empty()
         || column.starts_with(|c: char| c.is_ascii_digit())

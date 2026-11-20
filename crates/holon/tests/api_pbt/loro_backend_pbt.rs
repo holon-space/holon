@@ -126,7 +126,8 @@ mod stateful_tests {
         }
 
         fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
-            // Get all blocks including root (root will be parent for top-level user blocks)
+            // Get all blocks including root (root will be parent for top-level
+            // user blocks)
             let all_blocks = state
                 ._runtime
                 .block_on(state.backend.get_all_blocks(Traversal::ALL))
@@ -191,7 +192,8 @@ mod stateful_tests {
                 BlockTransition::WatchChanges { watcher_id } => {
                     let initial_version = state.versions[0].clone();
 
-                    // DON'T clone backend - watchers must observe the same backend instance
+                    // DON'T clone backend - watchers must observe the same
+                    // backend instance
                     let stream = match state._runtime.block_on(async {
                         tokio::time::timeout(
                             std::time::Duration::from_secs(1),
@@ -212,7 +214,8 @@ mod stateful_tests {
                         stream: Box::pin(stream),
                     };
 
-                    // Drain initial replay events (limit to 1000 to prevent infinite loops)
+                    // Drain initial replay events (limit to 1000 to prevent
+                    // infinite loops)
                     let mut pending_events = Vec::new();
                     let mut drain_count = 0;
                     const MAX_DRAIN_EVENTS: usize = 1000;
@@ -233,7 +236,8 @@ mod stateful_tests {
                             .await
                         }) {
                             Ok(Some(Ok(batch))) => {
-                                // Stream returns batches, so we need to flatten them
+                                // Stream returns batches, so we need to flatten
+                                // them
                                 for event in batch {
                                     pending_events.push(event);
                                 }
@@ -272,12 +276,14 @@ mod stateful_tests {
                         .expect("Failed to get current version");
                     state.versions.push(new_version);
 
-                    // Drain pending events from all active watchers (with safety limit)
+                    // Drain pending events from all active watchers (with
+                    // safety limit)
                     const MAX_EVENTS_PER_WATCHER: usize = 1000;
                     let watcher_ids: Vec<WatcherId> = state.watchers.keys().copied().collect();
 
                     for watcher_id in watcher_ids {
-                        // Lazy rehydration: rebuild stream if missing (e.g., after Clone)
+                        // Lazy rehydration: rebuild stream if missing (e.g.,
+                        // after Clone)
                         if !state.live_streams.contains_key(&watcher_id)
                             && let Some(descriptor) = state.watchers.get(&watcher_id)
                         {
@@ -328,7 +334,8 @@ mod stateful_tests {
                                     .await
                                 }) {
                                     Ok(Some(Ok(batch))) => {
-                                        // Stream returns batches, so we need to flatten them
+                                        // Stream returns batches, so we need to
+                                        // flatten them
                                         for event in batch {
                                             if let Some(descriptor) =
                                                 state.watchers.get_mut(&watcher_id)
@@ -421,9 +428,10 @@ mod stateful_tests {
                     let backend_clone = state.backend.clone();
                     let initial_version = state.initial_version.clone();
 
-                    // Create stream and drain initial replay events synchronously,
-                    // matching the reference implementation's behavior
-                    // Add timeout to prevent deadlock from synchronous replay into bounded channel
+                    // Create stream and drain initial replay events
+                    // synchronously, matching the reference implementation's
+                    // behavior Add timeout to prevent deadlock from synchronous
+                    // replay into bounded channel
                     let mut stream = runtime.block_on(async {
                         tokio::time::timeout(
                             std::time::Duration::from_secs(2),
@@ -438,7 +446,8 @@ mod stateful_tests {
                         )
                     });
 
-                    // Drain replay events with timeout (mimics reference implementation)
+                    // Drain replay events with timeout (mimics reference
+                    // implementation)
                     const MAX_DRAIN_EVENTS: usize = 1000;
                     let mut drain_count = 0;
                     loop {
@@ -454,7 +463,8 @@ mod stateful_tests {
                             .await
                         }) {
                             Ok(Some(Ok(batch))) => {
-                                // Stream returns batches, so we need to flatten them
+                                // Stream returns batches, so we need to flatten
+                                // them
                                 for event in batch {
                                     notifications.lock().unwrap().push(event);
                                 }
@@ -469,7 +479,8 @@ mod stateful_tests {
                     let handle = runtime.spawn(async move {
                         while let Some(batch_result) = stream.next().await {
                             if let Ok(batch) = batch_result {
-                                // Stream returns batches, so we need to flatten them
+                                // Stream returns batches, so we need to flatten
+                                // them
                                 for change in batch {
                                     notifications_clone.lock().unwrap().push(change);
                                 }
@@ -558,8 +569,8 @@ mod stateful_tests {
                             data: ref_block,
                             origin: ref_origin,
                         } => {
-                            // Find matching SUT change by content and parent_id (after ID
-                            // translation)
+                            // Find matching SUT change by content and parent_id
+                            // (after ID translation)
                             let ref_parent_str = ref_block.parent_id.to_string();
                             let translated_parent_id = state
                                 .id_map
@@ -567,16 +578,19 @@ mod stateful_tests {
                                 .cloned()
                                 .unwrap_or(ref_parent_str);
 
-                            // Disambiguate duplicate-content siblings by the id_map's
-                            // expected SUT id (built from the create-op response in
+                            // Disambiguate duplicate-content siblings by the
+                            // id_map's expected SUT id (built from the
+                            // create-op response in
                             // `update_id_map_after_create`). Two blocks sharing
-                            // (content, parent) — e.g. `CreateBlocks [(p,"x"),(p,"x")]` —
-                            // would otherwise let the content-only match pair ref→SUT
-                            // events in a different order than the id_map did, spuriously
-                            // failing the id-consistency check below. When a mapping
-                            // exists, require the SUT event to carry exactly that id;
-                            // otherwise fall back to content+parent (order-agnostic, per
-                            // the watcher's no-delivery-order guarantee).
+                            // (content, parent) — e.g. `CreateBlocks
+                            // [(p,"x"),(p,"x")]` — would otherwise let the
+                            // content-only match pair ref→SUT events in a
+                            // different order than the id_map did, spuriously
+                            // failing the id-consistency check below. When a
+                            // mapping exists, require the SUT event to carry
+                            // exactly that id; otherwise fall back to
+                            // content+parent (order-agnostic, per the watcher's
+                            // no-delivery-order guarantee).
                             let expected_sut_id = state.id_map.get(ref_block.id.as_str()).cloned();
 
                             let sut_match =
@@ -633,7 +647,8 @@ mod stateful_tests {
                             data: ref_block,
                             origin: ref_origin,
                         } => {
-                            // Find matching SUT change by ID (after translation) and content
+                            // Find matching SUT change by ID (after
+                            // translation) and content
                             let translated_ref_id = state
                                 .id_map
                                 .get(ref_id)
@@ -687,7 +702,8 @@ mod stateful_tests {
                             id: ref_id,
                             origin: ref_origin,
                         } => {
-                            // Find matching SUT change by ID (after translation)
+                            // Find matching SUT change by ID (after
+                            // translation)
                             let translated_ref_id = state
                                 .id_map
                                 .get(ref_id)
@@ -735,7 +751,8 @@ mod stateful_tests {
                             fields: ref_fields,
                             origin,
                         } => {
-                            // Find matching SUT change by ID (after translation)
+                            // Find matching SUT change by ID (after
+                            // translation)
                             let translated_ref_id = state
                                 .id_map
                                 .get(entity_id)

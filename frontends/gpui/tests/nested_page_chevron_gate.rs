@@ -890,8 +890,9 @@ fn probe_variant(cx: &mut TestAppContext, label: &str, dsl: &str) {
     vcx.simulate_mouse_move(center, None, Default::default());
     vcx.simulate_click(center, Default::default());
     vcx.run_until_parked();
-    // Drive the spawned collection driver on the test thread before the readout,
-    // then re-render — see `an_opened_nested_page_paints_its_children`.
+    // Drive the spawned collection driver on the test thread before the
+    // readout, then re-render — see
+    // `an_opened_nested_page_paints_its_children`.
     services.pump();
     vcx.run_until_parked();
     bounds.flush();

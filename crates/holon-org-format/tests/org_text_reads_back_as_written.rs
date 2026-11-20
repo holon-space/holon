@@ -1130,7 +1130,8 @@ impl CarrierPage {
             text.push('\n');
         }
         for (i, keyword_lines) in self.headings.iter().enumerate() {
-            // ZED before ALPHA: an authored drawer order that is not byte order.
+            // ZED before ALPHA: an authored drawer order that is not byte
+            // order.
             text.push_str(&format!(
                 "* H{i}\n:PROPERTIES:\n:ID: h{i}\n:ZED: 1\n:ALPHA: 2\n:END:\n"
             ));

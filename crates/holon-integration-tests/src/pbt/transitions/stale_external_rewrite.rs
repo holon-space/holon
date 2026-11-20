@@ -70,7 +70,8 @@ impl<
     type Reason = Reason;
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Only docs that hold editable Text content are worth replaying: an
-        // empty doc has no id-less blocks to reconcile, so the class can't fire.
+        // empty doc has no id-less blocks to reconcile, so the class can't
+        // fire.
         let docs: Vec<EntityUri> = state
             .document_uris()
             .into_iter()
@@ -119,21 +120,22 @@ impl<
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        // Predict the SUT's id-less reconcile by running the SAME `tiered_match`
-        // the controller uses, on the reference's view of the doc. Under the R2
-        // ruling: content UNIQUE in the document remaps (a true no-op); non-unique
-        // / empty content cannot be uniquely matched, so the SUT re-mints it
-        // (churn). The oracle must predict the SAME churn or the per-tick
-        // synthetic->real reconcile panics (`harness.rs`: `syn=[]` vs many reals).
-        // We re-mint every reference block `tiered_match` does NOT remap; Inc 3's
-        // write-back then re-stamps the fresh ids to disk, so a REPEAT replay of
-        // the same doc is quiescent (ids are back, content+positions stable ->
-        // all remap). Tautology disclosure: sharing `tiered_match` means the
-        // matching DECISION is not independently oracled here — acceptable because
-        // (1) its semantics are pinned by 10 independent red-first unit tests, and
-        // (2) the invariants of record (fixed-point, blocks-match-ref family)
-        // still check OUTCOMES independently; this shared call only fixes the
-        // id-bookkeeping prediction (and honors the one-keystone shared-logic rule).
+        // Predict the SUT's id-less reconcile by running the SAME
+        // `tiered_match` the controller uses, on the reference's view of the
+        // doc. Under the R2 ruling: content UNIQUE in the document remaps (a
+        // true no-op); non-unique / empty content cannot be uniquely matched,
+        // so the SUT re-mints it (churn). The oracle must predict the SAME
+        // churn or the per-tick synthetic->real reconcile panics (`harness.rs`:
+        // `syn=[]` vs many reals). We re-mint every reference block
+        // `tiered_match` does NOT remap; Inc 3's write-back then re-stamps the
+        // fresh ids to disk, so a REPEAT replay of the same doc is quiescent
+        // (ids are back, content+positions stable -> all remap). Tautology
+        // disclosure: sharing `tiered_match` means the matching DECISION is not
+        // independently oracled here — acceptable because (1) its semantics are
+        // pinned by 10 independent red-first unit tests, and (2) the invariants
+        // of record (fixed-point, blocks-match-ref family) still check OUTCOMES
+        // independently; this shared call only fixes the id-bookkeeping
+        // prediction (and honors the one-keystone shared-logic rule).
         let doc = self.doc_uri.clone();
 
         // Doc blocks in document order (parents before children), each with its
@@ -172,9 +174,10 @@ impl<
             })
             .collect();
 
-        // incoming: placeholder ids in the same document order; a child's parent
-        // is its parent's PLACEHOLDER (or the doc uri for top-level), mirroring how
-        // the parser re-mints an id-less tree before the controller reconciles it.
+        // incoming: placeholder ids in the same document order; a child's
+        // parent is its parent's PLACEHOLDER (or the doc uri for top-level),
+        // mirroring how the parser re-mints an id-less tree before the
+        // controller reconciles it.
         let placeholder_of: HashMap<EntityUri, EntityUri> = ordered
             .iter()
             .enumerate()
@@ -203,7 +206,8 @@ impl<
             })
             .collect();
 
-        // Churn: every existing block `tiered_match` did NOT remap onto re-mints.
+        // Churn: every existing block `tiered_match` did NOT remap onto
+        // re-mints.
         for (id, _, _) in &ordered {
             if !remapped.contains(id) {
                 state.remint_block(id);

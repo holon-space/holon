@@ -77,15 +77,17 @@ impl<
 > TransitionFactory<R> for ApplyMutation
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        // Routed by `SutApplyMutation` (source as a shrinkable axis). The gate names
-        // `SutLoro` so the composed alphabet admits `ApplyMutation` exactly when the
-        // peer mesh is wired (the implemented arm); the generator further restricts the
-        // composed source set to the implemented arms via `state.has_cap_set()`.
+        // Routed by `SutApplyMutation` (source as a shrinkable axis). The gate
+        // names `SutLoro` so the composed alphabet admits `ApplyMutation`
+        // exactly when the peer mesh is wired (the implemented arm); the
+        // generator further restricts the composed source set to the
+        // implemented arms via `state.has_cap_set()`.
         //
-        // NOTE: this gate cap (`SutLoro`) legitimately differs from the dispatch trait
-        // (`SutApplyMutation`), so this transition is NOT authored through
-        // `cap_transition!` (which single-sources ONE cap into both). The
-        // `required_caps_match_transition_impl_bounds` guard tracks the gate cap here.
+        // NOTE: this gate cap (`SutLoro`) legitimately differs from the
+        // dispatch trait (`SutApplyMutation`), so this transition is NOT
+        // authored through `cap_transition!` (which single-sources ONE cap into
+        // both). The `required_caps_match_transition_impl_bounds` guard tracks
+        // the gate cap here.
         vec![::holon_pbt_core::composition::CapId::of::<
             dyn ::holon_pbt_core::capabilities::SutLoro,
         >()]
@@ -107,10 +109,11 @@ impl<
                 .collect();
             let is_peer_modified = |id: &EntityUri| peer_modified.contains(id.id());
             let default_doc = EntityUri::no_parent();
-            // A block is a mutable primary target iff its owning document is not the
-            // seed sentinel (`no_parent`). `block_document_of` returns `None` for a
-            // block with no explicit document entry — treated as mutable, matching the
-            // legacy `is_none_or(|doc| *doc != default_doc)`.
+            // A block is a mutable primary target iff its owning document is
+            // not the seed sentinel (`no_parent`). `block_document_of` returns
+            // `None` for a block with no explicit document entry — treated as
+            // mutable, matching the legacy `is_none_or(|doc| *doc !=
+            // default_doc)`.
             let doc_ok = |id: &EntityUri| {
                 state
                     .block_document_of(id)
@@ -162,10 +165,11 @@ impl<
 
             let mut arms: Vec<(u32, BoxedStrategy<ApplyMutation>)> = Vec::new();
 
-            // Source-routing: on the composed path, draw a source's arm only when its
-            // CapMap arm is implemented. `composed` (the ref carries a `cap_set`) gates the
-            // not-yet-composed UI/layout/profile arms to native; the External arm is gated
-            // instead on `SutSeamMutate` presence (native always; composed iff a frontend),
+            // Source-routing: on the composed path, draw a source's arm only
+            // when its CapMap arm is implemented. `composed` (the ref carries a
+            // `cap_set`) gates the not-yet-composed UI/layout/profile arms to
+            // native; the External arm is gated instead on `SutSeamMutate`
+            // presence (native always; composed iff a frontend),
             // and the LoroPeer arm self-gates on `enable_loro`+peers below.
             let composed = state.has_cap_set();
             let seam_present = state.caps_available(&[::holon_pbt_core::composition::CapId::of::<
@@ -173,7 +177,8 @@ impl<
             >()]);
 
             if !doc_uris.is_empty() {
-                // ui_mutation: weight 0 by default; opt-in with PBT_WEIGHT_UI_MUTATION=N
+                // ui_mutation: weight 0 by default; opt-in with
+                // PBT_WEIGHT_UI_MUTATION=N
                 let ui_weight: u32 = std::env::var("PBT_WEIGHT_UI_MUTATION")
                     .ok()
                     .and_then(|s| s.parse().ok())
@@ -297,11 +302,13 @@ impl<
                     // assets/default/index.org): the LEFT sidebar's render/src
                     // carry bare `:id left_sidebar::…` ids, while the right
                     // sidebar / main panel use `default-…::…`. The earlier list
-                    // had `block:block:left_sidebar::…` (a double-`block:` typo)
-                    // and `block:default-left-sidebar::…` (wrong scheme) — neither
-                    // matched the real `block:left_sidebar::render::0`, so render
-                    // mutations clobbered the sidebar's `navigation_focus` render
-                    // with the focus_chain fixture and broke NavigateFocus.
+                    // had `block:block:left_sidebar::…` (a double-`block:`
+                    // typo) and `block:default-left-sidebar::…` (wrong scheme)
+                    // — neither matched the real
+                    // `block:left_sidebar::render::0`, so render
+                    // mutations clobbered the sidebar's `navigation_focus`
+                    // render with the focus_chain fixture and broke
+                    // NavigateFocus.
                     "block:left_sidebar::render::0",
                     "block:left_sidebar::src::0",
                     "block:default-left-sidebar::render::0",
@@ -361,10 +368,10 @@ impl<
             // LoroPeer channel: apply a generic mutation through a Loro CRDT
             // peer. Only valid when Loro is wired (`enable_loro`) AND at least
             // one peer exists (from prior `AddPeer`). Peer blocks are keyed by
-            // stable id; the generated mutation's bare ids ARE those stable ids.
-            // Mirrors `PeerEdit`'s generator: Create (deterministic stable id so
-            // ref + SUT agree) and Update (content-only); Delete is skipped
-            // (cascading-delete ref-model gap, same as PeerEdit).
+            // stable id; the generated mutation's bare ids ARE those stable
+            // ids. Mirrors `PeerEdit`'s generator: Create (deterministic stable
+            // id so ref + SUT agree) and Update (content-only); Delete is
+            // skipped (cascading-delete ref-model gap, same as PeerEdit).
             if state.enable_loro() && state.peers_len() > 0 {
                 let peer_count = state.peers_len();
                 let seq = state.next_block_id();
@@ -440,8 +447,8 @@ impl<
             }
 
             if arms.is_empty() {
-                // app_started is true but no documents / blocks → nothing to mutate.
-                // Surface in the histogram rather than panicking.
+                // app_started is true but no documents / blocks → nothing to
+                // mutate. Surface in the histogram rather than panicking.
                 return Validated::fail(Reason::NoDocumentsAvailable);
             }
 
@@ -559,9 +566,10 @@ impl<
 
     fn apply_to_ref(&self, state: &mut R) {
         // LoroPeer mutations apply to the peer's reference state only — they do
-        // NOT touch the primary block map until a `SyncWithPeer`/`MergeFromPeer`
-        // converges them. Mirrors `PeerEdit::apply_to_ref` (peer_apply_*),
-        // keyed off the mutation's bare ids.
+        // NOT touch the primary block map until a
+        // `SyncWithPeer`/`MergeFromPeer` converges them. Mirrors
+        // `PeerEdit::apply_to_ref` (peer_apply_*), keyed off the mutation's
+        // bare ids.
         if let MutationSource::LoroPeer { peer_idx } = self.event.source {
             match &self.event.mutation {
                 Mutation::Create {
@@ -606,9 +614,9 @@ impl<
         // apply + canonical re-sequencing, profile rebuild, render-expr cache,
         // next-id bump, cursor reset on content update) is encapsulated in the
         // `ReferenceState` impl — the generic body never touches ref internals.
-        // `External` mutations cross the org-FILE boundary (write + re-ingest), so
-        // the ref must model the file-parse tag reinterpretation; `UI` mutations
-        // stay in-store (echo-suppressed) and keep raw content.
+        // `External` mutations cross the org-FILE boundary (write + re-ingest),
+        // so the ref must model the file-parse tag reinterpretation; `UI`
+        // mutations stay in-store (echo-suppressed) and keep raw content.
         let crosses_org_boundary = self.event.source == MutationSource::External;
         if let Mutation::Create { fields, .. } | Mutation::Update { fields, .. } =
             &self.event.mutation
@@ -690,9 +698,10 @@ impl SutApplyMutation for holon_pbt_core::composition::CapMap {
                 }
             }
             MutationSource::External => {
-                // Org-file ingress: rewrite the affected user doc(s) and let the live
-                // FileSyncController re-ingest. Reuses the same-signature `SutSeamMutate`
-                // cap (the frontend's real composed seam) — no bespoke trait.
+                // Org-file ingress: rewrite the affected user doc(s) and let
+                // the live FileSyncController re-ingest. Reuses the
+                // same-signature `SutSeamMutate` cap (the frontend's real
+                // composed seam) — no bespoke trait.
                 self.expect::<dyn holon_pbt_core::capabilities::SutSeamMutate>()
                     .apply_mutation(event)
                     .await;

@@ -300,7 +300,8 @@ async fn gcal_upcoming_view_creates_and_tracks_writes() {
     );
 
     // No write touches the events. Two hours later "tomorrow" has not started,
-    // but an event starting in one hour has; and a day later "tomorrow" is past.
+    // but an event starting in one hour has; and a day later "tomorrow" is
+    // past.
     insert_event(&handle, "e_hour", "in 1 hour", "+1 hour").await;
     assert_eq!(read_upcoming(&handle).await.len(), 3);
     tick(&handle, "hour", "2026-09-29T14:00:00+00:00").await;

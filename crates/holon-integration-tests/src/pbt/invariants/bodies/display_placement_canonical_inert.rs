@@ -57,14 +57,16 @@ where
 
     async fn check(&self, reference: &R, sut: &S) -> InvariantResult {
         // ── F8: selection paired with the injection seam's env gate ──
-        // The display-placed node is only injected when HOLON_PBT_DISPLAY_PLACED
-        // is set (`frontend_slice::components::inject_display_placed`, keyed off
-        // the SAME env). With it unset there is no node to prove inert, so this
-        // invariant is NOT APPLICABLE this run — disclose it as `Skipped`
-        // (counted + visible in `report.ran`) rather than fail non-vacuity. This
-        // makes the default keystone deterministic and green; setting the env
-        // exercises the real Phase 1a inertness check below (which may legitimately
-        // RED on a real display-placement perturbation — the WIP signal).
+        // The display-placed node is only injected when
+        // HOLON_PBT_DISPLAY_PLACED
+        // is set (`frontend_slice::components::inject_display_placed`, keyed
+        // off the SAME env). With it unset there is no node to prove inert, so
+        // this invariant is NOT APPLICABLE this run — disclose it as `Skipped`
+        // (counted + visible in `report.ran`) rather than fail non-vacuity.
+        // This makes the default keystone deterministic and green; setting the
+        // env exercises the real Phase 1a inertness check below (which may
+        // legitimately RED on a real display-placement perturbation — the WIP
+        // signal).
         if std::env::var("HOLON_PBT_DISPLAY_PLACED").is_err() {
             return InvariantResult::Skipped(
                 "[inv-display-placement-canonical-inert] SKIPPED: HOLON_PBT_DISPLAY_PLACED unset \
@@ -91,10 +93,11 @@ where
         }
 
         // ── Canonical projection inertness ──
-        // Org render: assert SQL↔disk fixed point (the production echo-loop guard).
-        // The org render reads from SQL, not the widget tree, so a display-placed
-        // node cannot perturb it. The `InvOrgRenderFixedPoint` body's first pass
-        // is a fast Ok; re-run it here for this invariant's self-containment.
+        // Org render: assert SQL↔disk fixed point (the production echo-loop
+        // guard). The org render reads from SQL, not the widget tree, so a
+        // display-placed node cannot perturb it. The `InvOrgRenderFixedPoint`
+        // body's first pass is a fast Ok; re-run it here for this invariant's
+        // self-containment.
         let copies = holon_pbt_core::capabilities::copies_by_file(&reference.model_copies());
         for (path, disk, rendered) in &sut.snapshot_org_render_pairs(&copies).await {
             if disk != rendered {
@@ -108,8 +111,9 @@ where
             }
         }
 
-        // Block id-set: the SUT block ids must be a non-empty set of real blocks.
-        // This read goes through the backend (SQL), not the widget tree.
+        // Block id-set: the SUT block ids must be a non-empty set of real
+        // blocks. This read goes through the backend (SQL), not the widget
+        // tree.
         let store_ids: BTreeSet<String> = sut
             .live_block_snapshot()
             .await
@@ -124,8 +128,8 @@ where
             );
         }
         let placed_canonical_ids: BTreeSet<String> = placed_ids.into_iter().collect();
-        // The display-placed node's entity_id must be a real store id (otherwise
-        // it's a phantom, not a display-placed real block).
+        // The display-placed node's entity_id must be a real store id
+        // (otherwise it's a phantom, not a display-placed real block).
         for id in &placed_canonical_ids {
             if !store_ids.contains(id) {
                 return InvariantResult::Fail(format!(

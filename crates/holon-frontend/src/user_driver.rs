@@ -632,8 +632,8 @@ impl ReactiveEngineDriver {
         if let Some(block) = focused {
             // A structural op's focus response MOUNTS an editor on the block it
             // hands the caret to — prod does, and the reference models it
-            // (`open_active_editor`). Without this the mirror left a split's new
-            // block with no VM and `editor_live_text` fell back to the Loro
+            // (`open_active_editor`). Without this the mirror left a split's
+            // new block with no VM and `editor_live_text` fell back to the Loro
             // content cell, reporting the stripped content column as "what the
             // editor shows" while the surface is a source projection.
             //
@@ -726,8 +726,9 @@ impl ReactiveEngineDriver {
             let (_expr, rows) = self.engine.ensure_watching(&main_panel).snapshot();
             // WP-E: the slot parents to the main panel's navigation focus root,
             // resolved from the rendered rowset (NOT the caret, NOT the panel
-            // container). This is the SAME call the render's `interpret_virtual_child`
-            // (static path) / `AppendedRowsProvider::creation_slot` (streaming path)
+            // container). This is the SAME call the render's
+            // `interpret_virtual_child` (static path) /
+            // `AppendedRowsProvider::creation_slot` (streaming path)
             // makes, so the parent matches the rendered slot id exactly.
             // The main panel is always a single focus-rooted tree, so the
             // `no_parent` forest-root opt-in never applies here (`false`).
@@ -1249,10 +1250,10 @@ impl UserDriver for ReactiveEngineDriver {
         }
 
         // Profile-driven embedded page: the `expand_toggle` is synthesized
-        // during recursive resolve (no gate in a one-shot snapshot), so there is
-        // no `Mutable` to poke and the view store is the whole gesture
-        // (RATIFIED 2026-07-16, Option B). The `expand_toggle` builder seeds its
-        // gate from it on the next (re)build; the write bumps the render
+        // during recursive resolve (no gate in a one-shot snapshot), so there
+        // is no `Mutable` to poke and the view store is the whole gesture
+        // (RATIFIED 2026-07-16, Option B). The `expand_toggle` builder seeds
+        // its gate from it on the next (re)build; the write bumps the render
         // generation.
         self.engine
             .ui_state()
@@ -1261,7 +1262,8 @@ impl UserDriver for ReactiveEngineDriver {
         // Fail loud: force the render pipeline to rebuild (recursive `snapshot`
         // warms one nested level per call, so loop to a short deadline like the
         // SUT's fixed-point re-snapshot) and warn if the target renders no
-        // `expand_toggle` at all — the write would otherwise be silently absorbed.
+        // `expand_toggle` at all — the write would otherwise be silently
+        // absorbed.
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let _ = self.engine.snapshot(&root_uri);
@@ -1387,8 +1389,8 @@ impl UserDriver for ReactiveEngineDriver {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
-        // ALLOW(fallback): pre-existing one-shot DFS escape hatch with explicit warn
-        // Final fallback: if the router never saw the entity within the
+        // ALLOW(fallback): pre-existing one-shot DFS escape hatch with explicit
+        // warn Final fallback: if the router never saw the entity within the
         // poll window, build a fresh engine-snapshot focus path. This is
         // the same pattern GPUI uses for chord resolution when its router
         // is mid-fan-out, and it forces `ensure_watching` for every
@@ -1410,7 +1412,8 @@ impl UserDriver for ReactiveEngineDriver {
                 );
                 if std::env::var("HOLON_DEBUG_CHORD").is_ok() {
                     eprintln!(
-                        // ALLOW(fallback): debug message describing existing fallback path
+                        // ALLOW(fallback): debug message describing existing
+                        // fallback path
                         "[CHORD-FALLBACK] router timeout for entity={} chord={:?}; engine \
                          fp_found={}",
                         entity_id,
@@ -1467,8 +1470,8 @@ impl UserDriver for ReactiveEngineDriver {
                 _ => return None,
             }
         }
-        // ALLOW(fallback): pre-existing one-shot escape hatch when router has no path
-        // Fallback: one-shot DFS+bubble from the tree snapshot.
+        // ALLOW(fallback): pre-existing one-shot escape hatch when router has
+        // no path Fallback: one-shot DFS+bubble from the tree snapshot.
         let input = WidgetInput::KeyChord {
             keys: chord.0.clone(),
         };

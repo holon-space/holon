@@ -343,7 +343,8 @@ impl RefBlockTreeMut for ReferenceState {
                     .into(),
                 },
             }),
-            // Prod clears a keyword by removing the property, not by storing "".
+            // Prod clears a keyword by removing the property, not by storing
+            // "".
             None => {
                 let uri = parse_id_must(id);
                 let block = self
@@ -563,8 +564,9 @@ impl ReferenceState {
                 // parent is itself a top-level page (its own `block_documents`
                 // entry is `no_parent`/`sentinel`), the page IS the document —
                 // the child lives in the page's org file, not in the page's
-                // (sentinel) document. Inheriting the sentinel would misclassify
-                // the child as a seed block and drop it from the `/org` view.
+                // (sentinel) document. Inheriting the sentinel would
+                // misclassify the child as a seed block and drop it from the
+                // `/org` view.
                 match self.domain.block_state.block_documents.get(parent_id) {
                     Some(doc) if !doc.is_no_parent() && !doc.is_sentinel() => doc.clone(),
                     _ => parent_id.clone(),
@@ -582,23 +584,23 @@ impl ReferenceState {
         let surviving: std::collections::BTreeMap<EntityUri, Block> =
             blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
         // A mutation that REMOVES a block (`Delete`, which cascades over
-        // descendants) ends that block's file-backing: prod's redo must leave it
-        // dead, so `rematerialize_file_ingested` must never resurrect it from the
-        // pre-undo state. Keyed on the before/after difference rather than on
-        // `Mutation::Delete`'s own id so the cascade is covered too.
+        // descendants) ends that block's file-backing: prod's redo must leave
+        // it dead, so `rematerialize_file_ingested` must never resurrect it
+        // from the pre-undo state. Keyed on the before/after difference rather
+        // than on `Mutation::Delete`'s own id so the cascade is covered too.
         self.files
             .ingest_origin_blocks
             .retain(|id| surviving.contains_key(id));
         self.domain.block_state.blocks = surviving;
 
         // External (org-file) mutation: the created/updated block is written to
-        // disk and RE-INGESTED, so a trailing `:tag:` group on its headline (e.g.
-        // `:PROPERTIES:`) re-parses into `block.tags`, not content — mirror that
-        // FILE-parse reinterpretation exactly as `bulk_add_blocks` / the
-        // CreateDocument ingest do. `Mutation::apply_to` above already applied the
-        // inline-mark round-trip normalization; the tag split is the remaining
-        // org-file-boundary lens. A `UI` mutation stays in-store (echo-suppressed),
-        // so it keeps raw content and this is skipped.
+        // disk and RE-INGESTED, so a trailing `:tag:` group on its headline
+        // (e.g. `:PROPERTIES:`) re-parses into `block.tags`, not content —
+        // mirror that FILE-parse reinterpretation exactly as `bulk_add_blocks`
+        // / the CreateDocument ingest do. `Mutation::apply_to` above already
+        // applied the inline-mark round-trip normalization; the tag split is
+        // the remaining org-file-boundary lens. A `UI` mutation stays in-store
+        // (echo-suppressed), so it keeps raw content and this is skipped.
         if crosses_org_boundary {
             let affected = match mutation {
                 Mutation::Create { id, .. } | Mutation::Update { id, .. } => Some(id.clone()),
@@ -631,8 +633,8 @@ impl ReferenceState {
         }
         // Prod's data subscription refreshes an idle (clean) active editor from
         // the authority AS THE SURFACE SHOWS IT. `task_state` is part of that
-        // surface — a state toggle under an open editor changes the vault syntax
-        // it displays — so both columns re-seed it.
+        // surface — a state toggle under an open editor changes the vault
+        // syntax it displays — so both columns re-seed it.
         if let Mutation::Update { id, fields, .. } = mutation
             && (fields.contains_key("content") || fields.contains_key("task_state"))
         {

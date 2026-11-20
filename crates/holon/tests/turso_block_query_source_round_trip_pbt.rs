@@ -332,7 +332,8 @@ fn query_sources_agree_case(
             let loro_doc = NormalizedDocument::from_blocks(None, &loro_blocks);
 
             let expected = NormalizedDocument::from_blocks(None, &blocks);
-            // Each arm reproduces the generated store, hence agree with each other.
+            // Each arm reproduces the generated store, hence agree with each
+            // other.
             assert_normalized_docs_equal(&expected, &turso_doc, "query_source_equivalence[turso]")?;
             assert_normalized_docs_equal(&expected, &loro_doc, "query_source_equivalence[loro]")?;
             assert_normalized_docs_equal(
@@ -341,9 +342,9 @@ fn query_sources_agree_case(
                 "query_source_equivalence[loro==turso]",
             )?;
 
-            // Per-parent sibling order under each generated parent (`doc_id` → roots
-            // included); the Loro doc root lives under `no_parent`, which is not a
-            // generated parent, so it is not inspected here.
+            // Per-parent sibling order under each generated parent (`doc_id` →
+            // roots included); the Loro doc root lives under `no_parent`, which
+            // is not a generated parent, so it is not inspected here.
             assert_sibling_order_matches(
                 &blocks,
                 &turso_snapshot,

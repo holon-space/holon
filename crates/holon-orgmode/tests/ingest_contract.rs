@@ -555,8 +555,9 @@ fn vault_with_projection(
     projection: Arc<dyn holon_core::downstream_projection::DownstreamProjection>,
 ) -> Vault {
     let tmp = tempfile::tempdir().unwrap();
-    // macOS hands out `/var/...` temp dirs that canonicalize to `/private/var/...`;
-    // the controller strips the root prefix from each path, so both must agree.
+    // macOS hands out `/var/...` temp dirs that canonicalize to
+    // `/private/var/...`; the controller strips the root prefix from each path,
+    // so both must agree.
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let file = root.join("Spaghetti-Carbonara.fixture");
     std::fs::write(&file, contents).unwrap();

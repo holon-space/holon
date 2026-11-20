@@ -230,8 +230,8 @@ fn every_rest_sidecar_sync_and_projection_reference_declared_names() {
                      declared utcp.tools entry"
                 );
             }
-            // Every projection target must be a declared schema column, else the
-            // lifted value would land nowhere.
+            // Every projection target must be a declared schema column, else
+            // the lifted value would land nowhere.
             let columns: Vec<&str> = entity.schema.iter().map(|f| f.name.as_str()).collect();
             for target in sync.project.keys() {
                 assert!(

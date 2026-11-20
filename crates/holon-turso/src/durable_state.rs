@@ -65,7 +65,8 @@ mod tests {
 
     // is_ephemeral is reached through the public DurableReplicaState surface;
     // these pin both truth values and the `||` vs `&&` shape (invariant 10:
-    // the epoch guard uses durable_paths to decide what a mode-switch may wipe).
+    // the epoch guard uses durable_paths to decide what a mode-switch may
+    // wipe).
 
     #[test]
     fn file_backed_db_is_durable_with_all_sidecars() {
@@ -114,7 +115,8 @@ mod tests {
 
     #[test]
     fn instance_state_root_bare_filename_has_no_parent_dir() {
-        // parent() is Some("") for a bare name => the empty-parent guard => None.
+        // parent() is Some("") for a bare name => the empty-parent guard =>
+        // None.
         assert_eq!(instance_state_root(Path::new("holon.db")), None);
     }
 }

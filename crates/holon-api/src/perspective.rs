@@ -399,8 +399,8 @@ impl PanelSpec {
         let collapse_to = panel.get_property_str("collapse_to");
 
         // The panel's data source and render are declared by its child source
-        // blocks — exactly the query-source / render-source children the bundled
-        // layout panels carry.
+        // blocks — exactly the query-source / render-source children the
+        // bundled layout panels carry.
         let mut source: Option<PanelSource> = None;
         let mut render: Option<String> = None;
         for child in blocks.iter().filter(|b| b.parent_id == panel.id) {

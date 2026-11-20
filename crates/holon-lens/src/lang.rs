@@ -589,7 +589,8 @@ pub struct ConcatWitness {
 /// ways. Ambiguous iff there is a non-empty w with u, uw ∈ L1 and wv, v ∈ L2.
 pub fn concat_ambiguity(l1: &Dfa, l2: &Dfa) -> Option<ConcatWitness> {
     let alpha = &l1.alpha;
-    // States q of L2 for which some v ∈ L2 also leads q to acceptance, with that v.
+    // States q of L2 for which some v ∈ L2 also leads q to acceptance, with
+    // that v.
     let mut q2: HashMap<usize, String> = HashMap::new();
     for q in 0..l2.states() {
         if let Some(v) = shortest_both(l2, q, l2, 0) {

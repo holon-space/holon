@@ -1353,9 +1353,9 @@ impl Module for McpIntegrationsModule {
                         .await,
                     clock: resolver.resolve::<holon_api::InjectedClock>().0.clone(),
                     sync_gate: (*resolver.resolve::<SyncGate>()).clone(),
-                    // The session's ONE secret store: a session on the in-memory
-                    // backend must not have this reader talking to the login
-                    // keychain instead.
+                    // The session's ONE secret store: a session on the
+                    // in-memory backend must not have this reader talking to
+                    // the login keychain instead.
                     keychain: resolver
                         .resolve_async::<dyn holon_secrets::KeychainStore>()
                         .await,

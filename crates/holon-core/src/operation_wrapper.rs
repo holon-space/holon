@@ -102,7 +102,8 @@ where
             .await?;
 
         // 2. Sync to external systems (if sync provider is available)
-        // Extract FieldDeltas from the operation result and pass to sync_changes
+        // Extract FieldDeltas from the operation result and pass to
+        // sync_changes
         if let Some(ref sync_provider) = self.sync_provider {
             if let Err(e) = sync_provider.sync_changes(&result.changes).await {
                 tracing::warn!(

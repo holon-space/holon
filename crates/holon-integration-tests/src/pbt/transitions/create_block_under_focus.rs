@@ -128,19 +128,21 @@ impl<
         .into_iter()
         .collect::<Validated<Vec<()>, _>>()
         .map(|_| {
-            // A fresh, deterministic, non-`create-` id for the born-equal (Some)
-            // arm. `next_block_id()` advances after every mutating tick
+            // A fresh, deterministic, non-`create-` id for the born-equal
+            // (Some) arm. `next_block_id()` advances after every mutating tick
             // (`recanon_and_rebuild` bumps it), so `block:gen-N` is unique per
             // creation and reproducible under proptest replay (unlike a random
             // uuid). Distinct `gen-` prefix ⇒ no collision with `create-N` /
             // `split-N` / `bulk-N`.
             let next = state.next_block_id();
-            // Short org-safe ASCII words: no trailing whitespace, no org markup,
-            // so the created content round-trips through the block store / any
-            // org sync unchanged — the ref content matches the SUT verbatim.
+            // Short org-safe ASCII words: no trailing whitespace, no org
+            // markup, so the created content round-trips through the block
+            // store / any org sync unchanged — the ref content matches the SUT
+            // verbatim.
             let content = proptest::string::string_regex("[a-z]{1,8}").expect("valid regex");
-            // Mix both create paths: `Some` exercises the explicit-id (born-equal)
-            // op dispatch; `None` exercises the provider's mint-when-absent fix.
+            // Mix both create paths: `Some` exercises the explicit-id
+            // (born-equal) op dispatch; `None` exercises the provider's
+            // mint-when-absent fix.
             let strat = (content, proptest::bool::ANY)
                 .prop_map(move |(content, with_id)| CreateBlockUnderFocus {
                     content,
@@ -176,7 +178,8 @@ impl<
                 Reason::PreconditionFailed,
             ),
             // The write tier refuses a create under a read-only root on both
-            // paths: the slot is never offered and the explicit-id op is refused.
+            // paths: the slot is never offered and the explicit-id op is
+            // refused.
             check(
                 create_under_focus_parent(state)
                     .is_none_or(|root| !state.refuses_creation_under(&root)),
@@ -199,7 +202,8 @@ impl<
             Some(uri) => state.create_block_under_with_id(&parent, &self.content, uri.clone()),
             // The creation-slot GESTURE. Two ops, not one: an undo-invisible
             // empty birth then the user's undo-visible content write (ruling C
-            // + sub-ruling B; ADR 0030 D1 authority-only birth, `OpOrigin::Rule`
+            // + sub-ruling B; ADR 0030 D1 authority-only birth,
+            //   `OpOrigin::Rule`
             // pushes no undo entry). The oracle still allocates a synthetic
             // `create-N` for the harness reconcile to pair with the SUT's
             // minted uuid.

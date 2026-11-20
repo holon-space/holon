@@ -395,8 +395,8 @@ impl ReactiveRowProvider for AppendedRowsProvider {
                 )
             }
             // Derived creation slot (main panel etc.) and LiveCell keep the
-            // INCREMENTAL chain — see `keyed_rows_signal_vec` for why the atomic
-            // recompose is scoped to the explicit path only.
+            // INCREMENTAL chain — see `keyed_rows_signal_vec` for why the
+            // atomic recompose is scoped to the explicit path only.
             _ => {
                 let suffix = self.suffix.keyed_signal_vec().map(|(_, r)| r);
                 Box::pin(self.inner.rows_signal_vec().chain(suffix))
@@ -418,26 +418,27 @@ impl ReactiveRowProvider for AppendedRowsProvider {
         match &self.suffix {
             SuffixSource::CreationSlot { slot, .. } if slot.parent_is_explicit => {
                 let slot = slot.clone();
-                // ATOMIC recompose (derived-data-contracts, Law 3), scoped to the
-                // EXPLICIT-`virtual_parent` path (the journals feed). The appended
-                // creation slot is a function of the CURRENT inner rows,
-                // recomputed and re-appended on every inner change in ONE
+                // ATOMIC recompose (derived-data-contracts, Law 3), scoped to
+                // the EXPLICIT-`virtual_parent` path (the journals feed). The
+                // appended creation slot is a function of the CURRENT inner
+                // rows, recomputed and re-appended on every inner change in ONE
                 // emission. `SignalVec::chain` cannot deliver this reliably — a
                 // live inner's `Replace` (content reload) DROPS the chained
                 // trailing slot, and restoring it from a separate suffix stream
-                // races the painted frame, so an empty day's bullet flakes absent
-                // at settled frames. Folding the slot into the inner's own signal
-                // makes it present at every settled frame BY CONSTRUCTION.
+                // races the painted frame, so an empty day's bullet flakes
+                // absent at settled frames. Folding the slot into the inner's
+                // own signal makes it present at every settled frame BY
+                // CONSTRUCTION.
                 //
                 // SCOPE: explicit only. A whole-vec `Replace` makes the tree
                 // driver `rebuild` (re-interpret every row → re-run its per-row
                 // queries), so applying it to a DERIVED collection (the main
                 // panel, many rows) grows the `inv-sql-budget` re-execution
-                // ratchet on edits. The derived path keeps the incremental chain
-                // below. The journals feed is empty-only (JRN-2): a non-empty day
-                // resolves to no slot and its handful of descendant rows carry
-                // negligible recompose cost; an empty day is the case that needs
-                // the guarantee.
+                // ratchet on edits. The derived path keeps the incremental
+                // chain below. The journals feed is empty-only (JRN-2): a
+                // non-empty day resolves to no slot and its handful of
+                // descendant rows carry negligible recompose cost; an empty day
+                // is the case that needs the guarantee.
                 Box::pin(
                     self.inner
                         .keyed_rows_signal_vec()
@@ -451,7 +452,8 @@ impl ReactiveRowProvider for AppendedRowsProvider {
                 )
             }
             // Derived creation slot (main panel etc.) and LiveCell keep the
-            // INCREMENTAL chain — no whole-vec Replace, so no re-interpret storm.
+            // INCREMENTAL chain — no whole-vec Replace, so no re-interpret
+            // storm.
             _ => Box::pin(
                 self.inner
                     .keyed_rows_signal_vec()
@@ -1156,9 +1158,10 @@ impl ReactiveView {
                 // Advice weave (ADR 0022) is NOT wired here: it lives in the
                 // session-level sidecar (`crate::advice_weaver`) that the pure
                 // interpret path reads synchronously via
-                // `BuilderServices::advice_children`, so it is observable on the
-                // snapshot/MCP path — not only on this streaming driver. See the
-                // static collection builders (`shadow_builders::weave_advice`).
+                // `BuilderServices::advice_children`, so it is observable on
+                // the snapshot/MCP path — not only on this streaming driver.
+                // See the static collection builders
+                // (`shadow_builders::weave_advice`).
                 let effective_source: Arc<dyn ReactiveRowProvider> = match virtual_child {
                     Some(slot) => Arc::new(AppendedRowsProvider::creation_slot(
                         data_source.clone(),
@@ -1346,8 +1349,9 @@ impl ReactiveView {
                         crate::row_origin::RowOrigin::from_row(&row).is_creation_placeholder();
                     // A woven advice row (ADR 0022) rides `Occurrence::Placed`
                     // in its identity key. It renders READ-ONLY (ADR 0021 v1) —
-                    // the dismiss/click template, never the collection's editable
-                    // `item_template` — and skips rules (like the virtual slot).
+                    // the dismiss/click template, never the collection's
+                    // editable `item_template` — and skips rules (like the
+                    // virtual slot).
                     let is_advice = occurrence != holon_api::Occurrence::Canonical;
                     let slot_is_editing = is_virtual && caret_is_on_row(&row, svc.as_ref());
                     let template = if is_advice {
@@ -1364,8 +1368,8 @@ impl ReactiveView {
                     let active_rules: &[holon_api::render_types::RuleSpec] =
                         if is_virtual || is_advice { &[] } else { &rules };
                     let is_context_root = context_root.as_deref().is_some_and(|cid| {
-                        // ALLOW(raw_row_id_column): key — equality against the collection's
-                        // `context_root` id; compared as text
+                        // ALLOW(raw_row_id_column): key — equality against the
+                        // collection's `context_root` id; compared as text
                         row.get("id")
                             .and_then(|v| v.as_string())
                             .is_some_and(|rid| rid == cid)
@@ -1409,8 +1413,8 @@ impl ReactiveView {
         // parenthood: walk stated parents while they are present in the
         // rowset. Bounded so a transient parent cycle can't hang the driver.
         // A stated parent always references a CANONICAL row (a display-placed
-        // occurrence is never itself a parent target), so parent lookups key the
-        // canonical occurrence.
+        // occurrence is never itself a parent target), so parent lookups key
+        // the canonical occurrence.
         fn rowset_depth(
             row_map: &HashMap<holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>>,
             row: &holon_api::widget_spec::DataRow,
@@ -1429,14 +1433,14 @@ impl ReactiveView {
                     None => break,
                 }
             }
-            // WP-F projection assertion (free — the loop above already counts the
-            // walk): a chain longer than the rowset can only repeat a row, i.e. a
-            // parent CYCLE. Previously this was swallowed by the `depth <= len`
-            // bound and returned a bogus depth. The self-parented `sentinel:no_parent`
-            // FK anchor never reaches this projection (filtered from the `block`
-            // matview), so it cannot trip a false cycle. This closure returns
-            // `usize` with no `Result` on the path → per the fail-loud directive a
-            // `panic!` is used.
+            // WP-F projection assertion (free — the loop above already counts
+            // the walk): a chain longer than the rowset can only repeat a row,
+            // i.e. a parent CYCLE. Previously this was swallowed by the `depth
+            // <= len` bound and returned a bogus depth. The self-parented
+            // `sentinel:no_parent` FK anchor never reaches this projection
+            // (filtered from the `block` matview), so it cannot trip a false
+            // cycle. This closure returns `usize` with no `Result` on the path
+            // → per the fail-loud directive a `panic!` is used.
             if depth > row_map.len() {
                 panic!(
                     "{}",
@@ -1511,10 +1515,11 @@ impl ReactiveView {
                     let mut tree = tree.lock().unwrap();
                     let mut key_index = key_index.lock().unwrap();
                     let mut row_map = row_map.lock().unwrap();
-                    // Adopted orphans changed depth, so their interpreted widgets
-                    // (depth-dependent rule outcomes baked in) are stale —
-                    // re-interpret them at their post-adoption depth.
-                    // A row's stated parent is always canonical (see `rowset_depth`).
+                    // Adopted orphans changed depth, so their interpreted
+                    // widgets (depth-dependent rule outcomes baked in) are
+                    // stale — re-interpret them at their post-adoption depth.
+                    // A row's stated parent is always canonical (see
+                    // `rowset_depth`).
                     let parent_key = |row: &holon_api::widget_spec::DataRow| {
                         extract_parent_id(row).map(|p| (p, holon_api::Occurrence::Canonical))
                     };
@@ -1540,13 +1545,14 @@ impl ReactiveView {
                             tree.update(&id, parent, sk, w, ov);
                         }
                     };
-                    // `tree.remove` evicts the node's whole subtree, but upstream
-                    // only dropped the one key — the survivors are still live in
-                    // `row_map`/`key_index`. Re-insert them (DFS order, so parents
-                    // land before children); each becomes a root until its own
-                    // parent reappears, at which point `adopt_orphans` re-attaches
-                    // it. Skipping this desyncs `key_index` from upstream indices
-                    // and strands the survivors for `tree.update` to trip over.
+                    // `tree.remove` evicts the node's whole subtree, but
+                    // upstream only dropped the one key — the survivors are
+                    // still live in `row_map`/`key_index`. Re-insert them (DFS
+                    // order, so parents land before children); each becomes a
+                    // root until its own parent reappears, at which point
+                    // `adopt_orphans` re-attaches it. Skipping this desyncs
+                    // `key_index` from upstream indices and strands the
+                    // survivors for `tree.update` to trip over.
                     let reinstate_evicted = |tree: &mut crate::mutable_tree::MutableTree,
                                              row_map: &HashMap<
                         holon_api::RowKey,
@@ -1711,11 +1717,12 @@ impl ReactiveView {
                         }
                         VecDiff::Move { .. } => {}
                     }
-                    // The tree renders exactly the rows the driver holds: both are
-                    // maintained under this one lock scope, so they must agree at
-                    // every diff boundary. A divergence is the dropped-row bug —
-                    // a row the panel was given that renders no node — and
-                    // recording it here names the diff that caused it.
+                    // The tree renders exactly the rows the driver holds: both
+                    // are maintained under this one lock scope, so they must
+                    // agree at every diff boundary. A divergence is the
+                    // dropped-row bug — a row the panel was given that renders
+                    // no node — and recording it here names the diff that
+                    // caused it.
                     if crate::reactive::tree_desync::enabled() {
                         let tree_ids: std::collections::HashSet<EntityUri> =
                             tree.flat_ids().into_iter().map(|k| k.0).collect();
@@ -1736,30 +1743,31 @@ impl ReactiveView {
                 // Provider vs `row_map` is a CONVERGENCE contract, not a
                 // per-diff one: the provider snapshot flips to the new page in
                 // one step while `row_map` catches up one `VecDiff` at a time,
-                // so during a multi-row drain they necessarily disagree. Judging
-                // it per diff produced 300+ ERRORs per page navigation whose
-                // divergence drained monotonically to zero — noise that trains
-                // readers to ignore a probe that exists to catch a real dropped
-                // row. Evaluate it once the ready backlog is empty instead.
+                // so during a multi-row drain they necessarily disagree.
+                // Judging it per diff produced 300+ ERRORs per page navigation
+                // whose divergence drained monotonically to zero — noise that
+                // trains readers to ignore a probe that exists to catch a real
+                // dropped row. Evaluate it once the ready backlog is empty
+                // instead.
                 //
                 // Diffs are applied in exactly the arrival order they always
                 // were; only WHEN this probe runs changed.
                 while let Some(event) = diff_stream.next().await {
                     event.into_iter().for_each(&mut apply_one);
                     // Drain everything already queued before judging. The inner
-                    // poll uses a noop waker, but the loop always returns to the
-                    // awaited `next()` above, which re-registers the real one —
-                    // so no wakeup is lost.
+                    // poll uses a noop waker, but the loop always returns to
+                    // the awaited `next()` above, which re-registers the real
+                    // one — so no wakeup is lost.
                     while let Some(Some(queued)) = diff_stream.next().now_or_never() {
                         queued.into_iter().for_each(&mut apply_one);
                     }
 
                     if crate::reactive::tree_desync::enabled() {
-                        // The provider is the driver's only source of rows, so a
-                        // row it holds that never reached `row_map` — once the
-                        // backlog is empty — is a delivery gap in the signal-vec
-                        // subscription, a different culprit from a tree that lost
-                        // a row it was given.
+                        // The provider is the driver's only source of rows, so
+                        // a row it holds that never reached `row_map` — once
+                        // the backlog is empty — is a delivery gap in the
+                        // signal-vec subscription, a different culprit from a
+                        // tree that lost a row it was given.
                         let sample = || {
                             let row_ids: std::collections::HashSet<EntityUri> = row_map_probe
                                 .lock()
@@ -1775,14 +1783,15 @@ impl ReactiveView {
                             (provider_ids != row_ids).then_some((provider_ids, row_ids))
                         };
 
-                        // CONFIRM before recording. A write can land between the
-                        // drain ending and the sample above, which leaves the
-                        // provider legitimately ahead of `row_map` — the diff for
-                        // it is queued, not lost. Draining again and re-sampling
-                        // absorbs exactly that case, so the window in which a
-                        // concurrent write can fake a divergence shrinks to the
-                        // second sample. A divergence that survives both passes
-                        // is the real dropped-row bug this probe exists for.
+                        // CONFIRM before recording. A write can land between
+                        // the drain ending and the sample above, which leaves
+                        // the provider legitimately ahead of `row_map` — the
+                        // diff for it is queued, not lost. Draining again and
+                        // re-sampling absorbs exactly that case, so the window
+                        // in which a concurrent write can fake a divergence
+                        // shrinks to the second sample. A divergence that
+                        // survives both passes is the real dropped-row bug this
+                        // probe exists for.
                         let divergence = match sample() {
                             None => None,
                             Some(_) => {
@@ -1859,7 +1868,8 @@ impl ReactiveView {
                         };
                         {
                             // The row_map lock is released before the tree lock
-                            // is taken (the data driver takes tree, then row_map).
+                            // is taken (the data driver takes tree, then
+                            // row_map).
                             let updates: Vec<crate::mutable_tree::TreeEntry> = {
                                 let rm = row_map.lock().unwrap();
                                 affected
@@ -1954,8 +1964,9 @@ impl ReactiveView {
 
         // Shared entries for the two concurrent drivers. Keyed by the widened
         // `RowKey`; the tie-break in `full_rebuild` compares the whole key. The
-        // flat driver renders canonical rows only (display placement targets the
-        // tree path first), so nodes keep the default `Canonical` occurrence.
+        // flat driver renders canonical rows only (display placement targets
+        // the tree path first), so nodes keep the default `Canonical`
+        // occurrence.
         let entries: RowEntries = Arc::new(Mutex::new(Vec::new()));
 
         // Self-interpretation closure: captures services + space, recomputes
@@ -2058,15 +2069,16 @@ impl ReactiveView {
             }
         };
 
-        // Full rebuild: interpret every entry in DISPLAY order and replace target.
+        // Full rebuild: interpret every entry in DISPLAY order and replace
+        // target.
         //
         // `entries` is the index-addressed mirror of the upstream
-        // `keyed_rows_signal_vec` — a `VecDiff`'s `index` addresses it directly —
-        // so the display sort runs on a COPY. Sorting `entries` itself permuted it
-        // away from upstream's order, and the next `UpdateAt { index }` then wrote
-        // its row over an unrelated entry: that entry vanished and the updated one
-        // rendered twice (dogfood 2026-08-20, the journals feed showing one day as
-        // two adjacent sections).
+        // `keyed_rows_signal_vec` — a `VecDiff`'s `index` addresses it directly
+        // — so the display sort runs on a COPY. Sorting `entries` itself
+        // permuted it away from upstream's order, and the next `UpdateAt {
+        // index }` then wrote its row over an unrelated entry: that entry
+        // vanished and the updated one rendered twice (dogfood 2026-08-20, the
+        // journals feed showing one day as two adjacent sections).
         let full_rebuild = {
             let entries = entries.clone();
             let sort_key = sort_key.clone();
@@ -2080,11 +2092,12 @@ impl ReactiveView {
                 if let Some(ref spec) = sort_key {
                     // Honor the `-`-prefixed DESCENDING convention (e.g.
                     // `sortkey: "-content"` for the newest-first journal feed).
-                    // The raw spec is a sort DIRECTIVE, not a column name — using
-                    // it verbatim as `row.get("-content")` finds no column and
-                    // silently degrades to the `ka.cmp(kb)` arrival-order tie
-                    // (dogfood #6 row 34: feed rendered arrival-order). Mirrors
-                    // the static `sorted_rows` + tree-driver `parse_sort_key`.
+                    // The raw spec is a sort DIRECTIVE, not a column name —
+                    // using it verbatim as `row.get("-content")` finds no
+                    // column and silently degrades to the `ka.cmp(kb)`
+                    // arrival-order tie (dogfood #6 row 34: feed rendered
+                    // arrival-order). Mirrors the static `sorted_rows` +
+                    // tree-driver `parse_sort_key`.
                     let (col, descending) = holon_api::render_eval::parse_sort_key(spec);
                     ordered.sort_by(|(ka, a), (kb, b)| {
                         let ord = holon_api::render_eval::cmp_values(a.get(col), b.get(col));
@@ -2200,7 +2213,8 @@ impl ReactiveView {
             })
         };
 
-        // Space driver: full re-interpret when viewport/container-query changes.
+        // Space driver: full re-interpret when viewport/container-query
+        // changes.
         let space_driver = {
             let rebuild = full_rebuild.clone();
             let entries = entries.clone();
@@ -2400,11 +2414,13 @@ impl ReactiveView {
                             let ord = holon_api::render_eval::cmp_values(a.get(key), b.get(key));
                             let ord = if descending { ord.reverse() } else { ord };
                             ord.then_with(|| {
-                                // ALLOW(raw_row_id_column): key — sort tie-break; the id orders
-                                // rows and resolves nothing
+                                // ALLOW(raw_row_id_column): key — sort
+                                // tie-break; the id orders rows and resolves
+                                // nothing
                                 let id_a = a.get("id").and_then(|v| v.as_string()).unwrap_or("");
-                                // ALLOW(raw_row_id_column): key — sort tie-break; the id orders
-                                // rows and resolves nothing
+                                // ALLOW(raw_row_id_column): key — sort
+                                // tie-break; the id orders rows and resolves
+                                // nothing
                                 let id_b = b.get("id").and_then(|v| v.as_string()).unwrap_or("");
                                 id_a.cmp(id_b)
                             })
@@ -3238,7 +3254,8 @@ mod tests {
             parent_is_explicit: false,
         };
         assert_eq!(appended_row_count(inner, &slot), 1);
-        // The appended row is a creation placeholder parented to the focus root.
+        // The appended row is a creation placeholder parented to the focus
+        // root.
         let provider = AppendedRowsProvider::creation_slot(
             Arc::new(FixedRows(vec![row_with_parent(
                 "block:page",
@@ -3887,8 +3904,8 @@ mod tests {
         view.start(services, &tokio::runtime::Handle::current());
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Midnight rollover: `daily_journal` mints today's page. It arrives at the
-        // END of the upstream vec; the sort renders it FIRST.
+        // Midnight rollover: `daily_journal` mints today's page. It arrives at
+        // the END of the upstream vec; the sort renders it FIRST.
         row_set.apply_change(
             holon_api::Change::Created {
                 data: enriched(make_row("2026-08-20", "2026-08-20")),
@@ -3898,9 +3915,9 @@ mod tests {
         );
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Org write-back of `Journals/2026-08-20.org` re-emits the same block with
-        // a fresh `updated_at` — a REAL field change, so it is not swallowed by
-        // the `set_neq` CDC-echo suppressor.
+        // Org write-back of `Journals/2026-08-20.org` re-emits the same block
+        // with a fresh `updated_at` — a REAL field change, so it is not
+        // swallowed by the `set_neq` CDC-echo suppressor.
         let mut written_back = make_row("2026-08-20", "2026-08-20");
         written_back.insert("updated_at".to_string(), Value::String("1".to_string()));
         row_set.apply_change(
@@ -4330,8 +4347,8 @@ mod tests {
         use futures_signals::signal::SignalExt;
         use futures_signals::signal_vec::SignalVecExt;
 
-        // A minimal anchor-collection provider holding ONE unrelated row (it does
-        // NOT contain L → the bare-id suffix key cannot collide yet).
+        // A minimal anchor-collection provider holding ONE unrelated row (it
+        // does NOT contain L → the bare-id suffix key cannot collide yet).
         struct MockProvider(Vec<Arc<DataRow>>);
         impl ReactiveRowProvider for MockProvider {
             fn rows_snapshot(&self) -> Vec<Arc<DataRow>> {
@@ -4378,7 +4395,8 @@ mod tests {
             Arc::new(MockProvider(vec![Arc::new(make_row("other", "other"))]));
 
         let l = EntityUri::block("c1");
-        // L's canonical live row cell — what `ReactiveRowSet::row_mutable` hands out.
+        // L's canonical live row cell — what `ReactiveRowSet::row_mutable`
+        // hands out.
         let source = Mutable::new(Arc::new(make_row("c1", "c1")));
 
         let placed =
@@ -4404,9 +4422,9 @@ mod tests {
             "placed occurrence shows canonical content"
         );
 
-        // ── Liveness (SIGNAL): a write to the canonical cell re-emits the suffix,
-        //    so the render pipeline sees the placed occurrence update — the
-        //    shared-cell dividend, no `converge_input` reconciliation. ──
+        // ── Liveness (SIGNAL): a write to the canonical cell re-emits the
+        // suffix,    so the render pipeline sees the placed occurrence update —
+        // the    shared-cell dividend, no `converge_input` reconciliation. ──
         // The placed occurrence keys `(l, Placed(occ))`, so match on the entity
         // part of the widened key.
         let l_content = |v: &Vec<(holon_api::RowKey, Arc<DataRow>)>| {

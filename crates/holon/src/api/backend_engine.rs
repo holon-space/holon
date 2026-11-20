@@ -1004,10 +1004,11 @@ impl BackendEngine {
                 params.insert("context_parent_id".into(), Value::Null);
             }
         }
-        // `Unfiltered` binds an empty prefix so `text.starts_with` matches every
-        // row; `Under(prefix)` binds the resolved subtree prefix. The former
-        // "no prefix" `None` — which bound a zero-row sentinel — is gone: an
-        // unresolvable path never reaches here, it is an `Err` at resolution.
+        // `Unfiltered` binds an empty prefix so `text.starts_with` matches
+        // every row; `Under(prefix)` binds the resolved subtree prefix. The
+        // former "no prefix" `None` — which bound a zero-row sentinel — is
+        // gone: an unresolvable path never reaches here, it is an `Err` at
+        // resolution.
         params.insert(
             "context_path_prefix".into(),
             Value::String(context.path_context.prefix_literal().to_string()),
@@ -1063,8 +1064,8 @@ impl BackendEngine {
         context: Option<QueryContext>,
     ) -> Result<Vec<holon_api::StorageEntity>> {
         // Always bind context params (using NULL if no context provided).
-        // This enables stdlib virtual tables like `from children` to compile even
-        // without context.
+        // This enables stdlib virtual tables like `from children` to compile
+        // even without context.
         let ctx = context.unwrap_or_else(QueryContext::root);
         self.bind_context_params(&mut params, &ctx);
         self.bind_page_param(&sql, &mut params, &ctx).await?;
@@ -1154,8 +1155,8 @@ impl BackendEngine {
         self.bind_page_param(&sql, &mut params, &ctx).await?;
 
         let sql_with_params = Self::inline_parameters(&sql, &params)?;
-        // Same diagnostic as `query_and_watch`: without it this path's views are
-        // unattributable, and it is the one that still mints per placement.
+        // Same diagnostic as `query_and_watch`: without it this path's views
+        // are unattributable, and it is the one that still mints per placement.
         if std::env::var("HOLON_TRACE_VIEWS").is_ok() {
             tracing::warn!(
                 view_name = %crate::sync::MatviewManager::compute_view_name(&sql_with_params),
@@ -1206,9 +1207,10 @@ impl BackendEngine {
         // Shapes the fork's DBSP IVM cannot maintain (subquery predicates —
         // EXISTS / NOT EXISTS / IN) would be served from a silently-empty
         // matview — a fail-loud violation. Route them to eager re-execution on
-        // the row-change bus UP FRONT, before any CREATE. The disclosure travels
-        // with the stream (batch metadata) so the render surfaces a degraded
-        // banner. See `holon_turso::matview_manager::sql_ivm_maintainable`.
+        // the row-change bus UP FRONT, before any CREATE. The disclosure
+        // travels with the stream (batch metadata) so the render surfaces a
+        // degraded banner. See
+        // `holon_turso::matview_manager::sql_ivm_maintainable`.
         if !holon_turso::matview_manager::sql_ivm_maintainable(&sql_with_params) {
             tracing::warn!(
                 sql = %holon_turso::turso::redact_sql_for_logs(&sql_with_params),
@@ -1228,9 +1230,9 @@ impl BackendEngine {
         }
 
         // Diagnostic for HANDOFF_DATA_CDC_SCOPE_LEAK.md.
-        // HOLON_TRACE_QUERY_BLOCK=<substring> matches against the inlined SQL so
-        // we can see exactly which matview is created for a given block_id and
-        // correlate with HOLON_TRACE_BLOCK_DATA in the frontend.
+        // HOLON_TRACE_QUERY_BLOCK=<substring> matches against the inlined SQL
+        // so we can see exactly which matview is created for a given block_id
+        // and correlate with HOLON_TRACE_BLOCK_DATA in the frontend.
         if std::env::var("HOLON_TRACE_VIEWS").is_ok() {
             let view_name_preview =
                 crate::sync::MatviewManager::compute_view_name(&sql_with_params);
@@ -1244,12 +1246,13 @@ impl BackendEngine {
         // Ensure view exists, subscribe to CDC, and query initial data.
         // BACKSTOP: the shape predicate above is one classifier; the engine's
         // matview-conversion authority is another. If a shape the predicate
-        // thought maintainable is refused PERMANENTLY at CREATE (`Cannot convert
-        // LogicalExpr` — e.g. a `CASE` the predicate does not model), fall to
-        // eager re-execution and disclose the engine's own refusal text, rather
-        // than returning an Err that spins the watcher's retry loop forever on a
-        // permanent failure. A TRANSIENT error (a dependency table not built
-        // yet) is NOT swallowed — it propagates so the watcher retries.
+        // thought maintainable is refused PERMANENTLY at CREATE (`Cannot
+        // convert LogicalExpr` — e.g. a `CASE` the predicate does not model),
+        // fall to eager re-execution and disclose the engine's own refusal
+        // text, rather than returning an Err that spins the watcher's retry
+        // loop forever on a permanent failure. A TRANSIENT error (a dependency
+        // table not built yet) is NOT swallowed — it propagates so the watcher
+        // retries.
         let view_name = match self.matview_manager.ensure_view(&sql_with_params).await {
             Ok(view_name) => view_name,
             Err(e) if Self::is_permanent_matview_conversion_error(&e) => {
@@ -1318,9 +1321,10 @@ impl BackendEngine {
         }
         let data = data.ok_or_else(|| anyhow::anyhow!("Failed to query matview after retries"))?;
 
-        // Fold initial data into the stream as the first batch of Created items.
-        // Enrichment (flatten_properties, computed fields) happens downstream in
-        // enrich_batch() — same path as CDC updates, so no separate handling needed.
+        // Fold initial data into the stream as the first batch of Created
+        // items. Enrichment (flatten_properties, computed fields) happens
+        // downstream in enrich_batch() — same path as CDC updates, so no
+        // separate handling needed.
         Ok(Self::prepend_initial_data(data, &view_name, cdc_stream))
     }
 
@@ -1438,8 +1442,8 @@ impl BackendEngine {
                     linked_contexts: Vec::new(),
                     sync_token: None,
                     seq,
-                    // Every eager batch carries the disclosure so a watcher that
-                    // subscribes mid-stream still learns it is degraded.
+                    // Every eager batch carries the disclosure so a watcher
+                    // that subscribes mid-stream still learns it is degraded.
                     degraded: Some(disclosure.to_string()),
                 },
             }
@@ -1493,14 +1497,15 @@ impl BackendEngine {
                     Ok(rows) => rows,
                     Err(e) => {
                         // NOT silent: the whole query is already served under a
-                        // standing degraded-mode disclosure (the frontend sets it
-                        // for every eager-served shape, and its text says the last
-                        // known rows are retained if a refresh fails). Keeping the
-                        // last-good rows here — rather than blanking to empty — is
-                        // the disclosed behaviour; the failure is surfaced at ERROR
-                        // for debuggability and the next CDC tick retries. The
-                        // INITIAL load failure is loud separately: it propagates as
-                        // `Err` from `eager_requery_stream` (before this loop) into
+                        // standing degraded-mode disclosure (the frontend sets
+                        // it for every eager-served shape, and its text says
+                        // the last known rows are retained if a refresh fails).
+                        // Keeping the last-good rows here — rather than
+                        // blanking to empty — is the disclosed behaviour; the
+                        // failure is surfaced at ERROR for debuggability and
+                        // the next CDC tick retries. The INITIAL load failure
+                        // is loud separately: it propagates as `Err` from
+                        // `eager_requery_stream` (before this loop) into
                         // the frontend watcher's `set_error`.
                         tracing::error!(
                             relation = %relation,
@@ -2377,11 +2382,12 @@ mod tests {
         engine
             .db_handle()
             .execute(
-                // Plain INSERT, not INSERT OR REPLACE: `navigation_history` is a
-                // rowid-alias table (`id INTEGER PRIMARY KEY AUTOINCREMENT`) and
-                // the base of the `focus_roots` / `current_focus` matviews, which
-                // is the one shape the fork's IVM corrupts on a REPLACE — so the
-                // DbHandle guard refuses it. The row is fresh here anyway.
+                // Plain INSERT, not INSERT OR REPLACE: `navigation_history` is
+                // a rowid-alias table (`id INTEGER PRIMARY KEY AUTOINCREMENT`)
+                // and the base of the `focus_roots` / `current_focus` matviews,
+                // which is the one shape the fork's IVM corrupts on a REPLACE —
+                // so the DbHandle guard refuses it. The row is fresh here
+                // anyway.
                 "INSERT INTO navigation_history (id, region, block_id) VALUES (1, 'main', \
                  'block:p')",
                 vec![],
@@ -2491,10 +2497,10 @@ mod tests {
             .collect();
         row_ids.sort();
 
-        // PRQL stdlib: `from children = from block | filter parent_id == $context_id
-        //                                       | filter content_type != 'source'`.
-        // Source-typed `block:p::src::0` is filtered out; `block:other*` rows are
-        // not children of `block:p`.
+        // PRQL stdlib: `from children = from block | filter parent_id ==
+        // $context_id                                       | filter
+        // content_type != 'source'`. Source-typed `block:p::src::0` is filtered
+        // out; `block:other*` rows are not children of `block:p`.
         assert_eq!(
             row_ids,
             vec![
@@ -2603,8 +2609,8 @@ mod tests {
             module.with_operation_provider_factory(|backend| {
                 let db_handle =
                     tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
-                // entity names normalize `_` -> `-` (EntityName::new, URI-scheme
-                // safety); only the SQL table keeps the underscore.
+                // entity names normalize `_` -> `-` (EntityName::new,
+                // URI-scheme safety); only the SQL table keeps the underscore.
                 Arc::new(SqlOperationProvider::new(
                     db_handle,
                     "test_item".to_string(),
@@ -2720,10 +2726,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_register_custom_operation() {
-        // Use the provider factory pattern so the provider gets the correct db_handle
+        // Use the provider factory pattern so the provider gets the correct
+        // db_handle
         let engine = create_test_engine_with_providers(":memory:".into(), |module| {
             module.with_operation_provider_factory(|backend| {
-                // Get db_handle from backend using block_in_place to avoid blocking issues
+                // Get db_handle from backend using block_in_place to avoid
+                // blocking issues
                 let db_handle =
                     tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
                 Arc::new(SqlOperationProvider::new(
@@ -2826,8 +2834,8 @@ mod tests {
         let engine = create_test_engine().await.unwrap();
         let table = crate::storage::BLOCK_WRITE_TABLE;
 
-        // Five unblocked, agent-tagged, G1 TODOs (b0..b4) + a DONE dep (b8) that
-        // does NOT block b0.
+        // Five unblocked, agent-tagged, G1 TODOs (b0..b4) + a DONE dep (b8)
+        // that does NOT block b0.
         for i in 0..5 {
             engine
                 .db_handle()
@@ -3053,9 +3061,10 @@ mod tests {
             .await
             .unwrap();
 
-        // `date('now')` has no Exists/InSubquery node, so `sql_ivm_maintainable`
-        // returns true and the matview path is taken — where the engine refuses
-        // it at DDL as non-deterministic. The backstop must catch that and serve eager.
+        // `date('now')` has no Exists/InSubquery node, so
+        // `sql_ivm_maintainable` returns true and the matview path is taken —
+        // where the engine refuses it at DDL as non-deterministic. The backstop
+        // must catch that and serve eager.
         assert!(
             holon_turso::matview_manager::sql_ivm_maintainable(
                 "SELECT b.id, date('now') AS flag FROM block b"
@@ -3123,7 +3132,8 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // lj0 has a requires edge → EXCLUDED by `r.block_id IS NULL` (4 remain).
+        // lj0 has a requires edge → EXCLUDED by `r.block_id IS NULL` (4
+        // remain).
         engine
             .db_handle()
             .execute(
@@ -3171,8 +3181,8 @@ mod tests {
         // on c6cfab7d for a correlated scalar subquery in the SELECT list — the
         // one of the three "not-maintainable" shapes the backstop serves
         // end-to-end (measured: eager + disclosure). The others are R3-era
-        // strings kept because they may return once the transform bugs below are
-        // fixed and the engine's clean refusal surfaces.
+        // strings kept because they may return once the transform bugs below
+        // are fixed and the engine's clean refusal surfaces.
         for permanent in [
             "matview 'watch_view_x' could not be created: Failed to execute DDL: Parse error: \
              Cannot convert LogicalExpr to AST Expr: Case { … }",
@@ -3193,15 +3203,16 @@ mod tests {
         }
         // TRANSIENT (→ propagate, watcher retries): a dependency not built yet.
         // The last two are the ACTUAL errors measured today for EXCEPT and a
-        // derived table — they are indistinguishable from a real transient error
-        // (SQLite syntax / missing table), so the classifier CANNOT safely route
-        // them eager. They therefore WEDGE — but the root cause is a pair of
-        // pre-existing holon SQL-transform bugs (EXCEPT → invalid `EXCEPT ALL`;
-        // the `_change_origin` transform leaking a derived table's inner alias),
-        // triaged OPEN in bugfunnel 2026-08-19-except-transform-emits-except-all
-        // and 2026-08-19-change-origin-transform-leaks-derived-alias. Both paths
-        // (matview AND eager) hit the mangled SQL, so widening the classifier
-        // would not rescue them — the fix is the transforms.
+        // derived table — they are indistinguishable from a real transient
+        // error (SQLite syntax / missing table), so the classifier CANNOT
+        // safely route them eager. They therefore WEDGE — but the root cause is
+        // a pair of pre-existing holon SQL-transform bugs (EXCEPT → invalid
+        // `EXCEPT ALL`; the `_change_origin` transform leaking a derived
+        // table's inner alias), triaged OPEN in bugfunnel
+        // 2026-08-19-except-transform-emits-except-all
+        // and 2026-08-19-change-origin-transform-leaks-derived-alias. Both
+        // paths (matview AND eager) hit the mangled SQL, so widening the
+        // classifier would not rescue them — the fix is the transforms.
         for transient in [
             "no such table: block_tags_agg",
             "DDL timed out after 30s waiting for dependencies",

@@ -1033,9 +1033,9 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             // don't validate: mint no mark for it.
             //
             // The literal's BYTES still survive, as plain text. The render half
-            // emits this shape unchanged, so erasing it here would leave the two
-            // halves disagreeing about what the block holds and the store↔disk
-            // cycle without a fixed point.
+            // emits this shape unchanged, so erasing it here would leave the
+            // two halves disagreeing about what the block holds and the
+            // store↔disk cycle without a fixed point.
             if text.is_empty() {
                 push_text(state, &raw, node_src.clone(), true);
                 return;
@@ -1055,9 +1055,9 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             );
         }
         MarkKindHint::Sub | MarkKindHint::Super => {
-            // SUBSCRIPT / SUPERSCRIPT: `_{…}` / `^{…}` — strip 2-char prefix + 1-char
-            // suffix. No nested marks supported in sub/super for Phase 1 (rare
-            // in practice).
+            // SUBSCRIPT / SUPERSCRIPT: `_{…}` / `^{…}` — strip 2-char prefix +
+            // 1-char suffix. No nested marks supported in sub/super for Phase 1
+            // (rare in practice).
             let inner = strip_prefix_suffix(&raw, 2, 1);
             let inner_src = stripped_byte_range(&raw, 2, 1);
             let mark = match kind_hint {
@@ -1108,12 +1108,12 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
                 _ => unreachable!(),
             };
             // orgize reads `**x**` as bold in bold and `_a _b__` as underline
-            // in underline, so stripping both layers would yield two overlapping
-            // MarkSpans of one mark. The store keeps marks as a Peritext
-            // attribute set and merges those into their union, so write-back
-            // loses the inner delimiters. When an ancestor already carries this
-            // mark, keep the delimiters as literal content instead: one
-            // representable mark, and the bytes survive.
+            // in underline, so stripping both layers would yield two
+            // overlapping MarkSpans of one mark. The store keeps marks as a
+            // Peritext attribute set and merges those into their union, so
+            // write-back loses the inner delimiters. When an ancestor already
+            // carries this mark, keep the delimiters as literal content
+            // instead: one representable mark, and the bytes survive.
             if state.enclosing.contains(&outer_mark) {
                 emit_delimiters_as_content(&node, &raw, node_src, state);
                 return;
@@ -1255,11 +1255,12 @@ fn strip_link(raw: &str, classifier: &LinkTargetClassifier) -> (String, InlineMa
         .and_then(|s| s.strip_suffix("]]"))
         .unwrap_or(raw);
     // Split on `][` to separate uri and label, if present. Link labels must not
-    // carry leading/trailing whitespace (product rule): `[[a ]]` displays as `a`,
-    // not `a ` — so the extracted label (the content emitted for this link) is
-    // trimmed at the parse boundary, keeping every projection (Loro CONTENT_RAW /
-    // editor cell, SQL block_raw, org re-render) consistent. The no-explicit-label
-    // form `[[a ]]` uses the same trimmed string as both display and target.
+    // carry leading/trailing whitespace (product rule): `[[a ]]` displays as
+    // `a`, not `a ` — so the extracted label (the content emitted for this
+    // link) is trimmed at the parse boundary, keeping every projection (Loro
+    // CONTENT_RAW / editor cell, SQL block_raw, org re-render) consistent. The
+    // no-explicit-label form `[[a ]]` uses the same trimmed string as both
+    // display and target.
     let (uri, label) = match inside.split_once("][") {
         Some((u, l)) => (u.to_string(), l.trim().to_string()),
         None => {

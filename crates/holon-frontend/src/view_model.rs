@@ -1831,8 +1831,8 @@ pub(crate) fn naming_the_builder(widget: &str, message: String) -> String {
 /// column. Row text that names no entity gives `None` and a warning, so the
 /// node renders without entity operations and the bad row is disclosed.
 pub fn row_entity_name(row: &DataRow) -> Option<EntityName> {
-    // ALLOW(raw_row_id_column): key — reads the SCHEME only, to name the entity the
-    // row belongs to
+    // ALLOW(raw_row_id_column): key — reads the SCHEME only, to name the entity
+    // the row belongs to
     let id = match row.get("id") {
         Some(Value::String(id)) => Some(id.as_str()),
         _ => None,

@@ -1035,8 +1035,9 @@ mod tests {
                     let ingest_failed = seen.ingest_failed;
                     let ingest_running = self.running(CATCH_UP_INGEST, doc);
                     let write_running = self.running(CATCH_UP_WRITE, doc);
-                    // A write retry re-checks its guard when it comes due: the disk
-                    // at its base and the store away from the base's authority.
+                    // A write retry re-checks its guard when it comes due: the
+                    // disk at its base and the store away from the base's
+                    // authority.
                     let read = |place, field| token_field(&self.net, place, doc, field);
                     let write_can_land = write_running
                         || (seen.write_retry_pending
@@ -1059,8 +1060,9 @@ mod tests {
                             "{doc}: a document the stop leaves behind is named failed: {failed:?}"
                         );
                     }
-                    // A running attempt may still land, so the stop may wait one attempt;
-                    // a pending write retry may hold it until the retry comes due.
+                    // A running attempt may still land, so the stop may wait
+                    // one attempt; a pending write retry may hold it until the
+                    // retry comes due.
                     if ingest_failed
                         && !write_running
                         && !seen.write_retry_pending
@@ -1117,7 +1119,8 @@ mod tests {
             use Outcome::*;
             use Step::*;
             let fixed = [
-                // A write retry is due over a file back at its base after its ingest failed.
+                // A write retry is due over a file back at its base after its
+                // ingest failed.
                 vec![
                     StoreMoves(0),
                     DiskMoves(0),
@@ -1153,7 +1156,8 @@ mod tests {
                     DiskMoves(0),
                     Complete(0, Retryable),
                 ],
-                // A write retry is due over a file whose ingest failed for good.
+                // A write retry is due over a file whose ingest failed for
+                // good.
                 vec![
                     StoreMoves(0),
                     StoreMoves(0),
@@ -1172,7 +1176,8 @@ mod tests {
                     Advance(100),
                     DiskMoves(0),
                 ],
-                // A write retry is due after the store went back to the base's authority.
+                // A write retry is due after the store went back to the base's
+                // authority.
                 vec![
                     DiskMoves(0),
                     DiskReverts(0),
@@ -1183,8 +1188,8 @@ mod tests {
                     Advance(99),
                     Complete(0, Retryable),
                 ],
-                // A write retry is pending over a file at its base, and the store went
-                // back to the base's authority.
+                // A write retry is pending over a file at its base, and the
+                // store went back to the base's authority.
                 vec![
                     StoreMoves(0),
                     StoreReverts(0),

@@ -322,7 +322,8 @@ fn block_matview_with_edge_fields_no_duplicates_after_reboot() {
             .await
             .expect("write vault.org");
 
-        // ── Boot 1: seed, then write tags + requires through the prod edge path
+        // ── Boot 1: seed, then write tags + requires through the prod edge
+        // path
         env.start_app(true).await.expect("boot-1 start_app");
         wait_for_seed(&env).await;
 
@@ -331,7 +332,8 @@ fn block_matview_with_edge_fields_no_duplicates_after_reboot() {
             .set_block_tags("block:blk-a", &["proj".to_string()])
             .await
             .expect("set_block_tags(blk-a)");
-        // ALLOW(entity_uri_from_raw): test-caller-supplied id; from_raw schemes it.
+        // ALLOW(entity_uri_from_raw): test-caller-supplied id; from_raw schemes
+        // it.
         backend
             .set_block_requires("block:blk-a", &[EntityUri::from_raw("block:blk-b")])
             .await

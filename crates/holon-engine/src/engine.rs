@@ -174,8 +174,8 @@ impl Engine {
             marking.set_attr(&change.token, &change.attr, change.to.clone());
         }
 
-        // Handle create arcs — inject `step` so id_expr can produce unique IDs per
-        // firing
+        // Handle create arcs — inject `step` so id_expr can produce unique IDs
+        // per firing
         let mut create_maps = rhai_maps.clone();
         let mut step_map = rhai::Map::new();
         step_map.insert("n".into(), rhai::Dynamic::from(step as i64));
@@ -265,7 +265,8 @@ impl Engine {
                 .transition(&binding.transition_id)
                 .ok_or_else(|| format!("unknown transition: {}", binding.transition_id))?;
             let mut sim = marking.clone();
-            // Use a high step offset so created-token IDs don't collide with real firings
+            // Use a high step offset so created-token IDs don't collide with
+            // real firings
             self.fire(net, &mut sim, binding, usize::MAX - i)
                 .map_err(|e| format!("simulating '{}': {e}", binding.transition_id))?;
             let obj_after = crate::objective::evaluate(&self.evaluator, net, &sim)

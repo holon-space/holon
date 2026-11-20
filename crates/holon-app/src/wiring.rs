@@ -94,10 +94,11 @@ impl FrontendInjectorExt for Injector {
 
         let db_path = holon_config.resolve_db_path(&config_dir);
 
-        // Ledger of which boot steps this assembly actually performs. Steps that
-        // a `#[cfg]` compiles out — or that the hand-mirrored worker assembly
-        // never had — are warned about by `finish()` at the end of the session
-        // factory, so a silently missing feature becomes a startup log line.
+        // Ledger of which boot steps this assembly actually performs. Steps
+        // that a `#[cfg]` compiles out — or that the hand-mirrored worker
+        // assembly never had — are warned about by `finish()` at the end of the
+        // session factory, so a silently missing feature becomes a startup log
+        // line.
         let disclosure = BootDisclosure::new(PlatformCapabilities::current());
 
         // Lets a legacy-loro-state rejection name this process's actual files.
@@ -240,9 +241,9 @@ impl FrontendInjectorExt for Injector {
             .or_else(|| orgmode_root.as_ref().map(|r| r.join(".loro")))
             .unwrap_or_else(|| db_path.parent().unwrap_or(&db_path).join(".loro"));
 
-        // Model.md invariant 10: consolidator handover is an epoch, not a runtime
-        // lookup. Fail loud if a durable vault was consolidated by a different
-        // mode than the one configured now (escape hatch:
+        // Model.md invariant 10: consolidator handover is an epoch, not a
+        // runtime lookup. Fail loud if a durable vault was consolidated by a
+        // different mode than the one configured now (escape hatch:
         // HOLON_CONSOLIDATOR_MIGRATE=1). The identity comes from the same
         // SessionCapabilities pin the rest of the session uses; each component
         // describes its own durable footprint.
@@ -329,8 +330,8 @@ impl FrontendInjectorExt for Injector {
             // controller resolves `dyn AliasRegistrar` from DI; in the Turso
             // container the Loro module owns the doc store, so the registrar is
             // derived from `LoroBlockOperations` here at the composition root
-            // (only the wiring crate may name a concrete backend) — holon-orgmode
-            // stays storage-agnostic.
+            // (only the wiring crate may name a concrete backend) —
+            // holon-orgmode stays storage-agnostic.
             self.provide::<dyn holon_filesystem::AliasRegistrar>(Provider::root(|resolver| {
                 let ops = resolver.resolve::<LoroBlockOperations>();
                 Arc::new(crate::loro_seams::LoroAliasRegistrar {
@@ -338,11 +339,12 @@ impl FrontendInjectorExt for Injector {
                 }) as Arc<dyn holon_filesystem::AliasRegistrar>
             }));
 
-            // Block-CRUD authority: when Loro is enabled it owns block CRUD (the
-            // source of truth the SQL projection mirrors), so register the Loro
-            // provider as the `CrudAuthority`. The org file-sync wiring resolves
-            // this marker to pick the authority without naming a concrete backend
-            // (SqlOnly registers none and falls back to its local SQL provider).
+            // Block-CRUD authority: when Loro is enabled it owns block CRUD
+            // (the source of truth the SQL projection mirrors), so register the
+            // Loro provider as the `CrudAuthority`. The org file-sync wiring
+            // resolves this marker to pick the authority without naming a
+            // concrete backend (SqlOnly registers none and falls back to its
+            // local SQL provider).
             self.provide::<CrudAuthority>(Provider::root(|resolver| {
                 let ops = resolver.resolve::<LoroBlockOperations>();
                 Shared::new(CrudAuthority(ops as Arc<dyn OperationProvider>))
@@ -363,11 +365,11 @@ impl FrontendInjectorExt for Injector {
                 },
             ));
 
-            // Authoritative mount registry (Inc 3): the org ingest guard skips a
-            // shared-subtree projection file ONLY when its page id is a real
-            // mount node in the global Loro tree — never on drawer content alone
-            // (which round-trips from any user file). Backed by LoroShareBackend
-            // (async-provided), so resolve async.
+            // Authoritative mount registry (Inc 3): the org ingest guard skips
+            // a shared-subtree projection file ONLY when its page id is a real
+            // mount node in the global Loro tree — never on drawer content
+            // alone (which round-trips from any user file). Backed by
+            // LoroShareBackend (async-provided), so resolve async.
             self.provide::<dyn holon_filesystem::MountRegistry>(Provider::root_async(
                 |resolver| async move {
                     let backend = resolver
@@ -463,13 +465,14 @@ impl FrontendInjectorExt for Injector {
                 )) as Arc<dyn holon_core::WriteTierAuthority>
             }));
 
-            // 3-way text merger for the no-store conflict path (spec 0008 §3.1).
-            // Registered unconditionally here — NOT inside the `loro_enabled`
-            // block — because the conflict path it serves is SqlOnly/`Direct`
-            // mode (no Loro store). The impl is a transient LoroText (the merge
-            // *function* only; it needs the `loro` crate, not a live doc), so it
-            // is safe to construct in both modes; the file-sync controller
-            // consults it only when `Consolidator::Store` owns the store.
+            // 3-way text merger for the no-store conflict path (spec 0008
+            // §3.1). Registered unconditionally here — NOT inside the
+            // `loro_enabled` block — because the conflict path it serves is
+            // SqlOnly/`Direct` mode (no Loro store). The impl is a transient
+            // LoroText (the merge *function* only; it needs the `loro` crate,
+            // not a live doc), so it is safe to construct in both modes; the
+            // file-sync controller consults it only when `Consolidator::Store`
+            // owns the store.
             self.provide::<dyn holon_filesystem::ThreeWayTextMerge>(Provider::root(|_| {
                 Arc::new(holon_loro::TransientLoroTextMerge::default())
                     as Arc<dyn holon_filesystem::ThreeWayTextMerge>
@@ -623,7 +626,8 @@ impl FrontendInjectorExt for Injector {
                 // no EventBus subscription here anymore.
 
                 // Integrations connect in the background; each one installs its
-                // tables, hooks and operations into this engine when it connects.
+                // tables, hooks and operations into this engine when it
+                // connects.
                 #[cfg(not(target_arch = "wasm32"))]
                 async {
                     match resolver.try_resolve_async::<IntegrationSupervisor>().await {
@@ -704,7 +708,8 @@ impl FrontendInjectorExt for Injector {
                 .await;
 
                 // A type declared at runtime outlives its boot: its rows are
-                // stored, so it is declared again before any write can reach it.
+                // stored, so it is declared again before any write can reach
+                // it.
                 async {
                     let profiles = holon_capability::registry::shipped_profiles()
                         .expect("the shipped capability profiles must parse");
@@ -867,10 +872,11 @@ impl FrontendInjectorExt for Injector {
                         }
                         // Org initial scan is done (success, degraded, or no
                         // org module at all) — the serialized DatabaseActor is
-                        // no longer saturated by boot ingest. Open the sync gate
-                        // so deferred provider syncs run against an idle actor.
-                        // Opened on EVERY path so a deferred sync always
-                        // eventually runs (fail-loud: never a silent never-sync).
+                        // no longer saturated by boot ingest. Open the sync
+                        // gate so deferred provider syncs run against an idle
+                        // actor. Opened on EVERY path so a deferred sync always
+                        // eventually runs (fail-loud: never a silent
+                        // never-sync).
                         let mut failures: Vec<String> = Vec::new();
                         match resolver_bg.try_resolve::<holon_core::SyncGate>() {
                             Ok(gate) => {
@@ -882,7 +888,8 @@ impl FrontendInjectorExt for Injector {
                                  to the 600s watchdog: {e}"
                             )),
                         }
-                        // Resolving starts the controller; a SqlOnly session has none.
+                        // Resolving starts the controller; a SqlOnly session
+                        // has none.
                         match resolver_bg
                             .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
                             .await
@@ -931,9 +938,9 @@ impl FrontendInjectorExt for Injector {
                 let operation_engine = Some(engine.clone() as Arc<dyn holon::api::OperationEngine>);
                 let ui_watcher = engine.clone() as Arc<dyn holon::api::UiWatcher>;
                 // The block read seam over Turso's CDC mirrors. Built here so
-                // `block_query()` is total across both wirings (the no-Turso arm
-                // builds a `LoroBlockQuerySource`); consumers read blocks uniformly
-                // through the capability with no backend branch.
+                // `block_query()` is total across both wirings (the no-Turso
+                // arm builds a `LoroBlockQuerySource`); consumers read blocks
+                // uniformly through the capability with no backend branch.
                 let block_query = Arc::new(
                     holon::sync::turso_block_query_source::TursoBlockQuerySource::watch_default(
                         &engine,

@@ -840,11 +840,11 @@ impl CertifiableFormat for OrgFormat {
                 "#+ID: keyword-carried\n#+TITLE: Certify\n\n* Probe headline\n".to_string(),
                 "keyword-carried",
             ),
-            // MEASURED, and it REFUTES my earlier removal: with NO `:ID:` and no
-            // `#+ID:`, the document id is derived from the FILE PATH plus the
-            // vault root — both of which this probe already receives. It is a
-            // real, format-visible carrier, and deleting it to clear a gap was
-            // the wrong move.
+            // MEASURED, and it REFUTES my earlier removal: with NO `:ID:` and
+            // no `#+ID:`, the document id is derived from the FILE PATH plus
+            // the vault root — both of which this probe already receives. It is
+            // a real, format-visible carrier, and deleting it to clear a gap
+            // was the wrong move.
             IdCarrier::PathDerived => (
                 "#+TITLE: Certify\n\n* Probe headline\n".to_string(),
                 "profile",
@@ -903,7 +903,8 @@ impl CertifiableFormat for OrgFormat {
             Path::new(ROOT),
         )
         .map_err(|e| anyhow::anyhow!("the base fixture must parse: {e}"))?;
-        // Every parsed block names a parent; nothing free-standing can come out.
+        // Every parsed block names a parent; nothing free-standing can come
+        // out.
         Ok(Some(
             parsed.blocks.iter().all(|b| !b.parent_id.id().is_empty()),
         ))

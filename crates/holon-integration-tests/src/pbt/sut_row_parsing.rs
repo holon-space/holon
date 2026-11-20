@@ -121,12 +121,12 @@ pub(super) fn parse_block_rows(rows: &[holon_core::storage::types::StorageEntity
 pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -> Option<Block> {
     let id =
         EntityUri::parse(row.get("id")?.as_string()?).expect("block id from DB must be valid URI");
-    // A NULL/missing `parent_id` in `block_raw` is a top-level block — semantically
-    // `no_parent()` (the sentinel `no_orphan`/`block_parent` already recognize as
-    // the valid root). Splitting a top-level block mints such a sibling;
-    // coalescing here (rather than returning `None`, which every caller treats
-    // as a hard error) lets the SQL slice parse top-level blocks instead of
-    // panicking.
+    // A NULL/missing `parent_id` in `block_raw` is a top-level block —
+    // semantically `no_parent()` (the sentinel `no_orphan`/`block_parent`
+    // already recognize as the valid root). Splitting a top-level block mints
+    // such a sibling; coalescing here (rather than returning `None`, which
+    // every caller treats as a hard error) lets the SQL slice parse top-level
+    // blocks instead of panicking.
     let parent_id = match row.get("parent_id").and_then(|v| v.as_string()) {
         Some(s) => EntityUri::parse(s).expect("block parent_id from DB must be valid URI"),
         None => EntityUri::no_parent(),
@@ -154,18 +154,19 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
         .unwrap_or_default()
         .into();
 
-    // The block-referencing edge fields are hydrated from their junctions by the
-    // matview's json_group_array, exactly like `tags`. Omitting one silently
-    // pins the SUT side to `[]`, so `inv-blocks-match-ref/matview` can never
-    // see that edge fail to project.
+    // The block-referencing edge fields are hydrated from their junctions by
+    // the matview's json_group_array, exactly like `tags`. Omitting one
+    // silently pins the SUT side to `[]`, so `inv-blocks-match-ref/matview` can
+    // never see that edge fail to project.
     block.requires = edge_targets(row, "requires");
     block.advice_suppressed = edge_targets(row, "advice_suppressed");
     block.contributes_to = edge_targets(row, "contributes_to");
 
-    // `marks` — inline rich-text marks JSON (dogfood 2026-07-10 link-destruction
-    // class): parse it into `block.marks` or the SUT-side observable is
-    // marks-blind and `inv-blocks-match-ref` can never see mark loss. Mirrors
-    // `Block::try_from`'s arm: absent/Null/empty → None; invalid JSON = bug.
+    // `marks` — inline rich-text marks JSON (dogfood 2026-07-10
+    // link-destruction class): parse it into `block.marks` or the SUT-side
+    // observable is marks-blind and `inv-blocks-match-ref` can never see mark
+    // loss. Mirrors `Block::try_from`'s arm: absent/Null/empty → None; invalid
+    // JSON = bug.
     block.marks =
         match row.get("marks") {
             None | Some(Value::Null) => None,
@@ -182,8 +183,8 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
         };
 
     // The typed FOLD scalars, for the same reason the edge fields above are
-    // hydrated: leaving one out does not merely lose it, it pins the SUT side to
-    // `false` for EVERY block, so `inv-blocks-match-ref` reports
+    // hydrated: leaving one out does not merely lose it, it pins the SUT side
+    // to `false` for EVERY block, so `inv-blocks-match-ref` reports
     // `collapsed: sut=false ref=true` on any folded block no matter what the
     // store holds — and can never see a real fold regression either. Absent is
     // a LOUD error rather than a default: the only way a column goes missing is
@@ -198,11 +199,12 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
     if let Some(source_language) = row.get("source_language").and_then(|v| v.as_string()) {
         block.source_language = Some(source_language.parse::<SourceLanguage>().unwrap());
     }
-    // `source_name` is compared by `compare_block_fields` (`delta!(source_name)`)
-    // and both tables store it, so leaving it unread pins the SUT side to `None`
-    // and makes the comparison vacuous on it. Guarded like the fold scalars: a
-    // NULL here is a real value (no source name), but an ABSENT column is the
-    // SELECT having lost it, which is the failure this guard exists to catch.
+    // `source_name` is compared by `compare_block_fields`
+    // (`delta!(source_name)`) and both tables store it, so leaving it unread
+    // pins the SUT side to `None` and makes the comparison vacuous on it.
+    // Guarded like the fold scalars: a NULL here is a real value (no source
+    // name), but an ABSENT column is the SELECT having lost it, which is the
+    // failure this guard exists to catch.
     block.source_name = required_sql_opt_string(row, "source_name");
     block.block_type = required_sql_opt_string(row, "block_type").and_then(|stored| {
         holon_api::block::parse_stored_block_type(&stored)

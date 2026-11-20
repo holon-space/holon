@@ -78,9 +78,9 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
                 .unwrap_or("panel");
             let id = hashed_id(scroll_id);
             // Main-panel flow-panel split: a Flex flow column carrying an
-            // accordion child OR a scrollable collection (the outline) becomes a
-            // VIRTUALIZED main region (gpui::list) + pinned footer. Every other
-            // item takes the byte-identical original path below (sidebar
+            // accordion child OR a scrollable collection (the outline) becomes
+            // a VIRTUALIZED main region (gpui::list) + pinned footer. Every
+            // other item takes the byte-identical original path below (sidebar
             // firewall — sidebars are Fixed/shrink-drawer, never Flex flow).
             if matches!(item.layout_hint, LayoutHint::Flex { .. })
                 && super::column::is_main_panel_flow_column(item)

@@ -223,7 +223,8 @@ async fn exercise_entity(
         &std::collections::HashMap::new(),
     );
 
-    // ----- 1. Drain the FDW cursor (pagination + fan-out happen for real) -----
+    // ----- 1. Drain the FDW cursor (pagination + fan-out happen for real)
+    // -----
     let fdw_rows = tokio::task::spawn_blocking({
         let fdw = std::sync::Arc::new(fdw);
         let conn = conn.clone();

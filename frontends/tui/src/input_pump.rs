@@ -123,8 +123,8 @@ pub async fn dispatch_interaction(
             };
             // Focus the clicked block by setting the in-memory authority
             // directly (ADR 0010) — no `editor_cursor` write/CDC round-trip.
-            // ALLOW(entity_uri_from_raw): boundary — entity_id from TUI geometry hit-test
-            // (a String)
+            // ALLOW(entity_uri_from_raw): boundary — entity_id from TUI
+            // geometry hit-test (a String)
             let block_uri = holon_api::EntityUri::from_raw(&entity_id);
             engine.set_focus(Some(block_uri));
             InteractionResponse {

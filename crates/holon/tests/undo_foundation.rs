@@ -135,10 +135,10 @@ impl OperationProvider for StubProvider {
                     holon_api::Operation::new("block", "set_field", "Restore content", inv_params);
                 Ok(OperationResult::new(changes, inverse))
             }
-            // A genuine forward edit (OLD→NEW, so it IS journaled) whose inverse
-            // replays into `vacuous_replay` — modelling an entry whose undo turns
-            // out to change nothing (the state already matched the inverse's
-            // target by undo time).
+            // A genuine forward edit (OLD→NEW, so it IS journaled) whose
+            // inverse replays into `vacuous_replay` — modelling an entry whose
+            // undo turns out to change nothing (the state already matched the
+            // inverse's target by undo time).
             "edit_vacuous_inverse" => {
                 let changes = vec![FieldDelta::new(
                     BLOCK_ID,
@@ -158,8 +158,8 @@ impl OperationProvider for StubProvider {
                 );
                 Ok(OperationResult::new(changes, inverse))
             }
-            // Replay target that reports a vacuous delta (old==new) — the inverse
-            // whose replay proves the undo changed nothing.
+            // Replay target that reports a vacuous delta (old==new) — the
+            // inverse whose replay proves the undo changed nothing.
             "vacuous_replay" => {
                 let changes = vec![FieldDelta::new(
                     BLOCK_ID,

@@ -584,11 +584,12 @@ mod arch_tests {
         )
         .join("src/pbt/transitions");
         // The peer-sync transitions were co-located into `holon-loro-testing`
-        // (Phase-1a Step 4 — see the `pub use holon_loro_testing::transitions::…`
-        // re-export above). Their dedicated files live in that crate's
-        // `src/transitions/` dir, not here. The file-per-transition invariant
-        // still holds — it just spans the crate seam, so these variants are
-        // searched for in the co-located crate instead.
+        // (Phase-1a Step 4 — see the `pub use
+        // holon_loro_testing::transitions::…` re-export above). Their dedicated
+        // files live in that crate's `src/transitions/` dir, not here. The
+        // file-per-transition invariant still holds — it just spans the crate
+        // seam, so these variants are searched for in the co-located crate
+        // instead.
         let loro_dir = std::path::PathBuf::from(
             std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
         )
@@ -740,9 +741,10 @@ mod required_caps_guard {
         }
 
         // BlockTreeWrite
-        // SplitBlock omitted: migrated to `cap_transition!`, which single-sources the
-        // cap, so its required_caps and `S: SutBlockTreeWrite` bound cannot drift —
-        // no guard entry needed. (The drop-out the macro is designed to produce.)
+        // SplitBlock omitted: migrated to `cap_transition!`, which
+        // single-sources the cap, so its required_caps and `S:
+        // SutBlockTreeWrite` bound cannot drift — no guard entry needed. (The
+        // drop-out the macro is designed to produce.)
         one!(JoinBlock, c::SutBlockTreeWrite);
         one!(Indent, c::SutBlockTreeWrite);
         one!(Outdent, c::SutBlockTreeWrite);
@@ -788,14 +790,15 @@ mod required_caps_guard {
         one!(ArrowNavigate, fe::SutArrowNavigate);
         // Mutate (test-local)
         one!(ToggleState, lc::SutMutate);
-        // ApplyMutation is now SOURCE-ROUTED via `SutApplyMutation` (one transition,
-        // source as a shrinkable axis), so its dispatch trait and its GATE cap
-        // legitimately differ: the gate names `SutLoro` (the implemented
-        // composed arm — LoroPeer), while dispatch goes through
+        // ApplyMutation is now SOURCE-ROUTED via `SutApplyMutation` (one
+        // transition, source as a shrinkable axis), so its dispatch trait and
+        // its GATE cap legitimately differ: the gate names `SutLoro` (the
+        // implemented composed arm — LoroPeer), while dispatch goes through
         // `SutApplyMutation`. The "one fine-grained cap == bound" drift
         // guard therefore tracks the GATE cap here, not the dispatch trait.
         one!(ApplyMutation, c::SutLoro);
-        // BulkExternalAdd still binds the `SutSeamMutate` seam cap (pre-existing).
+        // BulkExternalAdd still binds the `SutSeamMutate` seam cap
+        // (pre-existing).
         one!(BulkExternalAdd, lc::SutSeamMutate);
         // FixtureFs (test-local)
         one!(CreateDirectory, lc::SutFixtureFs);
@@ -821,8 +824,9 @@ mod required_caps_guard {
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);
 
-        // Loro peer ops — PCG-4 flipped `SutLoro` to `&self` + dyn-compatible, so `dyn
-        // SutLoro`/`CapId::of` now exist. Also wiring-gated on `HasStorage(Loro)`.
+        // Loro peer ops — PCG-4 flipped `SutLoro` to `&self` + dyn-compatible,
+        // so `dyn SutLoro`/`CapId::of` now exist. Also wiring-gated on
+        // `HasStorage(Loro)`.
         one!(AddPeer, c::SutLoro);
         one!(PeerEdit, c::SutLoro);
         one!(PeerCharEdit, c::SutLoro);

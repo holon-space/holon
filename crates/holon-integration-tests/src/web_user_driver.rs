@@ -184,8 +184,9 @@ impl WebUserDriver {
     ) -> Result<Self> {
         let mut builder = BrowserConfig::builder()
             .args(vec![
-                // The app needs crossOriginIsolated for wasm-wasip1-threads; the
-                // server sends COOP/COEP, these keep Chrome from vetoing it.
+                // The app needs crossOriginIsolated for wasm-wasip1-threads;
+                // the server sends COOP/COEP, these keep Chrome from vetoing
+                // it.
                 "--enable-features=SharedArrayBuffer",
                 "--disable-dev-shm-usage",
             ])

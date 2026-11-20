@@ -79,8 +79,8 @@ pub fn normalize_block(block: &Block) -> Block {
     let mut normalized = block.clone();
     normalized.created_at = 0;
     normalized.updated_at = 0;
-    // sort_key is no longer a field of the domain Block (ADR 0005) — ordering is
-    // validated separately via the order facet below.
+    // sort_key is no longer a field of the domain Block (ADR 0005) — ordering
+    // is validated separately via the order facet below.
     // Trim overall content and normalize internal trailing whitespace per line
     // (org round-trip strips trailing whitespace from source block lines)
     normalized.content = normalized

@@ -61,8 +61,9 @@ impl CrossingLog {
             widens_audience: !winner.widens_audience,
             content: winner.content.clone(),
             inverse_of: Some(crossing_id.clone()),
-            // The inverse supersedes the crossing it reverses, so after the undo
-            // only the inverse is live for the block (the original is history).
+            // The inverse supersedes the crossing it reverses, so after the
+            // undo only the inverse is live for the block (the original is
+            // history).
             supersedes: Some(crossing_id.clone()),
         };
         let inverse_id = inverse.crossing_id.clone();

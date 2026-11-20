@@ -97,9 +97,9 @@ impl VaultPath {
                     root.display()
                 );
             }
-            // APPEND, never `with_extension`: that REPLACES whatever follows the
-            // leaf's last dot, so `citrix-STX.BROWSER_AGENT` filed itself as
-            // `citrix-STX.org` — a title that no longer round-trips, and one
+            // APPEND, never `with_extension`: that REPLACES whatever follows
+            // the leaf's last dot, so `citrix-STX.BROWSER_AGENT` filed itself
+            // as `citrix-STX.org` — a title that no longer round-trips, and one
             // file two differently-titled pages both claim.
             if i == last {
                 path.push(format!("{segment}.org"));

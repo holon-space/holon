@@ -70,9 +70,9 @@ async fn revert_to_undoes_the_creates_a_failed_batch_left_behind() {
         LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend, EntityUri::no_parent(), "root").await;
 
-    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
-    // are not exposed through the doc-boundary API, and single-threaded probe
-    // reads cannot observe another writer.
+    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and
+    // `oplog_frontiers` are not exposed through the doc-boundary API, and
+    // single-threaded probe reads cannot observe another writer.
     let raw = doc.doc();
     raw.commit();
     let before_batch = raw.oplog_frontiers();
@@ -108,9 +108,9 @@ async fn a_later_write_does_not_resurrect_the_reverted_batch() {
         LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend, EntityUri::no_parent(), "root").await;
 
-    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
-    // are not exposed through the doc-boundary API, and single-threaded probe
-    // reads cannot observe another writer.
+    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and
+    // `oplog_frontiers` are not exposed through the doc-boundary API, and
+    // single-threaded probe reads cannot observe another writer.
     let raw = doc.doc();
     raw.commit();
     let before_batch = raw.oplog_frontiers();
@@ -147,13 +147,13 @@ async fn a_remote_op_inside_the_batch_window_is_reverted_too() {
     let doc_b = Arc::new(LoroDocument::new("revert-remote-b".to_string()).unwrap());
     let backend_b =
         LoroBackend::from_document(doc_b.clone(), std::sync::Arc::new(holon_api::SystemClock));
-    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
-    // are not exposed through the doc-boundary API, and single-threaded probe
-    // reads cannot observe another writer.
+    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and
+    // `oplog_frontiers` are not exposed through the doc-boundary API, and
+    // single-threaded probe reads cannot observe another writer.
     let raw_a = doc_a.doc();
-    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
-    // are not exposed through the doc-boundary API, and single-threaded probe
-    // reads cannot observe another writer.
+    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and
+    // `oplog_frontiers` are not exposed through the doc-boundary API, and
+    // single-threaded probe reads cannot observe another writer.
     let raw_b = doc_b.doc();
 
     raw_a.commit();
@@ -217,9 +217,9 @@ async fn revert_across_a_shallow_snapshot_boundary_fails() {
     let backend =
         LoroBackend::from_document(doc.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend, EntityUri::no_parent(), "root").await;
-    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
-    // are not exposed through the doc-boundary API, and single-threaded probe
-    // reads cannot observe another writer.
+    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and
+    // `oplog_frontiers` are not exposed through the doc-boundary API, and
+    // single-threaded probe reads cannot observe another writer.
     let raw = doc.doc();
     raw.commit();
     let before_batch = raw.oplog_frontiers();
@@ -265,9 +265,9 @@ async fn the_guard_admits_a_local_only_window_and_refuses_a_peer_touched_one() {
         LoroBackend::from_document(doc_a.clone(), std::sync::Arc::new(holon_api::SystemClock));
     create(&backend_a, EntityUri::no_parent(), "root").await;
 
-    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
-    // are not exposed through the doc-boundary API, and single-threaded probe
-    // reads cannot observe another writer.
+    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and
+    // `oplog_frontiers` are not exposed through the doc-boundary API, and
+    // single-threaded probe reads cannot observe another writer.
     let raw_a = doc_a.doc();
     raw_a.commit();
 
@@ -284,9 +284,9 @@ async fn the_guard_admits_a_local_only_window_and_refuses_a_peer_touched_one() {
     let doc_b = Arc::new(LoroDocument::new("guard-b".to_string()).unwrap());
     let backend_b =
         LoroBackend::from_document(doc_b.clone(), std::sync::Arc::new(holon_api::SystemClock));
-    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and `oplog_frontiers`
-    // are not exposed through the doc-boundary API, and single-threaded probe
-    // reads cannot observe another writer.
+    // ALLOW(loro_doc_escape): measurement probe — `revert_to` and
+    // `oplog_frontiers` are not exposed through the doc-boundary API, and
+    // single-threaded probe reads cannot observe another writer.
     let raw_b = doc_b.doc();
     raw_b
         .import(

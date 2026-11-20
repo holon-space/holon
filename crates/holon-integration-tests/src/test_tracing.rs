@@ -565,14 +565,14 @@ impl SpanCollector {
     /// process and `set_global_default` can only be called once.
     pub fn global() -> &'static SpanCollector {
         GLOBAL_COLLECTOR.get_or_init(|| {
-            // Record panics from EVERY thread — including spawned background tokio
-            // workers, whose panics kill only that task and never fail the test
-            // thread (exactly how the advice `No id found` panic hid behind a green
-            // test) — into the OWNING test scope's sink so `inv-no-observed-errors`
-            // fails on a swallowed panic, and only for the test that owns the
-            // thread. Then flush the chrome trace (the intentionally-panicking PBT
-            // thread would otherwise leave it truncated) and chain the previous
-            // hook.
+            // Record panics from EVERY thread — including spawned background
+            // tokio workers, whose panics kill only that task and never fail
+            // the test thread (exactly how the advice `No id found` panic hid
+            // behind a green test) — into the OWNING test scope's sink so
+            // `inv-no-observed-errors` fails on a swallowed panic, and only for
+            // the test that owns the thread. Then flush the chrome trace (the
+            // intentionally-panicking PBT thread would otherwise leave it
+            // truncated) and chain the previous hook.
             {
                 let prev_hook = std::panic::take_hook();
                 std::panic::set_hook(Box::new(move |info| {
@@ -632,11 +632,11 @@ impl SpanCollector {
             // even sped up unrelated SQL 6× by relieving CPU/mutex pressure).
             //
             // Default `info` keeps every span the invariants/budgets read
-            // (SQL `query`/`execute`/`execute_ddl`, `pbt.*`, `queryable_cache.*`
-            // are all INFO) and drops the DEBUG render-tree noise. Override
-            // with `HOLON_OTEL_FILTER` (any `EnvFilter` syntax) to record the
-            // hot-path spans back, e.g. `HOLON_OTEL_FILTER=trace` for a full
-            // chrome-trace render investigation.
+            // (SQL `query`/`execute`/`execute_ddl`, `pbt.*`,
+            // `queryable_cache.*` are all INFO) and drops the DEBUG render-tree
+            // noise. Override with `HOLON_OTEL_FILTER` (any `EnvFilter` syntax)
+            // to record the hot-path spans back, e.g. `HOLON_OTEL_FILTER=trace`
+            // for a full chrome-trace render investigation.
             let otel_filter = EnvFilter::new(
                 std::env::var("HOLON_OTEL_FILTER").unwrap_or_else(|_| "info".into()),
             );
@@ -666,13 +666,13 @@ impl SpanCollector {
                         ),
                 );
 
-            // Reseed-attribution observer (Inc 0). Pinned to the `holon_latency`
-            // target only (via `Targets`). This DOES raise the registry's
-            // `max_level_hint` to DEBUG; what keeps the hot DEBUG render-tree
-            // spans out of this layer is per-layer interest caching — the
-            // `Targets` filter reports interest for `holon_latency` callsites
-            // ONLY, so every other DEBUG callsite is disabled for this layer
-            // (same mechanism as `error_capture` above).
+            // Reseed-attribution observer (Inc 0). Pinned to the
+            // `holon_latency` target only (via `Targets`). This DOES raise the
+            // registry's `max_level_hint` to DEBUG; what keeps the hot DEBUG
+            // render-tree spans out of this layer is per-layer interest caching
+            // — the `Targets` filter reports interest for `holon_latency`
+            // callsites ONLY, so every other DEBUG callsite is disabled for
+            // this layer (same mechanism as `error_capture` above).
             #[cfg(feature = "pbt")]
             let registry = registry.with(
                 crate::pbt::composed::reseed_observer::ReseedObserverLayer.with_filter(
@@ -964,9 +964,9 @@ impl SpanCollector {
 
         let total_query_duration: Duration = sql_spans.clone().map(span_duration).sum();
 
-        // Duplicate SQL detection: count identical SQL texts fired multiple times.
-        // The `sql` attribute is set by turso.rs #[tracing::instrument(fields(sql =
-        // ...))].
+        // Duplicate SQL detection: count identical SQL texts fired multiple
+        // times. The `sql` attribute is set by turso.rs
+        // #[tracing::instrument(fields(sql = ...))].
         let duplicate_sql = find_duplicate_sql(&spans, SQL_SPAN_NAMES);
         // Reads only — the budget gate subtracts redundant *read* re-executions
         // from `sql_read_count`, so it must not see write/DDL duplicates.

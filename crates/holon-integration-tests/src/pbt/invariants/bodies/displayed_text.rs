@@ -162,8 +162,8 @@ where
     }
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
-        // Skip transient placeholder roots (loading / spacer / interpret panic):
-        // the contract only holds for a settled content render.
+        // Skip transient placeholder roots (loading / spacer / interpret
+        // panic): the contract only holds for a settled content render.
         if !sut.root_render_ready().await {
             return InvariantResult::Skipped(format!(
                 "[{}] root render not ready (loading/spacer/not interpretable)",
@@ -180,8 +180,9 @@ where
             .filter_map(|n| {
                 let content = n.props.get("content")?;
                 let raw = n.entity_id.as_ref()?;
-                // ALLOW(entity_uri_from_raw): widget-tree entity_ids are SUT-space
-                // UUIDs, parsed the same way the geometry mirror parses them.
+                // ALLOW(entity_uri_from_raw): widget-tree entity_ids are
+                // SUT-space UUIDs, parsed the same way the geometry mirror
+                // parses them.
                 let entity_id = EntityUri::parse(raw).ok()?;
                 Some(TextSample {
                     widget_kind: n.kind.clone(),
@@ -208,8 +209,8 @@ where
                     .flatten()
             },
             // The actively-edited block's uncommitted text lives in InputState,
-            // not the ViewModel tree — skip it here to avoid a false positive on
-            // every in-flight edit; the `/widget` arm owns that case.
+            // not the ViewModel tree — skip it here to avoid a false positive
+            // on every in-flight edit; the `/widget` arm owns that case.
             true,
         );
 

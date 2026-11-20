@@ -229,8 +229,8 @@ impl LoroSut {
                     .collect();
 
                 // Normalize page parent_ids on both sides. Pages are managed
-                // separately (DocumentManager) and their identity mapping is tested
-                // by the SQL assertions, not the Loro assertion.
+                // separately (DocumentManager) and their identity mapping is
+                // tested by the SQL assertions, not the Loro assertion.
                 let ref_filtered: Vec<_> = ref_blocks.iter().filter(|b| !b.is_page()).collect();
 
                 let loro_content_ids: HashSet<&EntityUri> =
@@ -326,11 +326,12 @@ impl SutLoro for LoroSut {
                 content,
                 stable_id,
             } => {
-                // The parent is drawn from the peer's REFERENCE mirror, which keys by
-                // bare oracle-local id — so a split tail arrives as `:split-0` and needs
-                // the same resolution Update/Delete get. The block's OWN `stable_id` is
-                // minted by the generator and agreed by both sides, so it is not
-                // resolved. A genuine `None` is a legal root create.
+                // The parent is drawn from the peer's REFERENCE mirror, which
+                // keys by bare oracle-local id — so a split tail arrives as
+                // `:split-0` and needs the same resolution Update/Delete get.
+                // The block's OWN `stable_id` is minted by the generator and
+                // agreed by both sides, so it is not resolved. A genuine `None`
+                // is a legal root create.
                 let resolved_parent = parent_stable_id
                     .as_deref()
                     .map(|pid| self.resolve_stable_id(pid));

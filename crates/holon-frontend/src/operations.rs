@@ -141,8 +141,9 @@ pub fn dispatch_operation(
     let run = session.execute_operation(&entity_name, &op_name, params);
     spawner.spawn(Box::pin(async move {
         if let Err(e) = run.await {
-            // A refused/failed op writes nothing: retire its latency entry so no
-            // later unrelated delivery for the row closes it as a phantom sample.
+            // A refused/failed op writes nothing: retire its latency entry so
+            // no later unrelated delivery for the row closes it as a phantom
+            // sample.
             if let Some(target) = &latency_target {
                 holon_api::latency_e2e::interaction_failed(
                     &op_name,
@@ -436,8 +437,8 @@ pub fn find_set_field_op<'a>(
 /// `"block:uuid"` → `"block"`), falling back to an explicit `entity_name`
 /// field.
 pub fn get_entity_name(ctx: &RenderContext) -> Option<String> {
-    // ALLOW(raw_row_id_column): key — reads the SCHEME only, to name the entity the
-    // row belongs to
+    // ALLOW(raw_row_id_column): key — reads the SCHEME only, to name the entity
+    // the row belongs to
     if let Some(Value::String(id)) = ctx.row().get("id") {
         if let Some((scheme, _)) = id.split_once(':') {
             return Some(scheme.to_string());

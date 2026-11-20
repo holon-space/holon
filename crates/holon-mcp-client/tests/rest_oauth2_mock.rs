@@ -114,8 +114,9 @@ async fn start_mock() -> Mock {
                     if method == "POST" && path == "/token" {
                         s.token_posts += 1;
                         if s.token_endpoint_fails {
-                            // A token-shaped field is planted here on purpose: the
-                            // engine must surface only error/error_description.
+                            // A token-shaped field is planted here on purpose:
+                            // the engine must surface only
+                            // error/error_description.
                             respond(
                                 "401 Unauthorized",
                                 r#"{"error":"invalid_grant","error_description":"Token has been expired","access_token":"ya29.PLANTED_LEAK"}"#,

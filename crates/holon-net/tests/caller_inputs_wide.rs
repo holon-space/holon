@@ -1230,7 +1230,8 @@ impl NetGen {
             Some(r) => Body::Effectful(receiver(r)),
             None => Body::Pure(w.body.body(t, &self.output_places())),
         };
-        // A work that is the `Answer` of another ask is manual, as an `Answer` is.
+        // A work that is the `Answer` of another ask is manual, as an `Answer`
+        // is.
         let plays_answer = self.work_names().iter().any(|o| answer_transition(o) == t);
         let mut work = TransitionDef::new(
             t,
@@ -2246,8 +2247,8 @@ impl Machine {
             }
             Op::Asks => {
                 let exec = &self.exec;
-                // L7 refuses the firing of a work that binds the answer input, not
-                // its row.
+                // L7 refuses the firing of a work that binds the answer input,
+                // not its row.
                 let ghosts: BTreeSet<String> = self
                     .net
                     .work_names()

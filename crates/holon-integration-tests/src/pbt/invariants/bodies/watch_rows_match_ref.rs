@@ -165,8 +165,8 @@ where
                     let expected_parent =
                         normalize_parent(expected_row.get("parent_id").and_then(|v| v.as_ref()));
                     if actual_parent != expected_parent {
-                        // No CDC-lag downgrade — parent_id is asserted hard. This
-                        // is the path that catches the pre-existing
+                        // No CDC-lag downgrade — parent_id is asserted hard.
+                        // This is the path that catches the pre-existing
                         // `block:root-layout` parent_id bug.
                         return InvariantResult::Fail(format!(
                             "CDC parent_id mismatch for {expected_id} in watch \

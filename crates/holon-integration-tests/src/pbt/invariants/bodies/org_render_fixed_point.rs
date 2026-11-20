@@ -61,13 +61,14 @@ where
         }
 
         // A divergence here is NOT automatically an echo-loop. Prod's
-        // `re_render_all_tracked` is CDC-gated and 50ms-debounced, so a transient
-        // Loro->SQL projection LAG (a just-reordered sibling batch whose new
-        // `sort_key` has not projected yet) self-heals in ONE render pass without
-        // spinning. The echo-loop this invariant guards needs render != disk to
-        // PERSIST. So model prod: bounded-wait for the render to reach a STABLE
-        // fixed point (equal, and holding for a quiet floor so a momentarily-equal
-        // OSCILLATION can't slip through). Fail only if the divergence persists.
+        // `re_render_all_tracked` is CDC-gated and 50ms-debounced, so a
+        // transient Loro->SQL projection LAG (a just-reordered sibling batch
+        // whose new `sort_key` has not projected yet) self-heals in ONE render
+        // pass without spinning. The echo-loop this invariant guards needs
+        // render != disk to PERSIST. So model prod: bounded-wait for the render
+        // to reach a STABLE fixed point (equal, and holding for a quiet floor
+        // so a momentarily-equal OSCILLATION can't slip through). Fail only if
+        // the divergence persists.
         use std::time::Duration;
         use std::time::Instant;
         let budget = Duration::from_secs(5);
@@ -92,7 +93,8 @@ where
                     None => stable_since = Some(Instant::now()),
                 },
                 Some((path, disk, rendered)) => {
-                    // Still diverged (or oscillated back) — reset the stability window.
+                    // Still diverged (or oscillated back) — reset the stability
+                    // window.
                     stable_since = None;
                     last_fail = format!(
                         "--- disk ({} bytes) [{path}] ---\n{disk}\n--- rendered from SQL ({} \

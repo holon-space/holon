@@ -127,7 +127,8 @@ pub fn decode_cell(token: &str, row: usize, context: &str) -> Result<String> {
     if !token.starts_with('"') {
         return Ok(token.to_string());
     }
-    // Quoted: must end with an unescaped closing quote and contain nothing after.
+    // Quoted: must end with an unescaped closing quote and contain nothing
+    // after.
     let inner = &token[1..];
     if !inner.ends_with('"') || inner.is_empty() {
         return Err(ToonError::UnterminatedQuote {

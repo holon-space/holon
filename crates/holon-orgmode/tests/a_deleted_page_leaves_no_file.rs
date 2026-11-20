@@ -271,8 +271,9 @@ fn case_strategy() -> impl Strategy<Value = Case> {
     )
         .prop_flat_map(|(creation, deletion, aliases)| {
             // A delete removes leaves before their parent
-            // (holon-loro loro_sync_controller.rs, "Delete leaves first"); a page
-            // removed before its block is ungrounded and the removal guard refuses it.
+            // (holon-loro loro_sync_controller.rs, "Delete leaves first"); a
+            // page removed before its block is ungrounded and the removal guard
+            // refuses it.
             let (n, order) = match deletion {
                 Deletion::UndoConvert => (3usize, Just(vec![0, 1, 2]).prop_shuffle().boxed()),
                 Deletion::Delete => (2, Just(vec![0, 1]).boxed()),

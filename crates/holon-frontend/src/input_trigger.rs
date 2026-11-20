@@ -107,7 +107,8 @@ pub(crate) fn check_triggers(
                         }
                         let after_prefix = pos + prefix.len();
                         let between = &current_line[after_prefix..end];
-                        // If the link is already closed (]] between prefix and cursor), skip
+                        // If the link is already closed (]] between prefix and
+                        // cursor), skip
                         if prefix == "[[" && between.contains("]]") {
                             continue;
                         }

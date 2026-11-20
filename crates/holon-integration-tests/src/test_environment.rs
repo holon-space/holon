@@ -898,8 +898,8 @@ pub(crate) async fn run_epoch_flip_rejection_check(
     vault_root: &std::path::Path,
     currently_loro_enabled: bool,
 ) {
-    // A live migrate acknowledgement would make the guard WIPE the app's durable
-    // state instead of erroring — refuse to run the flip in that case.
+    // A live migrate acknowledgement would make the guard WIPE the app's
+    // durable state instead of erroring — refuse to run the flip in that case.
     assert!(
         std::env::var("HOLON_CONSOLIDATOR_MIGRATE").as_deref() != Ok("1"),
         "[EpochFlipRejected] HOLON_CONSOLIDATOR_MIGRATE=1 is set — a flipped boot would WIPE the \
@@ -907,7 +907,8 @@ pub(crate) async fn run_epoch_flip_rejection_check(
     );
 
     let db_path = temp_path.join("test.db");
-    // Turso is durable here (real db file), so the first boot recorded the marker.
+    // Turso is durable here (real db file), so the first boot recorded the
+    // marker.
     let marker_path = temp_path.join(".holon").join("consolidator");
     assert!(
         marker_path.exists(),
@@ -962,7 +963,8 @@ pub(crate) async fn run_epoch_flip_rejection_check(
          Got: {msg}"
     );
 
-    // The rejected attempt must not have wiped/rewritten the marker (no migrate).
+    // The rejected attempt must not have wiped/rewritten the marker (no
+    // migrate).
     let marker_after =
         std::fs::read(&marker_path).expect("[EpochFlipRejected] read marker after flip");
     assert_eq!(
@@ -1425,11 +1427,12 @@ impl TestEnvironment {
                     register_loro_operation_engine(injector, shared_store.clone(), doc.clone());
                     register_block_query_frontend(injector);
 
-                    // Org file-sync over the Loro seams — the SAME backend-blind
-                    // core the Turso path uses (ADR 0004). Register the three seams +
-                    // alias registrar + config, then the core; resolving the
-                    // `FileSyncStarted` marker (post-seed, below) spawns the
-                    // controller. No `spawn_*` call.
+                    // Org file-sync over the Loro seams — the SAME
+                    // backend-blind core the Turso path uses (ADR 0004).
+                    // Register the three seams + alias registrar + config, then
+                    // the core; resolving the `FileSyncStarted` marker
+                    // (post-seed, below) spawns the controller. No `spawn_*`
+                    // call.
                     injector.provide::<holon_orgmode::OrgModeConfig>(fluxdi::Provider::root(
                         move |_| {
                             fluxdi::Shared::new(holon_orgmode::OrgModeConfig::new(org_root.clone()))
@@ -1479,7 +1482,8 @@ impl TestEnvironment {
                     }
                     holon_orgmode::di::register_org_file_sync_core(injector)
                         .map_err(|e| anyhow::anyhow!("register_org_file_sync_core: {e}"))?;
-                    // Force the in-memory org fs over the core's real-disk defaults.
+                    // Force the in-memory org fs over the core's real-disk
+                    // defaults.
                     override_org_fs_bindings(injector, &org_fs);
                     Ok(())
                 }
@@ -1495,9 +1499,9 @@ impl TestEnvironment {
         self.latch_reactive_engine(reactive_engine);
 
         // Start org sync by resolving the backend-blind FileSyncStarted marker
-        // (registered above via register_org_file_sync_core). Same self-starting
-        // DI path the Turso container uses — no `spawn_*` call, no hardcoded
-        // adapters.
+        // (registered above via register_org_file_sync_core). Same
+        // self-starting DI path the Turso container uses — no `spawn_*` call,
+        // no hardcoded adapters.
         injector
             .resolve_async::<holon_orgmode::di::FileSyncStarted>()
             .await;
@@ -1797,10 +1801,10 @@ impl TestEnvironment {
                 .map_err(|e| anyhow::anyhow!("Failed to load org file: {}", e))?;
         }
 
-        // Wait for FileSyncController to create the document entity with a UUID.
-        // `resolve_page_uri_by_name` is backend-agnostic (Turso `block_raw` or
-        // the Loro `BlockQuerySource` snapshot), so this poll covers both
-        // wirings as the controller's watcher ingests the new file.
+        // Wait for FileSyncController to create the document entity with a
+        // UUID. `resolve_page_uri_by_name` is backend-agnostic (Turso
+        // `block_raw` or the Loro `BlockQuerySource` snapshot), so this poll
+        // covers both wirings as the controller's watcher ingests the new file.
         let timeout = std::time::Duration::from_secs(5);
         let start = std::time::Instant::now();
         let doc_uri = loop {
@@ -1885,12 +1889,12 @@ impl TestEnvironment {
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow::anyhow!("Cannot extract stem from filename: {}", filename))?;
 
-        // No-Turso: there is no `block_raw` table — read the page block straight
-        // from the session's `BlockQuerySource` snapshot (the Loro tree). A page
-        // is `is_page()` and its title is the first line of `content`, matching
-        // the Turso SQL below. This is the read-side mirror of the org→Loro
-        // ingest just performed by `FileSyncController`, so it also verifies the
-        // document actually landed (not an assumed identity).
+        // No-Turso: there is no `block_raw` table — read the page block
+        // straight from the session's `BlockQuerySource` snapshot (the Loro
+        // tree). A page is `is_page()` and its title is the first line of
+        // `content`, matching the Turso SQL below. This is the read-side mirror
+        // of the org→Loro ingest just performed by `FileSyncController`, so it
+        // also verifies the document actually landed (not an assumed identity).
         if matches!(self.storage, StorageSelector::LoroMemory) {
             let session = self
                 .session
@@ -2240,7 +2244,8 @@ impl TestEnvironment {
             .and_then(|sl| sl.as_query())
             .expect("Source block's language is not a query language");
 
-        // Execute the query with the PARENT's context (not the source block's own ID)
+        // Execute the query with the PARENT's context (not the source block's
+        // own ID)
         self.query_with_context(content, language, &parent_id).await
     }
 
@@ -2612,14 +2617,14 @@ impl TestEnvironment {
         let mut params: holon_api::StorageEntity = HashMap::new();
         params.insert(
             "id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
-            // bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering
+            // helper; bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(id).to_string()),
         );
         params.insert(
             "parent_id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
-            // bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering
+            // helper; bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(parent_id).to_string()),
         );
         params.insert("content".into(), Value::String(content.to_string()));
@@ -2639,14 +2644,14 @@ impl TestEnvironment {
         let mut params: holon_api::StorageEntity = HashMap::new();
         params.insert(
             "id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
-            // bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering
+            // helper; bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(id).to_string()),
         );
         params.insert(
             "parent_id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
-            // bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering
+            // helper; bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(parent_id).to_string()),
         );
         params.insert("content".into(), Value::String(content.to_string()));
@@ -2661,8 +2666,8 @@ impl TestEnvironment {
         let mut params: holon_api::StorageEntity = HashMap::new();
         params.insert(
             "id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
-            // bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering
+            // helper; bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(id).to_string()),
         );
         params.insert("field".into(), Value::String("content".to_string()));
@@ -2678,8 +2683,8 @@ impl TestEnvironment {
         let mut params: holon_api::StorageEntity = HashMap::new();
         params.insert(
             "id".into(),
-            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
-            // bare→schemed normalization at boundary
+            // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering
+            // helper; bare→schemed normalization at boundary
             Value::String(EntityUri::from_raw(id).to_string()),
         );
 
@@ -2701,8 +2706,8 @@ impl TestEnvironment {
         // ("block:block-1"). Normalize at this boundary — idempotent for
         // already-schemed input (per ORG_SYNTAX: schemes live everywhere
         // outside org files).
-        // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering helper;
-        // bare→schemed normalization at boundary
+        // ALLOW(entity_uri_from_raw): test-caller-supplied bare id entering
+        // helper; bare→schemed normalization at boundary
         let schemed = EntityUri::from_raw(block_id).to_string();
         let sql = format!("SELECT id FROM block_raw WHERE id = '{}'", schemed);
         crate::wait_until(&format!("{schemed} in block_raw"), deadline, || async {
@@ -2770,13 +2775,13 @@ impl TestEnvironment {
         let mut acc_opt = self.all_blocks.borrow_mut().take();
         if let (Some(stream), Some(acc)) = (stream_opt.as_mut(), acc_opt.as_mut()) {
             loop {
-                // Synthetic ref-side ids (`block::split-N`, `block:bulk-N-M`) are
-                // placeholders the SUT replaces with real UUIDs — by construction
-                // they NEVER appear in the CDC accumulator. Treat them as
-                // count-only: the real block they stand for still counts toward
-                // `length_ok`, but waiting for the synthetic id itself would
-                // deliberately run to the timeout (it used to cost a flat 5s on
-                // every PressKey-Enter under Turso).
+                // Synthetic ref-side ids (`block::split-N`, `block:bulk-N-M`)
+                // are placeholders the SUT replaces with real UUIDs — by
+                // construction they NEVER appear in the CDC accumulator. Treat
+                // them as count-only: the real block they stand for still
+                // counts toward `length_ok`, but waiting for the synthetic id
+                // itself would deliberately run to the timeout (it used to cost
+                // a flat 5s on every PressKey-Enter under Turso).
                 let subset_ok = expected_ids
                     .iter()
                     .filter(|id| !crate::pbt::is_synthetic_ref_id(id))
@@ -2850,8 +2855,8 @@ impl TestEnvironment {
         let start = std::time::Instant::now();
 
         // Take the accumulator + stream into locals so the await-driven drain
-        // loop never holds a `RefCell` borrow across a suspension point; restore
-        // them before returning.
+        // loop never holds a `RefCell` borrow across a suspension point;
+        // restore them before returning.
         let mut stream_opt = self.all_blocks_stream.borrow_mut().take();
         let mut acc_opt = self.all_blocks.borrow_mut().take();
         if let (Some(stream), Some(acc)) = (stream_opt.as_mut(), acc_opt.as_mut()) {

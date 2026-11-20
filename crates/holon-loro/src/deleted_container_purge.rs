@@ -221,8 +221,8 @@ mod tests {
         );
 
         // The bootstrapped peer's history is trimmed, so its frontiers are the
-        // shape `doc_lamport_height`'s `get_change(id).expect(...)` panics on if
-        // a frontier ever references a trimmed change (task #78).
+        // shape `doc_lamport_height`'s `get_change(id).expect(...)` panics on
+        // if a frontier ever references a trimmed change (task #78).
         peer.with_read(|d| Ok(crate::loro_backend::doc_lamport_height(d)))
             .unwrap();
     }

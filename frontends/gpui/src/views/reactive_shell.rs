@@ -784,16 +784,17 @@ impl Render for ReactiveShell {
                 .into_any_element();
             }
             let scroll_id = self.block_id.as_deref().unwrap_or("block-content-scroll");
-            // Accordion-bearing column: fire the flow-panel split HERE — the real
-            // production seam. Production wraps the main panel in a `live_block`,
-            // so `columns::render`'s flow child is a live_block and its split
-            // never fires; the split must fire wherever the column-with-accordion
-            // is actually rendered — this block-mode shell arm. The split's
-            // `flex_1 min_h_0` main region only resolves inside a DEFINITE-height
-            // wrapper, which is what a `Panel` placement guarantees (same role as
-            // `columns::panel_wrap`'s absolute size_full); a `Nested` shell has no
-            // such height, so it falls through to the content-height arm below.
-            // Shell-less compositions still split at `columns::render` — ONE
+            // Accordion-bearing column: fire the flow-panel split HERE — the
+            // real production seam. Production wraps the main panel in a
+            // `live_block`, so `columns::render`'s flow child is a live_block
+            // and its split never fires; the split must fire wherever the
+            // column-with-accordion is actually rendered — this block-mode
+            // shell arm. The split's `flex_1 min_h_0` main region only resolves
+            // inside a DEFINITE-height wrapper, which is what a `Panel`
+            // placement guarantees (same role as `columns::panel_wrap`'s
+            // absolute size_full); a `Nested` shell has no such height, so it
+            // falls through to the content-height arm below. Shell-less
+            // compositions still split at `columns::render` — ONE
             // implementation (`render_accordion_split`), two call sites.
             if self.placement == ShellPlacement::Panel {
                 let sid = gpui::ElementId::from(SharedString::from(format!("{scroll_id}-main")));
@@ -816,20 +817,22 @@ impl Render for ReactiveShell {
                     return builders::render_accordion_split_slot(tree, &column, sid, &gpui_ctx);
                 }
             }
-            // Plain block tree. A PANEL-placed shell mirrors the eager arm above
-            // (id + overflow_y_scroll on the size_full div): without the scroll
-            // viewport a content-height column that overflows is clipped to the
-            // panel with no way to reach below-fold rows (the plain-path main
-            // panel stopped scrolling, Martin dogfood — the outer columns.rs
-            // wrapper cannot scroll because this size_full shell exactly fills
-            // it), and `size_full` is also the DEFINITE-height context that
-            // relative-height descendants (live_query `relative(1.0)`, virtualized
-            // `gpui::list` sidebars) resolve against.
+            // Plain block tree. A PANEL-placed shell mirrors the eager arm
+            // above (id + overflow_y_scroll on the size_full div): without the
+            // scroll viewport a content-height column that overflows is clipped
+            // to the panel with no way to reach below-fold rows (the plain-path
+            // main panel stopped scrolling, Martin dogfood — the outer
+            // columns.rs wrapper cannot scroll because this size_full shell
+            // exactly fills it), and `size_full` is also the DEFINITE-height
+            // context that relative-height descendants (live_query
+            // `relative(1.0)`, virtualized `gpui::list` sidebars) resolve
+            // against.
             //
-            // A NESTED shell must NOT take that shape: its parent is one row of an
-            // outline and has no definite height, so `height: 100%` collapses to a
-            // fixed empty band and no row is laid out (the ClaudeCode blank-page
-            // bug). It is content-sized, and the enclosing outline owns the scroll.
+            // A NESTED shell must NOT take that shape: its parent is one row of
+            // an outline and has no definite height, so `height: 100%`
+            // collapses to a fixed empty band and no row is laid out (the
+            // ClaudeCode blank-page bug). It is content-sized, and the
+            // enclosing outline owns the scroll.
             let wrapper = div()
                 .id(SharedString::from(scroll_id.to_string()))
                 .flex()

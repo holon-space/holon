@@ -129,9 +129,9 @@ pub fn capability_pair_impl(mut decl: ItemTrait) -> TokenStream {
     let mut trait_attrs: Vec<Attribute> = Vec::new();
     let mut errors: Vec<TokenStream> = Vec::new();
 
-    // 1. Trait-level `#[pair(sut_name = .., ref_name = ..)]`: override the default
-    //    `Sut{Stem}`/`Ref{Stem}` name on either side (the divergent-name
-    //    exception).
+    // 1. Trait-level `#[pair(sut_name = .., ref_name = ..)]`: override the
+    //    default `Sut{Stem}`/`Ref{Stem}` name on either side (the
+    //    divergent-name exception).
     for attr in std::mem::take(&mut decl.attrs) {
         if attr.path().is_ident("pair") {
             let r = attr.parse_nested_meta(|meta| {

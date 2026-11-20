@@ -54,14 +54,15 @@ async fn block_engine() -> Arc<BackendEngine> {
                     std::sync::Arc::new(holon_api::SystemClock),
                 ));
                 // Point the cache at `block_raw` so provider-internal reads
-                // (`get_by_id`, sibling scans) see the rows the provider writes —
-                // same pattern as the `sql_block_operations` unit tests.
+                // (`get_by_id`, sibling scans) see the rows the provider writes
+                // — same pattern as the `sql_block_operations` unit tests.
                 let mut block_raw_type_def = Block::type_definition();
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = tokio::runtime::Handle::current();
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread test
-                    // runtime; block_in_place makes the bridge deadlock-free.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread test runtime; block_in_place makes the
+                    // bridge deadlock-free.
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");

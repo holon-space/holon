@@ -955,8 +955,9 @@ impl<T> FrontendSession<T> {
     /// the stream stays open and recovers when the underlying block is
     /// fixed.
     pub async fn watch_ui(&self, block_id: &EntityUri) -> Result<holon_api::WatchHandle> {
-        // Dispatch through the `UiWatcher` capability — `BackendEngine` (CDC) for
-        // Turso, `LoroUiWatcher` (block_query snapshot) for no-Turso. No branch.
+        // Dispatch through the `UiWatcher` capability — `BackendEngine` (CDC)
+        // for Turso, `LoroUiWatcher` (block_query snapshot) for no-Turso. No
+        // branch.
         self.ui_watcher.clone().watch_ui(block_id.clone()).await
     }
 

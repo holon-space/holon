@@ -197,10 +197,10 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
 
     // 1. The REAL seeded expression, parsed by the production DSL parser, then
-    //    wrapped by the REAL backend wrap (`block:default-main-panel` carries both
-    //    a render source and a `holon_sql` query source, so production always
-    //    applies it). The panel tree's root is therefore a `view_mode_switcher`
-    //    holding the authored column — production's shape.
+    //    wrapped by the REAL backend wrap (`block:default-main-panel` carries
+    //    both a render source and a `holon_sql` query source, so production
+    //    always applies it). The panel tree's root is therefore a
+    //    `view_mode_switcher` holding the authored column — production's shape.
     let src = extract_src_block("#+BEGIN_SRC render :id default-main-panel::render::0");
     assert!(
         src.contains("max_height_fraction: 0.33"),
@@ -247,14 +247,15 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
 
     // 4. PRODUCTION-FAITHFUL composition: register the accordion column as
     //    `block:default-main-panel` and wrap it in a `live_block`, so the tree
-    //    routes through the REAL per-block `ReactiveShell` (the layer that wraps
-    //    every `block:default-*` panel). `columns::render`'s flow child is then a
-    //    `live_block`, not a column — exactly as in prod — so the accordion split
-    //    must (and now does) fire at the block-shell arm, NOT at `columns::render`.
-    //    (An earlier version mounted `columns(column(accordion))` directly, which
-    //    fired the split at `columns::render` and MASKED the prod break where the
-    //    accordion rendered the placement-error div — the environment-parity
-    //    lesson.) The block tree is handed out once via `watch_live`.
+    //    routes through the REAL per-block `ReactiveShell` (the layer that
+    //    wraps every `block:default-*` panel). `columns::render`'s flow child
+    //    is then a `live_block`, not a column — exactly as in prod — so the
+    //    accordion split must (and now does) fire at the block-shell arm, NOT
+    //    at `columns::render`. (An earlier version mounted
+    //    `columns(column(accordion))` directly, which fired the split at
+    //    `columns::render` and MASKED the prod break where the accordion
+    //    rendered the placement-error div — the environment-parity lesson.) The
+    //    block tree is handed out once via `watch_live`.
     let column_slot = std::sync::Mutex::new(Some(panel_vm));
     let thunk: support::BlockTreeThunk = Arc::new(move || {
         column_slot
@@ -279,8 +280,9 @@ fn seeded_main_panel_renders_capped_accordion_split(cx: &mut TestAppContext) {
         ..ReactiveViewModel::from_widget("columns", HashMap::new())
     });
 
-    // 5. Render at a definite window (the panel height the cap resolves against),
-    //    threading the SAME registry-backed services so the live_block resolves.
+    // 5. Render at a definite window (the panel height the cap resolves
+    //    against), threading the SAME registry-backed services so the
+    //    live_block resolves.
     let snap = support::render_reactive_fixture_quiescent_sized_with_services(
         cx,
         root,

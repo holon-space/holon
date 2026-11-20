@@ -216,7 +216,8 @@ mod tests {
             parsed["engagement"]["inv-block-parent-validity"],
             json!([0, 4])
         );
-        // Wall aggregates are present and separable from the deterministic body.
+        // Wall aggregates are present and separable from the deterministic
+        // body.
         assert_eq!(parsed["wall"]["total_us"], 100);
         assert!(parsed["wall"]["per_kind_us"].is_object());
     }

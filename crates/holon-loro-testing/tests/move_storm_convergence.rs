@@ -361,7 +361,8 @@ fn apply_script(doc: &LoroDoc, script: &[(usize, usize)]) {
         }
         let node = peer_ops::find_node_by_stable_id(doc, sid).expect("fuzz node");
         let pnode = parent.map(|p| peer_ops::find_node_by_stable_id(doc, p).expect("fuzz parent"));
-        // Err == native cyclic-move rejection (defense-in-depth); replica unchanged.
+        // Err == native cyclic-move rejection (defense-in-depth); replica
+        // unchanged.
         let _rejected_locally = multi_peer::move_block(doc, node, pnode);
     }
 }

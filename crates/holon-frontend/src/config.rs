@@ -1129,7 +1129,8 @@ mod tests {
                 "[a-z \"\\\\\n]{0,4}".prop_map(toml::Value::String),
                 any::<i64>().prop_map(toml::Value::Integer),
                 any::<bool>().prop_map(toml::Value::Boolean),
-                // NaN is left out: NaN != NaN, so `Value` equality cannot judge it.
+                // NaN is left out: NaN != NaN, so `Value` equality cannot judge
+                // it.
                 (proptest::num::f64::NORMAL
                     | proptest::num::f64::SUBNORMAL
                     | proptest::num::f64::ZERO
@@ -1745,8 +1746,8 @@ mod tests {
     fn clap_mcp_enabled_env_and_absent_default() {
         use clap::Parser;
 
-        // Absent flag/env → None, and `mcp_enabled()` defaults to TRUE (opt-out).
-        // Asserted BEFORE any env mutation.
+        // Absent flag/env → None, and `mcp_enabled()` defaults to TRUE
+        // (opt-out). Asserted BEFORE any env mutation.
         let absent = HolonConfig::try_parse_from(["holon"]).expect("parse must succeed");
         assert_eq!(absent.mcp.enabled, None, "absent flag → None");
         assert!(absent.mcp_enabled(), "absent → default enabled (TRUE)");

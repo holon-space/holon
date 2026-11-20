@@ -71,15 +71,16 @@ where
                 continue;
             }
             // Walk `parent_of` to a root. `parent_of` returns `None` at a root
-            // (no_parent / sentinel — see the `ReferenceState` cap impl), so the
-            // loop terminates at a valid root without a special-case check.
-            // Every ancestor between this page and its root must itself be a page.
+            // (no_parent / sentinel — see the `ReferenceState` cap impl), so
+            // the loop terminates at a valid root without a special-case check.
+            // Every ancestor between this page and its root must itself be a
+            // page.
             let mut seen: BTreeSet<EntityUri> = BTreeSet::new();
             let mut cursor = ref_.parent_of(&page);
             while let Some(ancestor) = cursor {
                 if !seen.insert(ancestor.clone()) {
-                    // A parent cycle in the ref — `inv-no-parent-cycles` owns the
-                    // SUT side; here we fail loud rather than spin forever.
+                    // A parent cycle in the ref — `inv-no-parent-cycles` owns
+                    // the SUT side; here we fail loud rather than spin forever.
                     violations.push(format!(
                         "page `{}` has a CYCLIC ancestor chain (revisited `{}`)",
                         page.id(),

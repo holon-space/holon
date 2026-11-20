@@ -41,9 +41,10 @@ impl<R: RefLifecycle> TransitionFactory<R> for EmitMcpData {
 
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
-        // Turso-only: the navigation / CDC-watch / MCP providers this transition
-        // dispatches have no Loro-native source in the no-Turso wiring
-        // (see loro_block_query_source.rs:77). Gate it out of {Loro} slices.
+        // Turso-only: the navigation / CDC-watch / MCP providers this
+        // transition dispatches have no Loro-native source in the no-Turso
+        // wiring (see loro_block_query_source.rs:77). Gate it out of {Loro}
+        // slices.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {

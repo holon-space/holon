@@ -75,7 +75,8 @@ async fn block_engine() -> Arc<BackendEngine> {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = tokio::runtime::Handle::current();
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread runtime.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread runtime.
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");
@@ -193,7 +194,8 @@ async fn block_engine_loro_authority() -> Arc<BackendEngine> {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = tokio::runtime::Handle::current();
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread runtime.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread runtime.
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");
@@ -205,9 +207,9 @@ async fn block_engine_loro_authority() -> Arc<BackendEngine> {
             .with_operation_provider_factory(|_backend| {
                 let dir = tempfile::tempdir().expect("loro tempdir");
                 let path = dir.path().to_path_buf();
-                // Keep the backing dir alive for the whole test (the provider is
-                // never asked to WRITE here — only `operations()` is read — but
-                // the store must not vanish mid-test).
+                // Keep the backing dir alive for the whole test (the provider
+                // is never asked to WRITE here — only `operations()` is read —
+                // but the store must not vanish mid-test).
                 std::mem::forget(dir);
                 let store = Arc::new(TokioRwLock::new(LoroDocumentStore::new(path)));
                 Arc::new(LoroBlockOperations::new(
@@ -262,9 +264,10 @@ async fn slash_menu_entries_are_unique_by_label_and_op_id() {
          dispatch is unchanged): {duplicates:?}"
     );
 
-    // Guard the fix's dedup KEY: we dedup by op id, never by label alone. If two
-    // DIFFERENT op ids collide on a display label, that is a finding to report,
-    // not something the dedup may silently merge — surface it loudly here.
+    // Guard the fix's dedup KEY: we dedup by op id, never by label alone. If
+    // two DIFFERENT op ids collide on a display label, that is a finding to
+    // report, not something the dedup may silently merge — surface it loudly
+    // here.
     let mut label_to_ids: HashMap<String, BTreeSet<String>> = HashMap::new();
     for item in &menu {
         label_to_ids

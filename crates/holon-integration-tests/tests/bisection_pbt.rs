@@ -88,7 +88,8 @@ fn reproduces_with_signature(
                 .or_else(|| payload.downcast_ref::<&str>().copied())
                 .unwrap_or_else(|| {
                     // A non-string payload can't be signature-matched; treating
-                    // it as "not reproduced" would exonerate a failing component.
+                    // it as "not reproduced" would exonerate a failing
+                    // component.
                     panic!(
                         "reproduces_with_signature: panic payload is neither String nor &str \
                          (type_id {:?}) — cannot match signature {needle:?}",
@@ -165,8 +166,8 @@ fn skip_gated_replay_is_portable_for_committed_capture() {
 /// test above carries only `Any`-wiring transitions, so it never skips.)
 #[test]
 fn editor_transition_skips_purely_under_storeless_node() {
-    // `PressKey` gates on `AnyStorageOf({Loro, Turso})` (ADR 0009 asymmetry #1),
-    // so the node must lack *both* to gate it out. An Org-only node does:
+    // `PressKey` gates on `AnyStorageOf({Loro, Turso})` (ADR 0009 asymmetry
+    // #1), so the node must lack *both* to gate it out. An Org-only node does:
     // `Wiring::org_create_ordering()` = `{Org}`.
     let org_only = ComponentSet::new(
         holon_pbt_core::Wiring::org_create_ordering(),
@@ -245,11 +246,11 @@ fn editor_transitions_gate_on_any_of_loro_or_turso() {
 #[test]
 #[ignore = "manual tool: set HOLON_BISECT_CAPTURE or HOLON_BISECT_SLICE, run with --ignored"]
 fn bisect_capture_from_env() {
-    // Two ways to name the capture: an explicit path (`HOLON_BISECT_CAPTURE`), or
-    // a slice name (`HOLON_BISECT_SLICE`) resolved to its auto-written capture
-    // under `tests/.captures/<slice>.captured.json`. The slice form is the CI
-    // triage entry: on a red wide PBT, re-run with `HOLON_BISECT_SLICE=<slice>`
-    // to localize the just-written capture.
+    // Two ways to name the capture: an explicit path (`HOLON_BISECT_CAPTURE`),
+    // or a slice name (`HOLON_BISECT_SLICE`) resolved to its auto-written
+    // capture under `tests/.captures/<slice>.captured.json`. The slice form is
+    // the CI triage entry: on a red wide PBT, re-run with
+    // `HOLON_BISECT_SLICE=<slice>` to localize the just-written capture.
     let capture_path = match (
         std::env::var("HOLON_BISECT_CAPTURE"),
         std::env::var("HOLON_BISECT_SLICE"),

@@ -399,8 +399,8 @@ impl OutlineTree {
             let row = &self.sorted_rows[i];
             result.push(render_item(row, depth));
 
-            // ALLOW(raw_row_id_column): key — index key into `children_of`; compared as
-            // text, never converted
+            // ALLOW(raw_row_id_column): key — index key into `children_of`;
+            // compared as text, never converted
             if let Some(own_id) = row.get("id").and_then(|v| v.as_string()) {
                 if let Some(child_indices) = self.children_of.get(own_id) {
                     self.walk_level(child_indices, depth + 1, render_item, result);

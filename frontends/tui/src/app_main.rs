@@ -429,8 +429,8 @@ impl App for AppMain {
     ) -> CommonResult<RenderPipeline> {
         throws_with_return!({
             // Spawn the watch task on the very first render — needs the
-            // main_thread_channel_sender from GlobalData, which isn't accessible
-            // before the event loop starts.
+            // main_thread_channel_sender from GlobalData, which isn't
+            // accessible before the event loop starts.
             ensure_watch_task_started(global_data);
 
             let window_size = global_data.window_size;
@@ -465,9 +465,9 @@ impl App for AppMain {
                     let mut content_ops = RenderOpIRVec::new();
                     let max_width = window_size.col_width.as_usize().saturating_sub(2);
                     let mut registry = RenderRegistry::default();
-                    // The marker is pinned to the focused row's (entity_id, kind),
-                    // not its registry index, so it survives the post-walk
-                    // de-dup of the registry.
+                    // The marker is pinned to the focused row's (entity_id,
+                    // kind), not its registry index, so it survives the
+                    // post-walk de-dup of the registry.
                     let focus_pin = state.focus_pin.lock().unwrap().clone();
                     // Snapshot edit_state under its lock so the view borrow
                     // stays valid for the duration of the render walk.
@@ -990,9 +990,9 @@ fn enter_pressed(state: &mut TuiState) -> EnterAction {
     // chord-resolution (`bubble_input_oneshot`) and any consumer of
     // `ui_state.focused_block` see stale focus, breaking keybindings on the
     // freshly-opened editor.
-    // ALLOW(entity_uri_from_raw): boundary — `target.block_id` is the focused row
-    // id (a `String`); parse once here before handing a typed URI to the cell
-    // registry.
+    // ALLOW(entity_uri_from_raw): boundary — `target.block_id` is the focused
+    // row id (a `String`); parse once here before handing a typed URI to the
+    // cell registry.
     let target_uri = holon_api::EntityUri::from_raw(&target.block_id);
     state.engine.set_focus(Some(target_uri.clone()));
     let cell = match state.engine.editable_text(&target_uri, &target.field) {

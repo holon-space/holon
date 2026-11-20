@@ -219,8 +219,8 @@ pub fn register_schema_providers(injector: &Injector) {
         .with_dependency::<DbReady<BlockTables>>(),
     );
 
-    // -- BlockHierarchyView (block_with_path: FROM block — chained on the matview)
-    // --
+    // -- BlockHierarchyView (block_with_path: FROM block — chained on the
+    // matview) --
     injector.provide::<DbReady<BlockHierarchyView>>(
         Provider::root_async(|inj| async move {
             let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
@@ -289,8 +289,8 @@ pub fn register_schema_providers(injector: &Injector) {
 
     // -- HistoryStore (C2b): the typed `dyn HistoryStore` port over the boot-
     // owned `block_history` table, so non-engine writers (the org-ingest
-    // doc-page create in `FileSyncController`) can record provenance through the
-    // same store the engine uses. Depends on HistoryTables so the relation
+    // doc-page create in `FileSyncController`) can record provenance through
+    // the same store the engine uses. Depends on HistoryTables so the relation
     // exists before any record. --
     injector.provide::<dyn holon_api::HistoryStore>(
         Provider::root_async(|inj| async move {
@@ -302,8 +302,8 @@ pub fn register_schema_providers(injector: &Injector) {
         .with_dependency::<DbReady<HistoryTables>>(),
     );
 
-    // -- AutomationsJournalView (matview grouped over block_history — depends on
-    // HistoryTables only) --
+    // -- AutomationsJournalView (matview grouped over block_history — depends
+    // on HistoryTables only) --
     injector.provide::<DbReady<AutomationsJournalView>>(
         Provider::root_async(|inj| async move {
             let _hist = inj.resolve_async::<DbReady<HistoryTables>>().await;
@@ -337,8 +337,8 @@ pub fn register_schema_providers(injector: &Injector) {
         .with_dependency::<DbReady<JournalDayPagesView>>(),
     );
 
-    // -- BlockTables (depends on CoreTables: junction FKs reference block_raw.id)
-    // --
+    // -- BlockTables (depends on CoreTables: junction FKs reference
+    // block_raw.id) --
     injector.provide::<DbReady<BlockTables>>(
         Provider::root_async(|inj| async move {
             let _core = inj.resolve_async::<DbReady<CoreTables>>().await;

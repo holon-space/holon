@@ -162,9 +162,9 @@ pub(crate) fn load_seed_profile_into_ref(state: &mut ReferenceState) {
 /// seed-profile state (those stay with the caller: `StartApp` applies them; the
 /// composed oracle aligns nav in `structural_ref_wired`).
 pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: bool) {
-    // The production system always seeds default layout blocks on first startup.
-    // `default_doc_uri` is the *document* the seed layout belongs to (the
-    // no-parent sentinel) — used below as the parent/doc for the index.org
+    // The production system always seeds default layout blocks on first
+    // startup. `default_doc_uri` is the *document* the seed layout belongs to
+    // (the no-parent sentinel) — used below as the parent/doc for the index.org
     // layout blocks and to classify them as seeds. The default page block
     // itself has the stable id `block:__default__` (matches prod's
     // `FrontendSession::default_doc_uri()` after the sentinel root-fix);
@@ -181,8 +181,8 @@ pub(crate) fn seed_booted_layout_into_ref(state: &mut ReferenceState, fresh: boo
     // only for the composed frontend arm (see `wide_e2e`).
     //
     // The rule blocks' per-parent `sequence` follows the asset's order, as the
-    // seed creates them, so the oracle's `(sibling_order_group, sequence, id)` sort
-    // (ADR 0005) reproduces the SUT's fractional-index order.
+    // seed creates them, so the oracle's `(sibling_order_group, sequence, id)`
+    // sort (ADR 0005) reproduces the SUT's fractional-index order.
     let mut asset = crate::pbt::journals_asset::blocks().into_iter();
     let journals_page = asset.next().expect("the asset's page");
     let journals_uri = journals_page.id.clone();

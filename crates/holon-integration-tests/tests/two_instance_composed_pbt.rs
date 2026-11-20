@@ -121,8 +121,8 @@ fn rt() -> tokio::runtime::Runtime {
 #[test]
 fn two_instances_boot_with_distinct_peer_ids_and_transport_nothing_unshared() {
     let rt = rt();
-    // `wide_e2e_ref` extracts the cap set by booting its OWN runtime, so it must
-    // be built outside `block_on` — nested runtimes panic.
+    // `wide_e2e_ref` extracts the cap set by booting its OWN runtime, so it
+    // must be built outside `block_on` — nested runtimes panic.
     let ref_state = wide_e2e_ref();
     rt.block_on(async {
         let resolver = IdResolver::default();
@@ -215,8 +215,8 @@ fn one_way_share_converges_on_the_receiver_over_iroh() {
 
 fn one_way_share_converges_over(transport: TransportChoice) {
     let rt = rt();
-    // `wide_e2e_ref` extracts the cap set by booting its OWN runtime, so it must
-    // be built outside `block_on` — nested runtimes panic.
+    // `wide_e2e_ref` extracts the cap set by booting its OWN runtime, so it
+    // must be built outside `block_on` — nested runtimes panic.
     let ref_state = wide_e2e_ref();
     rt.block_on(async {
         let resolver = IdResolver::default();
@@ -607,7 +607,8 @@ async fn apply_pair_op(
     let target = targets[pick % targets.len()].clone();
     match op {
         PairOp::Create => {
-            // The slot gesture creates under whatever page the main panel shows.
+            // The slot gesture creates under whatever page the main panel
+            // shows.
             caps.expect::<dyn SutFocusWrite>()
                 .apply_navigate_focus(CapRegion::Main, &target)
                 .await;
@@ -1136,10 +1137,11 @@ fn drive_two_writer_chain() -> (Sut, ReferenceState) {
         *ref_state = Machine::apply(ref_state.clone(), &t);
         let sut = <Sut as StateMachineTest>::apply(sut, ref_state, t);
         // A second settle window. The receiver's org write-back can outlast one
-        // `CONVERGE_BUDGET` on a loaded host — the load-sensitive red `pair-inc0`
-        // recorded on pristine `main` — and this chain would then red on that
-        // instead of on the two-writer question. Same production settle, one
-        // more budget; a write-back that is stalled rather than slow still reds.
+        // `CONVERGE_BUDGET` on a loaded host — the load-sensitive red
+        // `pair-inc0` recorded on pristine `main` — and this chain would then
+        // red on that instead of on the two-writer question. Same production
+        // settle, one more budget; a write-back that is stalled rather than
+        // slow still reds.
         sut.settle_projections();
         sut
     };

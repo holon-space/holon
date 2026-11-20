@@ -154,9 +154,9 @@ fn cycle_task_state_undo_reverts_the_cycle_not_the_previous_op() {
             "content edit must push an undo entry"
         );
 
-        // ── OP #2: a User-origin cycle_task_state. MUST push a SECOND undo entry
-        //    (its own `task_state` inverse). This is the op the dogfood found
-        //    missing.
+        // ── OP #2: a User-origin cycle_task_state. MUST push a SECOND undo
+        // entry    (its own `task_state` inverse). This is the op the dogfood
+        // found    missing.
         let mut cycle_params = std::collections::HashMap::new();
         cycle_params.insert("id".to_string(), Value::String(target_id.clone()));
         session
@@ -179,7 +179,8 @@ fn cycle_task_state_undo_reverts_the_cycle_not_the_previous_op() {
         );
         let after_cycle = task_state(&session, &target_id).await;
 
-        // ── UNDO ONCE. This must invert OP #2 (the cycle), NOT OP #1 (content).
+        // ── UNDO ONCE. This must invert OP #2 (the cycle), NOT OP #1
+        // (content).
         let outcome = session.undo().await.expect("undo dispatch");
         assert!(
             matches!(outcome, UndoOutcome::Applied),
@@ -203,9 +204,9 @@ fn cycle_task_state_undo_reverts_the_cycle_not_the_previous_op() {
             task_state(&session, &target_id).await
         );
 
-        // (B) The earlier content edit is STILL applied — the undo did NOT reach
-        //     down to OP #1. (Directly refutes the observed symptom where the
-        //     indent/content op was reverted instead of the cycle.)
+        // (B) The earlier content edit is STILL applied — the undo did NOT
+        // reach     down to OP #1. (Directly refutes the observed symptom where
+        // the     indent/content op was reverted instead of the cycle.)
         assert_eq!(
             block_content(&session, &target_id).await.as_deref(),
             Some(edited.as_str()),
@@ -214,7 +215,8 @@ fn cycle_task_state_undo_reverts_the_cycle_not_the_previous_op() {
         );
 
         // (C) One entry (the content edit) remains, and undoing it restores the
-        //     original content. Proves the cycle entry was a real, distinct entry.
+        //     original content. Proves the cycle entry was a real, distinct
+        // entry.
         assert!(
             session.can_undo().await,
             "after undoing the cycle, the content-edit entry must still be on the stack"
@@ -256,9 +258,11 @@ fn metamorphic_property_ops_round_trip_through_undo() {
         };
         // Two distinct provider paths, both reachable from the editor and both
         // property-backed (snapshot-visible via the `properties` map):
-        //   - `cycle_task_state` (TaskOperations → set_state → set_field task_state)
+        //   - `cycle_task_state` (TaskOperations → set_state → set_field
+        //     task_state)
         //   - `set_field` on an arbitrary org-drawer property (the generic
-        //     property-write path `set_priority`/`set_due_date` also funnel through)
+        //     property-write path `set_priority`/`set_due_date` also funnel
+        //     through)
         let cases: Vec<(&str, Params)> = vec![
             ("cycle_task_state", build(&target_id, &[])),
             (
@@ -282,7 +286,8 @@ fn metamorphic_property_ops_round_trip_through_undo() {
                 .await
                 .unwrap_or_else(|e| panic!("dispatch '{op_name}' failed: {e:#}"));
 
-            // The op pushed its OWN entry (fail-loud on the silent-no-push hole).
+            // The op pushed its OWN entry (fail-loud on the silent-no-push
+            // hole).
             let pushed = wait_until(&format!("{op_name}-pushed"), Duration::from_secs(5), || {
                 session.can_undo()
             })

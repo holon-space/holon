@@ -72,8 +72,8 @@ impl<R: RefLifecycle + RefDocumentsMut> TransitionRef<R> for CreateDocument {
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        // The whole create-document reference effect (mint synthetic uri, register
-        // filename, insert the empty page block) lives in
+        // The whole create-document reference effect (mint synthetic uri,
+        // register filename, insert the empty page block) lives in
         // `RefDocumentsMut::insert_document`.
         state.insert_document(&self.file_name);
     }

@@ -99,9 +99,9 @@ pub fn classify_change_to_event(
                 );
                 Some(FileEvent::Renamed { from, to })
             } else if is_relevant(&from) {
-                // Renamed OUT of vault-space (`.org` -> `.txt`): the org side sees
-                // only the departure, so treat it as a change to the vanished
-                // `from` (stats NotFound -> delete).
+                // Renamed OUT of vault-space (`.org` -> `.txt`): the org side
+                // sees only the departure, so treat it as a change to the
+                // vanished `from` (stats NotFound -> delete).
                 debug!(
                     "Org file renamed out of org-space: {} -> {}",
                     from.display(),

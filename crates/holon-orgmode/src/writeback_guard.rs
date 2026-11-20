@@ -315,7 +315,8 @@ Command palette body.
         // Non-canonical disk formatting: a list body directly above the next
         // headline, which the renderer closes with a blank line.
         // The projection is the canonical render — byte-different but block-
-        // preserving. The guard MUST allow it (legal first-boot canonicalization).
+        // preserving. The guard MUST allow it (legal first-boot
+        // canonicalization).
         let noisy = "\
 #+ID: gpui-doc
 * Flow mode shell
@@ -450,8 +451,9 @@ Command palette body.
     /// into its own materialized file) is grounded, not loss.
     #[test]
     fn sibling_union_grounds_deinlined_page() {
-        // The companion render de-inlines `capture-mode-overlay`; a sibling file
-        // materializes it, and its render is unioned into the surviving set.
+        // The companion render de-inlines `capture-mode-overlay`; a sibling
+        // file materializes it, and its render is unioned into the surviving
+        // set.
         let deinlined_companion = "\
 #+ID: gpui-doc
 
@@ -506,7 +508,8 @@ The shell hosts the flow.
 Command palette body.
 ";
         let rendered = render_projection(lossy);
-        // Sanction a DIFFERENT id; the empty-sibling union has no capture-overlay.
+        // Sanction a DIFFERENT id; the empty-sibling union has no
+        // capture-overlay.
         let unrelated = HashSet::from([EntityUri::block("some-other-block").as_str().to_string()]);
         let dropped = drops(SOURCE, &surviving(&rendered), &unrelated);
         assert!(

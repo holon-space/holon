@@ -295,8 +295,8 @@ fn typed_then_split_the_same_block_both_measure() {
     );
     assert_eq!(typed.len(), 1, "the content write closes on its own token");
     assert!(pending.is_empty());
-    // 2. Enter → split_block, tokenless. Its delta re-projects the row, which still
-    //    carries the sticky write_seq 7.
+    // 2. Enter → split_block, tokenless. Its delta re-projects the row, which
+    //    still carries the sticky write_seq 7.
     let t1 = base + Duration::from_millis(100);
     pending.push(pend("split_block", "block:t", None, t1));
     let split = close_delivered(

@@ -161,10 +161,11 @@ impl EntityCellRegistry for SqlOnlyCellRegistry {
                  Construct with `SqlOnlyCellRegistry::wired` at the composition root."
             ));
         };
-        // `content` is the block's text: it exists only as `Cell<String>`. Asking
-        // for any other `T` is a caller bug, and answering it from the generic
-        // scalar builder would hand back a property-backed cell that merely
-        // shares the name — silently wrong. Mirrors the Loro twin's guard.
+        // `content` is the block's text: it exists only as `Cell<String>`.
+        // Asking for any other `T` is a caller bug, and answering it from the
+        // generic scalar builder would hand back a property-backed cell that
+        // merely shares the name — silently wrong. Mirrors the Loro twin's
+        // guard.
         if field == "content" && type_id != TypeId::of::<String>() {
             return Err(anyhow!(
                 "SqlOnlyCellRegistry::live_field_any: field \"content\" requires T=String \

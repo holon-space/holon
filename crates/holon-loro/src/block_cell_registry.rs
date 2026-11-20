@@ -543,32 +543,34 @@ impl EntityCellRegistry for BlockCellRegistry {
                     .await
                     .map_err(|e| anyhow!("update_block_position({new_id}): {e:#}"))?;
             }
-            // Reconcile the requested edge fields against the existing node — but
-            // only WRITE when the tree's current value differs from the request.
+            // Reconcile the requested edge fields against the existing node —
+            // but only WRITE when the tree's current value differs from the
+            // request.
             //
             // The existing node may be a tagless placeholder root, auto-created
-            // (below) when a child's `create_in_tree` reached this id before its
-            // own create call: reconciling its tags keeps a page document's `Page`
-            // marker in Loro (otherwise the outbound projector diffs Loro(no tag)
-            // against SQL(Page) and wipes the SQL tag). But re-asserting a value
-            // the node ALREADY carries still emits a Loro op → DiffEvent → SQL
-            // junction DELETE+INSERT: gratuitous churn on every boot re-seed and
-            // org re-scan, and — on a restart, where the persisted matview keeps a
-            // tag its emptied base table no longer holds — the delta that DOUBLES
-            // the matview tag row. Comparing against the Loro tree (the authority,
-            // fully loaded before the seed runs) makes the skip deterministic,
-            // unlike diffing the lagging SQL projection during boot.
+            // (below) when a child's `create_in_tree` reached this id before
+            // its own create call: reconciling its tags keeps a page document's
+            // `Page` marker in Loro (otherwise the outbound projector diffs
+            // Loro(no tag) against SQL(Page) and wipes the SQL tag). But
+            // re-asserting a value the node ALREADY carries still emits a Loro
+            // op → DiffEvent → SQL junction DELETE+INSERT: gratuitous churn on
+            // every boot re-seed and org re-scan, and — on a restart, where the
+            // persisted matview keeps a tag its emptied base table no longer
+            // holds — the delta that DOUBLES the matview tag row. Comparing
+            // against the Loro tree (the authority, fully loaded before the
+            // seed runs) makes the skip deterministic, unlike diffing the
+            // lagging SQL projection during boot.
             let current = backend
                 .get_block(new_id.id())
                 .await
                 .map_err(|e| anyhow!("get_block({new_id}) for edge reconcile: {e:#}"))?;
-            // Content half of the same placeholder reconcile. A placeholder root
-            // is created with NO content, and its outbound projection writes that
-            // "" over the parent's real SQL row — permanently, because no later
-            // call ever gave the node its content. Completing it here is
-            // clobber-free by construction (an empty node has nothing to lose)
-            // and re-homes it off the tree root, where it was parked. The
-            // re-home resolves its own parent through the SAME
+            // Content half of the same placeholder reconcile. A placeholder
+            // root is created with NO content, and its outbound projection
+            // writes that "" over the parent's real SQL row — permanently,
+            // because no later call ever gave the node its content. Completing
+            // it here is clobber-free by construction (an empty node has
+            // nothing to lose) and re-homes it off the tree root, where it was
+            // parked. The re-home resolves its own parent through the SAME
             // placeholder-standing-up path, so a whole ancestor chain reached
             // bottom-up (the folder-companion vault shape) still lands homed
             // instead of stranding pages at the root — where write-back would
@@ -725,9 +727,9 @@ impl EntityCellRegistry for BlockCellRegistry {
         // Ids this chunk is about to create. A parent in here is NOT absent —
         // it is created earlier in this same batch (requests arrive in document
         // order, parents first) and the write loop resolves it through the
-        // stable-id index, which hears each node the batch writes. Standing up a
-        // placeholder root for one would mint a SECOND node for the same stable
-        // id, which is how a batched ingest lost blocks.
+        // stable-id index, which hears each node the batch writes. Standing up
+        // a placeholder root for one would mint a SECOND node for the same
+        // stable id, which is how a batched ingest lost blocks.
         let will_create: std::collections::HashSet<&str> =
             requests.iter().map(|r| r.id.id()).collect();
         for (idx, request) in requests.iter().enumerate() {
@@ -740,9 +742,9 @@ impl EntityCellRegistry for BlockCellRegistry {
                     .is_live_in_a_share(request.id.id())
                     .map_err(|e| anyhow!("create_entities({}): {e}", request.id))?
             {
-                // Already in the tree: the idempotent reconcile path (placeholder
-                // completion, edge-field reconcile) is subtle and rare on a cold
-                // boot — run the single-block seam unchanged.
+                // Already in the tree: the idempotent reconcile path
+                // (placeholder completion, edge-field reconcile) is subtle and
+                // rare on a cold boot — run the single-block seam unchanged.
                 out[idx] = self
                     .create_entity(
                         &request.parent_id,
@@ -811,8 +813,8 @@ impl EntityCellRegistry for BlockCellRegistry {
         // resolve parent_id to TreeID") and the app never started on
         // upgraded vaults. Sentinel/no-parent parents read `tree.roots()`
         // and need no node, so they go straight through.
-        // ALLOW(entity_uri_from_raw): parent_id &str backend API param (accepts both id
-        // formats)
+        // ALLOW(entity_uri_from_raw): parent_id &str backend API param (accepts
+        // both id formats)
         let parent_uri = EntityUri::from_raw(parent_id);
         if !parent_uri.is_no_parent()
             && !parent_uri.is_sentinel()
@@ -908,8 +910,8 @@ impl EntityCellRegistry for BlockCellRegistry {
         // - `id`: the row's primary key, never reassigned
         // - `depth`: no SQL column; consumers derive depth from the tree
         // - `content_type`, `source_name`: stored in Loro but written by
-        //   `update_block_text` / chord-time content create paths, not by `set_field`
-        //   callers
+        //   `update_block_text` / chord-time content create paths, not by
+        //   `set_field` callers
         // (`source_language` IS handled below: the org re-ingest of an
         // `index.org` swap legitimately changes a src block's language via
         // `set_field`, and an SQL-direct write would fork the authority.)
@@ -959,10 +961,11 @@ impl EntityCellRegistry for BlockCellRegistry {
                 Ok(true)
             }
             _ if holon_api::EdgeField::is_edge_column(field) => {
-                // Set-valued edge field (`tags`/`requires`/`advice_suppressed`):
-                // write the tree node's dedicated meta key so the Loro→SQL
-                // projector reads it into the matching junction table. Generic
-                // over every `EdgeField` member — routing to `properties` (the
+                // Set-valued edge field
+                // (`tags`/`requires`/`advice_suppressed`): write the tree
+                // node's dedicated meta key so the Loro→SQL projector reads it
+                // into the matching junction table. Generic over every
+                // `EdgeField` member — routing to `properties` (the
                 // `_` cell arm) would drop it from the junction.
                 let targets = Self::parse_edge_string_targets(field, &value)?;
                 holon_api::EdgeField::from_drawer_key(field)
@@ -976,14 +979,14 @@ impl EntityCellRegistry for BlockCellRegistry {
             }
             "sort_key" => {
                 // Sibling order is owned by `place()`/`tree.mov_after` and
-                // projected to SQL from the Loro fractional index by the outbound
-                // snapshot projection — a block's `sort_key` is never written
-                // through `set_field`. The org sync path explicitly omits it
-                // (`build_block_params`). A `set_field("sort_key")` reaching
-                // here is a bug, not a positional intent — fail loud rather than
-                // silently mis-route it to the meta `properties` map (which
-                // `read_block_from_tree` ignores in favour of the fractional
-                // index).
+                // projected to SQL from the Loro fractional index by the
+                // outbound snapshot projection — a block's `sort_key` is never
+                // written through `set_field`. The org sync path explicitly
+                // omits it (`build_block_params`). A `set_field("sort_key")`
+                // reaching here is a bug, not a positional intent — fail loud
+                // rather than silently mis-route it to the meta `properties`
+                // map (which `read_block_from_tree` ignores in favour of the
+                // fractional index).
                 Err(anyhow!(
                     "write_field(sort_key) is unsupported: order is owned by place()/mov_after \
                      and projected from the fractional index; a set_field(\"sort_key\") reached \
@@ -1651,7 +1654,8 @@ mod tests {
             .current();
         assert_eq!(seeded, "OLD layout", "create must write the seed content");
 
-        // A NEWER shipped asset carries different content → reseed refreshes it.
+        // A NEWER shipped asset carries different content → reseed refreshes
+        // it.
         let refreshed = registry
             .reseed_content(&[(child.clone(), "NEW layout".to_string())])
             .await?;
@@ -1664,7 +1668,8 @@ mod tests {
             .current();
         assert_eq!(now, "NEW layout", "content updated to the current asset");
 
-        // Idempotent: re-seeding the SAME content emits NO Loro op (boot churn).
+        // Idempotent: re-seeding the SAME content emits NO Loro op (boot
+        // churn).
         let before = doc.oplog_frontiers();
         let refreshed2 = registry
             .reseed_content(&[(child.clone(), "NEW layout".to_string())])

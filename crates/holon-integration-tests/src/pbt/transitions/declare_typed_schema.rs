@@ -126,9 +126,9 @@ impl TransitionFactory<ReferenceState> for DeclareTypedSchema {
 
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         check(state.app_started(), Reason::AppNotStarted).map(|_| {
-            // `gen_<n>` cannot collide with a registry type or a core table, and
-            // is never a SQL keyword. `n` counts declared types, so a replay
-            // reproduces the same name.
+            // `gen_<n>` cannot collide with a registry type or a core table,
+            // and is never a SQL keyword. `n` counts declared types, so a
+            // replay reproduces the same name.
             let type_name = format!("gen_{}", state.typed_entities.declared_count());
             let strat = proptest::collection::hash_set(
                 proptest::string::string_regex("[a-z]{3,8}").expect("valid regex"),

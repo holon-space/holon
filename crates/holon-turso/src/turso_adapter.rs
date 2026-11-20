@@ -1341,7 +1341,8 @@ mod tests {
     }
 
     // A free-standing typed entity lives in its own table and NEVER appears in
-    // any block table — the datatype-axis identity, proven at the storage layer.
+    // any block table — the datatype-axis identity, proven at the storage
+    // layer.
     #[tokio::test]
     async fn free_standing_entity_never_lands_in_a_block_table() {
         use std::collections::HashMap;

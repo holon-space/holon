@@ -114,9 +114,10 @@ impl<R: RefLifecycle + RefEditorMirror + RefBlockTree + RefDocuments> Transition
 
     type Reason = Reason;
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        // Fire only while a text-block editor is focused AND its owning doc has a
-        // real file (the org-rewrite seam looks the file up). A page/source block
-        // or a fileless doc has no external channel, so the class narrows out.
+        // Fire only while a text-block editor is focused AND its owning doc has
+        // a real file (the org-rewrite seam looks the file up). A page/source
+        // block or a fileless doc has no external channel, so the class narrows
+        // out.
         let focused = state.active_editor_block();
         let target = focused.filter(|b| {
             state.is_text_block(b)
@@ -127,12 +128,13 @@ impl<R: RefLifecycle + RefEditorMirror + RefBlockTree + RefDocuments> Transition
                     .is_some_and(|d| state.has_document_uri(&d))
         });
         // OFF by default (same rationale as `ExternalWriteWhileFocused` /
-        // `StaleExternalRewrite`): the whole-doc external-rewrite + re-ingest seam
-        // this transition drives also trips the PARKED reconcile-duplication red
-        // (a re-minted duplicate of a short/non-unique-content block surfaces as
-        // an `inv-matview-consistent-with-recompute` watch-view drift), so it must
-        // not red the shared keystone. `HOLON_PBT_EXTERNAL_RACES=1` arms it for
-        // the targeted echo/reconcile run.
+        // `StaleExternalRewrite`): the whole-doc external-rewrite + re-ingest
+        // seam this transition drives also trips the PARKED
+        // reconcile-duplication red (a re-minted duplicate of a
+        // short/non-unique-content block surfaces as
+        // an `inv-matview-consistent-with-recompute` watch-view drift), so it
+        // must not red the shared keystone. `HOLON_PBT_EXTERNAL_RACES=1` arms
+        // it for the targeted echo/reconcile run.
         let enabled = std::env::var("HOLON_PBT_EXTERNAL_RACES").is_ok();
         check(
             enabled && state.app_started() && target.is_some(),
@@ -143,10 +145,10 @@ impl<R: RefLifecycle + RefEditorMirror + RefBlockTree + RefDocuments> Transition
             // Divergence window: buffer ahead of the committed projection (the
             // mid-edit "uncommitted local typing" the class is about — reached
             // headless via a trailing-whitespace keystroke the store trims).
-            // ONE predicate with `ExternalWriteWhileFocused`, which gates on it.
-            // When it is OPEN the external write races a diverged buffer (the
-            // hazard), so weight it up like `PressKey`'s pending-edit arm; when
-            // closed the collision is still valid, lower-value coverage.
+            // ONE predicate with `ExternalWriteWhileFocused`, which gates on
+            // it. When it is OPEN the external write races a diverged buffer
+            // (the hazard), so weight it up like `PressKey`'s pending-edit arm;
+            // when closed the collision is still valid, lower-value coverage.
             let diverged = crate::pbt::transitions::pending_buffer(state);
             let weight = if diverged { 8 } else { 2 };
             let strat = (prop::sample::select(vec![block_id]), "ext-[a-z]{3,6}")
@@ -180,13 +182,14 @@ impl<R: RefLifecycle + RefBlockTree + RefApplyMutationMut> TransitionRef<R>
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        // The SAME reference effect as the composed `ApplyMutation` External arm:
-        // cross the org-file boundary (write + re-ingest), so the ref models the
-        // file-parse tag reinterpretation AND — crucially — runs the focused
-        // editor through `refresh_clean_active_editor`'s trim-shape echo
-        // discriminator (the reference twin of prod's `converge_editor` /
-        // `evaluate_data_sync_echo`). A substantive change converges the buffer;
-        // the buffer's own trailing-whitespace canonicalization keeps it.
+        // The SAME reference effect as the composed `ApplyMutation` External
+        // arm: cross the org-file boundary (write + re-ingest), so the ref
+        // models the file-parse tag reinterpretation AND — crucially — runs the
+        // focused editor through `refresh_clean_active_editor`'s trim-shape
+        // echo discriminator (the reference twin of prod's `converge_editor` /
+        // `evaluate_data_sync_echo`). A substantive change converges the
+        // buffer; the buffer's own trailing-whitespace canonicalization keeps
+        // it.
         state.apply_content_mutation(&self.event().mutation, true);
     }
 }

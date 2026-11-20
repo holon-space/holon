@@ -132,12 +132,13 @@ impl Module for LoroModule {
         }));
 
         // Register LoroBlockOperations. When the subtree-share machinery is
-        // compiled in, thread the `SharedTreeSyncManager` (the `SharedTreeStore`)
-        // into the block-ops write path so writes to blocks that were pruned
-        // into a shared subtree doc route there instead of silently no-op-ing on
-        // the global doc (B3: mount-aware write routing). The manager provider is
-        // registered by `register_subtree_share` in this same `configure`; both
-        // are lazy factories, so registration order within `configure` is moot.
+        // compiled in, thread the `SharedTreeSyncManager` (the
+        // `SharedTreeStore`) into the block-ops write path so writes to blocks
+        // that were pruned into a shared subtree doc route there instead of
+        // silently no-op-ing on the global doc (B3: mount-aware write routing).
+        // The manager provider is registered by `register_subtree_share` in
+        // this same `configure`; both are lazy factories, so registration order
+        // within `configure` is moot.
         injector.provide::<LoroBlockOperations>(Provider::root(|resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
             let bus = resolver.resolve::<Arc<holon_conditions::ConditionBus>>();
@@ -257,17 +258,17 @@ impl Module for LoroModule {
         // root factory to defer execution until DI resolution. The handle
         // owns the Loro subscription and the background task; keeping this
         // value in DI keeps both alive.
-        // The downstream Loro→SQL projection (consolidator → SQL sink convergent
-        // feed) as a SHARED, standalone DI service. Built independently of the
-        // controller's run-loop task so org's initial scan can drive it (via
-        // `DownstreamProjection::flush`) WITHOUT resolving the controller handle
-        // — that handle's factory runs `seed` + `controller.start()`, which is
-        // gated post-scan. The controller resolves the SAME instance, so the
-        // run loop and org's flush advance one `last_synced` watermark and
-        // serialize on the projection's lock. `last_synced` loads from the
-        // sidecar (last session's frontier); Loro's persisted snapshot is the
-        // startup source of truth, so the diff is bounded to this session's
-        // changes.
+        // The downstream Loro→SQL projection (consolidator → SQL sink
+        // convergent feed) as a SHARED, standalone DI service. Built
+        // independently of the controller's run-loop task so org's initial scan
+        // can drive it (via `DownstreamProjection::flush`) WITHOUT resolving
+        // the controller handle — that handle's factory runs `seed` +
+        // `controller.start()`, which is gated post-scan. The controller
+        // resolves the SAME instance, so the run loop and org's flush advance
+        // one `last_synced` watermark and serialize on the projection's lock.
+        // `last_synced` loads from the sidecar (last session's frontier);
+        // Loro's persisted snapshot is the startup source of truth, so the diff
+        // is bounded to this session's changes.
         injector.provide::<CommitClock>(Provider::root(|_| Shared::new(CommitClock::new())));
         injector.provide::<ViewEngine>(Provider::root(|resolver| {
             let clock = resolver.resolve::<CommitClock>();
@@ -325,8 +326,8 @@ impl Module for LoroModule {
                 // scan starts flushing this projection: the scan resolves it as
                 // `dyn DownstreamProjection` and drives one flush per file,
                 // while the controller that used to register the subscriptions
-                // is gated until the scan finishes. Registering there left every
-                // scan flush on the full-document walk.
+                // is gated until the scan finishes. Registering there left
+                // every scan flush on the full-document walk.
                 projection
                     .install_doc_subscriptions()
                     .await
@@ -386,11 +387,12 @@ impl Module for LoroModule {
 
             // Loro is NOT seeded from the persistent (Turso) store. The bundled
             // Org assets are the seed source: they reach Loro directly via
-            // intents (`BlockOrdering::create_in_tree`) — `Journals.org` through
-            // the file watcher's `on_file_changed`, the `index.org` layout +
-            // `__default__` page through `FrontendSession::seed_default_layout`.
-            // SQL (`block_raw`) is a pure projection of Loro. There is no
-            // SQL→Loro direction (the Turso-seed + runtime mirror are removed).
+            // intents (`BlockOrdering::create_in_tree`) — `Journals.org`
+            // through the file watcher's `on_file_changed`, the `index.org`
+            // layout + `__default__` page through
+            // `FrontendSession::seed_default_layout`. SQL (`block_raw`) is a
+            // pure projection of Loro. There is no SQL→Loro direction (the
+            // Turso-seed + runtime mirror are removed).
 
             // Move a pre-split vault's layout subtree out of the replicated
             // global doc and into the device-local layout doc. Runs before the
@@ -464,8 +466,9 @@ impl Module for LoroModule {
                 }
             }
 
-            // Advance the shared projection watermark to the current frontiers so
-            // the controller's first reconcile starts from the loaded doc state.
+            // Advance the shared projection watermark to the current frontiers
+            // so the controller's first reconcile starts from the loaded doc
+            // state.
             {
                 let frontiers = {
                     let store = doc_store_arc.read().await;

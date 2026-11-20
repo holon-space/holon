@@ -156,7 +156,8 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
     // Harness settle (the windowed realization's pump-to-fixed-point).
     settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
-    // The component holds only the Send geometry handle; build the composed CapMap.
+    // The component holds only the Send geometry handle; build the composed
+    // CapMap.
     let geometry: Box<dyn GeometryProvider> = Box::new(bounds.clone());
     let capmap = window_layout(geometry);
 
@@ -185,7 +186,8 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
         "CapMap-hosted SutLayout returned only degenerate geometry"
     );
 
-    // (2) Faithful: the CapMap forward sees exactly the BoundsRegistry's elements.
+    // (2) Faithful: the CapMap forward sees exactly the BoundsRegistry's
+    // elements.
     assert_eq!(
         via_capmap.len(),
         raw.len(),
@@ -209,11 +211,12 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
         via_capmap.len()
     );
 
-    // ── E4 increment 2: the full windowed registry invariants via run_selected ──
+    // ── E4 increment 2: the full windowed registry invariants via run_selected
+    // ──
     //
-    // Compose the windowed SUT: the same window's geometry (`SutLayout`) AND its
-    // own frontend `ReactiveEngine` (`SutViewModel` + `SutRenderer`). The ref is
-    // a minimal honest oracle carrying
+    // Compose the windowed SUT: the same window's geometry (`SutLayout`) AND
+    // its own frontend `ReactiveEngine` (`SutViewModel` + `SutRenderer`). The
+    // ref is a minimal honest oracle carrying
     // `RefLayout`/`RefBlockTree`/`RefEditorMirror`. `run_selected` then selects
     // exactly the invariants this slice's caps satisfy and runs them over the
     // real geometry — the composition path, not `E2ESut`.
@@ -235,10 +238,10 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
         ran.contains(&"inv-frontend-bounds-rendered"),
         "the windowed slice must select inv-frontend-bounds-rendered; ran={ran:?}",
     );
-    // …and it ran its STRICT geometry checks to a verdict of `Ok` — NOT `Skipped`
-    // (which would mean the frontend root was still loading / `frontend_root_vm`
-    // returned `None`, leaving the proof vacuous). This is what makes "passes over
-    // real geometry" meaningful.
+    // …and it ran its STRICT geometry checks to a verdict of `Ok` — NOT
+    // `Skipped` (which would mean the frontend root was still loading /
+    // `frontend_root_vm` returned `None`, leaving the proof vacuous). This is
+    // what makes "passes over real geometry" meaningful.
     let bounds_result = report
         .ran
         .iter()
@@ -272,29 +275,30 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
         ran.len(),
     );
 
-    // ── E4 increment 3a: graft a fixed-id tree → the displayed-text oracle BITES
-    // ──
+    // ── E4 increment 3a: graft a fixed-id tree → the displayed-text oracle
+    // BITES ──
     //
     // Until now the windowed `inv-displayed-text` ran but compared nothing: the
-    // honest empty oracle knows none of the vault's random-UUID blocks, so every
-    // text widget was skipped (unknown block ⇒ skip). 3a grafts the fixed shared
-    // `parent`/`c1`/`c2` tree under the Main focus root and seeds the ref with the
-    // SAME ids+content, so the rendered widgets resolve to ref-known blocks and the
-    // comparison runs for real. A clean pass + a planted-divergence FAIL together
-    // prove the windowed text oracle is non-vacuous.
+    // honest empty oracle knows none of the vault's random-UUID blocks, so
+    // every text widget was skipped (unknown block ⇒ skip). 3a grafts the fixed
+    // shared `parent`/`c1`/`c2` tree under the Main focus root and seeds the
+    // ref with the SAME ids+content, so the rendered widgets resolve to
+    // ref-known blocks and the comparison runs for real. A clean pass + a
+    // planted-divergence FAIL together prove the windowed text oracle is
+    // non-vacuous.
     runtime
         .block_on(graft_displayed_text_tree(&env))
         .expect("graft fixed-id tree under Main focus root");
-    // Re-settle: the new blocks must propagate (Turso → CDC → engine → paint) and
-    // the window must repaint them before the invariants read geometry/VM.
+    // Re-settle: the new blocks must propagate (Turso → CDC → engine → paint)
+    // and the window must repaint them before the invariants read geometry/VM.
     settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
     // Both displayed-text arms compare the grafted content: `/widget` reads the
-    // on-screen geometry (`SutLayout`), and `/viewmodel` reads the ViewModel tree —
-    // which the component resolves via the engine's RECURSIVE `snapshot` (warm
-    // window watches), so it descends through the Main-panel `live_block` into the
-    // grafted blocks. First prove the graft is genuinely on-screen so the passes
-    // below are non-vacuous.
+    // on-screen geometry (`SutLayout`), and `/viewmodel` reads the ViewModel
+    // tree — which the component resolves via the engine's RECURSIVE `snapshot`
+    // (warm window watches), so it descends through the Main-panel `live_block`
+    // into the grafted blocks. First prove the graft is genuinely on-screen so
+    // the passes below are non-vacuous.
     let geo = runtime.block_on(async { sut.rendered_elements().await });
     for (id, want) in [
         ("block:c1", "c1"),
@@ -323,8 +327,8 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
                 .unwrap_or_else(|| panic!("{id} not in ran set; ran={:?}", report.ran_ids()))
         };
 
-    // Clean run: the seeded ref knows parent/c1/c2 with matching content, so BOTH
-    // arms COMPARE them (not skip) and must reach `Ok`.
+    // Clean run: the seeded ref knows parent/c1/c2 with matching content, so
+    // BOTH arms COMPARE them (not skip) and must reach `Ok`.
     let seeded = window_ref_caps_seeded();
     let seeded_report =
         runtime.block_on(run_selected(&composed_invariant_catalog(), &sut, &seeded));
@@ -343,9 +347,9 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
     );
     eprintln!("[3a] seeded run: inv-displayed-text/{{widget,viewmodel}} both reached Ok");
 
-    // Planted run: same grafted window, but the ref claims `c1 = c1-WRONG`. BOTH
-    // arms MUST now fail on c1 — the negative control proving each layer genuinely
-    // compares the grafted content (not a vacuous skip/pass).
+    // Planted run: same grafted window, but the ref claims `c1 = c1-WRONG`.
+    // BOTH arms MUST now fail on c1 — the negative control proving each layer
+    // genuinely compares the grafted content (not a vacuous skip/pass).
     let planted = window_ref_caps_planted();
     let planted_report =
         runtime.block_on(run_selected(&composed_invariant_catalog(), &sut, &planted));
@@ -366,17 +370,17 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
     // ── E4 increment 3b: drive a focus, run the windowed focus invariant
     // ──────────
     //
-    // On boot no block is in edit mode, so no `editable_text` mounts and both focus
-    // authorities are unfocused — `inv-window-focus-matches-engine-focus` would
-    // Skip ("both authorities unfocused"), which is vacuous. Drive a REAL click on
-    // the grafted `block:c1` (through the windowed `SimUserDriver`, the same driver
-    // the windowed PBT loop uses): that mounts c1's `editable_text` and moves
-    // engine focus to it. Then run the focus invariant over the composed
-    // `CapMap`:
-    //   - clean (`window_focus_wide`, engine read live)  → engine == window == c1 →
-    //     Ok
-    //   - planted (`window_focus_wide_planted`, engine FORCED to c2) → engine c2 vs
-    //     window c1 → Fail (steal-back / zombie editor, ADR 0010).
+    // On boot no block is in edit mode, so no `editable_text` mounts and both
+    // focus authorities are unfocused — `inv-window-focus-matches-engine-focus`
+    // would Skip ("both authorities unfocused"), which is vacuous. Drive a REAL
+    // click on the grafted `block:c1` (through the windowed `SimUserDriver`,
+    // the same driver the windowed PBT loop uses): that mounts c1's
+    // `editable_text` and moves engine focus to it. Then run the focus
+    // invariant over the composed `CapMap`:
+    //   - clean (`window_focus_wide`, engine read live)  → engine == window ==
+    //     c1 → Ok
+    //   - planted (`window_focus_wide_planted`, engine FORCED to c2) → engine
+    //     c2 vs window c1 → Fail (steal-back / zombie editor, ADR 0010).
     // That clean/planted pair is the focus-axis analogue of 3a's displayed-text
     // pair — it proves the windowed focus oracle bites on the composition path,
     // not via `E2ESut`.
@@ -398,11 +402,12 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
     runtime
         .block_on(async { driver.click_entity(&c1, "main").await })
         .expect("click block:c1 to focus it (mount its editable_text)");
-    // Settle the editor mount + the spawned window-focus binding to a fixed point.
+    // Settle the editor mount + the spawned window-focus binding to a fixed
+    // point.
     settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
 
-    // Prove the click actually focused c1's editor on-screen, so the Ok below is
-    // non-vacuous: c1 must be window-focused AND its editable_text mounted.
+    // Prove the click actually focused c1's editor on-screen, so the Ok below
+    // is non-vacuous: c1 must be window-focused AND its editable_text mounted.
     let geo_focus = runtime.block_on(async { sut.rendered_elements().await });
     let window_focused: Vec<String> = geo_focus
         .iter()
@@ -426,9 +431,9 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
 
     let wf_id = "inv-window-focus-matches-engine-focus";
 
-    // Clean: the composed CapMap reads the live engine focus (= c1) and the window
-    // focus (= c1) — they agree, so the focus invariant reaches Ok over real
-    // geometry.
+    // Clean: the composed CapMap reads the live engine focus (= c1) and the
+    // window focus (= c1) — they agree, so the focus invariant reaches Ok over
+    // real geometry.
     let focus_sut = window_focus_wide(Box::new(bounds.clone()), engine.clone());
     let focus_report = runtime.block_on(run_selected(
         &composed_invariant_catalog(),
@@ -448,9 +453,9 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
     eprintln!("[3b] clean run: {wf_id} reached Ok (engine focus == window focus == block:c1)");
 
     // Planted: same window (c1 still window-focused), but the SutDriver's
-    // engine_focused_block is FORCED to report block:c2. Engine claims c2 while the
-    // window shows c1 → the invariant must Fail (the steal-back it exists to
-    // catch).
+    // engine_focused_block is FORCED to report block:c2. Engine claims c2 while
+    // the window shows c1 → the invariant must Fail (the steal-back it exists
+    // to catch).
     let planted_focus_sut = window_focus_wide_planted(
         Box::new(bounds.clone()),
         engine.clone(),
@@ -476,8 +481,8 @@ fn capmap_hosts_windowed_sutlayout_over_real_geometry() {
          focus oracle bites on the composition path"
     );
 
-    // Leak the !Send HeadlessAppContext (gpui leak detector); process exits after
-    // the test.
+    // Leak the !Send HeadlessAppContext (gpui leak detector); process exits
+    // after the test.
     drop(_rebind);
     app.update(|cx| cx.shutdown());
     app.run_until_parked();
@@ -575,8 +580,9 @@ fn nested_live_block_paints_the_rows_its_model_holds() {
             .count()
     };
 
-    // (1) MODEL: pump until the recursive ViewModel snapshot descends through the
-    // nested `live_block` and carries one marker-bearing node per query row.
+    // (1) MODEL: pump until the recursive ViewModel snapshot descends through
+    // the nested `live_block` and carries one marker-bearing node per query
+    // row.
     let model_deadline = Instant::now() + Duration::from_secs(60);
     let mut vm_rows = 0usize;
     while Instant::now() < model_deadline {
@@ -587,8 +593,8 @@ fn nested_live_block_paints_the_rows_its_model_holds() {
         }
     }
     // Then keep pumping (bounded) until the widget's rows are on screen, so the
-    // judgement below reads a settled frame rather than an in-flight one. On the
-    // defective build this simply runs to its deadline.
+    // judgement below reads a settled frame rather than an in-flight one. On
+    // the defective build this simply runs to its deadline.
     let paint_deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < paint_deadline {
         settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(30));
@@ -754,13 +760,13 @@ fn boot_band_page(app: &mut HeadlessAppContext, post_count: usize) -> BandPage {
         })
         .expect("window opened");
 
-    // Settle on the MODEL, not on paint. The outline is virtualized AND the page
-    // boots scrolled, so the band is routinely off-viewport at this point —
-    // waiting for its rows to be PAINTED here would either hang or (worse) exit
-    // the moment some unrelated row appeared, judging geometry before the query
-    // had even resolved. What must be true before a test may drive is that the
-    // band's rows exist in the ViewModel; where they are on screen is the
-    // question the tests then ask.
+    // Settle on the MODEL, not on paint. The outline is virtualized AND the
+    // page boots scrolled, so the band is routinely off-viewport at this point
+    // — waiting for its rows to be PAINTED here would either hang or (worse)
+    // exit the moment some unrelated row appeared, judging geometry before the
+    // query had even resolved. What must be true before a test may drive is
+    // that the band's rows exist in the ViewModel; where they are on screen is
+    // the question the tests then ask.
     let sut = window_wide(Box::new(bounds.clone()), engine.clone());
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut round = 0u32;
@@ -964,8 +970,8 @@ fn band_rows_do_not_overlap_the_following_sibling_row() {
     // Reveal the BAND, not the sibling: `scroll_to_entity` brings its target to
     // the top of the viewport, so revealing the sibling would push the band —
     // the thing whose bottom edge this test measures — above the fold. With the
-    // band at the top, the seam it must not cross is in view whether the band is
-    // correct (sibling just below the band's ~18 rows) or defective (sibling
+    // band at the top, the seam it must not cross is in view whether the band
+    // is correct (sibling just below the band's ~18 rows) or defective (sibling
     // drawn a few rows down, inside the band).
     {
         let driver = band_driver(&app, &page);
@@ -977,9 +983,10 @@ fn band_rows_do_not_overlap_the_following_sibling_row() {
             })
             .expect("reveal the nested query band");
     }
-    // Then settle on PAINT, bounded: the reveal's scroll → mount → paint cascade
-    // needs to commit before geometry is read. On a build where the band paints
-    // nothing this simply runs to its deadline and the assert below reports it.
+    // Then settle on PAINT, bounded: the reveal's scroll → mount → paint
+    // cascade needs to commit before geometry is read. On a build where the
+    // band paints nothing this simply runs to its deadline and the assert below
+    // reports it.
     let paint_deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < paint_deadline {
         settle_frame(
@@ -1053,8 +1060,8 @@ fn band_rows_do_not_overlap_the_following_sibling_row() {
 
     // Nothing else may overlap either: within a single outline, no two painted
     // text rows share vertical space. Whatever of the page is on screen in this
-    // frame gets checked — the sibling included when it is visible, which is the
-    // direct reading of Martin's screenshots.
+    // frame gets checked — the sibling included when it is visible, which is
+    // the direct reading of Martin's screenshots.
     let mut all: Vec<(String, f32, f32)> = painted_rows(&page.bounds, BAND_ROW_MARKER);
     all.extend(painted_rows(&page.bounds, BAND_PRE_MARKER));
     all.extend(painted_rows(&page.bounds, BAND_POST_MARKER));

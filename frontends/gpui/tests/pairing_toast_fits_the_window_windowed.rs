@@ -124,8 +124,8 @@ fn every_pairing_toast_line_is_inside_the_window() {
     });
 
     let query = holon_loro::device_pairing_op::conflict_copies_query();
-    // The bus condition reaches the toast stack over a tokio hop the watermark does
-    // not count.
+    // The bus condition reaches the toast stack over a tokio hop the watermark
+    // does not count.
     settle_window_until(
         &app,
         &bounds,

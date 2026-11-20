@@ -212,8 +212,9 @@ mod tests {
         let c = gen_key_between(Some(&b), None).unwrap();
         assert_eq!((a.as_str(), b.as_str(), c.as_str()), ("80", "8180", "8280"));
 
-        // LAST child: undo re-places it after `a` with no successor. The mint is
-        // idempotent, so the key returns byte-identical and nothing looks amiss.
+        // LAST child: undo re-places it after `a` with no successor. The mint
+        // is idempotent, so the key returns byte-identical and nothing looks
+        // amiss.
         assert_eq!(gen_key_between(Some(&a), None).unwrap(), b);
 
         // MIDDLE child: undo re-places it between `a` and the successor that

@@ -304,7 +304,8 @@ fn non_owner_root_rejected() {
 #[test]
 fn expired_intermediate_cert_breaks_chain() {
     let clock = TestClock::new(1200);
-    // Alice's own delegation cert has expired; bob's is fresh — bob still loses.
+    // Alice's own delegation cert has expired; bob's is fresh — bob still
+    // loses.
     let owner = owner_cert("A", "alice", true, Lease::starting_at(0, 1000));
     let delegate = MembershipCert::issue(
         block("A"),

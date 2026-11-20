@@ -397,17 +397,19 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
         for change in changes {
             match change {
                 Change::Created { data, .. } | Change::Updated { data, .. } => {
-                    // A single un-keyable / un-parseable CDC row must NOT kill the
-                    // whole live feed. This runs on the detached `subscribe` actor
-                    // task, so an `.expect()` panic here unwinds ONLY that task —
-                    // tokio swallows it, the CDC stream is never drained again, and
-                    // every downstream mirror (org write-back, link indexer, the
-                    // ViewModel) silently freezes with no banner (BugFunnel row 24:
-                    // "feed DIES silently mid-session, app looks healthy"). That is
-                    // the "silently degrades to look fine" anti-pattern this repo
-                    // forbids. Fail LOUD (ERROR — captured by `inv-no-observed-errors`
-                    // and visible in prod logs) and DROP just this row, keeping the
-                    // feed alive for every subsequent good row (disclosed degradation).
+                    // A single un-keyable / un-parseable CDC row must NOT kill
+                    // the whole live feed. This runs on the detached
+                    // `subscribe` actor task, so an `.expect()` panic here
+                    // unwinds ONLY that task — tokio swallows it, the CDC
+                    // stream is never drained again, and every downstream
+                    // mirror (org write-back, link indexer, the ViewModel)
+                    // silently freezes with no banner (BugFunnel row 24:
+                    // "feed DIES silently mid-session, app looks healthy").
+                    // That is the "silently degrades to look fine" anti-pattern
+                    // this repo forbids. Fail LOUD (ERROR — captured by
+                    // `inv-no-observed-errors` and visible in prod logs) and
+                    // DROP just this row, keeping the feed alive for every
+                    // subsequent good row (disclosed degradation).
                     let id = match (self.id_fn)(&data) {
                         Ok(id) => id,
                         Err(e) => {
@@ -470,11 +472,12 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     }
                 }
                 Change::FieldsChanged { entity_id, .. } => {
-                    // FieldsChanged is never produced for LiveData-backed matviews;
-                    // its arrival signals an upstream defect. Surface it LOUDLY, but
-                    // do not `panic!` — this actor is detached, so a panic here would
-                    // silently kill the whole feed (see the Created/Updated arm above,
-                    // BugFunnel row 24) instead of just flagging the bad change.
+                    // FieldsChanged is never produced for LiveData-backed
+                    // matviews; its arrival signals an upstream defect. Surface
+                    // it LOUDLY, but do not `panic!` — this actor is detached,
+                    // so a panic here would silently kill the whole feed (see
+                    // the Created/Updated arm above, BugFunnel row 24) instead
+                    // of just flagging the bad change.
                     tracing::error!(
                         "LiveData: unexpected FieldsChanged for {entity_id} — ignoring \
                          this change and keeping the feed alive (upstream defect)"
@@ -608,9 +611,9 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 //
                 // Scaled by the batch's row count, so the armed delay models a
                 // pipeline where each WRITE costs more. A flat per-batch sleep
-                // does not: CDC delivers many rows per batch, so it barely moves
-                // a per-write throughput measurement — the slowed arm once
-                // measured FASTER than the clean one.
+                // does not: CDC delivers many rows per batch, so it barely
+                // moves a per-write throughput measurement — the slowed arm
+                // once measured FASTER than the clean one.
                 #[cfg(feature = "slo-fault-injection")]
                 if let Some(d) = crate::latency_slo::fault_injection::delivery_delay() {
                     std::thread::sleep(d * change_count.max(1) as u32);
@@ -632,10 +635,11 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     changes = change_count,
                     "LiveData batch applied"
                 );
-                // Latency stage (projection->rows): a CDC batch from the matview
-                // lands and the reactive mirror applies it — the point at which a
-                // projected change becomes visible to the view model / widgets
-                // (final GPU paint excluded). Greppable via target="holon_latency".
+                // Latency stage (projection->rows): a CDC batch from the
+                // matview lands and the reactive mirror applies it — the point
+                // at which a projected change becomes visible to the view model
+                // / widgets (final GPU paint excluded). Greppable via
+                // target="holon_latency".
                 if change_count > 0 {
                     tracing::info!(
                         target: "holon_latency",

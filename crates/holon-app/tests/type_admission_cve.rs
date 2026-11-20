@@ -71,8 +71,9 @@ async fn boot_fresh_db(
                 },
             ));
             // Contributed here exactly as `turso_seams.rs` contributes it in
-            // production — the same `provide_into_set` of the same provider. The
-            // sibling `rehome_entity_op.rs` wires its provider the same way.
+            // production — the same `provide_into_set` of the same provider.
+            // The sibling `rehome_entity_op.rs` wires its provider the same
+            // way.
             injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root_async(
                 |resolver| async move {
                     let profiles = Arc::new(

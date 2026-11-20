@@ -103,7 +103,8 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         let lines: Vec<&str> = content.lines().collect();
         let mut idx = 0;
 
-        // --- Page properties: leading `key:: value` lines before the first bullet.
+        // --- Page properties: leading `key:: value` lines before the first
+        // bullet.
         let mut page_props: Vec<(String, String)> = Vec::new();
         while idx < lines.len() {
             let l = lines[idx];

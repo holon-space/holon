@@ -434,8 +434,8 @@ fn color_palette_section() -> RenderExpr {
     // The exhibit IS the vocabulary: it lists `ThemeToken::ALL`, so a token
     // added to the table appears here without anyone remembering to add it, and
     // a token removed cannot linger as a stale entry. It paints no colour
-    // itself. An entry is the token's NAME, which is the only thing a layout may
-    // write, and a palette exhibit that painted literal colours was dropped
+    // itself. An entry is the token's NAME, which is the only thing a layout
+    // may write, and a palette exhibit that painted literal colours was dropped
     // under D136.a: a literal colour is what the vocabulary exists to refuse.
     let mut entries: Vec<RenderExpr> = Vec::new();
     for chunk in ThemeToken::ALL.chunks(5) {
@@ -2048,9 +2048,10 @@ mod tests {
     #[test]
     fn board_state_accent_drives_card_accent_per_row() {
         // Proves the end-to-end flow:
-        //   board(item_template: card(accent: state_accent(col("status")), ...))
-        // The state_accent value-fn runs during card-template arg evaluation
-        // for each row, so each card gets the palette color matching its lane.
+        //   board(item_template: card(accent: state_accent(col("status")),
+        // ...)) The state_accent value-fn runs during card-template arg
+        // evaluation for each row, so each card gets the palette color matching
+        // its lane.
         let row = |status: &str| {
             Value::Object(HashMap::from([
                 ("status".to_string(), Value::String(status.into())),

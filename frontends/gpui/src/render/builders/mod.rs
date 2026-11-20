@@ -319,12 +319,12 @@ pub fn render(
         }
 
         // Under a `Nested` placement there is no definite height for the
-        // virtualized `gpui::list` to measure against — `scrollable_list_wrapper`'s
-        // `size_full` chain resolves to 0 and the list paints nothing. Render
-        // eagerly at content height instead, the same firewall
-        // `column::eager_collection_div` provides for content-sized columns.
-        // A virtualized `gpui::list` stacks its rows, so a collection laid
-        // side by side renders eagerly too.
+        // virtualized `gpui::list` to measure against —
+        // `scrollable_list_wrapper`'s `size_full` chain resolves to 0 and the
+        // list paints nothing. Render eagerly at content height instead, the
+        // same firewall `column::eager_collection_div` provides for
+        // content-sized columns. A virtualized `gpui::list` stacks its rows, so
+        // a collection laid side by side renders eagerly too.
         let horizontal = view.layout().is_some_and(|l| l.flow.is_horizontal());
         if ctx.placement == crate::views::ShellPlacement::Nested || horizontal {
             return tag(

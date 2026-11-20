@@ -60,9 +60,9 @@ impl<R: RefLifecycle + RefViewSelection + RefArrowNav<Direction = NavDirection>>
 
         for region in &regions {
             if state.region_has_focus(*region) {
-                // Determine available directions from navigator type. The render
-                // name is main-panel/sidebar granular (CapRegion collapses the
-                // two sidebars, which both list-navigate anyway).
+                // Determine available directions from navigator type. The
+                // render name is main-panel/sidebar granular (CapRegion
+                // collapses the two sidebars, which both list-navigate anyway).
                 let cap_region = match region {
                     Region::Main => CapRegion::Main,
                     _ => CapRegion::Sidebar,

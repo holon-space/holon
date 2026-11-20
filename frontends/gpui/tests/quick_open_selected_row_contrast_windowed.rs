@@ -177,7 +177,8 @@ impl Fixture {
             interaction_tx,
         ));
 
-        // ALLOW(entity_uri_from_raw): the seed grafts this bare id; schemed here.
+        // ALLOW(entity_uri_from_raw): the seed grafts this bare id; schemed
+        // here.
         let target = EntityUri::from_raw(CHORD_TARGET_ID);
         let root_id = holon_api::root_layout_block_uri();
         Self {

@@ -230,7 +230,8 @@ fn decl(y: &Y, path: &str) -> R<Decl> {
                 .map(|c| regex_syntax::escape(&c.to_string()))
                 .collect();
             // The language holds only values `get` can read without overflowing
-            // `i128` (below 10^37); a longer number falls to the union's `otherwise`.
+            // `i128` (below 10^37); a longer number falls to the union's
+            // `otherwise`.
             DeclKind::Number {
                 re: Re::parse(
                     &format!("[0-9]{{1,{INT_DIGITS}}}([{class}][0-9]{{1,18}})?"),
@@ -243,8 +244,8 @@ fn decl(y: &Y, path: &str) -> R<Decl> {
         }
         "fraction" => {
             keys_in(v, &[], &p)?;
-            // Only fractions `get` can read: a non-zero denominator, and whole·den + num
-            // within `i128`.
+            // Only fractions `get` can read: a non-zero denominator, and
+            // whole·den + num within `i128`.
             DeclKind::Fraction(Re::parse(
                 "([0-9]{1,18} +)?[0-9]{1,18} */ *0{0,17}[1-9][0-9]{0,17}",
                 &p,

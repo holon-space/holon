@@ -427,8 +427,8 @@ fn the_breadcrumb_follows_the_view_root_and_then_the_focus() {
     );
 
     // A BACKGROUND tab closing moves no view and no caret, so the bar must not
-    // move either. `navigation.close` carries no region, so the mirror bumps the
-    // view generation for it regardless — the bar must survive that.
+    // move either. `navigation.close` carries no region, so the mirror bumps
+    // the view generation for it regardless — the bar must survive that.
     let recaret = tap_target(engine.ui_state().focused_block());
     runtime
         .block_on(async { driver.click_entity(&recaret, "main").await })

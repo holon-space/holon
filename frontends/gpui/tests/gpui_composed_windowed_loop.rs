@@ -67,7 +67,8 @@ fn benchmark_windowed_per_case_boot_cost() {
             let oracle = wide_e2e_windowed_ref(narrow_to_windowed_alphabet(live));
             ComposedSut::<WideE2E>::check_invariants(&sut, &oracle);
 
-            // Two ClickBlock ticks (c1/c2 are the wide working-tree text leaves).
+            // Two ClickBlock ticks (c1/c2 are the wide working-tree text
+            // leaves).
             let mut cur_oracle = oracle.clone();
             for block in ["c1", "c2"] {
                 let t = E2ETransition::ClickBlock(ClickBlock {
@@ -149,15 +150,16 @@ fn drive_windowed_case(
 
     for transition in transitions {
         let step_label = transition.variant_name();
-        // Mirror `test_sequential`: mark the transition seen BEFORE applying, so the
-        // shrinker's "delete unseen trailing transitions" step is correct.
+        // Mirror `test_sequential`: mark the transition seen BEFORE applying,
+        // so the shrinker's "delete unseen trailing transitions" step is
+        // correct.
         if let Some(c) = seen_counter.as_ref() {
             c.fetch_add(1, Ordering::SeqCst);
         }
         ref_state = <WideE2EMachine as ReferenceStateMachine>::apply(ref_state, &transition);
 
-        // SUT-side apply consumes the SUT; catch so a driver-level panic tears down
-        // cleanly (the SUT is dropped inside the caught unwind on a
+        // SUT-side apply consumes the SUT; catch so a driver-level panic tears
+        // down cleanly (the SUT is dropped inside the caught unwind on a
         // non-runtime-entered thread).
         match catch_unwind(AssertUnwindSafe(|| {
             ComposedSut::<WideE2E>::apply(sut, &ref_state, transition)
@@ -215,8 +217,8 @@ fn drive_windowed_case(
 /// acceptable outcome; a fudged-green one is not.
 #[test]
 fn general_e2e_composed_pbt_windowed() {
-    // One throwaway window boot to read + narrow + DISCLOSE the live windowed cap
-    // set. The strategy's `init_state` needs it before generation begins.
+    // One throwaway window boot to read + narrow + DISCLOSE the live windowed
+    // cap set. The strategy's `init_state` needs it before generation begins.
     with_windowed_wide_sut(|sut, _default_oracle, _sink| {
         let live = sut.cap_set();
         disclose_excluded(&live);

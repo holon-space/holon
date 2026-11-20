@@ -122,9 +122,9 @@ fn journals_feed_expands_only_the_day_pages_on_screen() {
     let days = runtime
         .block_on(graft_journal_days(&env, JOURNAL_DAY_COUNT))
         .expect("graft the journals day pages");
-    // A hundred new pages are a hundred new documents: let the CDC/org-writeback
-    // wave finish before asking the window for a stable frame, or the settle
-    // chases a backend that is still moving.
+    // A hundred new pages are a hundred new documents: let the
+    // CDC/org-writeback wave finish before asking the window for a stable
+    // frame, or the settle chases a backend that is still moving.
     runtime.block_on(env.settle());
     settle_frame(&app, &bounds, &runtime, &env, Duration::from_secs(60));
 
@@ -255,11 +255,11 @@ fn journals_feed_expands_only_the_day_pages_on_screen() {
          down to y {laid_out_bottom:.0}",
     );
 
-    // VACUITY GUARDS. The oracle below can reach `Ok` without judging anything —
-    // an empty feed, an unreadable expansion state, or a frame with no day left
-    // off screen all produce a green that means nothing. These pin the evidence
-    // the verdict has to have been drawn from, so a green verdict after A2
-    // cannot be confused with an unexercised one.
+    // VACUITY GUARDS. The oracle below can reach `Ok` without judging anything
+    // — an empty feed, an unreadable expansion state, or a frame with no day
+    // left off screen all produce a green that means nothing. These pin the
+    // evidence the verdict has to have been drawn from, so a green verdict
+    // after A2 cannot be confused with an unexercised one.
     assert!(
         !onscreen.is_empty(),
         "the panel must paint at least one of the {} grafted day pages, else the claim below is \

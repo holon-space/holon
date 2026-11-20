@@ -223,7 +223,8 @@ impl OrgModeSyncProvider {
                 // the same carrier the ingest resolves identity from.
                 let document = match parse_doc_uri_any_carrier(&content) {
                     Ok(document) => document,
-                    // The ingest refuses this file by name; its row names no document.
+                    // The ingest refuses this file by name; its row names no
+                    // document.
                     Err(e) => {
                         tracing::debug!(path = %path.display(), error = %format!("{e:#}"), "[OrgModeSyncProvider] file declares an unusable document id");
                         None
@@ -287,7 +288,8 @@ impl OrgModeSyncProvider {
         for delta in changes {
             // Look for FieldDeltas with field name "file_path"
             if delta.field == "file_path" {
-                // Extract file path from new_value (or old_value if new_value is null)
+                // Extract file path from new_value (or old_value if new_value
+                // is null)
                 if let Value::String(path_str) = &delta.new_value {
                     if !path_str.is_empty() {
                         file_paths.insert(PathBuf::from(path_str));
@@ -397,18 +399,18 @@ impl SyncableProvider for OrgModeSyncProvider {
     async fn sync_changes(&self, changes: &[FieldDelta]) -> Result<()> {
         use tracing::info;
 
-        // TODO: Once operations return OperationResult with FieldDeltas, extract file
-        // paths from changes For now, operations don't return FieldDeltas, so
-        // changes is always empty Since operations write files directly, we
-        // should NOT sync from files (would cause duplicates) Instead, we need
-        // to update sync state hash for affected files
+        // TODO: Once operations return OperationResult with FieldDeltas,
+        // extract file paths from changes For now, operations don't return
+        // FieldDeltas, so changes is always empty Since operations write files
+        // directly, we should NOT sync from files (would cause duplicates)
+        // Instead, we need to update sync state hash for affected files
 
         if changes.is_empty() {
-            // No FieldDeltas available - operations wrote files but didn't tell us which
-            // ones We can't safely update sync state without knowing which
-            // files changed For now, skip sync entirely - operations already
-            // wrote files TODO: Once operations return FieldDeltas, extract
-            // file paths and update sync state
+            // No FieldDeltas available - operations wrote files but didn't tell
+            // us which ones We can't safely update sync state without knowing
+            // which files changed For now, skip sync entirely - operations
+            // already wrote files TODO: Once operations return FieldDeltas,
+            // extract file paths and update sync state
             info!(
                 "[OrgModeSyncProvider] sync_changes: No FieldDeltas available (operations don't \
                  return them yet), skipping sync to avoid duplicates"

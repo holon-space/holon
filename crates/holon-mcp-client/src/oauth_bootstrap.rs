@@ -154,8 +154,8 @@ impl AuthState {
     /// matter.
     fn matches(&self, candidate: &str) -> bool {
         let (a, b) = (self.0.as_bytes(), candidate.as_bytes());
-        // A plain `!=` flag rather than folding the lengths in with `as u8`: the
-        // cast truncated, so a candidate padded to exactly 256 bytes longer
+        // A plain `!=` flag rather than folding the lengths in with `as u8`:
+        // the cast truncated, so a candidate padded to exactly 256 bytes longer
         // contributed 0 and — since the byte loop zero-pads the shorter side —
         // a NUL-padded nonce compared EQUAL.
         let mut diff: u8 = u8::from(a.len() != b.len());
@@ -413,7 +413,8 @@ impl LoopbackRedirect {
             let read_budget =
                 deadline.min(tokio::time::Instant::now() + PER_CONNECTION_READ_BUDGET);
             match tokio::time::timeout_at(read_budget, read_request_target(&mut sock)).await {
-                // A request line arrived: this is the callback, for good or ill.
+                // A request line arrived: this is the callback, for good or
+                // ill.
                 Ok(Ok(Some(target))) => break (sock, target),
                 // Connected and closed without saying anything — a preconnect.
                 // Keep waiting for the real redirect.
@@ -421,8 +422,8 @@ impl LoopbackRedirect {
                 // A malformed or oversized request is not something to keep
                 // waiting through; it is refused loudly.
                 Ok(Err(e)) => return Err(e),
-                // This peer went quiet. Drop it and keep the window open for the
-                // genuine callback, unless the whole window is gone.
+                // This peer went quiet. Drop it and keep the window open for
+                // the genuine callback, unless the whole window is gone.
                 Err(_) => {
                     if tokio::time::Instant::now() >= deadline {
                         return Err(timed_out());
@@ -515,7 +516,8 @@ async fn read_request_target(sock: &mut tokio::net::TcpStream) -> anyhow::Result
 /// nonce does not match is somebody else's redirect, and neither the code nor
 /// the error message should be believed or acted on.
 fn parse_callback(target: &str, expected_state: &AuthState) -> anyhow::Result<String> {
-    // The target is origin-form (`/?code=…`); a base is needed only to parse it.
+    // The target is origin-form (`/?code=…`); a base is needed only to parse
+    // it.
     let url = reqwest::Url::parse("http://127.0.0.1")
         .expect("a literal loopback base URL parses")
         .join(target)

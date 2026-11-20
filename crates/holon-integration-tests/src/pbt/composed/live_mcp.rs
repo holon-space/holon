@@ -191,10 +191,10 @@ impl LiveMcp {
         }
 
         // The click's editor focus lands a frame LATER on iOS (idle rendering:
-        // often the next keystroke is what drives the frame that applies focus),
-        // so caret keystrokes sent immediately would miss the editor. Wait until
-        // the engine's authoritative focus IS this block before returning — fail
-        // loud on timeout with the last seen focus.
+        // often the next keystroke is what drives the frame that applies
+        // focus), so caret keystrokes sent immediately would miss the editor.
+        // Wait until the engine's authoritative focus IS this block before
+        // returning — fail loud on timeout with the last seen focus.
         let want = resolved.to_string();
         let poll_start = std::time::Instant::now();
         loop {
@@ -442,9 +442,9 @@ impl SutLoroLog for LiveMcp {
     }
 
     async fn loro_block_snapshot(&self) -> Option<Vec<Block>> {
-        // Union every loaded Loro doc's blocks (the app is Loro-authority — this
-        // is the live tree, bypassing SQL). `inspect_loro_blocks` returns the same
-        // `BlockWire` shape `debug_pbt_snapshot.live_blocks` carries.
+        // Union every loaded Loro doc's blocks (the app is Loro-authority —
+        // this is the live tree, bypassing SQL). `inspect_loro_blocks` returns
+        // the same `BlockWire` shape `debug_pbt_snapshot.live_blocks` carries.
         let docs = self.list_documents().await;
         let mut out = Vec::new();
         for doc_id in docs {
@@ -638,9 +638,9 @@ impl SutBlockTreeWrite for LiveMcp {
     async fn apply_outdent(&self, id: &EntityUri) {
         let resolved = self.resolve(id);
         self.focus_editor(&resolved, "Outdent").await;
-        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a driver
-        // failure — see `is_page_boundary_outdent_refusal`. Any OTHER keystroke
-        // error stays fail-loud.
+        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a
+        // driver failure — see `is_page_boundary_outdent_refusal`. Any OTHER
+        // keystroke error stays fail-loud.
         if let Err(e) = self.driver.send_raw_keystroke("tab", &["shift"]).await {
             let msg = format!("{e:#}");
             assert!(
@@ -1129,8 +1129,8 @@ impl ComposedSlice for LiveMcpE2E {
     /// and refreshes the UI snapshot through it.
     type Handle = Arc<McpUserDriver>;
 
-    // The per-draw `required_invariants` override (delegated to `WideE2E`) derives
-    // the floor from the drawn cap set, so no static list is needed.
+    // The per-draw `required_invariants` override (delegated to `WideE2E`)
+    // derives the floor from the drawn cap set, so no static list is needed.
     const REQUIRED_INVARIANTS: &'static [&'static str] = &[];
     const SETTLE: Duration = Duration::from_millis(QUIESCE_BUDGET_MS);
     const MULTI_THREAD: bool = true;
@@ -1179,9 +1179,9 @@ impl ComposedSlice for LiveMcpE2E {
         let mut caps = CapMap::new();
         register_live_caps_for_target(&mut caps, provider);
 
-        // Scaffold = everything booted OR modeled by the oracle EXCEPT the non-seed
-        // working tree (parent/c1/c2) and `block:journals` (present + asserted on
-        // both sides). Identical math to `boot_and_seed_wide`.
+        // Scaffold = everything booted OR modeled by the oracle EXCEPT the
+        // non-seed working tree (parent/c1/c2) and `block:journals` (present +
+        // asserted on both sides). Identical math to `boot_and_seed_wide`.
         let fixed = fixed_ids();
         let journals = EntityUri::parse("block:journals").expect("journals id");
         let tree: BTreeSet<EntityUri> = [fixed.parent, fixed.c1, fixed.c2].into_iter().collect();

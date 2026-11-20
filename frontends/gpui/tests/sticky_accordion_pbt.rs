@@ -439,7 +439,8 @@ fn journals_multi_section_engages_all_three_invariants(cx: &mut TestAppContext) 
          occl(list)={r_occl_list:?}\n  occl(footer)={r_occl_footer:?}"
     );
 
-    // DONE-CRITERIA: non-zero engagement (Ok/Fail, never all-Skip) for each body.
+    // DONE-CRITERIA: non-zero engagement (Ok/Fail, never all-Skip) for each
+    // body.
     assert!(
         sticky_engaged >= 1,
         "inv-sticky-accordion-spec never engaged (vacuous)"

@@ -189,7 +189,8 @@ fn sidecar_remedy_keys_are_keys_the_parser_accepts() {
     use holon_mcp_client::integration_config::HOLON_TOOLS_KEY;
     use holon_mcp_client::integration_config::MANUAL_TOOLS_KEY;
 
-    // The constants say where things live; this sidecar puts them exactly there.
+    // The constants say where things live; this sidecar puts them exactly
+    // there.
     let (manual_head, manual_tools) = MANUAL_TOOLS_KEY
         .split_once('.')
         .expect("the manual-tools key is dotted");

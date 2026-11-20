@@ -76,8 +76,8 @@ async fn mcp_user_driver_smoke() -> Result<()> {
     }
 
     // 3. Assert the DRIVER round-trip: after a short settle for the async input
-    //    pipeline, the add-block editor is present in the main-panel `describe_ui`
-    //    tree.
+    //    pipeline, the add-block editor is present in the main-panel
+    //    `describe_ui` tree.
     //
     //    NOTE on what is (not) asserted: `describe_ui` does NOT serialize a
     //    text editor's *transient* (uncommitted) buffer — only widget

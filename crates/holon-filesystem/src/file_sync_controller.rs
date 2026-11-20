@@ -209,10 +209,10 @@ impl DocOrder {
         }
 
         // Derived from the orphan set itself, never from a count: the root is a
-        // holder member only once its own `Upsert` has landed, so any arithmetic
-        // that budgets for it goes silent on exactly the documents whose root is
-        // still in flight — a silent exclusion, which is the one outcome this
-        // WARN exists to prevent.
+        // holder member only once its own `Upsert` has landed, so any
+        // arithmetic that budgets for it goes silent on exactly the documents
+        // whose root is still in flight — a silent exclusion, which is the one
+        // outcome this WARN exists to prevent.
         let mut orphans: Vec<&str> = self
             .blocks
             .keys()
@@ -1824,8 +1824,9 @@ impl FileSyncController {
                                 self.booted_base_hash
                                     .insert(canonical.clone(), projection.base_hash);
                             }
-                            // A file behind its store holds the empty hash: only
-                            // its base is known, nothing a boot may skip on.
+                            // A file behind its store holds the empty hash:
+                            // only its base is known, nothing a boot may skip
+                            // on.
                             if projection.content_hash.is_empty() {
                                 continue;
                             }
@@ -1927,8 +1928,9 @@ impl FileSyncController {
 
         // last_projection (full rendered string) is intentionally NOT eagerly
         // populated by walking every block — it is the session's merge base,
-        // populated lazily by `on_file_changed`. Walking iter_documents_with_blocks
-        // here would pay parse+render cost for every doc on every boot.
+        // populated lazily by `on_file_changed`. Walking
+        // iter_documents_with_blocks here would pay parse+render cost for every
+        // doc on every boot.
         info!("[FileSyncController] Initialize complete");
         Ok(())
     }
@@ -2157,7 +2159,8 @@ impl FileSyncController {
 
     async fn heal_title_less_doc_root(&mut self, path: &Path, disk_content: &str) -> Result<bool> {
         // A declared id the format refuses is not a heal candidate:
-        // `ingest_file` reaches the same probe next and refuses the file by name.
+        // `ingest_file` reaches the same probe next and refuses the file by
+        // name.
         let Ok(Some(id)) = self.adapter(path)?.doc_id_from_content(disk_content) else {
             return Ok(false);
         };
@@ -2194,8 +2197,8 @@ impl FileSyncController {
             // derivable stem (a pathological empty stem, e.g. a bare `.org`).
             // Re-deriving an empty title would silently re-leave the blank row,
             // so disclose loudly by doc id and leave content empty; the sidebar
-            // row is covered by the disclosed render-side `(untitled)` placeholder
-            // (`render_eval` `empty:` named-arg, PR #59).
+            // row is covered by the disclosed render-side `(untitled)`
+            // placeholder (`render_eval` `empty:` named-arg, PR #59).
             tracing::warn!(
                 doc_id = %doc.id,
                 path = %path.display(),
@@ -2226,10 +2229,11 @@ impl FileSyncController {
         );
         doc.content = filename_title;
         doc.parent_id = derived_parent;
-        // Converge through the single org→block write seam a normal block update
-        // uses. A MINIMAL params map (no `tags`/`requires` keys) so `update_in_tree`
-        // leaves the `Page` tag + junctions untouched and only rewrites content +
-        // parent. `ROUTING_DOC_URI_KEY` is the doc-root's own id (it IS the doc).
+        // Converge through the single org→block write seam a normal block
+        // update uses. A MINIMAL params map (no `tags`/`requires` keys) so
+        // `update_in_tree` leaves the `Page` tag + junctions untouched and only
+        // rewrites content + parent. `ROUTING_DOC_URI_KEY` is the doc-root's
+        // own id (it IS the doc).
         let mut params = holon_api::StorageEntity::new();
         params.insert("id".into(), Value::String(doc.id.to_string()));
         params.insert("parent_id".into(), Value::String(doc.parent_id.to_string()));
@@ -2345,18 +2349,19 @@ impl FileSyncController {
         // (recognition principle). Before ANY cascade, check whether this doc's
         // identity (`#+ID`) already lives at ANOTHER tracked path that still
         // exists on disk. If so, the vanished file is the SOURCE side of a
-        // rename whose destination we already track — the watcher's pairing fell
-        // back to a bare `Remove` (a byte-syncer / lock file interposed, or the
-        // pair timed out), and the title-based D3 guard below cannot catch it
-        // because the title has not yet followed. Re-home instead of
+        // rename whose destination we already track — the watcher's pairing
+        // fell back to a bare `Remove` (a byte-syncer / lock file interposed,
+        // or the pair timed out), and the title-based D3 guard below cannot
+        // catch it because the title has not yet followed. Re-home instead of
         // cascade-deleting a LIVE doc. A TRUE move-out-of-vault (the id lives
         // nowhere else) falls through and still cascades below.
         //
-        // Bounded: scans only the in-memory `last_projection` (the tracked set),
-        // not the whole vault. The Remove-arrives-before-the-destination-ingest
-        // ordering (which this scan cannot see yet) is prevented at the source by
-        // the pairing's relevance-gate + timeout-only flush, and any residual is
-        // repaired by `poll_new_files` + re-ingest.
+        // Bounded: scans only the in-memory `last_projection` (the tracked
+        // set), not the whole vault. The
+        // Remove-arrives-before-the-destination-ingest ordering (which this
+        // scan cannot see yet) is prevented at the source by the pairing's
+        // relevance-gate + timeout-only flush, and any residual is repaired by
+        // `poll_new_files` + re-ingest.
         let mut reunion: Option<PathBuf> = None;
         for (p, content) in &self.last_projection {
             if p == canonical {
@@ -2388,15 +2393,15 @@ impl FileSyncController {
             return Box::pin(self.on_file_renamed(path, &dest)).await;
         }
 
-        // D3 / identity plan §5 guard (order matters: guard BEFORE any delete). A
-        // page rename re-homes the doc to a NEW `<new-title>.org` and removes the
-        // OLD file; that removal fires THIS handler for the old path, whose
-        // `#+ID:` still resolves to the (renamed, re-homed) doc. Cascade-deleting
-        // here would DELETE the very doc the rename just moved — the double
-        // defect the RenameDocument SUT comments flag. So: never cascade-delete a
-        // doc whose CURRENT authoritative file path is a DIFFERENT file than the
-        // vanished one. The vanished file is stale rename-cleanup — forget it and
-        // stop.
+        // D3 / identity plan §5 guard (order matters: guard BEFORE any delete).
+        // A page rename re-homes the doc to a NEW `<new-title>.org` and removes
+        // the OLD file; that removal fires THIS handler for the old path, whose
+        // `#+ID:` still resolves to the (renamed, re-homed) doc.
+        // Cascade-deleting here would DELETE the very doc the rename just moved
+        // — the double defect the RenameDocument SUT comments flag. So: never
+        // cascade-delete a doc whose CURRENT authoritative file path is a
+        // DIFFERENT file than the vanished one. The vanished file is stale
+        // rename-cleanup — forget it and stop.
         if document.is_page() {
             let current_chain = self.authoritative_name_chain(&document_uri).await?;
             if !current_chain.is_empty() {
@@ -2430,10 +2435,10 @@ impl FileSyncController {
             }
         }
 
-        // Ownership proof before ANY cascade, the block-side twin of the retire's
-        // `stale_home_ownership`. Identity taken from the vanished file's own
-        // last projection is self-proving; identity taken from the name chain is
-        // a GUESS and must be backed by a home record.
+        // Ownership proof before ANY cascade, the block-side twin of the
+        // retire's `stale_home_ownership`. Identity taken from the vanished
+        // file's own last projection is self-proving; identity taken from the
+        // name chain is a GUESS and must be backed by a home record.
         let authority = if rooted_here.is_some() {
             CascadeAuthority::ItsOwnLastProjection
         } else {
@@ -3468,8 +3473,9 @@ impl FileSyncController {
         // source, quarantine) from the old path to the new one.
         self.migrate_file_state(&from_canon, &to_canon)?;
 
-        // Re-point the doc's home so `inv-every-page-has-its-own-file` and every
-        // file-tracking consumer resolve the doc to its NEW home immediately.
+        // Re-point the doc's home so `inv-every-page-has-its-own-file` and
+        // every file-tracking consumer resolve the doc to its NEW home
+        // immediately.
         self.note_doc_home(&document_uri, to, HomeMembership::Untouched)?;
         if let Some(ref registrar) = self.alias_registrar {
             registrar.register_alias(&document_uri, to).await;
@@ -3491,9 +3497,10 @@ impl FileSyncController {
         };
 
         // File-move spec (D2): a document page's title FOLLOWS its file name.
-        // Retitle the doc-root page to the new file stem through the SAME single
-        // org->block write seam a normal update uses (the heal path's mechanism).
-        // A no-op when the stem is unchanged or the file is not a page.
+        // Retitle the doc-root page to the new file stem through the SAME
+        // single org->block write seam a normal update uses (the heal path's
+        // mechanism). A no-op when the stem is unchanged or the file is not a
+        // page.
         if document.is_page() {
             if let Ok(rel) = to.strip_prefix(&self.root_dir) {
                 let segments = path_to_name_chain(rel);
@@ -3849,8 +3856,8 @@ impl FileSyncController {
     async fn on_file_changed_unpersisted(&mut self, path: &Path) -> Result<IngestOutcome> {
         let canonical = CanonicalPath::new(path);
         // Post-boot pre-ingest steps, in INVARIANT ORDER. A vanished file reads
-        // as `None` — that is an external deletion, which `ingest_file` handles.
-        // During the initial scan neither step applies: the one-shot
+        // as `None` — that is an external deletion, which `ingest_file`
+        // handles. During the initial scan neither step applies: the one-shot
         // `heal_title_less_doc_roots` sweep runs once after the scan instead,
         // and `ingest_file` carries the same mount guard for that path.
         if !self.in_initial_scan() {
@@ -3882,9 +3889,9 @@ impl FileSyncController {
                 // file proves nothing of the sort — nothing of it was read into
                 // the store — so its quarantine stands.
                 if outcome == IngestOutcome::Ingested {
-                    // All-clear for a prior refusal of this file. Unconditional:
-                    // clearing a condition that was never raised broadcasts
-                    // nothing.
+                    // All-clear for a prior refusal of this file.
+                    // Unconditional: clearing a condition that was never raised
+                    // broadcasts nothing.
                     if let Some(disclosure) = &self.writeback_disclosure {
                         disclosure.ingest_recovered(path);
                     }
@@ -4182,10 +4189,10 @@ impl FileSyncController {
                 .await?
             {
                 Some(existing) => {
-                    // A page already claims this (parent, title). If a companion
-                    // file claims a DIFFERENT authoritative id, two roots
-                    // genuinely contend for this folder — disclose both ids
-                    // loudly (fail-loud philosophy) rather than silently
+                    // A page already claims this (parent, title). If a
+                    // companion file claims a DIFFERENT authoritative id, two
+                    // roots genuinely contend for this folder — disclose both
+                    // ids loudly (fail-loud philosophy) rather than silently
                     // adopt-by-guess. Keep the existing page so we don't mint a
                     // third; a one-time dedup migration reconciles legacy rows.
                     if let Some(comp) = &companion_id {
@@ -4213,8 +4220,8 @@ impl FileSyncController {
                 }
                 None => {
                     // `create_forcing_id`: the adopted companion `#+ID` (or the
-                    // page_slot id) IS this page's identity — never substitute a
-                    // same-`(parent,title)` row minted elsewhere.
+                    // page_slot id) IS this page's identity — never substitute
+                    // a same-`(parent,title)` row minted elsewhere.
                     let create = |id: EntityUri| {
                         let mut new_doc =
                             Block::new_text(id, current_parent_id.clone(), segment.to_string());
@@ -5356,10 +5363,10 @@ impl FileSyncController {
         match self.probe_share_file(path, disk_content).await? {
             ShareProbe::Ordinary => Ok(false),
             ShareProbe::UnregisteredDrawer(page_id) => {
-                // Content looks like a mount but the page id is NOT a registered
-                // mount — a hand-authored / imported / templated `share-role`
-                // drawer. Disclosed, then ingested as a normal file (never
-                // silently dropped).
+                // Content looks like a mount but the page id is NOT a
+                // registered mount — a hand-authored / imported / templated
+                // `share-role` drawer. Disclosed, then ingested as a normal
+                // file (never silently dropped).
                 tracing::warn!(
                     path = %path.display(),
                     page_id = %page_id,
@@ -5389,9 +5396,9 @@ impl FileSyncController {
     /// ops.
     #[tracing::instrument(skip(self), name = "org.ingest_file", fields(path = %path.display()))]
     async fn ingest_file(&mut self, path: &Path) -> Result<IngestOutcome> {
-        // Model.md invariant 11: skip (only) a byte-syncer conflict artifact that
-        // appears at runtime — ingesting it would create a duplicate-ID document.
-        // Disclosed, never silent; normal files are unaffected.
+        // Model.md invariant 11: skip (only) a byte-syncer conflict artifact
+        // that appears at runtime — ingesting it would create a duplicate-ID
+        // document. Disclosed, never silent; normal files are unaffected.
         if crate::sync_conflict::is_sync_conflict_artifact(path) {
             tracing::error!(
                 path = %path.display(),
@@ -5419,9 +5426,9 @@ impl FileSyncController {
 
         // A 0-byte file at a path Holon HOLDS CONTENT FOR is a save in flight:
         // every truncate-then-write save makes the target observable at zero
-        // length first, and parsing it yields zero blocks, which the ingest diff
-        // turns into a delete of every block the document had. Refuse it and
-        // wait for the bytes.
+        // length first, and parsing it yields zero blocks, which the ingest
+        // diff turns into a delete of every block the document had. Refuse it
+        // and wait for the bytes.
         //
         // At a path Holon holds nothing for there is no such document, and a
         // 0-byte file is not an intermediate at all: it is what an empty
@@ -5538,21 +5545,22 @@ impl FileSyncController {
             &disk_root,
         ) {
             // Invariant: fast-path skip requires the content present in EVERY
-            // active store, not just SQL. The matching hash proves the SQL side;
-            // `content_present_in_all_stores` additionally proves the Loro side
-            // when Loro is an active store. A SQL hash match with an empty Loro
-            // tree (the 2026-07-06 reset hole: fresh `.loro` + retained SQL row)
-            // must NOT skip — skipping leaves SQL and Loro silently diverged and
-            // the next Loro create fails at `resolve_parent_tree_id`.
+            // active store, not just SQL. The matching hash proves the SQL
+            // side; `content_present_in_all_stores` additionally proves the
+            // Loro side when Loro is an active store. A SQL hash match with an
+            // empty Loro tree (the 2026-07-06 reset hole: fresh `.loro` +
+            // retained SQL row) must NOT skip — skipping leaves SQL and Loro
+            // silently diverged and the next Loro create fails at
+            // `resolve_parent_tree_id`.
             //
             // This predicate certifies ONLY byte-identity + store presence. It
-            // deliberately does NOT reason about store HEALTH (e.g. a title-less
-            // doc-root) — encoding a specific degradation here would leak the
-            // next degradation class through the same skip. Store-health repair
-            // is a separate, unconditional concern owned by
-            // `heal_title_less_doc_roots` (boot sweep) + the file-watch heal seam.
-            // A failed ingest bails before it stamps the hash, so a recorded
-            // refusal means the store may hold what that ingest wrote.
+            // deliberately does NOT reason about store HEALTH (e.g. a
+            // title-less doc-root) — encoding a specific degradation here would
+            // leak the next degradation class through the same skip.
+            // Store-health repair is a separate, unconditional concern owned by
+            // `heal_title_less_doc_roots` (boot sweep) + the file-watch heal
+            // seam. A failed ingest bails before it stamps the hash, so a
+            // recorded refusal means the store may hold what that ingest wrote.
             if stored == &disk_hash
                 && !self.persisted_refusals.contains_key(&canonical)
                 && self.content_present_in_all_stores(root).await?
@@ -5626,11 +5634,12 @@ impl FileSyncController {
             path.display()
         );
 
-        // Boot-ingest instrumentation (holon_latency target, Option 0). Marks the
-        // start of the real ingest path (past the mount skip + the cold-boot
-        // fast-path skip). `boot_parse` / `boot_write` / `boot_place_wait` /
-        // `boot_feed_wait` split this file's cost; `boot_file` (per-file total) is
-        // emitted by the scan driver in `run_file_sync_controller`.
+        // Boot-ingest instrumentation (holon_latency target, Option 0). Marks
+        // the start of the real ingest path (past the mount skip + the
+        // cold-boot fast-path skip). `boot_parse` / `boot_write` /
+        // `boot_place_wait` / `boot_feed_wait` split this file's cost;
+        // `boot_file` (per-file total) is emitted by the scan driver in
+        // `run_file_sync_controller`.
         let t_ingest = std::time::Instant::now();
 
         let rel_path = path.strip_prefix(&self.root_dir).map_err(|e| {
@@ -5693,16 +5702,17 @@ impl FileSyncController {
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
         // A title-less (empty-content) `Page` doc-root left by a broken
-        // convert/delete is NOT repaired here — the byte-identity fast-path above
-        // skips an unchanged degraded file before this point, so healing in ingest
-        // would be unreachable exactly for the case that needs it. Repair is the
-        // store-health seam's job (`heal_title_less_doc_roots` boot sweep +
-        // the file-watch heal in `on_file_changed`), which runs before/around this
-        // ingest, so the doc resolved here is already healed in the store.
-        // `doc_was_created` (R3b): whether THIS ingest minted the doc-page (vs
-        // resolved an existing one). Computed from the resolution itself —
-        // BEFORE `create_forcing_id`/`resolve_dir_page_chain` materialise the row
-        // — so a re-ingest/edit of an existing doc never counts as a create.
+        // convert/delete is NOT repaired here — the byte-identity fast-path
+        // above skips an unchanged degraded file before this point, so healing
+        // in ingest would be unreachable exactly for the case that needs it.
+        // Repair is the store-health seam's job (`heal_title_less_doc_roots`
+        // boot sweep + the file-watch heal in `on_file_changed`), which runs
+        // before/around this ingest, so the doc resolved here is already healed
+        // in the store. `doc_was_created` (R3b): whether THIS ingest minted the
+        // doc-page (vs resolved an existing one). Computed from the resolution
+        // itself — BEFORE `create_forcing_id`/`resolve_dir_page_chain`
+        // materialise the row — so a re-ingest/edit of an existing doc never
+        // counts as a create.
         let (document, doc_was_created) = match id_in_file.clone() {
             Some(id) => {
                 match self.doc_manager.get_by_id(&id).await? {
@@ -5724,15 +5734,16 @@ impl FileSyncController {
                         // `Frontends/GPUI.org` next to `Frontends.org`) mints a
                         // random-id name-chain placeholder page for the shared
                         // `Frontends` segment; a plain `create` would de-dup by
-                        // `(parent, title)` and hand that placeholder's id back,
-                        // so writeback would re-mint this file's `#+ID` (data
-                        // loss). `create_forcing_id` keeps the authoritative id.
+                        // `(parent, title)` and hand that placeholder's id
+                        // back, so writeback would re-mint this file's `#+ID`
+                        // (data loss). `create_forcing_id` keeps the
+                        // authoritative id.
                         (self.doc_manager.create_forcing_id(new_doc).await?, true)
                     }
                 }
             }
-            // No `#+ID`: name-chain-derived identity. A genuine NEW doc-page iff
-            // the store has no page for this name chain BEFORE
+            // No `#+ID`: name-chain-derived identity. A genuine NEW doc-page
+            // iff the store has no page for this name chain BEFORE
             // `resolve_dir_page_chain` create-if-absents it.
             None => {
                 let existing = self.doc_manager.find_by_name_chain(&segment_refs).await?;
@@ -5816,8 +5827,8 @@ impl FileSyncController {
         // CreateDocument / external new file), so the C2 provenance floor
         // (`inv-history-records-all-creates`) covers ingest creates, not only
         // engine-routed ones. The boot's scan and its backlog are excluded so a
-        // vault load never floods history. Ingest-origin: recorded, never on the
-        // undo stack (undo-reach of ingest ops is a separate item).
+        // vault load never floods history. Ingest-origin: recorded, never on
+        // the undo stack (undo-reach of ingest ops is a separate item).
         let doc_page_is_new_runtime = doc_was_created
             && !self.in_initial_scan()
             && !self.in_backlog_ingest
@@ -5859,10 +5870,10 @@ impl FileSyncController {
                 .with_context(|| format!("record ingest doc-create history for {document_uri}"))?;
         }
 
-        // Register UUID → file path (in the alias registry too, if Loro is available)
-        // This file reached identity resolution without colliding, so any
-        // earlier duplicate-id refusal for it is resolved — re-arm the loud
-        // disclosure in case the same path collides again later.
+        // Register UUID → file path (in the alias registry too, if Loro is
+        // available) This file reached identity resolution without colliding,
+        // so any earlier duplicate-id refusal for it is resolved — re-arm the
+        // loud disclosure in case the same path collides again later.
         self.duplicate_id_disclosed.retain(|(p, _)| p != &canonical);
         // The blocks a read-only file declares, from the parse that just read
         // it — the file is their sole authority, so this is the one place the
@@ -6108,40 +6119,42 @@ impl FileSyncController {
 
         let mut new_blocks_vec = new_parse.blocks;
 
-        // ── ID-less headline reconciliation (external re-edit duplicate guard) ──
-        // An org headline with no `:ID:` is minted a FRESH `Uuid::new_v4()` on
-        // EVERY parse (`parser::extract_or_generate_id`). So the classic
+        // ── ID-less headline reconciliation (external re-edit duplicate guard)
+        // ── An org headline with no `:ID:` is minted a FRESH `Uuid::new_v4()`
+        // on EVERY parse (`parser::extract_or_generate_id`). So the classic
         // external-editor workflow — write an ID-less headline, let the app
-        // ingest + write it back (minting id A), then write a STALE pre-mint copy
-        // of the same text — re-parses that headline to a DIFFERENT id B, and the
-        // by-id diff below sees `B ∉ old_blocks` → CREATE. In the steady state the
-        // delete pass then removes the orphaned twin A (a churned identity, but no
-        // duplicate); under a CONCURRENT external re-write the writeback of the
-        // minted `:ID:`s is skipped by the TOCTOU guard, so `last_projection`
-        // (hence the diff base `old_blocks`) desyncs from the store and the twin
-        // survives — the block DUPLICATES under two ids (observed at ~60-block
-        // scale on the live vault; see BugFunnel 2026-07-22 / PR #76).
+        // ingest + write it back (minting id A), then write a STALE pre-mint
+        // copy of the same text — re-parses that headline to a DIFFERENT id B,
+        // and the by-id diff below sees `B ∉ old_blocks` → CREATE. In the
+        // steady state the delete pass then removes the orphaned twin A (a
+        // churned identity, but no duplicate); under a CONCURRENT external
+        // re-write the writeback of the minted `:ID:`s is skipped by the TOCTOU
+        // guard, so `last_projection` (hence the diff base `old_blocks`)
+        // desyncs from the store and the twin survives — the block DUPLICATES
+        // under two ids (observed at ~60-block scale on the live vault; see
+        // BugFunnel 2026-07-22 / PR #76).
         //
-        // Remedy: before the id-keyed diff runs, remap an ID-less incoming block
-        // (`blocks_needing_ids`) onto its already-minted twin when that twin sits
-        // under the SAME parent at the SAME sibling position with EXACTLY equal
-        // content, so the stale re-write reconciles as an idempotent update
-        // instead of a re-mint (which churns identity or, on base desync,
-        // duplicates). We match against the STORE's CURRENT children (ground
-        // truth), NOT the diff base `old_blocks`: the base is parsed from
-        // `last_projection` and desyncs precisely in the duplicating case, holding
-        // throwaway ids that match neither the real twin nor the new mint — so
-        // matching the base cannot find the twin and the duplicate still lands.
-        // Deterministic + conservative: positional 1:1, so two genuinely-distinct
-        // ID-less siblings with identical content stay two blocks; a content match
-        // at a DIFFERENT position is disclosed (WARN) and left to mint rather than
-        // guessed into a merge.
-        // Inc 3: set when the id-less reconcile binds id-less blocks onto EXISTING
-        // store ids (remaps). Such a bind is a pure UPDATE (no create/delete), so
-        // `has_structural_changes` stays false and the UPDATE-only fast path below
-        // would return WITHOUT re-rendering -- leaving the minted `:ID:` drawers off
-        // disk forever (the Inc 0 guard-(c) echo loop). Forcing the round-trip here
-        // stamps them, mirroring `needs_id_writeback` for the doc `#+ID`.
+        // Remedy: before the id-keyed diff runs, remap an ID-less incoming
+        // block (`blocks_needing_ids`) onto its already-minted twin when that
+        // twin sits under the SAME parent at the SAME sibling position with
+        // EXACTLY equal content, so the stale re-write reconciles as an
+        // idempotent update instead of a re-mint (which churns identity or, on
+        // base desync, duplicates). We match against the STORE's CURRENT
+        // children (ground truth), NOT the diff base `old_blocks`: the base is
+        // parsed from `last_projection` and desyncs precisely in the
+        // duplicating case, holding throwaway ids that match neither the real
+        // twin nor the new mint — so matching the base cannot find the twin and
+        // the duplicate still lands. Deterministic + conservative: positional
+        // 1:1, so two genuinely-distinct ID-less siblings with identical
+        // content stay two blocks; a content match at a DIFFERENT position is
+        // disclosed (WARN) and left to mint rather than guessed into a merge.
+        // Inc 3: set when the id-less reconcile binds id-less blocks onto
+        // EXISTING store ids (remaps). Such a bind is a pure UPDATE (no
+        // create/delete), so `has_structural_changes` stays false and the
+        // UPDATE-only fast path below would return WITHOUT re-rendering --
+        // leaving the minted `:ID:` drawers off disk forever (the Inc 0
+        // guard-(c) echo loop). Forcing the round-trip here stamps them,
+        // mirroring `needs_id_writeback` for the doc `#+ID`.
         let mut needs_block_id_writeback = false;
         if !new_parse.blocks_needing_ids.is_empty() {
             let existing_children = self
@@ -6202,9 +6215,10 @@ impl FileSyncController {
                 })
                 .collect();
 
-            // Top-level headlines parse with `parent_id == new_parse.document.id`;
-            // the store keys the same children under `document_uri` — normalise so
-            // they group together for positional matching.
+            // Top-level headlines parse with `parent_id ==
+            // new_parse.document.id`; the store keys the same children under
+            // `document_uri` — normalise so they group together for positional
+            // matching.
             let incoming: Vec<IncomingIdentity> = new_blocks_vec
                 .iter()
                 .map(|b| IncomingIdentity {
@@ -6241,7 +6255,8 @@ impl FileSyncController {
                     _ => None,
                 })
                 .collect();
-            // Provenance: the basis each remap was decided on (WARN/debug trail).
+            // Provenance: the basis each remap was decided on (WARN/debug
+            // trail).
             let basis_by_minted: HashMap<EntityUri, MatchBasis> = verdicts
                 .iter()
                 .filter_map(|v| match v {
@@ -6252,9 +6267,10 @@ impl FileSyncController {
             needs_block_id_writeback = !remaps.is_empty();
 
             if !remaps.is_empty() {
-                // Apply id + parent remaps IN PLACE. A child of a remapped ID-less
-                // headline has `parent_id == <old minted parent>` (a remap key), so
-                // rewriting parent links here reparents it onto the existing twin.
+                // Apply id + parent remaps IN PLACE. A child of a remapped
+                // ID-less headline has `parent_id == <old minted parent>` (a
+                // remap key), so rewriting parent links here reparents it onto
+                // the existing twin.
                 for block in new_blocks_vec.iter_mut() {
                     if let Some(existing_id) = remaps.get(&block.parent_id) {
                         block.parent_id = existing_id.clone();
@@ -6271,10 +6287,10 @@ impl FileSyncController {
                             existing_id,
                         );
                         block.id = existing_id.clone();
-                        // Keep the flat `ID` property consistent with the remapped
-                        // id (build_block_params falls back to `block.id.id()`, but
-                        // a future reader of the parse block must not see the stale
-                        // mint).
+                        // Keep the flat `ID` property consistent with the
+                        // remapped id (build_block_params falls back to
+                        // `block.id.id()`, but a future reader of the parse
+                        // block must not see the stale mint).
                         block.set_property("ID", Value::String(existing_id.id().to_string()));
                     }
                 }
@@ -6293,8 +6309,8 @@ impl FileSyncController {
                     .map(|b| b.content.as_str())
                     .unwrap_or("");
                 // Content matched existing store blocks but not uniquely in the
-                // document (multiple twins, or the incoming side is duplicated) —
-                // not deterministically resolvable. Mint rather than guess a
+                // document (multiple twins, or the incoming side is duplicated)
+                // — not deterministically resolvable. Mint rather than guess a
                 // merge, disclosed with the candidate ids for auditing.
                 warn!(
                     "[FileSyncController] ID-less headline content matches existing store \
@@ -6346,29 +6362,30 @@ impl FileSyncController {
             );
         }
 
-        // Foreign PAGE doc-root protection (dogfood 2026-07-12). A block that is
-        // CURRENTLY a `Page` owned by a DIFFERENT page-file is authoritatively
-        // that page. A folder-companion / aggregating file (e.g. `Journals.org`)
-        // that inlines the page-file's doc-root as a plain heading must NOT
-        // create, update, re-parent, or delete it — above all it must not strip
-        // its `Page` tag. The page-file stays the SOLE authority for the page's
-        // identity, content, tags, and placement; letting the companion write
-        // would be a silent last-writer-wins between two on-disk representations
-        // of the SAME logical page (SqlOnly: the `Page` tag is stripped; Loro:
-        // the re-`create_in_tree` of an already-rooted id never lands under the
-        // companion's parent and the whole ingest times out + quarantines).
+        // Foreign PAGE doc-root protection (dogfood 2026-07-12). A block that
+        // is CURRENTLY a `Page` owned by a DIFFERENT page-file is
+        // authoritatively that page. A folder-companion / aggregating file
+        // (e.g. `Journals.org`) that inlines the page-file's doc-root as a
+        // plain heading must NOT create, update, re-parent, or delete it —
+        // above all it must not strip its `Page` tag. The page-file stays the
+        // SOLE authority for the page's identity, content, tags, and placement;
+        // letting the companion write would be a silent last-writer-wins
+        // between two on-disk representations of the SAME logical page
+        // (SqlOnly: the `Page` tag is stripped; Loro: the re-`create_in_tree`
+        // of an already-rooted id never lands under the companion's parent and
+        // the whole ingest times out + quarantines).
         //
         // Contract (externally visible): the `Page` tag stays truthful — a
         // foreign file inlining a doc-root as a heading cannot demote it. The
-        // discriminator is `doc_manager.get_by_id`, which reads the Page matview
-        // (`tag='Page'`) — the tag IS the page-authority signal, no second
-        // ownership/path predicate leaks to any consumer.
+        // discriminator is `doc_manager.get_by_id`, which reads the Page
+        // matview (`tag='Page'`) — the tag IS the page-authority signal, no
+        // second ownership/path predicate leaks to any consumer.
         //
         // Why not `find_foreign_blocks`: its `blocks_by_document` attribution
         // CANNOT see a doc-root (page blocks are excluded from every document's
-        // descendant list, and a page is never a member of its own document), so
-        // the create-path conflict re-parent above never fires for exactly this
-        // topology. The Page matview answers "is this id a page RIGHT NOW"
+        // descendant list, and a page is never a member of its own document),
+        // so the create-path conflict re-parent above never fires for exactly
+        // this topology. The Page matview answers "is this id a page RIGHT NOW"
         // authoritatively regardless of that attribution gap.
         let mut foreign_page_ids: std::collections::HashSet<EntityUri> =
             std::collections::HashSet::new();
@@ -6392,16 +6409,16 @@ impl FileSyncController {
         }
 
         // File-authority extends to the WHOLE inlined subtree, not just the
-        // page root (real-vault cold-boot escape, 2026-07-12: a folder-companion
-        // `Journals.org` inlining 3 page-files' roots + their 14 descendants
-        // re-parented those descendants into itself, and the ingest gate then
-        // expected blocks that `get_blocks`'s Page-boundary walk can NEVER
-        // return — permanent count-check failure, file quarantined, retry
-        // flood). Every parsed block whose parsed parent chain passes through a
-        // foreign page root belongs to that page's own document: never create,
-        // update, re-parent, or place it from this file. `new_blocks_vec` is
-        // DFS document order (parents before children), so one forward pass
-        // reaches the transitive closure.
+        // page root (real-vault cold-boot escape, 2026-07-12: a
+        // folder-companion `Journals.org` inlining 3 page-files' roots + their
+        // 14 descendants re-parented those descendants into itself, and the
+        // ingest gate then expected blocks that `get_blocks`'s Page-boundary
+        // walk can NEVER return — permanent count-check failure, file
+        // quarantined, retry flood). Every parsed block whose parsed parent
+        // chain passes through a foreign page root belongs to that page's own
+        // document: never create, update, re-parent, or place it from this
+        // file. `new_blocks_vec` is DFS document order (parents before
+        // children), so one forward pass reaches the transitive closure.
         let mut foreign_subtree_ids = foreign_page_ids.clone();
         for block in &new_blocks_vec {
             if foreign_subtree_ids.contains(&block.parent_id) {
@@ -6618,9 +6635,9 @@ impl FileSyncController {
 
         // Classify each block the last ingest saw against the tree. One the
         // tree never held is re-seeded. One Holon deleted or moved since is
-        // overruled: Holon's change stands, this ingest skips the block, and the
-        // write-back brings the file in line. A deleted block's file subtree
-        // goes with it.
+        // overruled: Holon's change stands, this ingest skips the block, and
+        // the write-back brings the file in line. A deleted block's file
+        // subtree goes with it.
         let mut reseed: HashSet<EntityUri> = HashSet::new();
         let mut lost: HashSet<EntityUri> = HashSet::new();
         let mut overruled: HashMap<EntityUri, HolonChange> = HashMap::new();
@@ -6786,11 +6803,12 @@ impl FileSyncController {
         let mut operations: Vec<(String, holon_api::StorageEntity)> = Vec::new();
         let mut has_structural_changes = false;
 
-        // Set when the updates pass 3-way merged a concurrent file-vs-UI content
-        // edit. A pure content update is not "structural", so the early-return
-        // below would skip the disk write-back — but a merge produces content
-        // that is on NEITHER disk nor in `last_projection`, so we must force the
-        // re-render/write-back so disk converges to the merged text.
+        // Set when the updates pass 3-way merged a concurrent file-vs-UI
+        // content edit. A pure content update is not "structural", so the
+        // early-return below would skip the disk write-back — but a merge
+        // produces content that is on NEITHER disk nor in `last_projection`, so
+        // we must force the re-render/write-back so disk converges to the
+        // merged text.
         let mut did_text_merge = false;
         let mut created_ids: Vec<String> = Vec::new();
         let mut updated_via_conflict_ids: Vec<String> = Vec::new();
@@ -6815,7 +6833,8 @@ impl FileSyncController {
 
         // Creates (in document order so parents before children).
         // Blocks that already exist under a different document are re-parented
-        // via "update" instead of "create" (INSERT OR IGNORE would silently skip them).
+        // via "update" instead of "create" (INSERT OR IGNORE would silently
+        // skip them).
         //
         // For each new block we attach the typed positional intent
         // `after_block_id = <previous sibling in file under same parent>`,
@@ -6954,9 +6973,10 @@ impl FileSyncController {
         // here — only the contract. Exact positioning is the place loop's job,
         // so `after_id` is `None`.
         let mut consolidator_creates: usize = 0;
-        // Ids of consolidator-persisted creates (Loro mode): their sink rows are
-        // written by the downstream flush at site B, not by the `operations`
-        // batch — so they are excluded from the site-A feed catch-up set below.
+        // Ids of consolidator-persisted creates (Loro mode): their sink rows
+        // are written by the downstream flush at site B, not by the
+        // `operations` batch — so they are excluded from the site-A feed
+        // catch-up set below.
         let mut consolidator_create_ids: Vec<String> = Vec::new();
         // Creates are buffered and handed to the authority a chunk at a time.
         // Per-block creates cost one existence walk + one commit EACH, which is
@@ -7039,9 +7059,9 @@ impl FileSyncController {
                     } else {
                         block.parent_id.clone()
                     };
-                    // Full typed content (`to_block_content` preserves source vs
-                    // text + language) so a `#+BEGIN_SRC` block isn't degraded
-                    // to text by the downstream projection.
+                    // Full typed content (`to_block_content` preserves source
+                    // vs text + language) so a `#+BEGIN_SRC` block isn't
+                    // degraded to text by the downstream projection.
                     pending_creates.push(PendingCreate {
                         request: block_create_request(block, &parent_uri),
                         kind: PendingCreateKind::Fresh(params),
@@ -7107,10 +7127,10 @@ impl FileSyncController {
                 // diverged from the base AND the store holds a competing edit,
                 // 3-way merge the two instead of clobbering with the disk value
                 // (whole-value LWW). `text_merge_active` already restricts this
-                // to SqlOnly (`Store`) mode with a wired merger; the base is the
-                // BaseStore snapshot (`old_block`), "theirs" the disk parse,
-                // "mine" the current store content. Text CONTENT only — edge and
-                // structural fields still take the disk value.
+                // to SqlOnly (`Store`) mode with a wired merger; the base is
+                // the BaseStore snapshot (`old_block`), "theirs" the disk
+                // parse, "mine" the current store content. Text CONTENT only —
+                // edge and structural fields still take the disk value.
                 let mut merged_block: Option<Block> = None;
                 if text_merge_active && new_block.content != old_block.content {
                     if let Some(mine) = store_content.get(id) {
@@ -7191,8 +7211,8 @@ impl FileSyncController {
                     // Phase 2: drop edge fields from params when unchanged, so
                     // SqlOperationProvider's edge_field_replace_sql (DELETE +
                     // re-INSERT into block_requires/block_tags) is not invoked.
-                    // Junction values are order-undefined on read, so compare as
-                    // sets. Idempotent re-ingests of an unchanged vault stop
+                    // Junction values are order-undefined on read, so compare
+                    // as sets. Idempotent re-ingests of an unchanged vault stop
                     // churning ~2,400 statements per startup.
                     strip_unchanged_edge_fields(&mut params, old_block, effective);
                     // Text the file did not change since the base is the
@@ -7227,9 +7247,10 @@ impl FileSyncController {
                 }
                 // Never delete a foreign page doc-root. If a companion file
                 // stops inlining a page's heading, that page still lives in its
-                // own page-file — its deletion is that file's concern, not ours.
-                // (`foreign_page_ids` is built from the NEW parse, so an id that
-                // vanished from this file isn't in it — re-check the Page matview.)
+                // own page-file — its deletion is that file's concern, not
+                // ours. (`foreign_page_ids` is built from the NEW parse, so an
+                // id that vanished from this file isn't in it — re-check the
+                // Page matview.)
                 if *id != document_uri && self.doc_manager.get_by_id(id).await?.is_some() {
                     info!(
                         "[FileSyncController] NOT deleting {} on ingest of {} — it is a Page \
@@ -7239,7 +7260,8 @@ impl FileSyncController {
                     );
                     continue;
                 }
-                // Another file adopted it: gone from here is a move, not a delete.
+                // Another file adopted it: gone from here is a move, not a
+                // delete.
                 if let Some(owner_doc) = self.resolve_authoritative_doc(id).await? {
                     if owner_doc != document_uri && owner_doc != new_parse.document.id {
                         info!(
@@ -7272,8 +7294,9 @@ impl FileSyncController {
                 deleted_here.insert(id.clone());
                 let mut params: holon_api::StorageEntity = HashMap::new();
                 params.insert("id".into(), Value::String(id.to_string()));
-                // Phase 3: pin the document URI so the provider's prepare_delete
-                // skips the WITH RECURSIVE Page-walk (find_document_uri).
+                // Phase 3: pin the document URI so the provider's
+                // prepare_delete skips the WITH RECURSIVE Page-walk
+                // (find_document_uri).
                 params.insert(
                     ROUTING_DOC_URI_KEY.into(),
                     Value::String(document_uri.to_string()),
@@ -7332,37 +7355,38 @@ impl FileSyncController {
         }
 
         // Apply each operation through `BlockOrdering` — the single org→block
-        // write seam. There is no command bus: `update_in_tree` routes Loro-mode
-        // writes field-by-field into Loro (the outbound projector emits the SQL
-        // row) and SqlOnly writes straight to SQL; `delete_in_tree` deletes from
-        // Loro (projector emits the SQL DELETE) or from SQL directly. `"create"`
-        // ops only occur in SqlOnly (Loro creates persisted via `create_in_tree`
-        // returning true and were counted in `consolidator_creates`); they share
-        // the `update_in_tree` upsert path, which picks the right CDC op kind.
+        // write seam. There is no command bus: `update_in_tree` routes
+        // Loro-mode writes field-by-field into Loro (the outbound projector
+        // emits the SQL row) and SqlOnly writes straight to SQL;
+        // `delete_in_tree` deletes from Loro (projector emits the SQL DELETE)
+        // or from SQL directly. `"create"` ops only occur in SqlOnly (Loro
+        // creates persisted via `create_in_tree` returning true and were
+        // counted in `consolidator_creates`); they share the `update_in_tree`
+        // upsert path, which picks the right CDC op kind.
         //
         // `consolidator_creates` blocks were sent to the consolidator via
-        // `create_in_tree` — their sink rows are written by the downstream flush
-        // below, not here. Exclude them from the post-apply cache-catch-up
-        // expectation; the full "every block present" check happens after the
-        // flush. `gate_excluded_ids` (foreign page subtrees + Page-tagged parse
-        // blocks) are structurally invisible to `get_blocks`'s Page-boundary
-        // walk, so expecting them made the gate unsatisfiable (2026-07-12
-        // quarantined-vault escape).
+        // `create_in_tree` — their sink rows are written by the downstream
+        // flush below, not here. Exclude them from the post-apply
+        // cache-catch-up expectation; the full "every block present" check
+        // happens after the flush. `gate_excluded_ids` (foreign page subtrees +
+        // Page-tagged parse blocks) are structurally invisible to
+        // `get_blocks`'s Page-boundary walk, so expecting them made the gate
+        // unsatisfiable (2026-07-12 quarantined-vault escape).
         // The blocks expected present in `block_raw` (site-A cache) after this
         // apply: every parsed block that is NEITHER gate-excluded (foreign page
         // subtrees + Page-tagged parse blocks — structurally invisible to
         // `get_blocks`'s Page-boundary walk) NOR consolidator-persisted (their
         // sink rows flush downstream at site B). Computed with the SAME double
         // predicate as `expected_present_ids` below so the count and the id-set
-        // never disagree. NB the two sets OVERLAP (a newly-ingested `:Page:`-tagged
-        // child is BOTH gate-excluded AND a consolidator create), so the former
-        // `count(non-gate-excluded) - consolidator_creates` underflowed (subtracting
-        // a create that was never in the count) — the row-137 subdir fileless
-        // journals topology tripped exactly that. This double-filter cannot
-        // underflow and equals `expected_present_ids.len()` by construction.
-        // An adopted block's new parent reaches `block_raw` with the downstream
-        // flush when the consolidator is upstream; it is checked after that
-        // flush instead.
+        // never disagree. NB the two sets OVERLAP (a newly-ingested
+        // `:Page:`-tagged child is BOTH gate-excluded AND a consolidator
+        // create), so the former `count(non-gate-excluded) -
+        // consolidator_creates` underflowed (subtracting a create that was
+        // never in the count) — the row-137 subdir fileless journals topology
+        // tripped exactly that. This double-filter cannot underflow and equals
+        // `expected_present_ids.len()` by construction. An adopted block's new
+        // parent reaches `block_raw` with the downstream flush when the
+        // consolidator is upstream; it is checked after that flush instead.
         let moves_land_downstream: HashSet<EntityUri> =
             if matches!(self.ordering.consolidator(), Consolidator::Upstream) {
                 moved_in.keys().cloned().collect()
@@ -7396,14 +7420,15 @@ impl FileSyncController {
         );
         let t_write = std::time::Instant::now();
         if !operations.is_empty() {
-            // One batched apply per file: in SqlOnly mode the whole op-vector is
-            // one `db_handle.transaction()`, so the live-watch matview IVM
-            // maintenance runs once per file instead of once per block (the O(N²)
-            // cold-boot ingest, BugFunnel row 32). In Loro mode `apply_ingest_batch`
-            // falls back to the per-op seam (Loro owns order). Document order is
-            // preserved — the vector is already creates→updates→deletes in
-            // parse order, and rows-then-edges + deferred FK settle parents at
-            // COMMIT regardless of intra-batch row order.
+            // One batched apply per file: in SqlOnly mode the whole op-vector
+            // is one `db_handle.transaction()`, so the live-watch matview IVM
+            // maintenance runs once per file instead of once per block (the
+            // O(N²) cold-boot ingest, BugFunnel row 32). In Loro mode
+            // `apply_ingest_batch` falls back to the per-op seam (Loro owns
+            // order). Document order is preserved — the vector is already
+            // creates→updates→deletes in parse order, and rows-then-edges +
+            // deferred FK settle parents at COMMIT regardless of intra-batch
+            // row order.
             self.ordering
                 .apply_ingest_batch(operations)
                 .await
@@ -7417,15 +7442,16 @@ impl FileSyncController {
                 "holon_latency",
             );
 
-            // Phase 5 cutover (site A): wait on the positional `LiveData<Block>`
-            // catch-up — every block this scan expects in the cache is visible
-            // in the convergent feed — instead of the `event_acks` watermark
-            // (`wait_for_cache_caught_up`), replacing the original push-based-but-
-            // timestamp-proxy wait with a push-based positional one. The expected
-            // set is every parsed block EXCEPT the consolidator-persisted creates
-            // (their sink rows are written by the downstream flush at site B). The
-            // `block` matview feed is strictly downstream of `block_raw` (what
-            // `get_blocks` reads), so feed-present ⟹ block_raw-present; the count
+            // Phase 5 cutover (site A): wait on the positional
+            // `LiveData<Block>` catch-up — every block this scan expects in the
+            // cache is visible in the convergent feed — instead of the
+            // `event_acks` watermark (`wait_for_cache_caught_up`), replacing
+            // the original push-based-but- timestamp-proxy wait with a
+            // push-based positional one. The expected set is every parsed block
+            // EXCEPT the consolidator-persisted creates (their sink rows are
+            // written by the downstream flush at site B). The `block` matview
+            // feed is strictly downstream of `block_raw` (what `get_blocks`
+            // reads), so feed-present ⟹ block_raw-present; the count
             // check below is then guaranteed and kept as the ground-truth gate.
             let expected_present_ids: Vec<String> = new_blocks_vec
                 .iter()
@@ -7439,7 +7465,8 @@ impl FileSyncController {
             // in steady state it waits per file, unchanged. The `get_blocks`
             // count-check below stays UNCONDITIONAL — `block_raw` is written
             // synchronously by the ops above, so it is the real intra-file
-            // write-success gate independent of the (async, sidebar-facing) feed.
+            // write-success gate independent of the (async, sidebar-facing)
+            // feed.
             let caught_up = self.feed_barrier(&expected_present_ids, "updates").await;
             ingest_progress::record_doc_walk();
             let cached_blocks = self.block_reader.get_blocks(&document_uri).await?;
@@ -7489,9 +7516,10 @@ impl FileSyncController {
         {
             let mut live_children: HashMap<EntityUri, Vec<String>> = HashMap::new();
             let mut expected_per_parent: HashMap<EntityUri, HashSet<String>> = HashMap::new();
-            // `BlockOrdering::children` filters `b.parent_id.as_str() == parent_id`,
-            // and `EntityUri::as_str()` returns the FULL URI (`"block:ref-doc-0"`).
-            // Keys here are full URIs so the compare matches.
+            // `BlockOrdering::children` filters `b.parent_id.as_str() ==
+            // parent_id`, and `EntityUri::as_str()` returns the FULL URI
+            // (`"block:ref-doc-0"`). Keys here are full URIs so the compare
+            // matches.
             for new_block in &new_blocks_vec {
                 if !created_ids.contains(&new_block.id.to_string()) {
                     continue;
@@ -7568,13 +7596,13 @@ impl FileSyncController {
             if matches!(self.ordering.consolidator(), Consolidator::Upstream) {
                 // Loro owns order: place each text block after its file
                 // predecessor. `update_block_position` reads the LIVE tree and
-                // no-ops cheaply when already positioned, so doc-order placement
-                // is order-correct regardless of the initial layout.
+                // no-ops cheaply when already positioned, so doc-order
+                // placement is order-correct regardless of the initial layout.
                 progress.begin_phase();
                 for new_block in &new_blocks_vec {
                     progress.advance("place");
-                    // Foreign page subtree: it lives in its OWN page-file's tree,
-                    // not this companion's — never place it here.
+                    // Foreign page subtree: it lives in its OWN page-file's
+                    // tree, not this companion's — never place it here.
                     if foreign_subtree_ids.contains(&new_block.id)
                         || overruled.contains_key(&new_block.id)
                     {
@@ -7593,17 +7621,17 @@ impl FileSyncController {
                         &new_block.parent_id
                     };
                     // Full-URI form throughout: `BlockOrdering::children` /
-                    // `prev_sibling` return `b.id.as_str()` = `"block:foo"`, and
-                    // `place()`'s internal comparisons (sql_block_operations.rs:182)
-                    // also use `as_str()`. Mixing bare ids here silently skips
-                    // every block.
+                    // `prev_sibling` return `b.id.as_str()` = `"block:foo"`,
+                    // and `place()`'s internal comparisons
+                    // (sql_block_operations.rs:182) also use `as_str()`. Mixing
+                    // bare ids here silently skips every block.
                     let want_after: Option<&EntityUri> =
                         predecessors.get(&new_block.id).and_then(|p| p.as_ref());
 
                     let siblings = live_children.get(parent).map(Vec::as_slice).unwrap_or(&[]);
-                    // Presence sanity only — the wait-loop guarantees newly-created
-                    // blocks are in `live_children` and pre-existing ones were
-                    // backfilled.
+                    // Presence sanity only — the wait-loop guarantees
+                    // newly-created blocks are in `live_children` and
+                    // pre-existing ones were backfilled.
                     if !siblings.iter().any(|s| s == new_block.id.as_str()) {
                         if created_ids.contains(&new_block.id.to_string()) {
                             anyhow::bail!(
@@ -7631,23 +7659,24 @@ impl FileSyncController {
                         .map_err(|e| anyhow::anyhow!("ordering.place failed: {e}"))?;
                 }
             } else {
-                // No Loro: the SQL store is the sole order owner, and the file's
-                // line order is the authoritative TOTAL order. Incremental
-                // `place` can't converge a full reorder (it inserts one block at
-                // a time relative to a mutating store), which is the
-                // `inv-live-children-match-ref` divergence. Instead mint one
-                // fresh, gap-free key sequence per parent over its text children
-                // in document order via `place_all` — total by construction, so
-                // `ORDER BY sort_key` reproduces the file exactly
-                // (Replication.md §5/§11: one owner, projected verbatim).
-                // Source/synthetic children are render-grouped ahead of text
-                // regardless of sort_key and are not re-keyed here.
+                // No Loro: the SQL store is the sole order owner, and the
+                // file's line order is the authoritative TOTAL order.
+                // Incremental `place` can't converge a full reorder (it inserts
+                // one block at a time relative to a mutating store), which is
+                // the `inv-live-children-match-ref` divergence. Instead mint
+                // one fresh, gap-free key sequence per parent over its text
+                // children in document order via `place_all` — total by
+                // construction, so `ORDER BY sort_key` reproduces the file
+                // exactly (Replication.md §5/§11: one owner, projected
+                // verbatim). Source/synthetic children are render-grouped ahead
+                // of text regardless of sort_key and are not re-keyed here.
                 let mut per_parent: Vec<(EntityUri, Vec<EntityUri>)> = Vec::new();
                 let mut parent_slot: HashMap<EntityUri, usize> = HashMap::new();
                 for new_block in &new_blocks_vec {
-                    // Foreign page subtree: owned by its own page-file — exclude
-                    // from this companion's per-parent order (a `place_all` here
-                    // would re-key it under the companion's parents).
+                    // Foreign page subtree: owned by its own page-file —
+                    // exclude from this companion's per-parent order (a
+                    // `place_all` here would re-key it under the companion's
+                    // parents).
                     if foreign_subtree_ids.contains(&new_block.id)
                         || overruled.contains_key(&new_block.id)
                     {
@@ -7704,10 +7733,10 @@ impl FileSyncController {
                     .await?;
             }
             None => {
-                // Fail loud: a create the consolidator persisted (create_in_tree
-                // returned true) has no command-bus row, so without a downstream
-                // feed its sink row would never be written. That's a wiring bug,
-                // not a degraded-but-fine state.
+                // Fail loud: a create the consolidator persisted
+                // (create_in_tree returned true) has no command-bus row, so
+                // without a downstream feed its sink row would never be
+                // written. That's a wiring bug, not a degraded-but-fine state.
                 if consolidator_creates > 0 {
                     anyhow::bail!(
                         "[on_file_changed] {consolidator_creates} block create(s) were persisted \
@@ -7740,17 +7769,18 @@ impl FileSyncController {
             }
         }
         if !created_ids.is_empty() {
-            // Phase 5 cutover (site B): wait on the positional `LiveData<Block>`
-            // catch-up — every just-created id visible in the convergent feed —
-            // instead of the `event_acks` watermark (`wait_for_cache_caught_up`).
-            // The feed (the `block` matview CDC stream) is downstream of the same
-            // `block_raw` the renderer reads, so its catch-up is a sound, push-
-            // based, positional proxy. Validated by the Step-0 shadow: 33/33 PBT
-            // cases caught up at 0 ms, 0 misses. Fail loud on timeout — a stuck
-            // feed is a real bug, not a state to silently continue past.
-            // During the initial scan (site C) this buffers `created_ids` for the
-            // single end-of-scan convergence wait instead of blocking per file;
-            // the fail-loud check then fires once in `finish_initial_scan`.
+            // Phase 5 cutover (site B): wait on the positional
+            // `LiveData<Block>` catch-up — every just-created id visible in the
+            // convergent feed — instead of the `event_acks` watermark
+            // (`wait_for_cache_caught_up`). The feed (the `block` matview CDC
+            // stream) is downstream of the same `block_raw` the renderer reads,
+            // so its catch-up is a sound, push- based, positional proxy.
+            // Validated by the Step-0 shadow: 33/33 PBT cases caught up at 0
+            // ms, 0 misses. Fail loud on timeout — a stuck feed is a real bug,
+            // not a state to silently continue past. During the initial scan
+            // (site C) this buffers `created_ids` for the single end-of-scan
+            // convergence wait instead of blocking per file; the fail-loud
+            // check then fires once in `finish_initial_scan`.
             let feed_caught_up = self.feed_barrier(&created_ids, "creates").await;
             if !feed_caught_up {
                 anyhow::bail!(
@@ -7786,9 +7816,9 @@ impl FileSyncController {
                 .await?;
             self.disclose_undone_deletion(&id, &root, path, holders, put_back);
         }
-        // Write-ahead: the record of an undone deletion reaches the vault before
-        // the put-back line does, so a crash in between leaves a record the
-        // boot settles, never a put-back nobody remembers.
+        // Write-ahead: the record of an undone deletion reaches the vault
+        // before the put-back line does, so a crash in between leaves a record
+        // the boot settles, never a put-back nobody remembers.
         self.persist_undone_deletions().await?;
         #[cfg(feature = "crash-injection")]
         crate::crash_injection::reached("after_undone_deletions_persisted");
@@ -7803,18 +7833,19 @@ impl FileSyncController {
             );
         }
 
-        // For UPDATE-only ingestion (no creates/deletes), the disk content already
-        // reflects the authoritative state — we just parsed it and persisted the
-        // diff to SQL. Re-rendering from the CDC cache here would be racy: count-
-        // based waiting can't detect property updates, so the cache may still
-        // return the pre-update row and we'd overwrite the file with stale data,
-        // losing the properties we just ingested. Skip the round-trip entirely
-        // and record the disk content as the new projection.
+        // For UPDATE-only ingestion (no creates/deletes), the disk content
+        // already reflects the authoritative state — we just parsed it and
+        // persisted the diff to SQL. Re-rendering from the CDC cache here would
+        // be racy: count- based waiting can't detect property updates, so the
+        // cache may still return the pre-update row and we'd overwrite the file
+        // with stale data, losing the properties we just ingested. Skip the
+        // round-trip entirely and record the disk content as the new
+        // projection.
         //
-        // EXCEPTION: when the file lacks a `#+ID:` directive, force the round-trip
-        // so the renderer can persist `#+ID: <uuid>` to disk. This makes the
-        // document's identity rename-safe and lets future loads short-circuit the
-        // name-chain lookup.
+        // EXCEPTION: when the file lacks a `#+ID:` directive, force the
+        // round-trip so the renderer can persist `#+ID: <uuid>` to disk. This
+        // makes the document's identity rename-safe and lets future loads
+        // short-circuit the name-chain lookup.
         let needs_id_writeback = id_in_file.is_none();
         // `did_text_merge` forces the round-trip: a merge produced content that
         // is on NEITHER disk nor in `last_projection`, so recording disk as the
@@ -7848,10 +7879,11 @@ impl FileSyncController {
         // Foreign-page subtrees were skipped above, so a re-render from this
         // document's blocks would rewrite the file WITHOUT the inlined
         // page-owned headings — a silent de-inline of the user's file, which is
-        // the writeback-side workstream's decision (de-inline + materialization),
-        // not this ingest's. Defer the write-back: disk already reflects every
-        // block this ingest processed (the ops came FROM this parse), so
-        // recording it as the projection is sound. ALLOW(fallback): disclosed.
+        // the writeback-side workstream's decision (de-inline +
+        // materialization), not this ingest's. Defer the write-back: disk
+        // already reflects every block this ingest processed (the ops came FROM
+        // this parse), so recording it as the projection is sound.
+        // ALLOW(fallback): disclosed.
         if inlines_foreign_pages && !did_text_merge {
             info!(
                 "[FileSyncController] Deferring write-back of {} — it inlines {} block(s) owned \
@@ -7896,8 +7928,9 @@ impl FileSyncController {
             return Ok(IngestOutcome::Ingested);
         }
 
-        // Structural changes occurred — re-project from cache so the file reflects
-        // any merges (e.g. conflict re-parenting, seed layout integration).
+        // Structural changes occurred — re-project from cache so the file
+        // reflects any merges (e.g. conflict re-parenting, seed layout
+        // integration).
         let rendered = self.render_file_by_doc_id(&document_uri, path).await?;
         let rendered = self.keep_copies(path, &canonical, rendered, &disk_content)?;
         assert!(
@@ -7912,34 +7945,38 @@ impl FileSyncController {
         // Ingest→write-back data-loss guard (BugFunnel row 28, P0). `rendered`
         // is the re-projection of the blocks that ACTUALLY landed. If ingest
         // silently dropped blocks (e.g. an FK rollback that aborted part of the
-        // file without surfacing an error), `rendered` is a TRUNCATED prefix and
-        // writing it below would delete those lines from the user's file. Refuse
-        // loudly when the projection lost a block present on disk; the `?`
-        // propagates to `on_file_changed`, whose Err arm QUARANTINES the file so
-        // no write-back path renders the truncated state over disk. A legal
-        // canonical reformat / 3-way merge preserves every block and passes.
+        // file without surfacing an error), `rendered` is a TRUNCATED prefix
+        // and writing it below would delete those lines from the user's file.
+        // Refuse loudly when the projection lost a block present on disk; the
+        // `?` propagates to `on_file_changed`, whose Err arm QUARANTINES the
+        // file so no write-back path renders the truncated state over disk. A
+        // legal canonical reformat / 3-way merge preserves every block and
+        // passes.
         //
-        // Grounding is AUTHORITY-based, the same single verdict the block-driven
-        // paths take (`writeback_drops`): the store that produced `rendered` also
-        // says which file owns each block the render omitted. That is what makes
-        // a first ingest of a hand-authored page inlining `:Page:` children pass
-        // — those children became page doc-roots of their OWN files during this
-        // very ingest, so the render legitimately stops at them — while a block
-        // the authority no longer holds still reads as loss.
+        // Grounding is AUTHORITY-based, the same single verdict the
+        // block-driven paths take (`writeback_drops`): the store that produced
+        // `rendered` also says which file owns each block the render omitted.
+        // That is what makes a first ingest of a hand-authored page inlining
+        // `:Page:` children pass — those children became page doc-roots of
+        // their OWN files during this very ingest, so the render legitimately
+        // stops at them — while a block the authority no longer holds still
+        // reads as loss.
         let (loss, unresolvable) = self
             .writeback_drops(path, &disk_content, &rendered, &deleted_in_holon)
             .await?;
         if !loss.dropped.is_empty() || !unresolvable.is_empty() {
-            // Inc 3 carry-forward (risk-register #2). If the SOLE reason we left the
-            // UPDATE-only fast path is `needs_block_id_writeback` (a pure id-less
-            // reconcile that bound blocks onto existing store ids), the re-render
-            // exists only to stamp `:ID:` drawers. For most files it is lossless and
-            // converges inv-org-render-fixed-point. But a companion / round-trip-lossy
-            // page (a heading the renderer models elsewhere) DROPS a block on re-render
-            // -- the exact loss the fast path was avoiding. Rather than quarantine,
-            // carry the re-stamp obligation forward: preserve disk EXACTLY as the
-            // pre-Inc-3 fast path did. The lossless guard stays fully fatal for any
-            // ingest with real structural changes -- only this pure re-stamp degrades.
+            // Inc 3 carry-forward (risk-register #2). If the SOLE reason we
+            // left the UPDATE-only fast path is `needs_block_id_writeback` (a
+            // pure id-less reconcile that bound blocks onto existing store
+            // ids), the re-render exists only to stamp `:ID:` drawers. For most
+            // files it is lossless and converges inv-org-render-fixed-point.
+            // But a companion / round-trip-lossy page (a heading the renderer
+            // models elsewhere) DROPS a block on re-render -- the exact loss
+            // the fast path was avoiding. Rather than quarantine,
+            // carry the re-stamp obligation forward: preserve disk EXACTLY as
+            // the pre-Inc-3 fast path did. The lossless guard stays fully fatal
+            // for any ingest with real structural changes -- only this pure
+            // re-stamp degrades.
             let restamp_only = needs_block_id_writeback
                 && !has_structural_changes
                 && !needs_id_writeback
@@ -8376,8 +8413,8 @@ impl FileSyncController {
             match read {
                 Ok(Some(auth)) if auth.is_page() => {
                     // The mark is keyed on `auth.id` — the page whose identity
-                    // file failed — NOT on the routed `doc_id`: an untitled page
-                    // is typically routed to its PARENT, so keying on the
+                    // file failed — NOT on the routed `doc_id`: an untitled
+                    // page is typically routed to its PARENT, so keying on the
                     // document would both collapse two failing pages into one
                     // disclosure and re-arm on the parent's unrelated success.
                     match self.materialize_page_identity_file(&auth.id).await {
@@ -8625,8 +8662,8 @@ impl FileSyncController {
         delta: &BlockDelta,
         rows: &mut crate::sync_ports::BlockRowMemo,
     ) -> Result<BlockChangeVerdict> {
-        // Did this delta actually bring something new? Computed BEFORE the fold,
-        // because afterwards the holder already agrees with it.
+        // Did this delta actually bring something new? Computed BEFORE the
+        // fold, because afterwards the holder already agrees with it.
         //
         // Only the fold-completeness gate's escalation reads this, and only to
         // answer "is a write being BLOCKED, or is this a retry with nothing to
@@ -8647,8 +8684,8 @@ impl FileSyncController {
                 .is_some_and(|entry| entry.blocks.contains_key(id)),
         };
 
-        // Derived state first: the holder is what everything below renders from,
-        // so it must reflect this delta before any path can read it.
+        // Derived state first: the holder is what everything below renders
+        // from, so it must reflect this delta before any path can read it.
         self.apply_block_delta(doc_id, delta);
 
         self.page_identity_preflight(doc_id, delta, rows).await;
@@ -8718,9 +8755,9 @@ impl FileSyncController {
 
         // Fold-completeness gate. Deliberately AFTER the adopting ingest
         // above: that ingest writes blocks into the authority which the
-        // CDC-fed holder cannot know yet, so a gate reading the authority before
-        // it would compare the holder against a pre-ingest snapshot and wave
-        // through exactly the render that drops the just-ingested blocks.
+        // CDC-fed holder cannot know yet, so a gate reading the authority
+        // before it would compare the holder against a pre-ingest snapshot and
+        // wave through exactly the render that drops the just-ingested blocks.
         match self
             .holder_fold_is_complete(doc_id, &path, delta_brings_new_content)
             .await?
@@ -9157,7 +9194,8 @@ impl FileSyncController {
             let sig = match self.fs.metadata(&path).await {
                 Ok(m) => (m.modified, m.len),
                 // Vanished between the scan and this stat (TOCTOU): nothing to
-                // ingest. A later discovery tick re-observes it if it reappears.
+                // ingest. A later discovery tick re-observes it if it
+                // reappears.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
                     return Err(e).with_context(|| {
@@ -9203,11 +9241,12 @@ impl FileSyncController {
 
             // PER-FILE CONTAINMENT (Inc 3b). One poisoned org file must NOT
             // abort the whole discovery walk: propagating the `?` here left
-            // every later healthy file un-ingested, and the next tick re-hit the
-            // same poison first, so healthy files were NEVER ingested while the
-            // poison persisted. Instead: on failure log ONE loud, chain-rich
-            // error (Fail Loud, fall back VISIBLY), quarantine the file at its
-            // current signature, and CONTINUE so healthy files still ingest.
+            // every later healthy file un-ingested, and the next tick re-hit
+            // the same poison first, so healthy files were NEVER ingested while
+            // the poison persisted. Instead: on failure log ONE loud,
+            // chain-rich error (Fail Loud, fall back VISIBLY), quarantine the
+            // file at its current signature, and CONTINUE so healthy files
+            // still ingest.
             match self.on_file_changed(&path).await {
                 Ok(IngestOutcome::Ingested) => {
                     if self.ingest_quarantine.remove(&canonical).is_some() {
@@ -9305,9 +9344,9 @@ impl FileSyncController {
 
         for canonical in keys {
             let path: PathBuf = (*canonical).to_path_buf();
-            // If disk content differs from last_projection, ingest the pending external
-            // change first so the re-render includes both the block event and external
-            // edit.
+            // If disk content differs from last_projection, ingest the pending
+            // external change first so the re-render includes both the block
+            // event and external edit.
             let mut basis = self.fs.read_stamped(&path).await.with_context(|| {
                 format!("[re_render_all_tracked] Cannot read {}", path.display())
             })?;
@@ -9370,11 +9409,12 @@ impl FileSyncController {
                     self.root_dir.display(),
                 )
             })?;
-            // Resolve the document by its authoritative `#+ID` first. Name-chain
-            // resolution (below) is ambiguous when a same-named subdirectory has
-            // minted a placeholder page with the file's title, so it can pick the
-            // wrong page and re-mint the file's `#+ID` on write-back (data loss).
-            // The disk bytes carry the id, so prefer it whenever present.
+            // Resolve the document by its authoritative `#+ID` first.
+            // Name-chain resolution (below) is ambiguous when a same-named
+            // subdirectory has minted a placeholder page with the file's title,
+            // so it can pick the wrong page and re-mint the file's `#+ID` on
+            // write-back (data loss). The disk bytes carry the id, so prefer it
+            // whenever present.
             let declared = match self.adapter(&path)?.doc_id_from_content(&disk_content) {
                 Ok(declared) => {
                     self.clear_failure(&batch_file_key(&path), BATCH_READ_SITE);
@@ -9411,10 +9451,10 @@ impl FileSyncController {
                     Ok(Some(doc)) => doc.id,
                     Ok(None) => {
                         // Path was tracked but no document entity exists (e.g.
-                        // empty file was registered before the skip-empty guard).
-                        // Downgraded to debug: re_render_all_tracked is now
-                        // debounced and runs on every burst, so warn-level would
-                        // flood the log on every initial scan.
+                        // empty file was registered before the skip-empty
+                        // guard). Downgraded to debug: re_render_all_tracked is
+                        // now debounced and runs on every burst, so warn-level
+                        // would flood the log on every initial scan.
                         debug!(
                             "[re_render_all_tracked] No document found for path {} (segments: \
                              {:?}) — skipping",
@@ -9487,8 +9527,8 @@ impl FileSyncController {
         let mut current = page_id.clone();
         let mut is_self = true;
         let mut guard = 0usize;
-        // The nearest page-ancestor already folded into `chain` (self included):
-        // the top of the page-chain walked so far. Used to resolve a
+        // The nearest page-ancestor already folded into `chain` (self
+        // included): the top of the page-chain walked so far. Used to resolve a
         // file-owning subtree root when the walk reaches a non-page ancestor.
         let mut subtree_root_page: Option<EntityUri> = None;
         loop {
@@ -9522,17 +9562,18 @@ impl FileSyncController {
                 chain.push(title);
                 subtree_root_page = Some(current.clone());
             } else if !is_self {
-                // Non-page ancestor. A page directly under a non-page is normally
-                // prohibited (interim ruling 2026-07-13) — EXCEPT when the page
-                // subtree already walked is rooted at a page that OWNS its own
-                // on-disk file whose doc-root was ingested under a synthetic
-                // (empty) document-root sentinel rather than a page-chain (e.g. a
-                // subdir journal date file `Journals/<date>.org`). That root page
-                // is file-resolvable via the alias registry, so a runtime page
-                // minted beneath it — e.g. `convert_block_to_page`'s new page —
-                // must nest under that file, not error out and vanish from disk
-                // (job 72446a9c). Resolve the subtree-root page's own path and
-                // prepend its ancestor segments; only bail when the root page
+                // Non-page ancestor. A page directly under a non-page is
+                // normally prohibited (interim ruling 2026-07-13) — EXCEPT when
+                // the page subtree already walked is rooted at a page that OWNS
+                // its own on-disk file whose doc-root was ingested under a
+                // synthetic (empty) document-root sentinel rather than a
+                // page-chain (e.g. a subdir journal date file
+                // `Journals/<date>.org`). That root page is file-resolvable via
+                // the alias registry, so a runtime page minted beneath it —
+                // e.g. `convert_block_to_page`'s new page — must nest under
+                // that file, not error out and vanish from disk (job 72446a9c).
+                // Resolve the subtree-root page's own path and prepend its
+                // ancestor segments; only bail when the root page
                 // owns no resolvable file either.
                 let root_page = subtree_root_page
                     .as_ref()
@@ -9619,10 +9660,10 @@ impl FileSyncController {
         // identity there falls to `find_by_name_chain` on the now-vacated OLD
         // chain; the ordinary outcome is a miss and the "no document entity"
         // early return.
-        // These paths feed an `fs.remove` below, so they are proven contained on
-        // the way in — a rename cleanup that DELETES outside the vault is the
-        // same escape class as a write that does, and neither source is any more
-        // trusted than the one `doc_id_to_path` checks.
+        // These paths feed an `fs.remove` below, so they are proven contained
+        // on the way in — a rename cleanup that DELETES outside the vault is
+        // the same escape class as a write that does, and neither source is any
+        // more trusted than the one `doc_id_to_path` checks.
         let prior_paths = self.prior_page_homes(page_id).await?;
         // Already ours (we wrote it) — nothing to do.
         if self.last_projection.contains_key(&canonical) {
@@ -9634,9 +9675,9 @@ impl FileSyncController {
             return Ok(());
         }
         // Render the page's own doc: the `#+ID:` header (from the authoritative
-        // doc-root block) + any children the page already has. `render_document`
-        // emits `#+ID: <id>` for a block-scheme doc-root, so a childless page
-        // renders NON-empty — its identity file exists.
+        // doc-root block) + any children the page already has.
+        // `render_document` emits `#+ID: <id>` for a block-scheme doc-root, so
+        // a childless page renders NON-empty — its identity file exists.
         let children = self.block_reader.get_blocks(page_id).await?;
         let rendered = self.disclose_render(
             &path,
@@ -9662,9 +9703,10 @@ impl FileSyncController {
             return Ok(());
         }
         self.run_post_write_hook(&path);
-        // Remove the orphaned old files left by a page rename (see `prior_paths`).
-        // Each removal is gated on a fresh OWNERSHIP proof: a stale home record
-        // says where the page USED to live, never who owns those bytes now.
+        // Remove the orphaned old files left by a page rename (see
+        // `prior_paths`). Each removal is gated on a fresh OWNERSHIP proof: a
+        // stale home record says where the page USED to live, never who owns
+        // those bytes now.
         for prior_vault in prior_paths {
             let prior = prior_vault.as_path();
             let prior_canonical = CanonicalPath::new(prior);
@@ -9909,9 +9951,9 @@ impl FileSyncController {
                 continue;
             }
             // Copy-on-write: a virtual seed doc (`block:__default__`) is NEVER
-            // materialized by the boot sweep (the F4 stale-seed pin). Record its
-            // pristine asset render as the post-boot copy-on-write baseline and
-            // skip the write. `disk` is empty here (checked above).
+            // materialized by the boot sweep (the F4 stale-seed pin). Record
+            // its pristine asset render as the post-boot copy-on-write baseline
+            // and skip the write. `disk` is empty here (checked above).
             if self.gate_virtual_seed_write(&doc_id, &canonical, &rendered, false) {
                 continue;
             }
@@ -10458,10 +10500,10 @@ impl FileSyncController {
             .writeback_drops(path, source, rendered, sanctioned_removals)
             .await?;
 
-        // Checked before the drop verdict (BugFunnel row 23/29): an absent block
-        // whose own-file path could NOT be resolved (name_chain failed loud — a
-        // prohibited topology) refuses the write under its OWN error, so the
-        // message names the topology bug rather than a generic removal.
+        // Checked before the drop verdict (BugFunnel row 23/29): an absent
+        // block whose own-file path could NOT be resolved (name_chain failed
+        // loud — a prohibited topology) refuses the write under its OWN error,
+        // so the message names the topology bug rather than a generic removal.
         if !unresolvable.is_empty() {
             let err = anyhow::anyhow!(
                 "UNRESOLVABLE WRITE-BACK DROP: {} on-disk block(s) are absent from the projection \
@@ -10541,8 +10583,8 @@ impl FileSyncController {
     ) -> Result<Option<VaultPath>> {
         // Try alias registrar first (fastest path). An alias records where a
         // document's file actually is (ingested or written), where the name
-        // chain below only says where a page of that title would go, so a doc that
-        // has one is routed by it. An alias is only ever registered for a
+        // chain below only says where a page of that title would go, so a doc
+        // that has one is routed by it. An alias is only ever registered for a
         // vault file Holon ingested or wrote, so containment must already
         // hold — assert it here rather than trust it, so NO path this function
         // yields can name a file outside the vault.
@@ -11638,8 +11680,8 @@ fn compute_idless_remaps(existing: &[ExistingChild], incoming: &[IncomingIdentit
         sibs.sort_by_key(|e| e.seq);
     }
 
-    // Existing ids the incoming set already matches verbatim by id are claimed —
-    // an ID-less block cannot also absorb one of those.
+    // Existing ids the incoming set already matches verbatim by id are claimed
+    // — an ID-less block cannot also absorb one of those.
     let incoming_ids: HashSet<&EntityUri> = incoming.iter().map(|i| &i.id).collect();
     let mut claimed: HashSet<EntityUri> = existing
         .iter()
@@ -11713,8 +11755,9 @@ impl BlockMatchStrategy for PositionalExactMatcher {
                     basis: MatchBasis::ContentAtPosition,
                 }
             } else if ambiguous.contains(&inc.id) {
-                // Candidates = existing children with equal content -- the ids the
-                // caller's WARN discloses. Informational; does not gate behavior.
+                // Candidates = existing children with equal content -- the ids
+                // the caller's WARN discloses. Informational; does not gate
+                // behavior.
                 let candidates = ctx
                     .existing
                     .iter()
@@ -11860,7 +11903,8 @@ pub fn tiered_match(
             .push(i);
     }
 
-    // Precompute both sides' descendant subtree signatures (memoized post-order).
+    // Precompute both sides' descendant subtree signatures (memoized
+    // post-order).
     let mut existing_sig_cache: HashMap<EntityUri, SubtreeSig> = HashMap::new();
     for e in existing {
         existing_subtree_sig(&e.id, &by_parent, &mut existing_sig_cache);
@@ -11870,8 +11914,8 @@ pub fn tiered_match(
         incoming_subtree_sig(&i.id, &incoming_children, &mut incoming_sig_cache);
     }
 
-    // Existing ids matched verbatim by an incoming id are claimed up front -- an
-    // id-less block can never absorb an authored twin.
+    // Existing ids matched verbatim by an incoming id are claimed up front --
+    // an id-less block can never absorb an authored twin.
     let incoming_ids: HashSet<&EntityUri> = incoming.iter().map(|i| &i.id).collect();
     let mut claimed: HashSet<EntityUri> = existing
         .iter()
@@ -11916,7 +11960,8 @@ pub fn tiered_match(
         candidates.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.id.id().cmp(b.id.id())));
 
         if candidates.is_empty() {
-            // No candidate left -- genuinely new (RULING A2: the sole mint path).
+            // No candidate left -- genuinely new (RULING A2: the sole mint
+            // path).
             verdicts.push(MatchVerdict::MintFresh {
                 minted: inc.id.clone(),
             });
@@ -11926,10 +11971,11 @@ pub fn tiered_match(
         let inc_sig = &incoming_sig_cache[&inc.id];
 
         // T1: exact content at the SAME sibling position under the (resolved)
-        // parent (PR #81). GUARDED (RULING A2): the positional twin wins only if
-        // it is the SOLE candidate or its subtree signature matches -- otherwise
-        // several same-content twins with different subtrees would let position
-        // silently re-home children onto the wrong twin; defer to T2.
+        // parent (PR #81). GUARDED (RULING A2): the positional twin wins only
+        // if it is the SOLE candidate or its subtree signature matches --
+        // otherwise several same-content twins with different subtrees would
+        // let position silently re-home children onto the wrong twin; defer to
+        // T2.
         let positional = by_parent
             .get(&parent)
             .and_then(|s| s.get(pos))
@@ -11971,7 +12017,8 @@ pub fn tiered_match(
         // SIGNATURE matches (that twin keeps its own children -- never re-homed
         // onto the wrong twin); among matches, and when none match, the lowest
         // (seq, id) candidate wins (relative position; identical-subtree twins
-        // are interchangeable). Always claims a candidate -- never MintAmbiguous.
+        // are interchangeable). Always claims a candidate -- never
+        // MintAmbiguous.
         let (e, basis) = match candidates
             .iter()
             .copied()
@@ -12134,7 +12181,8 @@ mod idless_reconcile_tests {
         ];
         let vs = verdicts(&existing, &incoming).await;
         assert_eq!(remap_onto(&vs, "B1"), Some(EntityUri::block("A1")));
-        // B2's content matches A1 but A1 is claimed -> not ambiguous, just mints.
+        // B2's content matches A1 but A1 is claimed -> not ambiguous, just
+        // mints.
         assert!(is_mint_fresh(&vs, "B2"));
         assert!(!is_ambiguous(&vs, "B2"));
     }
@@ -12205,7 +12253,8 @@ mod idless_reconcile_tests {
     async fn contract_one_to_one_partial_matching() {
         let d = doc();
         let existing = vec![existing("A1", &d, 0, "Foo"), existing("A2", &d, 1, "Foo")];
-        // Three identical incoming, only two twins -> at most two remaps, all distinct.
+        // Three identical incoming, only two twins -> at most two remaps, all
+        // distinct.
         let incoming = vec![
             incoming("B1", &d, "Foo", true),
             incoming("B2", &d, "Foo", true),
@@ -12351,7 +12400,8 @@ mod tiered_matcher_tests {
     async fn shifted_position_unique_content_remaps() {
         let d = doc();
         let existing = vec![existing("A", &d, 0, "Alpha")];
-        // A new id-less note is inserted before the twin, pushing "Alpha" to pos 1.
+        // A new id-less note is inserted before the twin, pushing "Alpha" to
+        // pos 1.
         let incoming = vec![
             incoming("note", &d, "Note", true),
             incoming("i", &d, "Alpha", true),
@@ -12392,7 +12442,8 @@ mod tiered_matcher_tests {
     async fn reordered_identical_twins_pair_by_position() {
         let d = doc();
         let existing = vec![existing("A", &d, 0, "Dup"), existing("X", &d, 1, "Dup")];
-        // Both incoming twins land under a different parent -> no positional twin.
+        // Both incoming twins land under a different parent -> no positional
+        // twin.
         let other = EntityUri::block("other");
         let incoming = vec![
             incoming("i1", &other, "Dup", true),
@@ -12685,7 +12736,8 @@ mod shared_projection_guard_tests {
         assert!(!is_shared_subtree_projection(&doc, &blocks));
     }
 
-    // The page block IS the mount (adopt-and-collapse page share) → skip ingest.
+    // The page block IS the mount (adopt-and-collapse page share) → skip
+    // ingest.
     #[test]
     fn mount_page_is_a_shared_projection() {
         let mut doc = page("mount");
@@ -12694,8 +12746,8 @@ mod shared_projection_guard_tests {
         assert!(is_shared_subtree_projection(&doc, &[]));
     }
 
-    // Synthetic-container share: the page is a plain synthetic page, but a child
-    // carries the mount role / shared-tree-id stamp → skip ingest.
+    // Synthetic-container share: the page is a plain synthetic page, but a
+    // child carries the mount role / shared-tree-id stamp → skip ingest.
     #[test]
     fn descendant_with_share_stamp_is_a_shared_projection() {
         let doc = page("synthetic");

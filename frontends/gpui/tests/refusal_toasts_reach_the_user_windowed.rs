@@ -351,8 +351,8 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
          that merely got shorter"
     );
 
-    // The whole painted stack, printed on every run: a geometry failure below is
-    // unreadable without the neighbours that pushed the offender off-screen.
+    // The whole painted stack, printed on every run: a geometry failure below
+    // is unreadable without the neighbours that pushed the offender off-screen.
     for (id, i) in &lines {
         println!(
             "  {id:<28} x={:>7.1} y={:>7.1} w={:>7.1} h={:>6.1}  {:?}",
@@ -364,9 +364,9 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
         );
     }
 
-    // 1. Nothing is lost. A connection is accounted for when it is named on screen;
-    //    the ones that are not must be COUNTED on screen, because a user who cannot
-    //    see a refusal cannot go and fix the file it names.
+    // 1. Nothing is lost. A connection is accounted for when it is named on
+    //    screen; the ones that are not must be COUNTED on screen, because a
+    //    user who cannot see a refusal cannot go and fix the file it names.
     // Every refusal raised, not only the NotEnabled ones: the count line speaks
     // for the whole stack, so an accounting set that omitted one would compare
     // the painted number against the wrong total.
@@ -407,9 +407,9 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
         );
     }
 
-    // 2. What is shown is shown whole. An ellipsis in a disclosure means the clause
-    //    that was cut — the file to edit, the tail of a command — is reachable
-    //    nowhere on screen, and toast text cannot be selected.
+    // 2. What is shown is shown whole. An ellipsis in a disclosure means the
+    //    clause that was cut — the file to edit, the tail of a command — is
+    //    reachable nowhere on screen, and toast text cannot be selected.
     for line in &painted {
         assert!(
             !line.contains('…'),
@@ -460,9 +460,9 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
     }
 
     // 3. A refusal that IS shown says where to act on it. The toast is a
-    //    notification, not a terminal — the enable command lives in the log, which
-    //    is readable and copyable; what the toast owes the user is the connection's
-    //    name and the surface that fixes it.
+    //    notification, not a terminal — the enable command lives in the log,
+    //    which is readable and copyable; what the toast owes the user is the
+    //    connection's name and the surface that fixes it.
     for connection in shown.iter().filter(|c| **c != UNUSABLE) {
         assert!(
             painted
@@ -495,20 +495,20 @@ fn run_at(window: &str, window_w: f32, window_h: f32) {
         );
     }
 
-    // 4. What is painted is inside the window, WITH a real height. A line at h=0 is
-    //    in the element tree and on nobody's screen — the failure mode a text-only
-    //    assertion cannot see. A line that runs off the edge is the disclosure not
-    //    arriving, the same failure by a different route.
+    // 4. What is painted is inside the window, WITH a real height. A line at
+    //    h=0 is in the element tree and on nobody's screen — the failure mode a
+    //    text-only assertion cannot see. A line that runs off the edge is the
+    //    disclosure not arriving, the same failure by a different route.
     //
-    //    The LEFT bound is the stack's own inset, not zero, and that is the whole
-    //    of the narrow-window case. The stack is anchored to the right edge at a
-    //    fixed width; when the window is narrower than that width the box starts
-    //    at a NEGATIVE x and the first words of every line are drawn outside the
-    //    surface. `BoundsRegistry` reports the CLIPPED rect, so the overflowing
-    //    box comes back sitting at x=0 with a shortened width — an `x >= 0` test
-    //    sees a tidy box and passes, which is what it did. A box that fits has
-    //    its declared 16px of air on the left exactly as it has on every other
-    //    side; a box that does not fit has none.
+    //    The LEFT bound is the stack's own inset, not zero, and that is the
+    // whole    of the narrow-window case. The stack is anchored to the right
+    // edge at a    fixed width; when the window is narrower than that width the
+    // box starts    at a NEGATIVE x and the first words of every line are drawn
+    // outside the    surface. `BoundsRegistry` reports the CLIPPED rect, so the
+    // overflowing    box comes back sitting at x=0 with a shortened width — an
+    // `x >= 0` test    sees a tidy box and passes, which is what it did. A box
+    // that fits has    its declared 16px of air on the left exactly as it has
+    // on every other    side; a box that does not fit has none.
     for (id, info) in &lines {
         assert!(
             info.width > 0.0

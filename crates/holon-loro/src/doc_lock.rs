@@ -98,8 +98,9 @@ impl DocLock {
     pub(crate) fn for_doc(doc: &Arc<LoroDoc>) -> Self {
         let key = Arc::as_ptr(doc) as DocKey;
         let mut map = registry();
-        // A doc whose last holder was a raw `Arc` leaves its entry; a live `Arc`
-        // pins its address, so a dead entry never holds a lock still in use.
+        // A doc whose last holder was a raw `Arc` leaves its entry; a live
+        // `Arc` pins its address, so a dead entry never holds a lock still in
+        // use.
         map.retain(|_, entry| entry.doc.strong_count() > 0);
         let entry = map.entry(key).or_insert_with(|| Entry {
             doc: Arc::downgrade(doc),

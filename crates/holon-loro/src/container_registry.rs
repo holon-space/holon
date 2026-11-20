@@ -194,7 +194,8 @@ impl SubtreeIndex {
             return true;
         }
         // Walk `block`'s ancestors up to the root; bounded by the node count so
-        // a corrupted cyclic parent chain fails as "not contained", never hangs.
+        // a corrupted cyclic parent chain fails as "not contained", never
+        // hangs.
         let mut cur = block;
         for _ in 0..=self.parents.len() {
             match self.parents.get(cur) {

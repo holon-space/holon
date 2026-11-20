@@ -61,7 +61,8 @@ fn round_trip(carrier: Carrier, id: &str) -> EntityUri {
 fn minted_id() -> impl Strategy<Value = String> {
     let segment = "[A-Za-z0-9 ._()äé&+=-]{1,10}";
     prop_oneof![
-        // A UUID: engine creates, split_block, org ingest of an id-less heading.
+        // A UUID: engine creates, split_block, org ingest of an id-less
+        // heading.
         any::<u128>().prop_map(uuid_text),
         // Markdown `<relpath>::b::<n>` (obsidian.rs / logseq.rs `mint`), with
         // subdirectories: the relpath is `EntityUri::file`'s encoded path.

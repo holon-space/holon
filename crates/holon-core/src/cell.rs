@@ -252,15 +252,16 @@ impl Cell<String> {
             // Derive a WAKEUP-ONLY delta stream from it: each external content
             // change (or local-write echo) yields one empty-`ops` `TextDelta`.
             // The payload is intentionally empty — every `remote_deltas()`
-            // subscriber converges ABSOLUTELY to `current()` on wakeup (it never
-            // replays the ops), so the ops carry no information and MUST NOT be
-            // applied as an edit. This keeps the entity `Cell` the sole external
-            // content source in SqlOnly mode too (retiring `_data_subscription`)
-            // WITHOUT enabling LWW text *editing*: this is inbound-only, and
-            // `as_text_backing()` stays `None`, so `apply_text_op` still fails
-            // loud (authority-first invariant preserved). This wakeup-only path
-            // becomes obsolete once the SqlOnly axis moves to an ephemeral-LoroText cell
-            // (2026-07-07 reframe: retire the `Lww*` backings), which supplies a
+            // subscriber converges ABSOLUTELY to `current()` on wakeup (it
+            // never replays the ops), so the ops carry no information and MUST
+            // NOT be applied as an edit. This keeps the entity `Cell` the sole
+            // external content source in SqlOnly mode too (retiring
+            // `_data_subscription`) WITHOUT enabling LWW text *editing*: this
+            // is inbound-only, and `as_text_backing()` stays `None`, so
+            // `apply_text_op` still fails loud (authority-first invariant
+            // preserved). This wakeup-only path becomes obsolete once the
+            // SqlOnly axis moves to an ephemeral-LoroText cell (2026-07-07
+            // reframe: retire the `Lww*` backings), which supplies a
             // real text backing and thus a real delta stream.
             None => {
                 use futures::StreamExt;
@@ -492,8 +493,8 @@ mod tests {
     #[tokio::test]
     async fn lww_scalar_backing_replace_and_signal_round_trip() {
         // Bool scalar through the same `Cell<T>` surface — caller can't tell it
-        // apart from a Loro-backed scalar cell. The signal factory stands in for
-        // CDC: writes push the new value onto the stream.
+        // apart from a Loro-backed scalar cell. The signal factory stands in
+        // for CDC: writes push the new value onto the stream.
         let value = Arc::new(Mutex::new(false));
         let value_for_read = value.clone();
         let value_for_write = value.clone();

@@ -477,8 +477,8 @@ impl ServerHandler for MockServer {
             _ => (LIST_TOOL, "List mock items"),
         };
         // Only the steering tools publish a schema: they are the ones the
-        // sidecar's param names and shapes must agree with, so the mock declares
-        // them exactly as the real provider does.
+        // sidecar's param names and shapes must agree with, so the mock
+        // declares them exactly as the real provider does.
         let input_schema = match name {
             SEND_TOOL => send_tool_schema(),
             ANSWER_TOOL => answer_tool_schema(),

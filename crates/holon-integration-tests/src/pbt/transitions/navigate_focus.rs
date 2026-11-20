@@ -67,10 +67,11 @@ impl<R: RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefNavHistoryM
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
         // Turso-only: this navigates by clicking a LeftSidebar page entry and
         // verifies the move through the `current_focus` SQL view (+ CDC drain).
-        // The sidebar page list and `current_focus` projection are Turso-native;
-        // a no-Turso session has neither, so gate it out of {Loro} slices.
-        // (The in-memory NavigationProvider covers ClickBlock / ArrowNavigate /
-        // NavigateBack / NavigateForward / NavigateHome / ToggleDrawer.)
+        // The sidebar page list and `current_focus` projection are
+        // Turso-native; a no-Turso session has neither, so gate it out of
+        // {Loro} slices. (The in-memory NavigationProvider covers ClickBlock /
+        // ArrowNavigate / NavigateBack / NavigateForward / NavigateHome /
+        // ToggleDrawer.)
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
@@ -186,8 +187,9 @@ impl<R: RefLifecycle + RefBlockTree + RefNavHistoryMut + RefFocusRoots> Transiti
         // so the page entry is never rendered/laid-out and cannot be clicked.
         // Without this gate the SUT click falls through to a plain `set_focus`
         // (focus only, no nav-history write) while the ref records a focus move
-        // → divergence that surfaces ~1000 lines later. A real user would re-open the
-        // drawer first; that's a separate `ToggleDrawer` transition.
+        // → divergence that surfaces ~1000 lines later. A real user would
+        // re-open the drawer first; that's a separate `ToggleDrawer`
+        // transition.
         checks.push(check(
             state.drawer_is_open(LEFT_SIDEBAR_PANEL),
             Reason::LeftSidebarDrawerClosed,
@@ -225,9 +227,9 @@ impl<R: RefLifecycle + RefBlockTree + RefNavHistoryMut + RefFocusRoots> Transiti
         {
             return;
         }
-        // The whole `focus(region, block_id)` reference effect — idempotency guard,
-        // first-visit budget flag, history-row push, open-pin reset, region-focus
-        // clear, global-focus set, editor blur — lives in
+        // The whole `focus(region, block_id)` reference effect — idempotency
+        // guard, first-visit budget flag, history-row push, open-pin reset,
+        // region-focus clear, global-focus set, editor blur — lives in
         // `RefNavHistoryMut::nav_focus` (mirrors `provider.rs::focus`).
         state.nav_focus(self.region, &self.block_id);
     }

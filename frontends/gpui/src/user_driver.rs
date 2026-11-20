@@ -305,10 +305,10 @@ impl GpuiUserDriver {
         // Tie-break: prefer elements that carry an entity_id, so a wrapper
         // widget registered with the same bounds as its `entity_id`-bearing
         // child does not shadow the child in the hit-test. Without this,
-        // `editable_text#N` (entity_id=None) and `editable-text-block:…-content`
-        // (entity_id=Some) share identical bounds and the wrapper non-
-        // deterministically wins, sending clicks to a handler that can't
-        // identify the target block (PBT seed=42 step 11).
+        // `editable_text#N` (entity_id=None) and
+        // `editable-text-block:…-content` (entity_id=Some) share identical
+        // bounds and the wrapper non- deterministically wins, sending clicks to
+        // a handler that can't identify the target block (PBT seed=42 step 11).
         hits.sort_by(|a, b| {
             a.3.partial_cmp(&b.3)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -689,8 +689,9 @@ impl UserDriver for GpuiUserDriver {
                 // key MCP call lands its text in the OLD block and silently
                 // splits it — no error surfaced anywhere user-visible. Clear
                 // `focused_block` so the stale editor blurs and later
-                // keystrokes go unhandled (fail loud in `key_down_until_handled`)
-                // instead of corrupting content invisibly.
+                // keystrokes go unhandled (fail loud in
+                // `key_down_until_handled`) instead of corrupting content
+                // invisibly.
                 self.engine.ui_state().focused_block_mutable().set(None);
                 eprintln!(
                     "[ui-event] click_entity({entity_id:?}) FAILED to resolve bounds within \

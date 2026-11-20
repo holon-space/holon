@@ -278,7 +278,8 @@ impl PeerFingerprint {
 
 impl fmt::Debug for PeerFingerprint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Short prefix is enough to correlate; full key is not secret but noisy.
+        // Short prefix is enough to correlate; full key is not secret but
+        // noisy.
         write!(
             f,
             "PeerFingerprint({:02x}{:02x}{:02x}{:02x}…)",

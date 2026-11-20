@@ -147,20 +147,22 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         caps.insert(self.clone() as Arc<dyn RefEditorMirror>);
         // `RefLayout` carries the layout-block / document metadata the windowed
         // `inv-frontend-bounds-rendered` reads (`has_user_documents`,
-        // `region_entity_focused`). Registering it unconditionally is harmless to
-        // existing slices: selection ANDs the SUT and ref cap sets, and only the
-        // windowed slice supplies the matching `SutLayout + SutViewSelection`.
+        // `region_entity_focused`). Registering it unconditionally is harmless
+        // to existing slices: selection ANDs the SUT and ref cap sets, and only
+        // the windowed slice supplies the matching `SutLayout +
+        // SutViewSelection`.
         caps.insert(self.clone() as Arc<dyn RefLayout>);
         // `RefWatch` carries the active-watch query set + expected rows the B5
         // watch invariants read (E1 SutWatch relocation). Harmless to existing
         // slices: only the frontend slice supplies the matching `SutWatch`.
         caps.insert(self.clone() as Arc<dyn RefWatch>);
-        // `RefFocus` carries the per-region navigation focus + expected focus roots
-        // the `inv-navigation-focus` / `inv-focus-roots` invariants read (SutHandle
-        // decomposition: NavigateFocus onto SutFocusWrite). Harmless to existing
-        // slices: selection ANDs the SUT and ref cap sets, and only a slice that
-        // also supplies `SutSqlProjection` (+`SutBackend`) selects the focus
-        // invariants — and only the navigation slice drives real focus data.
+        // `RefFocus` carries the per-region navigation focus + expected focus
+        // roots the `inv-navigation-focus` / `inv-focus-roots` invariants read
+        // (SutHandle decomposition: NavigateFocus onto SutFocusWrite). Harmless
+        // to existing slices: selection ANDs the SUT and ref cap sets, and only
+        // a slice that also supplies `SutSqlProjection` (+`SutBackend`) selects
+        // the focus invariants — and only the navigation slice drives real
+        // focus data.
         caps.insert(self.clone() as Arc<dyn RefFocus>);
         // `RefViewSelection` carries the active-view / render-expr metadata the
         // ViewModel invariants read (`inv-view-selection`, the C3 renderer
@@ -170,33 +172,35 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // `SutViewSelection`/`SutRenderer` selects it.
         caps.insert(self.clone() as Arc<dyn RefViewSelection>);
         // `RefTaskState` + `RefGlobalFocus` carry the task-state / global-focus
-        // metadata the `value_fn_provider_*` ViewModel invariants read (C3 batch 2).
-        // Logic already on `ReferenceState`; harmless to existing slices (selection
-        // ANDs SUT∧ref cap sets — only a `SutViewSelection` slice selects them).
+        // metadata the `value_fn_provider_*` ViewModel invariants read (C3
+        // batch 2). Logic already on `ReferenceState`; harmless to existing
+        // slices (selection ANDs SUT∧ref cap sets — only a `SutViewSelection`
+        // slice selects them).
         caps.insert(self.clone() as Arc<dyn RefTaskState>);
         // `RefToggle` carries the expand/collapse (`is_expanded`) model the
-        // `inv-embedded-page-collapsed-lazy` invariant reads (Phase 4 ExpandToggle
-        // keystone). Harmless to existing slices: selection ANDs SUT∧ref cap sets,
-        // and only the frontend slice supplying `SutRenderer` selects it.
+        // `inv-embedded-page-collapsed-lazy` invariant reads (Phase 4
+        // ExpandToggle keystone). Harmless to existing slices: selection ANDs
+        // SUT∧ref cap sets, and only the frontend slice supplying `SutRenderer`
+        // selects it.
         caps.insert(self.clone() as Arc<dyn RefToggle>);
         // `RefNavHistory` carries the drawer open/closed model
         // `inv-drawer-open-matches-ref` reads. Harmless to existing slices:
         // selection ANDs SUT∧ref cap sets, and only a slice supplying
         // `SutRenderer` selects that invariant.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefNavHistory>);
-        // `RefJournalFeed` scopes `inv-journal-feed-viewport-lazy` to the feed's
-        // own day pages. Harmless to existing slices: only a slice supplying
-        // windowed `SutLayout` geometry selects that invariant.
+        // `RefJournalFeed` scopes `inv-journal-feed-viewport-lazy` to the
+        // feed's own day pages. Harmless to existing slices: only a slice
+        // supplying windowed `SutLayout` geometry selects that invariant.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefJournalFeed>);
         // `RefAdvice` carries the advice-weave expectation (ADR 0021/0022) the
         // `advice rows woven` keystone invariant reads. Harmless to existing
-        // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying the
-        // matching SUT advice-matview cap selects it.
+        // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying
+        // the matching SUT advice-matview cap selects it.
         caps.insert(self.clone() as Arc<dyn RefAdvice>);
-        // `RefClock` carries the calendar-day model + predicted journal count the
-        // `AdvanceDay` journal-count invariant reads (ADR 0024 §6). Harmless to
-        // existing slices: selection ANDs SUT∧ref cap sets, and only a slice
-        // supplying the matching `SutJournalCount` selects it.
+        // `RefClock` carries the calendar-day model + predicted journal count
+        // the `AdvanceDay` journal-count invariant reads (ADR 0024 §6).
+        // Harmless to existing slices: selection ANDs SUT∧ref cap sets, and
+        // only a slice supplying the matching `SutJournalCount` selects it.
         caps.insert(self.clone() as Arc<dyn RefClock>);
         // `RefHistoryExpectation` carries the C2 provenance-oracle expectation
         // (ever-created id anchor + UI-driven op-group floor) the `history_*`
@@ -212,11 +216,11 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         caps.insert(self.clone() as Arc<dyn RefGlobalFocus>);
         // `RefAudience` carries the ADR 0028 C2/H3 sharing overlay (per-block
         // policy audience + per-container effective audience + epoch) the
-        // `inv-audience-never-over-approximates` keystone oracle reads. Ref-only
-        // (no SUT twin yet — no share machinery in prod), so it selects on every
-        // composed draw like `inv-no-page-under-non-page`; `shared_block_ids()`
-        // is empty on a ref modeling no crossings, so the oracle is vacuously
-        // green and adds no false RED to the keystone.
+        // `inv-audience-never-over-approximates` keystone oracle reads.
+        // Ref-only (no SUT twin yet — no share machinery in prod), so it
+        // selects on every composed draw like `inv-no-page-under-non-page`;
+        // `shared_block_ids()` is empty on a ref modeling no crossings, so the
+        // oracle is vacuously green and adds no false RED to the keystone.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefAudience>);
         // `RefSharedView` carries the true-sharing whole-vault share + the
         // owner→receiver round count the two-instance convergence/boundary
@@ -228,9 +232,9 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // (Turso-only), so a Loro-only / no-Turso slice deselects honestly.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefTypedEntities>);
         // `RefRemoteListSync` carries the remote-list sync oracle (the fixture
-        // peer's declared list) the mirror invariant reads. Harmless to existing
-        // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying
-        // the matching `SutRemoteListSync` selects it.
+        // peer's declared list) the mirror invariant reads. Harmless to
+        // existing slices: selection ANDs SUT∧ref cap sets, and only a slice
+        // supplying the matching `SutRemoteListSync` selects it.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefRemoteListSync>);
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefIntegrationConnect>);
         // `RefReadOnlyHomes` names the blocks homed in a read-only format, so

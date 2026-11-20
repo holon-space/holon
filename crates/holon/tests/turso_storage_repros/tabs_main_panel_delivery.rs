@@ -86,8 +86,8 @@ async fn cursor_filtered_main_panel_delivers_at_vault_scale() {
         )
         .await
         .unwrap();
-    // Real `focus_roots` matview (multi-tab capable) — main_panel reads FROM it,
-    // exactly as production (matview-on-matview chain, mirrors
+    // Real `focus_roots` matview (multi-tab capable) — main_panel reads FROM
+    // it, exactly as production (matview-on-matview chain, mirrors
     // tabs_cursor_filtered_panel + matview_focus_roots.sql).
     handle
         .execute_ddl(
@@ -99,8 +99,8 @@ async fn cursor_filtered_main_panel_delivers_at_vault_scale() {
         .unwrap();
 
     // Synthetic ~70-page vault: 70 pages (doc_0..doc_69); each a small tree of
-    // 15 blocks. The active page (doc_0) additionally carries a DEEP chain of 30
-    // to exercise the depth cap (< 20) and the visited-path guard.
+    // 15 blocks. The active page (doc_0) additionally carries a DEEP chain of
+    // 30 to exercise the depth cap (< 20) and the visited-path guard.
     let mut rows: Vec<String> = Vec::new();
     let mut expected_active: BTreeSet<String> = BTreeSet::new();
     for p in 0..70u32 {

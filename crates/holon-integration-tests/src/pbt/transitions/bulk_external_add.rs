@@ -59,10 +59,10 @@ impl<R: RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate> Trans
         check(!doc_uris.is_empty(), Reason::NoDocumentsAvailable).map(|_| {
             // Boost weight when most documents have no editable Text content.
             // Without seeded content, every edit-path generator that filters on
-            // `main_editable_descendants` (SplitBlock, Indent, EditViaViewModel,
-            // ClickBlock-as-Main, …) returns `None` and the PBT never reaches
-            // editing code. Once docs hold Text blocks the weight drops back to
-            // base so the rest of the strategy can run.
+            // `main_editable_descendants` (SplitBlock, Indent,
+            // EditViaViewModel, ClickBlock-as-Main, …) returns `None` and the
+            // PBT never reaches editing code. Once docs hold Text blocks the
+            // weight drops back to base so the rest of the strategy can run.
             let is_empty_doc =
                 |doc_uri: &EntityUri| -> bool { !state.doc_has_editable_text(doc_uri) };
             let empty_doc_uris: Vec<EntityUri> = doc_uris
@@ -77,11 +77,12 @@ impl<R: RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate> Trans
                 1
             };
 
-            // Prefer empty docs when any exist: the multi-block-into-empty-parent
-            // path is the cleanest exerciser of the Full-mode CDC ordering invariant
-            // (org-parser-assigned sort_keys must agree with the Loro tree's
-            // fractional indices). Sampling from the empty subset deterministically
-            // hits that path on every BulkExternalAdd, instead of leaving it to a
+            // Prefer empty docs when any exist: the
+            // multi-block-into-empty-parent path is the cleanest exerciser of
+            // the Full-mode CDC ordering invariant (org-parser-assigned
+            // sort_keys must agree with the Loro tree's fractional indices).
+            // Sampling from the empty subset deterministically hits that path
+            // on every BulkExternalAdd, instead of leaving it to a
             // random `select(doc_uris)` to land there.
             let candidate_docs = if !empty_doc_uris.is_empty() {
                 empty_doc_uris
@@ -153,9 +154,9 @@ impl<R: RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate> Trans
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        // The whole bulk-add reference effect (org round-trip normalization, doc
-        // ownership, canonical re-sequencing, block-id counter advance) lives in
-        // `RefLayoutMutate::bulk_add_blocks`.
+        // The whole bulk-add reference effect (org round-trip normalization,
+        // doc ownership, canonical re-sequencing, block-id counter advance)
+        // lives in `RefLayoutMutate::bulk_add_blocks`.
         for block in &self.blocks {
             crate::pbt::generators::note_escaped_body_line_reach("BulkExternalAdd", &block.content);
             let (content, marks) = crate::pbt::types::normalize_content_for_org_roundtrip(

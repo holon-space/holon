@@ -38,8 +38,9 @@ use holon_pbt_core::composition::CapProvider;
 use holon_pbt_core::composition::Config;
 pub use holon_pbt_core::composition::run_selected;
 
-// Prelude: the catalog a test drives, re-exported so `fixtures::*` is a one-line
-// import. (Builders are slice-specific and imported from each slice directly.)
+// Prelude: the catalog a test drives, re-exported so `fixtures::*` is a
+// one-line import. (Builders are slice-specific and imported from each slice
+// directly.)
 pub use super::catalog::composed_invariant_catalog;
 
 pub fn uri(s: &str) -> EntityUri {

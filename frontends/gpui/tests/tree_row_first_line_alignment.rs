@@ -78,9 +78,9 @@ fn tree_row(id: &str, marker: Marker) -> ReactiveViewModel {
 
     let mut content =
         match marker {
-            // `selectable(row(icon("notebook"), spacer(6), text(col("content"))))`
-            // — the left sidebar's item template verbatim (assets/default/index.org,
-            // `left_sidebar::render::0`).
+            // `selectable(row(icon("notebook"), spacer(6),
+            // text(col("content"))))` — the left sidebar's item template
+            // verbatim (assets/default/index.org, `left_sidebar::render::0`).
             Marker::PageIcon => {
                 let mut icon_props = HashMap::new();
                 icon_props.insert("name".to_string(), Value::String("notebook".to_string()));

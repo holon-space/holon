@@ -66,7 +66,8 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionFactory<R> for PeerEdit
             // PeerEdit::Create — deterministic stable ID from hash of
             // (peer_idx, parent, content, seq) ensures ref model and SUT agree.
             {
-                // Extract peer data before the strategy to avoid borrow escaping.
+                // Extract peer data before the strategy to avoid borrow
+                // escaping.
                 let peer_blocks_per_idx: Vec<Vec<String>> = (0..peer_count)
                     .map(|idx| state.peer_block_stable_ids(idx))
                     .collect();
@@ -110,7 +111,8 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionFactory<R> for PeerEdit
             // PeerEdit::Delete is disabled: cascading-delete ref model gap.
             //
             // PeerEdit::Update — enumerate all (peer_idx, stable_id) pairs
-            // and filter via preconditions (which checks source-block exclusion).
+            // and filter via preconditions (which checks source-block
+            // exclusion).
             {
                 let all_peers: Vec<(usize, Vec<String>)> = (0..peer_count)
                     .map(|idx| (idx, state.peer_block_stable_ids(idx)))
@@ -167,7 +169,8 @@ impl<R: RefLifecycle + RefPeers + RefPeersMut> TransitionRef<R> for PeerEdit {
                 PeerEditOp::Delete { stable_id } => has_block(stable_id),
             };
 
-            // Use PeerEditSourceBlockViolation for source-block exclusions if needed
+            // Use PeerEditSourceBlockViolation for source-block exclusions if
+            // needed
             checks.push(check(valid_op, Reason::PeerEditSourceBlockViolation));
         }
 

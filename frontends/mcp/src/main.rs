@@ -23,8 +23,8 @@ use holon_mcp::server::HolonMcpServer;
 /// noisy HTTP client and OpenTelemetry logs. Built by the shared
 /// `env_filter_with_default`, which also applies the `holon_latency` directive.
 fn default_env_filter() -> EnvFilter {
-    // Some crates use dashes in target names, others use underscores - filter both
-    // variants
+    // Some crates use dashes in target names, others use underscores - filter
+    // both variants
     holon_frontend::logging::env_filter_with_default(
         "info,reqwest=warn,hyper=warn,hyper_util=warn,h2=warn,tower=warn,opentelemetry=warn,\
          opentelemetry_sdk=warn,opentelemetry_http=warn,opentelemetry_otlp=warn,\
@@ -107,7 +107,8 @@ fn parse_args() -> Result<Config> {
                 loro_enabled = Some(true);
             }
             "--help" | "-h" => {
-                // Write help to stderr to avoid interfering with stdout in stdio mode
+                // Write help to stderr to avoid interfering with stdout in
+                // stdio mode
                 eprintln!("Usage: holon-mcp [OPTIONS] [DATABASE_PATH]");
                 eprintln!();
                 eprintln!("Options:");
@@ -192,7 +193,8 @@ async fn run_stdio_server(
             return Err(anyhow::anyhow!("MCP server task panicked"));
         }
         // For JoinError, check if it's a connection closed error
-        // Connection closed is expected when stdin closes, so we should exit cleanly
+        // Connection closed is expected when stdin closes, so we should exit
+        // cleanly
         let error_msg = format!("{}", join_err).to_lowercase();
         if error_msg.contains("connection closed")
             || error_msg.contains("connectionclosed")
@@ -246,7 +248,8 @@ fn main() -> Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("building the tokio runtime: {e}"))?;
     let result = runtime.block_on(run());
-    // A stdio client that went away takes stderr with it; the log keeps the error.
+    // A stdio client that went away takes stderr with it; the log keeps the
+    // error.
     if let Err(e) = &result {
         tracing::error!("holon-mcp exits with an error: {e:#}");
     }
@@ -267,8 +270,8 @@ async fn run() -> Result<()> {
     // Configure logging based on transport mode
     match config.transport_mode {
         TransportMode::Stdio => {
-            // In stdio mode, write all logs to a file to avoid interfering with protocol
-            // communication Determine log file path
+            // In stdio mode, write all logs to a file to avoid interfering with
+            // protocol communication Determine log file path
             let log_file_path = std::env::var("HOLON_MCP_LOG_FILE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| {
@@ -398,8 +401,8 @@ async fn run() -> Result<()> {
         }
     }
 
-    // Relay mode: when HOLON_BROWSER_RELAY_URL is set, forward all tool calls to
-    // the browser via the serve.mjs WebSocket hub. No local engine or DB
+    // Relay mode: when HOLON_BROWSER_RELAY_URL is set, forward all tool calls
+    // to the browser via the serve.mjs WebSocket hub. No local engine or DB
     // needed.
     if std::env::var("HOLON_BROWSER_RELAY_URL").is_ok() {
         let relay_port: u16 = std::env::var("RELAY_PORT")

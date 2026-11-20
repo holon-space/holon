@@ -97,8 +97,9 @@ impl SutLayout for GpuiWindowComponent {
 
     // `rendered_elements_fresh` uses the default (== `rendered_elements`): the
     // harness pumps the window to a fixed point during settle, so the committed
-    // snapshot is already fresh when a cap reads it — no per-read frame pump (and
-    // the single-threaded harness couldn't pump from inside an `&self` cap anyway).
+    // snapshot is already fresh when a cap reads it — no per-read frame pump
+    // (and the single-threaded harness couldn't pump from inside an `&self` cap
+    // anyway).
 
     /// No screenshot watcher is wired through the `GeometryProvider` port, so
     /// the pixel-level `not-visually-empty` backstop is unavailable here —
@@ -225,9 +226,10 @@ impl GpuiFrontendEngineComponent {
             Arc::new(Mutex::new(Vec::new()));
         // Spawn the intermediate-emission collector ONCE (mirrors E2ESut's
         // `ensure_reactive_engine`): watch the reactive root and buffer every
-        // ViewModel snapshot so `drain_vm_emission_toggles` inspects the transient
-        // emissions a later structural re-render would mask. Uses the engine's own
-        // runtime handle so it runs regardless of which thread constructs us.
+        // ViewModel snapshot so `drain_vm_emission_toggles` inspects the
+        // transient emissions a later structural re-render would mask. Uses the
+        // engine's own runtime handle so it runs regardless of which thread
+        // constructs us.
         {
             use futures::StreamExt;
             let collector = vm_emissions.clone();
@@ -361,10 +363,11 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
             });
         tokio::task::yield_now().await;
         let report = probe_provider_stability(&reactive).await;
-        // ALWAYS restore, INCLUDING to "no viewport known": `if_space` reads that
-        // state as desktop-first, so leaving the probe's narrow viewport in place
-        // moves every later render on this shared engine onto the mobile branch,
-        // where both sidebars render `overlay` (i.e. default-closed).
+        // ALWAYS restore, INCLUDING to "no viewport known": `if_space` reads
+        // that state as desktop-first, so leaving the probe's narrow viewport
+        // in place moves every later render on this shared engine onto the
+        // mobile branch, where both sidebars render `overlay` (i.e.
+        // default-closed).
         reactive.ui_state().restore_viewport(previous);
         report
     }
@@ -482,8 +485,8 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
         let live_items = lt.items();
         // Match live↔fresh by ROW ID, not position (a hierarchical live tree
         // projects rows in DFS order, differing from the matview order
-        // `mp_data_rows` follows). Rows present on only one side are skipped — the
-        // bug caught is a stale VARIANT/props on a row present in both.
+        // `mp_data_rows` follows). Rows present on only one side are skipped —
+        // the bug caught is a stale VARIANT/props on a row present in both.
         let row_id_of = |vm: &holon_frontend::ReactiveViewModel| -> Option<String> {
             vm.data
                 .get_cloned()
@@ -502,8 +505,8 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
                 .collect();
         let mut prop_diffs = Vec::new();
         // The tree driver wraps each row in a `tree_item`; the fresh side
-        // interprets the bare `item_template`. Unwrap the live `tree_item` to its
-        // content child so we compare like-for-like.
+        // interprets the bare `item_template`. Unwrap the live `tree_item` to
+        // its content child so we compare like-for-like.
         let unwrap_tree_item =
             |vm: &Arc<holon_frontend::ReactiveViewModel>| -> Arc<holon_frontend::ReactiveViewModel> {
                 if vm.widget_name().as_deref() == Some("tree_item")
@@ -715,14 +718,15 @@ impl SutRenderer for GpuiFrontendEngineComponent {
         let Some(_rqr) = self.resolve_watch(&root_uri).await else {
             return empty();
         };
-        // Use the engine's RECURSIVE resolver (`snapshot`, cycle-detected) rather
-        // than `interpret_pure(render_expr, data_rows)`: the latter expands
-        // `live_block` region nodes only via `services.get_block_data`, which is a
-        // cold/empty read for the nested Main-panel content (E2ESut's headless
-        // services stub it to an empty table). `engine.snapshot` resolves each
-        // `live_block` through the live window's already-warm watches — the same
-        // path `frontend_root_vm` uses — so the Main-panel content (the grafted
-        // blocks) is present and `inv-displayed-text/viewmodel` can compare it.
+        // Use the engine's RECURSIVE resolver (`snapshot`, cycle-detected)
+        // rather than `interpret_pure(render_expr, data_rows)`: the latter
+        // expands `live_block` region nodes only via `services.get_block_data`,
+        // which is a cold/empty read for the nested Main-panel content
+        // (E2ESut's headless services stub it to an empty table).
+        // `engine.snapshot` resolves each `live_block` through the live
+        // window's already-warm watches — the same path `frontend_root_vm` uses
+        // — so the Main-panel content (the grafted blocks) is present and
+        // `inv-displayed-text/viewmodel` can compare it.
         let vm = self.engine.snapshot(&root_uri);
         view_model_to_snapshot(&vm)
     }
@@ -838,16 +842,18 @@ impl CapProvider for GpuiFrontendEngineComponent {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
         caps.insert(self.clone() as Arc<dyn SutViewSelection>);
         caps.insert(self.clone() as Arc<dyn SutRenderer>);
-        // The windowed live-engine caps (C-5 split off SutViewSelection): the root-VM
-        // resolution surface (`SutFrontendEngine`) and the emission-observer surface
-        // (`SutFrontendEmissions`). A live gpui `ReactiveEngine` is the only faithful
-        // source, so only this windowed component registers them; the headless slice
-        // deselects the frontend/emission invariants honestly.
+        // The windowed live-engine caps (C-5 split off SutViewSelection): the
+        // root-VM resolution surface (`SutFrontendEngine`) and the
+        // emission-observer surface (`SutFrontendEmissions`). A live gpui
+        // `ReactiveEngine` is the only faithful source, so only this windowed
+        // component registers them; the headless slice deselects the
+        // frontend/emission invariants honestly.
         caps.insert(self.clone() as Arc<dyn SutFrontendEngine>);
         caps.insert(self.clone() as Arc<dyn SutFrontendEmissions>);
-        // Full-mode query engine (a real Turso-backed `ReactiveEngine` window) — keeps
-        // the degraded `inv-viewmodel-shows-source-when-no-query` twin deselected here
-        // and `inv-viewmodel-decompiled-rows-match-query` selectable.
+        // Full-mode query engine (a real Turso-backed `ReactiveEngine` window)
+        // — keeps the degraded `inv-viewmodel-shows-source-when-no-query` twin
+        // deselected here and `inv-viewmodel-decompiled-rows-match-query`
+        // selectable.
         caps.insert(self as Arc<dyn SutQueryResults>);
     }
 }

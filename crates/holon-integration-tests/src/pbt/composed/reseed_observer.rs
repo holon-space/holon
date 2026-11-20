@@ -310,8 +310,8 @@ impl tracing::field::Visit for ProjectionVisitor {
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        // Fallback for any non-`&str` recording path. String fields recorded via
-        // `record_debug` arrive quoted (`"full"`); strip a single pair.
+        // Fallback for any non-`&str` recording path. String fields recorded
+        // via `record_debug` arrive quoted (`"full"`); strip a single pair.
         let raw = format!("{value:?}");
         let v = raw.trim_matches('"').to_string();
         match field.name() {

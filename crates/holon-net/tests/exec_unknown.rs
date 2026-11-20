@@ -258,7 +258,8 @@ impl<const CANDIDATE: bool> StateMachineTest for Test<CANDIDATE> {
             }
             Op::Abandon => {
                 sut.d.tick(ABANDON + 1).expect("the net quiesces");
-                // A run starts at t >= 0, so no run timer expires before RUN_TIMER.
+                // A run starts at t >= 0, so no run timer expires before
+                // RUN_TIMER.
                 if sut.d.now >= Duration::from_secs(RUN_TIMER) {
                     sut.released = true;
                 }

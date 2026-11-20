@@ -115,7 +115,8 @@ async fn call_and_summarise(
                             let mut fields: Vec<&String> = first.keys().collect();
                             fields.sort();
                             println!("    first item fields: {:?}", fields);
-                            // Surface a few field types so we know what's nested vs scalar.
+                            // Surface a few field types so we know what's
+                            // nested vs scalar.
                             for f in fields.iter().take(20) {
                                 let kind = type_label(&first[*f]);
                                 println!("      {f}: {kind}");

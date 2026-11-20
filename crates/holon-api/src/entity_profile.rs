@@ -348,8 +348,8 @@ impl EntityProfile {
         loud: &BTreeSet<String>,
     ) -> Option<Arc<StoredProfile>> {
         // Variants are sorted by priority desc.
-        // First match wins — conditionless variants (empty condition_source) always
-        // match.
+        // First match wins — conditionless variants (empty condition_source)
+        // always match.
         for variant in &self.variants {
             if variant.condition_source.is_empty()
                 || eval_condition(
@@ -393,9 +393,10 @@ impl EntityProfile {
             }
             scope.push(key.clone(), value_to_dynamic(value));
 
-            // Flatten `properties` object so inner fields (task_state, priority, etc.)
-            // are available as top-level scope variables for profile conditions.
-            // (Nested `if let`: holon-api is edition 2021, no let-chains.)
+            // Flatten `properties` object so inner fields (task_state,
+            // priority, etc.) are available as top-level scope variables for
+            // profile conditions. (Nested `if let`: holon-api is edition 2021,
+            // no let-chains.)
             if key == "properties" {
                 if let Value::Object(props) = value {
                     for (prop_key, prop_value) in props {
@@ -631,9 +632,9 @@ pub trait ProfileResolving: Send + Sync {
     /// Returns `None` when no profile of that name is in the cache, so the
     /// caller can disclose the degraded default-variant behaviour
     /// (fail-visible, not fail-silent).
-    // ALLOW(fallback): documents a disclosed, fail-visible degrade (returns None so
-    // the caller surfaces it), not a hidden swallow ALLOW(unused_param): trait
-    // shape; default impl (mocks) has no cache
+    // ALLOW(fallback): documents a disclosed, fail-visible degrade (returns
+    // None so the caller surfaces it), not a hidden swallow
+    // ALLOW(unused_param): trait shape; default impl (mocks) has no cache
     fn resolve_collection_variants_named(&self, _name: &EntityName) -> Option<Vec<RenderVariant>> {
         None
     }

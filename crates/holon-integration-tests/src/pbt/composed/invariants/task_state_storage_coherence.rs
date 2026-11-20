@@ -36,8 +36,9 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn SutLoroTaskState>(),
             ],
             sut_absent: Vec::new(),
-            // Re-anchored to the ref (F4): the body now compares both SUT stores
-            // to `RefTaskState`, so the ref cap is a real selection dependency.
+            // Re-anchored to the ref (F4): the body now compares both SUT
+            // stores to `RefTaskState`, so the ref cap is a real selection
+            // dependency.
             ref_present: vec![CapId::of::<dyn RefTaskState>()],
         },
         Attribution::at(Layer::StoreCrdt, file!()),
@@ -172,8 +173,9 @@ mod real_sut_teeth {
     /// runtime" panic that a `#[tokio::test]` would hit.
     #[test]
     fn toggle_state_moves_sql_and_loro_in_lockstep() {
-        // Synchronously (outside any runtime): seed the oracle, which initializes the
-        // `full_headless_cap_set()` OnceLock via its own short-lived runtime.
+        // Synchronously (outside any runtime): seed the oracle, which
+        // initializes the `full_headless_cap_set()` OnceLock via its own
+        // short-lived runtime.
         let ref_state = wide_e2e_ref();
         let c1 = fixed_ids().c1;
 
@@ -186,7 +188,8 @@ mod real_sut_teeth {
         rt.block_on(async {
             let (mut caps, _handle, _scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
 
-            // Baseline: the seed block carries no task_state in either projection.
+            // Baseline: the seed block carries no task_state in either
+            // projection.
             assert_eq!(
                 caps.block_task_state(&c1).await,
                 None,
@@ -198,12 +201,13 @@ mod real_sut_teeth {
                 "precondition: seeded c1 has no Loro task_state"
             );
 
-            // `boot_and_seed_wide` already focused the page root (`structural-page`),
-            // so c1 — a direct child — is a VISIBLE Main row. Production has no
-            // block-zoom gesture that would make the child block c1 a focus root of
-            // its own (the sidebar only focuses pages), so a click on c1's
-            // `state_toggle` is exactly the faithful user gesture. Cycle it to TODO
-            // via the real `SutMutate::toggle_state` write path (same dispatch the
+            // `boot_and_seed_wide` already focused the page root
+            // (`structural-page`), so c1 — a direct child — is a VISIBLE Main
+            // row. Production has no block-zoom gesture that would make the
+            // child block c1 a focus root of its own (the sidebar only focuses
+            // pages), so a click on c1's `state_toggle` is exactly the faithful
+            // user gesture. Cycle it to TODO via the real
+            // `SutMutate::toggle_state` write path (same dispatch the
             // PBT uses).
             TransitionImpl::apply_to_sut(
                 &ToggleState {

@@ -406,7 +406,8 @@ mod tests {
         let store = PendingWriteStore::new();
         store.enqueue_pending("k", write(PendingState::AwaitingConfirmation));
         store.confirm("k");
-        // A reactive re-fire of the same intent must not resurrect it to awaiting.
+        // A reactive re-fire of the same intent must not resurrect it to
+        // awaiting.
         store.enqueue_pending("k", write(PendingState::AwaitingConfirmation));
         assert_eq!(store.state_of("k"), Some(PendingState::Confirmed));
         assert_eq!(store.list().len(), 1);

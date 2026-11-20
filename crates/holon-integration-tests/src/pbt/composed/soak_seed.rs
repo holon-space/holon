@@ -307,8 +307,9 @@ fn wide_docs(total: usize, start_k: usize) -> (Vec<(String, String)>, usize) {
         let k = start_k + i;
         let mut body = format!("#+ID: soak-doc-{k}\n#+TITLE: Soak Page {k}\n");
         let mut rng = 0x5EED_0000_0000_0000u64 ^ (k as u64);
-        // Current heading depth (org `*` count). Random-walk in 1..=4, biased to stay
-        // shallow, so the tree is genuinely nested (parents + descendants) not flat.
+        // Current heading depth (org `*` count). Random-walk in 1..=4, biased
+        // to stay shallow, so the tree is genuinely nested (parents +
+        // descendants) not flat.
         let mut depth: usize = 1;
         for j in 0..per_doc {
             if emitted >= total {
@@ -316,8 +317,9 @@ fn wide_docs(total: usize, start_k: usize) -> (Vec<(String, String)>, usize) {
             }
             emitted += 1;
             let r = splitmix(&mut rng);
-            // Walk depth: 40% deeper, 30% shallower, 30% same — clamped to 1..=4, and
-            // never deeper than one below the previous (valid org nesting).
+            // Walk depth: 40% deeper, 30% shallower, 30% same — clamped to
+            // 1..=4, and never deeper than one below the previous (valid org
+            // nesting).
             depth = match r % 10 {
                 0..=3 => (depth + 1).min(4),
                 4..=6 => depth.saturating_sub(1).max(1),
@@ -331,7 +333,8 @@ fn wide_docs(total: usize, start_k: usize) -> (Vec<(String, String)>, usize) {
                 _ => "",
             };
             let frag = FRAGMENTS[((r >> 16) as usize) % FRAGMENTS.len()];
-            // Every ~7th block carries an intra-vault link, exercising link parsing.
+            // Every ~7th block carries an intra-vault link, exercising link
+            // parsing.
             let link = if j % 7 == 3 && j > 0 {
                 format!(" see [[block:soak-{k}-0][top]]")
             } else {
@@ -361,8 +364,9 @@ fn deep_docs(total: usize, start_k: usize) -> (Vec<(String, String)>, usize) {
         let chain_len = depth.min(total - emitted);
         let mut body = format!("#+ID: soak-doc-{k}\n#+TITLE: Soak Chain {k}\n");
         for j in 0..chain_len {
-            // Heading level `j+1`: each block is the single child of the previous,
-            // so the whole doc is one depth-`chain_len` chain under the page.
+            // Heading level `j+1`: each block is the single child of the
+            // previous, so the whole doc is one depth-`chain_len` chain under
+            // the page.
             let stars = "*".repeat(j + 1);
             let frag = FRAGMENTS[(k + j) % FRAGMENTS.len()];
             body.push_str(&format!(

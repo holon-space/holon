@@ -188,8 +188,8 @@ fn a_post_boot_edit_to_an_unmaterialized_share_still_discloses() {
         .await
         .expect("store-side create inside the shared subtree");
 
-        // Poll: the disclosure lands when the write-back reaches the file, which
-        // is a step behind the store write.
+        // Poll: the disclosure lands when the write-back reaches the file,
+        // which is a step behind the store write.
         let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
         let mut disclosed = not_materialized_subjects(&env);
         while disclosed.is_empty() && std::time::Instant::now() < deadline {

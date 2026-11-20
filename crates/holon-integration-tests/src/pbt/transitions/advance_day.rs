@@ -63,10 +63,11 @@ impl<R: RefLifecycle + RefClock> TransitionFactory<R> for AdvanceDay {
     type Reason = Reason;
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         check(state.app_started(), Reason::AppNotStarted).map(|_| {
-            // Weight rollover 3:1 over the same-day re-tick, so a run mostly grows
-            // the journal set (the primary property) while still exercising
-            // idempotence. Cap the jump at one day so each rollover fires exactly
-            // one new create — the one-per-distinct-day oracle stays legible.
+            // Weight rollover 3:1 over the same-day re-tick, so a run mostly
+            // grows the journal set (the primary property) while still
+            // exercising idempotence. Cap the jump at one day so each rollover
+            // fires exactly one new create — the one-per-distinct-day oracle
+            // stays legible.
             let strat = prop_oneof![3 => Just(1i64), 1 => Just(0i64)]
                 .prop_map(|days| AdvanceDay { days })
                 .boxed();

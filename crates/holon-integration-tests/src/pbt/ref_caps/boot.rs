@@ -88,9 +88,10 @@ impl RefBootMut for ReferenceState {
 
         self.action.app_started = true;
 
-        // Freshness mirrors prod `seed_default_layout`: the default layout is only
-        // seeded when `block:root-layout` is absent at boot. A pre-startup user
-        // `index.org` keeps the well-known root id, so it suppresses the default seed.
+        // Freshness mirrors prod `seed_default_layout`: the default layout is
+        // only seeded when `block:root-layout` is absent at boot. A pre-startup
+        // user `index.org` keeps the well-known root id, so it suppresses the
+        // default seed.
         let fresh = !self
             .domain
             .block_state
@@ -119,8 +120,9 @@ impl RefBootMut for ReferenceState {
 
         load_seed_profile_into_ref(self);
 
-        // FU-10 mirror: prod `seed_default_layout` calls `navigation::focus(Main,
-        // block:journals)` on fresh DBs ONLY, inserting a navigation_history row.
+        // FU-10 mirror: prod `seed_default_layout` calls
+        // `navigation::focus(Main, block:journals)` on fresh DBs ONLY,
+        // inserting a navigation_history row.
         if fresh {
             let journals_uri = EntityUri::block("journals");
             let history = self

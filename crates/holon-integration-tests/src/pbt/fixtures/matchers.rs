@@ -189,10 +189,10 @@ pub fn match_assertion(step: &Step) -> Result<Assertion, String> {
     // does not draw. Matched BEFORE the positive `contains` regexes so the
     // longer phrase always wins.
     //
-    // An absence assertion takes NO retry budget (see `Assertion::WidgetOmits`),
-    // so a `within N seconds` prefix on one is refused rather than dropped:
-    // silently ignoring an explicit instruction is exactly the degradation the
-    // fail-loud rule forbids.
+    // An absence assertion takes NO retry budget (see
+    // `Assertion::WidgetOmits`), so a `within N seconds` prefix on one is
+    // refused rather than dropped: silently ignoring an explicit instruction is
+    // exactly the degradation the fail-loud rule forbids.
     let re_root_omits =
         Regex::new(r#"(?i)^the widget does not (?:contain|show)\s+"(?P<text>.*)"$"#).unwrap();
     if let Some(caps) = re_root_omits.captures(text) {

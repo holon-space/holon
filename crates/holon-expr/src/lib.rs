@@ -110,7 +110,8 @@ impl<'de> Deserialize<'de> for CompiledExpr {
 impl CompiledExpr {
     pub fn compile(engine: &Engine, source: impl Into<String>) -> Result<Self, String> {
         let raw = source.into();
-        // Strip optional leading `=` (org-file convention for Rhai expressions).
+        // Strip optional leading `=` (org-file convention for Rhai
+        // expressions).
         let source = match raw.strip_prefix('=') {
             Some(rest) => rest.trim().to_string(),
             None => raw,
@@ -179,8 +180,8 @@ fn extraction_is_unsound(ast: &AST) -> bool {
             // node, not a `Stmt::Var`, so it is never subtracted and leaks.
             ASTNode::Stmt(Stmt::For(..)) => unsound = true,
             // A `let` that is not a top-level statement (path deeper than the
-            // node itself) sits inside a block and may shadow an outer name that
-            // the flat subtraction would then wrongly drop.
+            // node itself) sits inside a block and may shadow an outer name
+            // that the flat subtraction would then wrongly drop.
             ASTNode::Stmt(Stmt::Var(..)) if path.len() > 1 => unsound = true,
             _ => {}
         }
@@ -464,10 +465,11 @@ mod required_columns_tests {
 
     #[test]
     fn is_holon_source_requires_source_language_not_the_prior_field() {
-        // is_source is a sibling computed field, NOT a column — but required_columns
-        // is context-free and lists every referenced name; the EVALUATOR resolves
-        // is_source against the live scope. Here we only assert the column
-        // source_language is present and no method/keyword leaks in.
+        // is_source is a sibling computed field, NOT a column — but
+        // required_columns is context-free and lists every referenced name; the
+        // EVALUATOR resolves is_source against the live scope. Here we only
+        // assert the column source_language is present and no method/keyword
+        // leaks in.
         let cols = req(
             "is_source && (source_language == \"holon_prql\" || source_language == \"render\")",
         );
@@ -506,7 +508,8 @@ mod required_columns_tests {
     #[test]
     fn closure_param_never_becomes_a_required_column() {
         // BUG A: `|t| …` — `t` (never a scope column) must NOT be required.
-        // Fail-closed => empty => always evaluated (loud on a real missing col).
+        // Fail-closed => empty => always evaluated (loud on a real missing
+        // col).
         let cols = req("tags.filter(|t| t != \"\").len > 0");
         assert!(
             !cols.contains("t"),
@@ -553,7 +556,8 @@ mod required_columns_tests {
 
     #[test]
     fn namespaced_call_target_is_not_a_column() {
-        // `foo::bar` is namespace-qualified — not a scope variable; only the arg.
+        // `foo::bar` is namespace-qualified — not a scope variable; only the
+        // arg.
         assert_eq!(req("foo::bar(x)"), set(&["x"]));
     }
 

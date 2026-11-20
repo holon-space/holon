@@ -45,7 +45,8 @@ fn parse_render_signature(path: &std::path::Path) -> RenderSignature {
         .unwrap_or_else(|| panic!("{}: missing `pub fn render(`", path.display()));
     let after = &source[idx + marker.len()..];
 
-    // Find matching closing paren, tracking nesting depth for generics/brackets.
+    // Find matching closing paren, tracking nesting depth for
+    // generics/brackets.
     let mut depth: i32 = 1;
     let mut end = 0;
     for (i, c) in after.char_indices() {
@@ -441,7 +442,8 @@ pub fn builder_registry_impl(input: TokenStream) -> TokenStream {
                     }
                 };
 
-            // All builders are called with (node, ctx) — widget_name() dispatch.
+            // All builders are called with (node, ctx) — widget_name()
+            // dispatch.
             let arms: Vec<_> = entries
                 .iter()
                 .map(|name| {

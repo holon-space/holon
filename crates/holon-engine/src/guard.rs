@@ -114,7 +114,8 @@ impl RhaiEvaluator {
             let token_val = token.get(attr);
             match spec {
                 PrecondSpec::Placeholder(name) => {
-                    // Placeholder bind: capture value, unifying with any earlier capture
+                    // Placeholder bind: capture value, unifying with any
+                    // earlier capture
                     let val = token_val.cloned().unwrap_or(Value::Null);
                     let prior = existing_placeholders
                         .get(name)

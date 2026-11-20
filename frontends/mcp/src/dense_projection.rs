@@ -372,7 +372,8 @@ pub fn build_projection(
             Some(rb.parent_id.clone())
         };
         // Gap: the block's true parent was elided (not selected) and is not the
-        // render root/container. The page container is not an "elided ancestor".
+        // render root/container. The page container is not an "elided
+        // ancestor".
         let gap = !in_set.contains(true_parent.as_str()) && true_parent != file_id;
         if gap {
             gap_ids.insert(rb.id.as_str().to_string());

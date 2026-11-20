@@ -266,7 +266,8 @@ impl CoreOperations for MemoryBackend {
                 result.push(block.clone());
             }
 
-            // Recursively traverse children only if we haven't reached max_level
+            // Recursively traverse children only if we haven't reached
+            // max_level
             if current_level < traversal.max_level {
                 let children = state
                     .children_by_parent
@@ -281,7 +282,8 @@ impl CoreOperations for MemoryBackend {
 
         // Start traversal from root nodes
         for parent_key in state.children_by_parent.keys() {
-            // ALLOW(entity_uri_from_raw): id/parent key String from MemoryState store
+            // ALLOW(entity_uri_from_raw): id/parent key String from MemoryState
+            // store
             let uri = EntityUri::from_raw(parent_key);
             if (uri.is_no_parent() || uri.is_sentinel())
                 && let Some(children) = state.children_by_parent.get(parent_key)
@@ -438,7 +440,8 @@ impl CoreOperations for MemoryBackend {
         let new_parent_str = new_parent.as_str().to_string();
 
         // Domain-level precondition gate (ADR 0005): existence + cycle (+ the
-        // `after` table) live in `BlockMutation::validate`, not re-derived here.
+        // `after` table) live in `BlockMutation::validate`, not re-derived
+        // here.
         {
             let state = self.state.read().unwrap();
             BlockMutation::Move {
@@ -601,7 +604,8 @@ impl CoreOperations for MemoryBackend {
     async fn delete_blocks(&self, ids: Vec<String>) -> Result<(), ApiError> {
         let mut state = self.state.write().unwrap();
 
-        // Deduplicate IDs to handle cases where the same ID appears multiple times
+        // Deduplicate IDs to handle cases where the same ID appears multiple
+        // times
         let mut seen = std::collections::HashSet::new();
 
         for id in ids {
@@ -716,8 +720,8 @@ impl ChangeNotifications<Block> for MemoryBackend {
         let mut subscribers = subscribers.lock().await;
         subscribers.push(tx);
 
-        // Create a stream that first yields replay items as a batch, then live updates
-        // This avoids spawning tasks which can cause runtime deadlocks
+        // Create a stream that first yields replay items as a batch, then live
+        // updates This avoids spawning tasks which can cause runtime deadlocks
         let replay_batch = if replay_items.is_empty() {
             vec![]
         } else {

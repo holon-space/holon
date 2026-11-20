@@ -42,8 +42,8 @@ fn mirror_key(id_column: &str, row: &StorageEntity) -> anyhow::Result<String> {
         }
         None => anyhow::bail!("mirror row is missing id column '{id_column}'"),
     };
-    // ALLOW(entity_uri_from_raw): mirror keys rows by the same EntityUri form the
-    // sync full-diff uses for existing_ids and Change::Deleted.id
+    // ALLOW(entity_uri_from_raw): mirror keys rows by the same EntityUri form
+    // the sync full-diff uses for existing_ids and Change::Deleted.id
     Ok(EntityUri::from_raw(&raw).to_string())
 }
 
@@ -66,9 +66,10 @@ fn to_storage_change(change: &Change<DynamicEntity>) -> Change<StorageEntity> {
             id: id.clone(),
             origin: origin.clone(),
         },
-        // The sync full/incremental paths only ever emit Created/Updated/Deleted.
-        // A FieldsChanged reaching the mirror is an upstream defect — surface it
-        // loudly rather than silently mishandling it.
+        // The sync full/incremental paths only ever emit
+        // Created/Updated/Deleted. A FieldsChanged reaching the mirror is an
+        // upstream defect — surface it loudly rather than silently mishandling
+        // it.
         Change::FieldsChanged { entity_id, .. } => {
             panic!("EntityMirror received unexpected FieldsChanged for '{entity_id}' from sync")
         }
@@ -226,8 +227,8 @@ mod tests {
                 origin: origin(),
             },
             Change::Updated {
-                // Sync emits `Change::Updated.id` as the EntityUri string; for a
-                // plain `scheme:id` that is the literal itself.
+                // Sync emits `Change::Updated.id` as the EntityUri string; for
+                // a plain `scheme:id` that is the literal itself.
                 id: "cc-session:a".to_string(),
                 data: entity("cc-session", "a", &[("title", "A2")]),
                 origin: origin(),
@@ -258,9 +259,9 @@ mod tests {
         let created = entity("cc-session", "abc", &[]);
         m.seed(vec![created.clone()]);
         // The sync computes removed ids from the mirror snapshot and emits the
-        // id column parsed to an EntityUri and stringified — reproduce that here.
-        // ALLOW(entity_uri_from_raw): test literal reproducing the sync's delete-id
-        // derivation
+        // id column parsed to an EntityUri and stringified — reproduce that
+        // here. ALLOW(entity_uri_from_raw): test literal reproducing the sync's
+        // delete-id derivation
         let del_id = EntityUri::from_raw(created.get_string("id").unwrap().as_str()).to_string();
         m.apply(&[Change::Deleted {
             id: del_id,

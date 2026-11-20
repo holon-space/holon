@@ -78,10 +78,11 @@ impl BlockQueryFrontendComponent {
             )
             .await
             .expect("seed query page");
-        // A query-source child: `source_language` parses to a real query language
-        // (`holon_prql` → `QueryLanguage::HolonPrql`), so `as_query()` is `Some` and
-        // `derive_render_expr` degrades the parent to `source_editor`. A bare alias
-        // like `"prql"` would parse to `SourceLanguage::Other` and render a leaf.
+        // A query-source child: `source_language` parses to a real query
+        // language (`holon_prql` → `QueryLanguage::HolonPrql`), so `as_query()`
+        // is `Some` and `derive_render_expr` degrades the parent to
+        // `source_editor`. A bare alias like `"prql"` would parse to
+        // `SourceLanguage::Other` and render a leaf.
         backend
             .create_block(
                 page.id.clone(),
@@ -111,8 +112,8 @@ impl BlockQueryFrontendComponent {
 
         let session = injector.resolve::<FrontendSession>();
         let reactive = injector.resolve::<ReactiveEngine>();
-        // Populate the OnceLock that breaks the engine↔interpreter cycle — the same
-        // step the Turso path performs after resolving the engine.
+        // Populate the OnceLock that breaks the engine↔interpreter cycle — the
+        // same step the Turso path performs after resolving the engine.
         let slot = injector.resolve::<BuilderServicesSlot>();
         let services: Arc<dyn BuilderServices> = reactive.clone();
         slot.0.set(services).ok(); // ALLOW(ok): OnceLock set — idempotent
@@ -276,8 +277,9 @@ impl SutRenderer for BlockQueryFrontendComponent {
 
 impl CapProvider for BlockQueryFrontendComponent {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
-        // Renderer ONLY — no `SutQueryResults` (no query engine). That absence is
-        // exactly what selects the degraded twin and deselects the full-mode one.
+        // Renderer ONLY — no `SutQueryResults` (no query engine). That absence
+        // is exactly what selects the degraded twin and deselects the full-mode
+        // one.
         caps.insert(self as Arc<dyn SutRenderer>);
     }
 }

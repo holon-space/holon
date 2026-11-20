@@ -361,7 +361,8 @@ async fn rung3_navigate_back_onto_closed_row_retracts_focus_panel() {
         )
         .await
         .expect("navigation_cursor");
-    // H1 = prior focus (CLOSED by a later focus_replace — the NavigateBack target).
+    // H1 = prior focus (CLOSED by a later focus_replace — the NavigateBack
+    // target).
     handle
         .execute(
             "INSERT INTO navigation_history (id, region, block_id, closed_at) \
@@ -370,7 +371,8 @@ async fn rung3_navigate_back_onto_closed_row_retracts_focus_panel() {
         )
         .await
         .expect("H1 closed");
-    // H2 = current focus (OPEN). Same block; focus didn't logically leave `page`.
+    // H2 = current focus (OPEN). Same block; focus didn't logically leave
+    // `page`.
     handle
         .execute(
             "INSERT INTO navigation_history (id, region, block_id, closed_at) \
@@ -387,7 +389,8 @@ async fn rung3_navigate_back_onto_closed_row_retracts_focus_panel() {
         .await
         .expect("cursor at H2");
 
-    // focus_roots matview — verbatim from matview_focus_roots.sql (open rows only).
+    // focus_roots matview — verbatim from matview_focus_roots.sql (open rows
+    // only).
     reconcile_named_view(
         &handle,
         "focus_roots",
@@ -668,7 +671,8 @@ async fn rung6_reparent_changes_depth_within_subtree_no_stale_old_depth_row() {
 #[tokio::test]
 async fn rung7_bulk_batch_reparent_no_drift() {
     let (handle, _rx) = new_db().await;
-    // page (anchor) → b0 → b1 → b2 → b3 → b4  (a deep chain, the bulk-0-* shape)
+    // page (anchor) → b0 → b1 → b2 → b3 → b4  (a deep chain, the bulk-0-*
+    // shape)
     handle
         .execute(
             "CREATE TABLE blk_raw (id TEXT PRIMARY KEY, parent_id TEXT, content TEXT, \
@@ -704,9 +708,10 @@ async fn rung7_bulk_batch_reparent_no_drift() {
         .await
         .expect("fdesc7 joined recursive matview");
 
-    // ONE transaction (single CDC batch): bulk re-parents — b4 under b2 (evidence
-    // shape), b3 up under page (depth change), b1 out to `outside` (cascades b0's
-    // remaining subtree). All three deltas land in the SAME maintenance batch.
+    // ONE transaction (single CDC batch): bulk re-parents — b4 under b2
+    // (evidence shape), b3 up under page (depth change), b1 out to `outside`
+    // (cascades b0's remaining subtree). All three deltas land in the SAME
+    // maintenance batch.
     handle
         .transaction(vec![
             (

@@ -684,7 +684,8 @@ pub fn preferences_render_expr(defs: &[PreferenceDef]) -> holon_api::render_type
                         value: holon_api::Value::String(section.as_str().into()),
                     },
                 }];
-                // Each pref_field as an individual positional arg (not wrapped in Array)
+                // Each pref_field as an individual positional arg (not wrapped
+                // in Array)
                 for pf in pref_fields {
                     section_args.push(Arg {
                         name: None,

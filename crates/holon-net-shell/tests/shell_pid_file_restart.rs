@@ -184,7 +184,8 @@ fn listed_are_recorded(lab: &Lab, model: &Model, groups: &[Group]) -> Result<(),
     for g in groups {
         if !read_back(&left, g) && alive(g.pgid) {
             // A replaced or forgotten group leaves the listing for good, so a
-            // group still listed after the read was listed and unrecorded at once.
+            // group still listed after the read was listed and unrecorded at
+            // once.
             if model.shared(g.attempt.0) {
                 let Answer::InTime(now) = lab.in_flight(Caller::Thread).within(BOUND) else {
                     continue;
@@ -458,7 +459,8 @@ fn play(s: &Scenario) -> Vec<String> {
     if let Err(e) = settle(&lab, &model, "after every run ended") {
         failures.push(e);
     }
-    // A child that started only after its run's drop returned is dead by now too.
+    // A child that started only after its run's drop returned is dead by now
+    // too.
     for (i, run) in runs.iter().enumerate() {
         if model.runs[i].dropped {
             failures.extend(dropped_group_dies(run).err());

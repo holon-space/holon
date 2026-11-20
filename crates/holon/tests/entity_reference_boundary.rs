@@ -108,7 +108,8 @@ async fn block_engine_with_a_second_indent_authority() -> Arc<BackendEngine> {
                 block_raw_type_def.name = holon::storage::BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = tokio::runtime::Handle::current();
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread runtime.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread runtime.
                     handle.block_on(holon::core::queryable_cache::QueryableCache::<
                         holon_api::block::Block,
                     >::new(db_handle, block_raw_type_def))
@@ -415,8 +416,8 @@ fn the_engine_synthetic_block_descriptors_pass_the_registration_rule() {
     use holon::api::operation_engine::DispatchingOperationEngine;
 
     for include_template_picker in [false, true] {
-        // The builder is the set's single source and validates before returning,
-        // so a failure here surfaces as the build error it is.
+        // The builder is the set's single source and validates before
+        // returning, so a failure here surfaces as the build error it is.
         let ops = DispatchingOperationEngine::block_synthetic_descriptors(include_template_picker)
             .unwrap_or_else(|e| panic!("the synthetic set must build: {e}"));
         holon_api::validate_entity_references(&ops).unwrap_or_else(|e| {

@@ -82,9 +82,10 @@ use crate::pbt::composed::seed_primitives::PARENT;
 use crate::pbt::composed::seed_primitives::fixed_ids;
 use crate::pbt::composed::subsystem_seed::build_started_ref;
 use crate::pbt::composed::subsystem_seed::run_with_seeded_ref;
-// THE SWAP machinery, relocated to the `pbt`-gated `composed::wide_e2e` (single source
-// of truth) so the `tests/` integration test can drive it; the lib slices/teeth here
-// consume it: page_root/SETTLE/WIDE_TREE_ORG/structural_ref{,_wired}/wide_ref/
+// THE SWAP machinery, relocated to the `pbt`-gated `composed::wide_e2e` (single
+// source of truth) so the `tests/` integration test can drive it; the lib
+// slices/teeth here consume it:
+// page_root/SETTLE/WIDE_TREE_ORG/structural_ref{,_wired}/wide_ref/
 // boot_and_seed_wide/full_headless_cap_set/wide_e2e_ref/WideE2E{,Machine}.
 use crate::pbt::composed::wide_e2e::{
     SETTLE, WIDE_TREE_ORG, boot_and_seed_wide, converge_handle, folder_journal_page,
@@ -187,8 +188,9 @@ fn aggregate(state: &ReferenceState) -> BoxedStrategy<StructTransition> {
     arm!(SplitBlock, StructTransition::SplitBlock);
     arm!(JoinBlock, StructTransition::JoinBlock);
     if arms.is_empty() {
-        // No structural transition applies in this state — fall back to the no-op so
-        // proptest can still step (and the invariants re-check) rather than panic.
+        // No structural transition applies in this state — fall back to the
+        // no-op so proptest can still step (and the invariants re-check) rather
+        // than panic.
         return Just(StructTransition::Nothing).boxed();
     }
     Union::new_weighted(arms).boxed()
@@ -209,10 +211,11 @@ impl ReferenceStateMachine for StructMachine {
     }
 
     fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
-        // Re-gate on production preconditions during shrink replay: a reparenting
-        // transition valid when generated can become invalid after the shrinker
-        // drops an earlier one. Delegating lets proptest reject the shrink instead
-        // of applying it and panicking the oracle's `apply_to_ref`.
+        // Re-gate on production preconditions during shrink replay: a
+        // reparenting transition valid when generated can become invalid after
+        // the shrinker drops an earlier one. Delegating lets proptest reject
+        // the shrink instead of applying it and panicking the oracle's
+        // `apply_to_ref`.
         match transition {
             StructTransition::SplitBlock(t) => t.preconditions(state).is_good(),
             StructTransition::JoinBlock(t) => t.preconditions(state).is_good(),
@@ -248,9 +251,9 @@ async fn boot_and_seed(
     );
     let engine = comp.engine();
 
-    // Capture the booted scaffold ids (everything present BEFORE the working tree)
-    // — these become the oracle's seed set so they filter out of the SUT-side
-    // id comparison.
+    // Capture the booted scaffold ids (everything present BEFORE the working
+    // tree) — these become the oracle's seed set so they filter out of the
+    // SUT-side id comparison.
     let scaffold_ids: BTreeSet<EntityUri> = {
         let mut c = CapMap::new();
         c.insert(comp.clone() as Arc<dyn SutBackend>);
@@ -385,8 +388,8 @@ fn wide_aggregate(state: &ReferenceState) -> BoxedStrategy<E2ETransition> {
     // teeth `wide_indent_outdent_roundtrip_lockstep`
     // + `wide_indent_then_split_parent_lockstep`, plus the random sweep): #1
     //   (top-level NULL
-    // parent_id) never fires — the page-rooted tree outdents only to the real page
-    // block, and the composed reader tolerates NULL anyway; #2
+    // parent_id) never fires — the page-rooted tree outdents only to the real
+    // page block, and the composed reader tolerates NULL anyway; #2
     // (split-of-a-block-with-children → Loro positional child-vs-sibling) does
     // NOT reproduce — the Loro-authority→Turso path places the new block as a
     // sibling correctly. So they're simply un-blocked, no prod fix needed.
@@ -397,8 +400,8 @@ fn wide_aggregate(state: &ReferenceState) -> BoxedStrategy<E2ETransition> {
     // proposes candidates when the focused region root is an
     // interactively-rendered text block, so it fires only after a
     // `NavigateFocus` lands focus on a text child (parent/c1/c2).
-    // A pure property write (`set_field task_state`) — mints no blocks, reconcile
-    // no-op.
+    // A pure property write (`set_field task_state`) — mints no blocks,
+    // reconcile no-op.
     arm!(ToggleState, E2ETransition::ToggleState);
     // Editor arms (#2 — the combined "one PBT"). `FocusEditableText` opens an
     // editor on a focusable text child (self-gates: only when no editor is
@@ -406,9 +409,9 @@ fn wide_aggregate(state: &ReferenceState) -> BoxedStrategy<E2ETransition> {
     // drive keystrokes (self-gate on an active editor). With no `MoveCursor`,
     // the caret stays at end-of-text so backspace never joins (no block
     // removal) — pure content edits, no reconcile-removal needed.
-    // The editor↔structural interplay (Split/NavigateFocus while editor open) is
-    // exercised here; any caret/focus-after-structural divergence is the narrow
-    // #3 piece to add.
+    // The editor↔structural interplay (Split/NavigateFocus while editor open)
+    // is exercised here; any caret/focus-after-structural divergence is the
+    // narrow #3 piece to add.
     arm!(FocusEditableText, E2ETransition::FocusEditableText);
     arm!(TypeChars, E2ETransition::TypeChars);
     arm!(DeleteBackward, E2ETransition::DeleteBackward);
@@ -419,33 +422,33 @@ fn wide_aggregate(state: &ReferenceState) -> BoxedStrategy<E2ETransition> {
     // (doc-uri-minting generalization) — the doc-uri case the old E2ESut
     // `block_tree_post_action` CreateDocument arm handled.
     arm!(CreateDocument, E2ETransition::CreateDocument);
-    // Inverse of SR-1: `DeleteDocument` removes a `CreateDocument`-minted org file
-    // via the production `FileSystem::remove` seam (the watcher observes the
-    // deletion). Its generator self-gates on a synthetic `doc_<n>.org`
+    // Inverse of SR-1: `DeleteDocument` removes a `CreateDocument`-minted org
+    // file via the production `FileSystem::remove` seam (the watcher observes
+    // the deletion). Its generator self-gates on a synthetic `doc_<n>.org`
     // existing, so it only fires after a create landed.
     arm!(DeleteDocument, E2ETransition::DeleteDocument);
-    // Nav-history transitions folded from the nav slice (toward deleting it). The
-    // wide boot's nav-history is aligned in `structural_ref_wired`
+    // Nav-history transitions folded from the nav slice (toward deleting it).
+    // The wide boot's nav-history is aligned in `structural_ref_wired`
     // ([journals#1, page#2], next=3), and the probe proved the
     // structural/editor/doc transitions write NO nav rows, so the AUTOINCREMENT
-    // counter stays in lockstep. `NavigateHome` self-gates (idempotent when already
-    // home); `PinBlock` draws a real pinnable text child via its weighted
-    // generator (the wide oracle seeds `block_state`, unlike the RefFocus-only
-    // nav slice); `NavigateBack/Forward` self-gate via their `can_go_back`/
-    // `can_go_forward` preconditions over the aligned stack. `UnpinBlock`
-    // is layered in `WideMachine::transitions` (state-dependent — its `history_id`
-    // is drawn from the pins the oracle currently holds, so it always matches a
-    // SUT-assigned id).
+    // counter stays in lockstep. `NavigateHome` self-gates (idempotent when
+    // already home); `PinBlock` draws a real pinnable text child via its
+    // weighted generator (the wide oracle seeds `block_state`, unlike the
+    // RefFocus-only nav slice); `NavigateBack/Forward` self-gate via their
+    // `can_go_back`/ `can_go_forward` preconditions over the aligned stack.
+    // `UnpinBlock` is layered in `WideMachine::transitions` (state-dependent —
+    // its `history_id` is drawn from the pins the oracle currently holds, so it
+    // always matches a SUT-assigned id).
     arm!(NavigateHome, E2ETransition::NavigateHome);
     // `PinBlock` targets the FIXED stable seed block `c1` (Text, non-page,
     // focusable — always passes preconditions, always present). NOT the
     // weighted generator: that draws from Main's editable descendants, which
     // after a `SplitBlock` includes the synthetic `block::split-N`.
     // `SutNavHistoryDrive::pin_block` does NOT resolve oracle→real ids (only
-    // the `OpDispatchWriter` block-tree path does), so pinning a synthetic id pins
-    // a GHOST on the SUT (`focus_roots(right_sidebar)` then diverges, since
-    // pins persist). A stable target needs no resolution. (Mirrors the nav
-    // slice's fixed `PINNABLE_ID`.)
+    // the `OpDispatchWriter` block-tree path does), so pinning a synthetic id
+    // pins a GHOST on the SUT (`focus_roots(right_sidebar)` then diverges,
+    // since pins persist). A stable target needs no resolution. (Mirrors the
+    // nav slice's fixed `PINNABLE_ID`.)
     arms.push((
         2,
         Just(E2ETransition::PinBlock(PinBlock {
@@ -461,8 +464,8 @@ fn wide_aggregate(state: &ReferenceState) -> BoxedStrategy<E2ETransition> {
     // drawers make re-parse id-stable), so `apply_to_ref` is a no-op and the
     // reconcile is clean. `SutAppLifecycle::simulate_restart` settles block_raw
     // to a stable id-set in the cap (no composed seam). (StartApp stays out:
-    // the composed SUT is pre-booted, so `app_started` is true → its precondition
-    // gates it out.)
+    // the composed SUT is pre-booted, so `app_started` is true → its
+    // precondition gates it out.)
     arm!(SimulateRestart, E2ETransition::SimulateRestart);
     if arms.is_empty() {
         return Just(E2ETransition::Nothing(Nothing)).boxed();
@@ -527,17 +530,18 @@ fn swap_design_probe_generated_alphabet() {
     eprintln!("GENERATED ({}): {:?}", names.len(), names);
     eprintln!("=== end ===\n");
 
-    // NON-VACUITY: the swap must drive the AUTO-NARROWED PRODUCTION alphabet, not a
-    // collapsed handful. From the initial seeded state the generator must offer the
-    // structural + nav core AND the new transitions the swap folds in beyond the
-    // curated `wide_aggregate` (so a future cap/wiring regression that silently
-    // narrows the alphabet fails HERE). `Join`/`MoveCursor`/`Redo` etc. unlock only
-    // once state evolves (blocks to join, an editor open, a mutation to undo), so
-    // they are not asserted from the initial state.
-    // `SetupWatch` is feasible from the initial state (task #5: watch-query parity
-    // converged, the `.without(SutWatchRegister)` narrowing dropped). `RemoveWatch`
-    // unlocks only after a watch exists, so it is not asserted from the initial
-    // state (like `Join`/`MoveCursor`/`Redo`).
+    // NON-VACUITY: the swap must drive the AUTO-NARROWED PRODUCTION alphabet,
+    // not a collapsed handful. From the initial seeded state the generator must
+    // offer the structural + nav core AND the new transitions the swap folds in
+    // beyond the curated `wide_aggregate` (so a future cap/wiring regression
+    // that silently narrows the alphabet fails HERE).
+    // `Join`/`MoveCursor`/`Redo` etc. unlock only once state evolves (blocks to
+    // join, an editor open, a mutation to undo), so they are not asserted from
+    // the initial state. `SetupWatch` is feasible from the initial state (task
+    // #5: watch-query parity converged, the `.without(SutWatchRegister)`
+    // narrowing dropped). `RemoveWatch` unlocks only after a watch exists, so
+    // it is not asserted from the initial state (like
+    // `Join`/`MoveCursor`/`Redo`).
     for required in REQUIRED {
         assert!(
             names.contains(required),
@@ -613,8 +617,8 @@ fn editor_ref() -> ReferenceState {
     let page = page_root();
     let ids = fixed_ids();
 
-    // Insert the page root as a seed page (same shape as `structural_ref`) so the
-    // working tree compares as flat leaf siblings under the page.
+    // Insert the page root as a seed page (same shape as `structural_ref`) so
+    // the working tree compares as flat leaf siblings under the page.
     let mut page_block = Block::new_text(page.clone(), EntityUri::no_parent(), "structural-page");
     page_block.set_page(true);
     state
@@ -655,10 +659,11 @@ fn editor_ref() -> ReferenceState {
 
     // Model the boot-fired journal day-page so it enters `all_block_ids` — the
     // ref-known universe the `inv-viewmodel-entity-ids-subset-of-data` phantom
-    // check subtracts. `boot_and_seed_editor` pins the keystone boot clock, so the
-    // SUT's auto-created day-page id matches `keystone_boot_journal_id`; without
-    // this seed it renders in the journals feed as an unknown (phantom) id — the
-    // midnight-rollover class fixed for the org-link-marks twin in c21a8a00.
+    // check subtracts. `boot_and_seed_editor` pins the keystone boot clock, so
+    // the SUT's auto-created day-page id matches `keystone_boot_journal_id`;
+    // without this seed it renders in the journals feed as an unknown (phantom)
+    // id — the midnight-rollover class fixed for the org-link-marks twin in
+    // c21a8a00.
     crate::pbt::composed::wide_e2e::seed_boot_journal(&mut state);
 
     // Mirror the SUT boot sequence EXACTLY so every invariant aligns: navigate
@@ -693,11 +698,12 @@ async fn boot_and_seed_editor(
     ref_state: &ReferenceState,
 ) -> (CapMap, Arc<HeadlessFrontendComponent>, BTreeSet<EntityUri>) {
     // Pin the boot clock to the fixed keystone day so the boot auto-create rule
-    // mints a DETERMINISTIC journal day-page id (`keystone_boot_journal_id`), not
-    // one keyed on the host's real date. The plain `new_with_loro` boot uses the
-    // OS `SystemClock`, whose date-dependent day-page `editor_ref` never modeled →
-    // a date-dependent `inv-viewmodel-entity-ids-subset-of-data` phantom
-    // (midnight-rollover class, mirrors c21a8a00).
+    // mints a DETERMINISTIC journal day-page id (`keystone_boot_journal_id`),
+    // not one keyed on the host's real date. The plain `new_with_loro` boot
+    // uses the OS `SystemClock`, whose date-dependent day-page `editor_ref`
+    // never modeled → a date-dependent
+    // `inv-viewmodel-entity-ids-subset-of-data` phantom (midnight-rollover
+    // class, mirrors c21a8a00).
     let comp = Arc::new(
         HeadlessFrontendComponent::new_with_clock(
             &[("structural-page.org", WIDE_TREE_ORG)],
@@ -719,13 +725,13 @@ async fn boot_and_seed_editor(
     // degraded `inv-viewmodel-shows-source-when-no-query` twin deselected over
     // this real renderer.
     caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
-    // The editor READ cap — pairs with the (always-registered) `RefEditorMirror` to
-    // select `inv-editor-{text,caret}-matches-ref`. The WRITE cap is already in the
-    // component's `register`.
+    // The editor READ cap — pairs with the (always-registered)
+    // `RefEditorMirror` to select `inv-editor-{text,caret}-matches-ref`. The
+    // WRITE cap is already in the component's `register`.
     caps.insert(comp.clone() as Arc<dyn SutEditorMirrorRead>);
-    // Intentionally REPLACE register's fresh-resolver `OpDispatchWriter` with the
-    // shared-resolver one (explicit `replace` — plain `insert` fails loud on the
-    // dup).
+    // Intentionally REPLACE register's fresh-resolver `OpDispatchWriter` with
+    // the shared-resolver one (explicit `replace` — plain `insert` fails loud
+    // on the dup).
     caps.replace(
         Arc::new(OpDispatchWriter::with_resolver(engine, resolver.clone()))
             as Arc<dyn SutBlockTreeWrite>,
@@ -736,10 +742,10 @@ async fn boot_and_seed_editor(
         .into_iter()
         .collect();
 
-    // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms boot
-    // settle can return before the day-page lands. Await it (fail loud on timeout)
-    // so the scaffold snapshot below deterministically captures it and the
-    // widget-tree phantom check sees a settled, ref-known block.
+    // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms
+    // boot settle can return before the day-page lands. Await it (fail loud on
+    // timeout) so the scaffold snapshot below deterministically captures it and
+    // the widget-tree phantom check sees a settled, ref-known block.
     let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -757,8 +763,8 @@ async fn boot_and_seed_editor(
     let booted = sut_ids(&caps).await;
     let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
 
-    // Focus the page root (so its children render in the main panel), then open the
-    // editor on `c1` — the SUT side of the oracle's pre-opened editor.
+    // Focus the page root (so its children render in the main panel), then open
+    // the editor on `c1` — the SUT side of the oracle's pre-opened editor.
     TransitionImpl::apply_to_sut(
         &NavigateFocus {
             region: Region::Main,
@@ -870,7 +876,8 @@ mod teeth {
         let report = run_with_seeded_ref(&registry, &caps, resolved).await;
 
         let failures = report.failures();
-        // The companion must ingest CLEANLY — no quarantine / no swallowed ERROR.
+        // The companion must ingest CLEANLY — no quarantine / no swallowed
+        // ERROR.
         assert!(
             !failures
                 .iter()
@@ -886,7 +893,8 @@ mod teeth {
             "folder-companion cold boot must not demote the page-file's Page tag; failures: \
              {failures:?}",
         );
-        // Non-vacuity: the sidebar page-tag oracle actually ran over the seeded page.
+        // Non-vacuity: the sidebar page-tag oracle actually ran over the seeded
+        // page.
         assert!(
             report.ran_ids().contains(&"inv-sidebar-page-tag-preserved"),
             "inv-sidebar-page-tag-preserved must select + run over the seeded page (ran: {:?})",
@@ -973,7 +981,8 @@ mod teeth {
             report.failures(),
         );
         // Non-inert: the two Fork-B oracles must actually select + run over the
-        // seeded fileless page (else this would pass vacuously — the row-137 trap).
+        // seeded fileless page (else this would pass vacuously — the row-137
+        // trap).
         for id in [
             "inv-every-page-has-its-own-file",
             "inv-companion-has-no-child-page-headings",
@@ -1118,20 +1127,21 @@ mod teeth {
     /// nested file.
     #[tokio::test(flavor = "multi_thread")]
     async fn fileless_page_writeback_materializes() {
-        // Companion inlines child-note as a Page-tagged heading; NO child-note.org.
-        // The heading text is DELIBERATELY distinct from the `:ID:`. When they
-        // matched (`* child-note` / `:ID: child-note`) a file containing only
-        // `#+ID: child-note` satisfied every text assertion, which masked the
-        // BugFunnel 2026-07-30 loss of the page's own title and body.
+        // Companion inlines child-note as a Page-tagged heading; NO
+        // child-note.org. The heading text is DELIBERATELY distinct from the
+        // `:ID:`. When they matched (`* child-note` / `:ID: child-note`) a file
+        // containing only `#+ID: child-note` satisfied every text assertion,
+        // which masked the BugFunnel 2026-07-30 loss of the page's own title
+        // and body.
         const COMPANION_ORG: &str = "#+ID: my-notes\n* Child Note :Page:\n:PROPERTIES:\n:ID: \
                                      child-note\n:END:\nbody text that must not vanish\n";
 
         let (_caps, comp) = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;
 
         // Materialization check via DISK TRUTH (not the boot-tracked snapshot,
-        // which cannot see a file materialized after boot): after settle + the B2
-        // boot sweep, `child-note` must own a file — some `.org` on disk whose
-        // `#+ID:` is `child-note`.
+        // which cannot see a file materialized after boot): after settle + the
+        // B2 boot sweep, `child-note` must own a file — some `.org` on disk
+        // whose `#+ID:` is `child-note`.
         let disk_ids = comp.disk_org_file_ids().await;
         assert!(
             disk_ids.iter().any(|id| id == "child-note"),
@@ -1278,8 +1288,8 @@ mod teeth {
         // headless Loro component reads its doc-root through a seam that never
         // sees the synced content, so asserting here would fail on a harness
         // divergence rather than a product defect. Tracked as a fidelity
-        // follow-up; the PRIMARY loss this test exists for — the `:Page:`-tagged
-        // child — is asserted above and fixed on both wirings.
+        // follow-up; the PRIMARY loss this test exists for — the
+        // `:Page:`-tagged child — is asserted above and fixed on both wirings.
         let disk_ids = comp.disk_org_file_ids().await;
         assert!(
             disk_ids.iter().any(|id| id == "tagged-child"),
@@ -1308,9 +1318,10 @@ mod teeth {
 
         let (_caps, comp) = boot_companion_topology(&[("my-notes.org", COMPANION_ORG)]).await;
 
-        // Precondition: B2 materialized exactly one `child-note` file. Discover its
-        // path (NESTED — `my-notes/child-note.org` — since child-note is a fileless
-        // child of the `my-notes` companion), don't assume a flat name.
+        // Precondition: B2 materialized exactly one `child-note` file. Discover
+        // its path (NESTED — `my-notes/child-note.org` — since child-note is a
+        // fileless child of the `my-notes` companion), don't assume a flat
+        // name.
         let child_paths: Vec<_> = comp
             .disk_org_files()
             .await
@@ -1342,8 +1353,8 @@ mod teeth {
             "after the watcher pump `child-note` must remain exactly one file (echo suppressed); \
              found {child_after:?}",
         );
-        // No re-mint: the block_raw id-set is unchanged (child-note not re-created
-        // under a fresh id, nothing dropped).
+        // No re-mint: the block_raw id-set is unchanged (child-note not
+        // re-created under a fresh id, nothing dropped).
         let store_after = comp.store_block_ids().await;
         assert_eq!(
             store_before, store_after,
@@ -1406,21 +1417,23 @@ mod teeth {
         use holon_pbt_core::capabilities::SutSqlProjection;
         use holon_pbt_core::composition::CapProvider;
 
-        // The page-rooted working tree AS org: `structural-page` is the doc/page,
-        // parent/c1/c2 are its leaf-sibling children with pinned bare ids.
+        // The page-rooted working tree AS org: `structural-page` is the
+        // doc/page, parent/c1/c2 are its leaf-sibling children with pinned bare
+        // ids.
         const TREE_ORG: &str = "#+ID: structural-page\n* parent\n:PROPERTIES:\n:ID: \
                                 parent\n:END:\n* c1\n:PROPERTIES:\n:ID: c1\n:END:\n* \
                                 c2\n:PROPERTIES:\n:ID: c2\n:END:\n";
 
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
-        // File name = page content: the doc/page title the viewmodel renders comes
-        // from the filename, and the oracle's page block content is "structural-page".
-        // Pin the boot clock to the fixed keystone day so the boot auto-create rule
-        // mints a DETERMINISTIC journal day-page id (`keystone_boot_journal_id`), not
-        // one keyed on the host's real date — the plain `new` (SystemClock) boot
-        // date-hashes today's day-page, which `structural_ref` never modeled → a
-        // date-dependent `inv-viewmodel-entity-ids-subset-of-data` phantom
-        // (midnight-rollover class, mirrors the org-link-marks twin in c21a8a00).
+        // File name = page content: the doc/page title the viewmodel renders
+        // comes from the filename, and the oracle's page block content is
+        // "structural-page". Pin the boot clock to the fixed keystone day so
+        // the boot auto-create rule mints a DETERMINISTIC journal day-page id
+        // (`keystone_boot_journal_id`), not one keyed on the host's real date —
+        // the plain `new` (SystemClock) boot date-hashes today's day-page,
+        // which `structural_ref` never modeled → a date-dependent
+        // `inv-viewmodel-entity-ids-subset-of-data` phantom (midnight-rollover
+        // class, mirrors the org-link-marks twin in c21a8a00).
         let comp = Arc::new(
             HeadlessFrontendComponent::new_with_clock(
                 &[("structural-page.org", TREE_ORG)],
@@ -1436,9 +1449,9 @@ mod teeth {
         caps.insert(comp.clone() as Arc<dyn SutSqlProjection>);
         // `SutFocus` (C-5 split, 2026-07-02) — preserves focus/nav selection.
         caps.insert(comp.clone() as Arc<dyn SutFocus>);
-        // `SutQueryResults` (full-mode query engine) — same rationale as the combined
-        // boot above: keeps the full decompiled twin selected and the degraded twin
-        // off.
+        // `SutQueryResults` (full-mode query engine) — same rationale as the
+        // combined boot above: keeps the full decompiled twin selected and the
+        // degraded twin off.
         caps.insert(comp.clone() as Arc<dyn SutQueryResults>);
         // Intentionally REPLACE register's fresh-resolver writer with the
         // shared-resolver one (explicit `replace` — plain `insert` fails loud
@@ -1448,16 +1461,18 @@ mod teeth {
             resolver.clone(),
         )) as Arc<dyn SutBlockTreeWrite>);
 
-        // Scaffold = everything booted EXCEPT the non-seed working tree (parent/c1/c2).
-        // `structural-page` is the seed page, so it stays in the scaffold (injected).
+        // Scaffold = everything booted EXCEPT the non-seed working tree
+        // (parent/c1/c2). `structural-page` is the seed page, so it stays in
+        // the scaffold (injected).
         let ids = fixed_ids();
         let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
             .into_iter()
             .collect();
 
-        // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms boot
-        // settle can return before the day-page lands. Await it (fail loud on timeout)
-        // so the scaffold snapshot below deterministically captures it.
+        // The boot journal auto-create fires ASYNC off the clock CDC; the 300ms
+        // boot settle can return before the day-page lands. Await it (fail loud
+        // on timeout) so the scaffold snapshot below deterministically captures
+        // it.
         let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -1476,11 +1491,12 @@ mod teeth {
         let scaffold: BTreeSet<EntityUri> = booted.difference(&tree).cloned().collect();
 
         let mut oracle = structural_ref();
-        // Model the boot-fired journal day-page in the oracle's block_state so it
-        // enters `all_block_ids` — the ref-known universe the phantom check
-        // subtracts. `inject_scaffold_seed` (below) only touches `block_documents`,
-        // so WITHOUT this the auto-created day-page renders as an unknown (phantom)
-        // entity id. The pinned keystone clock makes the SUT's day-page id match.
+        // Model the boot-fired journal day-page in the oracle's block_state so
+        // it enters `all_block_ids` — the ref-known universe the phantom check
+        // subtracts. `inject_scaffold_seed` (below) only touches
+        // `block_documents`, so WITHOUT this the auto-created day-page renders
+        // as an unknown (phantom) entity id. The pinned keystone clock makes
+        // the SUT's day-page id match.
         crate::pbt::composed::wide_e2e::seed_boot_journal(&mut oracle);
         NavigateFocus {
             region: Region::Main,
@@ -1635,8 +1651,8 @@ mod teeth {
         // (`keystone_boot_journal_id`) — not one keyed on the host's real date.
         // The plain `new` boot uses the OS `SystemClock`, whose date-dependent
         // day-page the structural oracle never modeled → a date-dependent
-        // `inv-viewmodel-entity-ids-subset-of-data` phantom (the day-page renders
-        // in the journals feed but is unknown to the ref). Mirrors the
+        // `inv-viewmodel-entity-ids-subset-of-data` phantom (the day-page
+        // renders in the journals feed but is unknown to the ref). Mirrors the
         // `full_headless_static_catalog_probe` recipe: pinned clock + awaited +
         // `seed_boot_journal`d day-page.
         let comp = Arc::new(
@@ -1688,10 +1704,11 @@ mod teeth {
         let mut oracle = structural_ref();
         // Model the boot-fired journal day-page in the oracle's block_state so
         // it enters `all_block_ids` — the ref-known universe the phantom check
-        // subtracts. `inject_scaffold_seed` (below) only touches `block_documents`,
-        // so WITHOUT this the auto-created day-page renders as an unknown
-        // (phantom) entity id. Mirrors `frontend_wired`'s seed for the composed
-        // keystone; the pinned keystone clock makes the SUT's day-page id match.
+        // subtracts. `inject_scaffold_seed` (below) only touches
+        // `block_documents`, so WITHOUT this the auto-created day-page renders
+        // as an unknown (phantom) entity id. Mirrors `frontend_wired`'s seed
+        // for the composed keystone; the pinned keystone clock makes the SUT's
+        // day-page id match.
         crate::pbt::composed::wide_e2e::seed_boot_journal(&mut oracle);
         // c2 on disk spells a wiki link: the reference holds the org-lens fixed
         // point — label-stripped content + the extracted Link mark.
@@ -2020,8 +2037,8 @@ entities:
             .expect("sidecar entities register");
 
         // Author the link the way a live editor commit does: create the block,
-        // then `set_field(content)` with RAW org markup. That is the gesture the
-        // dispatcher parses inline marks for.
+        // then `set_field(content)` with RAW org markup. That is the gesture
+        // the dispatcher parses inline marks for.
         let parent = holon_api::EntityUri::block("parent");
         let new_id = holon_api::EntityUri::block("entity-linker");
         holon_pbt_core::capabilities::SutBlockCreate::apply_create_under_focus(
@@ -2300,7 +2317,8 @@ entities:
         let (mut caps, comp, scaffold_ids) = boot_and_seed(&resolver).await;
         let oracle = structural_ref();
 
-        // Drive the split on the SUT only — DON'T advance the oracle, DON'T reconcile.
+        // Drive the split on the SUT only — DON'T advance the oracle, DON'T
+        // reconcile.
         let split = SplitBlock {
             block_id: fixed_ids().c1,
             position: 1,
@@ -2348,8 +2366,8 @@ entities:
         let oracle = frontend_wired(structural_ref()); // focused on the page root
         let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
-        // SUT-only NavigateFocus to the sidebar-listed `journals` page — DON'T advance
-        // the oracle (which stays on the structural-page root).
+        // SUT-only NavigateFocus to the sidebar-listed `journals` page — DON'T
+        // advance the oracle (which stays on the structural-page root).
         let nav = NavigateFocus {
             region: Region::Main,
             block_id: EntityUri::parse("block:journals").expect("journals id"),
@@ -2566,8 +2584,8 @@ entities:
         watch.apply_to_ref(&mut oracle);
         TransitionImpl::apply_to_sut(&watch, &oracle, &mut caps).await;
 
-        // ... but split `c1` on the SUT ONLY — its split tail is a non-seed block the
-        // oracle never learns about.
+        // ... but split `c1` on the SUT ONLY — its split tail is a non-seed
+        // block the oracle never learns about.
         let split = SplitBlock {
             block_id: fixed_ids().c1,
             position: 1,
@@ -2617,8 +2635,8 @@ entities:
             "lockstep TypeChars must stay green over the composed editor CapMap: {:?}",
             report.failures()
         );
-        // The committed-content + live editor parity invariants must all run (the
-        // editor keystone's non-vacuity guard).
+        // The committed-content + live editor parity invariants must all run
+        // (the editor keystone's non-vacuity guard).
         for id in [
             "inv-blocks-match-ref/block_raw",
             "inv-block-content/block_raw",
@@ -2685,8 +2703,8 @@ entities:
         let mut oracle = frontend_wired(wide_ref());
         let (mut caps, handle, scaffold_ids) = boot_and_seed_wide(&resolver, &oracle).await;
 
-        // Split `c1` at position 1 — the new block (the "1" tail of "c1") becomes the
-        // focused, active editor at caret 0 on BOTH sides.
+        // Split `c1` at position 1 — the new block (the "1" tail of "c1")
+        // becomes the focused, active editor at caret 0 on BOTH sides.
         let before = sut_ids(&caps).await;
         let split = SplitBlock {
             block_id: fixed_ids().c1,
@@ -2730,8 +2748,9 @@ entities:
             "split-then-type must stay green (#3 focus-handoff): {:?}",
             report.failures()
         );
-        // The editor live-text + committed-content parity must RUN — proving the type
-        // landed on the new block (active editor selected, not skipped).
+        // The editor live-text + committed-content parity must RUN — proving
+        // the type landed on the new block (active editor selected, not
+        // skipped).
         for id in ["inv-editor-text/mirror", "inv-block-content/block_raw"] {
             assert!(
                 report.ran_ids().contains(&id),
@@ -2780,9 +2799,9 @@ entities:
             }
         }
         // PERMANENT is the claim, so poll for a clean tree rather than judging
-        // one post-boot frame: a `live_block` still resolving its first query is
-        // a legal transient, and under suite-level CPU contention that frame can
-        // outlive the boot. Fail only if placeholders SURVIVE the budget.
+        // one post-boot frame: a `live_block` still resolving its first query
+        // is a legal transient, and under suite-level CPU contention that frame
+        // can outlive the boot. Fail only if placeholders SURVIVE the budget.
         let mut out = Vec::new();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut snap = snap;
@@ -2889,21 +2908,23 @@ entities:
             .expect("the full headless set boots a frontend");
         let mut caps = bundle.caps;
 
-        // The oracle models the boot-fired journal day-block (`frontend_wired` →
-        // `seed_boot_journal`): every full_headless (Turso) boot fires the seeded
-        // daily-journal rule once, minting a day-block under `block:journals`. As a
-        // REAL ref block it enters `all_block_ids` → the phantom-history universe,
-        // so its `block_history` create is no longer a phantom. This probe seeds no
-        // `Journals.org`, so the day-block never reaches the `/org` snapshot; it
-        // folds into `scaffold` below (seed-classified via `inject_scaffold_seed`),
-        // which excludes it from the block-set comparison exactly as before — while
-        // still counting for the history universe (`all_block_ids` reads `blocks`
-        // regardless of seed classification).
+        // The oracle models the boot-fired journal day-block (`frontend_wired`
+        // → `seed_boot_journal`): every full_headless (Turso) boot fires the
+        // seeded daily-journal rule once, minting a day-block under
+        // `block:journals`. As a REAL ref block it enters `all_block_ids` → the
+        // phantom-history universe, so its `block_history` create is no longer
+        // a phantom. This probe seeds no `Journals.org`, so the day-block never
+        // reaches the `/org` snapshot; it folds into `scaffold` below
+        // (seed-classified via `inject_scaffold_seed`), which excludes it from
+        // the block-set comparison exactly as before — while still counting for
+        // the history universe (`all_block_ids` reads `blocks` regardless of
+        // seed classification).
         let oracle = frontend_wired(wide_ref());
 
-        // The rule fires ASYNC off the clock CDC; the boot settle can return before
-        // it lands. Await the day-block before the scaffold snapshot / checks so a
-        // not-yet-fired journal does not false-diverge; fail loud on timeout.
+        // The rule fires ASYNC off the clock CDC; the boot settle can return
+        // before it lands. Await the day-block before the scaffold snapshot /
+        // checks so a not-yet-fired journal does not false-diverge; fail loud
+        // on timeout.
         let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -3377,8 +3398,8 @@ entities:
         settle_within(&handle, SETTLE).await;
         let after = sut_ids(&caps).await;
 
-        // Reconcile the one synthetic doc-uri ↔ the one real minted page id (the
-        // doc-uri generalization of the harness per-tick reconcile).
+        // Reconcile the one synthetic doc-uri ↔ the one real minted page id
+        // (the doc-uri generalization of the harness per-tick reconcile).
         let synthetic: Vec<EntityUri> = oracle
             .domain
             .block_state
@@ -3685,13 +3706,13 @@ entities:
             "the combined alphabet must offer FocusEditableText (open an editor); got \
              {base_variants:?}"
         );
-        // Structural arms feasible from focus-on-page (Join/Toggle need focus on a
-        // specific child first, so they're not offered at the page-focused base state).
-        // `CreateDocument` (seam-rebuild SR-1) is feasible from the started base state.
-        // Nav-history transitions folded from the nav slice. NavigateBack is offered at
-        // the base state (the aligned boot stack has cursor=1 → can_go_back).
-        // NavigateForward is NOT (cursor at top), so it's asserted post-Back
-        // below.
+        // Structural arms feasible from focus-on-page (Join/Toggle need focus
+        // on a specific child first, so they're not offered at the page-focused
+        // base state). `CreateDocument` (seam-rebuild SR-1) is feasible from
+        // the started base state. Nav-history transitions folded from the nav
+        // slice. NavigateBack is offered at the base state (the aligned boot
+        // stack has cursor=1 → can_go_back). NavigateForward is NOT (cursor at
+        // top), so it's asserted post-Back below.
         for v in [
             "SplitBlock",
             "NavigateFocus",
@@ -3707,7 +3728,8 @@ entities:
             );
         }
 
-        // Open an editor on a focusable child, then the keystroke arms must appear.
+        // Open an editor on a focusable child, then the keystroke arms must
+        // appear.
         let mut opened = base.clone();
         FocusEditableText {
             block_id: fixed_ids().c1,
@@ -3751,19 +3773,21 @@ entities:
 
         let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
         let (mut caps, comp, scaffold_ids) = boot_and_seed(&resolver).await;
-        // The cap gate's RHS — wired exactly as the eventual E2ESut→CapMap swap will.
+        // The cap gate's RHS — wired exactly as the eventual E2ESut→CapMap swap
+        // will.
         let mut oracle = structural_ref().with_cap_set(caps.cap_set());
 
         let before = sut_ids(&caps).await;
         // Wrap the split in the WIDE production enum; dispatch goes through
-        // `impl<S: SutHandle> TransitionImpl for E2ETransition` with `S = CapMap`.
+        // `impl<S: SutHandle> TransitionImpl for E2ETransition` with `S =
+        // CapMap`.
         let split = E2ETransition::SplitBlock(SplitBlock {
             block_id: fixed_ids().c1,
             position: 1,
         });
-        // The gate admits it: `SplitBlock`'s `[SutBlockTreeWrite]` is in the composed
-        // cap set, so the wide alphabet would generate it (no absent-cap `expect`
-        // panic).
+        // The gate admits it: `SplitBlock`'s `[SutBlockTreeWrite]` is in the
+        // composed cap set, so the wide alphabet would generate it (no
+        // absent-cap `expect` panic).
         assert!(
             oracle.caps_available(&split.required_caps()),
             "the composed cap set must admit SplitBlock"
@@ -4411,8 +4435,9 @@ entities:
         use holon_pbt_core::capabilities::SutRenderer;
 
         // Journals doc: two Page day-entries (newest = 2026-07-15), each with a
-        // child note under it. The child's parent is the day-entry, NOT journals,
-        // so the feed query (parent_id == journals) never lists it directly.
+        // child note under it. The child's parent is the day-entry, NOT
+        // journals, so the feed query (parent_id == journals) never lists it
+        // directly.
         let journals_org = concat!(
             "#+ID: journals\n",
             "* 2026-07-14 :Page:\n",
@@ -4426,7 +4451,8 @@ entities:
             "** evening note\n",
             ":PROPERTIES:\n:ID: day-0715-child\n:END:\n",
         );
-        // A plain notebook Page holding a plain sub-page — the collapsed control.
+        // A plain notebook Page holding a plain sub-page — the collapsed
+        // control.
         let plain_org = concat!(
             "#+ID: plain-doc\n",
             "* Notebook :Page:\n",
@@ -4449,10 +4475,11 @@ entities:
 
         let journals = EntityUri::parse("block:journals").expect("journals id");
 
-        // ── Prong (a): the journals feed, newest-first, expanded, with dividers.
-        // Poll until the feed query has populated (the block_tags 'Page' rows +
-        // CDC settle asynchronously; under parallel-test CPU load a single
-        // snapshot can race ahead of that population and see an empty list).
+        // ── Prong (a): the journals feed, newest-first, expanded, with
+        // dividers. Poll until the feed query has populated (the block_tags
+        // 'Page' rows + CDC settle asynchronously; under parallel-test CPU load
+        // a single snapshot can race ahead of that population and see an empty
+        // list).
         let mut feed = comp
             .widget_tree_for(&journals)
             .await
@@ -4473,9 +4500,10 @@ entities:
             .iter()
             .filter_map(|n| n.props.get("target_id").map(String::as_str))
             .collect();
-        // Relative NEWEST-FIRST: 2026-07-15 must precede 2026-07-14. (The journal
-        // auto-create rule may inject a further "today" entry ahead of both — a
-        // still-newest-first extra — so assert relative order, not an exact set.)
+        // Relative NEWEST-FIRST: 2026-07-15 must precede 2026-07-14. (The
+        // journal auto-create rule may inject a further "today" entry ahead of
+        // both — a still-newest-first extra — so assert relative order, not an
+        // exact set.)
         let pos_0715 = order.iter().position(|id| *id == "block:day-0715");
         let pos_0714 = order.iter().position(|id| *id == "block:day-0714");
         assert!(
@@ -4938,8 +4966,8 @@ entities:
     // The right sidebar shows PINNED block subtrees. Its backing query
     // (`assets/default/index.org` `default-right-sidebar::src::0`) declares
     // `... RETURN d ORDER BY fr.added_ts DESC, d.sort_key` — so pin ROOTS must
-    // render MOST-RECENTLY-PINNED-FIRST (`added_ts DESC`), which is exactly what
-    // the reference models (`RefBoot::pin_block` move-to-top by
+    // render MOST-RECENTLY-PINNED-FIRST (`added_ts DESC`), which is exactly
+    // what the reference models (`RefBoot::pin_block` move-to-top by
     // `added_ts_logical`, ref_caps/boot.rs). But the render
     // (`default-right-sidebar::render::0`) is `tree(sortkey: col("sort_key"))`,
     // and `OutlineTree::from_rows` (render_eval.rs) sorts ALL rows — INCLUDING
@@ -4954,22 +4982,23 @@ entities:
     // 1. REGION-LITERAL mismatch — FIXED. The seed GQL filtered `fr.region =
     //    'right'`, but `focus_pin` writes `navigation_history.region =
     //    Region::RightSidebar.as_str() = 'right_sidebar'`; SQL equality never
-    //    matched, so the sidebar rendered EMPTY (prod + SUT). The composed keystone
-    //    missed it because the ref interpreter (`pbt::query.rs` `gql_focus_region`)
-    //    mirrored whatever literal the seed carried (both empty → agree). Fixed by
-    //    canonicalizing the seed + `di/registration.rs` corpus to `'right_sidebar'`
-    //    and making `gql_focus_region` PARSE the literal into the `Region` enum
-    //    (unknown literal = loud panic, not a silently-empty filter). The
+    //    matched, so the sidebar rendered EMPTY (prod + SUT). The composed
+    //    keystone missed it because the ref interpreter (`pbt::query.rs`
+    //    `gql_focus_region`) mirrored whatever literal the seed carried (both
+    //    empty → agree). Fixed by canonicalizing the seed +
+    //    `di/registration.rs` corpus to `'right_sidebar'` and making
+    //    `gql_focus_region` PARSE the literal into the `Region` enum (unknown
+    //    literal = loud panic, not a silently-empty filter). The
     //    `right_sidebar_renders_pins` presence prong below is the permanent
     //    regression guard (un-ignored, GREEN).
     //
     // 2. SORTKEY OVERRIDE — STILL OPEN (surfaces now that pins render). A
-    //    single-column tree() `sortkey` CANNOT express "roots by `added_ts DESC`,
-    //    descendants by `sort_key`", so honoring the query's declared sort is a
-    //    render-DSL fork (per-level sortkey via the existing `rules` mechanism, OR
-    //    making `OutlineTree` preserve the backing query's row order for roots)
-    //    with codebase-wide consequences — escalated to Martin, hence the
-    //    `#[ignore]` on the ordering prong
+    //    single-column tree() `sortkey` CANNOT express "roots by `added_ts
+    //    DESC`, descendants by `sort_key`", so honoring the query's declared
+    //    sort is a render-DSL fork (per-level sortkey via the existing `rules`
+    //    mechanism, OR making `OutlineTree` preserve the backing query's row
+    //    order for roots) with codebase-wide consequences — escalated to
+    //    Martin, hence the `#[ignore]` on the ordering prong
     //    (`right_sidebar_renders_pins_in_declared_added_ts_order`). Remove the
     //    `#[ignore]` once that ruling + fix land.
 

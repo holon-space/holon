@@ -607,8 +607,9 @@ impl UndoStack {
         self.redo.clear();
 
         // Inside an open composite group: buffer raw, in execution order. No
-        // word-boundary coalescing applies (the whole group is one gesture); the
-        // buffered entries are folded into ONE composite entry at `end_group`.
+        // word-boundary coalescing applies (the whole group is one gesture);
+        // the buffered entries are folded into ONE composite entry at
+        // `end_group`.
         if let Some(group) = self.group.as_mut() {
             group.entries.push(entry);
             return;
@@ -1022,7 +1023,8 @@ mod tests_original {
     #[test]
     fn space_closes_the_group_at_the_word_boundary() {
         let mut stack = UndoStack::new();
-        // "hello world": space after "hello" closes group 1; "world" is group 2.
+        // "hello world": space after "hello" closes group 1; "world" is group
+        // 2.
         type_string(&mut stack, "b1", "content", "hello");
         stack.push(edit_entry("b1", "content", "hello", "hello ")); // space closes
         type_string_from(&mut stack, "b1", "content", "hello ", "world");
@@ -1079,7 +1081,8 @@ mod tests_original {
         let json = serde_json::to_string(&stack).unwrap();
         let restored: UndoStack = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.undo_len(), 2);
-        // After restore the open group is closed: a new alnum edit is its own group.
+        // After restore the open group is closed: a new alnum edit is its own
+        // group.
         let mut restored = restored;
         restored.push(edit_entry("b1", "content", "hi", "hix"));
         assert_eq!(restored.undo_len(), 3);

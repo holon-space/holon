@@ -272,7 +272,8 @@ impl OAuth2TokenProvider {
         let refresh_token = read_refresh_token(&files.refresh_token)?;
 
         // These two reach the wire in the token-grant POST body. Registering
-        // them covers a provider that echoes a submitted field back in an error.
+        // them covers a provider that echoes a submitted field back in an
+        // error.
         redactor.register(&client_secret);
         redactor.register(&refresh_token);
 
@@ -378,7 +379,8 @@ impl OAuth2TokenProvider {
         }
 
         let parsed: TokenResponse = serde_json::from_str(&body).map_err(|e| {
-            // Never echo the body — a success-shaped body would carry the token.
+            // Never echo the body — a success-shaped body would carry the
+            // token.
             anyhow::anyhow!(
                 "oauth2 token refresh to {} returned an unexpected/non-JSON response (body \
                  redacted): {e}. Check token_url and that the refresh token is still valid.",
@@ -393,12 +395,13 @@ impl OAuth2TokenProvider {
             );
         }
 
-        // The token now goes out on every request's `Authorization` header, so a
-        // server that echoes that header into an error body would disclose it.
+        // The token now goes out on every request's `Authorization` header, so
+        // a server that echoes that header into an error body would disclose
+        // it.
         self.redactor.register_minted(&parsed.access_token);
 
-        // Refresh proactively at 90% of the lifetime so a request never rides an
-        // about-to-expire token.
+        // Refresh proactively at 90% of the lifetime so a request never rides
+        // an about-to-expire token.
         let lifetime = Duration::from_secs(parsed.expires_in.max(1));
         let refresh_after = Instant::now() + lifetime.mul_f64(0.9);
         Ok(CachedToken {
@@ -555,7 +558,8 @@ fn read_keychain_entry(
 fn read_refresh_token(path: &ConfinedPath) -> anyhow::Result<String> {
     read_credential_file(path, /* enforce_private_file */ true).map_err(|e| {
         // Enrich the "not provisioned" case with the bootstrap pointer while
-        // preserving the typed UnresolvedVar so the caller still disclosed-skips.
+        // preserving the typed UnresolvedVar so the caller still
+        // disclosed-skips.
         if e.downcast_ref::<UnresolvedVar>().is_some() {
             anyhow::Error::new(UnresolvedVar {
                 var: format!(
@@ -954,7 +958,8 @@ mod tests {
 
     // The `client_secret_file` variant flows through resolve_secret with
     // enforce_private_file=true, so it enforces 0600 exactly like
-    // refresh_token_file — a group/world-readable secret file is refused loudly.
+    // refresh_token_file — a group/world-readable secret file is refused
+    // loudly.
     #[cfg(unix)]
     #[test]
     fn client_secret_file_variant_enforces_0600() {
@@ -991,9 +996,9 @@ mod tests {
         assert_eq!(got, "GOCSPX-secret");
     }
 
-    // `client_id_file` is NOT perm-checked: the OAuth client id is not secret, so
-    // a world-readable client-id file is accepted (deliberate asymmetry — we do
-    // not over-restrict a non-secret). Martin's file is 0600 regardless.
+    // `client_id_file` is NOT perm-checked: the OAuth client id is not secret,
+    // so a world-readable client-id file is accepted (deliberate asymmetry — we
+    // do not over-restrict a non-secret). Martin's file is 0600 regardless.
     #[cfg(unix)]
     #[test]
     fn client_id_file_variant_does_not_enforce_0600() {

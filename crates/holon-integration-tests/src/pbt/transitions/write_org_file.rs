@@ -219,11 +219,12 @@ impl<R: RefDocumentsMut + Clone + 'static> TransitionFactory<R> for WriteOrgFile
         // `HOLON_PBT_LAYOUT_OVERRIDE=1` to exercise custom-layout paths.
         let state_for_preconditions = state.clone();
         let allow_index_override = std::env::var("HOLON_PBT_LAYOUT_OVERRIDE").is_ok();
-        // Gate the advice-rule arm at generation time: mint a rule only when the
-        // reference holds no NON-SEED rule yet, so `active_rule`'s ≤1-active
-        // invariant holds. The bundled INACTIVE `index.org` rule seeds every
-        // vault (and the reference), so counting it would silently kill this
-        // arm forever. Re-checked under shrinking in `preconditions` below.
+        // Gate the advice-rule arm at generation time: mint a rule only when
+        // the reference holds no NON-SEED rule yet, so `active_rule`'s
+        // ≤1-active invariant holds. The bundled INACTIVE `index.org` rule
+        // seeds every vault (and the reference), so counting it would silently
+        // kill this arm forever. Re-checked under shrinking in `preconditions`
+        // below.
         let allow_advice_rule = !state.has_non_seed_advice_rule();
         // Axis 5 (promoted 2026-06-10): ~half the files carry a custom
         // `#+TODO:` keyword set, emitted as the org header on the SUT side
@@ -279,11 +280,11 @@ impl<R: RefDocumentsMut> TransitionRef<R> for WriteOrgFile {
         checks.push(check(!any_collision, Reason::BlockIdAlreadyExists));
 
         // Shrink-safe ≤1-rule gate: a file that seeds an advice-rule block may
-        // only land when the reference holds no advice-rule block yet. Generation
-        // time already gates this, but the shrinker can reorder/drop earlier
-        // transitions and revalidate this file against a state that now already
-        // has a rule — so the invariant (`active_rule` asserts ≤1 active) must be
-        // enforced here too, not only at generation.
+        // only land when the reference holds no advice-rule block yet.
+        // Generation time already gates this, but the shrinker can reorder/drop
+        // earlier transitions and revalidate this file against a state that now
+        // already has a rule — so the invariant (`active_rule` asserts ≤1
+        // active) must be enforced here too, not only at generation.
         let this_seeds_rule = self.blocks.iter().any(|b| {
             b.source_language
                 .as_ref()
@@ -293,7 +294,8 @@ impl<R: RefDocumentsMut> TransitionRef<R> for WriteOrgFile {
         });
         if this_seeds_rule {
             // Non-seed count only: the bundled INACTIVE seed rule is always
-            // present and must not veto minting (see `has_non_seed_advice_rule`).
+            // present and must not veto minting (see
+            // `has_non_seed_advice_rule`).
             let state_has_rule = state.has_non_seed_advice_rule();
             checks.push(check(!state_has_rule, Reason::PreconditionFailed));
         }
@@ -306,8 +308,9 @@ impl<R: RefDocumentsMut> TransitionRef<R> for WriteOrgFile {
 
     fn apply_to_ref(&self, state: &mut R) {
         // The whole pre-startup org-file seed effect (page-block insert, block
-        // remap/normalize, index-layout classification, canonical re-sequencing,
-        // pre-startup counter bump) lives in `RefDocumentsMut::seed_org_file`.
+        // remap/normalize, index-layout classification, canonical
+        // re-sequencing, pre-startup counter bump) lives in
+        // `RefDocumentsMut::seed_org_file`.
         state.seed_org_file(
             &self.filename,
             &self.blocks,

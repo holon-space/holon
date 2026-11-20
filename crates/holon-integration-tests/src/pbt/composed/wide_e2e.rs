@@ -326,12 +326,12 @@ async fn converge_projections_until(handle: &WideHandle, patience: Patience) {
 
     tracing::debug!(target: "holon_settle", ms = settle_started.elapsed().as_secs_f64() * 1e3, "settled");
 
-    // Advice weave (ADR 0022): now that CDC has converged (the `advice_rule_{slug}`
-    // matview + `advice_suppressed` reflect the settled SQL state), recompute the
-    // frontend's session-level advice sidecar so the pure snapshot the keystone's
-    // `inv-advice-rows-woven` reads sees the woven rows. Deterministic (one-shot
-    // canonical read), fail-loud through the same read path — no invariant
-    // softened.
+    // Advice weave (ADR 0022): now that CDC has converged (the
+    // `advice_rule_{slug}` matview + `advice_suppressed` reflect the settled
+    // SQL state), recompute the frontend's session-level advice sidecar so the
+    // pure snapshot the keystone's `inv-advice-rows-woven` reads sees the woven
+    // rows. Deterministic (one-shot canonical read), fail-loud through the same
+    // read path — no invariant softened.
     if let Some(comp) = &handle.frontend {
         comp.reactive().refresh_advice_sidecar().await;
     }
@@ -339,10 +339,11 @@ async fn converge_projections_until(handle: &WideHandle, patience: Patience) {
     // Editor data-sync converge (Inc 4, EditorBufferOwnership plan): with CDC
     // settled, the focused editor's cell-free VM buffer converges against the
     // stored (trimmed) `block.content` carrying the same `write_seq` — the
-    // headless analogue of prod's data subscription. The own trailing-whitespace
-    // echo is kept (`AdoptBaseline`); a substantive external change converges.
-    // This is what makes the `inv-editor-text/mirror` echo composition
-    // observable headless (and red-capable on an echo-guard regression).
+    // headless analogue of prod's data subscription. The own
+    // trailing-whitespace echo is kept (`AdoptBaseline`); a substantive
+    // external change converges. This is what makes the
+    // `inv-editor-text/mirror` echo composition observable headless (and
+    // red-capable on an echo-guard regression).
     if let Some(comp) = &handle.frontend {
         comp.converge_active_editors().await;
     }
@@ -606,11 +607,11 @@ pub fn seed_forward_edge_corpus(state: &mut ReferenceState) {
         let id = EntityUri::block(name);
         let mut block = Block::new_text(id.clone(), page.clone(), name);
         block.set_sequence(i as i64);
-        // `fe-blocked` forward-`:REQUIRES:` its later sibling `fe-target` — the edge
-        // that the pre-fix `block_requires.required_id` FK rejected at COMMIT.
-        // The org drawer, the `block` matview (inner-join keeps the present
-        // target), and the Loro authority all project `requires=[fe-target]`,
-        // so the field comparison stays consistent.
+        // `fe-blocked` forward-`:REQUIRES:` its later sibling `fe-target` — the
+        // edge that the pre-fix `block_requires.required_id` FK rejected at
+        // COMMIT. The org drawer, the `block` matview (inner-join keeps the
+        // present target), and the Loro authority all project
+        // `requires=[fe-target]`, so the field comparison stays consistent.
         if name == "fe-blocked" {
             block.requires = vec![EntityUri::block("fe-target")];
         }
@@ -713,7 +714,8 @@ pub fn seed_folder_companion(state: &mut ReferenceState) {
 
     // Seed the child block nested under the date page so
     // `inv-embedded-page-collapsed-lazy` has something to observe: a ref-known
-    // block whose presence in the main-panel widget tree signals eager rendering.
+    // block whose presence in the main-panel widget tree signals eager
+    // rendering.
     let child = folder_journal_page_child();
     let child_block = Block::new_text(child.clone(), page.clone(), "A note on the journal date");
     state
@@ -792,8 +794,8 @@ pub fn seed_folder_companion_subdir(state: &mut ReferenceState) {
         .blocks
         .insert(page.clone(), page_block);
     // NON-seed: the page is its own document root (owns its own file), so the
-    // block-doc is the page itself — NOT `no_parent`/sentinel (which would seed-
-    // classify it and hide it from `all_non_seed_block_ids`).
+    // block-doc is the page itself — NOT `no_parent`/sentinel (which would
+    // seed- classify it and hide it from `all_non_seed_block_ids`).
     state
         .domain
         .block_state
@@ -864,7 +866,8 @@ pub fn seed_journal_day(state: &mut ReferenceState, date: &str, sequence: i64) {
     let id = holon_api::link_parser::PageId::for_path(&format!("Journals/{date}"))
         .expect("journal page path is well-formed")
         .into_entity_uri();
-    // Idempotent: a same-day re-tick (or a re-seed) must not duplicate or churn.
+    // Idempotent: a same-day re-tick (or a re-seed) must not duplicate or
+    // churn.
     if state.domain.block_state.blocks.contains_key(&id) {
         return;
     }
@@ -873,8 +876,9 @@ pub fn seed_journal_day(state: &mut ReferenceState, date: &str, sequence: i64) {
     block.set_page(true);
     block.set_sequence(sequence);
     state.domain.block_state.blocks.insert(id.clone(), block);
-    // Self-documenting page (`block_documents[id]=id`, NON-seed) so it is INCLUDED
-    // in `all_non_seed_block_ids` — `inv-every-page-has-its-own-file` checks it.
+    // Self-documenting page (`block_documents[id]=id`, NON-seed) so it is
+    // INCLUDED in `all_non_seed_block_ids` — `inv-every-page-has-its-own-file`
+    // checks it.
     state
         .domain
         .block_state
@@ -914,12 +918,12 @@ pub fn structural_ref_wired(
         .insert(page.clone(), EntityUri::no_parent());
 
     // The page IS a user document: its org file is `structural-page.org` (what
-    // `boot_and_seed_wide` writes `WIDE_TREE_ORG` to) and its doc-uri is the page
-    // id (`block:structural-page` — the `#+ID:`-derived `file_id` the parser
-    // hands the SUT's `documents` key). Populating this un-gates the External
-    // (org) `ApplyMutation` arm and `BulkExternalAdd` (both require a non-empty
-    // `files.documents`); the value matches the SUT org filename so the native
-    // StartApp name-reconcile stays aligned too.
+    // `boot_and_seed_wide` writes `WIDE_TREE_ORG` to) and its doc-uri is the
+    // page id (`block:structural-page` — the `#+ID:`-derived `file_id` the
+    // parser hands the SUT's `documents` key). Populating this un-gates the
+    // External (org) `ApplyMutation` arm and `BulkExternalAdd` (both require a
+    // non-empty `files.documents`); the value matches the SUT org filename so
+    // the native StartApp name-reconcile stays aligned too.
     state
         .files
         .documents
@@ -1205,9 +1209,9 @@ fn install_observability_caps(caps: &mut CapMap, carry: Option<ObservabilityCarr
         caps.insert(std::sync::Arc::new(ComposedDeclaredColumnGaps::new())
             as std::sync::Arc<dyn DeclaredColumnGaps>);
 
-        // Reseed-attribution pin (Inc 0): the read cap + a per-case reset of the
-        // process-global observer, so each case's full-reseed attribution starts
-        // clean (mirrors the `SpanCollector::reset` in the harness).
+        // Reseed-attribution pin (Inc 0): the read cap + a per-case reset of
+        // the process-global observer, so each case's full-reseed attribution
+        // starts clean (mirrors the `SpanCollector::reset` in the harness).
         use crate::pbt::composed::reseed_observer::ComposedReseedObserver;
         use crate::pbt::composed::reseed_observer::ReseedAttribution;
         use crate::pbt::composed::reseed_observer::ReseedObserver;
@@ -1402,12 +1406,13 @@ pub(crate) async fn boot_wide_unaligned(
         set.wiring.storage_adapters,
         set.projections,
     );
-    // Scale-soak inflation: extra synthetic doc files (deep trees, tasks, links,
-    // unicode) appended to the SUT boot ONLY. Empty unless `HOLON_SOAK_SEED_BLOCKS`
-    // is set, so the keystone is untouched by default. Their ids fold into the
-    // oracle via the scaffold math below (booted-but-not-tree ⇒ seed-classified),
-    // so the invariant catalog stays green while every action pays the whole-vault
-    // projection/CDC/consolidator cost.
+    // Scale-soak inflation: extra synthetic doc files (deep trees, tasks,
+    // links, unicode) appended to the SUT boot ONLY. Empty unless
+    // `HOLON_SOAK_SEED_BLOCKS` is set, so the keystone is untouched by default.
+    // Their ids fold into the oracle via the scaffold math below
+    // (booted-but-not-tree ⇒ seed-classified), so the invariant catalog stays
+    // green while every action pays the whole-vault projection/CDC/consolidator
+    // cost.
     let soak_files = crate::pbt::composed::soak_seed::soak_org_files();
     let mut seed_files: Vec<(&str, &str)> = wide_seed_files(ref_state, JournalsSeed::File);
     for (name, body) in &soak_files {
@@ -1471,16 +1476,16 @@ pub(crate) async fn finish_wide_boot(
     }
     let mut caps = bundle.caps;
 
-    // Scale-soak: drain the WHOLE seeded vault into `block_raw` BEFORE the scaffold
-    // id-set is snapshotted below. The frontend boot settle is a flat 300ms — far
-    // too short to project 5–10k blocks — so an un-drained soak block would be
-    // absent from `booted`, escape seed-classification in the oracle, and later
-    // surface in the SUT store with no matching oracle seed entry → a false
-    // `inv-blocks-match-ref` divergence. Off (count 0) this is skipped
-    // entirely; the keystone is untouched.
+    // Scale-soak: drain the WHOLE seeded vault into `block_raw` BEFORE the
+    // scaffold id-set is snapshotted below. The frontend boot settle is a flat
+    // 300ms — far too short to project 5–10k blocks — so an un-drained soak
+    // block would be absent from `booted`, escape seed-classification in the
+    // oracle, and later surface in the SUT store with no matching oracle seed
+    // entry → a false `inv-blocks-match-ref` divergence. Off (count 0) this is
+    // skipped entirely; the keystone is untouched.
     // A scale rung whose seed never reached the SUT measures the small-corpus
-    // pipeline and passes vacuously, so the floor is asserted from the SUT's own
-    // store rather than trusted from the env var. 10% slack covers the boot
+    // pipeline and passes vacuously, so the floor is asserted from the SUT's
+    // own store rather than trusted from the env var. 10% slack covers the boot
     // scaffold accounting, not a partial drain.
     let seeded = crate::pbt::composed::soak_seed::soak_block_count();
     if seeded > 0 {
@@ -1498,21 +1503,22 @@ pub(crate) async fn finish_wide_boot(
     }
 
     // Fork B (dogfood #4): the boot auto-create rule fires today's journal
-    // day-block ASYNCHRONOUSLY off the clock CDC (fixed keystone clock → `clock`
-    // day row → trigger matview → `action_watcher` → `block.create`). The flat
-    // 300ms boot settle can return before that chain lands, so await the journal
-    // in `block_raw` BEFORE the scaffold snapshot / invariant checks — else a
-    // not-yet-fired journal false-diverges `inv-blocks-match-ref` as "missing in
-    // SQL". EVERY frontend (Turso) boot fires it — the rule-firing machinery
-    // (ClockScheduler + action watchers) runs unconditionally on any non-wasm
-    // Turso boot, NOT behind the `Actor::ActionEngine` label (see the oracle's
-    // `seed_boot_journal` gate in `wide_e2e_ref_for`). Await it on every frontend
-    // draw so the snapshot is taken AFTER it lands; fail loud on timeout so a
-    // genuinely-dropped firing is a RED, not a hang.
-    // The boot seed fills in what the vault lacks and must survive the initial
-    // scan: [`BOOT_FILLER_FILE`] sorts before `Journals.org` and delays its
-    // ingest into the seed's window, where a seed that does not wait for the
-    // scan loses the journal rule to the `Journals.org` delete pass.
+    // day-block ASYNCHRONOUSLY off the clock CDC (fixed keystone clock →
+    // `clock` day row → trigger matview → `action_watcher` → `block.create`).
+    // The flat 300ms boot settle can return before that chain lands, so await
+    // the journal in `block_raw` BEFORE the scaffold snapshot / invariant
+    // checks — else a not-yet-fired journal false-diverges
+    // `inv-blocks-match-ref` as "missing in SQL". EVERY frontend (Turso) boot
+    // fires it — the rule-firing machinery (ClockScheduler + action watchers)
+    // runs unconditionally on any non-wasm Turso boot, NOT behind the
+    // `Actor::ActionEngine` label (see the oracle's `seed_boot_journal` gate in
+    // `wide_e2e_ref_for`). Await it on every frontend draw so the snapshot is
+    // taken AFTER it lands; fail loud on timeout so a genuinely-dropped firing
+    // is a RED, not a hang. The boot seed fills in what the vault lacks and
+    // must survive the initial scan: [`BOOT_FILLER_FILE`] sorts before
+    // `Journals.org` and delays its ingest into the seed's window, where a seed
+    // that does not wait for the scan loses the journal rule to the
+    // `Journals.org` delete pass.
     if let Some(frontend) = &handle.frontend {
         let org_ready = frontend
             .injector()
@@ -1646,8 +1652,8 @@ pub(crate) async fn finish_wide_boot(
     // boot-FIRED journal day-block are non-seed children of journals — kept
     // compared, like the forward-edge children, so a dropped rule block or a
     // missing/duplicate boot journal fires `inv-blocks-match-ref`. Listed
-    // unconditionally: a no-op for a draw where an id is in neither `booted` nor
-    // `ref_ids` (e.g. the auto-create rule + boot journal on a non-frontend
+    // unconditionally: a no-op for a draw where an id is in neither `booted`
+    // nor `ref_ids` (e.g. the auto-create rule + boot journal on a non-frontend
     // draw, which `wide_e2e_ref_for` keeps out of the oracle — they are seeded
     // only by a frontend boot's `build_default_layout_blocks`).
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
@@ -1760,10 +1766,10 @@ pub async fn reboot_wide(
     let carry = ObservabilityCarry::from_caps(&caps);
 
     // Release the old boot BEFORE restarting. The caps and the handle hold this
-    // component (every frontend cap IS an `Arc<HeadlessFrontendComponent>`) plus
-    // direct clones of that boot's engine/reactive/driver; kept alive across the
-    // shutdown, the previous session's watcher and clock tasks go on querying a
-    // closed Turso actor for the whole second boot.
+    // component (every frontend cap IS an `Arc<HeadlessFrontendComponent>`)
+    // plus direct clones of that boot's engine/reactive/driver; kept alive
+    // across the shutdown, the previous session's watcher and clock tasks go on
+    // querying a closed Turso actor for the whole second boot.
     drop(caps);
     drop(handle);
     let holders = Arc::strong_count(&frontend);
@@ -1824,17 +1830,17 @@ pub async fn boot_and_seed_wide_windowed_base(
     // `NavigateFocus` cap — `SutFocusWrite` dispatches through the reactive
     // engine's `dispatch_intent_sync`, which runs the `navigation.focus` SQL
     // write AND mirrors focus into `engine.focused_block()`
-    // (`maybe_mirror_navigation_focus`), exactly as a production sidebar page-nav
-    // does. Done on the deferred base pre-window; window bring-up does not
-    // reset engine focus, so the first render paints the already-focused
+    // (`maybe_mirror_navigation_focus`), exactly as a production sidebar
+    // page-nav does. Done on the deferred base pre-window; window bring-up does
+    // not reset engine focus, so the first render paints the already-focused
     // engine. Mirrors `boot_and_seed_wide`'s headless drive.
     //
-    // §8.12 insert-only: the deferred base's `bundle.caps` is gesture-CAPLESS so
-    // the gpui-thread overlay can INSERT the window-driver gesture caps. So
+    // §8.12 insert-only: the deferred base's `bundle.caps` is gesture-CAPLESS
+    // so the gpui-thread overlay can INSERT the window-driver gesture caps. So
     // this seed focus-align (NOT a tested transition — it's boot state) drives
     // through a THROWAWAY gesture map bound to the component's OWN headless
-    // `ReactiveEngineDriver`. The focus effect lands on the SHARED engine/reactive,
-    // while `bundle.caps` stays capless for the overlay.
+    // `ReactiveEngineDriver`. The focus effect lands on the SHARED
+    // engine/reactive, while `bundle.caps` stays capless for the overlay.
     let comp = bundle
         .frontend
         .clone()
@@ -1854,14 +1860,14 @@ pub async fn boot_and_seed_wide_windowed_base(
 
     // Real START barrier (replaces the flat `sleep(SETTLE)`): drive the async
     // seed chains to a STORE-VISIBLE fixed point BEFORE the window loop begins
-    // driving. `forward-edge-page.org` ingests through the REAL FileSyncController
-    // (file -> Turso -> CDC -> Loro) and the boot journal fires async off the
-    // clock CDC — both can lag a flat sleep, so the first transition could hit a
-    // store where fe-* / the journal do not yet exist (the windowed-loop flake).
-    // Await them through the SAME `sut_ids` read path the transitions use — the
-    // headless `boot_and_seed_wide` uses this exact loop for the boot journal.
-    // Fail loud on timeout so a genuinely-dropped seed is a RED, not a silent
-    // green.
+    // driving. `forward-edge-page.org` ingests through the REAL
+    // FileSyncController (file -> Turso -> CDC -> Loro) and the boot journal
+    // fires async off the clock CDC — both can lag a flat sleep, so the first
+    // transition could hit a store where fe-* / the journal do not yet exist
+    // (the windowed-loop flake). Await them through the SAME `sut_ids` read
+    // path the transitions use — the headless `boot_and_seed_wide` uses this
+    // exact loop for the boot journal. Fail loud on timeout so a
+    // genuinely-dropped seed is a RED, not a silent green.
     let start_handle = WideHandle::from_bundle(&bundle);
     let mut start_expected: BTreeSet<EntityUri> = BTreeSet::new();
     if ref_state
@@ -1988,9 +1994,10 @@ pub fn windowed_composed_sut(
 /// (failure header discloses layer COVERAGE, never asserts unmeasured green).
 pub fn authority_routing_disclosure(wiring: &Wiring) -> String {
     let set = set_for_wiring(wiring);
-    // `has_editor` in `builder.rs` is exactly `set.has_projection(EditorState)`,
-    // and that flag alone drives `loro_enabled`/`crud.enabled`. Read it here so
-    // this disclosure cannot disagree with the actual block-CRUD wiring.
+    // `has_editor` in `builder.rs` is exactly
+    // `set.has_projection(EditorState)`, and that flag alone drives
+    // `loro_enabled`/`crud.enabled`. Read it here so this disclosure cannot
+    // disagree with the actual block-CRUD wiring.
     let block_crud = if set.has_projection(Projection::EditorState) {
         "Loro(LoroBlockOperations, via EditorState)"
     } else {
@@ -2003,8 +2010,8 @@ pub fn authority_routing_disclosure(wiring: &Wiring) -> String {
     } else {
         "none(Loro-only, no Sql sink)"
     };
-    // Org write-back (block → `.org` file) is active only when an Org adapter is
-    // wired into the draw.
+    // Org write-back (block → `.org` file) is active only when an Org adapter
+    // is wired into the draw.
     let org_writeback = if wiring.has_storage(StorageAdapter::Org) {
         "on"
     } else {
@@ -2097,8 +2104,8 @@ pub fn cap_ids_for_wiring(wiring: &Wiring) -> Vec<CapId> {
     let has_frontend = set.has_projection(Projection::ViewModel);
     let has_editor = set.has_projection(Projection::EditorState);
     // `set_for_wiring`'s normalization: Turso ⟺ a frontend ViewModel, Loro ⟺ an
-    // editor, and no-Turso ⇒ Loro. Any other combination means the normalization
-    // changed and the arms below were never measured against it.
+    // editor, and no-Turso ⇒ Loro. Any other combination means the
+    // normalization changed and the arms below were never measured against it.
     assert!(
         has_turso == has_frontend && has_loro == has_editor && (has_turso || has_loro),
         "cap-set table: unreachable wiring class turso={has_turso} loro={has_loro} \
@@ -2136,9 +2143,10 @@ pub fn cap_ids_for_wiring(wiring: &Wiring) -> Vec<CapId> {
             SutOrgRender,
             SutHomeProfile,
         ]);
-        // The per-config caps `compose_sut` adds on top of `register_non_gesture`,
-        // then the gesture-write family + the VM-rung driver
-        // (`DriverPlacement::HeadlessReactive`, which `compose_sut` always passes).
+        // The per-config caps `compose_sut` adds on top of
+        // `register_non_gesture`, then the gesture-write family + the VM-rung
+        // driver (`DriverPlacement::HeadlessReactive`, which `compose_sut`
+        // always passes).
         ids.extend(cap_ids![
             SutSqlProjection,
             SutFocus,
@@ -2181,20 +2189,22 @@ pub fn cap_ids_for_wiring(wiring: &Wiring) -> Vec<CapId> {
         }
     }
     if has_loro {
-        // `LoroUiRowsComponent` + `LoroBackendComponent`. `SutBackend` is Turso's
-        // when Turso is wired (`merge_missing` keeps the first registration and
-        // discloses Loro's as shadowed), so it enters the set exactly once.
+        // `LoroUiRowsComponent` + `LoroBackendComponent`. `SutBackend` is
+        // Turso's when Turso is wired (`merge_missing` keeps the first
+        // registration and discloses Loro's as shadowed), so it enters the set
+        // exactly once.
         ids.extend(cap_ids![SutLoroUiRows, SutLoroLog, SutLoroTaskState]);
         if !has_frontend {
             ids.extend(cap_ids![SutBackend]);
         }
         if has_frontend {
-            // `LoroSnapshotDurability` needs the frontend's authority store AND its
-            // sync-controller handle; both exist iff the frontend booted Loro on.
+            // `LoroSnapshotDurability` needs the frontend's authority store AND
+            // its sync-controller handle; both exist iff the frontend booted
+            // Loro on.
             ids.extend(cap_ids![SutLoroDurability]);
         } else {
-            // Pure Loro: the tag/typed-entity writes dispatch through the Loro-only
-            // operation engine.
+            // Pure Loro: the tag/typed-entity writes dispatch through the
+            // Loro-only operation engine.
             ids.extend(cap_ids![SutEdgeFieldWrite, SutTypedEntityWrite]);
         }
         ids.extend(cap_ids![SutTypedEntityLoro, SutLoro]);
@@ -2243,8 +2253,8 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
     let mut state = wide_ref();
     state.harness.wiring = set.wiring.clone();
     // Forward-edge ingest corpus (dogfood 2026-07-10 P0): a Turso-ingest-only
-    // regression, so seed it ONLY for a frontend draw. `boot_and_seed_wide` keys
-    // the `forward-edge-page.org` seed on this corpus being present in the
+    // regression, so seed it ONLY for a frontend draw. `boot_and_seed_wide`
+    // keys the `forward-edge-page.org` seed on this corpus being present in the
     // oracle, so a Loro-only draw (no `ViewModel` projection) never carries it
     // and the `inv-blocks-match-ref/{block_raw,matview}` arms deselect there
     // (no `SutSqlProjection`).
@@ -2254,20 +2264,21 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
         seed_read_only_recipe(&mut state);
         seed_decision_corpus(&mut state);
         // Companion page-tag demotion closure (dogfood 2026-07-12): a top-level
-        // page-file (`2026-07-10.org`) whose `Page` doc-root is inlined as a plain
-        // heading in the `Journals.org` companion. Frontend-only (a Turso org-
-        // ingest topology); `boot_and_seed_wide` keys the file seed on this page
-        // being in the ref.
+        // page-file (`2026-07-10.org`) whose `Page` doc-root is inlined as a
+        // plain heading in the `Journals.org` companion. Frontend-only (a Turso
+        // org- ingest topology); `boot_and_seed_wide` keys the file seed on
+        // this page being in the ref.
         //
         // ENV-gated OFF by default (`folder_companion_enabled`): the
         // page-authority FIX (foreign-page protection) is required for a clean
         // boot, but POST-fix the companion's inlined heading is intentionally
         // lossy on org round-trip (the heading belongs to the page-file, so
-        // `Journals.org` no longer renders it) — an `inv-org-render-fixed-point`
-        // divergence whose oracle is Fork B's writeback work. Promote to
-        // always-on-for-frontend once Fork B's companion-writeback oracle lands.
-        // The dedicated deterministic boot test seeds this directly (env-
-        // independent) and asserts only the ingest/tag invariants.
+        // `Journals.org` no longer renders it) — an
+        // `inv-org-render-fixed-point` divergence whose oracle is Fork B's
+        // writeback work. Promote to always-on-for-frontend once Fork B's
+        // companion-writeback oracle lands. The dedicated deterministic boot
+        // test seeds this directly (env- independent) and asserts only the
+        // ingest/tag invariants.
         if folder_companion_enabled() {
             seed_folder_companion(&mut state);
         }
@@ -2278,35 +2289,38 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
         //
         // Prod evidence (2026-07-16): the rule-firing machinery is NOT gated on
         // the `Actor::ActionEngine` PBT label — the `ClockScheduler`
-        // (`registration.rs`: `spawn_clock_scheduler` in `create_initialized_engine`,
-        // "Every embedder resolves through this shared path") and
-        // `start_action_watchers` (`holon-app/wiring.rs`, only `#[cfg(not(wasm32))]`)
-        // BOTH run unconditionally on every non-wasm Turso frontend boot, and prod
-        // has zero imports of the `Actor` enum. The SUT fires the boot journal on
-        // any Turso draw, so the prior `has_actor(ActionEngine)` gate here was too
-        // narrow: a `storage={Turso} actors={}` draw fired it in the SUT but the
-        // oracle did not model it → a spurious `inv-blocks-match-ref/{org,block_raw,
-        // matview}` divergence (SUT +1 block). The actor stays a label describing
-        // which transitions a draw can express, not a prod gate. `seed_boot_journal`
-        // is a no-op when no ViewModel booted (a non-frontend draw takes the `else`),
+        // (`registration.rs`: `spawn_clock_scheduler` in
+        // `create_initialized_engine`, "Every embedder resolves through this
+        // shared path") and `start_action_watchers` (`holon-app/wiring.rs`,
+        // only `#[cfg(not(wasm32))]`) BOTH run unconditionally on every
+        // non-wasm Turso frontend boot, and prod has zero imports of the
+        // `Actor` enum. The SUT fires the boot journal on any Turso draw, so
+        // the prior `has_actor(ActionEngine)` gate here was too
+        // narrow: a `storage={Turso} actors={}` draw fired it in the SUT but
+        // the oracle did not model it → a spurious
+        // `inv-blocks-match-ref/{org,block_raw, matview}` divergence (SUT +1
+        // block). The actor stays a label describing which transitions a draw
+        // can express, not a prod gate. `seed_boot_journal` is a no-op when no
+        // ViewModel booted (a non-frontend draw takes the `else`),
         // so the ViewModel gate alone is the right scope.
         seed_boot_journal(&mut state);
     } else {
         // Non-frontend (Loro/storage-only) draw: the journal auto-create RULE
-        // (`Journal Auto-Create` heading + `holon_rule` action) is seeded ONLY by
-        // a frontend boot's `build_default_layout_blocks` — a storage-only config
-        // has no frontend session and never mints it. `seed_booted_layout_into_ref`
-        // (run via `wide_ref()` under the fixed `{Loro, EditorState}` subsystem
-        // wiring) models it unconditionally, which for a non-frontend draw made the
-        // oracle expect a block the SUT structurally cannot have: a false
-        // `inv-blocks-match-ref` INGEST-DATA-LOSS RED at boot AND — once that no
-        // longer aborts — a `peer_update_block: block not found` panic when a
-        // `PeerEdit` transition targets the ref-modeled-but-SUT-absent rule block.
-        // Drop it from the oracle here (mirroring how the forward-edge corpus /
-        // boot journal are added ONLY for a frontend draw), so a non-frontend draw
-        // neither compares nor targets it. The page-display layer
-        // (`journals`/`src::0`/`render::0`) stays modeled — it is scaffold-filtered
-        // and never a mutation/peer target.
+        // (`Journal Auto-Create` heading + `holon_rule` action) is seeded ONLY
+        // by a frontend boot's `build_default_layout_blocks` — a storage-only
+        // config has no frontend session and never mints it.
+        // `seed_booted_layout_into_ref` (run via `wide_ref()` under the fixed
+        // `{Loro, EditorState}` subsystem wiring) models it unconditionally,
+        // which for a non-frontend draw made the oracle expect a block the SUT
+        // structurally cannot have: a false `inv-blocks-match-ref`
+        // INGEST-DATA-LOSS RED at boot AND — once that no longer aborts — a
+        // `peer_update_block: block not found` panic when a `PeerEdit`
+        // transition targets the ref-modeled-but-SUT-absent rule block. Drop it
+        // from the oracle here (mirroring how the forward-edge corpus /
+        // boot journal are added ONLY for a frontend draw), so a non-frontend
+        // draw neither compares nor targets it. The page-display layer
+        // (`journals`/`src::0`/`render::0`) stays modeled — it is
+        // scaffold-filtered and never a mutation/peer target.
         for uri in crate::pbt::journals_asset::rule_ids() {
             state.domain.block_state.blocks.remove(&uri);
             state.domain.block_state.block_documents.remove(&uri);
@@ -2343,12 +2357,12 @@ pub fn wide_e2e_ref() -> ReferenceState {
 pub fn frontend_wired(mut state: ReferenceState) -> ReferenceState {
     state.harness.wiring = ComponentSet::full_headless().wiring.clone();
     // Journals boot auto-create closure (dogfood #4): `frontend_wired` pins the
-    // `full_headless` (Turso frontend) wiring, and `boot_and_seed_wide` fires the
-    // seeded daily-journal rule once on EVERY frontend boot (ClockScheduler +
-    // action watchers run unconditionally on any non-wasm Turso boot), minting one
-    // journal day-block under `block:journals` and keeping its
-    // `keystone_boot_journal_id` COMPARED (not scaffold-filtered, see the `tree`
-    // set there). So the oracle must model it too — the SAME seed
+    // `full_headless` (Turso frontend) wiring, and `boot_and_seed_wide` fires
+    // the seeded daily-journal rule once on EVERY frontend boot (ClockScheduler
+    // + action watchers run unconditionally on any non-wasm Turso boot),
+    // minting one journal day-block under `block:journals` and keeping its
+    // `keystone_boot_journal_id` COMPARED (not scaffold-filtered, see the
+    // `tree` set there). So the oracle must model it too — the SAME seed
     // `wide_e2e_ref_for` applies for a frontend draw. Without it the SUT-fired
     // day-block is a spurious `+1` block that false-diverges
     // `inv-blocks-match-ref/{org,loro,block_raw, matview}` and surfaces as an
@@ -2420,8 +2434,8 @@ pub fn wide_init_state(
     // storage;sync;actors"` pins every draw to ONE exact
     // manifest (fail-loud on a typo or invalid manifest; an optional
     // `;Cell` or `;Dispatch` pins the editor leg) — the external-supply seam
-    // for bottom-up ladder runs and subset-wiring repros. Mutually exclusive with
-    // FORCE_FULL to keep a run's provenance unambiguous.
+    // for bottom-up ladder runs and subset-wiring repros. Mutually exclusive
+    // with FORCE_FULL to keep a run's provenance unambiguous.
     let wired = if let Ok(spec) = std::env::var("HOLON_PBT_PIN_WIRING") {
         assert!(
             std::env::var("HOLON_PBT_FORCE_FULL").is_err(),
@@ -2478,11 +2492,11 @@ impl ReferenceStateMachine for WideE2EMachine {
         // The alphabet gate comes FIRST, not just the ref-side precondition.
         // `init_state` draws the wiring, so the library shrinks it — and
         // `preconditions` is the only filter it re-applies to already-drawn
-        // transitions against the shrunk state (transition value-trees are built
-        // from the ORIGINAL state and can never be regenerated). Without the gate
-        // a shrink toward the cheap Loro-only backend keeps a transition the
-        // shrunk CapMap has no provider for, and the run dies in `CapMap::expect`
-        // instead of shrinking the divergence it was chasing.
+        // transitions against the shrunk state (transition value-trees are
+        // built from the ORIGINAL state and can never be regenerated). Without
+        // the gate a shrink toward the cheap Loro-only backend keeps a
+        // transition the shrunk CapMap has no provider for, and the run dies in
+        // `CapMap::expect` instead of shrinking the divergence it was chasing.
         crate::pbt::stepper::transition_applicable(state, transition)
             && transition.preconditions(state).is_good()
     }
@@ -2507,11 +2521,12 @@ pub struct WideE2E;
 impl ComposedSlice for WideE2E {
     type Transition = E2ETransition;
     type Machine = WideE2EMachine;
-    // My change (settle): the per-apply convergence settle needs the store handles.
+    // My change (settle): the per-apply convergence settle needs the store
+    // handles.
     type Handle = WideHandle;
-    // Main's change (uvuvnwnn): the per-draw `required_invariants` override below
-    // supersedes the static list, deriving the floor from the WHOLE shared
-    // catalog (every invariant this draw's caps select). The cap-level
+    // Main's change (uvuvnwnn): the per-draw `required_invariants` override
+    // below supersedes the static list, deriving the floor from the WHOLE
+    // shared catalog (every invariant this draw's caps select). The cap-level
     // `wide_cap_presence_guard` proves the widest wiring selects the whole
     // catalog; there is no per-id list to maintain (`WIDE_REQUIRED_INVARIANTS`
     // was retired).
@@ -3076,8 +3091,9 @@ mod tests {
     /// `init_state` draw non-frontend wirings.
     #[test]
     fn loro_only_wide_seed_runs_block_invariants_green() {
-        // Build the ref OUTSIDE any ambient runtime (it does a `block_on` for cap-set
-        // extraction — mirrors proptest's sync `init_state`), then drive the async boot
+        // Build the ref OUTSIDE any ambient runtime (it does a `block_on` for
+        // cap-set extraction — mirrors proptest's sync `init_state`), then
+        // drive the async boot
         // + catalog run on a manually-built multi-thread runtime (mirrors
         // `init_test`).
         let wiring = Wiring::custom(vec![StorageAdapter::Loro], vec![], vec![]);
@@ -3290,10 +3306,10 @@ mod tests {
             &WideE2EMachine::sequential_strategy(2..10usize),
             |(initial, transitions, seen)| {
                 for transition in &transitions {
-                    // The library's own runner counts every transition it reaches;
-                    // the shrinker uses that count to drop never-executed steps.
-                    // Skipping it would make this walk shrink differently from a
-                    // real run.
+                    // The library's own runner counts every transition it
+                    // reaches; the shrinker uses that count to drop
+                    // never-executed steps. Skipping it would make this walk
+                    // shrink differently from a real run.
                     if let Some(seen) = seen.as_ref() {
                         seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
@@ -3320,10 +3336,10 @@ mod tests {
         );
 
         match outcome {
-            // The trigger must be what fails, and it must survive to the minimal
-            // case — that is the proof the shrink ran WITH the lifecycle
-            // transition retained while everything else, the wiring included,
-            // was minimized.
+            // The trigger must be what fails, and it must survive to the
+            // minimal case — that is the proof the shrink ran WITH the
+            // lifecycle transition retained while everything else, the wiring
+            // included, was minimized.
             Err(TestError::Fail(reason, (initial, transitions, _))) => {
                 eprintln!(
                     "shrink walk seed {seed}: minimal case {:?} under wiring {:?}",
@@ -3365,9 +3381,9 @@ mod tests {
     /// layer Inc 2 makes the ONLY write-back path.
     #[test]
     fn turso_draw_reaches_the_feed_driven_writeback_path() {
-        // Touch the collector BEFORE the SUT boots so the subscriber is installed
-        // and the OTel layer records the span (an untouched collector captures
-        // nothing).
+        // Touch the collector BEFORE the SUT boots so the subscriber is
+        // installed and the OTel layer records the span (an untouched collector
+        // captures nothing).
         let collector = crate::test_tracing::SpanCollector::global();
         let scope = crate::test_tracing::ensure_test_scope();
 
@@ -3392,7 +3408,8 @@ mod tests {
             let resolver: IdResolver = Arc::new(Mutex::new(BTreeMap::new()));
             let (_caps, _handle, _scaffold) = boot_and_seed_wide(&resolver, &ref_state).await;
             // The resolver task drains asynchronously; poll rather than sleep a
-            // fixed amount so a fast machine doesn't pay for a slow one's margin.
+            // fixed amount so a fast machine doesn't pay for a slow one's
+            // margin.
             for _ in 0..100 {
                 if collector.count_spans("org.on_block_feed") > 0 {
                     break;
@@ -3846,8 +3863,8 @@ mod tests {
             "set_for_wiring must be identity on the already-normalized full_headless wiring"
         );
 
-        // A bare Loro-only manifest (the fast-path target) → Loro backend, EditorState
-        // only (ViewModel needs Turso), no UI.
+        // A bare Loro-only manifest (the fast-path target) → Loro backend,
+        // EditorState only (ViewModel needs Turso), no UI.
         let loro_only = Wiring::custom(vec![StorageAdapter::Loro], vec![], vec![]);
         let set = set_for_wiring(&loro_only);
         assert!(set.has_storage(StorageAdapter::Loro));
@@ -3964,8 +3981,8 @@ mod tests {
     fn wide_cap_presence_guard() {
         use holon_pbt_core::composition::CapProvider;
 
-        // The REAL widest CapMap the keystone drives: `full_headless` booted through
-        // the production builder (`boot_and_seed_wide`), INCLUDING the
+        // The REAL widest CapMap the keystone drives: `full_headless` booted
+        // through the production builder (`boot_and_seed_wide`), INCLUDING the
         // `ComposedSpanMetrics` span-metrics caps it registers on top of the
         // bare `compose_sut` map. The bare `full_headless_cap_set()` is only
         // the generation-narrowing hint and omits those, so checking against it
@@ -3986,7 +4003,8 @@ mod tests {
         CapProvider::register(Arc::new(wide_ref()), &mut ref_map);
         let ref_caps = ref_map.cap_set();
 
-        // cap-name → sorted, de-duped invariant ids that need it (on either axis).
+        // cap-name → sorted, de-duped invariant ids that need it (on either
+        // axis).
         let mut missing: BTreeMap<&'static str, BTreeSet<&'static str>> = BTreeMap::new();
         for inv in composed_invariant_catalog() {
             let needs = inv.needs();
@@ -4005,14 +4023,16 @@ mod tests {
 
         let mut excluded: BTreeSet<&'static str> =
             WIDE_HEADLESS_ABSENT_CAPS.iter().map(|(c, _)| *c).collect();
-        // `SutClockAdvance` is excluded only while its env gate is OFF; with the
-        // flag on the builder registers it, and the exclusion would read stale.
+        // `SutClockAdvance` is excluded only while its env gate is OFF; with
+        // the flag on the builder registers it, and the exclusion would read
+        // stale.
         if std::env::var("HOLON_PBT_ADVANCE_DAY").is_ok() {
             excluded.remove("SutClockAdvance");
         }
 
-        // Every excluded cap must ACTUALLY be missing — a stale exclusion (a cap that
-        // is now present) is itself a smell to prune, so fail loud on it too.
+        // Every excluded cap must ACTUALLY be missing — a stale exclusion (a
+        // cap that is now present) is itself a smell to prune, so fail loud on
+        // it too.
         let stale: Vec<&'static str> = excluded
             .iter()
             .copied()
@@ -4080,9 +4100,10 @@ mod tests {
     fn keystone_boots_ios_crdt_loro_authority_substrate() {
         use holon_pbt_core::capabilities::SutLoro;
 
-        // The config the keystone boots MUST carry EditorState — that projection is
-        // exactly what drives `crdt.enabled = Some(true)` in the frontend arm, the iOS
-        // material knob. (ViewModel + Turso pin the frontend/Turso half.)
+        // The config the keystone boots MUST carry EditorState — that
+        // projection is exactly what drives `crdt.enabled = Some(true)` in the
+        // frontend arm, the iOS material knob. (ViewModel + Turso pin the
+        // frontend/Turso half.)
         let set = ComponentSet::full_headless();
         assert!(
             set.has_projection(Projection::EditorState),
@@ -4122,8 +4143,8 @@ mod tests {
     /// catalog.
     #[test]
     fn composed_catalog_count_floor() {
-        // N = today's catalog size (45 without `otel-testing`; `sql_budget` adds one
-        // under it).
+        // N = today's catalog size (45 without `otel-testing`; `sql_budget`
+        // adds one under it).
         const N: usize = 45;
         let len = composed_invariant_catalog().len();
         assert!(

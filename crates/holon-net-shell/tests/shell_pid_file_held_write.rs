@@ -322,7 +322,8 @@ fn listed_are_recorded(lab: &Lab, model: &Model, groups: &[Group]) -> Result<(),
     for g in groups {
         if !read_back(&left, g) && alive(g.pgid) {
             // A replaced or forgotten group leaves the listing for good, so a
-            // group still listed after the read was listed and unrecorded at once.
+            // group still listed after the read was listed and unrecorded at
+            // once.
             if model.shared(g.attempt.0) {
                 let Answer::InTime(now) = lab.in_flight(Caller::Thread).within(BOUND) else {
                     continue;

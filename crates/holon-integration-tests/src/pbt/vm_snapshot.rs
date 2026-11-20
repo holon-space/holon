@@ -276,9 +276,10 @@ pub(crate) fn view_model_to_snapshot(
     }
 
     // Placed rows are identified in PBT snapshots by props["occurrence"] =
-    // key_suffix hex; invariants recompute OccurrenceId::for_placement(canonical,
-    // anchor) to match. Canonical nodes stamp nothing so every existing snapshot
-    // stays byte-identical until advice weaving lands.
+    // key_suffix hex; invariants recompute
+    // OccurrenceId::for_placement(canonical, anchor) to match. Canonical nodes
+    // stamp nothing so every existing snapshot stays byte-identical until
+    // advice weaving lands.
     if let holon_api::Occurrence::Placed(_) = vm.occurrence {
         props.insert("occurrence".into(), vm.occurrence.key_suffix());
     }

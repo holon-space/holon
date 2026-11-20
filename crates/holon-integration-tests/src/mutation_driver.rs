@@ -121,9 +121,9 @@ impl SutBlockTreeWrite for DirectUserDriver {
     }
 
     async fn apply_outdent(&self, id: &EntityUri) {
-        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a floor
-        // failure — see `is_page_boundary_outdent_refusal`. Any OTHER dispatch
-        // error stays fail-loud.
+        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a
+        // floor failure — see `is_page_boundary_outdent_refusal`. Any OTHER
+        // dispatch error stays fail-loud.
         let params: HashMap<String, Value> = self
             .id_only(id)
             .into_iter()
@@ -393,10 +393,11 @@ impl SutTemplateInstantiate for DirectUserDriver {
         // Seed the template blocks idempotent (UPSERT).
         let mut root_params: HashMap<String, Value> = HashMap::new();
         root_params.insert("id".to_string(), Value::String(template_id.to_string()));
-        // The template DEFINITION root is a top-level (parentless) block. Supply
-        // the canonical root sentinel explicitly so BOTH engines accept the seed as
-        // a root — the frontend Loro engine fails loud when `parent_id` is absent.
-        // `sentinel:no_parent` is the same parent pages/journals boot under.
+        // The template DEFINITION root is a top-level (parentless) block.
+        // Supply the canonical root sentinel explicitly so BOTH engines accept
+        // the seed as a root — the frontend Loro engine fails loud when
+        // `parent_id` is absent. `sentinel:no_parent` is the same parent
+        // pages/journals boot under.
         root_params.insert(
             "parent_id".to_string(),
             Value::String(EntityUri::no_parent().to_string()),
@@ -515,15 +516,16 @@ impl SutBlockToPage for DirectUserDriver {
             .synthetic_dispatch("block", "convert_block_to_page", params)
             .await
         {
-            // Interim identity policy (plan §5) / resolve-before-mint (ADR 0029):
-            // a convert whose destination page id is already held by a DIFFERENT
-            // entity (a page renamed away from that name but still holding its
-            // derived id) is REFUSED fail-loud before any constituent runs. That
-            // refusal is the SPECIFIED behaviour, NOT a driver failure: model it
-            // as a disclosed no-op (the reference mirrors it in
-            // `apply_block_to_page`). Any OTHER failure is a real defect — panic
-            // loud. Recognised by the stable marker (the concrete
-            // `IdentityCollision` type is erased by the dispatch chain's wrappers).
+            // Interim identity policy (plan §5) / resolve-before-mint (ADR
+            // 0029): a convert whose destination page id is already held by a
+            // DIFFERENT entity (a page renamed away from that name but still
+            // holding its derived id) is REFUSED fail-loud before any
+            // constituent runs. That refusal is the SPECIFIED behaviour, NOT a
+            // driver failure: model it as a disclosed no-op (the reference
+            // mirrors it in `apply_block_to_page`). Any OTHER failure is a real
+            // defect — panic loud. Recognised by the stable marker (the
+            // concrete `IdentityCollision` type is erased by the dispatch
+            // chain's wrappers).
             let msg = format!("{e:#}");
             assert!(
                 msg.contains(holon_api::IDENTITY_COLLISION_MARKER)

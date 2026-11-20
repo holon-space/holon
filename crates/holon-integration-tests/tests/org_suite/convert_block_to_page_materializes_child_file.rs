@@ -65,11 +65,11 @@ fn runtime_convert_block_to_page_materializes_rehomed_child_file() {
         // page owns a file (via the alias registry) yet its block_raw ancestor
         // chain contains a non-page. This is the topology under which a runtime
         // convert's new page previously failed to materialize.
-        // Pin the boot clock so the daily-journal auto-create rule mints a FIXED
-        // "today" page regardless of the real wall-clock date — the test must be
-        // deterministic under any date (job 72446a9c: it was clock-sensitive
-        // before the cross-doc-move convergence fix). Use a date distinct from
-        // the seeded 2026-01-15 subtree under test.
+        // Pin the boot clock so the daily-journal auto-create rule mints a
+        // FIXED "today" page regardless of the real wall-clock date — the test
+        // must be deterministic under any date (job 72446a9c: it was
+        // clock-sensitive before the cross-doc-move convergence fix). Use a
+        // date distinct from the seeded 2026-01-15 subtree under test.
         let pinned_ms = chrono::NaiveDate::from_ymd_opt(2026, 6, 15)
             .unwrap()
             .and_hms_opt(12, 0, 0)
@@ -84,8 +84,8 @@ fn runtime_convert_block_to_page_materializes_rehomed_child_file() {
             .expect("boot");
         env.settle().await;
 
-        // Convert the MIDDLE block into a page. P is minted under the date page;
-        // la-2 (its child) is re-homed under P; la-1 becomes a link to P.
+        // Convert the MIDDLE block into a page. P is minted under the date
+        // page; la-2 (its child) is re-homed under P; la-1 becomes a link to P.
         let mut params: HashMap<String, Value> = HashMap::new();
         params.insert("target".into(), Value::String("block:la-1".into()));
         env.execute_operation("block", "convert_block_to_page", params)
@@ -150,10 +150,11 @@ fn runtime_convert_block_to_page_materializes_rehomed_child_file() {
                 p_file = Some(p.display().to_string());
             }
         }
-        // The new page P must own its identity file, and the re-homed child must
-        // live IN that file (nested under the parent page). On the unfixed code
-        // P is FILELESS: no `#+ID: <P>` file exists and la-2 either vanished or
-        // is stranded in the origin file (guard veto -> render!=disk echo).
+        // The new page P must own its identity file, and the re-homed child
+        // must live IN that file (nested under the parent page). On the unfixed
+        // code P is FILELESS: no `#+ID: <P>` file exists and la-2 either
+        // vanished or is stranded in the origin file (guard veto ->
+        // render!=disk echo).
         assert!(
             p_file.is_some(),
             "new page {new_page} owns NO identity file on disk — runtime \

@@ -115,32 +115,33 @@ pub async fn reconcile_named_view(
         // Recreating a matview that other matviews chain on silently CORRUPTS
         // the dependents (they keep their old rows AND receive the recreated
         // base's rows as fresh inserts — duplicate rows; pinned by
-        // holon-advice/tests/matview_build.rs::probe_multi_junction_fanout_fix_shapes).
-        // Cascade-drop the dependents first; their owning schema modules run
-        // AFTER this one (that is the dependency direction) and recreate them
-        // fresh, and dynamic watch views are recreated on watch registration.
+        // holon-advice/tests/matview_build.
+        // rs::probe_multi_junction_fanout_fix_shapes). Cascade-drop the
+        // dependents first; their owning schema modules run AFTER this one
+        // (that is the dependency direction) and recreate them fresh, and
+        // dynamic watch views are recreated on watch registration.
         drop_dependent_views(db_handle, view_name).await?;
         db_handle
             .execute_ddl(&format!("DROP VIEW IF EXISTS {}", view_name))
             .await?;
     }
 
-    // Idempotent-or-recovering create. The `sqlite_master` probe above only sees
-    // rows of `type='view'`; a crash mid-DDL can leave the matview's backing
-    // table and/or its `__turso_internal_dbsp_state_*` tables behind WITHOUT a
-    // committed view row. A plain `CREATE MATERIALIZED VIEW` then dies with
-    // "table <name> already exists" and the app boot-loops (on Android the only
-    // escape was `pm clear` = user data loss). Recover instead: `CREATE ... IF
-    // NOT EXISTS` — Turso's create path itself reclaims a current-epoch orphaned
-    // DBSP state table — and on a residual name collision drop the orphaned
-    // *view-named* backing object (NOT the system-prefixed DBSP table, which
-    // Turso forbids dropping) and retry ONCE. `cleanup_orphaned_dbsp_state`
-    // only DISCLOSES any surviving DBSP residue; it never issues the forbidden
-    // `DROP TABLE __turso_internal_*` that was itself the Android boot panic.
-    // This is data-safe: a matview is a pure projection over its base tables
-    // (e.g. `block` over `block_raw`), which are never touched here, so the
-    // source of truth survives. If the retry still fails we surface a clear
-    // error rather than looping forever.
+    // Idempotent-or-recovering create. The `sqlite_master` probe above only
+    // sees rows of `type='view'`; a crash mid-DDL can leave the matview's
+    // backing table and/or its `__turso_internal_dbsp_state_*` tables behind
+    // WITHOUT a committed view row. A plain `CREATE MATERIALIZED VIEW` then
+    // dies with "table <name> already exists" and the app boot-loops (on
+    // Android the only escape was `pm clear` = user data loss). Recover
+    // instead: `CREATE ... IF NOT EXISTS` — Turso's create path itself reclaims
+    // a current-epoch orphaned DBSP state table — and on a residual name
+    // collision drop the orphaned *view-named* backing object (NOT the
+    // system-prefixed DBSP table, which Turso forbids dropping) and retry ONCE.
+    // `cleanup_orphaned_dbsp_state` only DISCLOSES any surviving DBSP residue;
+    // it never issues the forbidden `DROP TABLE __turso_internal_*` that was
+    // itself the Android boot panic. This is data-safe: a matview is a pure
+    // projection over its base tables (e.g. `block` over `block_raw`), which
+    // are never touched here, so the source of truth survives. If the retry
+    // still fails we surface a clear error rather than looping forever.
     cleanup_orphaned_dbsp_state(db_handle, view_name).await?;
     let create_idempotent = format!(
         "CREATE MATERIALIZED VIEW IF NOT EXISTS {} AS {}",
@@ -932,10 +933,11 @@ impl MatviewManager {
                 match tx.try_send(batch) {
                     Ok(()) => true,
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        // A dropped delta would silently corrupt the subscriber's
-                        // incremental state forever (lost rows / ghost rows). Close the
-                        // stream instead so the consumer sees the end-of-stream and must
-                        // resubscribe via watch(), re-querying initial rows.
+                        // A dropped delta would silently corrupt the
+                        // subscriber's incremental state forever (lost rows /
+                        // ghost rows). Close the stream instead so the consumer
+                        // sees the end-of-stream and must resubscribe via
+                        // watch(), re-querying initial rows.
                         tracing::error!(
                             "[MatviewManager] CDC subscriber for '{}' is full; closing its \
                              stream (delivering a partial delta stream would corrupt \
@@ -951,8 +953,8 @@ impl MatviewManager {
             let mut cmd_rx_open = true;
 
             loop {
-                // Stop when no subscribers remain AND the command channel is closed
-                // (no new subscribers can arrive)
+                // Stop when no subscribers remain AND the command channel is
+                // closed (no new subscribers can arrive)
                 if !cmd_rx_open && subscribers.is_empty() {
                     break;
                 }
@@ -1588,8 +1590,8 @@ impl MatviewManager {
     pub async fn watch(&self, sql: &str) -> Result<WatchResult> {
         let (view_name, stream) = self.ensure_and_subscribe(sql, None).await?;
         // The clause comes off the SOURCE query, where its table aliases are in
-        // scope; over the view they are not, so it has to be re-expressed in the
-        // view's own output columns before it can be spliced onto the read.
+        // scope; over the view they are not, so it has to be re-expressed in
+        // the view's own output columns before it can be spliced onto the read.
         let order_by = match crate::util::trailing_order_by(sql) {
             Some(clause) => {
                 let columns = self.view_columns(&view_name).await?;
@@ -1727,7 +1729,8 @@ impl MatviewManager {
                             rows.len(),
                             table_name,
                         );
-                        // Notify hook (e.g. subscribe to resource notifications)
+                        // Notify hook (e.g. subscribe to resource
+                        // notifications)
                         let hooks = self.hooks.read().await.clone();
                         for hook in hooks {
                             hook.on_fdw_primed(table_name, &fdw_sql).await;
@@ -1866,8 +1869,9 @@ mod tests {
     #[test]
     fn ivm_maintainable_flags_every_subquery_predicate_spelling() {
         // Maintainable (no WHERE subquery predicate): plain filters, plain/
-        // aliased joins, and the `LEFT JOIN … IS NULL` anti-join, which the fork
-        // maintains CORRECTLY after the c6cfab7d populate fix (pinned end-to-end
+        // aliased joins, and the `LEFT JOIN … IS NULL` anti-join, which the
+        // fork maintains CORRECTLY after the c6cfab7d populate fix (pinned
+        // end-to-end
         // by `left_join_isnull_matview_matches_fresh_after_populate_fix`).
         assert!(sql_ivm_maintainable(
             "SELECT id FROM block WHERE json_extract(properties,'$.task_state')='TODO'"
@@ -1879,9 +1883,9 @@ mod tests {
             "SELECT b.id FROM block b LEFT JOIN block_requires r ON r.block_id = b.id WHERE \
              r.block_id IS NULL"
         ));
-        // A string literal containing "exists" must NOT be flagged — we visit the
-        // typed AST nodes, so only a genuine `Exists`/`InSubquery` node counts,
-        // never rendered text.
+        // A string literal containing "exists" must NOT be flagged — we visit
+        // the typed AST nodes, so only a genuine `Exists`/`InSubquery` node
+        // counts, never rendered text.
         assert!(sql_ivm_maintainable(
             "SELECT id FROM block WHERE content = 'this does not exists'"
         ));
@@ -1889,11 +1893,11 @@ mod tests {
             "SELECT id FROM block WHERE content = 'Exists {'"
         ));
 
-        // Un-maintainable: EVERY subquery-predicate spelling, all silently-empty
-        // over the chained `block` matview (verifier 2b). `NOT EXISTS`,
-        // `NOT (EXISTS …)` (the keystone generator's spelling), plain `EXISTS`
-        // (the fork refuses `Exists { negated: false }` — the operator itself),
-        // `IN (subquery)` and `NOT IN (subquery)`, any nesting.
+        // Un-maintainable: EVERY subquery-predicate spelling, all
+        // silently-empty over the chained `block` matview (verifier 2b). `NOT
+        // EXISTS`, `NOT (EXISTS …)` (the keystone generator's spelling), plain
+        // `EXISTS` (the fork refuses `Exists { negated: false }` — the operator
+        // itself), `IN (subquery)` and `NOT IN (subquery)`, any nesting.
         for sql in [
             "SELECT b.* FROM block b WHERE NOT EXISTS (SELECT 1 FROM block_requires br WHERE \
              br.block_id=b.id)",
@@ -1974,8 +1978,8 @@ mod tests {
         ));
         // case-insensitive whole-token match.
         assert!(sql_references_identifier("select * from FOO", "foo"));
-        // substring must NOT match (kills the `-> false`/`delete !` mutants that
-        // would make every call match-nothing or match-everything).
+        // substring must NOT match (kills the `-> false`/`delete !` mutants
+        // that would make every call match-nothing or match-everything).
         assert!(!sql_references_identifier("SELECT * FROM foobar", "foo"));
         assert!(!sql_references_identifier("SELECT * FROM other", "foo"));
     }
@@ -2022,18 +2026,19 @@ mod tests {
             .expect("first reconcile");
         assert!(created, "first reconcile should create the view");
 
-        // 2. Second boot with identical SELECT is a no-op — the regression guard
-        //    against "table src_view already exists" boot-looping on restart.
+        // 2. Second boot with identical SELECT is a no-op — the regression
+        //    guard against "table src_view already exists" boot-looping on
+        //    restart.
         let created_again = reconcile_named_view(&handle, "src_view", "SELECT id, v FROM src")
             .await
             .expect("second reconcile must not error on an existing matview");
         assert!(!created_again, "identical reconcile should be a no-op");
 
-        // 3. Simulate the crash residue: a leftover object occupying the matview's NAME
-        //    with no committed `type='view'` row (what makes a plain `CREATE
-        //    MATERIALIZED VIEW` die with "already exists" and boot-loop). A plain table
-        //    standing on the name reproduces the collision; `reconcile_named_view` must
-        //    recover, not fail.
+        // 3. Simulate the crash residue: a leftover object occupying the
+        //    matview's NAME with no committed `type='view'` row (what makes a
+        //    plain `CREATE MATERIALIZED VIEW` die with "already exists" and
+        //    boot-loop). A plain table standing on the name reproduces the
+        //    collision; `reconcile_named_view` must recover, not fail.
         handle
             .execute_ddl("CREATE TABLE IF NOT EXISTS orphan_view (id TEXT)")
             .await

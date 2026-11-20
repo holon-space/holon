@@ -194,8 +194,9 @@ fn choices_for(param: &OperationParam) -> Option<Vec<ParamChoice>> {
                 slug: "false".to_string(),
             },
         ]),
-        // One choice per admitted value — including the single-value case, which
-        // is shown (not auto-picked) so every popup has a deterministic step.
+        // One choice per admitted value — including the single-value case,
+        // which is shown (not auto-picked) so every popup has a deterministic
+        // step.
         TypeHint::Enum { variants, .. } => Some(
             variants
                 .iter()

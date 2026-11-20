@@ -153,8 +153,9 @@ pub fn expectation_for(
     let ScoringTemplate::TagOverlapRecency(spec) = &rule.candidates;
     let candidate_tag = has_tag_only(&spec.source);
 
-    // Suppression direction: the ANCHOR carries the edge, the candidate (lesson)
-    // is the target — the `advice_suppressed(anchor_id, lesson_id)` junction.
+    // Suppression direction: the ANCHOR carries the edge, the candidate
+    // (lesson) is the target — the `advice_suppressed(anchor_id, lesson_id)`
+    // junction.
     let mut scored: Vec<(String, u32)> =
         scored_candidates(blocks, anchor_id, anchor, candidate_tag)
             .into_iter()
@@ -254,8 +255,8 @@ mod tests {
 
     #[test]
     fn shared_marker_tag_counts() {
-        // Both carry `lesson`, and they share `lesson` genuinely → counts toward
-        // overlap. anchorL(lesson,task) ∩ cand(lesson) = {lesson} = 1.
+        // Both carry `lesson`, and they share `lesson` genuinely → counts
+        // toward overlap. anchorL(lesson,task) ∩ cand(lesson) = {lesson} = 1.
         let blocks = map(vec![
             block("block:a", &["task", "lesson"]),
             block("block:c", &["lesson"]),
@@ -281,7 +282,8 @@ mod tests {
 
     #[test]
     fn suppression_is_directional_candidate_side_does_not_suppress() {
-        // A suppression edge on the CANDIDATE (not the anchor) must NOT remove it.
+        // A suppression edge on the CANDIDATE (not the anchor) must NOT remove
+        // it.
         let mut blocks = map(vec![
             block("block:task1", &["task", "proj"]),
             block("block:lessonA", &["lesson", "proj"]),
@@ -301,9 +303,9 @@ mod tests {
             block("block:both", &["task", "lesson", "proj"]),
             block("block:l", &["lesson", "proj"]),
         ]);
-        // both ∩ l = {lesson, proj} = 2 (full intersection, shared marker included);
-        // the point of the test is `both` does NOT weave itself despite carrying
-        // `lesson`.
+        // both ∩ l = {lesson, proj} = 2 (full intersection, shared marker
+        // included); the point of the test is `both` does NOT weave itself
+        // despite carrying `lesson`.
         let exp = expectation_for(&blocks, &rule(), &anchor("block:both"));
         assert_eq!(exp.scored, vec![("block:l".to_string(), 2)]);
     }

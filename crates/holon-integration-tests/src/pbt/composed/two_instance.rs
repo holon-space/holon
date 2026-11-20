@@ -532,11 +532,11 @@ impl SutTwoInstance for TwoInstanceHandle {
             .grant
             .clone();
 
-        // Snapshot what the owner holds BEFORE publishing: that is precisely the
-        // state this round can carry, and the convergence oracle judges against
-        // it rather than against a live set that may grow afterwards. The owner
-        // is settled here (the previous tick's settle ran to a fixed point), so
-        // this matches what the export sees.
+        // Snapshot what the owner holds BEFORE publishing: that is precisely
+        // the state this round can carry, and the convergence oracle judges
+        // against it rather than against a live set that may grow afterwards.
+        // The owner is settled here (the previous tick's settle ran to a fixed
+        // point), so this matches what the export sees.
         let owner_now = if owner_to_receiver {
             Some(backend_ids(&self.owner_backend).await)
         } else {
@@ -985,8 +985,8 @@ impl SutReceiverBackend for TwoInstanceHandle {
         let a = owner.get_doc(DocScope::Global).await.ok()?.doc();
         let b = receiver.get_doc(DocScope::Global).await.ok()?.doc();
         // Pairwise fixed point over THROWAWAY forks: import each side's delta
-        // into a fork of the other and compare. Forks, so the live documents the
-        // rest of the case reads stay untouched.
+        // into a fork of the other and compare. Forks, so the live documents
+        // the rest of the case reads stay untouched.
         let fork_a = a.fork();
         let fork_b = b.fork();
         fork_a
@@ -1151,9 +1151,9 @@ pub async fn boot_two_instances_seeded_on(
     let (mut owner_caps, owner, scaffold) =
         boot_and_seed_wide_with_peer_id(resolver, ref_state, Some(OWNER_PEER_ID)).await;
 
-    // The receiver boots the SAME wiring over its OWN vault and its OWN peer id,
-    // from a disjoint seed. A second `IdResolver` keeps its mints out of the
-    // owner-side reconcile map — the oracle models the OWNER.
+    // The receiver boots the SAME wiring over its OWN vault and its OWN peer
+    // id, from a disjoint seed. A second `IdResolver` keeps its mints out of
+    // the owner-side reconcile map — the oracle models the OWNER.
     let receiver_resolver = IdResolver::default();
     let set = set_for_wiring(&ref_state.harness.wiring);
     let receiver_bundle = compose_sut_seeded_with_peer_id(

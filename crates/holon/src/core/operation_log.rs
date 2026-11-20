@@ -167,7 +167,8 @@ impl OperationLogOperations for OperationLogStore {
             .and_then(|v| v.as_i64())
             .ok_or("Failed to get inserted operation ID from RETURNING clause")?;
 
-        // Amortize trim: only check every 10th operation to avoid per-op COUNT(*).
+        // Amortize trim: only check every 10th operation to avoid per-op
+        // COUNT(*).
         if id % 10 == 0 {
             self.trim_if_needed().await?;
         }

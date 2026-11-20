@@ -189,11 +189,11 @@ where
             // first match silently checked only the sidebar row (icon+text,
             // never a toggle) and let the main-panel title's `default`-variant
             // rendering through — vacuity found during triage, see
-            // devlog/2026-07-05. Check EVERY occurrence: per the `eq("level",0)`
-            // page_title rule the focus root is a level-0 row wherever it is a
-            // tree root, and no occurrence of it may carry an outline-row text.
-            // A snapshot with no occurrence of the id stays a non-failure
-            // (same "not rendered here" gate as before).
+            // devlog/2026-07-05. Check EVERY occurrence: per the
+            // `eq("level",0)` page_title rule the focus root is a level-0 row
+            // wherever it is a tree root, and no occurrence of it may carry an
+            // outline-row text. A snapshot with no occurrence of the id stays a
+            // non-failure (same "not rendered here" gate as before).
             // A `live_block` carries the id of the block it DELEGATES to, and
             // its subtree is that block's whole render rather than its own row
             // — so it is a boundary, not an occurrence. The delegated render's

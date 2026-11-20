@@ -144,7 +144,8 @@ mod tests {
         assert_eq!(caret, 0);
     }
 
-    // ── Unit-PBT: the durable guard for the single editor-text primitive ──────
+    // ── Unit-PBT: the durable guard for the single editor-text primitive
+    // ──────
     //
     // Both the SUT (`InMemEditorComponent`) and the reference oracle
     // (`ReferenceState::ActiveEditor`) drive THIS module for caret/text math.
@@ -193,7 +194,8 @@ mod tests {
             );
             assert!(caret <= text.len(), "caret {caret} past end of {text:?}");
             // `text` is a `String`, so it is valid UTF-8 by construction; this
-            // re-asserts it survived the op (a defensive trip-wire on the type).
+            // re-asserts it survived the op (a defensive trip-wire on the
+            // type).
             assert!(std::str::from_utf8(text.as_bytes()).is_ok());
         }
 

@@ -138,7 +138,8 @@ fn runtime_authored_holon_rule_is_discovered_by_the_live_watcher() {
         );
 
         // The claim under test: the LIVE discovery watcher spawns an operate
-        // watcher for the runtime-authored rule → its RuleStatus becomes Active.
+        // watcher for the runtime-authored rule → its RuleStatus becomes
+        // Active.
         let status = engine.rule_status().clone();
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut seen = None;

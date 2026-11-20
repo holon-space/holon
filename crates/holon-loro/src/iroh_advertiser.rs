@@ -230,8 +230,9 @@ impl IrohAdvertiser {
         admission: ShareAdmission,
         versions: Option<Arc<PeerVersions>>,
     ) -> Result<EndpointAddr> {
-        // Gated with the variant it reports: a production build cannot construct
-        // an un-gated share, so this disclosure only has a subject under `test`.
+        // Gated with the variant it reports: a production build cannot
+        // construct an un-gated share, so this disclosure only has a subject
+        // under `test`.
         #[cfg(test)]
         if let ShareAdmission::Ungated { capabilities } = &admission {
             warn!(
@@ -419,9 +420,10 @@ async fn accept_loop(
             // dialer must prove the capability (or present an owner-signed
             // device entry) on a dedicated stream BEFORE we run sync. A peer
             // that merely knows the (leaky) `shared_tree_id` — a forged ticket
-            // — cannot pass this and never reaches `sync_doc_handle_connection`,
-            // so it can neither read nor write the shared doc. `Enrolled` is
-            // the only admission a production build can construct.
+            // — cannot pass this and never reaches
+            // `sync_doc_handle_connection`, so it can neither read nor write
+            // the shared doc. `Enrolled` is the only admission a production
+            // build can construct.
             //
             // The decision's OUTCOME is what the sync leg then runs on: the
             // `AdmittedPeer` below is the only thing that can carry a peer's

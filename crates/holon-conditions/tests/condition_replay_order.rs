@@ -38,7 +38,8 @@ fn subjects(bus: &ConditionBus) -> Vec<String> {
 #[test]
 fn replay_follows_raise_order_not_subject_order() {
     let bus = ConditionBus::new();
-    // "zeta" first, "alpha" second: raise order and alphabetical order disagree.
+    // "zeta" first, "alpha" second: raise order and alphabetical order
+    // disagree.
     bus.emit(emptied_file("zeta.org"));
     bus.emit(emptied_file("alpha.org"));
     bus.emit(emptied_file("mid.org"));

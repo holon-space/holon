@@ -237,8 +237,8 @@ impl InvJournalFeedViewportLazy {
         // judge around. Convicting only the rows they agree on would make the
         // off-screen arm STRICTLY WEAKER than a single signal — a row below the
         // fold that the renderer did not clip (`y=1096, h=26`) is off screen by
-        // position, on screen by clip, and would walk free between the two arms.
-        // A disagreement means the viewport model no longer matches the
+        // position, on screen by clip, and would walk free between the two
+        // arms. A disagreement means the viewport model no longer matches the
         // frontend, so the whole frame is undecidable, not partially decidable.
         if !undecided.is_empty() {
             return InvariantResult::Skipped(format!(

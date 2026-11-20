@@ -64,7 +64,8 @@ impl<R: RefLifecycle + RefLayout + RefReboot> TransitionRef<R> for EpochFlipReje
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        // The rejected boot changes nothing; the reboot around it is a `Reboot`.
+        // The rejected boot changes nothing; the reboot around it is a
+        // `Reboot`.
         state.reboot_drops_in_memory_state();
     }
 }

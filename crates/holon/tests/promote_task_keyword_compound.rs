@@ -62,8 +62,9 @@ async fn block_engine() -> Arc<BackendEngine> {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = tokio::runtime::Handle::current();
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread test
-                    // runtime; block_in_place makes the bridge deadlock-free.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread test runtime; block_in_place makes the
+                    // bridge deadlock-free.
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");
@@ -205,9 +206,9 @@ async fn undo_entry_values(engine: &BackendEngine, half: &str, field: &str) -> O
         .iter()
         .find(|op| op["params"]["field"].as_str() == Some(field))
         .map(|op| {
-            // A `content` inverse restores text and marks as ONE `{text, marks}`
-            // Object, so undo puts the pair back atomically; every other field
-            // restores a bare string.
+            // A `content` inverse restores text and marks as ONE `{text,
+            // marks}` Object, so undo puts the pair back atomically; every
+            // other field restores a bare string.
             let v = &op["params"]["value"];
             v.get("text")
                 .unwrap_or(v)

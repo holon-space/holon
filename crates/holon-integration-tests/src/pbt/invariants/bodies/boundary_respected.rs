@@ -67,8 +67,9 @@ where
             );
         }
 
-        // Executed-witness: without a driven round, "the receiver holds nothing"
-        // is true because nothing was attempted, which proves no enforcement.
+        // Executed-witness: without a driven round, "the receiver holds
+        // nothing" is true because nothing was attempted, which proves no
+        // enforcement.
         let witness = sut.sync_witness().await;
         if witness.rounds_run == 0 {
             return InvariantResult::Skipped(

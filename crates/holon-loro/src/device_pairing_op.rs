@@ -1575,8 +1575,8 @@ mod tests {
         plan_reimport(std::slice::from_ref(&day), &owner);
     }
 
-    // Examples, not a property: a malformed drawer carrier has exactly these two
-    // shapes.
+    // Examples, not a property: a malformed drawer carrier has exactly these
+    // two shapes.
     #[test]
     #[should_panic(expected = "the org_properties carrier is not text")]
     fn a_conflict_copy_of_a_drawer_carrier_that_is_not_text_fails_loud() {

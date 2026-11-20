@@ -360,9 +360,9 @@ impl PrototypeValue {
                 }
                 Err(subset_err) => {
                     // Outside the typed subset -> Rhai Script (seat B). This
-                    // routing is disclosed downstream at `DerivedFieldPlan::plan`
-                    // time. A genuine Rhai error stays loud, enriched with the
-                    // subset rejection reason.
+                    // routing is disclosed downstream at
+                    // `DerivedFieldPlan::plan` time. A genuine Rhai error stays
+                    // loud, enriched with the subset rejection reason.
                     let compiled = CompiledExpr::compile(engine, expr).map_err(|rhai_err| {
                         format!(
                             "expression '{expr}' is neither A2-subset-parseable ({subset_err}) \
@@ -476,12 +476,12 @@ pub fn resolve_prototype(
     let sorted = topo_sort_computed(&computed);
 
     // C4 convergence: evaluate each computed prototype expression through the
-    // shared, fail-loud `Computation` evaluator (holon-api) instead of a private
-    // Rhai loop. rank_tasks scoring and the C4 derived-field pipeline now run the
-    // SAME bounded engine + coercion, so a computed field cannot rank one way
-    // here and materialize another way in the pipeline. Results thread back into
-    // the Value-typed context so later fields depend on earlier ones (topo
-    // order preserved).
+    // shared, fail-loud `Computation` evaluator (holon-api) instead of a
+    // private Rhai loop. rank_tasks scoring and the C4 derived-field pipeline
+    // now run the SAME bounded engine + coercion, so a computed field cannot
+    // rank one way here and materialize another way in the pipeline. Results
+    // thread back into the Value-typed context so later fields depend on
+    // earlier ones (topo order preserved).
     let mut ctx: holon_api::computation::Context = literals
         .iter()
         .map(|(k, v)| (k.clone(), holon_api::Value::Float(*v)))
@@ -1303,8 +1303,9 @@ fn build_task_transitions(
 
     match &task.executor {
         // `@agent:` async firing is not yet wired; until then an agent-executed
-        // task borrows Self exactly like a self transition (PetriNet.md defers the
-        // async agent sub-net). It never crashes — the task still materializes.
+        // task borrows Self exactly like a self transition (PetriNet.md defers
+        // the async agent sub-net). It never crashes — the task still
+        // materializes.
         Executor::SelfExec | Executor::Agent { .. } => {
             inputs.push(InputArc {
                 bind: "self".to_string(),
@@ -1962,7 +1963,8 @@ mod tests {
         // Unknown verb_op keyword — skipped, so its unique surface never lands.
         let bad_keyword = verb_dict_block(&EntityUri::block_random(), "frobnicate", "brokenverb");
 
-        // Missing verb_surface (marker present so it is still discovered) — skipped.
+        // Missing verb_surface (marker present so it is still discovered) —
+        // skipped.
         let mut missing_surface = Block::new_text(
             EntityUri::block_random(),
             EntityUri::block("dict-parent"),

@@ -117,7 +117,8 @@ fn update_with_parent_and_content_decodes_to_relocate_plus_setfield_one_update()
         ],
     )]);
     let cs = ChangeSet::from_ops(&ops, Provenance::default());
-    // One Relocate + one SetField (content); sort_key/parent_id fold into Relocate.
+    // One Relocate + one SetField (content); sort_key/parent_id fold into
+    // Relocate.
     assert_eq!(cs.ops.len(), 2);
     assert!(
         cs.ops

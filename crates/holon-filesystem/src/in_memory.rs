@@ -382,7 +382,8 @@ impl InMemoryFileSystem {
             let mut new = copy.lock();
             new.write_targets.clear();
             new.clock = st.clock;
-            // The ancestors of `from` are left out: `mkdir_all` made those of `to`.
+            // The ancestors of `from` are left out: `mkdir_all` made those of
+            // `to`.
             for dir in st.dirs.iter().filter(|d| d.starts_with(&from)) {
                 new.insert_dir(to.join(dir.strip_prefix(&from).expect("starts with from")));
             }

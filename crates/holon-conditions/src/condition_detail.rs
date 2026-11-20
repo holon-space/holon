@@ -276,10 +276,10 @@ impl ConditionKind {
                 vec![installed_path.clone(), why.clone()],
             ),
 
-            // The seed file is a PAYLOAD, not prose: this banner is what stops a
-            // screenshot passing a fixture off as a real credential, so it owes
-            // the reader the file NAME, and the name sits at the tail of a long
-            // temp path the headline cap would eat.
+            // The seed file is a PAYLOAD, not prose: this banner is what stops
+            // a screenshot passing a fixture off as a real credential, so it
+            // owes the reader the file NAME, and the name sits at the tail of a
+            // long temp path the headline cap would eat.
             Self::SecretsHeldInMemory { why, seed_path } => {
                 ConditionDetail::with_body(why.clone(), seed_path.iter().cloned().collect())
             }

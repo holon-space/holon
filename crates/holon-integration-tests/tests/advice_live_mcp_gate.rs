@@ -224,7 +224,8 @@ fn advice_live_mcp_gate() {
     // ── Seed the advice scenario through the keystone transition path (proven
     //    green by advice_step4_red): ACTIVE rule, anchor on its own page, three
     //    lessons on another page, navigate the main panel to the anchor page,
-    //    then pool-tag so b∩a=3, c∩a=2, d∩a=1 → k=2 woven {b,c}, d truncated. ──
+    //    then pool-tag so b∩a=3, c∩a=2, d∩a=1 → k=2 woven {b,c}, d truncated.
+    // ──
     let (ref_state, sut) = step(
         ref_state,
         sut,
@@ -390,7 +391,8 @@ fn advice_live_mcp_gate() {
         "advice_suppressed must persist ({anchor}, {lesson_b}); got {rows_str}"
     );
 
-    // ── 3. Deleting a woven lesson leaves NO dangling row in the rule matview. ──
+    // ── 3. Deleting a woven lesson leaves NO dangling row in the rule matview.
+    // ──
     sut.runtime()
         .block_on(driver.call_tool_text(
             "execute_operation",

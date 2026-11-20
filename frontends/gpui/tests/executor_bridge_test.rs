@@ -21,8 +21,8 @@ fn main() {
     let tokio_handle = rt.handle().clone();
 
     app.run(move |cx| {
-        // Run all experiments sequentially in one cx.spawn so they don't block each
-        // other
+        // Run all experiments sequentially in one cx.spawn so they don't block
+        // each other
         cx.spawn(async move |_cx| {
             let mut results = Vec::new();
 
@@ -85,7 +85,8 @@ fn main() {
                     }
                 });
 
-                // map_future returns Signal<Option<T>>: None while pending, Some when done
+                // map_future returns Signal<Option<T>>: None while pending,
+                // Some when done
                 use futures::stream::StreamExt;
                 let mut stream = pin!(signal.to_stream());
                 let mut found = false;

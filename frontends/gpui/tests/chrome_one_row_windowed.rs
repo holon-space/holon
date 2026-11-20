@@ -574,8 +574,8 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
         );
     }
 
-    // SWITCH. Pick a tab on a DIFFERENT page than the cursor's, so landing on it
-    // moves the view root the assertion reads.
+    // SWITCH. Pick a tab on a DIFFERENT page than the cursor's, so landing on
+    // it moves the view root the assertion reads.
     let current = active_main_root(&w.env, &w.runtime);
     let (target_id, target_root) = tabs
         .iter()
@@ -690,8 +690,8 @@ fn the_tab_count_button_opens_a_list_that_switches_and_creates_tabs() {
          moved to {cursor_after_close:?}",
     );
 
-    // NEW TAB. Closing a tab leaves the list STANDING — closing several in a row
-    // is the point of a list — so the new-tab action is still on screen.
+    // NEW TAB. Closing a tab leaves the list STANDING — closing several in a
+    // row is the point of a list — so the new-tab action is still on screen.
     let new_button = w
         .bounds
         .element_info(TAB_LIST_NEW)

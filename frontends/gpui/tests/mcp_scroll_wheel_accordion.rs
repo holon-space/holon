@@ -154,11 +154,11 @@ fn mcp_scroll_reveals_below_fold_backlink_in_accordion(cx: &mut TestAppContext) 
     );
 
     // The `ListState`-only MCP primitive (`scroll_list_by`, reached by the
-    // `scroll` tool's `ScrollList` event) cannot reach the accordion body: it is
-    // a `min_h_0 + overflow_y_scroll` viewport, not a `ReactiveShell` `ListState`.
-    // It must report not-scrolled — never fake success (the oracle trap PR #85
-    // killed). An empty cache is the same fail-loud signal the eager-panel test
-    // pins: no panel shell => no ListState reachable.
+    // `scroll` tool's `ScrollList` event) cannot reach the accordion body: it
+    // is a `min_h_0 + overflow_y_scroll` viewport, not a `ReactiveShell`
+    // `ListState`. It must report not-scrolled — never fake success (the oracle
+    // trap PR #85 killed). An empty cache is the same fail-loud signal the
+    // eager-panel test pins: no panel shell => no ListState reachable.
     let cache = EntityCache::default();
     let scrolled = vcx.update(|_, cx| {
         holon_gpui::scroll_list_by("block:default-main-panel", -1600.0, &cache, cx)
@@ -176,10 +176,10 @@ fn mcp_scroll_reveals_below_fold_backlink_in_accordion(cx: &mut TestAppContext) 
         "the ListState-only path must not scroll the accordion body"
     );
 
-    // The tool's fixed emission: a MouseMove then a ScrollWheel at the accordion
-    // body centre (what `GpuiUserDriver::scroll_at` dispatches into the
-    // interaction pump). `simulate_wheel_at` sends exactly that pair. This drives
-    // the ScrollHandle-backed `overflow_y_scroll` viewport.
+    // The tool's fixed emission: a MouseMove then a ScrollWheel at the
+    // accordion body centre (what `GpuiUserDriver::scroll_at` dispatches into
+    // the interaction pump). `simulate_wheel_at` sends exactly that pair. This
+    // drives the ScrollHandle-backed `overflow_y_scroll` viewport.
     simulate_wheel_at(vcx, point(px(VIEWPORT_W / 2.0), px(220.0)), px(-100000.0));
     vcx.run_until_parked();
     bounds.flush();
@@ -193,7 +193,8 @@ fn mcp_scroll_reveals_below_fold_backlink_in_accordion(cx: &mut TestAppContext) 
     );
 
     // Wire the windowed proof to the real pump conversion: the tool's two
-    // InteractionEvents must lower to exactly one MouseMove then one ScrollWheel.
+    // InteractionEvents must lower to exactly one MouseMove then one
+    // ScrollWheel.
     let center = (VIEWPORT_W / 2.0, 220.0);
     let mv = holon_gpui::interaction_event_to_platform_inputs(&InteractionEvent::MouseMove {
         position: center,

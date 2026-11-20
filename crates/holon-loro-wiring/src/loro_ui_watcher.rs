@@ -359,8 +359,9 @@ async fn run_watch_loop(
     let mut rendered_version: Option<u64> = None;
 
     loop {
-        // Advice-rule status surface (ADR 0022): a NON-Active rule block renders its
-        // error in place. Inert in a no-Turso session (the map is empty there).
+        // Advice-rule status surface (ADR 0022): a NON-Active rule block
+        // renders its error in place. Inert in a no-Turso session (the map is
+        // empty there).
         let advice_error = advice_status
             .get(block_id.as_str())
             .filter(|status| !status.is_active());
@@ -726,8 +727,8 @@ mod tests {
             .create_block(root.id.clone(), BlockContent::text("second"), None)
             .await
             .unwrap();
-        // A query-source child makes `root` a query block. With no query engine,
-        // derive_render_expr degrades to the `source` view mode only.
+        // A query-source child makes `root` a query block. With no query
+        // engine, derive_render_expr degrades to the `source` view mode only.
         backend
             .create_block(
                 root.id.clone(),
@@ -775,8 +776,9 @@ mod tests {
             other => panic!("expected Structure first, got {other:?}"),
         }
 
-        // Second event: Data with the block + its direct children (the structural
-        // `id = X OR parent_id = X` row set), in canonical sibling order.
+        // Second event: Data with the block + its direct children (the
+        // structural `id = X OR parent_id = X` row set), in canonical sibling
+        // order.
         let data = handle.recv().await.expect("expected a Data event");
         let UiEvent::Data { batch, .. } = data else {
             panic!("expected Data second, got {data:?}");
@@ -792,7 +794,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // root first, then its children (text children + the query-source child).
+        // root first, then its children (text children + the query-source
+        // child).
         assert_eq!(ids.first().map(String::as_str), Some(root.id.as_str()));
         assert!(
             ids.contains(&first.id.as_str().to_string())
@@ -800,7 +803,8 @@ mod tests {
             "Data rows must include the block's direct children; got {ids:?}"
         );
 
-        // Row shape fidelity: content + parent_id survive the Block→row mapping.
+        // Row shape fidelity: content + parent_id survive the Block→row
+        // mapping.
         let first_row = batch
             .inner
             .items

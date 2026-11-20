@@ -185,8 +185,8 @@ fn value_to_i64(v: &Value) -> Option<i64> {
     match v {
         Value::Integer(i) => Some(*i),
         Value::Float(f) => Some(*f as i64),
-        // ALLOW(ok): best-effort numeric coercion — a non-numeric string is legitimately "not an
-        // i64" (None).
+        // ALLOW(ok): best-effort numeric coercion — a non-numeric string is
+        // legitimately "not an i64" (None).
         Value::String(s) => s.parse().ok(),
         _ => None,
     }

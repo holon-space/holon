@@ -154,8 +154,8 @@ fn recompute_fields(inputs: &Context, fields: &[(&str, Computation)]) -> HashMap
 #[test]
 fn end_to_end_computed_field_and_incrementality() {
     let eng = engine();
-    // Derived-field program: priority_weight, then task_weight depending on it +
-    // position. Mixed Script + Arith + Field shapes.
+    // Derived-field program: priority_weight, then task_weight depending on it
+    // + position. Mixed Script + Arith + Field shapes.
     let fields = vec![
         (
             "priority_weight",
@@ -368,7 +368,8 @@ fn case_switch_eval_matches_first_equal_branch() {
 
 #[test]
 fn case_lowers_to_nested_iif_not_case_when() {
-    // The spike-mandated lowering: CASE is rejected by the fork IVM, iif is not.
+    // The spike-mandated lowering: CASE is rejected by the fork IVM, iif is
+    // not.
     let case = Computation::Case {
         scrutinee: f("priority"),
         branches: vec![
@@ -541,8 +542,9 @@ fn non_finite_float_literal_is_a_loud_plant_error() {
 
 #[test]
 fn compile_sql_and_with_script_child_propagates_error() {
-    // An And that embeds a script term must NOT silently drop it. Here the script
-    // is inside a Computation::And-equivalent via Arith to prove propagation.
+    // An And that embeds a script term must NOT silently drop it. Here the
+    // script is inside a Computation::And-equivalent via Arith to prove
+    // propagation.
     let script = CompiledExpr::compile(&engine(), "x + 1").unwrap();
     let expr = Computation::Arith {
         op: ArithOp::Add,

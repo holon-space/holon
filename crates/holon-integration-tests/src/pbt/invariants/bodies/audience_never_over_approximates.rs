@@ -136,7 +136,8 @@ mod tests {
             self.epoch
         }
         fn shared_block_ids(&self) -> BTreeSet<EntityUri> {
-            // Union of blocks carrying a non-local policy or effective audience.
+            // Union of blocks carrying a non-local policy or effective
+            // audience.
             self.policy
                 .iter()
                 .chain(self.effective.iter())

@@ -193,7 +193,8 @@ fn outline_content_ids(
         // An INLINE `live_query(…)` node carries no entity id, so its registry
         // entry (a synthetic `query:<hash>` key) is not addressable from the
         // widget tree. Its rows stay unjudged — the residual recorded in
-        // docs/Testing/bugfunnel/entries/2026-08-26-query-surface-rows-unjudged.md.
+        // docs/Testing/bugfunnel/entries/
+        // 2026-08-26-query-surface-rows-unjudged.md.
         if node.kind == "live_query" && !at_root {
             return;
         }

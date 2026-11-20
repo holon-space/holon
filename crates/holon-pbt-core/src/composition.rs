@@ -158,8 +158,8 @@ impl CapMap {
         let tid = TypeId::of::<C>();
         if self.names.contains_key(&tid) {
             // The names map only ever holds `C::NAME`, so there is exactly one
-            // name to report — the earlier "existing vs incoming" duo was a fiction
-            // (both sides printed the same string).
+            // name to report — the earlier "existing vs incoming" duo was a
+            // fiction (both sides printed the same string).
             panic!(
                 "duplicate capability registration: `{}` is already provided. Two registrations \
                  claim this cap; the second would silently shadow the first, invalidating \
@@ -196,10 +196,11 @@ impl CapMap {
              existing cap; use `insert` for the initial registration",
             C::NAME,
         );
-        // Keep the names table in lock-step with providers. `C::NAME` is invariant
-        // for a given `TypeId`, so this is a no-op today — but leaving it out is the
-        // asymmetry trap: a future rename or a differently-named provider under the
-        // same cap would leave `names` reporting the stale identity in diagnostics.
+        // Keep the names table in lock-step with providers. `C::NAME` is
+        // invariant for a given `TypeId`, so this is a no-op today — but
+        // leaving it out is the asymmetry trap: a future rename or a
+        // differently-named provider under the same cap would leave `names`
+        // reporting the stale identity in diagnostics.
         self.names.insert(tid, C::NAME);
         self.providers.insert(tid, Box::new(provider));
     }
@@ -282,8 +283,8 @@ impl CapMap {
         for (tid, provider) in other.providers {
             if self.providers.contains_key(&tid) {
                 // `other.names` is a distinct field, untouched by moving
-                // `other.providers` into the loop — accessing it here is a legal
-                // partial borrow.
+                // `other.providers` into the loop — accessing it here is a
+                // legal partial borrow.
                 if let Some(name) = other.names.get(&tid) {
                     shadowed.push(*name);
                 }
@@ -798,9 +799,9 @@ mod poc {
             .build()
     }
 
-    // ── Invariants (single-sourced; the registry is shared by every config). ──
-    // Note the async body: `backend.live_block_ids().await` — the macro wraps
-    // the body in `Box::pin(async move { … })` so cap reads can `.await`.
+    // ── Invariants (single-sourced; the registry is shared by every config).
+    // ── Note the async body: `backend.live_block_ids().await` — the macro
+    // wraps the body in `Box::pin(async move { … })` so cap reads can `.await`.
     cap_invariant! {
         name: InvNoOrphanBlocks, id: "inv-no-orphan-blocks", mode: Strict,
         attribution: Attribution::at(Layer::StoreCrdt, file!()),
@@ -911,7 +912,8 @@ mod poc {
     }
     impl Slice {
         fn apply_split(&self, parent: u64, new_child: u64) {
-            // write cap is `&self` (interior mutability) → callable behind `Arc`.
+            // write cap is `&self` (interior mutability) → callable behind
+            // `Arc`.
             block_on(
                 self.sut
                     .expect::<dyn SutBlockTreeWrite>()
@@ -970,7 +972,8 @@ mod poc {
         );
 
         let degraded = block_on(run_selected(&reg, &gpui_memory_degraded(), &r));
-        // Renderer present, query ABSENT → degraded twin selects, full does not.
+        // Renderer present, query ABSENT → degraded twin selects, full does
+        // not.
         assert!(
             degraded
                 .ran_ids()
@@ -1078,7 +1081,8 @@ mod poc {
             vec!["SutBackend", "SutBlockTreeWrite", "SutEditorMirror"],
             "all three overlapping caps must be reported as shadowed"
         );
-        // First-registered wins: A's caret 4 (not B's 99), A's blocks [1] (not [9]).
+        // First-registered wins: A's caret 4 (not B's 99), A's blocks [1] (not
+        // [9]).
         assert_eq!(a.expect::<dyn SutEditorMirror>().caret(), 4);
         assert_eq!(
             block_on(a.expect::<dyn SutBackend>().live_block_ids()),

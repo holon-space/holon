@@ -77,9 +77,9 @@ impl CrossingLog {
     }
 
     fn append(&self, body: LogEntryBody) -> CrossingKey {
-        // Lamport read IMMEDIATELY before the push = the lamport the new op will
-        // receive (Inc 0(b)). Concurrent appends from a shared base read the
-        // same height => equal lamport => the peer tiebreak decides.
+        // Lamport read IMMEDIATELY before the push = the lamport the new op
+        // will receive (Inc 0(b)). Concurrent appends from a shared base read
+        // the same height => equal lamport => the peer tiebreak decides.
         let lamport = holon_loro::loro_backend::doc_lamport_height(&self.doc);
         let key = CrossingKey {
             lamport,

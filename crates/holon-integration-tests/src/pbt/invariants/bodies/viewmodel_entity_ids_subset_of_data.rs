@@ -60,20 +60,20 @@ where
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         // NB: NO `has_root_render_expr()` gate. In the wide composed run the
-        // default 3-column layout keeps its render sources on the PANELS, not on
-        // `root-layout`, so that gate is permanently false there and silently
-        // blinds this phantom-id backstop (F1). The check needs only a rendered
-        // tree + the root layout's query data — both present in 3-column mode
-        // (the root layout watch carries the panel rows).
+        // default 3-column layout keeps its render sources on the PANELS, not
+        // on `root-layout`, so that gate is permanently false there and
+        // silently blinds this phantom-id backstop (F1). The check needs only a
+        // rendered tree + the root layout's query data — both present in
+        // 3-column mode (the root layout watch carries the panel rows).
         let root = sut.widget_tree_snapshot().await;
-        // Exclude DECLARED display-only UI ids that legitimately have no backing
-        // block (they are intended UI, not phantom data — see BugFunnel row 80,
-        // "rendered rows vs backing rows + DECLARED VIRTUAL SLOTS"):
-        //  - `collect_canonical_entity_ids()` drops display-placed occurrences (ADR
-        //    0015 `props["occurrence"]`).
-        //  - a `:__virtual:<parent>` CreationPlaceholder ("type here to create") slot
-        //    carries a synthetic id and no backing block; detect it with the TYPED
-        //    `RowOrigin` classifier, never an id-infix sniff.
+        // Exclude DECLARED display-only UI ids that legitimately have no
+        // backing block (they are intended UI, not phantom data — see BugFunnel
+        // row 80, "rendered rows vs backing rows + DECLARED VIRTUAL SLOTS"):
+        //  - `collect_canonical_entity_ids()` drops display-placed occurrences
+        //    (ADR 0015 `props["occurrence"]`).
+        //  - a `:__virtual:<parent>` CreationPlaceholder ("type here to
+        //    create") slot carries a synthetic id and no backing block; detect
+        //    it with the TYPED `RowOrigin` classifier, never an id-infix sniff.
         // A genuinely fabricated NON-virtual id is still flagged — the phantom
         // teeth are intact; only the designed UI slots are excluded.
         let tree_ids: std::collections::BTreeSet<String> = root

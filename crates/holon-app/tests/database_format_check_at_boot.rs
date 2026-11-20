@@ -265,7 +265,8 @@ fn tables_of(conn: &Arc<turso_core::Connection>) -> Vec<Table> {
                 .collect();
             let class = table_classes::class_of(&name, &caches);
             Table {
-                // Owned and unclassified tables stay; sync tokens go with the caches.
+                // Owned and unclassified tables stay; sync tokens go with the
+                // caches.
                 kept: match &class {
                     Some(Class::Lost(_)) => name != "sync_states",
                     None => true,
@@ -392,7 +393,8 @@ fn plant_rows(path: &Path, stale: bool) -> Vec<StaleRow> {
         match (&table.class, table.name.as_str()) {
             (Some(Class::Lost(_)), "advice_suppressed") => {
                 // The app parses `lesson_id` as a block URI. A vault block's
-                // suppressions follow its org drawer, so no anchor is a vault block.
+                // suppressions follow its org drawer, so no anchor is a vault
+                // block.
                 let lesson = ("lesson_id", "block:pbt-mark");
                 insert(&table, &[("anchor_id", STALE_BLOCK), lesson]);
                 insert(&table, &[("anchor_id", "block:pbt-gone"), lesson]);
@@ -727,7 +729,8 @@ fn run(case: Case) -> Result<(), TestCaseError> {
 
 #[test]
 fn every_database_state_boots_to_the_vault_and_keeps_owned_rows() {
-    // The random cases are few, so every state and owned-row value runs here first.
+    // The random cases are few, so every state and owned-row value runs here
+    // first.
     let every_state = ALL_STATES.into_iter().flat_map(|state| {
         [false, true].map(|owned_row| Case {
             blocks: vec![(0, "a page".to_string()), (1, "a child".to_string())],

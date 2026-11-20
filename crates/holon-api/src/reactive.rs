@@ -388,8 +388,8 @@ where
     pub fn from_rows(rows: Vec<HashMap<K, crate::Value>>) -> Self {
         let mut state = HashMap::with_capacity(rows.len());
         for row in rows {
-            // ALLOW(raw_row_id_column): key — the reactive map keys on the id TEXT,
-            // agreeing with the CDC arms that carry an id without a row
+            // ALLOW(raw_row_id_column): key — the reactive map keys on the id
+            // TEXT, agreeing with the CDC arms that carry an id without a row
             if let Some(id) = row.get("id").and_then(|v| v.as_string()) {
                 state.insert(id.to_string(), row);
             }
@@ -442,7 +442,8 @@ where
     /// Apply a `Change<DataRow>` directly.
     pub fn apply_change(&mut self, change: crate::Change<HashMap<K, crate::Value>>) {
         let diff = Self::change_to_diff(change);
-        // FieldsChanged produces a partial Update — patch in-place if row exists
+        // FieldsChanged produces a partial Update — patch in-place if row
+        // exists
         if let MapDiff::Update { ref key, ref value } = diff {
             if let Some(existing) = self.state.get_mut(key) {
                 for (k, v) in value {

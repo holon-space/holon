@@ -53,8 +53,9 @@ impl BlockQuerySource for LoroBlockQuerySource {
 
         // Navigation focus is a Turso matview today with no Loro-native source.
         // Under a Loro-only wiring `inv-focus-roots` drops (it reads that
-        // matview), so empty focus-roots is the correct, disclosed behaviour for
-        // this slice — see plan task V3. An in-memory nav source is deferred.
+        // matview), so empty focus-roots is the correct, disclosed behaviour
+        // for this slice — see plan task V3. An in-memory nav source is
+        // deferred.
         Ok(BlockSnapshot::from_ordered(
             blocks.into_iter().map(|snap| snap.block),
             Vec::new(),
@@ -108,8 +109,9 @@ pub async fn register_loro_read_stack(
         .expect("register_loro_read_stack: get_doc(Global) failed");
     let backend = Arc::new(LoroBackend::from_document(doc, clock));
 
-    // A `LoroDocumentStore` clone shares the global-doc `Arc`, so the registered
-    // store, the read backend, and the write store below all observe one doc.
+    // A `LoroDocumentStore` clone shares the global-doc `Arc`, so the
+    // registered store, the read backend, and the write store below all observe
+    // one doc.
     let store_for_provider = doc_store.clone();
     injector.provide::<LoroDocumentStore>(Provider::root(move |_| {
         Shared::new(store_for_provider.clone())
@@ -140,10 +142,10 @@ pub fn register_loro_operation_engine(
     let block_ops = LoroBlockOperations::new(doc_store, clock.clone());
     // Thread the shared-tree registry into the write path if the container
     // registered one. No-Turso sessions do not run `register_subtree_share`, so
-    // this is normally `None` (no subtree is ever shared here) — but resolving it
-    // opportunistically keeps this site correct if share machinery is ever added
-    // to a Loro-only container. `None` simply means shared writes don't route,
-    // which is correct when there are no shared subtrees.
+    // this is normally `None` (no subtree is ever shared here) — but resolving
+    // it opportunistically keeps this site correct if share machinery is ever
+    // added to a Loro-only container. `None` simply means shared writes don't
+    // route, which is correct when there are no shared subtrees.
     #[cfg(all(
         feature = "iroh-sync",
         not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -193,8 +195,8 @@ pub fn loro_operation_engine(
     // drops block CRUD here must crash at composition time, not silently drop
     // content writes (the EventInfraModule-alone class of bug).
     let typed = holon_loro::loro_entity_operations::LoroTypeWriteAuthority::new(collab, None);
-    // Integration mirrors need their connector, which a no-Turso session has none
-    // of.
+    // Integration mirrors need their connector, which a no-Turso session has
+    // none of.
     for type_def in holon_profiles::create_default_registry()
         .expect("[loro_block_query_source] default TypeRegistry")
         .all()
@@ -303,8 +305,8 @@ mod tests {
     async fn children_order_follows_loro_tree_not_insertion_order() {
         // Seed order is first, second, third. Move `third` to sit right after
         // `first` in the Loro tree. `children_ordered` must report the NEW tree
-        // order — proving order is read from the LoroTree (the source of truth),
-        // not from insertion/creation order or any Turso projection.
+        // order — proving order is read from the LoroTree (the source of
+        // truth), not from insertion/creation order or any Turso projection.
         let (backend, root, expected, _gc) = seed_backend().await;
         let (first, third) = (&expected[0], &expected[2]);
 
@@ -441,7 +443,8 @@ mod tests {
 
         let child_id = {
             let doc_store = LoroDocumentStore::new(dir.clone());
-            // `backend` and `ops` share this store's global doc (clone shares the Arc).
+            // `backend` and `ops` share this store's global doc (clone shares
+            // the Arc).
             let doc = doc_store.get_doc(DocScope::Global).await.unwrap();
             let backend =
                 LoroBackend::from_document(doc, std::sync::Arc::new(holon_api::SystemClock));

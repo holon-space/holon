@@ -95,7 +95,8 @@ where
             // (`closed_at IS NULL AND block_id IS NOT NULL`). If the base set
             // already matches the matview, the matview is faithfully reflecting
             // the base — the bug is a holon close-path / reference-model
-            // mismatch, NOT Turso. Only a base≠matview split is a real IVM drift.
+            // mismatch, NOT Turso. Only a base≠matview split is a real IVM
+            // drift.
             let mut base: HashMap<String, BTreeSet<String>> = HashMap::new();
             for (r, block_id) in sut.nav_history_open_rows().await {
                 base.entry(r).or_default().insert(block_id);

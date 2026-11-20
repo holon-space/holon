@@ -58,8 +58,9 @@ pub struct ReferenceState {
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl Default for ReferenceState {
     fn default() -> Self {
-        // Try to use current runtime handle if available (when called from async
-        // context), otherwise create a new runtime (for standalone/sync tests)
+        // Try to use current runtime handle if available (when called from
+        // async context), otherwise create a new runtime (for standalone/sync
+        // tests)
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 let backend = tokio::task::block_in_place(|| {
@@ -217,7 +218,8 @@ pub async fn apply_transition<R: CoreOperations>(
         BlockTransition::CreateBlock { parent_id, content } => {
             let block = backend
                 .create_block(
-                    // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
+                    // ALLOW(entity_uri_from_raw): id/parent from
+                    // BlockTransition PBT DSL value
                     EntityUri::from_raw(parent_id),
                     BlockContent::text(content),
                     None,
@@ -250,7 +252,8 @@ pub async fn apply_transition<R: CoreOperations>(
             let new_blocks: Vec<NewBlock> = blocks
                 .iter()
                 .map(|(parent_id, content)| NewBlock {
-                    // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
+                    // ALLOW(entity_uri_from_raw): id/parent from
+                    // BlockTransition PBT DSL value
                     parent_id: EntityUri::from_raw(parent_id),
                     content: BlockContent::text(content),
                     id: None,
@@ -329,9 +332,9 @@ pub fn verify_backends_match<R1, R2>(
 
     // Translate parent_ids to depth-relative form so that backend-specific IDs
     // don't cause spurious mismatches. We keep the parent_id only when it is a
-    // well-known sentinel (document URI or sentinel:no_parent); otherwise we store
-    // a canonical "parent_depth=<n>" placeholder derived from looking up the
-    // parent.
+    // well-known sentinel (document URI or sentinel:no_parent); otherwise we
+    // store a canonical "parent_depth=<n>" placeholder derived from looking up
+    // the parent.
     fn normalize_parent(block: &Block, all_blocks: &[Block]) -> String {
         if block.parent_id.is_no_parent() || block.parent_id.is_sentinel() {
             return "@doc_root".to_string();
@@ -455,8 +458,9 @@ pub fn update_id_map_after_create(
     match transition {
         BlockTransition::CreateBlock { parent_id, content } => {
             // Find the newly created block in reference backend.
-            // When multiple siblings match (parent_id, content), pick the last one
-            // among the parent's children — newly created blocks are appended at the end.
+            // When multiple siblings match (parent_id, content), pick the last
+            // one among the parent's children — newly created blocks are
+            // appended at the end.
             let candidates: Vec<&Block> = ref_blocks
                 .iter()
                 .filter(|b| {
@@ -473,8 +477,9 @@ pub fn update_id_map_after_create(
             let ref_block = if candidates.len() == 1 {
                 candidates[0]
             } else {
-                // Tiebreaker: among siblings with the same content, pick the one
-                // appearing last in the parent's child list (the most recently appended).
+                // Tiebreaker: among siblings with the same content, pick the
+                // one appearing last in the parent's child list (the most
+                // recently appended).
                 let sibling_ids: Vec<&str> = ref_blocks
                     .iter()
                     // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
@@ -652,7 +657,8 @@ pub async fn check_transition_preconditions<B: CoreOperations>(
 
     match transition {
         BlockTransition::CreateBlock { parent_id, .. } => {
-            // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
+            // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT
+            // DSL value
             let parent_uri = EntityUri::from_raw(parent_id);
             parent_uri.is_no_parent() || parent_uri.is_sentinel() || block_ids.contains(parent_id)
         }
@@ -672,16 +678,17 @@ pub async fn check_transition_preconditions<B: CoreOperations>(
             }
         }
         BlockTransition::CreateBlocks { blocks } => blocks.iter().all(|(parent_id, _)| {
-            // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT DSL value
+            // ALLOW(entity_uri_from_raw): id/parent from BlockTransition PBT
+            // DSL value
             let parent_uri = EntityUri::from_raw(parent_id);
             parent_uri.is_no_parent() || parent_uri.is_sentinel() || block_ids.contains(parent_id)
         }),
         BlockTransition::DeleteBlocks { ids } => ids.iter().all(|id| block_ids.contains(id)),
         BlockTransition::WatchChanges { .. } => true,
         BlockTransition::UnwatchChanges { .. } => {
-            // Shared infrastructure has no watcher state — specific implementations
-            // (e.g. loro_backend_pbt) must override this with their own check that
-            // the watcher_id exists.
+            // Shared infrastructure has no watcher state — specific
+            // implementations (e.g. loro_backend_pbt) must override this with
+            // their own check that the watcher_id exists.
             false
         }
     }
@@ -701,7 +708,8 @@ impl ReferenceStateMachine for ReferenceState {
     }
 
     fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
-        // Get all blocks including root (root will be parent for top-level user blocks)
+        // Get all blocks including root (root will be parent for top-level user
+        // blocks)
         let all_blocks = tokio::task::block_in_place(|| {
             state.handle.block_on(
                 state

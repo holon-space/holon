@@ -55,10 +55,10 @@ where
         }
 
         // A divergence here may be transient IVM maintenance lag (self-heals in
-        // one CDC pass) rather than a persistent matview-vs-recompute bug. Model
-        // that: bounded-wait for a STABLE match (equal, and holding for a quiet
-        // floor so a momentarily-equal oscillation can't slip through). Fail only
-        // if the divergence persists for the whole budget.
+        // one CDC pass) rather than a persistent matview-vs-recompute bug.
+        // Model that: bounded-wait for a STABLE match (equal, and holding for a
+        // quiet floor so a momentarily-equal oscillation can't slip through).
+        // Fail only if the divergence persists for the whole budget.
         use std::time::Duration;
         use std::time::Instant;
         let budget = Duration::from_secs(5);

@@ -168,8 +168,8 @@ fn extract_param_name(pat: &Pat) -> String {
         Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
         Pat::Wild(_) => "_".to_string(),
         _ => {
-            // Fallback: try to stringify the pattern // ALLOW(fallback): describes
-            // default-branch path, not error swallowing
+            // Fallback: try to stringify the pattern // ALLOW(fallback):
+            // describes default-branch path, not error swallowing
             quote! { #pat }.to_string()
         }
     }
@@ -415,8 +415,8 @@ pub fn operation(_: TokenStream, item: TokenStream) -> TokenStream {
 /// with the Pattern parser at expansion time (ADR 0031 P2).
 #[proc_macro_attribute]
 pub fn require(_: TokenStream, item: TokenStream) -> TokenStream {
-    // Just return the item unchanged - the operations_trait macro will process the
-    // require attributes This is a no-op macro that just passes through the
+    // Just return the item unchanged - the operations_trait macro will process
+    // the require attributes This is a no-op macro that just passes through the
     // item We clone the token stream to ensure proper span preservation for
     // rust-analyzer
     item

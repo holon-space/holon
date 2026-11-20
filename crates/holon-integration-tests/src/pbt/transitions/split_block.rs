@@ -279,8 +279,8 @@ pub fn split_block_apply_to_ref<
     // `PressKey(Enter)` is NOT such a producer any more: it crosses the
     // surface→content seam before it gets here, exactly as prod does.
     // A MISSING block is not a refusal and must not fold into one: prod answers
-    // it with its own Err, and reaching it here means the reference lost a block
-    // it is still being asked to split — a model bug, loud by design.
+    // it with its own Err, and reaching it here means the reference lost a
+    // block it is still being asked to split — a model bug, loud by design.
     let content = state.block_content(block_id).unwrap_or_else(|| {
         panic!("split_block_apply_to_ref: block {block_id} is absent from the reference")
     });
@@ -318,8 +318,9 @@ impl<R: RefBlockTree + RefEditorMirror + RefLifecycle + RefReadOnlyHomes> Transi
     for SplitBlock
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        // Single-sourced from the `cap_transition!` below — cannot drift with the
-        // `S: SutBlockTreeWrite` dispatch bound (both come from the one cap token).
+        // Single-sourced from the `cap_transition!` below — cannot drift with
+        // the `S: SutBlockTreeWrite` dispatch bound (both come from the one cap
+        // token).
         Self::declared_caps()
     }
 

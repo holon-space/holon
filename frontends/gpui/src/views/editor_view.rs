@@ -181,15 +181,16 @@ impl EditorView {
             }
         }
 
-        // Increment G — seed `InputState` from the cell authority when a cell is
-        // attached. `remote_deltas()` delivers only FUTURE deltas, so without
-        // this seed a freshly-mounted cell-attached editor would display the
-        // SQL-projected `content` prop until the first delta — the transient
-        // staleness the removed just-focused render backstop used to cure. The
-        // cell text is synchronously readable here (`current_text()` is a
-        // synchronous borrow, already used below to seed the VM buffer).
-        // Building `input` AFTER `attach_cell` means no stale value ever exists.
-        // No cell (unwired / headless) → seed from `content`, exactly as before.
+        // Increment G — seed `InputState` from the cell authority when a cell
+        // is attached. `remote_deltas()` delivers only FUTURE deltas, so
+        // without this seed a freshly-mounted cell-attached editor would
+        // display the SQL-projected `content` prop until the first delta — the
+        // transient staleness the removed just-focused render backstop used to
+        // cure. The cell text is synchronously readable here (`current_text()`
+        // is a synchronous borrow, already used below to seed the VM buffer).
+        // Building `input` AFTER `attach_cell` means no stale value ever
+        // exists. No cell (unwired / headless) → seed from `content`, exactly
+        // as before.
         let cell_attached = controller.has_cell();
         let seed_value = if cell_attached {
             controller.current_text().unwrap_or_default()
@@ -200,8 +201,8 @@ impl EditorView {
 
         let input = cx.new(|cx| {
             let row_id_for_menu = row_id.clone();
-            // Bare block UUID (no `block:` scheme) — the form org files store and
-            // the form the user pastes into org refs / hands to agents.
+            // Bare block UUID (no `block:` scheme) — the form org files store
+            // and the form the user pastes into org refs / hands to agents.
             let bare_block_id = row_uri.id().to_string();
             InputState::new(window, cx)
                 .auto_grow(1, usize::MAX)
@@ -237,16 +238,17 @@ impl EditorView {
                 })
         });
 
-        // Kept for the `task_state` column: the editable surface shows a block's
-        // vault syntax, and that column is what turns stored content into it.
+        // Kept for the `task_state` column: the editable surface shows a
+        // block's vault syntax, and that column is what turns stored content
+        // into it.
         let task_row = data.clone();
         let field_for_task_state = field_for_subscription.clone();
 
         // Resolve the owning document's `#+TODO:` vocabulary ONCE for this
-        // editing session and converge the surface when it lands. Until it does,
-        // the surface shows stored content — safe by construction, because a
-        // buffer that is not keyword-headed commits on the content channel and
-        // can never change a task state.
+        // editing session and converge the surface when it lands. Until it
+        // does, the surface shows stored content — safe by construction,
+        // because a buffer that is not keyword-headed commits on the content
+        // channel and can never change a task state.
         {
             let services_for_vocab = services.clone();
             let block_for_vocab = row_uri.clone();
@@ -268,11 +270,12 @@ impl EditorView {
                 .await;
                 let vocabulary = match vocabulary {
                     Ok(Some(v)) => v,
-                    // No query capability: nothing to read, so the surface stays
-                    // UNCLASSIFIED (`Surface::Pending`) and its commits stay on
-                    // the channel that cannot change a task state. Classifying
-                    // under the parser's defaults instead would fabricate the
-                    // one fact this whole seam exists to get right.
+                    // No query capability: nothing to read, so the surface
+                    // stays UNCLASSIFIED (`Surface::Pending`) and its commits
+                    // stay on the channel that cannot change a task state.
+                    // Classifying under the parser's defaults instead would
+                    // fabricate the one fact this whole seam exists to get
+                    // right.
                     Ok(None) => {
                         tracing::debug!(
                             target: "editor.source_projection",
@@ -304,7 +307,8 @@ impl EditorView {
                             view.update(cx, |this, cx| {
                                 // The RAW authority column, never the visible
                                 // buffer: that one is already a projection, and
-                                // projecting it again would restate the keyword.
+                                // projecting it again would restate the
+                                // keyword.
                                 let raw = match this.controller.lock().unwrap().current_text() {
                                     Some(cell) => Some(cell),
                                     None => this.task_row.as_ref().and_then(|row| {
@@ -340,13 +344,14 @@ impl EditorView {
                         this.note_focus_gained();
 
                         // Promote this block to be the UiState.focused_block.
-                        // Without this, clicking inside an editable_text gives the
-                        // underlying Input gpui-focus but `focused_block` stays on
-                        // whatever was focused before — chord keys and operations
-                        // then dispatch against the wrong block. PBT inv-focus-matches-ref and the
-                        // GeometryDriver read the focus from the engine's
-                        // `focused_block_mutable()` Mutable, so this single write
-                        // is the only update needed.
+                        // Without this, clicking inside an editable_text gives
+                        // the underlying Input gpui-focus but `focused_block`
+                        // stays on whatever was focused before — chord keys and
+                        // operations then dispatch against the wrong block. PBT
+                        // inv-focus-matches-ref and the GeometryDriver read the
+                        // focus from the engine's `focused_block_mutable()`
+                        // Mutable, so this single write is the only update
+                        // needed.
                         let my_uri = row_uri_for_blur.clone();
                         if services_clone.focused_block().as_ref() != Some(&my_uri) {
                             if caret_probe() {
@@ -421,31 +426,33 @@ impl EditorView {
                         execute_action(action, &services_clone, editor_id, cx);
 
                         // Local edit routes through the VM buffer — the write
-                        // authority (buffer-ownership inversion). `apply_local_edit`
-                        // mutates the authoritative buffer, and:
+                        // authority (buffer-ownership inversion).
+                        // `apply_local_edit` mutates the authoritative buffer,
+                        // and:
                         //   - cell mode: applies the delta through the CRDT;
-                        //   - no-cell (SqlOnly) real block: stamps `write_seq`, records it as the
-                        //     VM's `last_local_seq`, and returns the `set_field("content")` intent
-                        //     the adapter dispatches (its sole commit funnel) so the typed text
-                        //     lands before the next transition;
+                        //   - no-cell (SqlOnly) real block: stamps `write_seq`,
+                        //     records it as the VM's `last_local_seq`, and
+                        //     returns the `set_field("content")` intent the
+                        //     adapter dispatches (its sole commit funnel) so
+                        //     the typed text lands before the next transition;
                         //   - unchanged: returns `None`.
                         // A caret on a creation affordance births its block
                         // first (`ViewEventHandler::edit_target_id`), so the
                         // intent names the newborn, never the affordance.
                         // The write_seq stamp happens INSIDE `apply_local_edit`
-                        // before this dispatch, so a fast CDC echo cannot race a
-                        // not-yet-recorded seq.
+                        // before this dispatch, so a fast CDC echo cannot race
+                        // a not-yet-recorded seq.
                         // A genuine keystroke makes this editor the authority
                         // again, so an armed undo re-seed must never reach it.
                         if ctrl.lock().unwrap().buffer() != text {
                             services_clone.consume_authority_reseed(&row_uri_for_reseed);
                         }
-                        // The buffer is VAULT SYNTAX, so the VM routes the write
-                        // to `source_text` when the text is (or has stopped
-                        // being) keyword-headed and to `content` otherwise. The
-                        // adapter does not need to know which — both are plain
-                        // fire-and-forget `set_field`s, and the store's parse is
-                        // the only thing that reads a keyword.
+                        // The buffer is VAULT SYNTAX, so the VM routes the
+                        // write to `source_text` when the text is (or has
+                        // stopped being) keyword-headed and to `content`
+                        // otherwise. The adapter does not need to know which —
+                        // both are plain fire-and-forget `set_field`s, and the
+                        // store's parse is the only thing that reads a keyword.
                         match ctrl.lock().unwrap().apply_local_edit(&text) {
                             Ok(Some(intent)) => services_clone.dispatch_intent(intent),
                             Ok(None) => {}
@@ -474,16 +481,18 @@ impl EditorView {
         //
         // Two safeguards:
         //
-        // 1. **Skip when focused.** While the user has the editor focused they are the
-        //    source of truth — overwriting `InputState` while they're typing yanks the
-        //    cursor to position 0 and drops the in-flight character. External changes
-        //    during a focused edit are dropped from the *visible* state until the next
-        //    focus cycle (data is still correct in the backend).
+        // 1. **Skip when focused.** While the user has the editor focused they
+        //    are the source of truth — overwriting `InputState` while they're
+        //    typing yanks the cursor to position 0 and drops the in-flight
+        //    character. External changes during a focused edit are dropped from
+        //    the *visible* state until the next focus cycle (data is still
+        //    correct in the backend).
         //
-        // 2. **Dedupe on the field's value.** The signal fires on every `.set()` of the
-        //    per-row Mutable, including no-op writes triggered by unrelated field
-        //    changes. `.dedupe_cloned()` on the extracted field value keeps the
-        //    subscription quiet unless the relevant column actually changed.
+        // 2. **Dedupe on the field's value.** The signal fires on every
+        //    `.set()` of the per-row Mutable, including no-op writes triggered
+        //    by unrelated field changes. `.dedupe_cloned()` on the extracted
+        //    field value keeps the subscription quiet unless the relevant
+        //    column actually changed.
         //
         // The render path no longer touches `set_value` — propagation is
         // entirely event-driven through this subscription. The returned
@@ -493,13 +502,14 @@ impl EditorView {
         // Increment G — in cell-attached mode the entity `Cell`'s
         // `remote_deltas()` (subscribed below) is the SINGLE external content
         // source. The per-row `DataRow` subscription is bound to the
-        // `ReactiveRowSet`'s per-row `Mutable`, which is replaced — orphaning the
-        // subscription — on every split/join/nav rowset rebuild; that fragility
-        // is the exact reason the render backstop existed. Drop the data handle
-        // so `.map` never spawns it. The surviving cell subscription is
-        // un-orphaned (`CellCache` returns the same live `Cell` for the same
-        // block id across rebuilds), so no external update is lost. No-cell
-        // (unwired / headless) editors keep the DataRow subscription.
+        // `ReactiveRowSet`'s per-row `Mutable`, which is replaced — orphaning
+        // the subscription — on every split/join/nav rowset rebuild; that
+        // fragility is the exact reason the render backstop existed. Drop the
+        // data handle so `.map` never spawns it. The surviving cell
+        // subscription is un-orphaned (`CellCache` returns the same live `Cell`
+        // for the same block id across rebuilds), so no external update is
+        // lost. No-cell (unwired / headless) editors keep the DataRow
+        // subscription.
         let data = if cell_attached { None } else { data };
         let _data_subscription: Option<Task<()>> = data.map(|data_handle| {
             let field_for_stream = field_for_subscription.clone();
@@ -565,20 +575,20 @@ impl EditorView {
                                 view.update(cx, |this, cx| {
                                     // The convergence DECISION lives in the VM
                                     // (`converge_from_data_sync`): it runs the
-                                    // op-versioned echo-suppression rule against
-                                    // the VM's own authoritative buffer, applies
-                                    // the safe mid-composition mutations
-                                    // (high-water advance / baseline adopt), and
-                                    // returns a directive only when the visible
-                                    // InputState must converge. The adapter
-                                    // applies it now, or defers it past an IME
-                                    // composition (Amendment 3).
+                                    // op-versioned echo-suppression rule
+                                    // against the VM's own authoritative
+                                    // buffer, applies the safe mid-composition
+                                    // mutations (high-water advance / baseline
+                                    // adopt), and returns a directive only when
+                                    // the visible InputState must converge. The
+                                    // adapter applies it now, or defers it past
+                                    // an IME composition (Amendment 3).
                                     // The buffer holds vault syntax, so the
                                     // authority the echo discriminator compares
                                     // against is the PROJECTION of the settled
-                                    // row — otherwise every source-channel write
-                                    // reads back as an external change and
-                                    // converges the keyword out of view.
+                                    // row — otherwise every source-channel
+                                    // write reads back as an external change
+                                    // and converges the keyword out of view.
                                     let surface = this.project_authority(&new_value);
                                     let directive = this
                                         .controller
@@ -596,11 +606,12 @@ impl EditorView {
             })
         });
 
-        // The editable surface is projected from `content` AND `task_state`, and a
-        // cell-attached editor drops the content subscription above (the CRDT
-        // owns content) — so `task_state` gets its own edge, in both arms. It
-        // carries no `write_seq` (no editor writes it), so it never feeds the
-        // echo discriminator: it re-projects the live authority and converges.
+        // The editable surface is projected from `content` AND `task_state`,
+        // and a cell-attached editor drops the content subscription above (the
+        // CRDT owns content) — so `task_state` gets its own edge, in both arms.
+        // It carries no `write_seq` (no editor writes it), so it never feeds
+        // the echo discriminator: it re-projects the live authority and
+        // converges.
         let _task_state_subscription: Option<Task<()>> = task_row.clone().map(|row| {
             let signal = row
                 .signal_cloned()
@@ -668,19 +679,19 @@ impl EditorView {
                 use futures::StreamExt;
                 let mut stream = cell.remote_deltas();
                 // Each remote delta is a WAKEUP only. The payload is discarded
-                // STRUCTURALLY — `stream.next().await.is_some()` never binds the
-                // `TextDelta`, so its `ops` are unreachable and cannot be applied
-                // even by accident. We converge absolutely to `cell.current()`
-                // (the authority) instead of replaying the delta. This structural
-                // discard is a STRONGER guarantee than a runtime
-                // `debug_assert!(ops.is_empty())` (the Step-0 alternative): it
-                // holds in release builds and for EVERY backing — including the
-                // SqlOnly wakeup-only `remote_deltas()` derived from `signal()`
-                // (see `Cell::remote_deltas`), whose empty-`ops` deltas carry no
-                // payload by construction. Out-of-order / coalesced deltas
-                // therefore all land on the same string, and the prior
-                // delta-replay sibling-flip (a stale splice landing on the wrong
-                // block) is impossible.
+                // STRUCTURALLY — `stream.next().await.is_some()` never binds
+                // the `TextDelta`, so its `ops` are unreachable and cannot be
+                // applied even by accident. We converge absolutely to
+                // `cell.current()` (the authority) instead of replaying the
+                // delta. This structural discard is a STRONGER guarantee than a
+                // runtime `debug_assert!(ops.is_empty())` (the Step-0
+                // alternative): it holds in release builds and for EVERY
+                // backing — including the SqlOnly wakeup-only `remote_deltas()`
+                // derived from `signal()` (see `Cell::remote_deltas`), whose
+                // empty-`ops` deltas carry no payload by construction.
+                // Out-of-order / coalesced deltas therefore all land on the
+                // same string, and the prior delta-replay sibling-flip (a stale
+                // splice landing on the wrong block) is impossible.
                 while stream.next().await.is_some() {
                     if this.upgrade().is_none() {
                         break;
@@ -715,12 +726,13 @@ impl EditorView {
                                     }
                                     // Same VM directive path as the data-sync
                                     // loop: build the directive (target = the
-                                    // live cell authority) and apply-or-defer it
-                                    // behind the adapter-side IME guard
+                                    // live cell authority) and apply-or-defer
+                                    // it behind the adapter-side IME guard
                                     // (Amendment 3). The structural payload of
                                     // the delta stays discarded above.
-                                    // Its own statement: the guard must drop before
-                                    // `project_authority` locks the controller again.
+                                    // Its own statement: the guard must drop
+                                    // before `project_authority` locks the
+                                    // controller again.
                                     let directive =
                                         this.controller.lock().unwrap().remote_converge_directive();
                                     let directive = directive.map(|d| ConvergeDirective {
@@ -960,8 +972,9 @@ impl EditorView {
         // write-authority buffer is also the self-echo sentinel: setting it
         // BEFORE `set_value` below makes the re-entrant Change a no-op, since
         // `apply_local_edit` sees `new_text == buffer`). Folds in the former
-        // `rebaseline` — a pure baseline update that dispatches nothing and does
-        // not advance the write-seq (passes the current high-water unchanged).
+        // `rebaseline` — a pure baseline update that dispatches nothing and
+        // does not advance the write-seq (passes the current high-water
+        // unchanged).
         {
             let mut vm = self.controller.lock().unwrap();
             let seq = vm.last_local_seq();
@@ -1111,8 +1124,9 @@ fn spawn_focus_binding(
                     let ctrl = view.read(cx).controller.clone();
                     let commit = ctrl.lock().unwrap().pending_commit_intent(&live_text);
                     if let Some(commit) = commit {
-                        // ALLOW(admit-in-spawn): a focus change is the event that
-                        // commits pending text, so the commit is admitted when it arrives.
+                        // ALLOW(admit-in-spawn): a focus change is the event
+                        // that commits pending text, so the commit is admitted
+                        // when it arrives.
                         services.dispatch_intent(commit);
                     }
                 }
@@ -1120,8 +1134,9 @@ fn spawn_focus_binding(
                     let _ = window_handle.update(cx, |_, window, cx| {
                         if focused {
                             // Fires on every focus arrival, including after the
-                            // user/driver already positioned the caret — applies
-                            // only an armed seed, never resets an unseeded caret.
+                            // user/driver already positioned the caret —
+                            // applies only an armed seed, never resets an
+                            // unseeded caret.
                             grab_focus_and_seed_caret(
                                 &input,
                                 window,
@@ -1260,8 +1275,8 @@ fn grab_focus_and_seed_caret(
         window.focus(&input.read(cx).focus_handle(cx), cx);
     }
     // The seed arrives in CONTENT coordinates (`join_block` reports the merge
-    // boundary, `split_block` reports 0) while this buffer holds the SURFACE, so
-    // it crosses the keyword prefix on any tasked target (task #93).
+    // boundary, `split_block` reports 0) while this buffer holds the SURFACE,
+    // so it crosses the keyword prefix on any tasked target (task #93).
     let seed = services.peek_caret_seed(row).and_then(|offset| {
         match controller.lock().unwrap().content_offset_to_surface(offset) {
             Ok(surface) => Some(surface),
@@ -1363,8 +1378,9 @@ impl Render for EditorView {
                 Some(s) => {
                     // Drive `scroll_to_item` ONLY on the frame the keyboard
                     // selection actually moved. Doing it every render re-snaps
-                    // the viewport to the selected row on unrelated notifies and
-                    // eats the user's mouse-wheel scroll (the "no scroll" cap).
+                    // the viewport to the selected row on unrelated notifies
+                    // and eats the user's mouse-wheel scroll (the "no scroll"
+                    // cap).
                     let scroll_to_selection = popup_should_scroll_to_selection(
                         self.popup_scrolled_index.get(),
                         s.selected_index,
@@ -1422,11 +1438,13 @@ impl Render for EditorView {
                 move |enter: &Enter, window, cx: &mut App| {
                     // Two layered guards keep Enter on a Page-level editor
                     // from acting on behalf of a focused child:
-                    //   1. only the editor whose own InputState owns keyboard focus runs the
-                    //      capture body, and
-                    //   2. the operation targets `services.focused_block()` (UiState's notion of
-                    //      focus), not this editor's own `row_id` — so even if the capture fires on
-                    //      a shared/ancestor editor, the split lands on the logically focused leaf.
+                    //   1. only the editor whose own InputState owns keyboard
+                    //      focus runs the capture body, and
+                    //   2. the operation targets `services.focused_block()`
+                    //      (UiState's notion of focus), not this editor's own
+                    //      `row_id` — so even if the capture fires on a
+                    //      shared/ancestor editor, the split lands on the
+                    //      logically focused leaf.
                     if !input.read(cx).focus_handle(cx).is_focused(window) {
                         return;
                     }
@@ -1586,10 +1604,11 @@ impl Render for EditorView {
                 move |_: &Backspace, _window, cx: &mut App| {
                     let cursor_byte = input.read(cx).cursor();
                     // A picker phase whose command text is hidden owns the
-                    // backspace at its anchor: it cancels the phase and puts the
-                    // text back. Letting the delete run first would eat into the
-                    // very region the anchor addresses, which is how a hide-time
-                    // offset ends up indexing past the end of the buffer.
+                    // backspace at its anchor: it cancels the phase and puts
+                    // the text back. Letting the delete run first would eat
+                    // into the very region the anchor addresses, which is how a
+                    // hide-time offset ends up indexing past the end of the
+                    // buffer.
                     let text = input.read(cx).value().to_string();
                     let (line_start, line_end) = line_bounds(&text, cursor_byte);
                     let cancel = ctrl.lock().unwrap().cancel_hidden_phase_at_anchor(
@@ -1670,13 +1689,14 @@ impl Render for EditorView {
                         StructuralCaret::on_plain_text(0),
                     ) {
                         let live_text = input.read(cx).value().to_string();
-                        // ADR 0028 D1: outdent of a direct page child is REJECTED
-                        // by the op engine (it would escape the page container).
-                        // Route through the awaitable path — same as the slash-menu
-                        // ops (commit abfbed92) — so the rejection surfaces as a
-                        // visible CommandFailed toast, not just a `tracing::error!`.
-                        // Commit any pending text edit FIRST (structural commit
-                        // point), then dispatch outdent and await its result.
+                        // ADR 0028 D1: outdent of a direct page child is
+                        // REJECTED by the op engine (it would escape the page
+                        // container). Route through the awaitable path — same
+                        // as the slash-menu ops (commit abfbed92) — so the
+                        // rejection surfaces as a visible CommandFailed toast,
+                        // not just a `tracing::error!`. Commit any pending text
+                        // edit FIRST (structural commit point), then dispatch
+                        // outdent and await its result.
                         let commit = ctrl.lock().unwrap().chord_commit_intent(&live_text);
                         let commit = commit.map(|c| services.dispatch_intent_awaitable(c));
                         let outdent = services.dispatch_intent_awaitable(intent);
@@ -2512,8 +2532,9 @@ fn execute_action<T: 'static>(
             }
             services.dispatch_intent(intent);
         }
-        // UpdatePopup, Dismissed, InsertText, None, Propagate — no action needed
-        // in the no-window context (subscribe callbacks). The caller handles cx.notify().
+        // UpdatePopup, Dismissed, InsertText, None, Propagate — no action
+        // needed in the no-window context (subscribe callbacks). The caller
+        // handles cx.notify().
         _ => {}
     }
 }
@@ -2615,8 +2636,8 @@ mod caret_preservation {
     #[test]
     fn multibyte_boundary_snaps_down() {
         // "café" — 'é' is 2 bytes (indices 3..5); an offset landing mid-'é' (4)
-        // must snap down to the char boundary 3, never a raw byte min that would
-        // panic in `offset_to_position`.
+        // must snap down to the char boundary 3, never a raw byte min that
+        // would panic in `offset_to_position`.
         let text = "café";
         assert_eq!(text.len(), 5);
         assert_eq!(preserved_caret(4, text), 3);

@@ -87,7 +87,8 @@ async fn dbsp_chain_break_after_upstream_drop_create() {
             .await
             .unwrap();
 
-        // Matview chain: current_focus → focus_roots → watch_view (recursive CTE)
+        // Matview chain: current_focus → focus_roots → watch_view (recursive
+        // CTE)
         handle
             .execute_ddl(
                 "CREATE MATERIALIZED VIEW current_focus AS SELECT nc.region, nh.block_id FROM \

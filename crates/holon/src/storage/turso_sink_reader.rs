@@ -65,9 +65,9 @@ impl SinkReader for TursoSinkReader {
             .map_err(|e| anyhow::anyhow!("TursoSinkReader query failed: {e}"))?;
         let mut out = HashMap::with_capacity(rows.len());
         for row in rows {
-            // sort_key is the SQL sink's internal ordering encoding — read it for
-            // the diff base before `try_from` consumes the row; it is no longer a
-            // field of the domain `Block` (ADR 0005).
+            // sort_key is the SQL sink's internal ordering encoding — read it
+            // for the diff base before `try_from` consumes the row; it is no
+            // longer a field of the domain `Block` (ADR 0005).
             let sort_key = row
                 .get("sort_key")
                 .and_then(|v| v.as_string())

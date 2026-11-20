@@ -382,21 +382,22 @@ pub trait DocumentManager: Send + Sync {
                 Some(doc) => doc,
                 None if is_self => {
                     // The page store tracks ONLY `Page`-tagged blocks (e.g.
-                    // `LiveDocumentManager`'s `WHERE tag='Page'` matview). A miss
-                    // on the STARTING block therefore means it is simply not a
-                    // page — it owns no file. Resolve to an empty chain;
+                    // `LiveDocumentManager`'s `WHERE tag='Page'` matview). A
+                    // miss on the STARTING block therefore means it is simply
+                    // not a page — it owns no file. Resolve to an empty chain;
                     // `doc_id_to_path` maps that to `Ok(None)` ("not a page,
                     // skip"). This is the folder-companion de-inline case: the
                     // non-page content headings of a de-inlined child page are
                     // absent from the companion's projection, and write-back
-                    // grounding must NOT treat them as an unresolvable hard-veto
-                    // (BugFunnel row 23/29 — the 749-error `Projects.org` storm).
+                    // grounding must NOT treat them as an unresolvable
+                    // hard-veto (BugFunnel row 23/29 — the 749-error
+                    // `Projects.org` storm).
                     return Ok(Vec::new());
                 }
                 None => {
-                    // A miss on an ANCESTOR (we are walking up from a real page)
-                    // means that page's structural ancestry is broken — its
-                    // parent is not itself a page in the store. That IS a
+                    // A miss on an ANCESTOR (we are walking up from a real
+                    // page) means that page's structural ancestry is broken —
+                    // its parent is not itself a page in the store. That IS a
                     // fail-loud error (interim ruling 2026-07-13).
                     anyhow::bail!(
                         "name_chain({doc_id}): ancestor '{current_id}' of a page is absent from \
@@ -1134,8 +1135,9 @@ mod name_chain_tests {
     async fn sentinel_rooted_chain_is_a_valid_root() {
         let synthetic_root = EntityUri::new("sentinel", "synthetic_root");
         assert!(synthetic_root.is_sentinel() && synthetic_root != EntityUri::no_parent());
-        // The page's parent is the synthetic sentinel directly — the loop breaks
-        // at the sentinel before ever trying to read it as a (non-page) block.
+        // The page's parent is the synthetic sentinel directly — the loop
+        // breaks at the sentinel before ever trying to read it as a (non-page)
+        // block.
         let p = page("P", synthetic_root, "todo");
         let mgr = MockDocManager::new(vec![p.clone()]);
         let chain = mgr

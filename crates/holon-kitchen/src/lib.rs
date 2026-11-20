@@ -74,9 +74,9 @@ pub fn register_kitchen_types(registry: &TypeRegistry) -> Result<()> {
     ] {
         let profile = parse_profile_yaml(yaml)
             .with_context(|| format!("Failed to parse the {name} profile YAML"))?;
-        // Fail LOUD here if a render calls a lookup the engine never registers —
-        // otherwise it errors at eval and degrades to () at WARN, inverting every
-        // condition it feeds.
+        // Fail LOUD here if a render calls a lookup the engine never registers
+        // — otherwise it errors at eval and degrades to () at WARN, inverting
+        // every condition it feeds.
         holon_profiles::validate_lookups_registered(&profile).with_context(|| {
             format!("{name} profile references an unregistered lookup function")
         })?;

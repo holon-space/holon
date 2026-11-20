@@ -199,7 +199,8 @@ fn defers_external_converge_and_preserves_composed_text(cx: &mut TestAppContext)
 
     seed(vcx, &entity, &data, "cafe", 100);
 
-    // Start composing an umlaut at the end → visible "cafeü", marked range Some.
+    // Start composing an umlaut at the end → visible "cafeü", marked range
+    // Some.
     begin_composition(vcx, &entity, "ü");
     assert_eq!(visible(vcx, &entity), "cafeü", "composition in progress");
     assert!(is_composing(vcx, &entity), "IME marked range must be Some");

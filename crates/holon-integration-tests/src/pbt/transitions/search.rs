@@ -55,8 +55,9 @@ const ADVERSARIAL_QUERIES: &[&str] = &[
     "абвгдежзийклмнопрстуфхцч αβγδεζηθικλμνξοπρστυφχψω",
     // Many-to-one folds: a two-element [lower upper] class hid every OTHER
     // character sharing the same fold, e.g. capital ẞ was unreachable from a
-    // "ß" query. See fold_class_tests in query_engine.rs for the BMP-wide proof;
-    // these keep the SAME family visible to the keystone's own generated draws.
+    // "ß" query. See fold_class_tests in query_engine.rs for the BMP-wide
+    // proof; these keep the SAME family visible to the keystone's own generated
+    // draws.
     "ß",
     "ẞ",
     "ǅ",

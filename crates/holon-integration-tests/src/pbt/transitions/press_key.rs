@@ -70,8 +70,9 @@ impl<
         // persists editor content. Gating to `AnyStorageOf({Loro, Turso})`
         // makes the editor path bisectable across the storage axis. Headless
         // Turso-only slices are unaffected: `preconditions` still requires
-        // `enable_loro() || real_editor_enabled()`, so without a real editor the
-        // transition is rejected dynamically just as the old structural gate did.
+        // `enable_loro() || real_editor_enabled()`, so without a real editor
+        // the transition is rejected dynamically just as the old structural
+        // gate did.
         ::holon_pbt_core::RequiredWiring::any_storage_of([
             ::holon_pbt_core::StorageAdapter::Loro,
             ::holon_pbt_core::StorageAdapter::Turso,

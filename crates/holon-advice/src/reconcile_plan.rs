@@ -108,8 +108,8 @@ impl AdviceReconcilerState {
             }
             RuleEvent::Upserted { block_id, content } => match parse(&content) {
                 Err(e) => {
-                    // Teardown-on-unparseable: a rule that no longer parses must not
-                    // leave its previously-synthesized view live.
+                    // Teardown-on-unparseable: a rule that no longer parses
+                    // must not leave its previously-synthesized view live.
                     let dropped = self.release(&block_id);
                     ReconcilePlan {
                         drops: dropped.into_iter().collect(),
@@ -122,13 +122,15 @@ impl AdviceReconcilerState {
                 }
                 Ok(rule) => {
                     let slug = rule.name.clone();
-                    // Slug collision: a *different* live block already owns this slug.
+                    // Slug collision: a *different* live block already owns
+                    // this slug.
                     if let Some(owner) = self.slug_to_block.get(slug.as_str())
                         && owner != &block_id
                     {
                         let owner = owner.clone();
-                        // The newcomer is refused; if it was renaming out of a slug
-                        // it owned, that old view is now orphaned — drop it.
+                        // The newcomer is refused; if it was renaming out of a
+                        // slug it owned, that old view is now orphaned — drop
+                        // it.
                         let dropped = self.release(&block_id);
                         return ReconcilePlan {
                             drops: dropped.into_iter().collect(),
@@ -142,8 +144,8 @@ impl AdviceReconcilerState {
                             },
                         };
                     }
-                    // Slug free or already ours. If we owned a *different* slug before,
-                    // this is a rename — drop the old view first.
+                    // Slug free or already ours. If we owned a *different* slug
+                    // before, this is a rename — drop the old view first.
                     let mut drops = Vec::new();
                     if let Some(prev) = self.block_to_slug.get(&block_id)
                         && prev.as_str() != slug.as_str()
@@ -343,8 +345,9 @@ mod tests {
 
     #[test]
     fn inactive_rule_still_reconciles_to_tear_down() {
-        // An inactive rule routes through reconcile (which DROPs its view) and still
-        // owns the slug so a second block can't claim it out from under an edit.
+        // An inactive rule routes through reconcile (which DROPs its view) and
+        // still owns the slug so a second block can't claim it out from under
+        // an edit.
         let mut st = AdviceReconcilerState::new();
         let plan = st.plan(
             upsert("block:1", rule_yaml("r", false, "task")),

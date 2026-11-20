@@ -70,8 +70,9 @@ pub struct PinBlock {
 
 impl<R: RefLifecycle + RefBlockTree + RefPinsMut> TransitionFactory<R> for PinBlock {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
-        // Single-sourced from the `cap_transition!` below — cannot drift with the
-        // `S: SutNavHistoryDrive` dispatch bound (both come from the one cap token).
+        // Single-sourced from the `cap_transition!` below — cannot drift with
+        // the `S: SutNavHistoryDrive` dispatch bound (both come from the one
+        // cap token).
         Self::declared_caps()
     }
 
@@ -153,8 +154,9 @@ impl<R: RefLifecycle + RefBlockTree + RefPinsMut> TransitionRef<R> for PinBlock 
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        // Move-to-top dedup + counter bookkeeping is encapsulated in the ref cap
-        // (mirrors `provider.rs::focus_pin`); the transition just declares intent.
+        // Move-to-top dedup + counter bookkeeping is encapsulated in the ref
+        // cap (mirrors `provider.rs::focus_pin`); the transition just declares
+        // intent.
         state.upsert_open_pin(self.region, &self.block_id);
     }
 }

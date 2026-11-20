@@ -45,15 +45,17 @@ impl<R: RefLifecycle + RefWatch + RefWatchesMut> TransitionFactory<R> for Remove
 
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
-        // Turso-only: the navigation / CDC-watch / MCP providers this transition
-        // dispatches have no Loro-native source in the no-Turso wiring
-        // (see loro_block_query_source.rs:77). Gate it out of {Loro} slices.
+        // Turso-only: the navigation / CDC-watch / MCP providers this
+        // transition dispatches have no Loro-native source in the no-Turso
+        // wiring (see loro_block_query_source.rs:77). Gate it out of {Loro}
+        // slices.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate parameter space (active watch IDs) and let
         // `preconditions` be the single source of truth for which ones are
-        // actually removable. Avoids duplicating the app_started / watch_exists checks.
+        // actually removable. Avoids duplicating the app_started / watch_exists
+        // checks.
         let candidates: Vec<String> = state
             .active_watch_ids()
             .into_iter()

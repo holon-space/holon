@@ -202,8 +202,8 @@ pub fn inject_entity_name(stmts: &mut [Statement]) {
                     cte_names.insert(cte.alias.name.value.to_lowercase());
                 }
             }
-            // Skip recursive CTE bodies — UNION ALL branches must have matching column
-            // counts
+            // Skip recursive CTE bodies — UNION ALL branches must have matching
+            // column counts
             if !is_recursive && let Some(with) = &mut query.with {
                 for cte in &mut with.cte_tables {
                     inject_into_query(&mut cte.query, &cte_names);
@@ -241,8 +241,9 @@ fn inject_into_set_expr(set_expr: &mut SetExpr, cte_names: &HashSet<String>) {
                     alias: Ident::new("entity_name"),
                 });
             } else if is_primary_table_cte(select, cte_names) && !has_wildcard(&select.projection) {
-                // Primary table is a CTE whose body already has entity_name injected.
-                // Add a column reference so the outer SELECT doesn't drop it.
+                // Primary table is a CTE whose body already has entity_name
+                // injected. Add a column reference so the outer SELECT doesn't
+                // drop it.
                 select
                     .projection
                     .push(SelectItem::UnnamedExpr(Expr::Identifier(Ident::new(
@@ -389,8 +390,8 @@ fn get_change_origin_table_and_alias(
     select: &Select,
     cte_names: &HashSet<String>,
 ) -> (Option<String>, Option<String>) {
-    // Try dominant qualifier: if all qualified columns reference the same alias,
-    // use that alias's real table name.
+    // Try dominant qualifier: if all qualified columns reference the same
+    // alias, use that alias's real table name.
     if let Some(dominant_alias) = get_dominant_qualifier(select)
         && let Some(real_name) = resolve_alias_to_table(select, &dominant_alias, cte_names)
     {
@@ -861,8 +862,8 @@ fn inject_change_origin(stmts: &mut [Statement], schema: &SchemaCatalog) {
                     cte_names.insert(cte.alias.name.value.to_lowercase());
                 }
             }
-            // Skip recursive CTE bodies — UNION ALL branches must have matching column
-            // counts
+            // Skip recursive CTE bodies — UNION ALL branches must have matching
+            // column counts
             if !is_recursive && let Some(with) = &mut query.with {
                 for cte in &mut with.cte_tables {
                     inject_change_origin_into_query(&mut cte.query, &cte_names, schema);
@@ -964,7 +965,8 @@ fn inject_json_aggregation(stmts: &mut [Statement]) {
                 continue;
             }
 
-            // Build CTEs: preserve existing ones, add _branch_N for each UNION branch
+            // Build CTEs: preserve existing ones, add _branch_N for each UNION
+            // branch
             let mut all_ctes: Vec<Cte> = query
                 .with
                 .as_ref()
@@ -989,7 +991,8 @@ fn inject_json_aggregation(stmts: &mut [Statement]) {
                 ));
             }
 
-            // Build new body: UNION ALL over `SELECT json_object(*) AS data FROM _branch_N`
+            // Build new body: UNION ALL over `SELECT json_object(*) AS data
+            // FROM _branch_N`
             let mut new_body = make_json_select_from_cte("_branch_0");
             for (idx, op) in operators.iter().enumerate() {
                 new_body = SetExpr::SetOperation {
@@ -1339,7 +1342,8 @@ mod tests {
         let sql = sql_to_string(&stmts);
         // CTE body gets 'block' AS entity_name
         assert!(sql.contains("'block' AS entity_name"), "got: {sql}");
-        // Outer SELECT has explicit columns — entity_name added as column reference
+        // Outer SELECT has explicit columns — entity_name added as column
+        // reference
         assert!(
             sql.contains("content, entity_name FROM"),
             "outer SELECT should reference entity_name from CTE: {sql}"
@@ -1360,8 +1364,9 @@ mod tests {
 
     #[test]
     fn test_inject_gql_style_qualified_columns_from_join() {
-        // GQL-compiled SQL: first FROM is a matview, but all RETURN columns come
-        // from a JOINed table (block). entity_name should be 'block', not the matview.
+        // GQL-compiled SQL: first FROM is a matview, but all RETURN columns
+        // come from a JOINed table (block). entity_name should be 'block', not
+        // the matview.
         let mut stmts = parse(
             "SELECT _v4.\"id\" AS \"id\", _v4.\"content\" AS \"content\" FROM current_focus AS \
              _v0 JOIN block AS _v2 ON _v0.block_id = _v2.parent_id JOIN block AS _v4 ON _v4.id = \
@@ -1489,9 +1494,9 @@ mod tests {
 
     #[test]
     fn test_change_origin_gql_style_uses_join_alias() {
-        // GQL-compiled SQL: first FROM is a matview (no _change_origin), but all
-        // selected columns come from block (via JOIN). Should inject using the
-        // block alias, not the matview alias.
+        // GQL-compiled SQL: first FROM is a matview (no _change_origin), but
+        // all selected columns come from block (via JOIN). Should inject using
+        // the block alias, not the matview alias.
         let mut stmts = parse(
             "SELECT _v4.\"id\" AS \"id\", _v4.\"content\" AS \"content\" FROM current_focus AS \
              _v0 JOIN block AS _v2 ON _v0.block_id = _v2.parent_id JOIN block AS _v4 ON _v4.id = \

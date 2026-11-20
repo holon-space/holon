@@ -79,7 +79,8 @@ impl Render for AppView {
             .gap_2()
             .p_2()
             .children([
-                // Panel A: uniform_list as direct child of root flex_col (KNOWN WORKING)
+                // Panel A: uniform_list as direct child of root flex_col (KNOWN
+                // WORKING)
                 panel(
                     "A: direct child",
                     div().flex_1().size_full().flex_col().child(
@@ -105,7 +106,8 @@ impl Render for AppView {
                         ),
                     ),
                 ),
-                // Panel C: uniform_list inside a View entity (like CollectionView)
+                // Panel C: uniform_list inside a View entity (like
+                // CollectionView)
                 panel(
                     "C: View entity",
                     div()
@@ -114,7 +116,8 @@ impl Render for AppView {
                         .flex_col()
                         .child(self.list_entity.clone()),
                 ),
-                // Panel D: uniform_list inside section-like div (w_full, flex_col, NO flex_1)
+                // Panel D: uniform_list inside section-like div (w_full,
+                // flex_col, NO flex_1)
                 panel(
                     "D: section (no flex_1)",
                     div().flex_1().size_full().flex_col().child(
@@ -129,7 +132,8 @@ impl Render for AppView {
                         ),
                     ),
                 ),
-                // Panel E: uniform_list inside section div WITH flex_1 and size_full
+                // Panel E: uniform_list inside section div WITH flex_1 and
+                // size_full
                 panel(
                     "E: section+flex_1+size_full",
                     div().flex_1().size_full().flex_col().child(
@@ -169,7 +173,8 @@ impl Render for AppView {
                             .child(self.list_entity.clone()),
                     ),
                 ),
-                // Panel H: columns.rs pattern — absolute+scroll parent around View entity
+                // Panel H: columns.rs pattern — absolute+scroll parent around
+                // View entity
                 panel(
                     "H: abs+scroll+View",
                     div().flex_1().relative().child(

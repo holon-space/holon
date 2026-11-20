@@ -74,7 +74,8 @@ fn general_e2e_composed_pbt() {
     });
     config.test_name = Some(concat!(module_path!(), "::general_e2e_composed_pbt"));
     config.source_file = Some(file!());
-    // Pinned when drawn too, so PROPTEST_RNG_SEED=<printed seed> replays the run.
+    // Pinned when drawn too, so PROPTEST_RNG_SEED=<printed seed> replays the
+    // run.
     let seed = match config.rng_seed {
         RngSeed::Fixed(seed) => seed,
         RngSeed::Random => TestRunner::new(config.clone()).rng().next_u64(),
@@ -186,9 +187,10 @@ fn general_e2e_composed_pbt_live_mcp() {
         return;
     }
 
-    // Capture the live cap set (throwaway connect, no reset) BEFORE the strategy is
-    // built, then drop that runtime — proptest runs the state machine synchronously
-    // with no ambient runtime, and each case's `init_test` builds its own.
+    // Capture the live cap set (throwaway connect, no reset) BEFORE the
+    // strategy is built, then drop that runtime — proptest runs the state
+    // machine synchronously with no ambient runtime, and each case's
+    // `init_test` builds its own.
     capture_live_cap_set();
 
     let cases = cases_or("PROPTEST_CASES", 8);
@@ -286,8 +288,8 @@ fn soak_reseed_reproduction() {
             // Import the peer's new block into the primary — the frontier-move
             // lever (no local commit facts ⇒ empty `pending`).
             v.push(E2ETransition::MergeFromPeer(MergeFromPeer { peer_idx: 0 }));
-            // Periodically re-baseline the peer from the primary snapshot so the
-            // next create diverges from a fresh common ancestor.
+            // Periodically re-baseline the peer from the primary snapshot so
+            // the next create diverges from a fresh common ancestor.
             if i % 3 == 2 {
                 v.push(E2ETransition::SyncWithPeer(SyncWithPeer { peer_idx: 0 }));
             }
@@ -318,8 +320,8 @@ fn soak_reseed_reproduction() {
     const SEEDS: usize = 3;
     let mut guard = RunResultGuard::new("soak-reseed", SEEDS as u32);
     // Post-boot floor: the soak seeder emits exactly `blocks` block ids, each
-    // draining into `block_raw`. Allow 10% slack for the flat boot settle, but a
-    // gross under-seed (boot ended unsettled) fails loud below.
+    // draining into `block_raw`. Allow 10% slack for the flat boot settle, but
+    // a gross under-seed (boot ended unsettled) fails loud below.
     let min_live = blocks * 9 / 10;
 
     eprintln!(
@@ -360,8 +362,9 @@ fn soak_reseed_reproduction() {
              FINDING (raise HOLON_SOAK_SETTLE_MS or investigate the boot drain)."
         );
 
-        // Boot/seed reseeds (legitimate coldboot) precede this reset; everything
-        // after is steady-state and attributed to an interactive transition.
+        // Boot/seed reseeds (legitimate coldboot) precede this reset;
+        // everything after is steady-state and attributed to an interactive
+        // transition.
         ReseedObserver::global().reset();
 
         for t in transitions {
@@ -381,8 +384,8 @@ fn soak_reseed_reproduction() {
             *kind_counts.entry(kind).or_default() += 1;
             // Under plain `pbt` (no `otel-testing`) the harness's own
             // `note_transition` is compiled out, so the rung marks the observer
-            // steady itself — otherwise every steady leak would be misattributed
-            // as boot/seed and never counted.
+            // steady itself — otherwise every steady leak would be
+            // misattributed as boot/seed and never counted.
             ReseedObserver::global().note_transition(&label);
             let t_start = Instant::now();
             sut = <ComposedSut<WideE2E> as StateMachineTest>::apply(sut, &ref_state, t);
@@ -572,10 +575,11 @@ fn soak_nav_latency() {
 
     // Reproduction bar for the RC5 cliff: the focus-descendant matview
     // materialization p95 must be multi-second to count as "the cliff
-    // reproduced". Prod measured ~11.9s @1038 live blocks; 1500ms is a generous,
-    // host-robust floor well above the sub-second materialization the harness
-    // shows at 2000 blocks but far below the prod cliff — so it distinguishes
-    // "cliff present" from "materialization is fast here" without host flakiness.
+    // reproduced". Prod measured ~11.9s @1038 live blocks; 1500ms is a
+    // generous, host-robust floor well above the sub-second materialization the
+    // harness shows at 2000 blocks but far below the prod cliff — so it
+    // distinguishes "cliff present" from "materialization is fast here" without
+    // host flakiness.
     const CLIFF_FLOOR_MS: u128 = 1500;
     // Cap on how many distinct soak pages to drive as cold roots (keeps a
     // 2000-block release run to a few minutes — ~10 cold materializations).
@@ -605,10 +609,10 @@ fn soak_nav_latency() {
     let budget = soak_seed::soak_nav_budget_ms();
     let hard_assert = soak_seed::soak_nav_hard_assert();
     let mut guard = RunResultGuard::new("soak-nav", roots as u32);
-    // Post-boot floor: the soak seeder emits exactly `blocks` block ids draining
-    // into `block_raw`; allow 10% slack for the flat boot settle. A gross
-    // under-seed (boot ended unsettled) means we'd be measuring an empty vault —
-    // fail loud below.
+    // Post-boot floor: the soak seeder emits exactly `blocks` block ids
+    // draining into `block_raw`; allow 10% slack for the flat boot settle. A
+    // gross under-seed (boot ended unsettled) means we'd be measuring an empty
+    // vault — fail loud below.
     let min_live = blocks * 9 / 10;
 
     eprintln!(
@@ -650,14 +654,15 @@ fn soak_nav_latency() {
     // NavigateFocus is structurally BLIND to the cold materialization. So after
     // each nav we register the SAME watch the real UI's main panel registers,
     // through the production `ReactiveEngine::watch_query_live` path (the
-    // `SutWatchRegister` cap the `SetupWatch` transition binds), and measure its
-    // register→settle wall-clock. NB the prod holon_sql form correctly SEEDS
-    // from `focus_roots`; the all-blocks recursive scan is introduced by Turso
-    // IVM's recursive-CTE compilation of `focus_descendants`. `TestQuery::to_sql`
-    // has no recursive surface, so we register the equivalent GQL form
-    // (`MATCH (fr:focus_root),(root:block)<-[:CHILD_OF*0..N]-(d) …`), which the
-    // query-equivalence PBT proves selects the identical row set and which IVM
-    // compiles to the same recursive descendant matview — the cliff locus.
+    // `SutWatchRegister` cap the `SetupWatch` transition binds), and measure
+    // its register→settle wall-clock. NB the prod holon_sql form correctly
+    // SEEDS from `focus_roots`; the all-blocks recursive scan is introduced by
+    // Turso IVM's recursive-CTE compilation of `focus_descendants`.
+    // `TestQuery::to_sql` has no recursive surface, so we register the
+    // equivalent GQL form (`MATCH (fr:focus_root),(root:block)<-[:CHILD_OF*0..
+    // N]-(d) …`), which the query-equivalence PBT proves selects the identical
+    // row set and which IVM compiles to the same recursive descendant matview —
+    // the cliff locus.
     let main_panel_watch = || TestQuery {
         table: QueryTable::Blocks,
         columns: vec!["id".to_string()],
@@ -671,12 +676,12 @@ fn soak_nav_latency() {
         },
     };
 
-    // Per fresh root: NavigateFocus (the focus write — the ~sub-second baseline)
-    // THEN register the main-panel descendant watch (the O(vault) content
-    // materialization). "cold" = the full nav→content-visible latency
-    // (nav + descendant materialization); "warm" = the focus-write-only baseline
-    // (what a revisit with a cached view costs). `watch_ms` isolates the pure
-    // descendant materialization — the RC5 cliff, if present.
+    // Per fresh root: NavigateFocus (the focus write — the ~sub-second
+    // baseline) THEN register the main-panel descendant watch (the O(vault)
+    // content materialization). "cold" = the full nav→content-visible latency
+    // (nav + descendant materialization); "warm" = the focus-write-only
+    // baseline (what a revisit with a cached view costs). `watch_ms` isolates
+    // the pure descendant materialization — the RC5 cliff, if present.
     let mut cold_ms: Vec<u128> = Vec::new(); // nav + descendant materialization
     let mut warm_ms: Vec<u128> = Vec::new(); // nav (focus write) only
     let mut watch_ms: Vec<u128> = Vec::new(); // descendant materialization only
@@ -747,8 +752,8 @@ fn soak_nav_latency() {
     );
 
     // Opt-in hard assertion (mode-independent): the user-facing content p95
-    // (nav→visible) must clear the budget. This is the SLO guard; RED whenever a
-    // navigation breaches, GREEN otherwise.
+    // (nav→visible) must clear the budget. This is the SLO guard; RED whenever
+    // a navigation breaches, GREEN otherwise.
     if hard_assert {
         holon_api::duration_budget::DurationBudget::small(
             "soak-nav p95 nav to content visible",
@@ -765,10 +770,11 @@ fn soak_nav_latency() {
 
     match expect {
         SoakNavExpect::Reproduce => {
-            // The RC5 cliff lives in the focus-descendant matview materialization
-            // (prod: ~11.9s @1038 live blocks). "Reproduced" = that materialization
-            // is multi-second (≥ CLIFF_FLOOR). Keyed on the descendant matview, NOT
-            // the nav-dominated content total, so it tests the actual cliff locus.
+            // The RC5 cliff lives in the focus-descendant matview
+            // materialization (prod: ~11.9s @1038 live blocks). "Reproduced" =
+            // that materialization is multi-second (≥ CLIFF_FLOOR). Keyed on
+            // the descendant matview, NOT the nav-dominated content total, so
+            // it tests the actual cliff locus.
             let reproduced = watch_p95 >= CLIFF_FLOOR_MS;
             assert!(
                 reproduced,

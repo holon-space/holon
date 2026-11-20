@@ -378,8 +378,8 @@ fn the_setup_columns_operation_buttons_wrap_instead_of_leaving_the_column() {
         gpui_platform::current_headless_renderer()
     });
 
-    // The bundled gcal sidecar names `~/.config/holon/gcal-client-*`; point HOME
-    // at an empty dir so a consent flow cannot reach a real browser.
+    // The bundled gcal sidecar names `~/.config/holon/gcal-client-*`; point
+    // HOME at an empty dir so a consent flow cannot reach a real browser.
     let home = tempfile::tempdir().expect("tempdir for HOME");
     // SAFETY: as above.
     unsafe { std::env::set_var("HOME", home.path()) };
@@ -435,10 +435,10 @@ fn the_setup_columns_operation_buttons_wrap_instead_of_leaving_the_column() {
     click_at(&mut app, window, center_of(&gear), "gear");
     settle_frame(&app, &bounds, &engine, Duration::from_secs(30));
 
-    // Give the first row a consent flow, after the modal is already open, so the
-    // update reaches the screen through the section's own `live_query` — the
-    // path a real projection uses. `begin_oauth` declares a relation guard over
-    // exactly these three columns, so this is what makes the row offer its
+    // Give the first row a consent flow, after the modal is already open, so
+    // the update reaches the screen through the section's own `live_query` —
+    // the path a real projection uses. `begin_oauth` declares a relation guard
+    // over exactly these three columns, so this is what makes the row offer its
     // third operation.
     runtime.block_on(async {
         db.execute_values(

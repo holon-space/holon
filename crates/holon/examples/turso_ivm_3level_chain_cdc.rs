@@ -310,7 +310,8 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     let wv_count = count_query(&conn, "SELECT count(*) as cnt FROM watch_view").await?;
 
-    // Re-evaluate via simpler query (recursive CTEs not supported at query time)
+    // Re-evaluate via simpler query (recursive CTEs not supported at query
+    // time)
     let raw_wv_count = count_query(
         &conn,
         "SELECT count(*) as cnt FROM (

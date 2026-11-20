@@ -135,7 +135,8 @@ impl ChangeOrigin {
             return (None, None);
         }
 
-        // Get the OpenTelemetry context that was set on this span (via set_parent)
+        // Get the OpenTelemetry context that was set on this span (via
+        // set_parent)
         let otel_ctx = span.context();
         let span_ref = otel_ctx.span();
         let span_ctx = span_ref.span_context();
@@ -602,7 +603,8 @@ impl BatchTraceContext {
         use opentelemetry::trace::TraceContextExt;
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-        // Second, try Context::current() which is propagated by tracing-opentelemetry
+        // Second, try Context::current() which is propagated by
+        // tracing-opentelemetry
         let current_ctx = opentelemetry::Context::current();
         let current_span = current_ctx.span();
         let current_span_ctx = current_span.span_context();

@@ -178,8 +178,9 @@ impl HeadlessEditorMirror {
             .lock()
             .unwrap()
             .remove(&(block_id.to_string(), occ));
-        // The editor buffer is occurrence-independent (canonical write home), so
-        // any focus-loss / structural-op forget on this block retires its VM.
+        // The editor buffer is occurrence-independent (canonical write home),
+        // so any focus-loss / structural-op forget on this block retires its
+        // VM.
         self.editors.lock().unwrap().remove(block_id);
         self.slash_menus.lock().unwrap().remove(block_id);
     }
@@ -607,7 +608,8 @@ impl HeadlessEditorMirror {
         // A click re-mounts the editor: (re)seed its buffer VM from the current
         // authority content, discarding any stale buffer from an earlier editor
         // session on this block (mirrors GPUI re-seeding `InputState` on
-        // focus-gain). Keyed by canonical id (occurrence-independent write home).
+        // focus-gain). Keyed by canonical id (occurrence-independent write
+        // home).
         self.editors
             .lock()
             .unwrap()
@@ -669,11 +671,11 @@ impl HeadlessEditorMirror {
 
         // Char keystrokes and mid-line backspace route through the block's
         // cell-free editor VM (Inc 4): the VM owns the buffer and dispatches a
-        // `set_field("content")`+`write_seq` write through the real op pipeline.
-        // No `MutableText` is required — the SqlOnly editor path the composed
-        // keystone models has no Loro cell. A block whose create intent has not
-        // landed yet surfaces as a loud op failure, not a silent no-op.
-        // SqlOnly variant has no `MutableText` — read the block's
+        // `set_field("content")`+`write_seq` write through the real op
+        // pipeline. No `MutableText` is required — the SqlOnly editor path the
+        // composed keystone models has no Loro cell. A block whose create
+        // intent has not landed yet surfaces as a loud op failure, not a silent
+        // no-op. SqlOnly variant has no `MutableText` — read the block's
         // SQL-projected `content` directly so the headless cursor walks the
         // same byte string a production GPUI editor would after
         // `set_value(content)`. Without this, `current_text` was `""`,
@@ -711,8 +713,9 @@ impl HeadlessEditorMirror {
         // already tracks), which yanked the caret back to a split's offset 0
         // after the user had typed.
         //
-        // Map first, then consume only what actually applied — the same order as
-        // prod's mount (`frontends/gpui/src/views/editor_view.rs:1218-1263`),
+        // Map first, then consume only what actually applied — the same order
+        // as prod's mount
+        // (`frontends/gpui/src/views/editor_view.rs:1218-1263`),
         // where the consumed `seed` is the POST-mapping value. A seed the
         // boundary filter drops stays armed, as it does in prod.
         let cursor_byte = match self.tracked_cursor_at(&block_id, occ) {
@@ -783,8 +786,8 @@ impl HeadlessEditorMirror {
                 self.note_text_changed(engine, &block_uri, &new_text, new_cursor_byte);
             }
             "enter" if !has_ctrl_alt_cmd && !has_shift => {
-                // LogSeq parity: if the cursor sits after a `/cmd` that matches a
-                // slash command, Enter executes it instead of splitting — the
+                // LogSeq parity: if the cursor sits after a `/cmd` that matches
+                // a slash command, Enter executes it instead of splitting — the
                 // same routing GPUI does via `EditorViewModel`/popup
                 // (`editor_view.rs:578-616`). Otherwise split at the cursor.
                 if let Some(intent) = self.slash_command_selection(engine, &block_uri) {

@@ -73,14 +73,16 @@ impl<P: OperationProvider> GenericProviderState<P> {
                         .map(|ids| !ids.is_empty())
                         .unwrap_or(false)
                 }
-                // Primitives, objects, expr, and collection can always be generated
+                // Primitives, objects, expr, and collection can always be
+                // generated
                 TypeHint::Bool | TypeHint::String | TypeHint::Number => true,
                 TypeHint::FieldValue { .. } => true,
                 TypeHint::RowKey => true,
                 TypeHint::Object { .. } => true,
                 TypeHint::Expr | TypeHint::Collection => true,
                 TypeHint::Enum { variants, .. } => !variants.is_empty(),
-                // A newtype needs its registered parser; a place id needs the place.
+                // A newtype needs its registered parser; a place id needs the
+                // place.
                 TypeHint::Newtype { .. } | TypeHint::PlaceId { .. } => false,
             }
         })
@@ -107,8 +109,9 @@ impl<P: OperationProvider> GenericProviderState<P> {
                             .unwrap_or_default();
 
                         if ids.is_empty() {
-                            // No entities available - this shouldn't happen if can_satisfy_params
-                            // worked Return a strategy that will fail
+                            // No entities available - this shouldn't happen if
+                            // can_satisfy_params worked Return a strategy that
+                            // will fail
                             return (name, Just(Value::String("".to_string())).boxed());
                         }
 
@@ -125,7 +128,8 @@ impl<P: OperationProvider> GenericProviderState<P> {
                         Just(Value::String("{}".to_string())).boxed()
                     }
                     TypeHint::Expr | TypeHint::Collection => {
-                        // Expr/Collection params are template references, not data values
+                        // Expr/Collection params are template references, not
+                        // data values
                         Just(Value::Null).boxed()
                     }
                     TypeHint::Enum { variants, .. } => prop::sample::select(variants.clone())
@@ -176,7 +180,8 @@ impl<P: OperationProvider> GenericProviderState<P> {
                     result: Some(id),
                 });
             } else {
-                // Provider doesn't support ID extraction, just track the operation
+                // Provider doesn't support ID extraction, just track the
+                // operation
                 self.history.push(OperationExecution {
                     entity_name: entity_str.to_string(),
                     op_name: op.name.clone(),

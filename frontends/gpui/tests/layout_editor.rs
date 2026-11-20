@@ -216,9 +216,9 @@ mod windowed_caret {
         cx: &mut TestAppContext,
         vm: Arc<ReactiveViewModel>,
     ) -> (Arc<TestServices>, BoundsRegistry, &mut VisualTestContext) {
-        // The styled path pulls theme colors (`build_highlights` → `cx.theme()`),
-        // so install the theme global before rendering. Harmless for the plain
-        // path.
+        // The styled path pulls theme colors (`build_highlights` →
+        // `cx.theme()`), so install the theme global before rendering. Harmless
+        // for the plain path.
         cx.update(gpui_component::init);
 
         let services = TestServices::new();

@@ -96,8 +96,8 @@ fn seeded_sidebar_live_query_paints_nonzero_height(cx: &mut TestAppContext) {
     let column_expr = parse_render_dsl(&src).expect("seeded left-sidebar render must parse");
 
     // 2. Interpret through a QUIESCENT `TestServices` threaded as the builder
-    //    services, so the seeded `live_query` reaches the canned `watch_query_live`
-    //    instead of a real engine.
+    //    services, so the seeded `live_query` reaches the canned
+    //    `watch_query_live` instead of a real engine.
     let registry = Arc::new(support::BlockTreeRegistry::new());
     let services = support::TestServices::with_registry_quiescent(registry.clone());
     let services: Arc<dyn holon_frontend::reactive::BuilderServices> = services;
@@ -116,7 +116,8 @@ fn seeded_sidebar_live_query_paints_nonzero_height(cx: &mut TestAppContext) {
     // 3. PRODUCTION-FAITHFUL composition: register the column as
     //    `block:default-left-sidebar` and wrap it in a `live_block` inside
     //    `columns`, so it renders through the REAL per-block `ReactiveShell` at
-    //    `ShellPlacement::Panel` — the placement that triggers the greedy height.
+    //    `ShellPlacement::Panel` — the placement that triggers the greedy
+    //    height.
     let column_slot = std::sync::Mutex::new(Some(column_vm));
     let thunk: support::BlockTreeThunk = Arc::new(move || {
         column_slot

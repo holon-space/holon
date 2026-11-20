@@ -116,11 +116,11 @@ impl IntegrationStateProjector {
         for row in &rows {
             self.db
                 .execute_values(
-                    // `status` is set on insert only. Re-projection runs on every
-                    // enablement change, and clobbering a resolved `Connected`
-                    // back to `Pending` because an unrelated integration was
-                    // toggled would make the column lie. The registry owns that
-                    // column after the row exists.
+                    // `status` is set on insert only. Re-projection runs on
+                    // every enablement change, and clobbering a resolved
+                    // `Connected` back to `Pending` because an unrelated
+                    // integration was toggled would make the column lie. The
+                    // registry owns that column after the row exists.
                     "INSERT INTO integration_state \
                      (id, provider_name, enabled, status, config_status, configurable, \
                      configure_progress, display_name, icon, default_view, origin, hosts, \
@@ -186,9 +186,10 @@ impl IntegrationStateProjector {
         // Settings `live_query` and the sidebar read it, and nothing else makes
         // an enablement change visible. Report the projected rows to the e2e
         // latency correlator so a `set_field` interaction closes here, the same
-        // way a block mirror closes its interactions from `LiveData::subscribe`.
-        // Absent this, a settings `set_field` never sees a block-row delivery
-        // for its `integration:` target and expires as `e2e_expired`.
+        // way a block mirror closes its interactions from
+        // `LiveData::subscribe`. Absent this, a settings `set_field` never sees
+        // a block-row delivery for its `integration:` target and expires as
+        // `e2e_expired`.
         holon_api::latency_e2e::rows_delivered(
             "integration_state",
             self.feed,

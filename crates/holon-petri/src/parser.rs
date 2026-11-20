@@ -300,8 +300,8 @@ impl ParsedTask {
     /// user-authored dictionary blocks into the [`VerbDict`] fed here; the
     /// built-in baseline is [`VerbDict::builtin`].
     pub fn parse_with_dict(raw: &str, verb_dict: &VerbDict) -> Self {
-        // Grammar is line-oriented: the first line is the task; any following lines
-        // are opaque body kept out of the label.
+        // Grammar is line-oriented: the first line is the task; any following
+        // lines are opaque body kept out of the label.
         let first_line = raw.trim().lines().next().unwrap_or("").trim();
         let mut rest = first_line.to_string();
 
@@ -353,7 +353,8 @@ impl ParsedTask {
         // 6. Recognized verb (whole-word, case-insensitive dictionary lookup).
         let verb = find_verb(&rest, verb_dict);
 
-        // 7. Reference roles. `#[[tag]]` is always context; bare `[[link]]` is an
+        // 7. Reference roles. `#[[tag]]` is always context; bare `[[link]]` is
+        //    an
         // object only when a verb is present, else context (the safe default).
         let (objects, tags) = classify_references(&rest, verb.is_some());
 
@@ -401,7 +402,8 @@ fn extract_via_routes(text: &str) -> (String, Vec<ViaRoute>) {
                 continue;
             }
         }
-        // A `via:` with no recognizable route — keep the literal and move past it.
+        // A `via:` with no recognizable route — keep the literal and move past
+        // it.
         out.push_str("via:");
         rest = &rest[pos + 4..];
     }
@@ -561,8 +563,8 @@ mod tests {
 
     #[test]
     fn safe_default_bare_link_without_verb_is_context_not_object() {
-        // The correctness core: no recognized verb -> the reference is context, so
-        // the task is NOT falsely blocked on Kat.
+        // The correctness core: no recognized verb -> the reference is context,
+        // so the task is NOT falsely blocked on Kat.
         let p = parse("Überlegen was ich [[Kat]] schenke");
         assert!(p.verb.is_none(), "no dictionary verb here");
         assert!(
@@ -615,7 +617,8 @@ mod tests {
     #[test]
     fn malformed_recurrence_leaves_task_valid() {
         let p = parse("Birthday 🔁 every year");
-        // year is coarser than day -> Recurrence rejects; the task still parses.
+        // year is coarser than day -> Recurrence rejects; the task still
+        // parses.
         assert!(p.recurrence.is_none());
         assert!(p.label.contains("Birthday"));
     }

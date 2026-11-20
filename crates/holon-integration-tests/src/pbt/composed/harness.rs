@@ -573,11 +573,12 @@ async fn catalog_report(
         // still points at one.
         inner.undo_redo_burned_ids = redo_burned.clone();
     }
-    // Freeze the budget window for `inv-sql-budget` (if a span-metrics provider is
-    // wired): everything up to this check is the transition's cost; the invariant
-    // bodies below must not count against it. Hands the host the post-transition
-    // oracle its `expected_sql` inspects. Mirrors the native runner's
-    // `freeze_at_check_start`. No-op when no `SutMetricsLifecycle` is present.
+    // Freeze the budget window for `inv-sql-budget` (if a span-metrics provider
+    // is wired): everything up to this check is the transition's cost; the
+    // invariant bodies below must not count against it. Hands the host the
+    // post-transition oracle its `expected_sql` inspects. Mirrors the native
+    // runner's `freeze_at_check_start`. No-op when no `SutMetricsLifecycle` is
+    // present.
     #[cfg(feature = "otel-testing")]
     if let Some(m) = caps.get::<dyn crate::pbt::composed::span_metrics::SutMetricsLifecycle>() {
         m.freeze_for_check(resolved.get());
@@ -801,8 +802,8 @@ impl UnheldHistory {
     /// `held_now`: the boot runs on memory while another process holds the
     /// file. `ui_creates`: the [`ui_create_count`] at the boot.
     fn note_boot(&mut self, held_now: bool, ui_creates: usize) {
-        // Ruling: "block_history is DB-file-only state like nav history and pins; the
-        // floor counts per DB epoch".
+        // Ruling: "block_history is DB-file-only state like nav history and
+        // pins; the floor counts per DB epoch".
         match (self.hold.take(), held_now) {
             (None, true) => {
                 self.hold = Some(HoldStart {
@@ -1032,17 +1033,17 @@ impl<S: ComposedSlice> ComposedSut<S> {
             return sut.rebooted(ref_state, &transition);
         }
         let action = action_label(&transition);
-        // Kept for the post-apply redo gate below (`action` itself is moved into
-        // the timed async block's tracing field).
+        // Kept for the post-apply redo gate below (`action` itself is moved
+        // into the timed async block's tracing field).
         let is_redo = action == "Redo";
         // Weights-spike telemetry: pre-clone the kind label (the async block
         // moves `action`), record after the timed apply. No-op when the flag is
         // off — `record_label` stays `None`.
         let record_label = super::telemetry::telemetry_enabled().then(|| action.clone());
         // Interleaving axis (Increment 2): the kind the mask keys on, and this
-        // transition's position in the sequence — together they seed the pump so
-        // two ticks of one kind explore two schedules. `plan` is `None` for every
-        // kind on an unarmed run.
+        // transition's position in the sequence — together they seed the pump
+        // so two ticks of one kind explore two schedules. `plan` is `None` for
+        // every kind on an unarmed run.
         let kind = S::transition_kind(&transition);
         let tick = sut.tick.get();
         sut.tick.set(tick + 1);
@@ -1058,9 +1059,10 @@ impl<S: ComposedSlice> ComposedSut<S> {
             });
         }
         let (before, after, action_us) = {
-            // Split the borrow: `settle_after_apply` reads `&sut.handle` while the apply
-            // writes `&mut sut.caps` — disjoint fields, so borrow each separately before
-            // the `block_on` (both are captured by the `async move`).
+            // Split the borrow: `settle_after_apply` reads `&sut.handle` while
+            // the apply writes `&mut sut.caps` — disjoint fields, so borrow
+            // each separately before the `block_on` (both are captured by the
+            // `async move`).
             let caps = &mut sut.caps;
             let handle = &sut.handle;
             let primary_peer_ids = &mut sut.primary_peer_ids;
@@ -1076,26 +1078,28 @@ impl<S: ComposedSlice> ComposedSut<S> {
                 // Bounded wait (`inv-settle-budget`): a WEDGED transition — the
                 // 2026-07-28 turso IVM regime held one navigation write for 23
                 // minutes — must become a red, not a hung suite. Slow-but-
-                // progressing transitions stay well inside this and are reported
-                // with their real measured duration by the invariant below.
+                // progressing transitions stay well inside this and are
+                // reported with their real measured duration by the invariant
+                // below.
                 let height_before = sut_lamport_height(caps).await;
                 let predicted = S::lamport_delta(&transition, ref_state, handle, caps).await;
                 let progressed = tokio::time::timeout(wedge, async {
                     match plan {
-                        // UNMASKED — the same two statements, in the same order,
-                        // this harness has always run. `plan_for` returns `None`
-                        // for every kind unless `HOLON_PBT_SCHED_KINDS` is set,
-                        // so this is the whole behaviour of an unarmed run.
+                        // UNMASKED — the same two statements, in the same
+                        // order, this harness has always run. `plan_for`
+                        // returns `None` for every kind unless
+                        // `HOLON_PBT_SCHED_KINDS` is set, so this is the whole
+                        // behaviour of an unarmed run.
                         None => {
                             S::apply_transition(&transition, ref_state, caps).await;
                             settle(handle, caps).await;
                         }
                         // MASKED — the fire-and-forget door plus a seeded pump
                         // closes the overlap window instead of the settle. The
-                        // settle still runs before any invariant reads state, so
-                        // the per-tick oracle stays exactly as strict as it is
-                        // unarmed; what changes is the ORDER the writes reached
-                        // the store in.
+                        // settle still runs before any invariant reads state,
+                        // so the per-tick oracle stays exactly as strict as it
+                        // is unarmed; what changes is the ORDER the writes
+                        // reached the store in.
                         Some(p) => {
                             let recording = interleave_armed_apply::<S>(
                                 &transition,
@@ -1108,8 +1112,8 @@ impl<S: ComposedSlice> ComposedSut<S> {
                             .await;
                             settle(handle, caps).await;
                             // Most intents settle during the settle, not during
-                            // the detached apply, so the signature is only whole
-                            // once the settle has run.
+                            // the detached apply, so the signature is only
+                            // whole once the settle has run.
                             if let (Some(rec), Some(j)) = (recording, S::dispatch_journal(handle)) {
                                 eprintln!(
                                     "[schedule-signature] {kind}: seed={} {}",
@@ -1134,9 +1138,10 @@ impl<S: ComposedSlice> ComposedSut<S> {
                 {
                     l.note_settle(&action, opened, std::time::Duration::from_micros(action_us));
                 }
-                // Latency (end-to-end, action->visible rows): dispatch through the
-                // real pipeline plus the CDC settle — everything except final GPU
-                // paint (headless harness). Greppable via target="holon_latency".
+                // Latency (end-to-end, action->visible rows): dispatch through
+                // the real pipeline plus the CDC settle — everything except
+                // final GPU paint (headless harness). Greppable via
+                // target="holon_latency".
                 tracing::info!(
                     target: "holon_latency",
                     stage = "action_total",
@@ -1166,7 +1171,8 @@ impl<S: ComposedSlice> ComposedSut<S> {
             action_us,
             record_label,
         );
-        // After the reconcile: it pairs the ids this tick minted with the SUT's.
+        // After the reconcile: it pairs the ids this tick minted with the
+        // SUT's.
         let (caps, clock_feed) = (&sut.caps, &mut sut.clock_feed);
         sut.rt.block_on(feed_sut_clock(caps, clock_feed, ref_state));
         sut
@@ -1199,34 +1205,36 @@ impl<S: ComposedSlice> ComposedSut<S> {
         if let Some(label) = record_label {
             sut.telemetry.borrow_mut().record(label, action_us);
         }
-        // Per-tick reconciliation: a single transition mints at most one block, so
-        // the one unmapped synthetic id (oracle, post-apply) pairs 1:1 with the one
-        // new real id (SUT). Accumulate into the shared resolver. (For a counter-sync
-        // backend the real id *is* the synthetic id, so this maps it to itself — the
-        // `align_ids` hook below kept the next mint in lockstep.)
+        // Per-tick reconciliation: a single transition mints at most one block,
+        // so the one unmapped synthetic id (oracle, post-apply) pairs 1:1 with
+        // the one new real id (SUT). Accumulate into the shared resolver. (For
+        // a counter-sync backend the real id *is* the synthetic id, so this
+        // maps it to itself — the `align_ids` hook below kept the next mint in
+        // lockstep.)
         //
-        // The synthetic schemes the harness reconciles: `block::split-N` (split tails)
-        // AND `block:ref-doc-N` (CreateDocument-minted doc pages — the doc-uri-minting
-        // generalization of the seam's `block_tree_post_action` CreateDocument arm).
-        // Both are placeholders the oracle allocates that the SUT backend
-        // materializes as fresh ids. This is a COMPOSED-LOCAL predicate,
-        // deliberately NOT the global `is_synthetic_ref_id` (which E2ESut keys
-        // its split-only mapping off — widening it there would make E2ESut
-        // mis-treat doc-uris as splits).
+        // The synthetic schemes the harness reconciles: `block::split-N` (split
+        // tails) AND `block:ref-doc-N` (CreateDocument-minted doc pages — the
+        // doc-uri-minting generalization of the seam's `block_tree_post_action`
+        // CreateDocument arm). Both are placeholders the oracle allocates that
+        // the SUT backend materializes as fresh ids. This is a COMPOSED-LOCAL
+        // predicate, deliberately NOT the global `is_synthetic_ref_id` (which
+        // E2ESut keys its split-only mapping off — widening it there would make
+        // E2ESut mis-treat doc-uris as splits).
         let mut map = sut.resolver.lock().expect("resolver lock");
-        // Resolver staleness across undo→redo. `UndoLastMutation` DELETES the real
-        // block a synthetic maps to; `Redo` then re-creates it under a FRESH uuid
-        // (prod burns block ids across undo — see `ReferenceState::pop_undo_to_redo`)
-        // while the oracle's redo snapshot restores the SAME synthetic label. Retire
-        // exactly the pairs that are BOTH live on the oracle side (the synthetic is
-        // a block the oracle currently holds) and dead on the SUT side (its uuid is
-        // gone) — those must re-pair below. A pair whose synthetic the oracle no
-        // longer holds is NOT retired: a deleted block's mapping is still needed to
-        // resolve oracle references that outlive it (e.g. `navigation_history`).
-        // The retired pair moves to `burned`, which still feeds the C2 provenance
-        // oracle — the dead uuid owns real `block_history` rows.
-        // Observed counterexample: [SplitBlock(c1,0), UndoLastMutation, Redo] —
-        // `tests/split_undo_redo_reconcile.rs`.
+        // Resolver staleness across undo→redo. `UndoLastMutation` DELETES the
+        // real block a synthetic maps to; `Redo` then re-creates it under a
+        // FRESH uuid (prod burns block ids across undo — see
+        // `ReferenceState::pop_undo_to_redo`) while the oracle's redo snapshot
+        // restores the SAME synthetic label. Retire exactly the pairs that are
+        // BOTH live on the oracle side (the synthetic is a block the oracle
+        // currently holds) and dead on the SUT side (its uuid is gone) — those
+        // must re-pair below. A pair whose synthetic the oracle no longer holds
+        // is NOT retired: a deleted block's mapping is still needed to
+        // resolve oracle references that outlive it (e.g.
+        // `navigation_history`). The retired pair moves to `burned`, which
+        // still feeds the C2 provenance oracle — the dead uuid owns real
+        // `block_history` rows. Observed counterexample: [SplitBlock(c1,0),
+        // UndoLastMutation, Redo] — `tests/split_undo_redo_reconcile.rs`.
         let retired: Vec<(EntityUri, EntityUri)> = map
             .iter()
             .filter(|(syn, real)| {
@@ -1238,17 +1246,19 @@ impl<S: ComposedSlice> ComposedSut<S> {
             map.remove(syn);
         }
         // `action` is the transition's Debug head (`Redo(Redo)` -> "Redo"), the
-        // discriminator the redo gate needs without constraining `S::Transition`.
+        // discriminator the redo gate needs without constraining
+        // `S::Transition`.
         if is_redo {
             sut.redo_burned
                 .extend(retired.iter().map(|(_, real)| real.clone()));
         }
         sut.burned.extend(retired.clone());
-        // Born-equal doc pages: `WriteOrgFile` pins the oracle's `block:ref-doc-N`
-        // into the file via `#+ID:`, so the SUT ingests the SAME id — synthetic in
-        // scheme, but with no fresh real partner. Self-map those (identity), like
-        // the counter-sync case above; only synthetics the SUT does NOT already
-        // hold (CreateDocument's empty file → fresh uuid) enter the 1:1 pairing.
+        // Born-equal doc pages: `WriteOrgFile` pins the oracle's
+        // `block:ref-doc-N` into the file via `#+ID:`, so the SUT ingests the
+        // SAME id — synthetic in scheme, but with no fresh real partner.
+        // Self-map those (identity), like the counter-sync case above; only
+        // synthetics the SUT does NOT already hold (CreateDocument's empty file
+        // → fresh uuid) enter the 1:1 pairing.
         let unmapped: Vec<EntityUri> = ref_state
             .domain
             .block_state
@@ -1262,15 +1272,17 @@ impl<S: ComposedSlice> ComposedSut<S> {
         for id in born_equal {
             map.insert(id.clone(), id);
         }
-        // Born-equal DETERMINISTIC ids minted THIS tick (in the SUT's new set AND
-        // already held by the oracle) — e.g. `InstantiateTemplate`'s instance blocks,
-        // whose production deterministic instance id (`plan_instantiation`) the oracle
-        // reproduces exactly. Self-map them (identity) so `history_ever_created`
-        // (derived from this map) knows every real id the oracle minted; without it a
-        // later `UndoLastMutation` leaves the append-only `block_history` create row
-        // looking like a phantom (`inv-history-no-phantom-rows`). Restricted to this
-        // tick's `after \ before` so seeds/layout are untouched; `k == v` self-maps
-        // never count toward `history_min_op_groups`.
+        // Born-equal DETERMINISTIC ids minted THIS tick (in the SUT's new set
+        // AND already held by the oracle) — e.g. `InstantiateTemplate`'s
+        // instance blocks, whose production deterministic instance id
+        // (`plan_instantiation`) the oracle reproduces exactly. Self-map them
+        // (identity) so `history_ever_created` (derived from this map) knows
+        // every real id the oracle minted; without it a
+        // later `UndoLastMutation` leaves the append-only `block_history`
+        // create row looking like a phantom (`inv-history-no-phantom-rows`).
+        // Restricted to this tick's `after \ before` so seeds/layout are
+        // untouched; `k == v` self-maps never count toward
+        // `history_min_op_groups`.
         for id in after.difference(&before) {
             if ref_state.domain.block_state.blocks.contains_key(id)
                 && !is_peer_scheme_id(id)
@@ -1281,19 +1293,19 @@ impl<S: ComposedSlice> ComposedSut<S> {
                 map.insert(id.clone(), id.clone());
             }
         }
-        // Peer-merged blocks (`block:peer-…`) surface in the SUT `block_raw` with a
-        // stable id already shared with the oracle — they need no synthetic→real
-        // mapping, so exclude them from `real_new` to keep the 1:1 split/doc
-        // guard intact (a `MergeFromPeer` would otherwise make `real_new`
-        // outrun `synthetic` and panic). Born-equal ids (External
+        // Peer-merged blocks (`block:peer-…`) surface in the SUT `block_raw`
+        // with a stable id already shared with the oracle — they need no
+        // synthetic→real mapping, so exclude them from `real_new` to keep the
+        // 1:1 split/doc guard intact (a `MergeFromPeer` would otherwise make
+        // `real_new` outrun `synthetic` and panic). Born-equal ids (External
         // `ApplyMutation::Create` and `BulkExternalAdd` write the block WITH
-        // its oracle id in the `:ID:` drawer, so `resolve_mutation_ids` leaves a
-        // Create's NEW id as-is) surface in the SUT with the SAME id the oracle already
-        // holds. Like peer-merged blocks they are shared, need no synthetic→real
-        // mapping, and would otherwise make `real_new` outrun `synthetic`
-        // (which only counts synthetic-scheme oracle ids) and panic.
-        // `resolve_id` passes unmapped ids through as identity, so dropping
-        // them here is correct.
+        // its oracle id in the `:ID:` drawer, so `resolve_mutation_ids` leaves
+        // a Create's NEW id as-is) surface in the SUT with the SAME id the
+        // oracle already holds. Like peer-merged blocks they are shared, need
+        // no synthetic→real mapping, and would otherwise make `real_new` outrun
+        // `synthetic` (which only counts synthetic-scheme oracle ids) and
+        // panic. `resolve_id` passes unmapped ids through as identity, so
+        // dropping them here is correct.
         // Blocks a SECOND writer authored (`ComposedSlice::foreign_ids`) are
         // excluded for the same reason as peer-scheme ids: the oracle never
         // minted a synthetic for them, so counting them here would make
@@ -1318,17 +1330,19 @@ impl<S: ComposedSlice> ComposedSut<S> {
                     hold.take_failed_dispatches("block", "create"),
                 )
             });
-        // Pairing safety for the R2 StaleExternalRewrite CHURN (multiple mints in
-        // one tick, unlike the usual one-mint transitions this zip was written for):
-        // the churn re-mints only NON-UNIQUE / empty content (unique content remaps
-        // via `tiered_match`, keeping its id — never appears here), so every element
-        // of `synthetic`/`real_new` this tick shares the same (parent, content). The
-        // zip is therefore order-insensitive: (1) `inv-blocks-match-ref` normalizes on
+        // Pairing safety for the R2 StaleExternalRewrite CHURN (multiple mints
+        // in one tick, unlike the usual one-mint transitions this zip was
+        // written for): the churn re-mints only NON-UNIQUE / empty content
+        // (unique content remaps via `tiered_match`, keeping its id — never
+        // appears here), so every element of `synthetic`/`real_new` this tick
+        // shares the same (parent, content). The zip is therefore
+        // order-insensitive: (1) `inv-blocks-match-ref` normalizes on
         // {id, parent, content, tags, …} with NO sort_key / position field, so
         // identical-(parent, content) blocks are interchangeable, and (2) no
-        // cross-content mispair is possible because all churn mints carry the same
-        // content. The oracle predicts the identical churn in `StaleExternalRewrite::
-        // apply_to_ref` (shared `tiered_match`), so the two lengths match here.
+        // cross-content mispair is possible because all churn mints carry the
+        // same content. The oracle predicts the identical churn in
+        // `StaleExternalRewrite:: apply_to_ref` (shared `tiered_match`), so the
+        // two lengths match here.
         let held = HeldCreates {
             parked,
             parked_other,
@@ -1448,13 +1462,13 @@ impl<S: ComposedSlice> ComposedSut<S> {
                 feed_sut_clock(&caps, &mut clock_feed, ref_state).await;
                 assert_sut_peers(&caps, ref_state, &mut primary_peer_ids, BOOT).await;
                 let after = sut_ids(&caps).await;
-                // Open the measurement window LAST. It must be opened (the window
-                // the previous transition left open would otherwise bill this
-                // boot's `ensure_schema` DDL and re-projection reads to that
-                // transition — measured as NavigateFocus.sql_ddl=76), and opened
-                // here rather than before the restart because a boot's cost is not
-                // an interaction's cost: the FIRST boot is outside every budget
-                // window for the same reason.
+                // Open the measurement window LAST. It must be opened (the
+                // window the previous transition left open would otherwise bill
+                // this boot's `ensure_schema` DDL and re-projection reads to
+                // that transition — measured as NavigateFocus.sql_ddl=76), and
+                // opened here rather than before the restart because a boot's
+                // cost is not an interaction's cost: the FIRST boot is outside
+                // every budget window for the same reason.
                 S::note_tick_start(transition, &caps).await;
                 (
                     before,
@@ -1488,8 +1502,8 @@ impl<S: ComposedSlice> ComposedSut<S> {
             primary_peer_ids,
             _slice,
         };
-        // The same post-apply path every transition takes. The id reconcile is a
-        // no-op by construction (a reboot re-opens the store, so `before ==
+        // The same post-apply path every transition takes. The id reconcile is
+        // a no-op by construction (a reboot re-opens the store, so `before ==
         // after` — asserted inside the seam), but running it keeps ONE
         // bookkeeping path: a future reboot that did move ids would be
         // reconciled, not silently unmodeled.
@@ -1639,9 +1653,10 @@ impl<S: ComposedSlice> ComposedSut<S> {
         ref_state: &ReferenceState,
         report_of: impl Fn(&Self, &BTreeSet<EntityUri>) -> RunReport,
     ) -> Option<RunReport> {
-        // Pump an attached gpui window to a fixed point so the geometry/text/focus caps
-        // read the post-transition frame (no-op headlessly — see `SettleHook`). Mirrors
-        // the sim windowed per-tick hook's `settle_to_fixed_point` before its check.
+        // Pump an attached gpui window to a fixed point so the
+        // geometry/text/focus caps read the post-transition frame (no-op
+        // headlessly — see `SettleHook`). Mirrors the sim windowed per-tick
+        // hook's `settle_to_fixed_point` before its check.
         (sut.settle)();
         // A parked run is a write the reference already applied but the test
         // holds out of the store, so the tick's store state is judged at the
@@ -1714,12 +1729,12 @@ impl<S: ComposedSlice> ComposedSut<S> {
             );
         }
         *sut.last_selected.borrow_mut() = Some(selected);
-        // `HOLON_PBT_INVARIANTS` disclosed softening: a matched `warn`/`skip` failure
-        // is logged loudly and made non-fatal (a DISCLOSED degraded run, not a
-        // clean pass); unmatched failures stay fatal. The composed home of the
-        // knob relocated from the deleted native runner core. The panic prefix
-        // is unchanged so `bisect_driver`'s `reproduction_signature()` still
-        // recognizes a composed divergence.
+        // `HOLON_PBT_INVARIANTS` disclosed softening: a matched `warn`/`skip`
+        // failure is logged loudly and made non-fatal (a DISCLOSED degraded
+        // run, not a clean pass); unmatched failures stay fatal. The composed
+        // home of the knob relocated from the deleted native runner core. The
+        // panic prefix is unchanged so `bisect_driver`'s
+        // `reproduction_signature()` still recognizes a composed divergence.
         use crate::pbt::invariant_mode_override::ModeOverride;
         use crate::pbt::invariant_mode_override::invariant_mode_override;
         // Softened ids are RETAINED (not dropped) — their layer ran and went
@@ -1750,11 +1765,11 @@ impl<S: ComposedSlice> ComposedSut<S> {
         // FIRST-DIVERGENT-LAYER verdict: several invariants across the stack
         // usually red at once (a store divergence re-projects into the matview,
         // re-derives into the viewmodel, re-renders…), so name the EARLIEST
-        // (most upstream) layer + its wiring source to start triage at the root.
-        // Kept AFTER the unchanged `reconciled composed sequence diverged from
-        // the oracle` prefix so `bisect_driver::reproduction_signature()` still
-        // matches (substring). Every id arrives attributed by its wiring, so no
-        // layer is ever guessed.
+        // (most upstream) layer + its wiring source to start triage at the
+        // root. Kept AFTER the unchanged `reconciled composed sequence diverged
+        // from the oracle` prefix so `bisect_driver::reproduction_signature()`
+        // still matches (substring). Every id arrives attributed by its wiring,
+        // so no layer is ever guessed.
         // Built ONLY on the failure path — a green tick pays nothing (the walk
         // is inside `inv-sql-budget`'s wall window).
         if !hard.is_empty() {
@@ -2002,18 +2017,19 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 }
             }
         }
-        // Windowed non-vacuity floor: when this SUT hosts a window (a `SutLayout` cap
-        // is present — true only on the §Round-5 windowed path), the windowed
-        // geometry family MUST have selected + run. Keyed off the ACTUAL caps
-        // (not the ref cap_set, which stays headless), so a silent deselect
-        // that turns the windowed families into "ran nothing" fails HERE
-        // instead of passing vacuously — the same guard
+        // Windowed non-vacuity floor: when this SUT hosts a window (a
+        // `SutLayout` cap is present — true only on the §Round-5 windowed
+        // path), the windowed geometry family MUST have selected + run. Keyed
+        // off the ACTUAL caps (not the ref cap_set, which stays headless), so a
+        // silent deselect that turns the windowed families into "ran nothing"
+        // fails HERE instead of passing vacuously — the same guard
         // `run_windowed_composed_check` enforces, now inside the unified
         // StateMachineTest.
         if sut.caps.get::<dyn SutLayout>().is_some() {
-            // Disclose the windowed ran set (C-5: lets the windowed harness log prove the
-            // `SutFrontendEngine` / `SutFrontendEmissions` invariants SELECT + RUN with
-            // real teeth — grep `[windowed ran]` for their ids).
+            // Disclose the windowed ran set (C-5: lets the windowed harness log
+            // prove the `SutFrontendEngine` / `SutFrontendEmissions` invariants
+            // SELECT + RUN with real teeth — grep `[windowed ran]` for their
+            // ids).
             eprintln!("[windowed ran] {:?}", report.ran_ids());
             assert!(
                 report.ran_ids().contains(&"inv-frontend-bounds-rendered"),
@@ -2048,7 +2064,8 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         let ledger = sut.engaged.borrow();
         // Weights-spike telemetry: one machine-parseable per-case line
         // (`[pbt-telemetry] {json}`) from the accumulated transitions + this
-        // ledger + the drawn wiring. Flag-gated, so a default run emits nothing.
+        // ledger + the drawn wiring. Flag-gated, so a default run emits
+        // nothing.
         if super::telemetry::telemetry_enabled() {
             let tele = sut.telemetry.borrow();
             let line = super::telemetry::build_line(
@@ -2067,11 +2084,11 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // engagement floor. Greppable via `[engagement summary]`.
         //
         // Catalogued-but-never-selected ids are listed too, as `=deselected`.
-        // The ledger is fed from `report.ran`, so a `Needs`-gated invariant this
-        // draw never selected leaves NO trace in it — and an id simply missing
-        // from the line is indistinguishable from one nobody wired. A draw that
-        // never selects an invariant is legitimate; a reader concluding the run
-        // covered it is not.
+        // The ledger is fed from `report.ran`, so a `Needs`-gated invariant
+        // this draw never selected leaves NO trace in it — and an id simply
+        // missing from the line is indistinguishable from one nobody wired. A
+        // draw that never selects an invariant is legitimate; a reader
+        // concluding the run covered it is not.
         let selected: std::collections::BTreeSet<&str> = ledger.keys().copied().collect();
         let deselected: Vec<String> = super::catalog::composed_invariant_catalog()
             .iter()

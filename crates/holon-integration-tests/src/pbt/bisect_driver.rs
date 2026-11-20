@@ -91,10 +91,10 @@ pub fn reproduces_under(set: &ComponentSet, transitions: &[E2ETransition]) -> bo
     }
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         // Seed the reference to match the composed `ComposedSut<WideE2E>` the
-        // `BisectionStepper` builds (`wide_e2e_ref_for` == the keystone's seeded init
-        // for this wiring), so reference and SUT start in lockstep — an empty
-        // `fresh_reference_state` would make every capture spuriously diverge on the
-        // seed.
+        // `BisectionStepper` builds (`wide_e2e_ref_for` == the keystone's
+        // seeded init for this wiring), so reference and SUT start in lockstep
+        // — an empty `fresh_reference_state` would make every capture
+        // spuriously diverge on the seed.
         let ref0 = wide_e2e_ref_for(&set.wiring);
         let mut stepper = BisectionStepper::default();
         run_sequence(

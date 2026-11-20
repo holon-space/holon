@@ -205,7 +205,8 @@ async fn apply_full_sync(
                 Some(Value::Integer(n)) => n.to_string(),
                 _ => return None,
             };
-            // ALLOW(entity_uri_from_raw): mirror row id column, already scheme-prefixed
+            // ALLOW(entity_uri_from_raw): mirror row id column, already
+            // scheme-prefixed
             Some((EntityUri::from_raw(&id_str), e.as_ref()))
         })
         .collect();
@@ -259,8 +260,9 @@ async fn apply_full_sync(
         });
     }
 
-    // Sequence: apply_batch (transactional) → on Ok write the SAME batch through
-    // to the mirror. On Err the mirror is left untouched (matches the rollback).
+    // Sequence: apply_batch (transactional) → on Ok write the SAME batch
+    // through to the mirror. On Err the mirror is left untouched (matches the
+    // rollback).
     let applied = changes.len();
     if !changes.is_empty() {
         cache.apply_batch(&changes, None).await?;
@@ -423,10 +425,10 @@ impl McpSyncEngine {
             })
             .collect();
 
-        // One mirror per sync-strategy entity, keyed by entity name. Each carries
-        // the entity's scheme (prefixed name) and id column so it can key rows
-        // exactly as the sync diff does. All start unseeded — seeded lazily on
-        // the first full sync.
+        // One mirror per sync-strategy entity, keyed by entity name. Each
+        // carries the entity's scheme (prefixed name) and id column so it can
+        // key rows exactly as the sync diff does. All start unseeded — seeded
+        // lazily on the first full sync.
         let mirrors: HashMap<String, Arc<EntityMirror>> = strategies
             .keys()
             .map(|name| {
@@ -569,10 +571,11 @@ impl McpSyncEngine {
     /// Subscribe to resource update notifications for all sync + vtable
     /// entities.
     pub async fn subscribe_all(&self) -> anyhow::Result<()> {
-        // Subscriptions require an MCP peer. A `rest` integration has no peer and
-        // must never declare subscribe-based syncs (that is enforced upstream in
-        // `finish_rest_integration`); reaching here with subscriptions but no
-        // peer is a wiring bug, so fail loud rather than silently no-op.
+        // Subscriptions require an MCP peer. A `rest` integration has no peer
+        // and must never declare subscribe-based syncs (that is enforced
+        // upstream in `finish_rest_integration`); reaching here with
+        // subscriptions but no peer is a wiring bug, so fail loud rather than
+        // silently no-op.
         let Some(peer) = &self.peer else {
             if self.has_subscriptions() {
                 anyhow::bail!(
@@ -774,10 +777,12 @@ impl McpSyncEngine {
 
 #[async_trait]
 impl MatviewHook for McpSyncEngine {
-    // ALLOW(unused_param): _fdw_sql required by trait shape — handler ignores it
+    // ALLOW(unused_param): _fdw_sql required by trait shape — handler ignores
+    // it
     async fn on_fdw_primed(&self, cache_table: &str, _fdw_sql: &str) {
         // Find the vtable subscription for this cache table.
-        // The FDW table name is "{cache_table}_fdw", so match by stripping the suffix.
+        // The FDW table name is "{cache_table}_fdw", so match by stripping the
+        // suffix.
         let fdw_table = format!("{cache_table}_fdw");
         let sub = match self
             .vtable_subscriptions
@@ -832,22 +837,23 @@ impl SyncableProvider for McpSyncEngine {
         &self.provider_name
     }
 
-    // ALLOW(unused_param): _position required by trait shape — full sync ignores
-    // stream position
+    // ALLOW(unused_param): _position required by trait shape — full sync
+    // ignores stream position
     async fn sync(&self, _position: StreamPosition) -> Result<StreamPosition> {
         let span = info_span!("mcp_full_sync", provider = %self.provider_name);
         async {
             info!("mcp_full_sync: starting");
 
-            // Full sweep is the engine's full-resync entry point: it runs at the
-            // initial boot sync and when the `full_sync` operation clears every
-            // cache table + sync token before re-syncing. In the latter case the
-            // tables were just emptied, so the mirrors must be reset here (they
-            // re-seed from the now-empty cache on the first per-entity diff) —
-            // this is how the engine is "informed" of the external clear without
-            // a cross-crate wire from the operation dispatcher. Routine
-            // notification/poll syncs never call `sync`, so their mirrors persist
-            // and keep serving diffs with zero DatabaseActor reads.
+            // Full sweep is the engine's full-resync entry point: it runs at
+            // the initial boot sync and when the `full_sync` operation clears
+            // every cache table + sync token before re-syncing. In the latter
+            // case the tables were just emptied, so the mirrors must be reset
+            // here (they re-seed from the now-empty cache on the first
+            // per-entity diff) — this is how the engine is "informed" of the
+            // external clear without a cross-crate wire from the operation
+            // dispatcher. Routine notification/poll syncs never call `sync`, so
+            // their mirrors persist and keep serving diffs with zero
+            // DatabaseActor reads.
             self.reset_all_mirrors();
 
             // Entities are independent replicas. Aborting the sweep on the
@@ -929,8 +935,8 @@ mod mirror_cutover_tests {
             Some(Value::Integer(n)) => n.to_string(),
             other => panic!("row has no usable id column '{id_col}': {other:?}"),
         };
-        // ALLOW(entity_uri_from_raw): test cache keys rows the same way the sync diff
-        // does
+        // ALLOW(entity_uri_from_raw): test cache keys rows the same way the
+        // sync diff does
         EntityUri::from_raw(&raw).to_string()
     }
 
@@ -985,14 +991,15 @@ mod mirror_cutover_tests {
         async fn get_all_ids(&self) -> CoreResult<Vec<EntityUri>> {
             self.get_all_ids_calls.fetch_add(1, SeqCst);
             let keys: Vec<String> = self.rows.lock().unwrap().keys().cloned().collect();
-            // ALLOW(entity_uri_from_raw): test cache re-derives typed ids from its own
-            // string keys
+            // ALLOW(entity_uri_from_raw): test cache re-derives typed ids from
+            // its own string keys
             Ok(keys.iter().map(|k| EntityUri::from_raw(k)).collect())
         }
         async fn apply_batch(
             &self,
             changes: &[Change<DynamicEntity>],
-            // ALLOW(unused_param): sync-token persistence is out of scope for this cache double
+            // ALLOW(unused_param): sync-token persistence is out of scope for
+            // this cache double
             _sync_token: Option<&holon_api::SyncTokenUpdate>,
         ) -> CoreResult<()> {
             self.apply_batch_calls.fetch_add(1, SeqCst);
@@ -1002,7 +1009,8 @@ mod mirror_cutover_tests {
                     Change::Created { data, .. } => {
                         let key = key_of(&self.id_col, data);
                         let mut stored = data.clone();
-                        // The real cache stamps every written row with its origin.
+                        // The real cache stamps every written row with its
+                        // origin.
                         stored.set("_change_origin", Value::String("local".to_string()));
                         rows.insert(key, stored);
                     }
@@ -1042,8 +1050,9 @@ mod mirror_cutover_tests {
         rows.iter().map(|(id, t)| record(id, t)).collect()
     }
 
-    // Hyphenated: production schemes come from `EntityName::as_str()` (hyphens),
-    // which is a valid URI scheme, so `EntityUri::from_raw` round-trips it.
+    // Hyphenated: production schemes come from `EntityName::as_str()`
+    // (hyphens), which is a valid URI scheme, so `EntityUri::from_raw`
+    // round-trips it.
     const SCHEME: &str = "cc-session";
 
     async fn full_sync(
@@ -1093,7 +1102,8 @@ mod mirror_cutover_tests {
         let cache = CountingCache::new("id");
         let mirror = EntityMirror::new(SCHEME.to_string(), "id".to_string());
 
-        // Initial full sync (empty cache → seed reads once, all records created).
+        // Initial full sync (empty cache → seed reads once, all records
+        // created).
         full_sync(&records(&[("a", "A"), ("b", "B")]), &mirror, &cache).await;
         assert_eq!(cache.get_all_calls(), 1, "seed read happens exactly once");
 
@@ -1126,8 +1136,8 @@ mod mirror_cutover_tests {
 
     fn key_of_json(r: &serde_json::Map<String, serde_json::Value>) -> String {
         let id = r.get("id").unwrap().as_str().unwrap();
-        // ALLOW(entity_uri_from_raw): test derives the expected key like the sync
-        // boundary
+        // ALLOW(entity_uri_from_raw): test derives the expected key like the
+        // sync boundary
         EntityUri::from_raw(&format!("{SCHEME}:{id}")).to_string()
     }
 
@@ -1191,7 +1201,8 @@ mod mirror_cutover_tests {
                         let recs = records(&chosen);
                         full_sync(&recs, &mirror, &cache).await;
                     }
-                    // Incremental (cursor) sync: a couple of created/updated rows.
+                    // Incremental (cursor) sync: a couple of created/updated
+                    // rows.
                     2 => {
                         let id = ids[rng.below(ids.len() as u64) as usize];
                         let title = if rng.below(2) == 0 { "Z" } else { "W" };
@@ -1200,7 +1211,8 @@ mod mirror_cutover_tests {
                             .await
                             .unwrap();
                     }
-                    // Clear-and-resync: the full_sync operation empties the cache
+                    // Clear-and-resync: the full_sync operation empties the
+                    // cache
                     // + tokens and the engine resets the mirror, then re-syncs.
                     3 => {
                         cache.clear();

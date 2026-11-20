@@ -429,7 +429,8 @@ async fn entity_index_spike() {
     let create_total: f64 = create.values().map(|v| v.as_f64().unwrap()).sum();
     let (rss1, bytes1) = (rss_kib(), page_bytes(&h).await);
 
-    // Correctness: the index holds every entity, and the writes above are visible.
+    // Correctness: the index holds every entity, and the writes above are
+    // visible.
     let total: usize = counts.iter().sum::<usize>() + 1;
     let idx_rows = match option.as_str() {
         "A" => q(&h, "SELECT uri FROM entity_index", vec![]).await,

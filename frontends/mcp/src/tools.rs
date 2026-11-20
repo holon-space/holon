@@ -1701,9 +1701,9 @@ fn held_mismatches(
                 ));
                 continue;
             }
-            // A dense text holds one row per TEXT block, so `after` names a text
-            // sibling; the body/source children an org file renders before the
-            // child headings are not rows and never precede one.
+            // A dense text holds one row per TEXT block, so `after` names a
+            // text sibling; the body/source children an org file renders before
+            // the child headings are not rows and never precede one.
             let siblings: Vec<&str> = held
                 .blocks
                 .iter()
@@ -3838,14 +3838,15 @@ impl HolonMcpServer {
         storage.insert("content_type".into(), Value::String("text".to_string()));
         storage.insert("task_state".into(), Value::String(task_state.clone()));
         storage.insert("gate".into(), Value::String(gate.clone()));
-        // ID property mirrors the bare id so org-rendered :PROPERTIES: blocks stay
-        // round-trip stable.
+        // ID property mirrors the bare id so org-rendered :PROPERTIES: blocks
+        // stay round-trip stable.
         storage.insert("ID".into(), Value::String(new_id_bare.clone()));
 
-        // Edge fields travel on the create params as a `Value::Array` of strings
-        // keyed by the column name — the carrier `EdgeField::param_value` builds
-        // and both write legs already read (`LoroBlockOperations::create`'s edge
-        // extraction, `SqlOperationProvider::partition_params`' edge partition).
+        // Edge fields travel on the create params as a `Value::Array` of
+        // strings keyed by the column name — the carrier
+        // `EdgeField::param_value` builds and both write legs already read
+        // (`LoroBlockOperations::create`'s edge extraction,
+        // `SqlOperationProvider::partition_params`' edge partition).
         // Absent/empty means "say nothing about this edge": emitting an empty
         // Array would make the provider issue a junction-clearing DELETE for a
         // row that cannot have edges yet.
@@ -3906,7 +3907,8 @@ impl HolonMcpServer {
         }
 
         // block.create returns response = None on successful INSERT,
-        // Some(existing_id) when INSERT OR IGNORE no-op'd on a primary-key collision.
+        // Some(existing_id) when INSERT OR IGNORE no-op'd on a primary-key
+        // collision.
         let response = self
             .service()
             .execute_operation(&EntityName::new("block"), "create", storage)
@@ -4098,8 +4100,8 @@ impl HolonMcpServer {
             rmcp::ErrorData::internal_error(format!("reset_vault build failed: {e}"), None)
         })?;
 
-        // 2. Swap the live MCP backend cell BEFORE rebinding, so any concurrent read
-        //    already sees the fresh engine (plan C2).
+        // 2. Swap the live MCP backend cell BEFORE rebinding, so any concurrent
+        //    read already sees the fresh engine (plan C2).
         {
             let mut cell = self.backend.write().expect("backend cell poisoned");
             cell.engine = Some(out.backend.clone());
@@ -4155,8 +4157,8 @@ impl HolonMcpServer {
                 rmcp::ErrorData::internal_error(format!("reset_vault rebind failed: {e}"), None)
             })?;
 
-        // 4. Retire the SUT: keep its Arcs + temp dirs alive-but-inert so no Drop runs
-        //    (plan F). Growth is observable via `RETIRED.len()`.
+        // 4. Retire the SUT: keep its Arcs + temp dirs alive-but-inert so no
+        //    Drop runs (plan F). Growth is observable via `RETIRED.len()`.
         push_retired(RetiredSut {
             _session: out.session,
             _engine: out.engine,
@@ -4374,8 +4376,9 @@ impl HolonMcpServer {
             )
         })?;
         // The cell is populated (block_query_source resolved), so the reactive
-        // engine slot MUST be present too — a missing one is a boot/reset wiring
-        // bug, not an honest "not wired". Fail loud rather than emit null.
+        // engine slot MUST be present too — a missing one is a boot/reset
+        // wiring bug, not an honest "not wired". Fail loud rather than emit
+        // null.
         let reactive_engine = reactive_engine.ok_or_else(|| {
             rmcp::ErrorData::internal_error(
                 "debug_pbt_snapshot: live_debug cell is populated but reactive_engine is unset \
@@ -5095,9 +5098,9 @@ impl HolonMcpServer {
                 )
             })?;
 
-        // Parse each result row into a Block via the canonical row parser. A row
-        // that is not a block row is a caller error (the query must select block
-        // columns) — fail loud rather than silently drop it.
+        // Parse each result row into a Block via the canonical row parser. A
+        // row that is not a block row is a caller error (the query must select
+        // block columns) — fail loud rather than silently drop it.
         let mut blocks = Vec::with_capacity(query_result.rows.len());
         for row in &query_result.rows {
             let block = Block::try_from(row.clone()).map_err(|e| {
@@ -5275,9 +5278,9 @@ impl HolonMcpServer {
                 rmcp::ErrorData::invalid_params(format!("could not plan patch: {e}"), None)
             })?;
 
-        // Optimistic concurrency: re-read updated_at for every touched block from
-        // the same `block` matview the projection was taken from; reject the
-        // whole batch if any changed.
+        // Optimistic concurrency: re-read updated_at for every touched block
+        // from the same `block` matview the projection was taken from; reject
+        // the whole batch if any changed.
         let mut conflicts: Vec<String> = Vec::new();
         if !plan.verify.is_empty() {
             let id_list = plan
@@ -6106,7 +6109,8 @@ impl HolonMcpServer {
         // input handler is installed — i.e. no editor is focused — so the
         // keystroke is dropped on the floor (dogfood #5 row 147: 22 keystrokes
         // vanished after a failed click cleared focus, yet the tool reported
-        // success). We must fail loud on that instead of faking `keystrokes_sent`.
+        // success). We must fail loud on that instead of faking
+        // `keystrokes_sent`.
         let mut handled_count = 0usize;
         for key in &keystrokes {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -6747,8 +6751,8 @@ impl HolonMcpServer {
                 )
             })?;
         let fs = self.debug.org_filesystem();
-        // Every arm passes the gate: an alias target comes from org files, which
-        // anyone who can write the vault controls. The refusal names the
+        // Every arm passes the gate: an alias target comes from org files,
+        // which anyone who can write the vault controls. The refusal names the
         // argument, never the path it resolved to.
         let refuse = |e: holon_filesystem::CanonicalRefusal, subject: &str| {
             rmcp::ErrorData::invalid_params(
@@ -6762,8 +6766,8 @@ impl HolonMcpServer {
         };
 
         if doc_arg_is_path(doc_id) {
-            // An absolute argument replaces the root in `join`, so both kinds meet the
-            // gate.
+            // An absolute argument replaces the root in `join`, so both kinds
+            // meet the gate.
             match holon_filesystem::VaultPath::inside_canonical(&*fs, &root, &root.join(doc_id)) {
                 Err(e) if e.names_no_entry() => {}
                 verdict => return verdict.map_err(|e| refuse(e, "it")),
@@ -10402,7 +10406,8 @@ mod dense_patch_shape_gate_tests {
             store.get_doc(DocScope::Global).await.expect("doc"),
             std::sync::Arc::new(holon_api::SystemClock),
         );
-        // A projection renders under its roots' parent; the sentinel cannot be one.
+        // A projection renders under its roots' parent; the sentinel cannot be
+        // one.
         put(&backend, "page", EntityUri::no_parent(), "page", &[], &[]).await;
         put(&backend, "root", EntityUri::block("page"), "root", &[], &[]).await;
         // The patch reads its writes back from the projection.

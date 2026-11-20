@@ -140,7 +140,8 @@ async fn every_root_delivery_holds_the_doc_write_guard() -> Result<()> {
         .and_then(|p| p.downcast::<String>().ok())
         .expect("a raw commit outside the write guard must panic in the subscription");
     assert!(message.contains(RAW), "panic names the origin: {message}");
-    // The panic unwound through loro's commit; nothing may touch the docs again.
+    // The panic unwound through loro's commit; nothing may touch the docs
+    // again.
     std::mem::forget((projection, global, layout, doc_store, raw));
     Ok(())
 }

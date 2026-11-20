@@ -134,10 +134,11 @@ impl Mutation {
                 let mut params = HashMap::new();
                 params.insert("id".to_string(), id.clone().into());
 
-                // Check if update targets a known SQL column or a custom property.
-                // Known columns use set_field (single-field update); custom properties
-                // use the "update" operation which packs unknown keys into the
-                // `properties` JSON column via partition_params.
+                // Check if update targets a known SQL column or a custom
+                // property. Known columns use set_field (single-field update);
+                // custom properties use the "update" operation which packs
+                // unknown keys into the `properties` JSON column via
+                // partition_params.
                 const KNOWN_COLUMNS: &[&str] = &[
                     "content",
                     "parent_id",
@@ -152,8 +153,8 @@ impl Mutation {
                 let has_custom_props = fields.keys().any(|k| !KNOWN_COLUMNS.contains(&k.as_str()));
 
                 if has_custom_props {
-                    // Use "update" operation — partition_params will pack custom
-                    // keys into the properties JSON column.
+                    // Use "update" operation — partition_params will pack
+                    // custom keys into the properties JSON column.
                     for (k, v) in fields.iter() {
                         params.insert(k.clone(), v.clone());
                     }
@@ -371,15 +372,17 @@ mod resolve_sut_id_tests {
             .downcast_ref::<String>()
             .expect("panic payload is a String");
         assert!(msg.contains("block::split-0"), "names the id: {msg}");
-        // The map contents are the diagnostic that makes the failure actionable.
+        // The map contents are the diagnostic that makes the failure
+        // actionable.
         assert!(msg.contains("block::split-9"), "names the map: {msg}");
     }
 
     #[test]
     fn born_equal_and_decoy_ids_pass_through_unchanged() {
         let map = map_of(&[]);
-        // `split-target-block` is the DECOY: it contains "split-" but is a real,
-        // born-equal id (single colon), not an oracle-only `block::split-N`.
+        // `split-target-block` is the DECOY: it contains "split-" but is a
+        // real, born-equal id (single colon), not an oracle-only
+        // `block::split-N`.
         for id in ["gen-1", "bulk-1-2", "split-target-block"] {
             let uri = EntityUri::block(id);
             assert_eq!(resolve_sut_id(&map, &uri), uri, "{id} must pass through");

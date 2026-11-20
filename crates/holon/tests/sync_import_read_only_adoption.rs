@@ -268,8 +268,8 @@ async fn a_block_imported_by_the_share_projection_refuses_the_users_next_edit() 
             .get_doc(holon_loro::loro_document_store::DocScope::Global)
             .await
             .expect("the global doc");
-        // ALLOW(loro_doc_escape): single-threaded test setup; no concurrent writer
-        // exists to observe.
+        // ALLOW(loro_doc_escape): single-threaded test setup; no concurrent
+        // writer exists to observe.
         let doc = global.doc();
         let tree = doc.get_tree(TREE_NAME);
         let mount = holon_loro::shared_tree::create_mount_node(

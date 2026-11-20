@@ -302,10 +302,10 @@ async fn a_failed_sink_write_discloses_the_read_model_ahead_of_the_index() -> Re
     );
     assert_eq!(sink.row_ids(), vec!["block:X-id".to_string()]);
 
-    // 3. The keystone oracle REPORTS the window. Rows are reduced to their ids —
-    //    the oracle keys on `first()` and compares whole rows, so ids alone are a
-    //    faithful reduction and the assertion cannot pass on a field the failure
-    //    did not touch.
+    // 3. The keystone oracle REPORTS the window. Rows are reduced to their ids
+    //    — the oracle keys on `first()` and compares whole rows, so ids alone
+    //    are a faithful reduction and the assertion cannot pass on a field the
+    //    failure did not touch.
     let rows = |ids: Vec<String>| -> Vec<Vec<String>> {
         let mut v: Vec<Vec<String>> = ids.into_iter().map(|id| vec![id]).collect();
         v.sort();

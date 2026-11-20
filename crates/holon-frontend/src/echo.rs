@@ -70,33 +70,36 @@ pub fn evaluate_data_sync_echo(
     {
         // Same seq as our last local write AND the echo is exactly the SERVER
         // canonicalization of the focused buffer. Non-editor writers
-        // (split/join/org) do NOT bump `write_seq`, so a genuine structural write
-        // echoes at `seq == last_local` too — but its content is a substantive
-        // change, never merely the whitespace-canonicalization of `current`. This
-        // branch is therefore the SQL-canonicalized echo of the user's OWN
-        // in-flight write. Converging would delete the just-typed whitespace (the
-        // "typed space vanishes ~100ms later" bug, whether at the end of the
-        // buffer or at the end of a multiline block's first line). Keep the
-        // buffer; the caller adopts the canonical baseline instead.
+        // (split/join/org) do NOT bump `write_seq`, so a genuine structural
+        // write echoes at `seq == last_local` too — but its content is a
+        // substantive change, never merely the whitespace-canonicalization of
+        // `current`. This branch is therefore the SQL-canonicalized echo of the
+        // user's OWN in-flight write. Converging would delete the just-typed
+        // whitespace (the "typed space vanishes ~100ms later" bug, whether at
+        // the end of the buffer or at the end of a multiline block's first
+        // line). Keep the buffer; the caller adopts the canonical baseline
+        // instead.
         //
         // The canonicalization MUST match what the store actually applied to
         // produce this echo, so it delegates to the single shared definition
-        // (`holon_api::content_canonical`) that `SqlOperationProvider::trimmed_content`
-        // also calls — the two can never drift. `is_source = false` is a
-        // deliberate approximation: the provider resolves `is_source` from the
-        // block's REAL content_type via a live DB lookup
-        // (`SqlOperationProvider`, set_field paths ~:2152-2175 / ~:1636-1654),
-        // which this pure function cannot see. For text blocks both sides use
-        // the text rule (exact match). For SOURCE blocks the store applies only
-        // `trim_end`, so a pure-trailing trim still matches (the reported bug
-        // stays fixed) and a first-line/leading divergence falls through to
-        // Converge — the pre-fix behavior, disclosed gap, no new data loss.
+        // (`holon_api::content_canonical`) that
+        // `SqlOperationProvider::trimmed_content` also calls — the two can
+        // never drift. `is_source = false` is a deliberate approximation: the
+        // provider resolves `is_source` from the block's REAL content_type via
+        // a live DB lookup (`SqlOperationProvider`, set_field paths ~:2152-2175
+        // / ~:1636-1654), which this pure function cannot see. For text blocks
+        // both sides use the text rule (exact match). For SOURCE blocks the
+        // store applies only `trim_end`, so a pure-trailing trim still matches
+        // (the reported bug stays fixed) and a first-line/leading divergence
+        // falls through to Converge — the pre-fix behavior, disclosed gap, no
+        // new data loss.
         EchoDecision::AdoptBaseline { seq }
     } else {
-        // `seq > last_local` (a genuinely newer authority — a peer edit stamps a
-        // fresh seq), OR `seq == last_local` with a substantive external change
-        // (a split truncation "hello world" -> "hello" shares the editor's seq
-        // but is not a trailing-whitespace trim of the buffer). Converge.
+        // `seq > last_local` (a genuinely newer authority — a peer edit stamps
+        // a fresh seq), OR `seq == last_local` with a substantive external
+        // change (a split truncation "hello world" -> "hello" shares the
+        // editor's seq but is not a trailing-whitespace trim of the buffer).
+        // Converge.
         EchoDecision::Converge { seq }
     }
 }
@@ -154,9 +157,9 @@ mod echo_suppression {
     #[test]
     fn split_truncation_after_last_keystroke_still_converges() {
         // A split_block issued AFTER the last keystroke gets a greater seq, so
-        // the surviving (reused) editor still converges to the truncated content
-        // while it owns focus — the property the old idle-heuristic preserved and
-        // the seq guard must keep.
+        // the surviving (reused) editor still converges to the truncated
+        // content while it owns focus — the property the old idle-heuristic
+        // preserved and the seq guard must keep.
         let d = evaluate_data_sync_echo("hello world", "hello", Some(12), 11);
         assert_eq!(d, EchoDecision::Converge { seq: 12 });
     }
@@ -164,13 +167,14 @@ mod echo_suppression {
     #[test]
     fn equal_seq_external_write_converges() {
         // Non-editor writers (split/join/org) don't bump write_seq, so the row
-        // retains the editor's last seq; their echo carries seq == last_local and
-        // a DIFFERENT value → converge (they changed content, not the token).
-        // The truncation "hello world" -> "hello" is NOT a trailing-whitespace
-        // canonicalization of the buffer (`"hello world".trim_end()` != "hello"),
-        // so it is a genuine external change and still converges even though it
-        // shares the editor's seq. This is the discriminator that keeps the
-        // trailing-space fix from swallowing real structural writes.
+        // retains the editor's last seq; their echo carries seq == last_local
+        // and a DIFFERENT value → converge (they changed content, not the
+        // token). The truncation "hello world" -> "hello" is NOT a
+        // trailing-whitespace canonicalization of the buffer (`"hello
+        // world".trim_end()` != "hello"), so it is a genuine external change
+        // and still converges even though it shares the editor's seq. This is
+        // the discriminator that keeps the trailing-space fix from swallowing
+        // real structural writes.
         let d = evaluate_data_sync_echo("hello world", "hello", Some(11), 11);
         assert_eq!(d, EchoDecision::Converge { seq: 11 });
     }
@@ -180,13 +184,13 @@ mod echo_suppression {
         // THE TRAILING-SPACE BUG. The user typed "foo " (trailing space); the
         // editor stamped write_seq 11 on that content write. The SQL provider
         // trims trailing whitespace on store ("foo") and echoes it back through
-        // CDC carrying the SAME write_seq 11 (the trim does not re-stamp). At the
-        // moment the echo arrives the focused buffer is still "foo " and
+        // CDC carrying the SAME write_seq 11 (the trim does not re-stamp). At
+        // the moment the echo arrives the focused buffer is still "foo " and
         // last_local_seq is 11. This echo is the SQL-canonicalized form of the
         // user's OWN in-flight write, distinguished from a genuine same-seq
-        // external write by `"foo ".trim_end() == "foo"`. Converging would delete
-        // the just-typed space; the correct decision keeps the buffer and adopts
-        // the canonical baseline.
+        // external write by `"foo ".trim_end() == "foo"`. Converging would
+        // delete the just-typed space; the correct decision keeps the buffer
+        // and adopts the canonical baseline.
         let d = evaluate_data_sync_echo("foo ", "foo", Some(11), 11);
         assert_eq!(d, EchoDecision::AdoptBaseline { seq: 11 });
     }
@@ -194,7 +198,8 @@ mod echo_suppression {
     #[test]
     fn same_seq_multiple_trailing_spaces_echo_adopts_baseline() {
         // Multiple trailing spaces collapse to the same canonical form, so the
-        // discriminator (`trim_end`) still recognises the echo as our own write.
+        // discriminator (`trim_end`) still recognises the echo as our own
+        // write.
         let d = evaluate_data_sync_echo("hello world   ", "hello world", Some(42), 42);
         assert_eq!(d, EchoDecision::AdoptBaseline { seq: 42 });
     }
@@ -204,21 +209,21 @@ mod echo_suppression {
         // CLASS EXTENSION. The server ALSO trims the FIRST line's trailing
         // whitespace in multiline text content (the first line becomes the org
         // headline). A space typed at the end of a multiline block's first line
-        // echoes back canonicalized ("foo \nbar" -> "foo\nbar") at the SAME seq.
-        // `current.trim_end()` cannot see this — the stripped space is interior
-        // to the whole string — so the discriminator must use the FULL server
-        // canonicalization (`holon_api::content_canonical`). Without it this
-        // narrower instance of the same bug still eats the space.
+        // echoes back canonicalized ("foo \nbar" -> "foo\nbar") at the SAME
+        // seq. `current.trim_end()` cannot see this — the stripped space is
+        // interior to the whole string — so the discriminator must use the FULL
+        // server canonicalization (`holon_api::content_canonical`). Without it
+        // this narrower instance of the same bug still eats the space.
         let d = evaluate_data_sync_echo("foo \nbar", "foo\nbar", Some(11), 11);
         assert_eq!(d, EchoDecision::AdoptBaseline { seq: 11 });
     }
 
     #[test]
     fn blur_reecho_after_adopt_does_not_loop() {
-        // BLUR-AFTER-ADOPT LIVENESS. After AdoptBaseline the buffer ("foo ") and
-        // SQL truth ("foo") diverge by a trailing space while focused. On blur
-        // the change-tracking (baselined to "foo") diffs the live "foo " and
-        // re-dispatches ONE set_field("foo ") — a blur intent carries NO
+        // BLUR-AFTER-ADOPT LIVENESS. After AdoptBaseline the buffer ("foo ")
+        // and SQL truth ("foo") diverge by a trailing space while focused. On
+        // blur the change-tracking (baselined to "foo") diffs the live "foo "
+        // and re-dispatches ONE set_field("foo ") — a blur intent carries NO
         // write_seq, so the provider trims to "foo" and leaves the write_seq
         // column at the editor's last value N. The re-echo is therefore
         // ("foo", seq N) at last_local N. Two terminal buffer states are
@@ -248,7 +253,8 @@ mod echo_suppression {
 
     #[test]
     fn self_echo_is_in_sync_and_advances_high_water() {
-        // The confirming echo of our own latest write equals current InputState.
+        // The confirming echo of our own latest write equals current
+        // InputState.
         let d = evaluate_data_sync_echo("abc", "abc", Some(11), 11);
         assert_eq!(
             d,

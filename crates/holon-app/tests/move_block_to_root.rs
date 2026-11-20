@@ -245,12 +245,12 @@ fn a_page_cannot_be_moved_to_root_because_root_is_not_a_page() {
             "fixture is vacuous: the block under test must be stored as a Page, got {stored_tags:?}"
         );
 
-        // `moved_is_page` comes through the prefetch, the way production supplies
-        // it, because the alternative pins nothing: `get_by_id` decodes through
-        // the DERIVED `TryFromEntity`, which defaults every `#[edge_field]` to
-        // empty, so `block.is_page()` read that way is ALWAYS false even though
-        // the matview holds `["Page"]` (asserted just above). That gap is a
-        // separate defect, reported with this change.
+        // `moved_is_page` comes through the prefetch, the way production
+        // supplies it, because the alternative pins nothing: `get_by_id`
+        // decodes through the DERIVED `TryFromEntity`, which defaults every
+        // `#[edge_field]` to empty, so `block.is_page()` read that way is
+        // ALWAYS false even though the matview holds `["Page"]` (asserted just
+        // above). That gap is a separate defect, reported with this change.
         //
         // `new_parent` is deliberately LEFT UNSET so the destination arm under
         // test is the one that answers — supplying it would bypass exactly what

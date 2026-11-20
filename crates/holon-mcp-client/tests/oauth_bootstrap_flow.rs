@@ -1154,7 +1154,8 @@ async fn a_cleartext_token_url_is_refused_before_the_browser_opens() {
     let creds_dir = tempfile::tempdir().unwrap();
     provision_client_credentials(creds_dir.path());
     let mut cfg = config_for(creds_dir.path(), "https://provider.example/token");
-    // A non-loopback cleartext endpoint: what a real misconfiguration looks like.
+    // A non-loopback cleartext endpoint: what a real misconfiguration looks
+    // like.
     cfg.token_url = "http://provider.example/token".to_string();
 
     let dir = store_dir();

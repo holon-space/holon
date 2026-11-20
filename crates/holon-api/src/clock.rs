@@ -419,9 +419,10 @@ impl Grain {
         let naive = dt
             .with_timezone(&local_offset(clock, millis)?)
             .naive_local();
-        // Treat the local wall-clock reading as if UTC to get a monotone integer
-        // that ticks at each *local* grain boundary. `div_euclid` floors toward
-        // negative infinity so pre-epoch instants still land in the right bucket.
+        // Treat the local wall-clock reading as if UTC to get a monotone
+        // integer that ticks at each *local* grain boundary. `div_euclid`
+        // floors toward negative infinity so pre-epoch instants still land in
+        // the right bucket.
         let secs = naive.and_utc().timestamp();
         Ok(GrainSample {
             tick: secs.div_euclid(self.unit_seconds()),

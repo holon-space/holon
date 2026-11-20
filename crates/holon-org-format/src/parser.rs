@@ -406,17 +406,17 @@ pub fn parse_org_file_with(
     let id_keyword = parse_doc_id(content);
     let resolved = resolve_document_identity(path, file_drawer.as_deref(), id_keyword.as_deref())?;
 
-    // THE CLASS-KILLER. `FileSyncController` asks `doc_id_from_content` for this
-    // file's identity BEFORE parsing, and treats `None` as "no stable identity"
-    // by minting one and stamping it on the file — silently rewriting the id the
-    // author wrote. So the probe disagreeing with the parse is not a cosmetic
-    // inconsistency, it is data loss with no error and no log line, and it has
-    // now happened twice (indented drawer; value-less `:KEY:` line).
+    // THE CLASS-KILLER. `FileSyncController` asks `doc_id_from_content` for
+    // this file's identity BEFORE parsing, and treats `None` as "no stable
+    // identity" by minting one and stamping it on the file — silently rewriting
+    // the id the author wrote. So the probe disagreeing with the parse is not a
+    // cosmetic inconsistency, it is data loss with no error and no log line,
+    // and it has now happened twice (indented drawer; value-less `:KEY:` line).
     //
     // The two share one function today, so this cannot fire. It is here because
-    // "cannot fire" is a property of the current factoring, not of the contract:
-    // if they are ever split again, the third axis must be LOUD instead of
-    // costing another vault its ids.
+    // "cannot fire" is a property of the current factoring, not of the
+    // contract: if they are ever split again, the third axis must be LOUD
+    // instead of costing another vault its ids.
     let probed = parse_doc_id_any_carrier(content);
     if probed != resolved {
         anyhow::bail!(
@@ -493,8 +493,8 @@ pub fn parse_org_file_with(
 
     // Top-level (pre-first-headline) source/image children of the document —
     // emitted FIRST so they precede headline blocks in document order. A page
-    // whose direct child is a source block (row-28: `convert_block_to_page` on a
-    // block owning a `holon_rule`) renders that child as a top-level
+    // whose direct child is a source block (row-28: `convert_block_to_page` on
+    // a block owning a `holon_rule`) renders that child as a top-level
     // `#+BEGIN_SRC` under the file `#+ID:` header; `process_headlines` only
     // walks headlines, so without this pass the block is dropped on round-trip.
     let top_section = extract_section_content(doc.section(), SectionRead::Preamble);
@@ -559,15 +559,16 @@ pub fn parse_org_file_with(
     // Parse boundary (F8, dogfood 2026-07-21): a single file must project to a
     // valid FOREST. Every block id must be distinct from the document id and
     // from every other block id in the file. A duplicate id makes a block its
-    // own ancestor -- the classic case is a doc `#+ID:` equal to a heading `:ID:`,
-    // which sets `block.parent_id == block.id` (a self-parent 1-cycle); two
-    // headings sharing an `:ID:` likewise tie one identity to two nodes.
+    // own ancestor -- the classic case is a doc `#+ID:` equal to a heading
+    // `:ID:`, which sets `block.parent_id == block.id` (a self-parent 1-cycle);
+    // two headings sharing an `:ID:` likewise tie one identity to two nodes.
     // Downstream the recursive `focus_descendants` tree projection walks
     // `child.parent_id = fd.id` with no cycle guard, so a self-parent recurses
     // without bound -- boot stack-overflow that kills the whole app. Parse,
     // don't validate: reject the malformed file HERE with an enriched error so
     // the ingest boundary quarantines it (loud + disclosed, other files keep
-    // syncing) instead of writing the cyclic row the projection then crashes on.
+    // syncing) instead of writing the cyclic row the projection then crashes
+    // on.
     reject_id_cycles(
         path,
         &document,
@@ -712,7 +713,8 @@ pub fn split_headline_tags(line: &str) -> (String, Vec<String>) {
 /// must not contain `]]` nor end in `]` (docs/Reference/ORG_SYNTAX.md).
 pub fn linkable_title(content: &str, tags: &holon_api::Tags) -> Option<(usize, String)> {
     let line = content.split_once('\n').map_or(content, |(line, _)| line);
-    // The parser ends the headline at its trailing ASCII whitespace (a `\r` too).
+    // The parser ends the headline at its trailing ASCII whitespace (a `\r`
+    // too).
     let line = line.trim_end_matches(|c: char| c.is_ascii_whitespace());
     let written = if tags.is_empty() {
         line.to_string()
@@ -975,8 +977,8 @@ fn emit_section_children(
         },
     ) in sources.into_iter().enumerate()
     {
-        // Extract :id from header args if present (preserves ID across round-trips)
-        // Otherwise fall back to stable ID based on parent + index
+        // Extract :id from header args if present (preserves ID across
+        // round-trips) Otherwise fall back to stable ID based on parent + index
         let src_id = source_block
             .header_args
             .remove("id")
@@ -1047,12 +1049,13 @@ fn emit_section_children(
                 "prologue",
                 "epilogue",
             ];
-            // Resolve the `:REQUIRES:`/`:BLOCKED-BY:` group as a UNIT before the
-            // header_args map is consumed below, so one writer owns the
-            // canonical key (symmetric with the headline path). header_args is a
-            // HashMap, so its iteration order is not the authored order — sort
-            // the group by key for a DETERMINISTIC carried value: a write ->
-            // read -> write fixed point must not depend on map iteration order.
+            // Resolve the `:REQUIRES:`/`:BLOCKED-BY:` group as a UNIT before
+            // the header_args map is consumed below, so one writer owns the
+            // canonical key (symmetric with the headline path). header_args is
+            // a HashMap, so its iteration order is not the authored order —
+            // sort the group by key for a DETERMINISTIC carried value: a write
+            // -> read -> write fixed point must not depend on map iteration
+            // order.
             let mut dep_entries: Vec<(String, String)> = source_block
                 .header_args
                 .iter()
@@ -1109,10 +1112,11 @@ fn emit_section_children(
                         }
                     }
                 } else if k.eq_ignore_ascii_case("TAGS") {
-                    // `:TAGS <space-joined>` is emitted by `source_block_to_org`
-                    // because a Source block has no headline to carry `:tag:`
-                    // notation. Lift it back into the typed `block.tags` set so
-                    // tags survive the org round-trip on rule/source blocks.
+                    // `:TAGS <space-joined>` is emitted by
+                    // `source_block_to_org` because a Source block has no
+                    // headline to carry `:tag:` notation. Lift it back into the
+                    // typed `block.tags` set so tags survive the org round-trip
+                    // on rule/source blocks.
                     if let Some(s) = v.as_string() {
                         src_block.tags = Tags::from_tag_iter(
                             s.split(|c: char| c == ',' || c.is_whitespace())
@@ -1383,7 +1387,8 @@ fn headline_rows<'t>(
     let now = holon_api::clock::now_millis();
     let mut block = Block {
         id: EntityUri::block(&id),
-        // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
+        // ALLOW(entity_uri_from_raw): org parser output: parent headline raw
+        // org slug
         parent_id: EntityUri::from_raw(parent_id),
         content,
         marks,
@@ -1517,8 +1522,8 @@ fn headline_rows<'t>(
         drawers.insert(block.id.clone(), lines);
     }
 
-    // Store ID in properties (extract_properties filters it out since it's used for
-    // block.id)
+    // Store ID in properties (extract_properties filters it out since it's used
+    // for block.id)
     block.set_property("ID", holon_api::Value::String(id.clone()));
     match properties_drawer(headline).map(|d| drawer_text(&d)) {
         Some(authored) => {
@@ -1884,12 +1889,12 @@ struct SectionContent {
     text_after_source: bool,
     /// Relative file paths of images found as [[file:...]] links in body text
     image_paths: Vec<String>,
-    // ALLOW(fallback): orgize misclassifies SCHEDULED as PARAGRAPH when properties drawer precedes
-    // planning
+    // ALLOW(fallback): orgize misclassifies SCHEDULED as PARAGRAPH when
+    // properties drawer precedes planning
     /// SCHEDULED recovered from paragraph text when orgize misclassifies it.
     scheduled_fallback: Option<String>,
-    // ALLOW(fallback): orgize misclassifies DEADLINE as PARAGRAPH when properties drawer precedes
-    // planning
+    // ALLOW(fallback): orgize misclassifies DEADLINE as PARAGRAPH when
+    // properties drawer precedes planning
     /// DEADLINE recovered from paragraph text when orgize misclassifies it.
     deadline_fallback: Option<String>,
 }
@@ -2020,10 +2025,10 @@ fn extract_section_content(section_opt: Option<Section>, read: SectionRead) -> S
         }
     }
 
-    // ALLOW(fallback): regex-extract SCHEDULED/DEADLINE from PARAGRAPH text orgize
-    // misclassifies Extract SCHEDULED/DEADLINE fallback from non-planning text
-    // (orgize misclassifies them as PARAGRAPH when properties drawer precedes
-    // planning).
+    // ALLOW(fallback): regex-extract SCHEDULED/DEADLINE from PARAGRAPH text
+    // orgize misclassifies Extract SCHEDULED/DEADLINE fallback from
+    // non-planning text (orgize misclassifies them as PARAGRAPH when properties
+    // drawer precedes planning).
     for child in section_syntax.children() {
         match child.kind() {
             SyntaxKind::SOURCE_BLOCK
@@ -2048,7 +2053,8 @@ fn extract_section_content(section_opt: Option<Section>, read: SectionRead) -> S
 
     // Extract body text by removing non-body nodes from the full section text.
     // This preserves original spacing (blank lines, lists, etc.) instead of
-    // reassembling from individual child nodes which would lose inter-node spacing.
+    // reassembling from individual child nodes which would lose inter-node
+    // spacing.
     let range_of = |node: &orgize::SyntaxNode| {
         let range = node.text_range();
         (
@@ -2944,8 +2950,9 @@ mod tests {
 
     #[test]
     fn edge_typed_drawer_keys_refuse_a_value_that_is_not_a_usable_block_id() {
-        // A vault template shipped with `{{mission}}` still unfilled is ordinary
-        // file content: ingest of that one file must fail, not the process.
+        // A vault template shipped with `{{mission}}` still unfilled is
+        // ordinary file content: ingest of that one file must fail, not the
+        // process.
         let sources = [
             "* Goal\n:PROPERTIES:\n:ID: p0\n:contributes-to: {{mission}}\n:END:\n",
             "* Task\n:PROPERTIES:\n:ID: p1\n:REQUIRES: {{mission}}\n:END:\n",
@@ -3023,8 +3030,9 @@ mod tests {
     fn test_blocked_by_edge_roundtrips_via_canonical_requires() {
         // End-to-end org round-trip for the dependency edge through the real
         // render path (`OrgRenderer::render_entitys`). Canonical render key is
-        // `:REQUIRES:` (owner ruling 2026-07-16); a `:BLOCKED-BY:`-authored edge
-        // survives render -> re-parse losslessly, converged to `:REQUIRES:`.
+        // `:REQUIRES:` (owner ruling 2026-07-16); a `:BLOCKED-BY:`-authored
+        // edge survives render -> re-parse losslessly, converged to
+        // `:REQUIRES:`.
         use crate::org_renderer::OrgRenderer;
 
         let content = "* TODO Task\n:PROPERTIES:\n:BLOCKED-BY: orient-daily-view \
@@ -3143,9 +3151,9 @@ mod tests {
     fn test_source_block_tags_survive_org_roundtrip() {
         // A Source block has no headline to carry `:tag:` notation, so its tags
         // ride a `:TAGS <space-joined>` header arg on the #+BEGIN_SRC line and
-        // the parser must lift them back into `block.tags`. (Regression: keystone
-        // red on inv-blocks-match-ref/org — a `task` tag added to the journals
-        // holon_rule block was destroyed on org re-ingest.)
+        // the parser must lift them back into `block.tags`. (Regression:
+        // keystone red on inv-blocks-match-ref/org — a `task` tag added to the
+        // journals holon_rule block was destroyed on org re-ingest.)
         let mut src = Block {
             id: EntityUri::block("journals::action::0"),
             parent_id: EntityUri::block("journals::auto-create"),
@@ -3995,8 +4003,9 @@ paragraph with *bold* and /italic/ words
     fn test_parser_no_marks_keeps_content_byte_identical() {
         // A heading without any inline markup must keep `content` byte-
         // identical to the raw text and `marks` = None — this preserves
-        // ALLOW(compatibility): describes a parser invariant for legacy headings, not a
-        // versioning shim backward compatibility for the bulk of the corpus.
+        // ALLOW(compatibility): describes a parser invariant for legacy
+        // headings, not a versioning shim backward compatibility for the bulk
+        // of the corpus.
         let content = "* plain heading
 :PROPERTIES:
 :ID: h2

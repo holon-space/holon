@@ -270,18 +270,19 @@ fn extract_org_snapshot<'a>(
     sut: &'a CapMap,
     refs: &'a CapMap,
 ) -> Pin<Box<dyn Future<Output = Extraction<Vec<Block>>> + 'a>> {
-    // Filter the on-disk-parsed SUT blocks by the SAME `seed_block_ids` the ref's
-    // `org_blocks` projection excludes (scaffold-injected boot layout: the
-    // `block:journals` page + its `src::0`/`render::0` display sources). This is
-    // the symmetric twin of `extract_block_raw` in holon-turso-testing — the
-    // block_raw arm has always filtered seed on the SUT side; the org arm only
-    // "matched" by accident while the parser silently dropped top-level
-    // `#+BEGIN_SRC` blocks (the seed sources render at the page's top level). Once
-    // the parser correctly round-trips top-level sources (row-28 data-loss fix),
-    // those seed sources surface here and MUST be filtered to stay symmetric —
-    // otherwise they read as spurious `only_in_actual` blocks. Non-seed content
-    // (the `journals::auto-create` heading + its `holon_rule` action, and all
-    // user blocks) is NOT in `seed_block_ids`, so it is still compared.
+    // Filter the on-disk-parsed SUT blocks by the SAME `seed_block_ids` the
+    // ref's `org_blocks` projection excludes (scaffold-injected boot layout:
+    // the `block:journals` page + its `src::0`/`render::0` display sources).
+    // This is the symmetric twin of `extract_block_raw` in holon-turso-testing
+    // — the block_raw arm has always filtered seed on the SUT side; the org arm
+    // only "matched" by accident while the parser silently dropped top-level
+    // `#+BEGIN_SRC` blocks (the seed sources render at the page's top level).
+    // Once the parser correctly round-trips top-level sources (row-28 data-loss
+    // fix), those seed sources surface here and MUST be filtered to stay
+    // symmetric — otherwise they read as spurious `only_in_actual` blocks.
+    // Non-seed content (the `journals::auto-create` heading + its `holon_rule`
+    // action, and all user blocks) is NOT in `seed_block_ids`, so it is still
+    // compared.
     Box::pin(async move {
         let seed_block_ids = RefBackend::seed_block_ids(refs);
         let copies = holon_pbt_core::capabilities::copies_by_file(
@@ -691,8 +692,8 @@ mod tests {
                 .any(|(id, _)| *id == "inv-block-parent/block_raw"),
             "the re-parent must be caught by the parent invariant; failures={failures:?}",
         );
-        // Isolation: the existence/termination/content invariants must NOT fire —
-        // the wrong parent is valid and only the parent linkage diverged.
+        // Isolation: the existence/termination/content invariants must NOT fire
+        // — the wrong parent is valid and only the parent linkage diverged.
         for clean in [
             "inv-no-orphan-blocks",
             "inv-no-parent-cycles",
@@ -717,8 +718,8 @@ mod tests {
             text: "helo".to_string(),
             caret: 4,
         });
-        // The real oracle holds "hello" (caret = len = 5); the buggy SUT dropped
-        // a char to "helo".
+        // The real oracle holds "hello" (caret = len = 5); the buggy SUT
+        // dropped a char to "helo".
         let ref_state = seed_ref_with_editor(Vec::new(), block, "hello");
 
         let report = run_with_seeded_ref(
@@ -748,8 +749,8 @@ mod tests {
             text: "hello".to_string(),
             caret: 4,
         });
-        // The real oracle opens the editor at end-of-text (caret = len = 5); the
-        // buggy SUT reports caret 4. Text agrees on "hello".
+        // The real oracle opens the editor at end-of-text (caret = len = 5);
+        // the buggy SUT reports caret 4. Text agrees on "hello".
         let ref_state = seed_ref_with_editor(Vec::new(), block, "hello");
 
         let report = run_with_seeded_ref(

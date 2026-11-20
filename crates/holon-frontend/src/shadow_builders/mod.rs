@@ -63,8 +63,9 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
         };
         // A vertical floor: the column never paints shorter than `min_height`
         // px, so a short/empty section (a LogSeq journal day) still occupies a
-        // comfortable block. Parsed at the boundary — present-but-non-numeric or
-        // negative is a config bug surfaced loud, never coerced to a default.
+        // comfortable block. Parsed at the boundary — present-but-non-numeric
+        // or negative is a config bug surfaced loud, never coerced to a
+        // default.
         let min_height = match ba.args.get_f64_strict("min_height") {
             Ok(Some(v)) if v < 0.0 => {
                 return ReactiveViewModel::error(

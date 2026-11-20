@@ -121,8 +121,9 @@ pub fn run(label: &'static str) {
         .clone()
         .expect("full_headless -> booted HeadlessFrontendComponent");
 
-    // ── 2. TUI renderer plumbing (the same lifted Arcs the phased harness used —
-    // see frontends/tui/src/user_driver.rs module docs for why they are shared). ──
+    // ── 2. TUI renderer plumbing (the same lifted Arcs the phased harness used
+    // — see frontends/tui/src/user_driver.rs module docs for why they are
+    // shared). ──
     let debug = Arc::new(DebugServices::default());
     let captured: Arc<RwLock<Option<OffscreenBuffer>>> = Arc::new(RwLock::new(None));
     let geometry = TuiGeometry::new();
@@ -216,8 +217,9 @@ pub fn run(label: &'static str) {
         interaction_tx,
     ));
     let geometry_box: Box<dyn GeometryProvider> = Box::new(geometry.clone());
-    // Settle handle (engine + frontend) captured before `bundle.caps` is moved, so
-    // the per-apply settle converges CDC + Loro + org like the headless path.
+    // Settle handle (engine + frontend) captured before `bundle.caps` is moved,
+    // so the per-apply settle converges CDC + Loro + org like the headless
+    // path.
     let handle = WideHandle::from_bundle(&bundle);
     let overlaid = overlay_windowed_caps(
         bundle.caps,
@@ -229,11 +231,12 @@ pub fn run(label: &'static str) {
         WindowMountConvention::InlineRow,
     );
 
-    // Settle hook: the renderer self-drives on the backend runtime, so settling is
-    // pure polling — wait until the element count is stable and no "loading"
+    // Settle hook: the renderer self-drives on the backend runtime, so settling
+    // is pure polling — wait until the element count is stable and no "loading"
     // placeholders remain (the TUI mirror of the gpui fixed-point settle).
-    // `wait_for_geometry_ready`'s row predicate stays out: that is a boot gate, and
-    // a transition may legitimately settle on a region with no addressable rows.
+    // `wait_for_geometry_ready`'s row predicate stays out: that is a boot gate,
+    // and a transition may legitimately settle on a region with no addressable
+    // rows.
     let settle_geometry = geometry.clone();
     let settle: SettleHook = Box::new(move || {
         let mut last = usize::MAX;
@@ -256,9 +259,9 @@ pub fn run(label: &'static str) {
         panic!("[tui composed] settle hook never reached a fixed point");
     });
 
-    // A dedicated runtime drives the apply/check leaf futures; the booted backend
-    // keeps running on `runtime`'s worker threads. The main thread is NOT
-    // runtime-entered, so the harness's internal `block_on` is legal here.
+    // A dedicated runtime drives the apply/check leaf futures; the booted
+    // backend keeps running on `runtime`'s worker threads. The main thread is
+    // NOT runtime-entered, so the harness's internal `block_on` is legal here.
     let composed_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -268,8 +271,8 @@ pub fn run(label: &'static str) {
     // ── 5. ONE generated windowed sequence, composed catalog every tick. ──
     let live = sut.cap_set();
     disclose_excluded(&live);
-    // TUI-SPECIFIC DISCLOSED EXCLUSION (tracked Phase-3 blocker, same doctrine as
-    // the C-3 rows 19–24): the keystroke-backed block-tree rows
+    // TUI-SPECIFIC DISCLOSED EXCLUSION (tracked Phase-3 blocker, same doctrine
+    // as the C-3 rows 19–24): the keystroke-backed block-tree rows
     // (SplitBlock/JoinBlock/ Indent/Outdent/Move*) ride
     // `KeystrokeBlockTreeWriter` (focus editor + Home/ Right×n/Enter/Tab/
     // Backspace through the driver), and the TUI's `app_handle_input_event`

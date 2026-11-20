@@ -59,7 +59,8 @@ async fn failed_sink_write_neither_advances_base_nor_drops_change() -> Result<()
     );
     projection.arm();
 
-    // ── (a) fail=false: insert B, seed `live` via a full (cold-boot) pass ──────
+    // ── (a) fail=false: insert B, seed `live` via a full (cold-boot) pass
+    // ──────
     sink.set_fail(false);
     insert_root_block(&doc_store, "B-id", "block B").await?;
     projection.project().await.expect("seed pass succeeds");
@@ -74,7 +75,8 @@ async fn failed_sink_write_neither_advances_base_nor_drops_change() -> Result<()
     let calls1 = sink.apply_calls();
     assert_eq!(calls1, 1, "one apply (the seed create) so far");
 
-    // ── (b) insert C, stage its create fact, arm the failure ──────────────────
+    // ── (b) insert C, stage its create fact, arm the failure
+    // ──────────────────
     let c_tid = insert_root_block(&doc_store, "C-id", "block C").await?;
     projection
         .pending()
@@ -86,7 +88,8 @@ async fn failed_sink_write_neither_advances_base_nor_drops_change() -> Result<()
         });
     sink.set_fail(true);
 
-    // ── (c) failing incremental pass: Err, base untouched, seeded flipped ──────
+    // ── (c) failing incremental pass: Err, base untouched, seeded flipped
+    // ──────
     let r = projection.project().await;
     assert!(r.is_err(), "a failed sink write surfaces as Err");
     assert!(
@@ -111,7 +114,8 @@ async fn failed_sink_write_neither_advances_base_nor_drops_change() -> Result<()
     );
     let calls_after_fail = sink.apply_calls();
 
-    // ── (d) recovery: next successful pass RE-EMITS C (never silently dropped) ─
+    // ── (d) recovery: next successful pass RE-EMITS C (never silently dropped)
+    // ─
     sink.set_fail(false);
     projection.project().await.expect("recovery pass succeeds");
     assert!(

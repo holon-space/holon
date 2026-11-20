@@ -149,8 +149,9 @@ async fn block_engine() -> Result<Arc<BackendEngine>> {
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
                     let handle = Handle::current();
-                    // ALLOW(block_on): wrapped in `block_in_place`, which is what makes a
-                    // blocking wait legal on a multi-thread runtime thread.
+                    // ALLOW(block_on): wrapped in `block_in_place`, which is
+                    // what makes a blocking wait legal on a multi-thread
+                    // runtime thread.
                     handle.block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })
                 .expect("block_raw cache");
@@ -168,8 +169,8 @@ async fn no_user_value_reaches_a_log_span_or_error() -> Result<()> {
     let ctx = E2ETestContext::from_engine(block_engine().await?);
     let engine = ctx.service().engine().clone();
 
-    // 1. A write carrying a user value in content AND in a property, with a number
-    //    among the property values.
+    // 1. A write carrying a user value in content AND in a property, with a
+    //    number among the property values.
     let mut params = StorageEntity::new();
     params.insert("id".into(), Value::String("block:sentinel-1".into()));
     params.insert("content".into(), Value::String(SENTINEL_CONTENT.into()));
@@ -203,8 +204,8 @@ async fn no_user_value_reaches_a_log_span_or_error() -> Result<()> {
         .context("the watched query under test must really run")?;
     drop(stream);
 
-    // 3. A view creation that FAILS — `preload` discloses the failure instead of
-    //    propagating it, and that disclosure carried the whole CREATE.
+    // 3. A view creation that FAILS — `preload` discloses the failure instead
+    //    of propagating it, and that disclosure carried the whole CREATE.
     let unbuildable = format!(
         "SELECT x FROM a_table_that_does_not_exist WHERE x = '{SENTINEL_PROPERTY}' AND y = \
          {SENTINEL_NUMBER}"
@@ -271,7 +272,8 @@ async fn no_user_value_reaches_a_log_span_or_error() -> Result<()> {
         // this line the capture holds no error built from a statement at all,
         // and the loop above would be vacuous for that whole class.
         "names no grain as a literal",
-        // Only step 3's failing preload (the matview_manager Err arm) writes this.
+        // Only step 3's failing preload (the matview_manager Err arm) writes
+        // this.
         "preload: failed to create view",
         // Only step 5's failing query is refused at statement preparation.
         "Failed to prepare query",

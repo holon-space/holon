@@ -315,9 +315,9 @@ fn expand(
     // The pre-filter is deliberately WIDER than the window, by two days. The
     // window itself is applied ONCE, to every row, by `in_window`, which judges
     // an all-day row by its DATE; but an all-day occurrence's midnight INSTANT
-    // is up to a day before the window instant (midnight in Berlin is 22:00Z the
-    // previous day), so a filter asking rrule for the window's instants would
-    // drop a row that `in_window` would keep. Widening here is what lets
+    // is up to a day before the window instant (midnight in Berlin is 22:00Z
+    // the previous day), so a filter asking rrule for the window's instants
+    // would drop a row that `in_window` would keep. Widening here is what lets
     // `in_window` be the single authority instead of one of two disagreeing
     // conventions.
     let slack = chrono::Duration::days(2);

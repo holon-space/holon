@@ -628,8 +628,9 @@ fn every_edge_key_and_block_kind_reaches_a_slot_preserving_fixed_point() {
 /// edge and ONE merged verbatim value under `REQUIRES`, authored order kept.
 #[test]
 fn a_cross_key_slot_and_real_id_survive_the_round_trip() {
-    // (label, slot spelling, real spelling, slot-first?) — both drawer spellings
-    // in both orders. The merged carried value is authored order, first line first.
+    // (label, slot spelling, real spelling, slot-first?) — both drawer
+    // spellings in both orders. The merged carried value is authored order,
+    // first line first.
     let cases: [(&str, &str, &str, bool); 4] = [
         (
             "REQUIRES-slot then BLOCKED-BY-real",

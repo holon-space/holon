@@ -416,10 +416,11 @@ impl<W> RenderInterpreter<W> {
         services: &dyn BuilderServices,
         interpret_fn: &dyn Fn(&RenderExpr, &RenderContext) -> W,
     ) -> W {
-        // One-level scoping of the parent's offer: the builder learns it through
-        // `parent_capability`, while the `ctx` it clones for its own children
-        // carries `ContainerCapability::None`. Without this strip an `accordion`
-        // wrapped in a `row` inside a `column` would inherit the column's offer.
+        // One-level scoping of the parent's offer: the builder learns it
+        // through `parent_capability`, while the `ctx` it clones for its own
+        // children carries `ContainerCapability::None`. Without this strip an
+        // `accordion` wrapped in a `row` inside a `column` would inherit the
+        // column's offer.
         let parent_capability = ctx.parent_capability;
         let stripped;
         let ctx = if parent_capability == crate::render_context::ContainerCapability::None {
@@ -562,8 +563,8 @@ pub fn resolve_props(
     };
 
     // Dummy interpret closure — props_only builders never recurse.
-    // ALLOW(unused_param): closure conforms to existing builder fn-pointer shape;
-    // both args are required by signature
+    // ALLOW(unused_param): closure conforms to existing builder fn-pointer
+    // shape; both args are required by signature
     let noop_interpret = |_e: &RenderExpr, _c: &RenderContext| -> ReactiveViewModel {
         ReactiveViewModel::from_widget("_unreachable", HashMap::new())
     };
@@ -994,9 +995,10 @@ pub fn shared_live_query_build<W>(
     });
 
     // Resolve `virtual_parent: true` → `virtual_parent: "<context_id>"`.
-    // The DSL author opts into virtual children by writing `virtual_parent: true`
-    // on a collection expression. We resolve the sentinel to the actual parent ID
-    // here, so the stored expression survives signal re-interpretation.
+    // The DSL author opts into virtual children by writing `virtual_parent:
+    // true` on a collection expression. We resolve the sentinel to the actual
+    // parent ID here, so the stored expression survives signal
+    // re-interpretation.
     let live_query_render_expr = resolve_virtual_parent(live_query_render_expr, &context_id);
 
     let mut child_ctx = deeper_ctx.with_data_rows(vec![]);
@@ -1058,9 +1060,10 @@ pub fn shared_render_entity_build<W>(ba: &BuilderArgs<'_, W>) -> RenderBlockResu
 
     // Profile/variant resolution — works for any entity type.
     // The profile resolver derives entity type from the row ID's URI scheme
-    // (e.g., "block:xyz" → block profiles, "cc-project:xyz" → cc-project profiles).
-    // All rendering behavior (source blocks, text editing, query blocks) is defined
-    // as variants in entity profile YAML — no hardcoded content_type matching.
+    // (e.g., "block:xyz" → block profiles, "cc-project:xyz" → cc-project
+    // profiles). All rendering behavior (source blocks, text editing, query
+    // blocks) is defined as variants in entity profile YAML — no hardcoded
+    // content_type matching.
     let profile = ba.services.resolve_profile(ba.ctx.row());
     let ops: Vec<OperationWiring> = profile
         .as_ref()

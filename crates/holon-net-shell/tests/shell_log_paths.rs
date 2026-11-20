@@ -684,7 +684,8 @@ fn run_once(pattern: &Pattern, names: &Names, attempt: u64) {
             .difference(&before)
             .cloned()
             .collect();
-        // The host refuses a name only once the runner has made its parent dirs.
+        // The host refuses a name only once the runner has made its parent
+        // dirs.
         let left = |path: &PathBuf| expected == Expect::Refused || !path.is_dir();
         assert!(
             !new.iter().any(left),
@@ -1052,7 +1053,8 @@ impl World {
             expected = Expect::Conflict;
         }
         if let Expect::Logged { exact, .. } = &mut expected {
-            // Another log or entry is there, or an open run may take the path first.
+            // Another log or entry is there, or an open run may take the path
+            // first.
             if exact
                 .as_deref()
                 .is_some_and(|e| self.taken(e) || on_disk(e))

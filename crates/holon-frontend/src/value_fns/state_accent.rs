@@ -46,7 +46,8 @@ pub fn accent_for_state(state: &str) -> &'static str {
     match key.as_str() {
         "DONE" | "COMPLETED" | "FINISHED" | "CLOSED" => ACCENT_DONE,
         // `NOW` is LogSeq's in-progress keyword (DOING-family); `LATER` is
-        // its not-started keyword (TODO-family, neutral) — ForeignVaultCompat §4.
+        // its not-started keyword (TODO-family, neutral) — ForeignVaultCompat
+        // §4.
         "DOING" | "NOW" | "IN PROGRESS" | "IN-PROGRESS" | "INPROGRESS" | "NEXT" | "STARTED" => {
             ACCENT_ACTIVE
         }

@@ -22,8 +22,8 @@ mod tests {
     /// scheme. Test fixtures still spell ids bare (`"A"`), so we compare on
     /// the canonical `block:`-prefixed form to accept either spelling.
     fn canon(id: &str) -> String {
-        // ALLOW(entity_uri_from_raw): canon() parses bare test-fixture id literal into
-        // canonical block form
+        // ALLOW(entity_uri_from_raw): canon() parses bare test-fixture id
+        // literal into canonical block form
         EntityUri::from_raw(id).as_str().to_string()
     }
 
@@ -156,8 +156,8 @@ mod tests {
                 _ => Value::Null,
             };
             match field {
-                // ALLOW(entity_uri_from_raw): test set_field boundary — parent_id value arrives as
-                // a raw string.
+                // ALLOW(entity_uri_from_raw): test set_field boundary —
+                // parent_id value arrives as a raw string.
                 "parent_id" => block.parent_id = value.as_string().map(EntityUri::from_raw),
                 "sort_key" => block.sort_key = value.as_string().unwrap().to_string(),
                 "content" => block.content = value.as_string().unwrap().to_string(),
@@ -179,8 +179,8 @@ mod tests {
                 .unwrap()
                 .to_string();
             let block = TestBlock {
-                // ALLOW(entity_uri_from_raw): test create() boundary — id/parent_id arrive as raw
-                // fixture strings.
+                // ALLOW(entity_uri_from_raw): test create() boundary —
+                // id/parent_id arrive as raw fixture strings.
                 id: EntityUri::from_raw(&id),
                 parent_id: fields
                     .get("parent_id")
@@ -400,8 +400,8 @@ mod tests {
                 None => {
                     drop(blocks);
                     self.insert(TestBlock {
-                        // ALLOW(entity_uri_from_raw): test update_in_tree boundary — id/parent_id
-                        // arrive as raw strings.
+                        // ALLOW(entity_uri_from_raw): test update_in_tree
+                        // boundary — id/parent_id arrive as raw strings.
                         id: EntityUri::from_raw(&id),
                         parent_id: params
                             .get("parent_id")
@@ -425,8 +425,8 @@ mod tests {
                 block.content = c.to_string();
             }
             if let Some(p) = params.get("parent_id").and_then(|v| v.as_string()) {
-                // ALLOW(entity_uri_from_raw): test update_in_tree boundary — parent_id arrives
-                // as a raw string.
+                // ALLOW(entity_uri_from_raw): test update_in_tree boundary —
+                // parent_id arrives as a raw string.
                 block.parent_id = Some(EntityUri::from_raw(p));
             }
             Ok(())
@@ -1063,7 +1063,8 @@ mod tests {
 
     #[tokio::test]
     async fn join_block_root_has_no_target_fails() {
-        // Block with no prev sibling AND no parent → both fallbacks unavailable.
+        // Block with no prev sibling AND no parent → both fallbacks
+        // unavailable.
         let store = MemStore::new();
         store.insert(TestBlock {
             id: EntityUri::block("Root"),
@@ -1287,7 +1288,8 @@ mod tests {
         );
     }
 
-    // ---- No-pages-under-non-pages op guard (interim ruling 2026-07-13) -------
+    // ---- No-pages-under-non-pages op guard (interim ruling 2026-07-13)
+    // -------
 
     /// Red-first proof of the write-side guard in `move_block`: a `Page`-tagged
     /// block may NOT be reparented under a non-page block. Both the SQL and
@@ -1298,8 +1300,8 @@ mod tests {
     #[tokio::test]
     async fn move_block_rejects_page_under_non_page() {
         let store = MemStore::new();
-        // `folder` is a page (org-file root); `date` is a page nested under it —
-        // the valid page-under-page topology the journal rule produces.
+        // `folder` is a page (org-file root); `date` is a page nested under it
+        // — the valid page-under-page topology the journal rule produces.
         insert_page(&store, "folder", None);
         insert_page(&store, "date", Some("folder"));
         // `text` is an ordinary non-page block, also under `folder`.
@@ -1315,7 +1317,8 @@ mod tests {
             "error must name the ruling; got: {msg}"
         );
 
-        // The rejected move left the tree untouched: `date` still parents `folder`.
+        // The rejected move left the tree untouched: `date` still parents
+        // `folder`.
         assert_eq!(
             store.get("date").unwrap().parent_id,
             Some(EntityUri::block("folder")),

@@ -86,8 +86,8 @@ impl IdentityProvider {
             .next()
             .ok_or_else(|| format!("merge_entities: canonical_a '{canonical_a}' not found"))?;
 
-        // 2. Verify canonical_b exists (otherwise the UPDATE silently rewrites aliases
-        //    to a phantom canonical_id).
+        // 2. Verify canonical_b exists (otherwise the UPDATE silently rewrites
+        //    aliases to a phantom canonical_id).
         let mut b_params = HashMap::new();
         b_params.insert("id".to_string(), Value::String(canonical_b.to_string()));
         let b_rows = self
@@ -234,7 +234,8 @@ impl IdentityProvider {
                 .map_err(|e| format!("restore_canonical_after_merge: update alias: {e}"))?;
         }
 
-        // 3. Inverse: merge_entities(canonical_a=id, canonical_b=merged_into_id).
+        // 3. Inverse: merge_entities(canonical_a=id,
+        //    canonical_b=merged_into_id).
         let mut inverse_params = HashMap::new();
         inverse_params.insert("canonical_a".to_string(), Value::String(id));
         inverse_params.insert("canonical_b".to_string(), Value::String(merged_into_id));

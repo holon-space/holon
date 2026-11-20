@@ -688,7 +688,8 @@ where
 
             if moved {
                 // The block may have left one sibling group and joined another;
-                // both need re-deriving, and neighbours emit nothing themselves.
+                // both need re-deriving, and neighbours emit nothing
+                // themselves.
                 if let Some((_, old_parent, _, _)) = &old {
                     if *old_parent != placement.parent {
                         reassign_group(

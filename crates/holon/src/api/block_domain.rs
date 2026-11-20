@@ -266,9 +266,9 @@ impl<'a> BlockDomain<'a> {
         // program machinery, evaluated ONLY by the action watcher — they must
         // never reach display-query evaluation. Profile routing (`is_program` →
         // rule_card, `has_query_source` excludes rule-machinery headings) keeps
-        // them off this path; if one slips through anyway, fail loud and visible
-        // (this Err surfaces as a red error node via UiWatcher) rather than
-        // running `query_and_watch` on a tableless/no-id trigger query.
+        // them off this path; if one slips through anyway, fail loud and
+        // visible (this Err surfaces as a red error node via UiWatcher) rather
+        // than running `query_and_watch` on a tableless/no-id trigger query.
         if block_info
             .get("query_src_is_rule_trigger")
             .and_then(|v| v.as_i64())
@@ -312,8 +312,8 @@ impl<'a> BlockDomain<'a> {
         // A render source may embed the `collection_view()` marker to compose
         // the block's profile-derived default collection view (tree/table/board
         // switcher) with surrounding chrome — e.g. the main panel wraps its
-        // outline in `column(collection_view(), …, live_query(backlinks))`. When
-        // the marker is present the composed layout owns its own view-mode
+        // outline in `column(collection_view(), …, live_query(backlinks))`.
+        // When the marker is present the composed layout owns its own view-mode
         // switcher, so we skip the auto query-source switcher wrap (which would
         // nest a second result/source switcher above it).
         let (result_expr, composes_collection_view) = if has_render_source {
@@ -497,8 +497,8 @@ impl<'a> BlockDomain<'a> {
         Self::wrap_with_outer_switcher(block_id, result_expr, mode_source_expr)
     }
 
-    // ALLOW(fallback): pre-existing comment-only — outer-wrap path when inner expr
-    // isn't a VMS
+    // ALLOW(fallback): pre-existing comment-only — outer-wrap path when inner
+    // expr isn't a VMS
     /// Used when the inner expression isn't a `view_mode_switcher`:
     /// wrap with a 2-mode (result, source) switcher. The `#qsrc` URI fragment
     /// keeps the wrap's state separate from any inner per-entity state.

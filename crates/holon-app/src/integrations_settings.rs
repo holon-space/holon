@@ -263,7 +263,8 @@ impl IntegrationsSettingsVm {
                 Err(e) => {
                     // The loader reports the same unreadable directory and the
                     // degraded bus carries it; a settings list that refused to
-                    // render would take away the surface for switching things off.
+                    // render would take away the surface for switching things
+                    // off.
                     tracing::warn!(
                         "[IntegrationsSettingsVm] could not read '{}' ({e:#}); rows fall back to \
                      derived names and disclose no hosts",

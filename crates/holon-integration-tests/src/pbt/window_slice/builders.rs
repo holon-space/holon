@@ -223,14 +223,14 @@ pub fn overlay_windowed_caps(
     Arc::new(GpuiWindowComponent::new(geometry)).register(&mut caps);
 
     // ★ C-5 windowed emission teeth (2026-07-02): the deferred base registered
-    // `SutViewSelection` via the headless `HeadlessFrontendComponent`, which does
-    // NOT provide the live-engine root-VM / emission surfaces. Insert them here
-    // from a `GpuiFrontendEngineComponent` over the SAME live window `engine` —
-    // the sole providers of `SutFrontendEngine` / `SutFrontendEmissions` on
-    // this path, so the frontend/emission invariants SELECT + RUN over the real
-    // render pipeline (they deselect on the headless keystone, which never
-    // inserts these). Insert-only: the base never claimed these caps;
-    // `CapMap::insert` panics on any duplicate.
+    // `SutViewSelection` via the headless `HeadlessFrontendComponent`, which
+    // does NOT provide the live-engine root-VM / emission surfaces. Insert them
+    // here from a `GpuiFrontendEngineComponent` over the SAME live window
+    // `engine` — the sole providers of `SutFrontendEngine` /
+    // `SutFrontendEmissions` on this path, so the frontend/emission invariants
+    // SELECT + RUN over the real render pipeline (they deselect on the headless
+    // keystone, which never inserts these). Insert-only: the base never claimed
+    // these caps; `CapMap::insert` panics on any duplicate.
     let frontend_engine = Arc::new(GpuiFrontendEngineComponent::new(engine.clone()));
     caps.insert(frontend_engine.clone() as Arc<dyn SutFrontendEngine>);
     caps.insert(frontend_engine as Arc<dyn SutFrontendEmissions>);
@@ -252,15 +252,16 @@ pub fn overlay_windowed_caps(
     ))
     .register(&mut caps);
 
-    // ★ §8.12 C-3 (mechanisms 1+2): bind the frontend's keystroke/click write caps
-    // (`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/`SutMutate`) to
-    // the WINDOW driver. The `DriverPlacement::Deferred` base registered NONE
-    // of them (it withheld the whole gesture rung), so these are plain INSERTs
-    // — the honest, insert-only realization: the base never claimed a driver,
-    // the overlay is the sole provider. Same production keystroke/click bodies
-    // as the headless base, over the window's `GpuiUserDriver`/`SimUserDriver`
-    // (§8.11 highest-available) instead of the headless `ReactiveEngineDriver`.
-    // `C-2`'s fail-loud `insert` guards double registration.
+    // ★ §8.12 C-3 (mechanisms 1+2): bind the frontend's keystroke/click write
+    // caps (`SutBlockTreeWrite`/`SutFocusWrite`/`SutEditorMirrorWrite`/
+    // `SutMutate`) to the WINDOW driver. The `DriverPlacement::Deferred` base
+    // registered NONE of them (it withheld the whole gesture rung), so these
+    // are plain INSERTs — the honest, insert-only realization: the base never
+    // claimed a driver, the overlay is the sole provider. Same production
+    // keystroke/click bodies as the headless base, over the window's
+    // `GpuiUserDriver`/`SimUserDriver` (§8.11 highest-available) instead of the
+    // headless `ReactiveEngineDriver`. `C-2`'s fail-loud `insert` guards double
+    // registration.
     frontend.register_gesture_writes(&mut caps, driver);
     caps
 }

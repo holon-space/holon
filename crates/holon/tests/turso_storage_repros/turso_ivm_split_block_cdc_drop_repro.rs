@@ -564,7 +564,8 @@ async fn recursive_matview_delete_then_insert_workaround() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let _ = drain_cdc(&mut cdc_rx);
 
-    // DELETE + INSERT instead of UPDATE. Coalesce should fold them into Updated.
+    // DELETE + INSERT instead of UPDATE. Coalesce should fold them into
+    // Updated.
     handle
         .execute("DELETE FROM block WHERE id = 'child_1'", vec![])
         .await

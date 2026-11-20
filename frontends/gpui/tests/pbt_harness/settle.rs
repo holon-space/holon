@@ -198,7 +198,8 @@ pub fn settle_window(
             if bounds.epoch() == epoch && emitted == target && watermark.operations_in_flight() == 0
             {
                 if !app.pending_views().is_empty() {
-                    // The first forced frame may itself change what the next one shows.
+                    // The first forced frame may itself change what the next
+                    // one shows.
                     app.force_frame();
                     bounds.flush();
                     let shown = screen(bounds);

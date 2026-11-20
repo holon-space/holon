@@ -24,11 +24,12 @@ pub fn wire() -> Box<dyn CapInvariant> {
         RunMode::Strict,
         Needs {
             // `SutClockAdvance` gates selection to the frontend+Turso arm that
-            // hosts the controllable clock and fires the journal auto-create rule
-            // live (env `HOLON_PBT_ADVANCE_DAY`); without it a Turso-storage slice
-            // that has `SutSqlProjection` but never fires the rule would false-RED
-            // P2 (boot day expected, no journal page). `SutSqlProjection` supplies
-            // the journal date-page read the body performs.
+            // hosts the controllable clock and fires the journal auto-create
+            // rule live (env `HOLON_PBT_ADVANCE_DAY`); without it a
+            // Turso-storage slice that has `SutSqlProjection` but never fires
+            // the rule would false-RED P2 (boot day expected, no journal page).
+            // `SutSqlProjection` supplies the journal date-page read the body
+            // performs.
             sut_present: vec![
                 CapId::of::<dyn SutSqlProjection>(),
                 CapId::of::<dyn SutClockAdvance>(),

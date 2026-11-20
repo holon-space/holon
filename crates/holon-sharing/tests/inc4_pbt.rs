@@ -382,7 +382,8 @@ fn build_mixed(specs: &[(u8, u8)]) -> Vec<Crossing> {
                     }
                 }
                 2 => {
-                    // wrong-block: latest earlier crossing on a DIFFERENT block.
+                    // wrong-block: latest earlier crossing on a DIFFERENT
+                    // block.
                     if let Some(prev) = out.iter().rev().find(|p| p.block.0 != block) {
                         c.supersedes = Some(prev.crossing_id.clone());
                     }

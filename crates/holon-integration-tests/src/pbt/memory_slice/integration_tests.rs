@@ -67,8 +67,8 @@ async fn memory_slice_runs_structural_block_invariants_without_turso() {
     // `filter-spec-resolves` is FLT-1.b, `SutBackend` only), plus
     // `no-machine-keychain-access`, which declares no capability at all and so
     // selects on every slice; the ref-comparing `blocks-match-ref/block_raw` is
-    // *deselected* (no `RefBackend` wired), disclosed rather than faked — the §2
-    // negative containment in action.
+    // *deselected* (no `RefBackend` wired), disclosed rather than faked — the
+    // §2 negative containment in action.
     assert_eq!(
         report.ran_ids().len(),
         6,

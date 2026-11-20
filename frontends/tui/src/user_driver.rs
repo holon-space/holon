@@ -198,8 +198,8 @@ impl TuiUserDriver {
         root_block_id: &holon_api::EntityUri,
         deadline: Instant,
     ) -> Result<()> {
-        // 1. Make sure the inner router is warmed for this root so the quiescence wait
-        //    can detect emissions. Idempotent.
+        // 1. Make sure the inner router is warmed for this root so the
+        //    quiescence wait can detect emissions. Idempotent.
         self.inner
             .warm_for_block(root_block_id)
             .await
@@ -208,12 +208,13 @@ impl TuiUserDriver {
         let pre_tick = self.inner.snapshot_emission_tick();
 
         // 2. Render barrier — the input has now been processed by
-        //    `app_handle_input_event` and any synchronous mutations are visible. Async
-        //    tokio::spawn'd engine dispatches may still be in flight.
+        //    `app_handle_input_event` and any synchronous mutations are
+        //    visible. Async tokio::spawn'd engine dispatches may still be in
+        //    flight.
         self.await_render(deadline).await?;
 
-        // 3. The spawned dispatch had an effect and its CDC deliveries reached the
-        //    router; then every dispatch it chained settled.
+        // 3. The spawned dispatch had an effect and its CDC deliveries reached
+        //    the router; then every dispatch it chained settled.
         self.inner
             .settle_after(pre_tick)
             .await
@@ -334,9 +335,11 @@ impl TuiUserDriver {
             tab_steps += 1;
         }
 
-        // 2. Walk Down within the target region until focus matches. advance_focus
-        //    cycles modularly within the region; bound by 2 * max-observed-region-size
-        //    + 1 to allow for one full wraparound + slack for legitimate registry
+        // 2. Walk Down within the target region until focus matches.
+        //    advance_focus cycles modularly within the region; bound by 2 *
+        //    max-observed-region-size
+        //    + 1 to allow for one full wraparound + slack for legitimate
+        //      registry
         //    deltas.
         let mut max_seen = 0usize;
         let mut steps = 0usize;

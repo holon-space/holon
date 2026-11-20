@@ -544,7 +544,8 @@ mod adapter {
         let our_hello = encode_hello(versions, doc)?;
         debug!("[accept] sending delta ({} bytes) + hello", our_delta.len());
         // Bound the writes too: a peer that stops reading stalls `write_all`
-        // once QUIC flow control fills the send buffer (a write-side slowloris).
+        // once QUIC flow control fills the send buffer (a write-side
+        // slowloris).
         with_accept_timeout("send delta", write_framed(&mut send, &our_delta)).await?;
         with_accept_timeout("send hello", write_framed(&mut send, &our_hello)).await?;
 
@@ -868,7 +869,8 @@ mod adapter {
             let peer2_doc = fresh_peer(2);
             peer2_doc.import(&shared_doc.export(ExportMode::Snapshot)?)?;
 
-            // One edit per side, so each side has a delta the other must import.
+            // One edit per side, so each side has a delta the other must
+            // import.
             edit_text(&shared_doc.get_tree(TREE_NAME), block_b, " - by P1");
             shared_doc.commit();
             edit_text(&peer2_doc.get_tree(TREE_NAME), block_b, " - by P2");
@@ -1192,7 +1194,8 @@ mod adapter {
                 .await
                 .map_err(|e| anyhow::anyhow!("open_bi failed: {e}"))?;
             // Announce a 16-byte body then stall: never write the body, never
-            // finish. This is the slowloris the acceptor timeout defends against.
+            // finish. This is the slowloris the acceptor timeout defends
+            // against.
             send.write_all(&16u32.to_be_bytes()).await?;
 
             let outcome = tokio::time::timeout(ACCEPT_IO_TIMEOUT + Duration::from_secs(5), handle)

@@ -39,13 +39,14 @@ impl Render for OpaqueWrapper {
 }
 
 fn main() {
-    // QUARANTINE (pre-existing wedge, tracked separately): this `harness = false`
-    // binary opens a REAL main-thread GPUI window. A test runner's collection
-    // probe (`cargo nextest`'s `--list --format terse`) would otherwise run this
-    // whole body and hang at window init, blocking collection of every other
-    // binary in the crate. Honor the custom-harness `--list` contract by
-    // reporting zero tests so collection proceeds; the test still runs under a
-    // direct `cargo test --test reactive_vm_realwindow_test`.
+    // QUARANTINE (pre-existing wedge, tracked separately): this `harness =
+    // false` binary opens a REAL main-thread GPUI window. A test runner's
+    // collection probe (`cargo nextest`'s `--list --format terse`) would
+    // otherwise run this whole body and hang at window init, blocking
+    // collection of every other binary in the crate. Honor the custom-harness
+    // `--list` contract by reporting zero tests so collection proceeds; the
+    // test still runs under a direct `cargo test --test
+    // reactive_vm_realwindow_test`.
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--list") {
         if args.iter().any(|a| a == "--format") {
@@ -123,7 +124,8 @@ fn main() {
         }
         eprintln!("ok");
 
-        // Verify display Mutables have correct value (signal fired and updated them)
+        // Verify display Mutables have correct value (signal fired and updated
+        // them)
         eprint!("  verifying display Mutable values ... ");
         let d0 = h.child_displays[0].get_cloned();
         assert!(

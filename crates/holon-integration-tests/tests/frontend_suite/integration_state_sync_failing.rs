@@ -258,10 +258,10 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
         .resolve::<dyn DbHandleProvider>()
         .handle();
 
-    // 1. NON-VACUITY. The mock received the list call, so the connection CONNECTED
-    //    and its first sync batch is running. A connect failure would have written
-    //    `Unavailable` without ever reaching the network, and a refused sidecar
-    //    would never have been built at all.
+    // 1. NON-VACUITY. The mock received the list call, so the connection
+    //    CONNECTED and its first sync batch is running. A connect failure would
+    //    have written `Unavailable` without ever reaching the network, and a
+    //    refused sidecar would never have been built at all.
     assert!(
         wait_until(async || mock.requests() >= 1).await,
         "the enabled connection '{PROVIDER}' never called its list tool within {DEADLINE:?} — it \
@@ -270,9 +270,9 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     );
 
     // 2. The row exists and is enabled, and its status while the first batch is
-    //    still in flight (the mock is holding the response open, so no outcome can
-    //    have been folded in yet). Read now, asserted below so the headline red is
-    //    the `Sync failing` one.
+    //    still in flight (the mock is holding the response open, so no outcome
+    //    can have been folded in yet). Read now, asserted below so the headline
+    //    red is the `Sync failing` one.
     let in_flight = read_row(&db).await.unwrap_or_else(|| {
         panic!(
             "provider '{PROVIDER}' has no row in the integration_state \
@@ -284,12 +284,12 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
         "'{PROVIDER}' is enabled by its state file, so the mirror must say so — got {in_flight:?}"
     );
 
-    // 3. Let the held call fail. Every batch now fails and none has ever succeeded,
-    //    so the fold reaches `Failing`.
+    // 3. Let the held call fail. Every batch now fails and none has ever
+    //    succeeded, so the fold reaches `Failing`.
     mock.release();
 
-    // 4. THE RED. The app must follow the sync-health signal and write the verdict
-    //    the batches justify.
+    // 4. THE RED. The app must follow the sync-health signal and write the
+    //    verdict the batches justify.
     let reached = wait_until(async || {
         read_row(&db).await.map(|(_, s)| s) == Some("Sync failing".to_string())
     })
@@ -305,10 +305,11 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     );
 
     // 5. The watcher that wrote that verdict holds a `DbHandle` and must not
-    //    outlive the store. Asserted HERE because this is the only test that boots
-    //    a connection that actually connects, so it is the only place an orphaned
-    //    sync-status task is observable at all — `session_shutdown_stops_watchers`
-    //    boots no integration and would pass with this family unregistered.
+    //    outlive the store. Asserted HERE because this is the only test that
+    //    boots a connection that actually connects, so it is the only place an
+    //    orphaned sync-status task is observable at all —
+    //    `session_shutdown_stops_watchers` boots no integration and would pass
+    //    with this family unregistered.
     let shutdown = env
         .injector()
         .expect("start_app must capture the injector")
@@ -321,9 +322,9 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
          actor. Registered: {registered:?}"
     );
 
-    // 5. And before that first outcome the row said `Syncing` — the word that keeps
-    //    "waiting for data" distinguishable from both `Pending` (no status ever
-    //    landed) and `Connected` (rows are landing).
+    // 5. And before that first outcome the row said `Syncing` — the word that
+    //    keeps "waiting for data" distinguishable from both `Pending` (no
+    //    status ever landed) and `Connected` (rows are landing).
     assert_eq!(
         in_flight.1, "Syncing",
         "while the first sync batch was in flight (the mock was holding the response open), \

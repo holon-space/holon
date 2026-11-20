@@ -336,7 +336,8 @@ fn drive_promote_then_blur(loro: bool, hold: bool, suffix: &str, window_title: &
     // ── the blur: click a DIFFERENT row ──────────────────────────────────
     click_and_settle(&driver, &blur_target, hold, &app, &bounds, &runtime, &env);
 
-    // NON-VACUITY 1: focus genuinely left the promoted row, so its blur edge ran.
+    // NON-VACUITY 1: focus genuinely left the promoted row, so its blur edge
+    // ran.
     assert_eq!(
         engine.focused_block().as_ref(),
         Some(&blur_target),

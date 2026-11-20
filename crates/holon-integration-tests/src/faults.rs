@@ -738,15 +738,18 @@ fn classify(
         return if attributed_problems.is_empty() {
             CorruptionOutcome::SilentDataLoss
         } else {
-            // Rows were lost, but the app named the damage: disclosed, not silent.
+            // Rows were lost, but the app named the damage: disclosed, not
+            // silent.
             CorruptionOutcome::ObservedProblem
         };
     }
-    // 2. Fail-loud rungs: a boot or read that returned a typed `Err` faked nothing.
+    // 2. Fail-loud rungs: a boot or read that returned a typed `Err` faked
+    //    nothing.
     if boot_note.contains("Err(") || post_raw.is_err() || post_ui.is_err() {
         return CorruptionOutcome::TypedError;
     }
-    // 3. No data delta, but the app disclosed damage it attributed to the fault.
+    // 3. No data delta, but the app disclosed damage it attributed to the
+    //    fault.
     if !attributed_problems.is_empty() {
         return CorruptionOutcome::ObservedProblem;
     }

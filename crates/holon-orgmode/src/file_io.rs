@@ -380,7 +380,8 @@ mod tests {
     fn insert_source_block_newline_boundaries() {
         // pos = 0, empty content: no leading, no trailing newline.
         assert_eq!(insert_source_block("", 0, &src()).unwrap(), formatted());
-        // pos = 1, between "A" and "B" (neither side a newline): both guards fire.
+        // pos = 1, between "A" and "B" (neither side a newline): both guards
+        // fire.
         assert_eq!(
             insert_source_block("AB", 1, &src()).unwrap(),
             format!("A\n{}\nB", formatted())

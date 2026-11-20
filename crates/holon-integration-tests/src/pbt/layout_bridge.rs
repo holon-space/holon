@@ -138,10 +138,10 @@ pub struct SutClickAdapter<'a, S: SutBlockInteract>(pub &'a mut S);
 impl<S: SutBlockInteract> Clickable for SutClickAdapter<'_, S> {
     fn click_at_element(&mut self, element_id: &str) {
         // The shared `apply_to_sut` bodies are async; the cap method is too.
-        // We're already inside a tokio runtime (the integration-tests PBT runner
-        // uses `runtime.block_on`), so `futures::executor::block_on` would
-        // `EnterError`. `block_in_place` releases the worker so we can call
-        // `Handle::current().block_on` synchronously without deadlock.
+        // We're already inside a tokio runtime (the integration-tests PBT
+        // runner uses `runtime.block_on`), so `futures::executor::block_on`
+        // would `EnterError`. `block_in_place` releases the worker so we can
+        // call `Handle::current().block_on` synchronously without deadlock.
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(self.0.click_at_element(element_id))
         });

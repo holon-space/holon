@@ -84,8 +84,9 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     // Outer matview — production watch_view shape (created by
-    // MatviewManager::ensure_view for `SELECT region, root_id FROM focus_roots`).
-    // Uses a deterministic name so the events recorder can filter.
+    // MatviewManager::ensure_view for `SELECT region, root_id FROM
+    // focus_roots`). Uses a deterministic name so the events recorder can
+    // filter.
     conn.execute(
         "CREATE MATERIALIZED VIEW watch_outer AS
          SELECT region, root_id FROM focus_roots",

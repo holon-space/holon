@@ -248,8 +248,8 @@ fn decode_create(params: &StorageEntity) -> ChangeOp {
     // default it away.
     let parent_id = match params.get("parent_id") {
         None => EntityUri::no_parent(),
-        // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string in the StorageEntity
-        // operation-params map
+        // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string in the
+        // StorageEntity operation-params map
         Some(Value::String(s)) => EntityUri::from_raw(s),
         Some(other) => {
             panic!("create op for block {id}: parent_id must be a string, got {other:?}")
@@ -294,13 +294,14 @@ fn decode_update(params: &StorageEntity, out: &mut Vec<ChangeOp>) {
     let order_changed =
         params.contains_key(POSITION_AFTER_BLOCK_ID_PARAM) || params.contains_key("sort_key");
     if parent_changed || order_changed {
-        // Closure kept for archlint's call-form rule — see `after_sibling` above.
+        // Closure kept for archlint's call-form rule — see `after_sibling`
+        // above.
         #[allow(clippy::redundant_closure)]
         out.push(ChangeOp::Relocate {
             id: id.clone(),
             parent: params.get("parent_id").map(|v| match v {
-                // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string in the
-                // StorageEntity operation-params map
+                // ALLOW(entity_uri_from_raw): parent_id arrives as a raw string
+                // in the StorageEntity operation-params map
                 Value::String(s) => EntityUri::from_raw(s),
                 other => {
                     panic!("update op for block {id}: parent_id must be a string, got {other:?}")

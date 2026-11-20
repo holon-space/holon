@@ -899,7 +899,8 @@ fn reassign_parser_sequences(blocks: &mut [Block]) {
             .map(|(i, _)| i)
             .collect();
 
-        // Sort like the renderer: source before text, then by sequence, then by id
+        // Sort like the renderer: source before text, then by sequence, then by
+        // id
         children.sort_by(|&a, &b| {
             let a_type: i64 = if ids[a].2 == ContentType::Source {
                 0
@@ -994,7 +995,8 @@ fn find_headline_sections(org_text: &str) -> Vec<HeadlineSection> {
         if line.starts_with('*') {
             let level = line.chars().take_while(|c| *c == '*').count();
             if level > 0 && line.chars().nth(level) == Some(' ') {
-                // Find section end (next headline at same or higher level, or EOF)
+                // Find section end (next headline at same or higher level, or
+                // EOF)
                 let end = lines
                     .iter()
                     .enumerate()
@@ -1165,7 +1167,8 @@ fn find_tags_suffix(text: &str) -> Option<&str> {
     // Tags look like :tag1:tag2: at the end of the line
     let trimmed = text.trim_end();
     if trimmed.ends_with(':') {
-        // Find the start of the tags by searching backwards for a space before ":"
+        // Find the start of the tags by searching backwards for a space before
+        // ":"
         if let Some(pos) = trimmed.rfind(' ') {
             let candidate = &trimmed[pos + 1..];
             if candidate.starts_with(':')

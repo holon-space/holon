@@ -395,7 +395,8 @@ impl PbtMcpIntegration {
             }));
         }
 
-        // Also send the notification (exercises that path), but don't rely on it.
+        // Also send the notification (exercises that path), but don't rely on
+        // it.
         let _ = self
             .server_peer
             .notify_resource_updated(ResourceUpdatedNotificationParam {

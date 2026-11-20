@@ -61,9 +61,9 @@ where
         // One strict read+compare. The harness convergence settle (landed after
         // this body's original 1s retry poll was written) already quiesces the
         // in-process focus signal by check time, so the poll is obsolete. No
-        // frontend engine (SqlOnly headless) is a visible Skip, not a silent Ok;
-        // `Unfocused` FAILS — the ref expects focus here, so a focus-less engine
-        // is the steal-back/lost-focus bug, not a skip.
+        // frontend engine (SqlOnly headless) is a visible Skip, not a silent
+        // Ok; `Unfocused` FAILS — the ref expects focus here, so a focus-less
+        // engine is the steal-back/lost-focus bug, not a skip.
         match sut.engine_focused_block().await {
             EngineFocus::NoEngine => {
                 InvariantResult::Skipped("no frontend engine (SqlOnly)".into())

@@ -201,10 +201,10 @@ impl<
             // `state_toggle` the panel actually paints. Visibility is the panel
             // query's traversal, not a bare ancestor walk: it stops at non-root
             // pages and truncates at a depth cap, so a descendant of the focus
-            // root can still render NO row (e.g. after `BlockToPage` re-homes it
-            // behind a new page). Gating on the ancestor walk offered targets
-            // whose intent never binds, and `cycle_state_toggle` then burned its
-            // full 2s poll for nothing. Same predicate as
+            // root can still render NO row (e.g. after `BlockToPage` re-homes
+            // it behind a new page). Gating on the ancestor walk offered
+            // targets whose intent never binds, and `cycle_state_toggle` then
+            // burned its full 2s poll for nothing. Same predicate as
             // `main_editable_descendants`, which is what keeps this transition
             // and `inv-main-panel-rows-match-focus` agreeing.
             check(

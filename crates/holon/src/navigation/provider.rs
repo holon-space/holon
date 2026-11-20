@@ -400,8 +400,8 @@ impl NavigationProvider {
         let mut params = HashMap::new();
         params.insert("region".to_string(), Value::from(region));
 
-        // Step 1: Get current cursor position (Turso doesn't support subqueries in
-        // DELETE)
+        // Step 1: Get current cursor position (Turso doesn't support subqueries
+        // in DELETE)
         tracing::debug!("[NavigationProvider] focus: getting current cursor position");
         let current_history_id = self.get_current_history_id(&mut params).await?;
         tracing::debug!(
@@ -558,7 +558,8 @@ impl NavigationProvider {
         params.insert("region".to_string(), Value::from(region));
         params.insert("block_id".to_string(), Value::String(block_id.to_string()));
 
-        // Step 1: check whether an open pin already exists for (region, block_id).
+        // Step 1: check whether an open pin already exists for (region,
+        // block_id).
         let existing = self
             .db_handle
             .query(
@@ -878,7 +879,8 @@ impl NavigationProvider {
 
         let current_id = self.get_current_history_id(&mut params).await?;
 
-        // Find the previous history entry (traversal ordered by id — unchanged).
+        // Find the previous history entry (traversal ordered by id —
+        // unchanged).
         let prev_result = self
             .db_handle
             .query(
@@ -893,14 +895,15 @@ impl NavigationProvider {
             .and_then(|row| row.get("id"))
             .and_then(|v| v.as_i64())
         {
-            // Write-side invariant (ruled option (a)): the main-panel focus query
-            // joins `focus_roots` (which is `navigation_history WHERE closed_at IS
-            // NULL` — open rows only) to `navigation_cursor` on `history_id`, so
-            // the cursor MUST land on an OPEN row. The back target was soft-closed
-            // by the forward `focus_replace` that superseded it; re-open it and
-            // close the departed row so the panel stays populated across back-nav
-            // (before this, the cursor pointed at a closed row → 0-row focus query
-            // → blank panel → creation-slot `0 live rows` panic).
+            // Write-side invariant (ruled option (a)): the main-panel focus
+            // query joins `focus_roots` (which is `navigation_history WHERE
+            // closed_at IS NULL` — open rows only) to `navigation_cursor` on
+            // `history_id`, so the cursor MUST land on an OPEN row. The back
+            // target was soft-closed by the forward `focus_replace` that
+            // superseded it; re-open it and close the departed row so the panel
+            // stays populated across back-nav (before this, the cursor pointed
+            // at a closed row → 0-row focus query → blank panel → creation-slot
+            // `0 live rows` panic).
             self.reopen_target_close_departed(region, current_id, prev_id)
                 .await?;
             tracing::debug!(
@@ -949,8 +952,9 @@ impl NavigationProvider {
             .and_then(|v| v.as_i64())
         {
             // Same write-side invariant as go_back: the forward target was
-            // soft-closed when we navigated back past it, so re-open it and close
-            // the departed row so the cursor lands on an OPEN focus_roots row.
+            // soft-closed when we navigated back past it, so re-open it and
+            // close the departed row so the cursor lands on an OPEN focus_roots
+            // row.
             self.reopen_target_close_departed(region, current_id, next_id)
                 .await?;
             tracing::debug!(
@@ -1032,8 +1036,8 @@ impl NavigationProvider {
         let region_str = region.as_str().to_string();
         self.db_handle
             .transaction(vec![
-                // Close the departed focus row (guarded on still-open; a no-op at
-                // home, where `departed_id` resolves to no row).
+                // Close the departed focus row (guarded on still-open; a no-op
+                // at home, where `departed_id` resolves to no row).
                 (
                     "UPDATE navigation_history SET closed_at = datetime('now') \
                      WHERE id = ? AND closed_at IS NULL"
@@ -1100,7 +1104,8 @@ impl NavigationProvider {
         if !matches!(row.get("history_id"), Some(Value::Integer(_))) {
             return Ok(());
         }
-        // `closed_at` is a TEXT display flag: non-NULL (String/DateTime) = CLOSED.
+        // `closed_at` is a TEXT display flag: non-NULL (String/DateTime) =
+        // CLOSED.
         if matches!(
             row.get("closed_at"),
             Some(Value::String(_)) | Some(Value::DateTime(_))

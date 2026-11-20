@@ -355,7 +355,8 @@ mod tests {
         let eph = CacheKey::Ephemeral("tree-collapse:block:X".into());
         let re = CacheKey::RenderEntity("block:X".into());
 
-        // LiveQuery: both scopes route to the same parent cache (data-semantic share).
+        // LiveQuery: both scopes route to the same parent cache (data-semantic
+        // share).
         let lq_a = scope_a.target_cache_for_test(&lq);
         let lq_b = scope_b.target_cache_for_test(&lq);
         assert!(Arc::ptr_eq(&lq_a, &parent));

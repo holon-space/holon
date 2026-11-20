@@ -506,7 +506,8 @@ fn guard_classification_agrees_with_the_renderers_is_program() {
         seed_merge_sides_one_rule(&engine).await;
         seed(&engine, "block:pageB", "sentinel:no_parent", None, true).await;
 
-        // Order matters: the non-program blocks genuinely move, so they go last.
+        // Order matters: the non-program blocks genuinely move, so they go
+        // last.
         let cases = [
             ("block:dupRule", true),
             ("block:dupTrig", true),

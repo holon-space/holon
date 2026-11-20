@@ -60,18 +60,21 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // D46: no operation offered on a read-only-homed block is one the
         // dispatcher's write tier refuses.
         invariants::offered_ops_pass_the_write_tier::wire(),
-        // A tagged subtree is a write boundary: every edit is accepted or refused
-        // as the block adapter decides for the model's post-edit subtree.
+        // A tagged subtree is a write boundary: every edit is accepted or
+        // refused as the block adapter decides for the model's post-edit
+        // subtree.
         invariants::shape_gate_refuses_illegal_writes::wire(),
-        // The shape gate judges a SIMULATED post-write state; every judged write
-        // must read back from the write authority as the simulator predicted.
+        // The shape gate judges a SIMULATED post-write state; every judged
+        // write must read back from the write authority as the simulator
+        // predicted.
         invariants::shape_sim_matches_authority::wire(),
         invariants::source_language::wire(),
         // FLT-1.b: every `holon_filter` source block resolves to a typed
         // FilterSpec over the projected block set. SutBackend only, no ref.
         invariants::filter_spec_resolves::wire(),
         // Org render fixed point (E1): needs `SutOrgRender`, no ref. Only the
-        // frontend slice supplies it (production CacheBlockReader + OrgRenderer).
+        // frontend slice supplies it (production CacheBlockReader +
+        // OrgRenderer).
         invariants::org_render_fixed_point::wire(),
         invariants::no_orphan::wire(),
         // Every `watch_context` row belongs to a live watch: the shared keyed
@@ -99,16 +102,17 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // dogfood 2026-07-12). Needs `SutBackend` + `RefBlockTree`.
         invariants::sidebar_page_tag_preserved::wire(),
         // Companion writeback de-inline (Fork B B0): the writeback-side twin of
-        // `sidebar_page_tag_preserved` — a companion `.org` must retain no heading
-        // for a `Page` doc-root that owns its own file. Needs `SutOrgRender` +
-        // `RefBlockTree`. Inert unless a companion inlines a ref-page id; RED today
-        // (per-file guard refuses the de-inline) until Fork B B1's union guard.
+        // `sidebar_page_tag_preserved` — a companion `.org` must retain no
+        // heading for a `Page` doc-root that owns its own file. Needs
+        // `SutOrgRender` + `RefBlockTree`. Inert unless a companion inlines a
+        // ref-page id; RED today (per-file guard refuses the de-inline) until
+        // Fork B B1's union guard.
         invariants::companion_has_no_child_page_headings::wire(),
-        // Materialization-side twin (Fork B B1): every non-seed `Page` doc-root must
-        // own EXACTLY ONE file after settle (`#+ID: <page-id>`) — neither fileless
-        // (row 137, the core Fork B loss) nor double-homed. Needs `SutOrgRender` +
-        // `RefBlockTree`. Vacuously green on a draw modeling no non-seed page (the
-        // default keystone), so it adds no false RED.
+        // Materialization-side twin (Fork B B1): every non-seed `Page` doc-root
+        // must own EXACTLY ONE file after settle (`#+ID: <page-id>`) — neither
+        // fileless (row 137, the core Fork B loss) nor double-homed. Needs
+        // `SutOrgRender` + `RefBlockTree`. Vacuously green on a draw modeling
+        // no non-seed page (the default keystone), so it adds no false RED.
         invariants::every_page_has_its_own_file::wire(),
         // The home-profile binding: production's resolved home profile must
         // equal the one the DRAW implies. Needs `SutHomeProfile` +
@@ -127,8 +131,8 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // boundary. Vacuously green on a ref modeling no crossings (default
         // keystone), so it adds no false RED.
         invariants::audience_never_over_approximates::wire(),
-        // True sharing (two-instance slice ONLY): the receiver holds exactly what
-        // the owner's policy sanctions, and everything it sanctions. Needs
+        // True sharing (two-instance slice ONLY): the receiver holds exactly
+        // what the owner's policy sanctions, and everything it sanctions. Needs
         // `SutReceiverBackend + SutTwoInstance` — no single-instance slice
         // supplies those, so both deselect (disclosed) on the keystone.
         invariants::two_instance_convergence::wire(),
@@ -160,7 +164,8 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::task_state_matches_ref::wire(),
         // Windowed (E4): selected only by the windowed slice
         // (`window_slice::window_wide`), which supplies `SutLayout` +
-        // `SutViewSelection` / `SutRenderer` over a live gpui `TestPlatform` window.
+        // `SutViewSelection` / `SutRenderer` over a live gpui `TestPlatform`
+        // window.
         invariants::frontend_bounds_rendered::wire(),
         invariants::live_block_shell_present::wire(),
         invariants::inline_row_mount_present::wire(),
@@ -174,32 +179,39 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // strike/code/link). Needs `SutLayout` (painted styled runs) +
         // `SutBackend` (write-side marks); windowed slice only.
         invariants::paint_text_styling::wire(),
-        // Windowed focus coherence (E4 inc4): needs `SutDriver` (now CapMap-hosted)
-        // + `SutLayout`; no ref cap. Only the full windowed slice supplies both.
+        // Windowed focus coherence (E4 inc4): needs `SutDriver` (now
+        // CapMap-hosted)
+        // + `SutLayout`; no ref cap. Only the full windowed slice supplies
+        //   both.
         invariants::window_focus::wire(),
         // Windowed no-error-widgets (laid-out tree + BoundsRegistry): needs
-        // `SutViewSelection + SutLayout`, no ref. Windowed sibling of the headless
-        // `viewmodel_no_error_widgets`; only the windowed slice supplies `SutLayout`.
+        // `SutViewSelection + SutLayout`, no ref. Windowed sibling of the
+        // headless `viewmodel_no_error_widgets`; only the windowed slice
+        // supplies `SutLayout`.
         invariants::frontend_no_error_widgets::wire(),
-        // Windowed differential focus: engine global focus matches the ref model.
-        // Needs `SutDriver` + `RefGlobalFocus + RefEditorMirror`. Only the windowed
-        // slice supplies `SutDriver`; body self-skips with no focus / open editor.
+        // Windowed differential focus: engine global focus matches the ref
+        // model. Needs `SutDriver` + `RefGlobalFocus + RefEditorMirror`. Only
+        // the windowed slice supplies `SutDriver`; body self-skips with no
+        // focus / open editor.
         invariants::focus_matches_ref::wire(),
-        // Watch invariants (E1 — SutWatch over the production reactive surface):
-        // needs `SutWatch` + `RefWatch`. Only the frontend slice supplies the
-        // SUT cap; trivially Ok until a slice registers watches + seeds the ref.
-        // The id-set half is auto-derived by `capability_pair! { pub trait Watch … }`
-        // (id pinned to `inv-active-watches-match-ref` — slice teeth assert it by id).
+        // Watch invariants (E1 — SutWatch over the production reactive
+        // surface): needs `SutWatch` + `RefWatch`. Only the frontend slice
+        // supplies the SUT cap; trivially Ok until a slice registers watches +
+        // seeds the ref. The id-set half is auto-derived by `capability_pair! {
+        // pub trait Watch … }` (id pinned to `inv-active-watches-match-ref` —
+        // slice teeth assert it by id).
         holon_pbt_core::capabilities::inv_pair_watch_watch_query_ids(),
         invariants::watch_rows::wire_watch_rows(),
         // Focus invariants (SutHandle decomposition — NavigateFocus onto
-        // SutFocusWrite): needs `SutSqlProjection` (+`SutBackend` for focus_roots)
-        // + `RefFocus`. Only the frontend `navigation_pbt` slice drives real focus
+        // SutFocusWrite): needs `SutSqlProjection` (+`SutBackend` for
+        // focus_roots)
+        // + `RefFocus`. Only the frontend `navigation_pbt` slice drives real
+        //   focus
         // data; storage slices select but pass vacuously (unnavigated ref).
         // Auto-derived by `capability_pair! { pub trait Focus … }` in
         // holon-pbt-core (the `#[compare(with = compare_navigation_focus, …)]`
-        // method). Id is pinned to `inv-navigation-focus` because the slice teeth
-        // assert it by id.
+        // method). Id is pinned to `inv-navigation-focus` because the slice
+        // teeth assert it by id.
         holon_pbt_core::capabilities::inv_pair_focus_current_focus_rows(),
         invariants::focus_roots::wire(),
         invariants::typed_matview_matches_ref::wire(),
@@ -216,38 +228,43 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // The list app holds what the round must have sent it.
         invariants::remote_list_peer_matches_ref::wire(),
         // ViewModel liveness/coherence invariants (Bundle C-remainder port,
-        // 2026-06-23): need `SutViewSelection` (`frontend_engine`/`frontend_root_not_error`/
-        // `live_tree_matches_fresh`) or `SutViewSelection + RefViewSelection` (`view_selection`).
-        // Only a slice with a real ViewModel (the frontend slice's headless
-        // `ReactiveEngine`) supplies the SUT cap; storage slices deselect them.
+        // 2026-06-23): need `SutViewSelection`
+        // (`frontend_engine`/`frontend_root_not_error`/
+        // `live_tree_matches_fresh`) or `SutViewSelection + RefViewSelection`
+        // (`view_selection`). Only a slice with a real ViewModel (the frontend
+        // slice's headless `ReactiveEngine`) supplies the SUT cap; storage
+        // slices deselect them.
         invariants::frontend_engine::wire(),
         invariants::frontend_root_not_error::wire(),
         invariants::live_tree_matches_fresh::wire(),
         // No-stale-rows-after-navigation (2026-07-05, cross-frontend prod bug):
         // main-panel rendered ref-known blocks must be in Main's current
-        // focus-root subtree. Needs SutRenderer + RefViewSelection/RefLayout/RefFocus.
+        // focus-root subtree. Needs SutRenderer +
+        // RefViewSelection/RefLayout/RefFocus.
         invariants::main_panel_rows_match_focus::wire(),
         // Embedded-page collapsed+lazy (Phase 1 RED): non-seed pages that are
         // strict descendants of the main focus root must render collapsed with
         // children lazy-loaded. Needs SutRenderer + RefBlockTree/RefLayout/
         // RefViewSelection/RefFocus/RefToggle.
         invariants::embedded_page_collapsed_lazy::wire(),
-        // Journals-feed day pages must be expanded exactly while they are in the
-        // rendered window. Needs the windowed SutLayout geometry, so only the
-        // window slice selects it.
+        // Journals-feed day pages must be expanded exactly while they are in
+        // the rendered window. Needs the windowed SutLayout geometry, so only
+        // the window slice selects it.
         invariants::journal_feed_viewport_lazy::wire(),
         // Auto-derived by `capability_pair! { pub trait ViewSelection … }` in
         // holon-pbt-core (the `#[compare] fn current_view` method).
         holon_pbt_core::capabilities::inv_pair_view_selection_current_view(),
         // ViewModel value-fn provider invariants (Bundle C-remainder batch 2):
-        // `SutViewSelection` + ref task-state/block-tree (`identity`) or layout/global-focus
-        // (`arg_variance_13`). Completes `SutViewSelection`'s native-consumer coverage.
+        // `SutViewSelection` + ref task-state/block-tree (`identity`) or
+        // layout/global-focus (`arg_variance_13`). Completes
+        // `SutViewSelection`'s native-consumer coverage.
         invariants::value_fn_provider_identity::wire(),
         invariants::value_fn_provider_arg_variance_13::wire(),
         // Renderer cluster (Bundle C-remainder batch 2b): `SutRenderer` (+ ref
-        // layout/render/block-tree/task-state, all now hosted on `ReferenceState`).
-        // Only a slice with a real renderer (the frontend slice's headless
-        // `ReactiveEngine` `widget_tree_snapshot`) supplies the SUT cap.
+        // layout/render/block-tree/task-state, all now hosted on
+        // `ReferenceState`). Only a slice with a real renderer (the frontend
+        // slice's headless `ReactiveEngine` `widget_tree_snapshot`) supplies
+        // the SUT cap.
         invariants::viewmodel_snapshot::wire(),
         invariants::viewmodel_tree_virtual_slots::wire(),
         // Display-placement inertness (Phase 1a — ADR 0015 §Evidence):
@@ -259,17 +276,17 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // set → runs the Phase 1a inertness check (may RED on a real gap).
         invariants::display_placement_canonical_inert::wire(),
         // Advice weave (ADR 0021/0022/0023): the rendered tree must weave each
-        // anchor's top-K suppression-filtered advice rows. Needs `SutRenderer` +
-        // `RefAdvice`. EXPECTED RED between the generator arm (step 4) and the
-        // renderer weave (step 6).
+        // anchor's top-K suppression-filtered advice rows. Needs `SutRenderer`
+        // + `RefAdvice`. EXPECTED RED between the generator arm (step 4) and
+        // the renderer weave (step 6).
         invariants::advice_rows_woven::wire(),
         invariants::editable_text_has_draggable::wire(),
         invariants::viewmodel_root_matches_render_expr::wire(),
         invariants::viewmodel_decompiled_rows_match_query::wire(),
         // Degraded "shows source" twin (Bundle D): the first negative-selection
-        // (`sut_absent: [SutQueryResults]`) consumer. Mutually exclusive with the
-        // full-mode `viewmodel_decompiled_rows_match_query` above — selected only by
-        // the no-query-engine `block_query_degraded` builder.
+        // (`sut_absent: [SutQueryResults]`) consumer. Mutually exclusive with
+        // the full-mode `viewmodel_decompiled_rows_match_query` above —
+        // selected only by the no-query-engine `block_query_degraded` builder.
         invariants::viewmodel_shows_source_when_no_query::wire(),
         invariants::block_render_matches_render_source::wire_render_only(),
         invariants::block_render_matches_render_source::wire_unparseable(),
@@ -310,10 +327,11 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // dangling after a bare undo (correct: the block is genuinely gone) is
         // structurally never reported.
         invariants::undo_redo_reference_heal::wire(),
-        // Per-transition SQL/wall/RSS budget (`otel-testing`-gated, like its body):
-        // needs the composed `ComposedBudget` cap (a span-metrics provider that
-        // captured the transition + frozen oracle). Only the `wide_e2e` slice
-        // registers `ComposedSpanMetrics`; storage/pure slices deselect it.
+        // Per-transition SQL/wall/RSS budget (`otel-testing`-gated, like its
+        // body): needs the composed `ComposedBudget` cap (a span-metrics
+        // provider that captured the transition + frozen oracle). Only the
+        // `wide_e2e` slice registers `ComposedSpanMetrics`; storage/pure slices
+        // deselect it.
         #[cfg(feature = "otel-testing")]
         invariants::sql_budget::wire(),
         // Within-run complexity-class TREND: a transition whose budget formula
@@ -355,8 +373,8 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
     // `holon_turso_testing::pbt_contribution()`); the `/loro` arm to
     // `holon-loro-testing`. What stays central: the editor-mirror
     // `inv-editor-{text,caret}/mirror` families (`active_editor_{text,caret}`),
-    // the org store `inv-blocks-match-ref/org` (`org_blocks`), and the root-layout
-    // ghost-row check `inv-matview-consistent-with-ref/root_layout`
+    // the org store `inv-blocks-match-ref/org` (`org_blocks`), and the
+    // root-layout ghost-row check `inv-matview-consistent-with-ref/root_layout`
     // (`matview_ghost_rows`, renderer-observed).
     catalog.extend(correspondences::active_editor_text().wire());
     catalog.extend(correspondences::active_editor_caret().wire());

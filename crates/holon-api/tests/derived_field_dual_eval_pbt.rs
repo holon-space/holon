@@ -844,7 +844,8 @@ fn default_petri_props_parse_and_plant_to_seat_a() {
 
 #[test]
 fn flagship_switch_and_if_defaults_match_rhai() {
-    // The two conditional flagship props evaluated both ways over sample inputs.
+    // The two conditional flagship props evaluated both ways over sample
+    // inputs.
     let engine = bounded_engine();
     let cases: &[(&str, HashMap<String, Value>)] = &[
         (

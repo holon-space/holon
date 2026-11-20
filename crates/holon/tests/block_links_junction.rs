@@ -198,8 +198,8 @@ async fn block_links_junction_and_backlinks_matview_lifecycle() {
         "backlinks matview must show src referencing the page (incremental)"
     );
 
-    // 3. A parent/leaf chain resolves by leaf suffix at write time (page already
-    //    exists here).
+    // 3. A parent/leaf chain resolves by leaf suffix at write time (page
+    //    already exists here).
     let mut p = create_params("src2", "see Projects/Linked Page too");
     p.insert(
         "marks".into(),
@@ -239,8 +239,8 @@ async fn block_links_junction_and_backlinks_matview_lifecycle() {
         "backlinks matview must drop src2 after its link is removed (IVM removal)"
     );
 
-    // 5. Deleting the page un-resolves inbound links (soft target → dangling again)
-    //    and empties its backlinks.
+    // 5. Deleting the page un-resolves inbound links (soft target → dangling
+    //    again) and empties its backlinks.
     let mut p: holon_api::StorageEntity = HashMap::new();
     p.insert("id".into(), Value::String("block:target-page".to_string()));
     provider

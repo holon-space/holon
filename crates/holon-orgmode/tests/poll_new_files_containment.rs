@@ -548,8 +548,8 @@ async fn refused_duplicate_id_file_is_not_re_ingested_while_unchanged() {
         "deciding the refusal requires reading the file once"
     );
 
-    // Tick 2: nothing changed on disk, so re-deciding cannot change the outcome.
-    // No read, no parse, no new disclosure — the storm-gate.
+    // Tick 2: nothing changed on disk, so re-deciding cannot change the
+    // outcome. No read, no parse, no new disclosure — the storm-gate.
     controller.poll_new_files().await.expect("tick 2");
     assert_eq!(
         fs.reads_of("z_dupe.org"),

@@ -57,14 +57,16 @@ pub async fn start_action_watchers(
     let status = engine.rule_status().clone();
     shutdown.spawn(
         "action-discovery",
-        // ALLOW(admit-in-spawn): the watcher admits per row event, not at start.
+        // ALLOW(admit-in-spawn): the watcher admits per row event, not at
+        // start.
         run_discovery_loop(engine.clone(), status, discovery_stream, shutdown.clone()),
     );
 
-    // Single-block `holon_rule` rules (ADR 0024 §7.2): the unified surface where
-    // one YAML block carries both guard and effect. Spawned alongside the legacy
-    // query+action pair watcher; the two never fire the same block (a single-block
-    // rule has no sibling trigger, which the pair discovery requires).
+    // Single-block `holon_rule` rules (ADR 0024 §7.2): the unified surface
+    // where one YAML block carries both guard and effect. Spawned alongside the
+    // legacy query+action pair watcher; the two never fire the same block (a
+    // single-block rule has no sibling trigger, which the pair discovery
+    // requires).
     crate::api::holon_rule_watcher::start_holon_rule_watchers(engine, shutdown)
         .await
         .context("Failed to start holon_rule watchers")?;
@@ -81,7 +83,8 @@ async fn run_discovery_loop(
 
     loop {
         // `biased`: a shutdown must win over a discovery backlog, so the pair
-        // watchers this loop owns are aborted before the store they read closes.
+        // watchers this loop owns are aborted before the store they read
+        // closes.
         let batch = tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
@@ -142,7 +145,8 @@ fn start_pair(
         handle.abort();
     }
 
-    // Legacy `action` language: refuse to execute; surface the deprecation loud.
+    // Legacy `action` language: refuse to execute; surface the deprecation
+    // loud.
     let action_language = extract_string(data, "action_language").map(|s| {
         s.parse::<SourceLanguage>()
             .expect("SourceLanguage::from_str is infallible")
@@ -258,16 +262,17 @@ async fn run_pair_watcher_inner(
                 Change::Created { data, .. } => {
                     fire_action(&engine, status, &entity_name, &parsed_action, &rule, &data).await;
                 }
-                // Re-fire on Updated ONLY for create-effect rules. A rowid-stable
-                // UPDATE (the clock relation's day-rollover write, WP1) re-fires
-                // the journal create; the deterministic effect id (WP2) makes the
-                // re-create converge to a no-op upsert. Non-create effects
-                // (set_field/update/delete) must NOT re-fire on Updated — they
-                // would re-execute a side effect with no dedup (a pre-existing
-                // re-fire hazard deferred to Phase-2 inhibitor guards). Gate
-                // strictly on the operation kind. `instantiate_template` is also
-                // safe — it derives deterministic instance ids from context_key,
-                // so re-fire converges.
+                // Re-fire on Updated ONLY for create-effect rules. A
+                // rowid-stable UPDATE (the clock relation's day-rollover write,
+                // WP1) re-fires the journal create; the deterministic effect id
+                // (WP2) makes the re-create converge to a no-op upsert.
+                // Non-create effects (set_field/update/delete) must NOT re-fire
+                // on Updated — they would re-execute a side effect with no
+                // dedup (a pre-existing re-fire hazard deferred to Phase-2
+                // inhibitor guards). Gate strictly on the operation kind.
+                // `instantiate_template` is also safe — it derives
+                // deterministic instance ids from context_key, so re-fire
+                // converges.
                 Change::Updated { data, .. }
                     if parsed_action.operation == "create"
                         || parsed_action.operation == "instantiate_template" =>
@@ -319,8 +324,8 @@ async fn fire_action(
     // collapses concurrent creates into one node, and a re-fire (boot re-reg,
     // day rollover) upserts the same id (Ok in both providers — SqlOnly ON
     // CONFLICT DO UPDATE, Loro get-then-update). We supply it explicitly so the
-    // provider's random-v4 id-less path never runs for rules. An author-supplied
-    // literal id is already replica-stable, so it wins.
+    // provider's random-v4 id-less path never runs for rules. An
+    // author-supplied literal id is already replica-stable, so it wins.
     if parsed_action.operation == "create" && !params.contains_key("id") {
         let key = FiringKey::from_row(data);
         let id = deterministic_block_id(rule, &key, &OutputSlot::first());
@@ -333,10 +338,10 @@ async fn fire_action(
     );
 
     // Duplicate-id create is a convergent upsert (Ok) in both providers, so a
-    // re-fire is idempotent, not an error. Any *other* execute failure is a real
-    // fault — logged loudly (fail-loud); it must not tear down the watcher.
-    // Rule-fired effects carry `fired-by` provenance (ADR 0024) and must NEVER
-    // enter the user undo stack.
+    // re-fire is idempotent, not an error. Any *other* execute failure is a
+    // real fault — logged loudly (fail-loud); it must not tear down the
+    // watcher. Rule-fired effects carry `fired-by` provenance (ADR 0024) and
+    // must NEVER enter the user undo stack.
     if let Err(e) = engine
         .execute_operation(
             entity_name,
@@ -607,9 +612,9 @@ mod tests {
     async fn rollover_update_refires_journal_create() {
         let engine = block_engine().await;
         seed_journals_parent(&engine).await;
-        // Pin the clock `day` row to a known date (a boot-seeded row may already
-        // exist), so the watcher's initial `Created` fires for a deterministic
-        // day.
+        // Pin the clock `day` row to a known date (a boot-seeded row may
+        // already exist), so the watcher's initial `Created` fires for a
+        // deterministic day.
         engine
             .db_handle()
             .execute(
@@ -634,8 +639,8 @@ mod tests {
         // Initial Created row → day-1 journal.
         wait_for_children(&engine, 1, Duration::from_secs(15)).await;
 
-        // Simulate day-rollover: a rowid-stable UPDATE emits CDC `Updated`, which
-        // the create-effect rule now re-fires on.
+        // Simulate day-rollover: a rowid-stable UPDATE emits CDC `Updated`,
+        // which the create-effect rule now re-fires on.
         engine
             .db_handle()
             .execute(

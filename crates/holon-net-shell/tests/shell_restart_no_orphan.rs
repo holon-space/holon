@@ -829,8 +829,8 @@ impl Case {
                     return Ok(());
                 };
                 let i = self.start_run(attempt, plan)?;
-                // A timeout may kill the child before its shell writes the marker; the end then
-                // says so.
+                // A timeout may kill the child before its shell writes the
+                // marker; the end then says so.
                 if plan.timeout_ms.is_none() {
                     self.wait_spawned(i, ANSWER)?;
                 }
@@ -1013,7 +1013,8 @@ impl Case {
         let i = self.start_run(attempt, plan)?;
         // A runner that records before it spawns fails before the child starts.
         let _ = self.wait_spawned(i, Duration::from_secs(2));
-        // Open until the run ended: the write goes into the pipe and never blocks.
+        // Open until the run ended: the write goes into the pipe and never
+        // blocks.
         let reader = match fault {
             Fault::Held(ms) => {
                 std::thread::sleep(Duration::from_millis(*ms));
@@ -1081,7 +1082,8 @@ impl Case {
                         "a run the shutdown cut short returned with its group living: {v}"
                     ));
                 }
-                // The shutdown's kill of its group is checked with the dropped runs.
+                // The shutdown's kill of its group is checked with the dropped
+                // runs.
                 continue;
             }
             let timed = self.runs.iter().position(|r| {
@@ -1361,7 +1363,8 @@ impl Case {
             }
         }
         if self.runs[i].pgid.is_none() {
-            // A child spawned just before the drop writes its marker soon after.
+            // A child spawned just before the drop writes its marker soon
+            // after.
             wait_until(Duration::from_secs(1), || self.marker_pgid(id).is_some());
             self.runs[i].pgid = self.marker_pgid(id);
         }
@@ -1546,7 +1549,8 @@ impl Case {
         dead_before: &BTreeSet<i32>,
     ) -> Result<(), String> {
         // A group is verified while its leader runs: no leader is a zombie
-        // now, and a dead host's leader neither starts nor ends during the open.
+        // now, and a dead host's leader neither starts nor ends during the
+        // open.
         let run_json = |r: &RunModel, pgid: i32| {
             json!({"pgid": pgid, "attempt": r.attempt, "transition": r.plan.transition,
                 "subject": r.plan.subject, "verified": living_members(pgid).contains(&pgid)})
@@ -2235,8 +2239,8 @@ fn check_names(ops: &[NameOp]) -> Result<(), TestCaseError> {
                 let held = live.iter().any(|(n, _)| same(n, name));
                 let lock = lock_name(name);
                 let temp = temp_name(name);
-                // An entry `<name>.spawn-<tail>` is this pid file's own unless its tail names
-                // another pid file.
+                // An entry `<name>.spawn-<tail>` is this pid file's own unless
+                // its tail names another pid file.
                 let records = occupied.iter().filter(|o| {
                     o.strip_prefix(&format!("{name}.spawn-"))
                         .is_some_and(|tail| !tail.contains(".pid"))

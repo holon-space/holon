@@ -212,12 +212,13 @@ pub fn replay_steps<M, S>(
     mut ref_state: M::State,
     mut sut: S,
     mut after_start_app: impl FnMut(&mut S),
-    // Per-tick hook fired after EVERY post-StartApp transition's invariants pass,
-    // with both the live SUT and reference state in scope (B-track E4: the windowed
-    // sim builds a windowed `CapMap` + ref from `(sut, ref_state)` and runs the
-    // composed catalog over it each tick). A no-op for the headless slices. Distinct
-    // from `after_start_app`, which fires ONCE. The pre-StartApp ticks are skipped
-    // (no rendered state to check) by gating on `ref_state.app_started()`.
+    // Per-tick hook fired after EVERY post-StartApp transition's invariants
+    // pass, with both the live SUT and reference state in scope (B-track E4:
+    // the windowed sim builds a windowed `CapMap` + ref from `(sut, ref_state)`
+    // and runs the composed catalog over it each tick). A no-op for the
+    // headless slices. Distinct from `after_start_app`, which fires ONCE. The
+    // pre-StartApp ticks are skipped (no rendered state to check) by gating on
+    // `ref_state.app_started()`.
     mut per_tick: impl FnMut(&mut S, &M::State),
     seen_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 ) -> S
@@ -230,9 +231,10 @@ where
         match step {
             FixtureStep::Action(t) => {
                 if !M::preconditions(&ref_state, t) {
-                    // The machine's gate is a bare bool, so re-ask the transition
-                    // for its named reasons: "preconditions FAILED" alone leaves a
-                    // fixture author guessing which assumption went stale.
+                    // The machine's gate is a bare bool, so re-ask the
+                    // transition for its named reasons: "preconditions FAILED"
+                    // alone leaves a fixture author guessing which assumption
+                    // went stale.
                     let why = match t.preconditions(&ref_state) {
                         validated::Validated::Good(()) => "alphabet gate".to_string(),
                         validated::Validated::Fail(reasons) => reasons
@@ -249,11 +251,11 @@ where
                 }
                 // Mark this transition seen BEFORE applying it (matching
                 // proptest-state-machine's `test_sequential`): the proptest
-                // shrinker's first step deletes never-seen trailing transitions,
-                // so the *failing* transition must be counted before it panics or
-                // the shrinker drops the very transition that reproduces. `None`
-                // outside the windowed proptest path (the library leaves it
-                // `None` during shrink runs too).
+                // shrinker's first step deletes never-seen trailing
+                // transitions, so the *failing* transition must be counted
+                // before it panics or the shrinker drops the very transition
+                // that reproduces. `None` outside the windowed proptest path
+                // (the library leaves it `None` during shrink runs too).
                 if let Some(counter) = seen_counter.as_ref() {
                     counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -276,19 +278,20 @@ where
                 if is_start_app {
                     after_start_app(&mut sut);
                 }
-                // Per-tick composed-catalog hook (E4). Fires only once the app is
-                // started (a rendered window exists to check) and after `after_start_app`
-                // has installed the driver/frontend on the StartApp tick.
+                // Per-tick composed-catalog hook (E4). Fires only once the app
+                // is started (a rendered window exists to check) and after
+                // `after_start_app` has installed the driver/frontend on the
+                // StartApp tick.
                 if ref_state.app_started() {
                     per_tick(&mut sut, &ref_state);
                 }
                 // Fault injection: a deterministic forced failure after
-                // the 1-based step `HOLON_PBT_FORCE_FAIL_AT_STEP`, so the windowed
-                // proptest shrinker + capture pipeline can be exercised without a
-                // flaky real seed. The message carries the `format_layer_report`
-                // marker so the shrinker's default signature recognizes it; the
-                // shrinker reduces the sequence down to this step. No effect unless
-                // the env var is set.
+                // the 1-based step `HOLON_PBT_FORCE_FAIL_AT_STEP`, so the
+                // windowed proptest shrinker + capture pipeline can be
+                // exercised without a flaky real seed. The message carries the
+                // `format_layer_report` marker so the shrinker's default
+                // signature recognizes it; the shrinker reduces the sequence
+                // down to this step. No effect unless the env var is set.
                 if let Ok(n) = std::env::var("HOLON_PBT_FORCE_FAIL_AT_STEP")
                     && n.parse::<usize>().ok() == Some(i + 1)
                 {

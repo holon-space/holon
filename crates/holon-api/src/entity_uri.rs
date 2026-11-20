@@ -113,14 +113,15 @@ impl EntityUri {
 
     /// Construct from scheme + opaque path: `"{scheme}:{path}"`.
     pub fn new(scheme: &str, path: &str) -> Self {
-        // Guard against double-scheming: the `path` must be a bare value, not an
-        // already-scheme-qualified URI. Passing e.g. `EntityUri::block("block:abc")`
-        // would silently produce `"block:block:abc"`, and a downstream
-        // `UPDATE … WHERE id = 'block:block:abc'` then matches zero rows — the
-        // class of bug behind KF-8 (a dropped re-parent in SqlOnly). Restricted
-        // to KNOWN holon schemes so synthetic ids (`default-main-panel::src::0`)
-        // and `block:{peer}:{counter}` paths don't false-positive. For an
-        // already-schemed string use [`EntityUri::from_raw`] / [`EntityUri::parse`].
+        // Guard against double-scheming: the `path` must be a bare value, not
+        // an already-scheme-qualified URI. Passing e.g.
+        // `EntityUri::block("block:abc")` would silently produce
+        // `"block:block:abc"`, and a downstream `UPDATE … WHERE id =
+        // 'block:block:abc'` then matches zero rows — the class of bug behind
+        // KF-8 (a dropped re-parent in SqlOnly). Restricted to KNOWN holon
+        // schemes so synthetic ids (`default-main-panel::src::0`) and `block:
+        // {peer}:{counter}` paths don't false-positive. For an already-schemed
+        // string use [`EntityUri::from_raw`] / [`EntityUri::parse`].
         debug_assert!(
             !["block:", "file:", "sentinel:"]
                 .iter()
@@ -370,10 +371,10 @@ impl EntityUri {
             // valid RFC 3986 URI: scheme `root-layout`, path `:src::0`. A real
             // `scheme:path` URI (other than the entity schemes below) never has
             // a path starting with `:` — that shape is the head of a bare id,
-            // not a scheme. Mis-accepting it made `is_block()` false downstream,
-            // so `resolve_to_tree_id` silently missed existing Loro nodes and
-            // field writes forked to the SQL path (layout-swap Loro divergence,
-            // 2026-06-11).
+            // not a scheme. Mis-accepting it made `is_block()` false
+            // downstream, so `resolve_to_tree_id` silently missed existing Loro
+            // nodes and field writes forked to the SQL path (layout-swap Loro
+            // divergence, 2026-06-11).
             //
             // EXCEPTION: the entity scheme `block` DOES legitimately carry a
             // colon-leading id — the reference model's synthetic split ids are

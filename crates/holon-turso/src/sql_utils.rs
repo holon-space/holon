@@ -94,7 +94,8 @@ pub fn rewrite_named_params(
                         break;
                     }
                 }
-                // A lone sigil (`cost $ 5`) is ordinary text, not a placeholder.
+                // A lone sigil (`cost $ 5`) is ordinary text, not a
+                // placeholder.
                 match if name.is_empty() {
                     None
                 } else {

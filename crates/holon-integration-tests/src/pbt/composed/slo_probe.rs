@@ -334,9 +334,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
         }
         let superseded: Superseded = superseded.parse().unwrap_or_else(|e| diverged(e));
         let quiet: QuietBatches = quiet.parse().unwrap_or_else(|e| diverged(e));
-        // Same reasoning as the queue depths: a sample nobody can attribute to a
-        // clock seam would have to be filed under a guess, and a guess here is
-        // the pooled percentile D119.a forbids.
+        // Same reasoning as the queue depths: a sample nobody can attribute to
+        // a clock seam would have to be filed under a guess, and a guess here
+        // is the pooled percentile D119.a forbids.
         let origin: ClockOrigin = match v.origin.as_deref().map(str::parse) {
             Some(Ok(o)) => o,
             other => panic!(

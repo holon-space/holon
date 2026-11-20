@@ -91,8 +91,8 @@ mod tests {
         assert_eq!(found, vec![PathBuf::from("/v/a.sync-conflict-x.org")]);
     }
 
-    // Faithful reproduction of the `FileSyncController::initialize` startup scan:
-    // walk a real vault via the `FileSystem` port, then run the tripwire.
+    // Faithful reproduction of the `FileSyncController::initialize` startup
+    // scan: walk a real vault via the `FileSystem` port, then run the tripwire.
     #[tokio::test]
     async fn startup_scan_errors_on_conflict_clean_vault_passes() {
         use crate::fs_port::FileSystem;

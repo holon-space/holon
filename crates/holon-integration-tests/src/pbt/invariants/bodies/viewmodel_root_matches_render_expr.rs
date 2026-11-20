@@ -113,11 +113,11 @@ where
 
         // Applicability gate. The invariant reaches its assertion in EITHER
         // mode: layout-less (a root render expr exists) OR 3-column (a main
-        // panel exists). We deliberately do NOT gate on `has_root_render_expr()`
-        // alone — under the wide run's default 3-column layout the render
-        // sources sit on the PANELS, so that gate is permanently false and used
-        // to blind this invariant to a vacuous `Ok` (F1). We reach the
-        // assertion via the main-panel drill, exactly as
+        // panel exists). We deliberately do NOT gate on
+        // `has_root_render_expr()` alone — under the wide run's default
+        // 3-column layout the render sources sit on the PANELS, so that gate is
+        // permanently false and used to blind this invariant to a vacuous `Ok`
+        // (F1). We reach the assertion via the main-panel drill, exactly as
         // `inv-main-panel-rows-match-focus` does.
         if root_expr_name.is_none() && main_panel_id.is_none() {
             // Distinguish "no root render expr at all" (not applicable → Skip)

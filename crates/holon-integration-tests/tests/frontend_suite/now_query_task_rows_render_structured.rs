@@ -120,13 +120,14 @@ async fn flat_query_task_rows_render_a_state_toggle() {
     };
 
     // The property: each task-backed row carries a state_toggle in its OWN
-    // row scope — the SAME core check `inv-viewmodel-task-rows-have-state-toggle`
-    // runs in the composed keystone.
-    // Title-preservation guard (the other half of the rule swap): the focused
-    // page's OWN root row must KEEP its page-title rendering — the page_title
-    // variant renders text only, so its row scope carries NO state_toggle.
-    // If the context-root rule stopped firing, the page row would fall to the
-    // `default` variant, which renders a state_toggle for every block.
+    // row scope — the SAME core check
+    // `inv-viewmodel-task-rows-have-state-toggle` runs in the composed
+    // keystone. Title-preservation guard (the other half of the rule swap): the
+    // focused page's OWN root row must KEEP its page-title rendering — the
+    // page_title variant renders text only, so its row scope carries NO
+    // state_toggle. If the context-root rule stopped firing, the page row would
+    // fall to the `default` variant, which renders a state_toggle for every
+    // block.
     let now_list_rows = snap
         .walk()
         .filter(|n| n.kind == "tree_item" && n.entity_id.as_deref() == Some("block:now-list"))

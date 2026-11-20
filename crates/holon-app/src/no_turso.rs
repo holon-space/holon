@@ -46,7 +46,8 @@ pub fn register_block_query_frontend(injector: &Injector) {
         let block_query = resolver.resolve::<dyn BlockQuerySource>();
         // The operation capability is optional: present when a storage adapter
         // registered one (e.g. `register_loro_operation_engine`), absent for a
-        // read-only no-Turso session. The session degrades structurally either way.
+        // read-only no-Turso session. The session degrades structurally either
+        // way.
         let operation_engine = resolver
             .try_resolve::<dyn holon::api::OperationEngine>()
             .ok();

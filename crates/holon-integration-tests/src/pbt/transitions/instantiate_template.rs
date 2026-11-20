@@ -142,19 +142,20 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate + RefRea
     fn apply_to_ref(&self, state: &mut R) {
         // Model the template DEFINITION blocks the SUT driver seeds (idempotent
         // `block.create`) so the composed per-tick reconcile treats them as
-        // oracle-held rather than surprise real-id mints, keeping the deep block
-        // comparison balanced.
+        // oracle-held rather than surprise real-id mints, keeping the deep
+        // block comparison balanced.
         //
         // These two fixed-id blocks are template-library scaffolding, not user
-        // content — template-engine internals the reference deliberately does not
-        // reproduce. `seed_template_definition` classifies them as SEED, which
-        // excludes them from every block/children comparison on both sides, while
-        // keeping `parent_id` truthful: the driver seeds the child UNDER the root,
-        // and invariants that apply no seed filter (`inv-watch-rows-match-ref`, whose
-        // AllBlocks watch returns every block) read that field directly. The driver
-        // seeds root and child via two INDEPENDENT idempotent `block.create`s, so
-        // guard each on ITS OWN existence (a shared root-only guard skips re-seeding
-        // the child when only the child's create was undone). Each create snapshots
+        // content — template-engine internals the reference deliberately does
+        // not reproduce. `seed_template_definition` classifies them as SEED,
+        // which excludes them from every block/children comparison on both
+        // sides, while keeping `parent_id` truthful: the driver seeds the child
+        // UNDER the root, and invariants that apply no seed filter
+        // (`inv-watch-rows-match-ref`, whose AllBlocks watch returns every
+        // block) read that field directly. The driver seeds root and child via
+        // two INDEPENDENT idempotent `block.create`s, so guard each on ITS OWN
+        // existence (a shared root-only guard skips re-seeding the child when
+        // only the child's create was undone). Each create snapshots
         // to stay 1:1 with the driver's separate User-origin create ops.
         let tpl_root = EntityUri::from_raw(TPL_ROOT);
         let tpl_child = EntityUri::from_raw(TPL_CHILD);
@@ -177,8 +178,8 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate + RefRea
 
         // The SUT's `plan_instantiation` mints deterministic instance ids from
         // `(template_id, context_key, node.id)` where the template nodes keep
-        // their seeded ids `block:tpl` / `block:tpl-c1`; compute the SAME ids so
-        // the instance blocks are born-equal (no synthetic→real reconcile).
+        // their seeded ids `block:tpl` / `block:tpl-c1`; compute the SAME ids
+        // so the instance blocks are born-equal (no synthetic→real reconcile).
         let ctx_key = self.context_key();
         let inst_root_id =
             holon_api::effect_id::deterministic_instance_id(TPL_ROOT, &ctx_key, TPL_ROOT);
@@ -187,13 +188,13 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate + RefRea
 
         // ONE undoable unit: `apply_instantiate_template` snapshots the
         // pre-instantiation tree exactly once and inserts BOTH instance blocks
-        // without per-block snapshots, so a single `UndoLastMutation` removes the
-        // WHOLE instantiation — matching the SUT's composite undo group. Per-block
-        // snapshots would leave the instance root behind on undo.
-        // Substitution and mark remapping are MODELLED, not written down: a span
-        // that crosses or follows the `{{date}}` slot must stretch and shift the
-        // way `plan_instantiation` makes it. A literal expectation agrees with
-        // prod only while every span precedes the first slot.
+        // without per-block snapshots, so a single `UndoLastMutation` removes
+        // the WHOLE instantiation — matching the SUT's composite undo group.
+        // Per-block snapshots would leave the instance root behind on undo.
+        // Substitution and mark remapping are MODELLED, not written down: a
+        // span that crosses or follows the `{{date}}` slot must stretch and
+        // shift the way `plan_instantiation` makes it. A literal expectation
+        // agrees with prod only while every span precedes the first slot.
         let bindings = self.bindings();
         let inst_root = template_fixture::instantiated_root(&bindings);
         let inst_child = template_fixture::instantiated_child(&bindings);

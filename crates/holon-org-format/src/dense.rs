@@ -502,8 +502,8 @@ fn split_trailing_token(first_line: &str) -> Result<(String, Option<(Alias, bool
     if gap {
         inner = &inner[..inner.len() - 1];
     }
-    // Guard against a false positive where `{#…}` is not a clean token (empty or
-    // a non-base62 char) — leave the title untouched.
+    // Guard against a false positive where `{#…}` is not a clean token (empty
+    // or a non-base62 char) — leave the title untouched.
     if inner.is_empty() || !inner.bytes().all(|b| BASE62.contains(&b)) {
         return Ok((first_line.to_string(), None));
     }

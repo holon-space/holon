@@ -157,10 +157,11 @@ impl ComposedBudget for ComposedSpanMetrics {
     }
 
     fn budget_report(&self) -> SqlBudgetReport {
-        // The harness runs an initial `check_invariants` BEFORE the first transition
-        // (proptest-state-machine semantics), so on that tick no transition has been
-        // noted — there is no per-transition cost to budget, so the report is trivially
-        // clean. Every subsequent tick has a noted transition + frozen snapshot.
+        // The harness runs an initial `check_invariants` BEFORE the first
+        // transition (proptest-state-machine semantics), so on that tick no
+        // transition has been noted — there is no per-transition cost to
+        // budget, so the report is trivially clean. Every subsequent tick has a
+        // noted transition + frozen snapshot.
         let Some(last) = self.last_transition.borrow().clone() else {
             return SqlBudgetReport {
                 enforce: false,

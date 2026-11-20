@@ -81,8 +81,9 @@ impl<R: RefLifecycle + RefNavHistoryMut> TransitionRef<R> for NavigateHome {
 
     fn apply_to_ref(&self, state: &mut R) {
         // The whole `focus(region, None)` reference effect — idempotency guard,
-        // home-row push, open-pin reset, region + global focus clear, editor blur
-        // — lives in `RefNavHistoryMut::nav_go_home` (mirrors `provider.rs::focus`).
+        // home-row push, open-pin reset, region + global focus clear, editor
+        // blur — lives in `RefNavHistoryMut::nav_go_home` (mirrors
+        // `provider.rs::focus`).
         state.nav_go_home(self.region);
     }
 }

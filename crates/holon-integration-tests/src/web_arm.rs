@@ -254,8 +254,8 @@ pub async fn read_and_cross_check(
         .with_context(|| format!("block_raw count query returned no `n` column: {rows:?}"))?
         as usize;
 
-    // 1. Every block the DOM shows must exist in the engine. The converse does NOT
-    //    hold — the main panel renders one page, not the whole store.
+    // 1. Every block the DOM shows must exist in the engine. The converse does
+    //    NOT hold — the main panel renders one page, not the whole store.
     let engine_ids: std::collections::BTreeSet<&str> =
         engine.block_ids.iter().map(String::as_str).collect();
     let phantom: Vec<&RenderedNode> = rendered
@@ -272,10 +272,10 @@ pub async fn read_and_cross_check(
         );
     }
 
-    // 2. The block query must not report more blocks than its own storage holds. A
-    //    COUNT comparison, deliberately, not a set subset: `block_raw` also holds
-    //    rows the block query filters out, so only this direction is sound without
-    //    re-implementing that filter here.
+    // 2. The block query must not report more blocks than its own storage
+    //    holds. A COUNT comparison, deliberately, not a set subset: `block_raw`
+    //    also holds rows the block query filters out, so only this direction is
+    //    sound without re-implementing that filter here.
     if raw_block_rows < engine.block_ids.len() {
         bail!(
             "[{phase}] block_raw holds {raw_block_rows} rows but the block query reports {} live \

@@ -17,7 +17,8 @@ fn bid(s: &str) -> BlockId {
 
 #[test]
 fn golden_small_forest() {
-    // A page with two children, one DONE, mirroring the motivating file's shape.
+    // A page with two children, one DONE, mirroring the motivating file's
+    // shape.
     let mut fix = ToonBlock::text(bid("id-fix"), "Fix bugs");
     fix.state = TaskState::new("DOING");
     let mut done = ToonBlock::text(bid("id-done"), "Make tests deterministic");

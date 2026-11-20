@@ -81,8 +81,8 @@ async fn frontend_slice_watch_rows_deliver_over_production_reactive_surface() {
         predicates: vec![],
         source: QuerySource::AllBlocks,
     };
-    // Diagnostic: is the `block` MATVIEW (what the watch query reads) hydrated in
-    // the headless session, vs the `block_raw` write-side table?
+    // Diagnostic: is the `block` MATVIEW (what the watch query reads) hydrated
+    // in the headless session, vs the `block_raw` write-side table?
     let raw_ids = comp.block_raw_query_ids("SELECT id FROM block_raw").await;
     let matview_ids = comp.block_raw_query_ids("SELECT id FROM block").await;
     eprintln!(
@@ -193,13 +193,13 @@ async fn frontend_slice_displayed_text_viewmodel_bites_on_nested_content() {
     };
     // This test scopes to the `/viewmodel` content arm. The component also
     // provides `SutBackend`, so the block-tree-vs-ref invariants
-    // (`inv-blocks-match-ref`, `inv-block-parent/block_raw`) also select against
-    // this *partial* ref (which knows only parent/c1/c2, not the whole booted
-    // vault) and legitimately diverge — those need a full-vault oracle and are
-    // covered elsewhere. So we assert the `/viewmodel` arm directly, not overall
-    // emptiness. `/viewmodel` skips ref-unknown blocks, so the partial ref is fine.
-    // (`run_with_seeded_ref` drops the `ReferenceState`'s tokio runtime
-    // off-thread.)
+    // (`inv-blocks-match-ref`, `inv-block-parent/block_raw`) also select
+    // against this *partial* ref (which knows only parent/c1/c2, not the whole
+    // booted vault) and legitimately diverge — those need a full-vault oracle
+    // and are covered elsewhere. So we assert the `/viewmodel` arm directly,
+    // not overall emptiness. `/viewmodel` skips ref-unknown blocks, so the
+    // partial ref is fine. (`run_with_seeded_ref` drops the `ReferenceState`'s
+    // tokio runtime off-thread.)
     let report = run_with_seeded_ref(
         &composed_invariant_catalog(),
         &sut,
@@ -287,7 +287,8 @@ async fn frontend_slice_watch_invariants_bite_over_production_watches() {
     comp.create_block(ids.c2.as_str(), ids.parent.as_str(), C2)
         .await;
 
-    // Register a production reactive watch for parent's direct children, id only.
+    // Register a production reactive watch for parent's direct children, id
+    // only.
     let children_query = TestQuery {
         table: QueryTable::Blocks,
         columns: vec!["id".to_string()],
@@ -481,14 +482,15 @@ async fn frontend_slice_setup_watch_via_cap_makes_invariants_bite() {
             .insert(WATCH_ID.to_string(), watch_spec());
         s
     };
-    // Drive `SetupWatch` through the composed `CapMap`'s `SutWatchRegister` adapter
-    // (NOT `comp.register_query_watch`): the transition compiles the query at the
-    // boundary and calls `caps.register_watch(..)`, which forwards to the same
-    // production `watch_query_live` surface. This is the decomposed drive path.
-    // `SetupWatch::apply_to_sut` ignores the ref, so we borrow `clean` here (it is
-    // then moved into `run_with_seeded_ref`, which drops it off-thread — a
-    // `ReferenceState` owns a `tokio::Runtime` that panics if dropped inline in an
-    // async context). The watch persists on the component for the later arm too.
+    // Drive `SetupWatch` through the composed `CapMap`'s `SutWatchRegister`
+    // adapter (NOT `comp.register_query_watch`): the transition compiles the
+    // query at the boundary and calls `caps.register_watch(..)`, which forwards
+    // to the same production `watch_query_live` surface. This is the decomposed
+    // drive path. `SetupWatch::apply_to_sut` ignores the ref, so we borrow
+    // `clean` here (it is then moved into `run_with_seeded_ref`, which drops it
+    // off-thread — a `ReferenceState` owns a `tokio::Runtime` that panics if
+    // dropped inline in an async context). The watch persists on the component
+    // for the later arm too.
     setup.apply_to_sut(&clean, &mut sut).await;
     let report = run_with_seeded_ref(
         &composed_invariant_catalog(),
@@ -661,11 +663,12 @@ async fn frontend_slice_org_render_fixed_point_bites() {
     );
     eprintln!("[org-render-teeth] clean: inv-org-render-fixed-point Ok");
 
-    // catch: a persistent `render(SQL) != disk` divergence must make the invariant
-    // FAIL. Override the `SutOrgRender` cap with a wrapper over the SAME component
-    // whose reported disk bytes carry a heading the render never emits — a
-    // disagreement the session cannot self-heal (nothing re-ingests the wrapper's
-    // synthetic bytes), so it holds across the invariant's stability window.
+    // catch: a persistent `render(SQL) != disk` divergence must make the
+    // invariant FAIL. Override the `SutOrgRender` cap with a wrapper over the
+    // SAME component whose reported disk bytes carry a heading the render never
+    // emits — a disagreement the session cannot self-heal (nothing re-ingests
+    // the wrapper's synthetic bytes), so it holds across the invariant's
+    // stability window.
     let mut divergent = frontend_wide(comp.clone());
     divergent.replace(Arc::new(DivergentOrgRender(comp.clone())) as Arc<dyn SutOrgRender>);
     let corrupted = run_selected(&composed_invariant_catalog(), &divergent, &ref_).await;
@@ -853,8 +856,8 @@ async fn frontend_slice_degraded_shows_source_twin_selects_and_passes() {
 
     let comp = Arc::new(BlockQueryFrontendComponent::new().await);
 
-    // The no-Turso seed actually renders `source_editor` (else the twin would Skip
-    // forever with no teeth).
+    // The no-Turso seed actually renders `source_editor` (else the twin would
+    // Skip forever with no teeth).
     assert_eq!(
         comp.root_render_kind().await.as_deref(),
         Some("source_editor"),
@@ -880,8 +883,8 @@ async fn frontend_slice_degraded_shows_source_twin_selects_and_passes() {
         report.ran_ids(),
     );
 
-    // The full-mode twin is mutually exclusive: deselected (disclosed) here because
-    // no `SutQueryResults` is wired.
+    // The full-mode twin is mutually exclusive: deselected (disclosed) here
+    // because no `SutQueryResults` is wired.
     assert!(
         !report.ran_ids().contains(&full),
         "the full-mode twin must be DESELECTED when no query engine is wired; ran={:?}",

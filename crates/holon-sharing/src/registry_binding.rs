@@ -118,7 +118,8 @@ mod tests {
         // Owner-private, NonReplicated. No API path routes its doc into the
         // registry (the following would not compile — NonReplicated yields no
         // replication handle):
-        //   registry.register_container("ledger", ledger.doc()) // no such method
+        //   registry.register_container("ledger", ledger.doc()) // no such
+        // method
         let _ledger = AliasLedger::new(StablePeerId(7), Box::new(UnverifiedAuthority));
 
         let ids: BTreeSet<String> = registry
@@ -137,8 +138,9 @@ mod tests {
 
     // A `SubtreeIndex` is only constructible via the registry's async
     // `subtree_index()`, which needs a live doc store; the containment *logic*
-    // it wraps is proven in holon-loro's `subtree_contains_walks_the_real_tree`.
-    // Here we prove the two Inc-3 contracts that live on THIS side of the edge.
+    // it wraps is proven in holon-loro's
+    // `subtree_contains_walks_the_real_tree`. Here we prove the two Inc-3
+    // contracts that live on THIS side of the edge.
 
     #[test]
     fn orphan_tripwire_passes_when_every_container_registered() {

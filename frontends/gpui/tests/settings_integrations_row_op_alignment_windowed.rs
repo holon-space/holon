@@ -182,12 +182,13 @@ fn main_test(app: &mut HeadlessAppContext, window: gpui::AnyWindowHandle, bounds
     }
     eprintln!("{inventory}");
 
-    // Collect the geometry to judge. Each entry: (provider, op_button rect, that
-    // row's label-baseline rect). The Settings integration list overdraws rows
-    // just outside its viewport, which register with a degenerate (clipped) rect
-    // (`ElementInfo::has_visible_area`); those rows cannot be clicked and carry
-    // no meaningful geometry, so the oracle judges the rows actually on screen —
-    // which include the multi-op rows where the drift is worst.
+    // Collect the geometry to judge. Each entry: (provider, op_button rect,
+    // that row's label-baseline rect). The Settings integration list overdraws
+    // rows just outside its viewport, which register with a degenerate
+    // (clipped) rect (`ElementInfo::has_visible_area`); those rows cannot be
+    // clicked and carry no meaningful geometry, so the oracle judges the rows
+    // actually on screen — which include the multi-op rows where the drift is
+    // worst.
     let mut rows: Vec<(&str, ElementInfo, ElementInfo)> = Vec::new();
     for &p in PROVIDERS {
         let Some(btn) = bounds

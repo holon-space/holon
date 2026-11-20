@@ -99,16 +99,18 @@ where
                 ));
             }
 
-            // Task blocks (non-empty task_state) must have an operation that can
-            // change the block's task_state, bound + non-empty states. The bound
-            // ops are the typed `set_state`/`cycle_task_state` (whose
-            // `affected_fields` is `task_state`), NOT the generic `set_field` (whose
-            // `affected_fields` is empty — `field` is a runtime param). Match by the
-            // affected-field, not a hardcoded op name, so this stays render-faithful.
+            // Task blocks (non-empty task_state) must have an operation that
+            // can change the block's task_state, bound + non-empty states. The
+            // bound ops are the typed `set_state`/`cycle_task_state` (whose
+            // `affected_fields` is `task_state`), NOT the generic `set_field`
+            // (whose `affected_fields` is empty — `field` is a runtime param).
+            // Match by the affected-field, not a hardcoded op name, so this
+            // stays render-faithful.
             let is_task = !expected_state.is_empty();
             if is_task {
                 let affects_task_state = node.operations.iter().any(|op| {
-                    // Canonical op form: `<name>:<affected_fields_csv>:<params_csv>`.
+                    // Canonical op form:
+                    // `<name>:<affected_fields_csv>:<params_csv>`.
                     op.split(':')
                         .nth(1)
                         .is_some_and(|fields| fields.split(',').any(|f| f == "task_state"))

@@ -280,16 +280,16 @@ impl ReferenceStateMachine for ReferenceMachine {
     }
 
     fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
-        // Alphabet gate FIRST, exactly as `WideE2EMachine::preconditions` and the
-        // generation/replay/shrink stepper apply it: a transition whose
-        // `required_wiring` + `required_caps` the state cannot satisfy is not in
-        // the alphabet, so `preconditions` (the ONLY filter proptest re-applies
-        // when it shrinks the initial state) must reject it too. A NO-OP for THIS
-        // machine's fixed `Wiring::full()` / `cap_set == None` init (nothing is
-        // ever gated out), but the gate lives here so a future variant that draws
-        // its wiring can never keep a transition its shrunk CapMap has no provider
-        // for and die in `CapMap::expect` instead of shrinking the divergence
-        // (task #46's escape class).
+        // Alphabet gate FIRST, exactly as `WideE2EMachine::preconditions` and
+        // the generation/replay/shrink stepper apply it: a transition whose
+        // `required_wiring` + `required_caps` the state cannot satisfy is not
+        // in the alphabet, so `preconditions` (the ONLY filter proptest
+        // re-applies when it shrinks the initial state) must reject it too. A
+        // NO-OP for THIS machine's fixed `Wiring::full()` / `cap_set == None`
+        // init (nothing is ever gated out), but the gate lives here so a future
+        // variant that draws its wiring can never keep a transition its shrunk
+        // CapMap has no provider for and die in `CapMap::expect` instead of
+        // shrinking the divergence (task #46's escape class).
         if !crate::pbt::stepper::transition_applicable(state, transition) {
             return false;
         }

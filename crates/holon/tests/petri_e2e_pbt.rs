@@ -861,7 +861,8 @@ fn check_transition_labels_clean(ref_state: &PetriRefState, net: &TaskNet) {
             .transition(&sut_id(&block.id))
             .unwrap_or_else(|| panic!("Missing transition for active task {}", block.id));
 
-        // The label should be the base_text (prefixes already stripped by generator)
+        // The label should be the base_text (prefixes already stripped by
+        // generator)
         let expected_label = block.base_text.lines().next().unwrap_or("");
         assert_eq!(
             transition.label, expected_label,
@@ -907,7 +908,8 @@ fn check_dependency_arcs(ref_state: &PetriRefState, net: &TaskNet) {
         }
         let transition = net.transition(&sut_id(&block.id)).unwrap();
 
-        // Check explicit depends_on (every dep ID must have a corresponding arc)
+        // Check explicit depends_on (every dep ID must have a corresponding
+        // arc)
         for dep_id in block.depends_on.iter() {
             let has_dep_arc = transition.inputs().iter().any(|i| {
                 i.token_type == "completion"
@@ -925,8 +927,8 @@ fn check_dependency_arcs(ref_state: &PetriRefState, net: &TaskNet) {
         if block.has_sequential_dep
             && let Some(prev_id) = find_previous_sibling(ref_state, block)
         {
-            // Sequential deps are resolved SUT-side from materialized block ids,
-            // so the arc precond carries the schemed id.
+            // Sequential deps are resolved SUT-side from materialized block
+            // ids, so the arc precond carries the schemed id.
             let prev_sut_id = sut_id(&prev_id);
             let has_seq_arc = transition.inputs().iter().any(|i| {
                 i.token_type == "completion"
@@ -1192,7 +1194,8 @@ fn check_ranking_reflects_priority(
             let block_a = ref_state.blocks.values().find(|b| sut_id(&b.id) == id_a);
             let block_b = ref_state.blocks.values().find(|b| sut_id(&b.id) == id_b);
             if let (Some(a), Some(b)) = (block_a, block_b) {
-                // Only compare when neither has a deadline (deadlines affect urgency)
+                // Only compare when neither has a deadline (deadlines affect
+                // urgency)
                 if a.deadline.is_none() && b.deadline.is_none() {
                     let pa = a.priority.map(|p| p.rank()).unwrap_or(0);
                     let pb = b.priority.map(|p| p.rank()).unwrap_or(0);
@@ -1380,9 +1383,10 @@ impl PetriSUT {
                         proto_block.set_property(k, HValue::Float(*f));
                     }
                     PrototypeValue::Computed(comp) => {
-                        // The generator only inserts Literals into the prototype
-                        // block today; a Script round-trips via its Rhai source.
-                        // A typed computed has no source string — unreachable here.
+                        // The generator only inserts Literals into the
+                        // prototype block today; a Script round-trips via its
+                        // Rhai source. A typed computed has no source string —
+                        // unreachable here.
                         let src = match comp {
                             Computation::Script(e) => e.source.clone(),
                             other => panic!(

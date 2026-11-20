@@ -66,8 +66,8 @@ impl<R: RefLifecycle + RefPinsMut> TransitionFactory<R> for UnpinBlock {
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
         // Enumerate every region's open-pin ids, then let `preconditions` (the
         // single source of truth for unpinnability) narrow to closeable pins: a
-        // region's active cursor-focus row is closed via focus_replace, not the X
-        // button, so `is_closeable_pin` excludes it.
+        // region's active cursor-focus row is closed via focus_replace, not the
+        // X button, so `is_closeable_pin` excludes it.
         let candidates: Vec<i64> = state
             .open_pin_history_ids()
             .into_iter()

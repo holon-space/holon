@@ -132,9 +132,9 @@ fn build_schema() -> GraphSchema {
         },
     );
 
-    // Same defaults production installs (`holon_turso::graph_schema`): they name
-    // a table no database has, so a MATCH shape with no typed resolver fails
-    // loud instead of silently reading the deleted EAV tables.
+    // Same defaults production installs (`holon_turso::graph_schema`): they
+    // name a table no database has, so a MATCH shape with no typed resolver
+    // fails loud instead of silently reading the deleted EAV tables.
     GraphSchema {
         nodes,
         edges,
@@ -326,7 +326,8 @@ async fn check_query(
     let mut got: Vec<String> = Vec::new();
     while let Some(row) = rows.next().await? {
         // Result is JSON-shaped per `raw_return: true`. Extract the id whether
-        // the row is a scalar string, an integer, or a JSON object containing it.
+        // the row is a scalar string, an integer, or a JSON object containing
+        // it.
         let v = row.get_value(0)?;
         let s = match v {
             turso::Value::Text(s) => s,

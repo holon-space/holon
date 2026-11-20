@@ -127,8 +127,8 @@ fn tsl_quantity() -> impl Strategy<Value = Option<Quantity>> {
 fn cook_quantity() -> impl Strategy<Value = Option<Quantity>> {
     let amount = prop_oneof![
         dec(3).prop_map(Amount::Exact),
-        // The fraction language's bound: whole part, numerator and denominator below 10^18;
-        // put_writes_or_refuses_any_value draws past it.
+        // The fraction language's bound: whole part, numerator and denominator
+        // below 10^18; put_writes_or_refuses_any_value draws past it.
         (0i128..10i128.pow(18), 1i128..10i128.pow(18))
             .prop_map(|(n, d)| Amount::Exact(Rational::new(n, d).unwrap())),
         (dec(2), dec(2)).prop_map(|(a, b)| Amount::Range(a, b)),

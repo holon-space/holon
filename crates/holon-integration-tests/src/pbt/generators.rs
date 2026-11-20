@@ -528,10 +528,10 @@ pub fn generate_org_file_content_with_keywords(
                 // field end-to-end (parser → Loro/SQL junction → projection →
                 // renderer) — the path that was previously never generated.
                 prop::bool::ANY,
-                // `make_contributes`: same predecessor trick as `make_requires`,
-                // for the Compass CONTRIBUTION edge (`:contributes-to:`). A
-                // separate axis so a regression in one edge field cannot be
-                // masked by the other still projecting.
+                // `make_contributes`: same predecessor trick as
+                // `make_requires`, for the Compass CONTRIBUTION edge
+                // (`:contributes-to:`). A separate axis so a regression in one
+                // edge field cannot be masked by the other still projecting.
                 prop::bool::ANY,
                 // Parent selector (extended-gen axis 2): heading `i` parents to
                 // `sel % (i + 1)` — 0 = doc root, k = heading `k-1`. Same
@@ -556,7 +556,8 @@ pub fn generate_org_file_content_with_keywords(
             // Sibling ids in document order, so a heading can depend on its
             // predecessor by id. Collected up front because the dependency
             // target (`ids[i-1]`) must be known while building block `i`.
-            // Uniquified (see `uniquify_ids`): org files require unique `:ID:`s.
+            // Uniquified (see `uniquify_ids`): org files require unique
+            // `:ID:`s.
             let ids = uniquify_ids(headings.iter().map(|(_, id, _, _, _, _, _)| id.clone()));
             // First pass: resolve each heading's parent. Flat (doc root) by
             // default; under extended gen, heading `i` parents to
@@ -591,9 +592,10 @@ pub fn generate_org_file_content_with_keywords(
                         // Single-element requires (depend on the previous TRUE
                         // sibling — same parent, so nesting stays orthogonal to
                         // the requires axis) — kept to one entry so the
-                        // order-insensitive junction read can't false-diff against
-                        // the parsed order.
-                        // Stored as a `block:` URI to match the parser boundary.
+                        // order-insensitive junction read can't false-diff
+                        // against the parsed order.
+                        // Stored as a `block:` URI to match the parser
+                        // boundary.
                         if make_requires && i > 0 && parents[i] == parents[i - 1] {
                             b.requires = vec![EntityUri::block(&ids[i - 1])];
                         }
@@ -611,8 +613,8 @@ pub fn generate_org_file_content_with_keywords(
 
     // Layout query sources are now emitted by `TestQuery::compile_layout_for`
     // so the SUT runs a query the reference can recover (via
-    // `QuerySource::recognize`) and `evaluate` identically. Each variant pairs a
-    // faithful `QuerySource` with a render template of known interactivity:
+    // `QuerySource::recognize`) and `evaluate` identically. Each variant pairs
+    // a faithful `QuerySource` with a render template of known interactivity:
     // PRQL `from children` (navigation-blind direct children — empty under the
     // layout block) with an interactive template; GQL all-blocks / var-length
     // descendants and SQL direct-children with static templates.
@@ -749,8 +751,8 @@ pub fn generate_org_file_content_with_keywords(
     //
     // The renderer emits section content (Source/Image, group 0) ahead of the
     // sub-heading and preserves this vec's order WITHIN group 0, but the parser
-    // re-emits all Sources before all Images regardless — so the stored order is
-    // always `Source < Image < Text` (world (b)). `image_first` deliberately
+    // re-emits all Sources before all Images regardless — so the stored order
+    // is always `Source < Image < Text` (world (b)). `image_first` deliberately
     // varies the on-disk order of the two artifacts so the reference model's
     // sibling-order prediction is exercised in both directions; the presence of
     // the non-exempt Text sub-heading is what makes the ordering actually
@@ -830,8 +832,9 @@ pub fn generate_org_file_content_with_keywords(
                 sub.set_property("ID", Value::String(sub_id.clone()));
 
                 // Vec order == on-disk document order. `image_first` flips the
-                // Source/Image order the renderer writes; the sub-heading trails
-                // (the renderer hoists section content ahead of it regardless).
+                // Source/Image order the renderer writes; the sub-heading
+                // trails (the renderer hoists section content ahead of it
+                // regardless).
                 let mut blocks = vec![heading];
                 if image_first {
                     blocks.push(image);
@@ -881,16 +884,18 @@ pub fn generate_org_file_content_with_keywords(
                 let mut heading = Block::new_text(heading_uri.clone(), doc_uri.clone(), &headline);
                 heading.set_property("ID", Value::String(id.clone()));
 
-                // Shaped like `crates/holon-advice/assets/lessons_for_tasks.yaml`.
+                // Shaped like
+                // `crates/holon-advice/assets/lessons_for_tasks.yaml`.
                 let yaml = format!(
                     "name: pbt_lessons\nactive: {active}\nanchor:\n  has_tag: \
                      {anchor_tag}\ncandidates:\n  tag_overlap_recency:\n    source:\n      \
                      has_tag: {source_tag}\nk: {k}\n"
                 );
 
-                // Round-trip guard (fail loud): the oracle reuses this exact prod
-                // parser, so a mismatch here would be parser-circular. Assert the
-                // parsed rule equals the typed intent before it leaves the arm.
+                // Round-trip guard (fail loud): the oracle reuses this exact
+                // prod parser, so a mismatch here would be parser-circular.
+                // Assert the parsed rule equals the typed intent before it
+                // leaves the arm.
                 let parsed = holon_advice::parse_advice_rule(&yaml)
                     .expect("generator-minted advice rule must parse");
                 assert_eq!(
@@ -979,12 +984,12 @@ pub fn generate_org_file_content_with_keywords(
     // May-2026 `Phase 6: Flow Optimization` loop class); leave it off to
     // keep CI green.
     // Filter file (FLT-1.b): a headline naming the filter plus ONE
-    // `holon_filter` source block whose body is a render-DSL predicate and whose
-    // `:polarity` / `:subtree` header args say what it does. Inert data like the
-    // advice-rule and render-artifact arms — it overrides no profile and renders
-    // as plain text (no `filter_card` until Inc 4) — so it rides in every mix.
-    // Exercises `inv-source-language-iff-source`, the org round-trip oracles, and
-    // `inv-filter-spec-resolves` over the real projection.
+    // `holon_filter` source block whose body is a render-DSL predicate and
+    // whose `:polarity` / `:subtree` header args say what it does. Inert data
+    // like the advice-rule and render-artifact arms — it overrides no profile
+    // and renders as plain text (no `filter_card` until Inc 4) — so it rides in
+    // every mix. Exercises `inv-source-language-iff-source`, the org round-trip
+    // oracles, and `inv-filter-spec-resolves` over the real projection.
     let file_with_filter = (
         "[a-z_]+_[0-9]+\\.org",
         "[A-Z][a-zA-Z0-9 ]{0,15}", // headline = the filter's name
@@ -1015,8 +1020,8 @@ pub fn generate_org_file_content_with_keywords(
             filter.set_property("subtree", Value::String(subtree.to_string()));
 
             // Round-trip guard (fail loud): the FLT-1.b boundary the invariant
-            // asserts must already hold for the minted intent — a parser-circular
-            // mismatch here is caught before it leaves the arm.
+            // asserts must already hold for the minted intent — a
+            // parser-circular mismatch here is caught before it leaves the arm.
             let spec = holon_api::filter::FilterSpec::parse(
                 &EntityUri::block(&id),
                 &[heading.clone(), filter.clone()],
@@ -1101,13 +1106,14 @@ pub fn generate_org_file_content_with_keywords(
         // Profile-bearing files override the default block entity profile,
         // and the test's profile YAMLs render just `row(editable_text(...))`
         // — no state_toggle. We keep them out of the no-overrides
-        // configuration so the default `assets/default/types/block_profile.yaml`
-        // (which has the state_toggle variant) stays in effect.
-        // Advice-rule blocks do NOT override profiles (inert data until the
-        // weave lands, then the feature under test) — so unlike profiles they
-        // stay in the default mix; excluding them made advice unreachable.
-        // The render-artifact arm rides along here too so the mixed
-        // Source/Image/Text sibling group is reachable in the default config.
+        // configuration so the default
+        // `assets/default/types/block_profile.yaml` (which has the state_toggle
+        // variant) stays in effect. Advice-rule blocks do NOT override profiles
+        // (inert data until the weave lands, then the feature under test) — so
+        // unlike profiles they stay in the default mix; excluding them made
+        // advice unreachable. The render-artifact arm rides along here too so
+        // the mixed Source/Image/Text sibling group is reachable in the default
+        // config.
         let base = prop_oneof![
             8 => regular_file,
             1 => file_with_render_artifacts,
@@ -1543,7 +1549,8 @@ mod advice_rule_tests {
 
         let mut runner = TestRunner::deterministic();
         let scenario = (
-            // Rule tags: distinct pool tags + small k (the `file_with_advice_rule` draw).
+            // Rule tags: distinct pool tags + small k (the
+            // `file_with_advice_rule` draw).
             (
                 prop::sample::select(ADVICE_TAG_POOL.to_vec()),
                 prop::sample::select(ADVICE_TAG_POOL.to_vec()),

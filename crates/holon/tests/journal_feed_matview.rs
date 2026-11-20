@@ -84,7 +84,8 @@ async fn journal_feed_chain_lists_day_pages_and_maintains_deltas() {
         .await
         .expect("FKs");
 
-    // Production chain: block_raw + junctions → block matview → detection → feed.
+    // Production chain: block_raw + junctions → block matview → detection →
+    // feed.
     CoreSchemaModule
         .ensure_schema(&handle)
         .await
@@ -125,7 +126,8 @@ async fn journal_feed_chain_lists_day_pages_and_maintains_deltas() {
         "both chain matviews must be visible in list_tables (sqlite_master)"
     );
 
-    // Seed the journals page + two day pages (Page-tagged) + one NON-page child.
+    // Seed the journals page + two day pages (Page-tagged) + one NON-page
+    // child.
     insert_block(&handle, "block:journals", "sentinel:no_parent", "Journals").await;
     insert_block(&handle, "block:2026-07-16", "block:journals", "2026-07-16").await;
     tag_page(&handle, "block:2026-07-16").await;
@@ -134,7 +136,8 @@ async fn journal_feed_chain_lists_day_pages_and_maintains_deltas() {
     // A non-Page child of journals must NOT surface in the feed.
     insert_block(&handle, "block:stray", "block:journals", "not a day page").await;
 
-    // (2) Feed = only the Page-tagged day pages, newest-first, expand_default=1.
+    // (2) Feed = only the Page-tagged day pages, newest-first,
+    // expand_default=1.
     assert_eq!(
         feed_contents(&handle).await,
         vec![("2026-07-17".to_string(), 1), ("2026-07-16".to_string(), 1),],

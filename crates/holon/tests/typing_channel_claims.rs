@@ -57,7 +57,8 @@ async fn block_engine() -> Arc<BackendEngine> {
                 let mut block_raw_type_def = Block::type_definition();
                 block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
                 let cache = tokio::task::block_in_place(|| {
-                    // ALLOW(block_on): sync provider-factory closure on a multi_thread runtime.
+                    // ALLOW(block_on): sync provider-factory closure on a
+                    // multi_thread runtime.
                     tokio::runtime::Handle::current()
                         .block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
                 })

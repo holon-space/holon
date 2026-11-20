@@ -48,15 +48,16 @@ impl<R: RefLifecycle + RefWatchesMut<WatchSpec = WatchSpec>> TransitionFactory<R
 
     type Reason = Reason;
     fn required_wiring() -> ::holon_pbt_core::RequiredWiring {
-        // Turso-only: the navigation / CDC-watch / MCP providers this transition
-        // dispatches have no Loro-native source in the no-Turso wiring
-        // (see loro_block_query_source.rs:77). Gate it out of {Loro} slices.
+        // Turso-only: the navigation / CDC-watch / MCP providers this
+        // transition dispatches have no Loro-native source in the no-Turso
+        // wiring (see loro_block_query_source.rs:77). Gate it out of {Loro}
+        // slices.
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        // Create a dummy instance to validate preconditions (no query/language needed
-        // yet); if they fail, the generator is disabled entirely (no weight=0
-        // fallback).
+        // Create a dummy instance to validate preconditions (no query/language
+        // needed yet); if they fail, the generator is disabled entirely (no
+        // weight=0 fallback).
         let dummy = SetupWatch {
             query_id: "dummy".to_string(),
             query: TestQuery {

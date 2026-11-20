@@ -213,8 +213,8 @@ async fn redo_of_create_recreates_the_same_id() {
     let minted = {
         let l = log.lock().unwrap();
         // create was dispatched with id=None; the mint is whatever the delete
-        // inverse now carries — reconstruct it from the next-counter: first mint
-        // is `block:minted-1`.
+        // inverse now carries — reconstruct it from the next-counter: first
+        // mint is `block:minted-1`.
         assert_eq!(l[0], ("create".to_string(), None));
         "block:minted-1".to_string()
     };

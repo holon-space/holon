@@ -77,8 +77,9 @@ async fn version_skewed_database_boots_and_repairs_itself() {
         println!("{name}: {sql}");
     }
 
-    // The startup order production uses (crates/holon/src/di/schema_providers.rs),
-    // flattened: every module below is reachable from the block matview chain.
+    // The startup order production uses
+    // (crates/holon/src/di/schema_providers.rs), flattened: every module below
+    // is reachable from the block matview chain.
     let modules: Vec<(&str, &dyn SchemaModule)> = vec![
         ("core", &CoreSchemaModule),
         ("block", &BlockSchemaModule),

@@ -38,12 +38,13 @@ impl StderrToLog {
         let redirected = Arc::new(AtomicBool::new(true));
         let previous_hook = std::panic::take_hook();
         let (to_terminal, still_redirected) = (Arc::clone(&terminal), Arc::clone(&redirected));
-        // Stays installed after `restore`: hooks installed on top of it chain it.
+        // Stays installed after `restore`: hooks installed on top of it chain
+        // it.
         std::panic::set_hook(Box::new(move |info| {
             previous_hook(info);
             if still_redirected.load(Ordering::SeqCst) {
-                // ALLOW(ok): the previous hook has logged the panic; a dead terminal takes
-                // nothing.
+                // ALLOW(ok): the previous hook has logged the panic; a dead
+                // terminal takes nothing.
                 let _ = writeln!(&*to_terminal, "holon-tui {info}");
             }
         }));

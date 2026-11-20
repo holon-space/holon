@@ -132,7 +132,8 @@ fn arrow_walk_keeps_focus_on_the_reference_outline_neighbour() {
 
     let mut runner = TestRunner::new(Config {
         cases,
-        // A window re-boot per shrink candidate is ~15s; keep shrinking bounded.
+        // A window re-boot per shrink candidate is ~15s; keep shrinking
+        // bounded.
         max_shrink_iters: 8,
         ..Config::default()
     });
@@ -241,9 +242,9 @@ fn drive_case(start: usize, steps: u32) -> Result<(), String> {
 
         let mut pos = start;
         for step in 0..steps {
-            // A boundary arrow toward the neighbour that exists: from the second
-            // row press `up` (→ first), from the first press `down` (→ second).
-            // This is exactly the crossing the reference model's
+            // A boundary arrow toward the neighbour that exists: from the
+            // second row press `up` (→ first), from the first press `down` (→
+            // second). This is exactly the crossing the reference model's
             // `apply_arrow_navigate` resolves for single-line siblings.
             let dir = if pos == 1 { Dir::Up } else { Dir::Down };
             let expected = if pos == 1 { 0 } else { 1 };

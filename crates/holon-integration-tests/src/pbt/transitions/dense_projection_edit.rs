@@ -398,7 +398,8 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
                 state.set_block_task_state(&first, keyword.as_deref());
                 state.set_block_content(&first, &content);
                 state.carry_block_text_across_history(&first);
-                // An idle editor open on the row re-seeds from the patched block.
+                // An idle editor open on the row re-seeds from the patched
+                // block.
                 state.refresh_clean_editor_surface(&first);
             }
         }

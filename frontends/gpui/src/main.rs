@@ -124,7 +124,8 @@ fn main() -> Result<()> {
         }
     }
 
-    // A stop signal quits the app like closing its window, so it reaches `quit`.
+    // A stop signal quits the app like closing its window, so it reaches
+    // `quit`.
     #[cfg(feature = "desktop")]
     let stopped = {
         let (tx, rx) = futures::channel::oneshot::channel::<()>();
@@ -241,7 +242,8 @@ fn main() -> Result<()> {
 
             // Install the pending-write store as a GPUI global so the window
             // wiring can spawn the bus bridge and the render pass can build the
-            // approve panel (mirrors the DegradedToastSink/ShareTrigger globals).
+            // approve panel (mirrors the DegradedToastSink/ShareTrigger
+            // globals).
             if let Some(store) = pending_writes {
                 cx.set_global(holon_gpui::share_ui::PendingWritesGlobal(store));
             }

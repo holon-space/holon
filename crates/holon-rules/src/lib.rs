@@ -169,11 +169,11 @@ impl Place {
             });
         }
         if let Some(inner) = raw.strip_prefix("page(").and_then(|s| s.strip_suffix(')')) {
-            // `page(<root>)` — the page-file placement kind: the emitted block is a
-            // `Page`-tagged child of `block:<root>`. Colon-free (unlike the ADR's
-            // prose `display(under: x)`) so it is a plain YAML scalar needing no
-            // quoting; `<root>` names the parent block, resolved exactly like a
-            // bare `place: <root>`.
+            // `page(<root>)` — the page-file placement kind: the emitted block
+            // is a `Page`-tagged child of `block:<root>`. Colon-free (unlike
+            // the ADR's prose `display(under: x)`) so it is a plain YAML scalar
+            // needing no quoting; `<root>` names the parent block, resolved
+            // exactly like a bare `place: <root>`.
             return Self::from_root(inner.trim(), true).ok_or_else(|| {
                 HolonRuleParseError::PagePlacement {
                     place: raw.to_string(),
@@ -433,7 +433,8 @@ fn guard_from_arcs(arcs: &[InputArcWire]) -> Result<Guard, HolonRuleParseError> 
     let mut conditions = Vec::new();
     for arc in arcs {
         if arc.arc_type.as_deref() == Some("clock") {
-            // Read arc on the clock relation: drives re-fire, contributes no body.
+            // Read arc on the clock relation: drives re-fire, contributes no
+            // body.
             continue;
         }
         let when = arc
@@ -532,8 +533,9 @@ emit:
             emit.place.is_page(),
             "page(journals) must mark the emission a page-file child"
         );
-        // Parent resolution is identical to a bare root: the page's name-chain is
-        // `[Journals, {today}]` — the chain the guard's block_exists matches.
+        // Parent resolution is identical to a bare root: the page's name-chain
+        // is `[Journals, {today}]` — the chain the guard's block_exists
+        // matches.
         assert_eq!(emit.place.parent(), &journals());
         assert_eq!(emit.name.render("2026-07-10"), "2026-07-10");
     }

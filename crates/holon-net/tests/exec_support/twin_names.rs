@@ -57,7 +57,8 @@ mod tests {
 
     #[test]
     fn every_executor_twin_has_a_name() {
-        // Exhaustive: a new `Twin` variant fails to compile until it is listed here.
+        // Exhaustive: a new `Twin` variant fails to compile until it is listed
+        // here.
         fn listed(t: Twin) -> Twin {
             match t {
                 Twin::HiddenReservation
@@ -109,8 +110,8 @@ mod tests {
 
     #[test]
     fn every_lowering_twin_has_a_name() {
-        // Exhaustive: a new `LowerTwin` variant fails to compile until it is listed
-        // here.
+        // Exhaustive: a new `LowerTwin` variant fails to compile until it is
+        // listed here.
         fn listed(t: LowerTwin) -> LowerTwin {
             match t {
                 LowerTwin::NoAskHash

@@ -121,12 +121,13 @@ fn prod_session_wires_undo_and_mcp_shares_the_same_stack() {
 
         // ── Editor typing analog: a User-origin content set_field, exactly the
         //    shape `ReactiveEngine::dispatch_intent` sends through
-        //    `FrontendSession::execute_operation` (which stamps OpOrigin::User).
-        // Faithful to `editor_view.rs`'s `InputEvent::Change` SqlOnly dispatch:
-        // it stamps a monotonic `write_seq` ordering token alongside `content`
-        // (row 40 echo-suppression). Included here so the test proves the
-        // write_seq column does NOT change the undo classification (the op still
-        // returns `UndoAction::Undo` and pushes an entry).
+        //    `FrontendSession::execute_operation` (which stamps
+        // OpOrigin::User). Faithful to `editor_view.rs`'s `InputEvent::Change`
+        // SqlOnly dispatch: it stamps a monotonic `write_seq` ordering token
+        // alongside `content` (row 40 echo-suppression). Included here so the
+        // test proves the write_seq column does NOT change the undo
+        // classification (the op still returns `UndoAction::Undo` and pushes an
+        // entry).
         let seq = holon_api::write_seq::next();
         let mut params = std::collections::HashMap::new();
         params.insert("id".to_string(), Value::String(target_id.clone()));
@@ -149,10 +150,11 @@ fn prod_session_wires_undo_and_mcp_shares_the_same_stack() {
              (can_undo=false) — the editor→FrontendSession→BackendEngine undo push is not wired"
         );
 
-        // (2) The embedded MCP reads the SAME stack. `HolonService::new_with_origin`
-        //     over the DI BackendEngine singleton is precisely what
-        //     `HolonMcpServer::service()` builds. If the MCP saw a different
-        //     engine, this would be false while (1) is true.
+        // (2) The embedded MCP reads the SAME stack.
+        // `HolonService::new_with_origin`     over the DI BackendEngine
+        // singleton is precisely what     `HolonMcpServer::service()` builds.
+        // If the MCP saw a different     engine, this would be false while (1)
+        // is true.
         let mcp_service = HolonService::new_with_origin(
             engine.clone(),
             OpOrigin::Agent {

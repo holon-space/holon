@@ -387,7 +387,8 @@ fn every_integrations_cell_fits_its_column_and_the_modal() {
     // stops an introduced connection's `from` and `calls` values eliding to
     // nothing at 300, which is the same collapse seen from the other end
     // (`docs/Testing/bugfunnel/entries/
-    // 2026-09-12-the-hosts-disclosure-line-elides-a-host-that-fits-its-column.md`).
+    // 2026-09-12-the-hosts-disclosure-line-elides-a-host-that-fits-its-column.
+    // md`).
     //
     // The reference is the WIDEST WINDOW's run rather than a constant: there
     // the whole table fits on one line, so each column is exactly its share of
@@ -402,10 +403,10 @@ fn every_integrations_cell_fits_its_column_and_the_modal() {
         budget.len()
     );
     // A column whose cells WRAP is exempt, and deliberately so: it is the one
-    // shape the table gives no floor, because giving one both over-provisions it
-    // in a narrow container and makes its own wrapping unreachable. It is not
-    // unjudged — its buttons must still stay inside its cell, and its header
-    // must still hold one line, both asserted per width above.
+    // shape the table gives no floor, because giving one both over-provisions
+    // it in a narrow container and makes its own wrapping unreachable. It is
+    // not unjudged — its buttons must still stay inside its cell, and its
+    // header must still hold one line, both asserted per width above.
     let wrapping = seen.last().expect("WIDTHS is not empty").wrapping.clone();
     assert!(
         wrapping.len() < budget.len(),
@@ -487,8 +488,8 @@ impl Sweep {
     /// Boot at the narrowest swept width and open Settings on it.
     fn open() -> Self {
         let window_spec = format!("{}x{}", WIDTHS[0] as i32, WINDOW_HEIGHT as i32);
-        // SAFETY: single-threaded test binary (`--test-threads=1`), set before the
-        // app boots and before any thread reads the environment.
+        // SAFETY: single-threaded test binary (`--test-threads=1`), set before
+        // the app boots and before any thread reads the environment.
         unsafe { std::env::set_var("HOLON_INITIAL_WINDOW_SIZE", &window_spec) };
 
         let text_system = real_text_system();
@@ -497,8 +498,8 @@ impl Sweep {
             gpui_platform::current_headless_renderer()
         });
 
-        // The bundled gcal sidecar names `~/.config/holon/gcal-client-*`; point HOME
-        // at an empty dir so a consent flow cannot reach a real browser.
+        // The bundled gcal sidecar names `~/.config/holon/gcal-client-*`; point
+        // HOME at an empty dir so a consent flow cannot reach a real browser.
         let home = tempfile::tempdir().expect("tempdir for HOME");
         // SAFETY: as above.
         unsafe { std::env::set_var("HOME", home.path()) };
@@ -589,15 +590,16 @@ impl Sweep {
             .map(|(key, (cell_id, _))| (key.clone(), painted.descendants_of(cell_id)))
             .collect();
 
-        // Numbers on every run, not only on a red: the margins a column has left
-        // are what a reader needs to judge whether a passing table is comfortable
-        // or one glyph from overflowing again.
+        // Numbers on every run, not only on a red: the margins a column has
+        // left are what a reader needs to judge whether a passing table is
+        // comfortable or one glyph from overflowing again.
         eprintln!("--- window {window_spec} ---{report}");
 
-        // ── The resize reached the window ──────────────────────────────────────
-        // Every judgement below is about a window `window_w` wide. If the platform
-        // ignored the resize, all seven widths would report one window's geometry
-        // and the sweep would pass by measuring nothing.
+        // ── The resize reached the window
+        // ────────────────────────────────────── Every judgement below is about
+        // a window `window_w` wide. If the platform ignored the resize, all
+        // seven widths would report one window's geometry and the sweep would
+        // pass by measuring nothing.
         if (viewport - window_w).abs() > 1.0 {
             violations.push(format!(
                 "the window is {viewport:.1}px wide after being resized to {window_w}px, so this \
@@ -605,7 +607,8 @@ impl Sweep {
             ));
         }
 
-        // ── Non-vacuity ────────────────────────────────────────────────────────
+        // ── Non-vacuity
+        // ────────────────────────────────────────────────────────
         if headers.is_empty() {
             violations.push(format!(
             "the open Settings modal must paint the integrations table's header row, else every \
@@ -614,11 +617,11 @@ impl Sweep {
         }
         let rows: BTreeSet<&String> = cells.keys().map(|(_, row)| row).collect();
         let columns: BTreeSet<usize> = cells.keys().map(|(k, _)| *k).collect();
-        // How many columns and rows are VISIBLE is a property of this viewport, not
-        // of the table: below the wrap threshold a row occupies several lines and
-        // the panel scrolls, so a narrow run legitimately judges one column of one
-        // row. The sweep as a whole is what must be non-vacuous, and the caller
-        // asserts that over every width at once.
+        // How many columns and rows are VISIBLE is a property of this viewport,
+        // not of the table: below the wrap threshold a row occupies several
+        // lines and the panel scrolls, so a narrow run legitimately judges one
+        // column of one row. The sweep as a whole is what must be non-vacuous,
+        // and the caller asserts that over every width at once.
         if !(rows.is_empty() || contents.values().any(|d| !d.is_empty())) {
             violations.push(format!(
                 "every visible cell painted an empty content subtree — the fit assertions would be \
@@ -626,12 +629,13 @@ impl Sweep {
             ));
         }
 
-        // ── (4) The HEADER row survives this width ─────────────────────────────
-        // Judged FIRST, and independently of the data rows, because the header is
-        // painted whatever the list scrolls to. Every header is one word, so the
-        // rule has nothing to argue about: `Integration` painted as
-        // `Int / eg / rat / ion` is the clearest single statement of the collapse,
-        // and it is the row a reader uses to tell which column is which.
+        // ── (4) The HEADER row survives this width
+        // ───────────────────────────── Judged FIRST, and independently of the
+        // data rows, because the header is painted whatever the list scrolls
+        // to. Every header is one word, so the rule has nothing to argue about:
+        // `Integration` painted as `Int / eg / rat / ion` is the clearest
+        // single statement of the collapse, and it is the row a reader uses to
+        // tell which column is which.
         for (k, h) in &headers {
             if h.height > MAX_SINGLE_LINE_H {
                 violations.push(format!(
@@ -647,7 +651,8 @@ impl Sweep {
             }
         }
 
-        // ── (0) The reconstructed modal panel matches what was painted ─────────
+        // ── (0) The reconstructed modal panel matches what was painted
+        // ─────────
         let (panel_left, panel_right) = panel_edges(window_w);
         let content_left = panel_left + MODAL_PAD;
         let content_right = panel_right - MODAL_PAD;
@@ -664,7 +669,8 @@ impl Sweep {
             }
         }
 
-        // ── (1) Every cell's content fits the cell that holds it ───────────────
+        // ── (1) Every cell's content fits the cell that holds it
+        // ───────────────
         for ((k, row), (_, cell)) in &cells {
             let header_label = headers
                 .get(k)
@@ -686,7 +692,8 @@ impl Sweep {
             }
         }
 
-        // ── (2) Nothing the table paints crosses the modal panel ───────────────
+        // ── (2) Nothing the table paints crosses the modal panel
+        // ───────────────
         for ((k, row), (_, cell)) in &cells {
             for (id, info) in contents[&(*k, row.clone())].iter().chain(std::iter::once(&(
                 format!("{CELL_PREFIX}{k}-{row}"),
@@ -704,17 +711,18 @@ impl Sweep {
             }
         }
 
-        // ── (3) No painted text is broken across lines ─────────────────────────
-        // "unconfigured" and "jsonplaceholder" are single words with no break
-        // opportunity, so a two-line cell is that word broken mid-word — the defect
-        // the dogfood pass saw, and at 300 every cell was a vertical stack of
-        // syllables. gpui wraps INSIDE one text element rather than emitting one
-        // element per line, so the split shows up as that element's HEIGHT.
+        // ── (3) No painted text is broken across lines
+        // ───────────────────────── "unconfigured" and "jsonplaceholder" are
+        // single words with no break opportunity, so a two-line cell is that
+        // word broken mid-word — the defect the dogfood pass saw, and at 300
+        // every cell was a vertical stack of syllables. gpui wraps INSIDE one
+        // text element rather than emitting one element per line, so the split
+        // shows up as that element's HEIGHT.
         //
         // Judged per TEXT, not per cell: an introduced connection's Integration
-        // cell is three lines by design — name, `from <file>`, `calls <host>` — and
-        // a cell-level rule would read that as a wrap. Each of those three texts is
-        // still one line, which is the property.
+        // cell is three lines by design — name, `from <file>`, `calls <host>` —
+        // and a cell-level rule would read that as a wrap. Each of those three
+        // texts is still one line, which is the property.
         for (k, row) in cells.keys() {
             let header_label = headers
                 .get(k)

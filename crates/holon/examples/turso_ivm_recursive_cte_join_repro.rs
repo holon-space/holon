@@ -65,7 +65,8 @@ async fn main() -> anyhow::Result<()> {
     println!("  events_view_block created");
 
     // =====================================================================
-    // STEP 2: Create navigation tables with JOIN matview (from NavigationSchema)
+    // STEP 2: Create navigation tables with JOIN matview (from
+    // NavigationSchema)
     // =====================================================================
     println!("\n[STEP 2] Creating navigation tables with JOIN matview...");
 
@@ -226,8 +227,8 @@ async fn main() -> anyhow::Result<()> {
     // This insert should trigger:
     // 1. IVM update on blocks_with_paths (recursive CTE with JOIN)
     // 2. CDC callback fires
-    // The combination with existing current_focus JOIN view can cause "Invalid join
-    // commit state"
+    // The combination with existing current_focus JOIN view can cause "Invalid
+    // join commit state"
 
     conn.execute(
         r#"INSERT INTO blocks (id, parent_id, content, content_type)

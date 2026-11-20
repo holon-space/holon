@@ -133,8 +133,8 @@ impl<
     }
 
     fn apply_to_ref(&self, state: &mut R) {
-        // The whole slash-delete reference effect (undo snapshot + delete via the
-        // shared mutation machinery + focus clear) lives in
+        // The whole slash-delete reference effect (undo snapshot + delete via
+        // the shared mutation machinery + focus clear) lives in
         // `RefLayoutMutate::apply_slash_delete`.
         state.apply_slash_delete(&self.block_id);
     }

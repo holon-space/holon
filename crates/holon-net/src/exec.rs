@@ -1260,8 +1260,9 @@ impl Reader<'_> {
         let stack = &self.trace.evaluating;
         let cycle: Option<Vec<Place>> = match stack.iter().position(|r| *r == row) {
             Some(at) => Some(stack[at..].iter().map(|(p, _)| p.clone()).collect()),
-            // shortcut: a recursion this deep over new subjects reads as a cycle
-            // of its places; raise the bound when a real net derives deeper.
+            // shortcut: a recursion this deep over new subjects reads as a
+            // cycle of its places; raise the bound when a real net derives
+            // deeper.
             None if stack.len() >= MAX_DERIVED_DEPTH => {
                 let mut places: Vec<Place> = Vec::new();
                 for (p, _) in stack {
@@ -2823,7 +2824,8 @@ impl Executor {
             .expect("every attempt is in its occurrence's set");
         attempts.insert(id, seen);
         if seen == Seen::Failed && (probe || settles_alone) {
-            // A probe reads the goal: no attempt that already answered took effect.
+            // A probe reads the goal: no attempt that already answered took
+            // effect.
             for s in attempts.values_mut() {
                 if *s == Seen::Unknown || settles_alone {
                     *s = Seen::Failed;
@@ -3138,7 +3140,8 @@ impl Executor {
         }
         let mark = self.marks.get(&(t.name.clone(), s.clone()));
         let same_input = bound.is_ok() && mark.is_some_and(|m| m.key == self.key(trace));
-        // ADR 0032 Q6.a: new input starts from zero tries, not after the backoff.
+        // ADR 0032 Q6.a: new input starts from zero tries, not after the
+        // backoff.
         if let Some(due) = self.retry_due(&t.name, s)
             && (bound.is_err() || same_input || mark.is_none())
         {
@@ -3749,7 +3752,8 @@ impl Executor {
             a.occurrence.clone(),
             Some(Settled::OutcomeUnknown(cause.clone())),
         );
-        // The run stays open: only Drop or the run timer lets the next producer fire.
+        // The run stays open: only Drop or the run timer lets the next producer
+        // fire.
         if self.twin(Twin::UnknownSettlesFailed) {
             let settle = Cause::definite(format!("outcome unknown: {}", cause.text));
             self.run_failed(&a.transition, &a.subject, &settle, now);

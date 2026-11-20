@@ -259,8 +259,8 @@ async fn web_arm_rule_engine_materializes_the_day_page() -> Result<()> {
     // titled with today's date; the rule mints it, nothing else does.
     // The day page belongs to the VIEWER, so the oracle is the browser's
     // calendar date, not this process's. Reading the host zone here passed only
-    // while the two happened to agree, which is the same vacuity the browser bug
-    // hid behind.
+    // while the two happened to agree, which is the same vacuity the browser
+    // bug hid behind.
     let today = (chrono::Utc::now()
         + chrono::Duration::seconds(i64::from(BROWSER_UTC_OFFSET_SECONDS)))
     .format("%Y-%m-%d")
@@ -453,7 +453,8 @@ async fn web_arm_reset_vault_rebinds_the_live_page() -> Result<()> {
         );
     }
 
-    // The reason the rebind matters: the seeded blocks become gesture-reachable.
+    // The reason the rebind matters: the seeded blocks become
+    // gesture-reachable.
     let page_uri = EntityUri::parse("block:structural-page")?;
     driver.click_entity(&page_uri, "sidebar").await?;
     let reachable: std::collections::BTreeSet<String> = driver

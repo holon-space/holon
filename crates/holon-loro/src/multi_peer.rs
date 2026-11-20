@@ -725,7 +725,8 @@ pub fn check_invariants<D: std::fmt::Debug>(ref_state: &GroupState<D>) {
         get_alive_stable_ids(&peer.doc);
     }
 
-    // C1-C3: Convergence invariants (trial sync on clones, always uses DirectSync)
+    // C1-C3: Convergence invariants (trial sync on clones, always uses
+    // DirectSync)
     let online = ref_state.online_indices();
     if online.len() >= 2 {
         let mut trial_docs: Vec<LoroDoc> = online
@@ -1336,7 +1337,8 @@ mod clock_parity_spike {
         // Padded shadow must match (same machinery as assert_parity).
         assert_parity(|u, clock, junk| script(u, clock, junk), &["parent"], &[]);
 
-        // UNPADDED shadow must DIVERGE — otherwise the parity tests are vacuous.
+        // UNPADDED shadow must DIVERGE — otherwise the parity tests are
+        // vacuous.
         let mut real = Universe::new();
         {
             let mut clock = |u: &Universe| u.height();

@@ -120,7 +120,8 @@ async fn seed_page(backend: &LoroShareBackend, id: &str, title: &str, tags: &[&s
                 .expect("content_raw");
             text.insert(0, title).expect("title");
             // Tags live in the node's `meta` as a JSON array string — the shape
-            // `LoroBackend::set_block_tags` writes and `read_block_from_tree` reads.
+            // `LoroBackend::set_block_tags` writes and `read_block_from_tree`
+            // reads.
             let tags_json = serde_json::to_string(tags).expect("tags json");
             meta.insert("tags", loro::LoroValue::from(tags_json.as_str()))
                 .expect("tags");

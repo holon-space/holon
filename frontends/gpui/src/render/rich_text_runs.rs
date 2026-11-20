@@ -380,15 +380,16 @@ mod tests {
 
     #[test]
     fn scalar_range_to_bytes_clamps_out_of_bounds_multibyte() {
-        // "a你好" = 3 scalars / 7 bytes. A span 0..9 clamps to the full byte range.
+        // "a你好" = 3 scalars / 7 bytes. A span 0..9 clamps to the full byte
+        // range.
         let r = scalar_range_to_bytes("a你好", 0..9);
         assert_eq!(r, 0..7);
     }
 
     #[test]
     fn scalar_range_to_bytes_clamps_start_past_end() {
-        // Both endpoints past content clamp to the tail; end is kept >= start so
-        // the returned range never inverts.
+        // Both endpoints past content clamp to the tail; end is kept >= start
+        // so the returned range never inverts.
         let r = scalar_range_to_bytes("hi", 5..9);
         assert_eq!(r, 2..2);
     }

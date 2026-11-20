@@ -328,8 +328,8 @@ fn an_introduced_rows_origin_line_stays_inside_its_column() {
         gpui_platform::current_headless_renderer()
     });
 
-    // The bundled gcal sidecar names `~/.config/holon/gcal-client-*`; point HOME
-    // at an empty dir so a consent flow cannot reach a real browser.
+    // The bundled gcal sidecar names `~/.config/holon/gcal-client-*`; point
+    // HOME at an empty dir so a consent flow cannot reach a real browser.
     let home = tempfile::tempdir().expect("tempdir for HOME");
     // SAFETY: as above.
     unsafe { std::env::set_var("HOME", home.path()) };
@@ -445,9 +445,9 @@ fn an_introduced_rows_origin_line_stays_inside_its_column() {
         eprintln!("--- phase {width}px origin={origin:?} hosts={hosts:?} ---{report}");
 
         // Everything this configuration paints outside the box that should hold
-        // it, collected rather than asserted: the sweep's teardown has to happen
-        // before the first panic, and a width that is judged by `continue` would
-        // otherwise pass by measuring nothing.
+        // it, collected rather than asserted: the sweep's teardown has to
+        // happen before the first panic, and a width that is judged by
+        // `continue` would otherwise pass by measuring nothing.
         let (panel_left, panel_right) = panel_edges(width);
         let mut overflow: Vec<String> = Vec::new();
         if (viewport - width).abs() > EPS {
@@ -523,9 +523,9 @@ fn an_introduced_rows_origin_line_stays_inside_its_column() {
 
     // ── The width sweep ────────────────────────────────────────────────────
     // The desktop width above is where the dogfood pass ran; it is not where a
-    // cell budget breaks. Both disclosure values were read eliding to nothing at
-    // the app's own floor, so the same row is re-measured at every width the app
-    // can open at, in the two configurations the claims below are about.
+    // cell budget breaks. Both disclosure values were read eliding to nothing
+    // at the app's own floor, so the same row is re-measured at every width the
+    // app can open at, in the two configurations the claims below are about.
     let swept: Vec<(Phase, Phase)> = WIDTHS
         .iter()
         .map(|w| {

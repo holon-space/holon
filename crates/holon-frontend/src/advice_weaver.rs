@@ -227,18 +227,18 @@ pub async fn recompute_sidecar(query_engine: &dyn holon_api::QueryEngine, sideca
         }
     };
 
-    // Group contiguous anchors (the SQL orders by anchor_id first), applying the
-    // per-anchor top-K truncation on the score-ordered stream. Content is taken
-    // from the joined `content` column of the winning (kept) rows.
+    // Group contiguous anchors (the SQL orders by anchor_id first), applying
+    // the per-anchor top-K truncation on the score-ordered stream. Content is
+    // taken from the joined `content` column of the winning (kept) rows.
     //
     // PERF / TODO(partitioned-top-K): the top-K is applied HERE in Rust because
-    // Turso IVM has global `ORDER BY ... LIMIT` but no PARTITION-BY (per-anchor)
-    // top-K operator, so the watched `advice_rule_{slug}` matview is per-anchor
-    // UNBOUNDED. This is O(all-candidate-advice) per recompute — fine while advice
-    // sets are small. If it becomes a latency dominator, push a partitioned top-K
-    // operator into the Turso IVM fork (core/incremental/) so K-per-anchor is
-    // maintained incrementally and the matview is bounded. Tracked in
-    // docs/Testing/BugFunnel.md (deferred-perf).
+    // Turso IVM has global `ORDER BY ... LIMIT` but no PARTITION-BY
+    // (per-anchor) top-K operator, so the watched `advice_rule_{slug}` matview
+    // is per-anchor UNBOUNDED. This is O(all-candidate-advice) per recompute —
+    // fine while advice sets are small. If it becomes a latency dominator, push
+    // a partitioned top-K operator into the Turso IVM fork (core/incremental/)
+    // so K-per-anchor is maintained incrementally and the matview is bounded.
+    // Tracked in docs/Testing/BugFunnel.md (deferred-perf).
     let mut per_anchor: Vec<(EntityUri, Vec<EntityUri>)> = Vec::new();
     let mut content_map: HashMap<EntityUri, Arc<DataRow>> = HashMap::new();
     let k = rule.k as usize;
@@ -314,8 +314,8 @@ async fn discover_active_rule(query_engine: &dyn holon_api::QueryEngine) -> Opti
     let mut active: Vec<ActiveRule> = rows
         .iter()
         .filter_map(|r| {
-            // ALLOW(raw_row_id_column): label — `DiscoveredRule.block_id` is a String field
-            // for diagnostics; nothing converts it
+            // ALLOW(raw_row_id_column): label — `DiscoveredRule.block_id` is a
+            // String field for diagnostics; nothing converts it
             let block_id = r.get("id").and_then(|v| v.as_string())?;
             let content = r.get("content").and_then(|v| v.as_string())?;
             let discovered = holon_advice::parse_discovered_rule(block_id, content);
@@ -417,7 +417,8 @@ pub fn spawn_session_weaver(
                 None => None,
             };
 
-            // Recompute on each data change; re-establish when the rule set changes.
+            // Recompute on each data change; re-establish when the rule set
+            // changes.
             loop {
                 let data_next = async {
                     match data_stream.as_mut() {
@@ -465,7 +466,8 @@ mod tests {
         // Rank order: 0 < 1 < 2 (string compare of the padded suffix).
         assert!(advice_sort_key(0) < advice_sort_key(1));
         assert!(advice_sort_key(1) < advice_sort_key(2));
-        // Sorts AFTER a real fractional-index hex key (leading '2'..'F' < sentinel).
+        // Sorts AFTER a real fractional-index hex key (leading '2'..'F' <
+        // sentinel).
         assert!(advice_sort_key(0).as_str() > "A0");
         assert!(advice_sort_key(9).as_str() > "ZZZZ");
     }
@@ -494,7 +496,8 @@ mod tests {
                 Occurrence::Placed(OccurrenceId::for_placement(lesson, &anchor)),
                 "occurrence rides the identity key (never the id string)"
             );
-            // id stays canonical; parent overridden to anchor; sort = rank sentinel.
+            // id stays canonical; parent overridden to anchor; sort = rank
+            // sentinel.
             assert_eq!(
                 row.get("id").and_then(|v| v.as_string()),
                 Some(lesson.as_str())

@@ -321,7 +321,8 @@ mod tests {
 
     #[test]
     fn empty_snapshot_still_counts_as_seeded() {
-        // "seeded with an empty tree" must be distinguishable from "never seeded".
+        // "seeded with an empty tree" must be distinguishable from "never
+        // seeded".
         let store = SyncBaseStore::in_memory();
         let key = BaseKey::file("org", "/empty.org");
         store.put_base(&key, HashMap::new());

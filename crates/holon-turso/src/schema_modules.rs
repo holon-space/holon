@@ -197,7 +197,8 @@ async fn migrate_junction_dropping_target_fk(
             };
             // The current shape names the target column only inside prose
             // comments explaining why it is NOT constrained; the
-            // `FOREIGN KEY (<col>)` clause itself appears in the old shape alone.
+            // `FOREIGN KEY (<col>)` clause itself appears in the old shape
+            // alone.
             ddl.split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -250,11 +251,11 @@ async fn migrate_junction_dropping_target_fk(
         );
         // A table carrying dependent matviews cannot be renamed — Turso rejects
         // the ALTER outright. Every deployed database has `block_requires_agg`
-        // (and its chain) persisted, because `reconcile_named_view` early-returns
-        // on an unchanged SELECT and so never recreates them. Clearing them here
-        // is safe: their owning schema modules run AFTER this one and rebuild
-        // them on the same boot, and dynamic watch views are recreated on watch
-        // registration.
+        // (and its chain) persisted, because `reconcile_named_view`
+        // early-returns on an unchanged SELECT and so never recreates them.
+        // Clearing them here is safe: their owning schema modules run AFTER
+        // this one and rebuild them on the same boot, and dynamic watch views
+        // are recreated on watch registration.
         crate::matview_manager::drop_dependent_views(db_handle, table)
             .await
             .map_err(|e| {
@@ -266,8 +267,8 @@ async fn migrate_junction_dropping_target_fk(
             .execute_ddl(&format!("ALTER TABLE {table} RENAME TO {staging}"))
             .await?;
         // The index followed the table through the RENAME and still holds its
-        // old name, so the current-shape `CREATE INDEX IF NOT EXISTS` would find
-        // the name taken and silently leave the new table unindexed.
+        // old name, so the current-shape `CREATE INDEX IF NOT EXISTS` would
+        // find the name taken and silently leave the new table unindexed.
         db_handle
             .execute_ddl(&format!("DROP INDEX IF EXISTS {index_name}"))
             .await?;
@@ -1279,9 +1280,10 @@ impl SchemaModule for LinkSchemaModule {
         // Merge redirects live here rather than in their own module: they are
         // the other half of id resolution and are re-derived at the same SQL
         // write boundary (from the survivor's `merged_from` property, as
-        // `block_links` is from `marks`). They are read on the block-lookup MISS
-        // path, NOT by the `resolved_id` rewrite — `merge_blocks` re-points
-        // inbound links eagerly, so a resolved link never needs the redirect.
+        // `block_links` is from `marks`). They are read on the block-lookup
+        // MISS path, NOT by the `resolved_id` rewrite — `merge_blocks`
+        // re-points inbound links eagerly, so a resolved link never needs the
+        // redirect.
         changes.extend(
             ensure_schema_sql(db_handle, include_str!("../sql/schema/block_redirects.sql")).await?,
         );
@@ -1513,7 +1515,8 @@ mod tests {
             .expect("old-shape block_requires");
         handle
             .execute(
-                // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
+                // ALLOW(sole_block_writer): schema-module unit test seeding the
+                // FK parent row.
                 "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES \
                  ('block:src', 'sentinel:no_parent', 1.0, 'Source')",
                 vec![],
@@ -1577,7 +1580,8 @@ mod tests {
             .expect("core schema");
         handle
             .execute(
-                // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
+                // ALLOW(sole_block_writer): schema-module unit test seeding the
+                // FK parent row.
                 "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES \
                  ('block:src', 'sentinel:no_parent', 1.0, 'Source')",
                 vec![],
@@ -1665,7 +1669,8 @@ mod tests {
             .expect("old-shape index");
         handle
             .execute(
-                // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
+                // ALLOW(sole_block_writer): schema-module unit test seeding the
+                // FK parent row.
                 "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES \
                  ('block:src', 'sentinel:no_parent', 1.0, 'Source')",
                 vec![],
@@ -1708,8 +1713,8 @@ mod tests {
             "the migration must PRESERVE rows, not drop the table"
         );
 
-        // The target FK is really gone: a dangling target now inserts, where the
-        // old shape aborted the transaction.
+        // The target FK is really gone: a dangling target now inserts, where
+        // the old shape aborted the transaction.
         handle
             .execute(
                 "INSERT INTO block_requires (block_id, required_id) VALUES ('block:src', \
@@ -1783,7 +1788,8 @@ mod tests {
 
         handle
             .execute(
-                // ALLOW(sole_block_writer): schema-module unit test seeding the FK parent row.
+                // ALLOW(sole_block_writer): schema-module unit test seeding the
+                // FK parent row.
                 "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES \
                  ('block:p', 'sentinel:no_parent', 1.0, 'Page One')",
                 vec![],
@@ -1880,7 +1886,8 @@ mod tests {
             Some("1970-01-01")
         );
 
-        // A matview is the only relation that surfaces base-table changes as CDC.
+        // A matview is the only relation that surfaces base-table changes as
+        // CDC.
         handle
             .execute_ddl(
                 "CREATE MATERIALIZED VIEW clock_mirror AS SELECT grain, today, epoch_day FROM \

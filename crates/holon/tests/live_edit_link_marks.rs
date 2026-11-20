@@ -574,8 +574,8 @@ async fn a_create_that_supplies_marks_is_not_reparsed() {
     let d = dispatcher(handle.clone());
     let entity: EntityName = ENTITY.to_string().into();
 
-    // The ingest shape: an already-stripped label whose surviving `[[...]]` bytes
-    // are sealed as literal by a Verbatim mark covering them.
+    // The ingest shape: an already-stripped label whose surviving `[[...]]`
+    // bytes are sealed as literal by a Verbatim mark covering them.
     let sealed = vec![MarkSpan::new(4, 17, InlineMark::Verbatim)];
     let mut p: holon_api::StorageEntity = HashMap::new();
     p.insert("id".into(), Value::String("block:src".to_string()));

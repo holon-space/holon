@@ -281,7 +281,8 @@ fn an_id_that_is_not_a_bare_block_id_is_refused_on_every_route() {
                     ],
                 ),
             ];
-            // `block:n-scheme` is itself a valid created id: `block:` over a bare id.
+            // `block:n-scheme` is itself a valid created id: `block:` over a
+            // bare id.
             if !id.starts_with("block:") {
                 routes.push((
                     "create",

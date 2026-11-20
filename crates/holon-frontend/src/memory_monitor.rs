@@ -112,8 +112,8 @@ impl MemoryMonitorHandle {
                             "[MemoryMonitor] RSS {current_mb:.1}MB exceeds abort threshold \
                              {rss_abort_mb:.0}MB — aborting to flush dhat-heap.json"
                         );
-                        // SIGINT ourselves so the ctrlc handler in heap_profile::start() flushes
-                        // dhat
+                        // SIGINT ourselves so the ctrlc handler in
+                        // heap_profile::start() flushes dhat
                         unsafe {
                             libc::raise(libc::SIGINT);
                         }

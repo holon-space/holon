@@ -49,7 +49,8 @@ pub fn init_opentelemetry() -> Result<()> {
         // Logs endpoint: /v1/logs
         let logs_endpoint = format!("{}/v1/logs", base_endpoint);
 
-        // Note: Can't use tracing::info! here because subscriber isn't initialized yet
+        // Note: Can't use tracing::info! here because subscriber isn't
+        // initialized yet
         tracing::debug!("Initializing OpenTelemetry OTLP exporters:");
         tracing::debug!("  Traces endpoint: {}", traces_endpoint);
         tracing::debug!("  Logs endpoint: {}", logs_endpoint);
@@ -57,8 +58,8 @@ pub fn init_opentelemetry() -> Result<()> {
         // Use OTLP exporter builder (0.31 API)
         use opentelemetry_otlp::WithExportConfig;
 
-        // Create OTLP trace exporter using builder - use with_http() to set HTTP
-        // protocol
+        // Create OTLP trace exporter using builder - use with_http() to set
+        // HTTP protocol
         let trace_exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .with_endpoint(traces_endpoint)
@@ -82,13 +83,15 @@ pub fn init_opentelemetry() -> Result<()> {
         global::set_tracer_provider(tracer_provider);
 
         // Set up log provider
-        // Note: logger_provider must be kept alive for the lifetime of the application
+        // Note: logger_provider must be kept alive for the lifetime of the
+        // application
         use opentelemetry_sdk::logs::SdkLoggerProvider;
         let logger_provider = SdkLoggerProvider::builder()
             .with_batch_exporter(log_exporter)
             .with_resource(resource.clone())
             .build();
-        // Leak the logger provider to keep it alive for the lifetime of the application
+        // Leak the logger provider to keep it alive for the lifetime of the
+        // application
         Box::leak(Box::new(logger_provider));
     } else {
         // Use stdout exporters only
@@ -97,7 +100,8 @@ pub fn init_opentelemetry() -> Result<()> {
         let stdout_trace_exporter = SpanExporter::default();
         let stdout_log_exporter = LogExporter::default();
 
-        // Note: Can't use tracing::info! here because subscriber isn't initialized yet
+        // Note: Can't use tracing::info! here because subscriber isn't
+        // initialized yet
         tracing::debug!("Initializing OpenTelemetry stdout exporters");
 
         // Set up trace provider
@@ -115,7 +119,8 @@ pub fn init_opentelemetry() -> Result<()> {
             .with_simple_exporter(stdout_log_exporter)
             .with_resource(resource)
             .build();
-        // Leak the logger provider to keep it alive for the lifetime of the application
+        // Leak the logger provider to keep it alive for the lifetime of the
+        // application
         Box::leak(Box::new(logger_provider));
     }
 

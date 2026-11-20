@@ -188,8 +188,8 @@ fn boot_holon_window(
         // `ui.theme` (and any other preference) saved by the settings UI in a
         // prior session is applied at boot — desktop reads this via
         // `load_config`; mobile skipping it booted the built-in `holonLight`
-        // every restart (dogfood 2026-07-19). CRDT is force-enabled: mobile is a
-        // first-class sharing target and without it `LoroModule` is never
+        // every restart (dogfood 2026-07-19). CRDT is force-enabled: mobile is
+        // a first-class sharing target and without it `LoroModule` is never
         // configured → `Arc<LoroShareBackend>` unregistered → share/accept ops
         // fail with "No provider registered for entity: tree".
         // A malformed holon.toml stops the boot with the parse error. Booting
@@ -291,7 +291,8 @@ fn boot_holon_window(
     debug.reset_builder.set(reset_builder).ok();
 
     // Main-thread reset pump: owns the `!Send` `RebindHandle` and re-points the
-    // live window when a `ResetRequest` arrives. Mirrors `setup_interaction_pump`.
+    // live window when a `ResetRequest` arrives. Mirrors
+    // `setup_interaction_pump`.
     let (reset_tx, mut reset_rx) =
         futures::channel::mpsc::channel::<holon_mcp::server::ResetRequest>(4);
     debug.reset_tx.set(reset_tx).ok();
@@ -478,8 +479,8 @@ pub fn safe_area_bottom_px() -> f32 {
 mod tests {
     // NB: import only what's needed — a `use super::*` glob would pull gpui's
     // `test` attribute macro (via the module's `use gpui::*`) into scope and
-    // shadow the std `#[test]`, causing "recursion limit reached while expanding
-    // #[test]".
+    // shadow the std `#[test]`, causing "recursion limit reached while
+    // expanding #[test]".
     use std::path::PathBuf;
 
     use super::android_storage_paths;

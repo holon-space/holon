@@ -354,8 +354,9 @@ fn the_last_integrations_row_switch_is_clickable() {
         gpui_platform::current_headless_renderer()
     });
 
-    // The bundled gcal sidecar names `~/.config/holon/gcal-client-*`; point HOME
-    // at an empty dir so nothing this test clicks can reach a real browser.
+    // The bundled gcal sidecar names `~/.config/holon/gcal-client-*`; point
+    // HOME at an empty dir so nothing this test clicks can reach a real
+    // browser.
     let home = tempfile::tempdir().expect("tempdir for HOME");
     // SAFETY: as above.
     unsafe { std::env::set_var("HOME", home.path()) };

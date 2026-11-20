@@ -127,8 +127,8 @@ fn adopted_block_loses_what_the_file_does_not_author(loro: bool) {
         let (_, bag_after_settle) = stored_row(&t).await.expect("the adopted block is gone");
         assert_eq!(bag, bag_after_settle, "the stored bag was still changing");
 
-        // `ui_only_key` was set by the app, not a file, but a file can carry it:
-        // once adopted, the file is authoritative for it.
+        // `ui_only_key` was set by the app, not a file, but a file can carry
+        // it: once adopted, the file is authoritative for it.
         for key in ["priority", "scheduled", "aisle", "ui_only_key"] {
             assert_eq!(
                 bag.get(key),

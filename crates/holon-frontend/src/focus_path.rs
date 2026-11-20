@@ -956,8 +956,9 @@ impl InputRouter {
             }
         }
 
-        // ALLOW(fallback): disclosed — when the cached common-prefix optimization
-        // can't apply, rebuild the focus path with a full DFS from root.
+        // ALLOW(fallback): disclosed — when the cached common-prefix
+        // optimization can't apply, rebuild the focus path with a full DFS from
+        // root.
         let fp = match resolver {
             Some(r) => build_focus_path_with_resolver(root, new_entity_id, r.as_ref()),
             None => build_focus_path(root, new_entity_id),
@@ -1676,7 +1677,8 @@ mod tests {
 
         let tree = list(vec![sidebar_item, make_row("block:page-bar")]);
 
-        // Click on the item with a bound action → returns the navigation.focus intent.
+        // Click on the item with a bound action → returns the navigation.focus
+        // intent.
         let intent = find_click_intent_oneshot(&tree, &uri("block:page-foo"))
             .expect("block:page-foo should yield a click intent");
         assert_eq!(intent.entity_name.as_str(), "navigation");
@@ -1755,8 +1757,9 @@ mod tests {
         );
         let main_panel = ViewModel::live_block(
             EntityUri::parse("block:default-main-panel").unwrap(),
-            // `collection` has no `column` kind; this resolved to `list` via the
-            // old silent default, so spell it `list` now that parsing is strict.
+            // `collection` has no `column` kind; this resolved to `list` via
+            // the old silent default, so spell it `list` now that parsing is
+            // strict.
             ViewModel::collection("list", vec![main_item]),
         );
         let root = ViewModel::layout("columns", vec![left_panel, main_panel]);

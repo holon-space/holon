@@ -498,7 +498,8 @@ impl Groups {
         let (text, written) = {
             let live = self.live();
             let mut left = self.left();
-            // Groups a dropped run moved here since `looked_at` stay as they are.
+            // Groups a dropped run moved here since `looked_at` stay as they
+            // are.
             let moved: Vec<_> = left.drain(..).filter(|g| !looked_at.contains(g)).collect();
             *left = running;
             left.extend(moved);
@@ -1070,7 +1071,8 @@ fn record_host(tail: &[u8]) -> Option<(i32, u64)> {
         (!field.is_empty() && field.iter().all(u8::is_ascii_digit))
             .then(|| {
                 let digits = std::str::from_utf8(field).expect("ASCII digits are UTF-8");
-                // ALLOW(ok): a number beyond u64 makes the tail one of another form.
+                // ALLOW(ok): a number beyond u64 makes the tail one of another
+                // form.
                 digits.parse::<u64>().ok()
             })
             .flatten()

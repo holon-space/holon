@@ -120,7 +120,8 @@ fn seed_over_legacy_journals_org_no_dup_no_dataloss() {
         // Let the org scan + writeback settle.
         tokio::time::sleep(Duration::from_millis(800)).await;
 
-        // (A) exactly ONE "Journal Auto-Create" heading — no seed/file duplicate.
+        // (A) exactly ONE "Journal Auto-Create" heading — no seed/file
+        // duplicate.
         let auto_create_rows = env
             .query_sql("SELECT id FROM block_raw WHERE content = 'Journal Auto-Create'")
             .await

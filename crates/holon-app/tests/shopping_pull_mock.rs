@@ -479,7 +479,8 @@ async fn a_served_list_projects_shopping_items() {
     assert_eq!(snapshot.version(), 7, "the list version came through");
     // The category vocabulary is a SECOND declared type the same mapping emits.
     // It never enters the list snapshot, and its content is pinned where the
-    // mapping is: `crates/holon-kitchen/tests/shopping_mapping_differential.rs`.
+    // mapping is:
+    // `crates/holon-kitchen/tests/shopping_mapping_differential.rs`.
 
     let inserts: Vec<_> = RemoteListReconciler::new(compiled.clone())
         .reconcile(&[], &snapshot)

@@ -985,9 +985,9 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
     ] {
         let profile = parse_profile_yaml(yaml)
             .with_context(|| "Failed to parse bundled profile YAML".to_string())?;
-        // Fail LOUD at boot if a bundled computed field calls a lookup the engine
-        // never registers — otherwise it errors at eval and silently degrades to
-        // () at WARN, inverting every condition it feeds.
+        // Fail LOUD at boot if a bundled computed field calls a lookup the
+        // engine never registers — otherwise it errors at eval and silently
+        // degrades to () at WARN, inverting every condition it feeds.
         crate::validate_lookups_registered(&profile).with_context(|| {
             format!(
                 "bundled profile '{}' references an unregistered lookup function",
@@ -1157,7 +1157,8 @@ mod tests {
 
         let compiled = registry.compiled_fields_for("task");
         assert_eq!(compiled.len(), 2);
-        // priority_score must come before weight (weight depends on priority_score)
+        // priority_score must come before weight (weight depends on
+        // priority_score)
         assert_eq!(compiled[0].name(), "priority_score");
         assert_eq!(compiled[1].name(), "weight");
         // Verify they're actually compiled (source is preserved)

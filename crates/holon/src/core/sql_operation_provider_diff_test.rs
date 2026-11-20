@@ -94,8 +94,8 @@ async fn prepare_update_returns_none_for_timestamp_only_change() {
         "content".into(),
         Value::String("stable content".to_string()),
     );
-    // Caller provides an explicit updated_at that differs from the stored value.
-    // This simulates the block_to_params regeneration-to-now pattern.
+    // Caller provides an explicit updated_at that differs from the stored
+    // value. This simulates the block_to_params regeneration-to-now pattern.
     params.insert("updated_at".into(), Value::Integer(99999));
 
     let result = provider
@@ -156,7 +156,8 @@ async fn prepare_update_returns_none_for_non_canonical_stored_properties() {
     let (_backend, _db, provider, id) =
         make_provider_with_block("x", Some(stored_props), 1000).await;
 
-    // Submit an update with extra_props a=2, b=1 (same values, different order).
+    // Submit an update with extra_props a=2, b=1 (same values, different
+    // order).
     let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
     params.insert("id".into(), Value::String(id));
     // Extra props are passed as individual Value entries that partition_params

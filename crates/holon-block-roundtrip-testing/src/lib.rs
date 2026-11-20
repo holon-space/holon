@@ -69,7 +69,8 @@ pub struct NormalizedBlock {
     // Planning timestamps
     pub scheduled: Option<String>,
     pub deadline: Option<String>,
-    // Custom drawer properties (non-internal keys like column-order, collapse-to, etc.)
+    // Custom drawer properties (non-internal keys like column-order,
+    // collapse-to, etc.)
     pub drawer_properties: BTreeMap<String, String>,
     // Ordering
     pub sequence: i64,
@@ -189,7 +190,8 @@ pub fn assert_sibling_order_matches(
 ) -> Result<(), TestCaseError> {
     use holon_core::storage::BlockQuery;
 
-    // Expected per-parent child order from the generated (document-order) blocks.
+    // Expected per-parent child order from the generated (document-order)
+    // blocks.
     let mut expected_children: BTreeMap<EntityUri, Vec<EntityUri>> = BTreeMap::new();
     for b in blocks {
         expected_children
@@ -563,10 +565,11 @@ pub fn marked_content_strategy() -> impl Strategy<Value = MarkedContent> {
 }
 
 pub fn valid_source_code() -> impl Strategy<Value = String> {
-    // Must start with non-whitespace (orgize strips leading blank lines from source
-    // content) Must not end with '\n': the wire format requires exactly one
-    // '\n' before `#+END_SRC`, and the parser strips it on extraction. Enforce
-    // the "content never ends with newline" invariant here so round-trip holds.
+    // Must start with non-whitespace (orgize strips leading blank lines from
+    // source content) Must not end with '\n': the wire format requires exactly
+    // one '\n' before `#+END_SRC`, and the parser strips it on extraction.
+    // Enforce the "content never ends with newline" invariant here so
+    // round-trip holds.
     prop_oneof![
         // Normal source code (no special chars)
         3 => "[a-zA-Z0-9_=(){}\\[\\];,.][a-zA-Z0-9_ =(){}\\[\\];,.\n]{9,99}",
@@ -608,7 +611,8 @@ pub struct PropertiesDrawer {
 
 pub fn properties_drawer_strategy() -> impl Strategy<Value = PropertiesDrawer> {
     (
-        // ~70% of headlines get an explicit :ID:, ~30% don't (simulates user-created headlines)
+        // ~70% of headlines get an explicit :ID:, ~30% don't (simulates
+        // user-created headlines)
         prop::option::weighted(
             0.7,
             "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
@@ -749,8 +753,8 @@ impl HeadlineSpec {
             })
         }));
 
-        // Set org properties as flat keys (only include :ID: if explicitly set in
-        // drawer)
+        // Set org properties as flat keys (only include :ID: if explicitly set
+        // in drawer)
         if let Some(ref explicit_id) = self.properties_drawer.explicit_id {
             block.set_property("ID", Value::String(explicit_id.clone()));
         }
@@ -840,7 +844,8 @@ pub fn headline_spec_strategy(
                 source_blocks,
                 fallback_id_bits,
             )| {
-                // Use explicit_id from drawer if present, otherwise generate a fresh UUID
+                // Use explicit_id from drawer if present, otherwise generate a
+                // fresh UUID
                 let raw_id = props
                     .explicit_id
                     .clone()

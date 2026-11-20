@@ -474,15 +474,16 @@ impl MutableTree {
     }
 
     fn walk_dfs_into(&self, ids: &[RowKey], out: &mut Vec<RowKey>) {
-        // F8 backstop (dogfood 2026-07-21): a cyclic parent graph -- e.g. a node
-        // that is its own child, the shape a doc `#+ID:` colliding a heading
-        // `:ID:` produces -- would recurse this DFS without bound and overflow
-        // the stack, aborting the whole app. A valid outline is acyclic, so a
-        // repeat visit is a structural cycle. Loud rejection of the org-ingest
-        // route lives at the parser boundary (`reject_id_cycles`); this guards a
-        // cycle arriving via ANY OTHER route (CRDT merge, direct SQL): surface it
-        // loudly and prune the back-edge (disclosed degrade -- the tree still
-        // renders, minus the impossible cycle) instead of crashing.
+        // F8 backstop (dogfood 2026-07-21): a cyclic parent graph -- e.g. a
+        // node that is its own child, the shape a doc `#+ID:` colliding a
+        // heading `:ID:` produces -- would recurse this DFS without bound and
+        // overflow the stack, aborting the whole app. A valid outline is
+        // acyclic, so a repeat visit is a structural cycle. Loud rejection of
+        // the org-ingest route lives at the parser boundary
+        // (`reject_id_cycles`); this guards a cycle arriving via ANY OTHER
+        // route (CRDT merge, direct SQL): surface it loudly and prune the
+        // back-edge (disclosed degrade -- the tree still renders, minus the
+        // impossible cycle) instead of crashing.
         let mut visited = std::collections::HashSet::new();
         self.walk_dfs_guarded(ids, out, &mut visited);
     }

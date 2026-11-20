@@ -123,7 +123,8 @@ fn journals_view_definition_survives_restart_over_existing_vault() {
     // the seed runs the `fresh=false` path — the `__default__` page is NOT
     // seeded, so a `_routing_doc_uri = block:__default__` set on the journals
     // view blocks is a DANGLING reference (no such document/file). Writeback
-    // that trusts it strands the blocks in no file → boot-2 ingest deletes them.
+    // that trusts it strands the blocks in no file → boot-2 ingest deletes
+    // them.
     run_restart_survival(Some((
         "Inbox.org",
         "#+TITLE: Inbox\n* a user note\n:PROPERTIES:\n:ID: user-note-1\n:END:\n",
@@ -182,13 +183,14 @@ fn run_restart_survival(existing_vault_file: Option<(&str, &str)>) {
             dump_org_files(&env).await
         );
 
-        // Secondary (BugFunnel row 144): `sentinel:no_parent` must NEVER surface
-        // as a real block. It lives in `block_raw` as the self-parented FK anchor
-        // (schema bootstrap, `INSERT OR IGNORE`, every boot) — that is by design
-        // and SYMMETRIC across boots — but every read surface (`block` matview,
-        // get_blocks, blocks_with_paths) excludes it by id. Assert it never
-        // reaches the read surface on the second boot (the reported asymmetry),
-        // and document that the base-table anchor is present on both boots.
+        // Secondary (BugFunnel row 144): `sentinel:no_parent` must NEVER
+        // surface as a real block. It lives in `block_raw` as the self-parented
+        // FK anchor (schema bootstrap, `INSERT OR IGNORE`, every boot) — that
+        // is by design and SYMMETRIC across boots — but every read surface
+        // (`block` matview, get_blocks, blocks_with_paths) excludes it by id.
+        // Assert it never reaches the read surface on the second boot (the
+        // reported asymmetry), and document that the base-table anchor is
+        // present on both boots.
         assert!(
             !present(&env, "sentinel:no_parent").await,
             "[journals-restart] sentinel:no_parent leaked into the `block` read surface after \

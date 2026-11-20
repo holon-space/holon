@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-// Import Block for use in extension traits (not re-exported to avoid FRB issues)
+// Import Block for use in extension traits (not re-exported to avoid FRB
+// issues)
 use holon_api::MarkClass;
 use holon_api::MarkSpan;
 use holon_api::RenderLoss;
@@ -1011,9 +1012,9 @@ pub(crate) fn document_head(
                 // filled in — `EntityUri::id()` of a name-chain document is its
                 // PATH, so substituting there would write the file's own path
                 // into the drawer as if the author had chosen it. This mirrors
-                // the parser's `drawer_id`, which rejects an empty value for the
-                // same reason; the two guards must agree or write-back invents
-                // an identity the parse will not accept back.
+                // the parser's `drawer_id`, which rejects an empty value for
+                // the same reason; the two guards must agree or write-back
+                // invents an identity the parse will not accept back.
                 if key.eq_ignore_ascii_case("ID") && !authored.is_empty() {
                     let id = id.as_ref().ok_or_else(|| {
                         anyhow::anyhow!(
@@ -1050,7 +1051,8 @@ pub(crate) fn document_head(
     // A drawer that already carries `:ID:` IS the identity carrier, so no
     // `#+ID:` is added beside it — the file keeps the single carrier its author
     // chose instead of growing a second one on every write-back. A file that
-    // authored BOTH (in agreement — the parser rejects disagreement) keeps both.
+    // authored BOTH (in agreement — the parser rejects disagreement) keeps
+    // both.
     let authored_id_keyword = doc_block.get_property(org_props::FILE_ID_KEYWORD).is_some();
     let id = id.filter(|_| !drawer_carries_id || authored_id_keyword);
 
@@ -1536,20 +1538,21 @@ impl OrgBlockExt for Block {
         // the block_requires junction) — the parser pulls it out of the drawer
         // and the renderer must put it back. Stored values are `block:` URIs
         // (added at parse boundary); strip the scheme on the way out so the
-        // org file keeps bare slugs (per docs/Reference/ORG_SYNTAX.md). Joined with
-        // spaces (org-edna convention).
+        // org file keeps bare slugs (per docs/Reference/ORG_SYNTAX.md). Joined
+        // with spaces (org-edna convention).
         //
         // Rendered under the canonical `:REQUIRES:` drawer key (owner ruling
-        // 2026-07-16). `:BLOCKED-BY:` is accepted as an input alias by the parser
-        // and converges to `:REQUIRES:` on write-back — both name the SAME
-        // `block_requires` edge (there is no distinct `BlockedBy` EdgeField; see
-        // block_requires.sql and crates/holon-api/src/edge_field.rs).
+        // 2026-07-16). `:BLOCKED-BY:` is accepted as an input alias by the
+        // parser and converges to `:REQUIRES:` on write-back — both name the
+        // SAME `block_requires` edge (there is no distinct `BlockedBy`
+        // EdgeField; see block_requires.sql and
+        // crates/holon-api/src/edge_field.rs).
         if !self.requires.is_empty() {
             // Sort the bare slugs: this edge is a SET of blockers (order is not
             // semantic), and the junction hydration (`json_group_array` over
-            // `block_requires`, no ORDER BY) does not guarantee insertion order.
-            // A sorted canonical form makes the org round-trip deterministic
-            // through the store regardless of aggregation order.
+            // `block_requires`, no ORDER BY) does not guarantee insertion
+            // order. A sorted canonical form makes the org round-trip
+            // deterministic through the store regardless of aggregation order.
             let mut bare: Vec<String> = self
                 .requires
                 .iter()
@@ -1799,7 +1802,8 @@ fn contract_only_emission(content: &str, marks: &[MarkSpan]) -> Option<String> {
         // reported by the caller that actually degrades.
         .find_map(|(retained, ..)| {
             // ALLOW(ok): a rung that does not render is control flow, not a
-            // failure — the next rung is tried and the caller reports the reason.
+            // failure — the next rung is tried and the caller reports the
+            // reason.
             crate::inline_marks::render_expecting(content, &retained, &contract).ok()
         })
         .or_else(|| {

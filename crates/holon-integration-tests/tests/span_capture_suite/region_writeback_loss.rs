@@ -160,11 +160,12 @@ fn three_mode_region_survives_ingest_and_writeback() {
 
         let path = env.org_file_path("Projects/Holon/Frontends/GPUI.org");
 
-        // --- Initial scan (CREATE path): every :ID: reachable from the doc root
-        // and every :ID: still on disk after the forced write-back. Before the
-        // fix, `flow-mode-shell`'s create transaction hit the `block_requires`
-        // `required_id` FK (target `orient-daily-view` not yet created) and the
-        // whole file scan aborted, dropping the region + everything after it.
+        // --- Initial scan (CREATE path): every :ID: reachable from the doc
+        // root and every :ID: still on disk after the forced write-back. Before
+        // the fix, `flow-mode-shell`'s create transaction hit the
+        // `block_requires` `required_id` FK (target `orient-daily-view` not yet
+        // created) and the whole file scan aborted, dropping the region +
+        // everything after it.
         let rows = env.non_page_block_rows().await;
         let disk = env.org_fs.read_to_string(&path).await.expect("read gpui");
         assert_region_survives(&rows, &disk, "initial-scan");

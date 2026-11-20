@@ -101,8 +101,8 @@ impl<R: RefLifecycle + RefDocumentsMut> TransitionFactory<R> for RenameDocument 
         // `doc-file-rename-title-followed` keystone case, which is gated by
         // `preconditions` alone, not this generator). The removal-cascade
         // over-delete and the atomic-Rename-kind gaps are now CLOSED
-        // (`on_file_renamed` re-homes + retitles with no delete window). Opt the
-        // random rung in with `HOLON_PBT_DOC_RENAME=1`.
+        // (`on_file_renamed` re-homes + retitles with no delete window). Opt
+        // the random rung in with `HOLON_PBT_DOC_RENAME=1`.
         let enabled = std::env::var("HOLON_PBT_DOC_RENAME").is_ok();
         let checks: Vec<Validated<(), Reason>> = vec![
             check(enabled, Reason::PreconditionFailed),

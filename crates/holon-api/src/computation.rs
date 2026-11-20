@@ -648,8 +648,9 @@ fn value_to_sql_literal(v: &Value, placeholder: usize, sql: &str) -> Result<Stri
         Value::Integer(i) if *i < 0 => format!("CAST('{i}' AS INTEGER)"),
         Value::Integer(i) => i.to_string(),
         // `{:?}` for f64 always renders a decimal point or exponent, so the
-        // literal keeps REAL affinity in SQLite (`3.0`, not `3` which would take
-        // integer division). Non-finite floats have no SQL literal — fail loud.
+        // literal keeps REAL affinity in SQLite (`3.0`, not `3` which would
+        // take integer division). Non-finite floats have no SQL literal — fail
+        // loud.
         Value::Float(f) => {
             if !f.is_finite() {
                 return Err(InlineError::NonFiniteFloat {
@@ -885,8 +886,8 @@ impl Computation {
                     params,
                 ))
             }
-            // `name` is a `FieldIdent`, so it is an identifier by construction —
-            // the only reason this interpolation is safe.
+            // `name` is a `FieldIdent`, so it is an identifier by construction
+            // — the only reason this interpolation is safe.
             Computation::IsDefined(name) => {
                 Ok(SqlFragment::new(format!("({name} IS NOT NULL)"), vec![]))
             }
@@ -1000,8 +1001,8 @@ impl Computation {
                 branches, else_, ..
             } => {
                 // The scrutinee is compared, never returned, so it does not
-                // contribute. `Null` arms are absorbed: `if c { name } else { ()
-                // }` is a nullable text column, not a type disagreement.
+                // contribute. `Null` arms are absorbed: `if c { name } else {
+                // () }` is a nullable text column, not a type disagreement.
                 let mut kind = None;
                 for arm in branches.iter().map(|(_, result)| result).chain([&**else_]) {
                     let arm_kind = match arm.result_kind(types) {
@@ -1263,11 +1264,11 @@ fn eval_script(expr: &CompiledExpr, ctx: &Context) -> Result<Value, ComputeError
     let mut scope = Scope::new();
     for (k, v) in ctx {
         match v {
-            // Push integers as Rhai INT (i64), NOT coerced to f64: coercion made
-            // the Script (seat B) path disagree with the typed (seat A) path on
-            // integer semantics — `switch j { 1 => … }` is type-strict, so a
-            // silently-float `j` would miss. Type-faithful marshalling keeps the
-            // two seats observably identical.
+            // Push integers as Rhai INT (i64), NOT coerced to f64: coercion
+            // made the Script (seat B) path disagree with the typed (seat A)
+            // path on integer semantics — `switch j { 1 => … }` is type-strict,
+            // so a silently-float `j` would miss. Type-faithful marshalling
+            // keeps the two seats observably identical.
             Value::Integer(i) => scope.push(k.clone(), *i),
             Value::Float(f) => scope.push(k.clone(), *f),
             Value::Boolean(b) => scope.push(k.clone(), *b),
@@ -1371,8 +1372,8 @@ fn predicate_column(pred: &Predicate) -> Option<&str> {
 fn join_predicates(preds: &[Predicate], sep: &str) -> Result<SqlFragment, SqlUnsupported> {
     let mut parts = Vec::with_capacity(preds.len());
     let mut params = Vec::new();
-    // `?` propagates a child's SqlUnsupported instead of dropping it (the disclosed
-    // fix).
+    // `?` propagates a child's SqlUnsupported instead of dropping it (the
+    // disclosed fix).
     for p in preds {
         let frag = predicate_to_sql(p)?;
         parts.push(format!("({})", frag.sql));

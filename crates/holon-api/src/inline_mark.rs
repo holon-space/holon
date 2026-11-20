@@ -596,10 +596,11 @@ pub fn split_content_marks(
     let right_content = right_raw.trim_start();
 
     // Scalar length of the left half AFTER trimming trailing whitespace; left
-    // marks are clamped into this so nothing dangles past the truncated content.
+    // marks are clamped into this so nothing dangles past the truncated
+    // content.
     let left_len = left_content.chars().count();
-    // Leading whitespace scalars trimmed off the right half — right marks rebase
-    // by the split point plus this amount.
+    // Leading whitespace scalars trimmed off the right half — right marks
+    // rebase by the split point plus this amount.
     let right_lead_trim = right_raw.chars().count() - right_content.chars().count();
     let right_shift = split_scalar + right_lead_trim;
 
@@ -609,7 +610,8 @@ pub fn split_content_marks(
     for m in marks {
         let (s, e) = (m.start, m.end);
         if e <= split_scalar {
-            // Entirely left: keep, clamping the end into the trimmed left length.
+            // Entirely left: keep, clamping the end into the trimmed left
+            // length.
             left_marks.push(MarkSpan::new(
                 s.min(left_len),
                 e.min(left_len),

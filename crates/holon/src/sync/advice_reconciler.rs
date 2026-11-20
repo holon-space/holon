@@ -122,7 +122,8 @@ async fn apply_reconcile_plan(
             block_id,
             status: intended,
         } => {
-            // A DDL failure downgrades the intended `Active` to a visible `DdlError`.
+            // A DDL failure downgrades the intended `Active` to a visible
+            // `DdlError`.
             let recorded = match ddl_error {
                 Some(msg) => AdviceRuleStatus::DdlError(msg),
                 None => intended,

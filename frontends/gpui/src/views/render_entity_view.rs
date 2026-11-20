@@ -123,7 +123,8 @@ impl Render for RenderEntityView {
         let child_el = builders::render(&content, &gpui_ctx);
 
         // A row that names no entity has no block to focus or edit; it renders
-        // its child and nothing else, exactly as a row with no `id` column does.
+        // its child and nothing else, exactly as a row with no `id` column
+        // does.
         let block_id = holon_api::row_id_of(self.current.entity().as_ref()).entity();
 
         let Some(ref id) = block_id else {

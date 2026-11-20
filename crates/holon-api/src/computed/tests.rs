@@ -83,7 +83,8 @@ fn an_overflowing_computed_field_is_refused_at_the_render_seat() {
 #[test]
 fn missing_required_column_is_unbound_null_not_evaluated() {
     // Type-aware binding: a required column absent from scope makes the field
-    // UNBOUND — rhai is never invoked (no "Variable not found"), output is Null.
+    // UNBOUND — rhai is never invoked (no "Variable not found"), output is
+    // Null.
     let mut ctx = HashMap::new();
     let fields = vec![field("bad", "nonexistent_var + 1")];
 

@@ -121,11 +121,11 @@ impl SinkReader for MemorySink {
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "A0".to_string());
-            // `block_to_params` writes only `block_raw`; the junction-synthesized
-            // edge columns are absent. `TursoSinkReader` COALESCEs every one of
-            // them to `'[]'` — mirror that over `EdgeField::ALL` so the strict
-            // `Block::try_from` decode succeeds and a newly added edge field
-            // cannot leave this stub behind.
+            // `block_to_params` writes only `block_raw`; the
+            // junction-synthesized edge columns are absent. `TursoSinkReader`
+            // COALESCEs every one of them to `'[]'` — mirror that over
+            // `EdgeField::ALL` so the strict `Block::try_from` decode succeeds
+            // and a newly added edge field cannot leave this stub behind.
             let mut row = params.clone();
             for field in EdgeField::ALL {
                 row.entry(field.column().into())

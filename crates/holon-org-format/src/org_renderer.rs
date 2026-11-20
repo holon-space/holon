@@ -211,7 +211,8 @@ impl OrgRenderer {
             &mut |block: &Block, minted_here: Option<&str>| {
                 let mut block = block.clone();
                 if block.content_type.is_heading() {
-                    // render_headline_block records the loss for an unreadable carrier.
+                    // render_headline_block records the loss for an unreadable
+                    // carrier.
                     last_section_blank_lines = block.blank_lines().unwrap_or_default().after;
                     Self::apply_page_keyword_edits(&mut block, edits);
                 }
@@ -259,8 +260,8 @@ impl OrgRenderer {
         file_id: &EntityUri,
     ) -> anyhow::Result<Vec<(crate::page_keywords::LineAt, String)>> {
         use crate::page_keywords::LineAt;
-        // document_head and render_headline_block record the loss for an unreadable
-        // carrier; a render discloses each one once.
+        // document_head and render_headline_block record the loss for an
+        // unreadable carrier; a render discloses each one once.
         let mut lines: Vec<(LineAt, String)> = doc_block
             .header_keyword_lines()
             .unwrap_or_default()
@@ -426,8 +427,8 @@ impl OrgRenderer {
         }
         // The only re-ordering the renderer imposes is a content-type grouping:
         // Source/Image children render before Text children (sub-headings) so a
-        // re-parse re-attaches the source to this heading, not the next one. The
-        // sort is stable, so input order is preserved within each group.
+        // re-parse re-attaches the source to this heading, not the next one.
+        // The sort is stable, so input order is preserved within each group.
         for kids in children_by_parent.values_mut() {
             kids.sort_by_key(|b| b.content_type.sibling_order_group());
         }
@@ -454,13 +455,13 @@ impl OrgRenderer {
             end_with_blank_lines(&mut result, head_after);
         }
 
-        // WP-F projection assertion (free — `visited` is populated by the walk we
-        // already performed): with dangling parents ruled out above, every real
-        // block chains up to a file root, so every block must have been visited.
-        // A block that was NOT visited is present with a present parent yet
-        // unreachable from any root — the signature of a parent CYCLE (or a
-        // disconnected component). Self-parented sentinel rows are skipped so
-        // they cannot masquerade as a cycle.
+        // WP-F projection assertion (free — `visited` is populated by the walk
+        // we already performed): with dangling parents ruled out above, every
+        // real block chains up to a file root, so every block must have been
+        // visited. A block that was NOT visited is present with a present
+        // parent yet unreachable from any root — the signature of a parent
+        // CYCLE (or a disconnected component). Self-parented sentinel rows are
+        // skipped so they cannot masquerade as a cycle.
         for b in blocks {
             if b.parent_id.as_str() == b.id.as_str() {
                 continue; // self-parented FK-anchor sentinel
@@ -494,8 +495,9 @@ impl OrgRenderer {
         render_block: &mut F,
     ) -> Result<(), E> {
         let block = place.block;
-        // Record reachability for the WP-F cycle/disconnected-component assertion
-        // in `render_entitys` — free, we are already walking every reachable node.
+        // Record reachability for the WP-F cycle/disconnected-component
+        // assertion in `render_entitys` — free, we are already walking every
+        // reachable node.
         visited.insert(block.id.as_str());
         if block.content_type == ContentType::Source {
             // source_block_to_org records the loss for an unreadable carrier.
@@ -503,8 +505,8 @@ impl OrgRenderer {
             end_with_blank_lines(result, &before);
         }
 
-        // Prepare block for org rendering - transfer Loro properties to org_props
-        // format
+        // Prepare block for org rendering - transfer Loro properties to
+        // org_props format
         let mut prepared_block = block.clone();
         Self::prepare_block_for_org(&mut prepared_block, place.level);
 
@@ -634,8 +636,9 @@ impl OrgRenderer {
         }
 
         // Reconstruct org_properties JSON when missing (after SQL round-trip,
-        // flat properties like "ID" exist but the "org_properties" JSON key doesn't).
-        // to_org() renders the :PROPERTIES: drawer exclusively from org_properties().
+        // flat properties like "ID" exist but the "org_properties" JSON key
+        // doesn't). to_org() renders the :PROPERTIES: drawer exclusively from
+        // org_properties().
         if block.org_properties().is_none() {
             let id = properties.get("ID").and_then(|v| v.as_string());
 
@@ -847,7 +850,8 @@ mod tests {
     }
 
     // WP-F guard against false positives: a normal tree (roots parented to the
-    // file root, children parented to present blocks) renders without panicking.
+    // file root, children parented to present blocks) renders without
+    // panicking.
     #[test]
     fn wpf_normal_tree_does_not_panic() {
         let doc = test_doc_uri();
@@ -863,15 +867,16 @@ mod tests {
         assert!(out.contains("Child"));
     }
 
-    // WP-F: a self-parented row (the filtered-out `sentinel:no_parent` FK anchor
-    // shape) must NOT trip the dangling or cycle assertion.
+    // WP-F: a self-parented row (the filtered-out `sentinel:no_parent` FK
+    // anchor shape) must NOT trip the dangling or cycle assertion.
     #[test]
     fn wpf_self_parented_sentinel_does_not_panic() {
         let doc = test_doc_uri();
         let mut root = Block::new_text(EntityUri::block("root"), doc.clone(), "Root");
         root.set_property("ID", Value::String("root".to_string()));
-        // Self-parented sentinel-shaped row (id == parent_id) alongside a normal
-        // root — the same self-parent shape as the filtered `sentinel:no_parent`.
+        // Self-parented sentinel-shaped row (id == parent_id) alongside a
+        // normal root — the same self-parent shape as the filtered
+        // `sentinel:no_parent`.
         let mut sentinel = Block::new_text(
             EntityUri::block("selfanchor"),
             EntityUri::block("selfanchor"),

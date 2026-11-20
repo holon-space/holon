@@ -98,7 +98,8 @@ impl FileSyncController {
         };
         let subject = doc.as_str();
         // Each write quiesces the net, so `OnDisk` leaves first: a `Base`
-        // that moved past the old `OnDisk` would fire an ingest of a stale read.
+        // that moved past the old `OnDisk` would fire an ingest of a stale
+        // read.
         if self.net_token(wn::ON_DISK, doc, "hash").is_some() {
             self.net
                 .apply(|exec, now| exec.retract(wn::ON_DISK, subject, now).map(|q| q.requests))

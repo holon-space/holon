@@ -180,18 +180,18 @@ impl Default for ReferenceState {
                 deleted_ids: HashMap::new(),
             },
             Err(_) => {
-                // MULTI-thread runtime is required here: the harness bridges its
-                // sync proptest body into tokio via `block_in_place(|| handle
-                // .block_on(...))`. `block_in_place` moves the current worker's
-                // other tasks onto sibling workers — on a `new_current_thread`
-                // runtime there ARE no siblings, so the DatabaseActor task the
-                // `block_on` future is waiting on can never be polled and the
-                // test deadlocks (BugFunnel: turso-storage PBT harness deadlock).
-                // This path only runs under the plain `#[test]`
-                // `test_turso_backend_state_machine`, which sets `fork: false`,
-                // so the old "fork-unsafe" concern about a multi-thread runtime
-                // does not apply (the runtime is built inside the test body, not
-                // across a proptest fork).
+                // MULTI-thread runtime is required here: the harness bridges
+                // its sync proptest body into tokio via `block_in_place(||
+                // handle .block_on(...))`. `block_in_place` moves the current
+                // worker's other tasks onto sibling workers — on a
+                // `new_current_thread` runtime there ARE no siblings, so the
+                // DatabaseActor task the `block_on` future is waiting on can
+                // never be polled and the test deadlocks (BugFunnel:
+                // turso-storage PBT harness deadlock). This path only runs
+                // under the plain `#[test]` `test_turso_backend_state_machine`,
+                // which sets `fork: false`, so the old "fork-unsafe" concern
+                // about a multi-thread runtime does not apply (the runtime is
+                // built inside the test body, not across a proptest fork).
                 let runtime = Arc::new(
                     tokio::runtime::Builder::new_multi_thread()
                         .worker_threads(4)
@@ -316,7 +316,8 @@ pub struct StorageTest {
     /// CDC-enabled connection (kept for backward compatibility, now managed by
     /// TursoBackend)
     pub cdc_connection: Option<turso::Connection>,
-    // Note: view_stream_connections removed - connections now managed by TursoBackend.write_conn
+    // Note: view_stream_connections removed - connections now managed by
+    // TursoBackend.write_conn
     /// View stream change collectors: view_name -> Arc<Mutex<Vec<RowChange>>>
     pub view_stream_changes: HashMap<String, Arc<Mutex<Vec<RowChange>>>>,
     /// View stream handles to keep tasks alive
@@ -432,7 +433,8 @@ impl StorageTest {
             .await
             .map_err(|e| format!("BEGIN TRANSACTION failed: {}", e))?;
 
-        // Execute all operations within the transaction using the SAME connection
+        // Execute all operations within the transaction using the SAME
+        // connection
         for op in &operations {
             let result = self.execute_operation_on_connection(&conn, op).await;
             if let Err(e) = result {
@@ -442,7 +444,8 @@ impl StorageTest {
             }
         }
 
-        // Commit the transaction - this is where JoinOperator::commit is triggered
+        // Commit the transaction - this is where JoinOperator::commit is
+        // triggered
         conn.execute("COMMIT", ())
             .await
             .map_err(|e| format!("COMMIT failed: {}", e))?;
@@ -602,7 +605,8 @@ fn apply_to_reference(
                 if view_entity == entity
                     && let Some(changes_vec) = state.view_stream_changes.get(view_name)
                 {
-                    // Assign ROWID for this view (each view has its own ROWID space)
+                    // Assign ROWID for this view (each view has its own ROWID
+                    // space)
                     let rowid = *state.next_view_rowid.entry(view_name.clone()).or_insert(1);
                     state.next_view_rowid.insert(view_name.clone(), rowid + 1);
                     state
@@ -631,7 +635,8 @@ fn apply_to_reference(
         }
         StorageTransition::Update { entity, id, value } => {
             let entities = state.entities.get_mut(entity).unwrap();
-            // In concurrent batches, the entity may have been deleted by another operation
+            // In concurrent batches, the entity may have been deleted by
+            // another operation
             let data = entities.get_mut(id)?;
             let new_value = Value::String(value.clone());
             // A view delivers net row changes, and an unchanged row has none.
@@ -653,8 +658,8 @@ fn apply_to_reference(
                 {
                     let updated_data = entities.get(id).unwrap().clone();
                     // Look up the ROWID for this entity in this view
-                    // In concurrent batches, the ROWID may not exist if entity was inserted after
-                    // view creation
+                    // In concurrent batches, the ROWID may not exist if entity
+                    // was inserted after view creation
                     let Some(rowid) = state
                         .view_rowids
                         .get(view_name)
@@ -711,7 +716,8 @@ fn apply_to_reference(
                 if view_entity == entity
                     && let Some(changes_vec) = state.view_stream_changes.get(view_name)
                 {
-                    // In concurrent batches, the ROWID may not exist if entity was never in view
+                    // In concurrent batches, the ROWID may not exist if entity
+                    // was never in view
                     if !state
                         .view_rowids
                         .get(view_name)
@@ -733,7 +739,8 @@ fn apply_to_reference(
                     };
                     changes_vec.lock().unwrap().push(change);
 
-                    // Remove ROWID mapping (ROWID might be reused in real Turso - to be tested)
+                    // Remove ROWID mapping (ROWID might be reused in real Turso
+                    // - to be tested)
                     if let Some(rowids) = state.view_rowids.get_mut(view_name) {
                         rowids.remove(id);
                     }
@@ -767,8 +774,8 @@ fn apply_to_reference(
                 .insert(view_name.clone(), (entity.clone(), count));
 
             // Assign ROWIDs to all existing entities in this view
-            // ROWIDs are assigned when rows enter the materialized view (at view creation
-            // time)
+            // ROWIDs are assigned when rows enter the materialized view (at
+            // view creation time)
             if let Some(entities) = state.entities.get(entity) {
                 let mut rowid = 1i64;
                 // Sort keys to ensure deterministic ROWID assignment
@@ -792,8 +799,8 @@ fn apply_to_reference(
                 .view_stream_changes
                 .insert(view_name.clone(), Arc::new(Mutex::new(Vec::new())));
 
-            // Assign ROWIDs to any entities that were inserted after CreateMaterializedView
-            // but before CreateViewStream
+            // Assign ROWIDs to any entities that were inserted after
+            // CreateMaterializedView but before CreateViewStream
             if let Some((entity, _)) = state.materialized_views.get(view_name)
                 && let Some(entities) = state.entities.get(entity)
             {
@@ -811,7 +818,8 @@ fn apply_to_reference(
         }
         StorageTransition::CreateRecursiveCTEView => {
             // Just mark that the recursive CTE view was created
-            // The reference state doesn't track view content, just the fact it exists
+            // The reference state doesn't track view content, just the fact it
+            // exists
             state.recursive_cte_view_created = true;
             None
         }
@@ -1147,7 +1155,8 @@ fn check_preconditions(state: &ReferenceState, transition: &StorageTransition) -
                 && !state.view_stream_changes.contains_key(view_name)
         }
         StorageTransition::CreateRecursiveCTEView => {
-            // Can only create once, and "entity" table must exist (required for the view)
+            // Can only create once, and "entity" table must exist (required for
+            // the view)
             !state.recursive_cte_view_created && state.entities.contains_key("entity")
         }
     }
@@ -1295,8 +1304,8 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
     })
     .boxed();
 
-    // Collect existing IDs for parent_id generation (do this before using in insert
-    // strategy)
+    // Collect existing IDs for parent_id generation (do this before using in
+    // insert strategy)
     let mut entity_existing_ids: Vec<String> = state
         .entities
         .get("entity")
@@ -1901,7 +1910,8 @@ impl StateMachineTest for StorageTest {
             }
 
             BatchMode::Concurrent => {
-                // Multiple operations: execute concurrently to detect race conditions
+                // Multiple operations: execute concurrently to detect race
+                // conditions
                 let failures = tokio::task::block_in_place(|| {
                     ref_state.handle.block_on(
                         state.execute_concurrent_batch(operations.clone(), &ref_state.handle),
@@ -2229,8 +2239,8 @@ mod tests {
         let collected_changes = changes.lock().unwrap();
 
         // We expect 3 events: INSERT (id2), UPDATE (id1), DELETE (id2)
-        // With the DatabaseActor pattern, all writes go through a single actor so CDC
-        // callbacks fire
+        // With the DatabaseActor pattern, all writes go through a single actor
+        // so CDC callbacks fire
         assert_eq!(
             collected_changes.len(),
             3,

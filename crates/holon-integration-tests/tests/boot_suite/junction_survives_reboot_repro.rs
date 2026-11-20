@@ -281,7 +281,8 @@ fn loro_written_edge_fields_survive_reboot_over_existing_db() {
             .set_block_tags("block:blk-a", &["proj".to_string()])
             .await
             .expect("set_block_tags(blk-a)");
-        // ALLOW(entity_uri_from_raw): test-caller-supplied id; from_raw schemes it.
+        // ALLOW(entity_uri_from_raw): test-caller-supplied id; from_raw schemes
+        // it.
         backend
             .set_block_requires("block:blk-a", &[EntityUri::from_raw("block:blk-b")])
             .await
@@ -477,8 +478,8 @@ fn reboot_harness_takes_the_cold_boot_fast_path_skip() {
              unreachable by construction. file rows = {hashes:?}"
         );
 
-        // SQL only — the org file on disk and its stored hash stay as they were,
-        // so the fast path still believes this file is unchanged.
+        // SQL only — the org file on disk and its stored hash stay as they
+        // were, so the fast path still believes this file is unchanged.
         env.query_sql(
             "UPDATE block_raw SET content = 'CORRUPTED-BY-PROBE' WHERE id = 'block:blk-a'",
         )
@@ -510,9 +511,9 @@ fn reboot_harness_takes_the_cold_boot_fast_path_skip() {
             }
         );
         // Asserts the PREMISE only, deliberately. Two independent runs of this
-        // discriminator disagree on the verdict (see the module doc), so pinning
-        // either answer here would encode a conclusion the evidence does not
-        // yet support. Read the printed verdict.
+        // discriminator disagree on the verdict (see the module doc), so
+        // pinning either answer here would encode a conclusion the evidence
+        // does not yet support. Read the printed verdict.
         assert!(
             hashes.iter().any(|(_, h)| !h.is_empty()),
             "the stored `file.content_hash` must still exist for the skip to be reachable at all"

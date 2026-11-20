@@ -82,8 +82,8 @@ fn root_slot_switches_via_set_field_and_override_drives_panel_variants() {
             .await
             .unwrap_or_else(|hung| panic!("tasks-main-panel block should sync: {hung}"));
 
-        // 1. Default: root slot synthesizes the bundled layout from the root-layout
-        //    block's own panels.
+        // 1. Default: root slot synthesizes the bundled layout from the
+        //    root-layout block's own panels.
         let default_expr = env.initial_widget().await.expect("default root render");
         let default_dbg = format!("{default_expr:?}");
         assert!(
@@ -152,9 +152,9 @@ fn root_slot_switches_via_set_field_and_override_drives_panel_variants() {
              {switched_dbg}"
         );
 
-        // 3. The perspective's profile_override drives the panel's resolved collection
-        //    variants: the kanban_collection profile's single unconditional board
-        //    variant becomes the panel's render.
+        // 3. The perspective's profile_override drives the panel's resolved
+        //    collection variants: the kanban_collection profile's single
+        //    unconditional board variant becomes the panel's render.
         // Poll: the override profile block is ingested into the profile cache
         // asynchronously (PROFILE_SQL matview), so give it the same window.
         let deadline = std::time::Instant::now() + SYNC_TIMEOUT;

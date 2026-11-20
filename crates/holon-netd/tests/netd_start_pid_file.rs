@@ -742,7 +742,8 @@ impl Feeder {
                     unsafe {
                         let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK);
                         if fd >= 0 {
-                            // A rename after the FIFO check may have put a regular file there.
+                            // A rename after the FIFO check may have put a
+                            // regular file there.
                             let mut stat = std::mem::zeroed::<libc::stat>();
                             assert_eq!(libc::fstat(fd, &mut stat), 0, "fstat the pid path");
                             if stat.st_mode & libc::S_IFMT == libc::S_IFIFO {
@@ -1319,7 +1320,8 @@ fn play(case: &Case) -> Vec<String> {
         drop(outcomes);
     }
     // An aborted start's open runs on in the blocking pool and may write the
-    // pid file after every later start returned; the runtime's end waits for it.
+    // pid file after every later start returned; the runtime's end waits for
+    // it.
     drop(rt);
     check_disk(
         &lab,

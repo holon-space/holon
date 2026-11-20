@@ -60,8 +60,8 @@ struct Recorder {
 
 impl Recorder {
     fn on(doc: &LoroDocument) -> Self {
-        // ALLOW(loro_doc_escape): a subscription registration; the callback reads only
-        // its event.
+        // ALLOW(loro_doc_escape): a subscription registration; the callback
+        // reads only its event.
         let doc = doc.doc();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();

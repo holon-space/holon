@@ -185,8 +185,8 @@ async fn close_active_tab_follows_cursor_to_neighbor() {
         "panel must render the left-neighbor tab, never go blank"
     );
 
-    // Close the now-active leftmost tab (1): no left neighbor -> follow RIGHT to
-    // doc_c (3), the only remaining open tab.
+    // Close the now-active leftmost tab (1): no left neighbor -> follow RIGHT
+    // to doc_c (3), the only remaining open tab.
     close(&provider, 1).await;
     assert_eq!(
         cursor_history_id(&handle).await,
@@ -195,7 +195,8 @@ async fn close_active_tab_follows_cursor_to_neighbor() {
     );
     assert_eq!(panel_ids(&handle).await, BTreeSet::from(["doc_c".into()]));
 
-    // Close the last remaining tab (3): no neighbor -> cursor cleared, panel empty.
+    // Close the last remaining tab (3): no neighbor -> cursor cleared, panel
+    // empty.
     close(&provider, 3).await;
     assert_eq!(
         cursor_history_id(&handle).await,

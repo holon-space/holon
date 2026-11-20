@@ -135,7 +135,8 @@ fn declared_vocabulary_survives_ingest(loro: bool) {
 
         let dump = dump_rows(&env).await;
         eprintln!("[prod-path] block_raw after ingest:\n{dump}");
-        // The seam the engine reads, built exactly as `BackendEngine` builds it.
+        // The seam the engine reads, built exactly as `BackendEngine` builds
+        // it.
         let source =
             SqlTaskVocabularySource::new(env.engine().db_handle().clone(), BLOCK_WRITE_TABLE);
         let vocab = source

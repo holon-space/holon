@@ -303,8 +303,8 @@ pub struct BisectionStepper {
 
 impl Stepper for BisectionStepper {
     fn init(&mut self, ref_state: &ReferenceState) {
-        // Build the composed `CapMap` for *this node's* wiring — the whole point of
-        // bisection. `ComposedSut::init_test` runs `compose_sut` for
+        // Build the composed `CapMap` for *this node's* wiring — the whole
+        // point of bisection. `ComposedSut::init_test` runs `compose_sut` for
         // `ref_state.wiring`, and dropping any previous SUT here releases its
         // DB/session Arcs.
         self.sut = Some(ComposedSut::<WideE2E>::init_test(ref_state));

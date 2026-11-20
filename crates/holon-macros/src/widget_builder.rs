@@ -593,7 +593,8 @@ pub fn widget_builder_impl(input: TokenStream) -> TokenStream {
 
         let expanded = match input.body {
             Some(block) => {
-                // Custom-body: extraction + user body in build, resolve_props_fn alongside
+                // Custom-body: extraction + user body in build,
+                // resolve_props_fn alongside
                 let stmts = &block.stmts;
                 quote! {
                     #meta
@@ -607,8 +608,8 @@ pub fn widget_builder_impl(input: TokenStream) -> TokenStream {
                 }
             }
             None => {
-                // Auto-body: build delegates to resolve_props_from_args (no separate
-                // extraction)
+                // Auto-body: build delegates to resolve_props_from_args (no
+                // separate extraction)
                 let auto_body = generate_auto_body(&widget_name, &input.params);
                 quote! {
                     #meta

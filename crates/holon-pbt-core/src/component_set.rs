@@ -186,8 +186,9 @@ impl ComponentSet {
         vec![
             Self::full_gpui(),
             Self::full_headless(),
-            // loro_backend / org_create / sql_only carry both projections so the
-            // running-invariant set matches the pre-ADR `headless_wide` slices.
+            // loro_backend / org_create / sql_only carry both projections so
+            // the running-invariant set matches the pre-ADR `headless_wide`
+            // slices.
             Self::new(
                 Wiring::loro_backend(),
                 [Projection::ViewModel, Projection::EditorState],
@@ -438,8 +439,8 @@ mod tests {
             assert_ne!(child, &set);
             assert!(child.is_valid());
         }
-        // Dropping ViewModel from full_gpui (UI present) would be invalid, so it
-        // must NOT appear as a child.
+        // Dropping ViewModel from full_gpui (UI present) would be invalid, so
+        // it must NOT appear as a child.
         let drop_vm = set.without(Component::Project(Projection::ViewModel));
         assert!(!drop_vm.is_valid());
         assert!(!children.contains(&drop_vm));
