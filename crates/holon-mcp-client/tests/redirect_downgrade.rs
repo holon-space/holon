@@ -53,6 +53,11 @@ async fn read_request(sock: &mut TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
+        // A TLS record (0x16) never ends an HTTP head; answering it at once
+        // fails the client's handshake instead of stalling it.
+        if request.first() == Some(&0x16) {
+            return request;
+        }
         if let Some(head_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
             let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
             let body_len = head
@@ -237,6 +242,8 @@ enum Target {
     OtherPortWithUserinfo,
     /// `[::1]` on the first host's port: only the host differs.
     OtherHostSamePort,
+    /// `https://` on the first host and port: only the scheme differs.
+    SchemeOnly,
 }
 
 #[derive(Debug, Clone)]
@@ -255,6 +262,7 @@ fn cross_origin_case() -> impl Strategy<Value = CrossOrigin> {
             .prop_map(Target::OtherPortWithPathAndQuery),
         Just(Target::OtherPortWithUserinfo),
         Just(Target::OtherHostSamePort),
+        Just(Target::SchemeOnly),
     ];
     (
         prop::sample::select(REDIRECT_STATUSES.to_vec()),
@@ -293,6 +301,7 @@ async fn second_host_receives_nothing(case: CrossOrigin) -> Result<(), TestCaseE
             format!("http://user:{TARGET_TOKEN}@127.0.0.1:{victim_port}/{TARGET_TOKEN}")
         }
         Target::OtherHostSamePort => format!("http://[::1]:{victim_port}/{TARGET_TOKEN}"),
+        Target::SchemeOnly => format!("https://{first_addr}/{TARGET_TOKEN}"),
     };
     let first_seen = serve_chain(first, vec![(case.status, location)]);
     let received = serve_victim(victim);
@@ -352,6 +361,12 @@ fn cross_origin_redirect_never_reaches_second_host() {
             header: "X-Api-Key",
             target: Target::LocalhostName,
             post: false,
+        },
+        CrossOrigin {
+            status: 307,
+            header: "Authorization",
+            target: Target::SchemeOnly,
+            post: true,
         },
     ];
     for case in examples {
