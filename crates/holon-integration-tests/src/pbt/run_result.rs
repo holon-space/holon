@@ -28,6 +28,7 @@
 //!   the field is empty and `holon_obs.py` fills it from `git rev-parse HEAD`.
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Once;
 use std::sync::atomic::AtomicU64;
@@ -128,13 +129,19 @@ fn disabled() -> bool {
 /// The workspace this test binary runs in. A `.git` marker cannot find
 /// it: a jj workspace has none, so a walk would reach an enclosing checkout.
 pub fn repo_root() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
-    )
-    .ancestors()
-    .nth(2)
-    .expect("the crate lives two levels under the workspace root")
-    .to_path_buf()
+    workspace_root_of(Path::new(
+        &std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR at run time"),
+    ))
+}
+
+/// `<root>` for a crate manifest dir of the shape `<root>/crates/<crate>`,
+/// from the path alone.
+fn workspace_root_of(manifest_dir: &Path) -> PathBuf {
+    manifest_dir
+        .ancestors()
+        .nth(2)
+        .expect("the crate lives two levels under the workspace root")
+        .to_path_buf()
 }
 
 /// Resolve the output directory: `HOLON_RESULT_DIR` if set, else
@@ -251,7 +258,100 @@ impl Drop for RunResultGuard {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    #[test]
+    fn repo_root_holds_this_crates_manifest() {
+        assert!(
+            repo_root()
+                .join("crates/holon-integration-tests/Cargo.toml")
+                .is_file()
+        );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Marker {
+        None,
+        GitDir,
+        GitFile,
+        JjDir,
+    }
+
+    fn place(dir: &Path, marker: Marker) {
+        match marker {
+            Marker::None => {}
+            Marker::GitDir => std::fs::create_dir(dir.join(".git")).expect("git dir"),
+            Marker::GitFile => std::fs::write(dir.join(".git"), "gitdir: x").expect("git file"),
+            Marker::JjDir => std::fs::create_dir(dir.join(".jj")).expect("jj dir"),
+        }
+    }
+
+    /// Builds `<tmp>/<outer..>/<root>/crates/holon-integration-tests`, puts
+    /// `markers[i]` into the i-th directory from `<tmp>` down to `<root>`,
+    /// and returns `(root, manifest_dir)`.
+    fn build_tree(
+        tmp: &Path,
+        outer: &[&str],
+        root_name: &str,
+        markers: &[Marker],
+    ) -> (PathBuf, PathBuf) {
+        let mut dir = tmp.to_path_buf();
+        let mut dirs = vec![dir.clone()];
+        for name in outer.iter().copied().chain([root_name]) {
+            dir = dir.join(name);
+            dirs.push(dir.clone());
+        }
+        let manifest_dir = dir.join("crates").join("holon-integration-tests");
+        std::fs::create_dir_all(&manifest_dir).expect("tree");
+        for (d, m) in dirs.iter().zip(markers) {
+            place(d, *m);
+        }
+        (dir, manifest_dir)
+    }
+
+    fn marker() -> impl Strategy<Value = Marker> {
+        prop_oneof![
+            Just(Marker::None),
+            Just(Marker::GitDir),
+            Just(Marker::GitFile),
+            Just(Marker::JjDir),
+        ]
+    }
+
+    const NAMES: [&str; 3] = ["a", "b", "c"];
+
+    /// Marker placements above and at the root must not move the resolved
+    /// root. The static case is a `.git` just above the root and none inside.
+    #[test]
+    fn workspace_root_ignores_marker_placement() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (root, manifest) = build_tree(
+            tmp.path(),
+            &["a"],
+            "ws",
+            &[Marker::None, Marker::GitDir, Marker::None],
+        );
+        assert_eq!(workspace_root_of(&manifest), root);
+
+        let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(64));
+        runner
+            .run(
+                &(
+                    proptest::collection::vec(proptest::sample::select(&NAMES[..]), 0..4),
+                    proptest::sample::select(&NAMES[..]),
+                    proptest::collection::vec(marker(), 5),
+                ),
+                |(outer, root_name, markers)| {
+                    let tmp = tempfile::tempdir().expect("tempdir");
+                    let (root, manifest) = build_tree(tmp.path(), &outer, root_name, &markers);
+                    prop_assert_eq!(workspace_root_of(&manifest), root);
+                    Ok(())
+                },
+            )
+            .expect("property holds");
+    }
 
     #[test]
     fn green_guard_writes_a_record() {
