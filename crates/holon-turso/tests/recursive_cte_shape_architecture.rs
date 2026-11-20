@@ -580,7 +580,7 @@ fn a_recursive_arm_never_left_joins_on_its_own_base_row() {
                 .to_lowercase()
                 .split(|c: char| !(c.is_alphanumeric() || c == '_'))
                 .any(|w| {
-                    w == cte_lower || cte_aliases(recursive, &cte_lower).contains(&w.to_string())
+                    w == cte_lower || cte_aliases(recursive, &cte_lower).iter().any(|i| i == w)
                 });
             if !references_cte {
                 violations.push(format!(

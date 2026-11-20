@@ -1184,7 +1184,7 @@ fn page_with_a_nested_band_scrolls_to_its_last_row() {
         .find_map(|(_, i)| {
             let text = i.displayed_text.as_deref()?;
             (text.contains(BAND_ROW_MARKER) && i.width > 1.0)
-                .then(|| (i.x + i.width / 2.0, i.y + i.height / 2.0))
+                .then_some((i.x + i.width / 2.0, i.y + i.height / 2.0))
         })
         .expect("precondition: a band row must be painted to aim the wheel at");
 

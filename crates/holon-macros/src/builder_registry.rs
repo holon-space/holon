@@ -89,7 +89,7 @@ fn parse_render_signature(path: &std::path::Path) -> RenderSignature {
                 if !trimmed.is_empty() {
                     params.push(trimmed);
                 }
-                current = String::new();
+                current.clear();
             }
             _ => current.push(c),
         }

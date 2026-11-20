@@ -319,7 +319,8 @@ async fn accepting_a_shared_page_puts_it_in_the_sidebar() {
     assert!(
         sidebar_titles(&handle_b)
             .await
-            .contains(&"Trip planning".to_string()),
+            .iter()
+            .any(|i: &String| i == "Trip planning"),
         "the accepted page never appeared in the accepter's sidebar"
     );
 

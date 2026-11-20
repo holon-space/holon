@@ -683,11 +683,11 @@ fn diff_verdict(
                     ("block_type", row.block_type.as_str(), ""),
                     ("properties", row.properties.as_str(), ""),
                 ] {
-                    if value != default && !undeclared_columns.contains(&col.to_string()) {
+                    if value != default && !undeclared_columns.iter().any(|i| i == col) {
                         undeclared_columns.push(col.to_string());
                     }
                 }
-                if !undeclared_columns.contains(&"sort_key".to_string()) {
+                if !undeclared_columns.iter().any(|i| i == "sort_key") {
                     // sort_key is always minted, even when it equals the
                     // default.
                     undeclared_columns.push("sort_key".to_string());

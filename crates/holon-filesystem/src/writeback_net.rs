@@ -729,7 +729,7 @@ mod tests {
             "the withheld fact is the disclosed route of the occurrence"
         );
         assert!(
-            unsettled(&exec).contains(&DOC.to_string()),
+            unsettled(&exec).iter().any(|i| i == DOC),
             "the document is unsettled, so the net reconciles the deletion"
         );
     }

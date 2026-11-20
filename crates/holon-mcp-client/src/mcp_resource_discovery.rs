@@ -70,7 +70,7 @@ pub fn parse_resource_template_meta(template: &ResourceTemplate) -> Option<Resou
                 m.get(serde_yaml::Value::String("type".into()))?.as_str()?
             };
             let sql_type = map_type_to_sql(type_str);
-            let is_pk = primary_keys.contains(&name.to_string());
+            let is_pk = primary_keys.iter().any(|i| i == name);
             let mut field = FieldSchema::new(name, sql_type);
             field.primary_key = is_pk;
             field.nullable = !is_pk;

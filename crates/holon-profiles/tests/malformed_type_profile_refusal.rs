@@ -90,10 +90,10 @@ fn the_registry_bridge_discloses_the_refusal_and_builds_the_rest() {
         .map(|p| p.entity_name.as_str().to_string())
         .collect();
 
-    assert!(!built.contains(&"gadget".to_string()), "{built:?}");
+    assert!(!built.iter().any(|i| i == "gadget"), "{built:?}");
     for entity in ["widget", "block", "person"] {
         assert!(
-            built.contains(&entity.to_string()),
+            built.iter().any(|i| i == entity),
             "{entity} missing: {built:?}"
         );
     }

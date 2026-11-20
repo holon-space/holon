@@ -190,7 +190,7 @@ fn resolve_param(
 
     // Try param mappings
     for mapping in &op.param_mappings {
-        if !mapping.provides.contains(&param_name.to_string()) {
+        if !mapping.provides.iter().any(|i: &String| i == param_name) {
             continue;
         }
 

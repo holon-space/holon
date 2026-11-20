@@ -718,7 +718,7 @@ mod tests {
             "clock.today",
         ] {
             assert!(
-                footprint.contains(&expected.to_string()),
+                footprint.iter().any(|i| i == expected),
                 "{expected} missing: {footprint:?}"
             );
         }
@@ -733,13 +733,10 @@ mod tests {
         assert_eq!(classified.residue.len(), 1);
         let footprint = places(only_mode(&classified), ArcOrigin::GuardFootprint);
         assert!(
-            footprint.contains(&"block.parent_id".to_string()),
+            footprint.iter().any(|i| i == "block.parent_id"),
             "{footprint:?}"
         );
-        assert!(
-            footprint.contains(&"block.tags".to_string()),
-            "{footprint:?}"
-        );
+        assert!(footprint.iter().any(|i| i == "block.tags"), "{footprint:?}");
     }
 
     /// A chain longer than the bound is a LOUD error naming the guard, not

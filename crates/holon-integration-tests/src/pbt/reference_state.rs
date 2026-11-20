@@ -174,7 +174,7 @@ pub fn valid_render_expressions() -> Vec<RenderExpr> {
         //
         // columns(#{collection: focus_chain(),
         //           item_template: columns(#{collection:
-        // chain_ops(col("level")),                                    
+        // chain_ops(col("level")),
         // item_template: text(col("name"))})})
         fc(
             "columns",

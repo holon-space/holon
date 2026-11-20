@@ -194,7 +194,7 @@ fn excluded_placement_fields_are_not_declared_writes() {
     let declared = set_field_written_places();
     for place in ["block.parent_id", "block.sort_key", "block.after_block_id"] {
         assert!(
-            !declared.contains(&place.to_string()),
+            !declared.iter().any(|i| i == place),
             "{place} is declared EXCLUDED (Model.md invariants 3 and 16) and must not \
              appear as a write: {declared:?}"
         );

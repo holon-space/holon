@@ -1092,6 +1092,19 @@ impl BlockCellRegistry {
     }
 }
 
+/// What the Loro tree knows about a block id. See
+/// [`BlockCellRegistry::loro_node_state`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoroNodeState {
+    /// A live node: the authority holds the block.
+    Live,
+    /// A node the tree once had and DELETED. A surviving `block_raw` row is
+    /// then a withheld or lost delete, not an ownership class.
+    Tombstoned,
+    /// No node, live or dead, has ever carried this id in this tree.
+    Never,
+}
+
 #[cfg(test)]
 mod tests {
     use holon_api::Tags;
@@ -1763,17 +1776,4 @@ mod tests {
         );
         Ok(())
     }
-}
-
-/// What the Loro tree knows about a block id. See
-/// [`BlockCellRegistry::loro_node_state`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoroNodeState {
-    /// A live node: the authority holds the block.
-    Live,
-    /// A node the tree once had and DELETED. A surviving `block_raw` row is
-    /// then a withheld or lost delete, not an ownership class.
-    Tombstoned,
-    /// No node, live or dead, has ever carried this id in this tree.
-    Never,
 }

@@ -4639,7 +4639,9 @@ mod tests {
             "the mount and the shared root must answer with the same children"
         );
         assert!(
-            via_mount.contains(&"block:mount-listed-child".to_string()),
+            via_mount
+                .iter()
+                .any(|i: &String| i == "block:mount-listed-child"),
             "the child created under the mount must be listed under it, got {via_mount:?}"
         );
 

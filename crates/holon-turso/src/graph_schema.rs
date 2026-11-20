@@ -497,11 +497,11 @@ mod tests {
             panic!("expected UnknownEdge, got {err:?}");
         };
         assert!(
-            unknown.contains(&"CHILD_OFF".to_string()),
+            unknown.iter().any(|i: &String| i == "CHILD_OFF"),
             "error names the offending edge: {err:?}"
         );
         assert!(
-            registered.contains(&"CHILD_OF".to_string()),
+            registered.iter().any(|i: &String| i == "CHILD_OF"),
             "error names the valid set: {err:?}"
         );
     }

@@ -423,7 +423,10 @@ pub fn find_set_field_op<'a>(
     }
     ops.iter()
         .find(|ow| {
-            ow.descriptor.affected_fields.contains(&field.to_string())
+            ow.descriptor
+                .affected_fields
+                .iter()
+                .any(|i: &String| i == field)
                 && ow
                     .descriptor
                     .required_params

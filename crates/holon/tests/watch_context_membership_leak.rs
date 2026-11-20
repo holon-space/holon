@@ -610,11 +610,11 @@ async fn two_overlapping_watches_each_receive_only_their_own_subtree() -> Result
     let (left_seed, _) = drain(&mut left, Duration::from_secs(3)).await;
     let (right_seed, _) = drain(&mut right, Duration::from_secs(3)).await;
     assert!(
-        left_seed.contains(&"block:mover".to_string()),
+        left_seed.iter().any(|i: &String| i == "block:mover"),
         "the left watch must open with its own subtree: {left_seed:?}"
     );
     assert!(
-        !right_seed.contains(&"block:mover".to_string()),
+        !right_seed.iter().any(|i: &String| i == "block:mover"),
         "the right watch must not open with the left subtree's block: {right_seed:?}"
     );
 
@@ -627,12 +627,12 @@ async fn two_overlapping_watches_each_receive_only_their_own_subtree() -> Result
     let (right_after, _) = drain(&mut right, Duration::from_secs(10)).await;
 
     assert!(
-        left_gone.contains(&"block:mover".to_string()),
+        left_gone.iter().any(|i: &String| i == "block:mover"),
         "the left watch must be told the block left its subtree; got present={left_after:?} \
          deleted={left_gone:?}"
     );
     assert!(
-        right_after.contains(&"block:mover".to_string()),
+        right_after.iter().any(|i: &String| i == "block:mover"),
         "the right watch must be told the block entered its subtree; got {right_after:?}"
     );
     Ok(())

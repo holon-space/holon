@@ -105,7 +105,7 @@ fn a_vault_home_profile_takes_effect_and_a_malformed_one_is_refused_and_disclose
                 .map(|i| i.name.to_string())
                 .collect();
             assert!(
-                declared.contains(&INVARIANT.to_string()),
+                declared.iter().any(|i| i == INVARIANT),
                 "the profile file in the vault's type home must take effect: {declared:?}"
             );
 

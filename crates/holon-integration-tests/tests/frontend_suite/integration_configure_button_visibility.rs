@@ -120,13 +120,17 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
     let services: &dyn BuilderServices = reactive.as_ref();
 
     assert!(
-        offered_ops(services, gcal).contains(&"begin_oauth".to_string()),
+        offered_ops(services, gcal)
+            .iter()
+            .any(|i| i == "begin_oauth"),
         "gcal declares a consent flow and has not run it, so its row must offer \
          it.\n  offered: {:?}",
         offered_ops(services, gcal)
     );
     assert!(
-        !offered_ops(services, todoist).contains(&"begin_oauth".to_string()),
+        !offered_ops(services, todoist)
+            .iter()
+            .any(|i| i == "begin_oauth"),
         "todoist has no consent flow to run, so its row must offer no \
          `Configure…`.\n  offered: {:?}",
         offered_ops(services, todoist)
@@ -139,7 +143,9 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
         holon_api::Value::String("configured".to_string()),
     );
     assert!(
-        !offered_ops(services, &configured).contains(&"begin_oauth".to_string()),
+        !offered_ops(services, &configured)
+            .iter()
+            .any(|i| i == "begin_oauth"),
         "the consent flow is one-time; a configured provider must not offer it again"
     );
 
@@ -150,7 +156,9 @@ async fn run(runtime: Arc<tokio::runtime::Runtime>) {
         holon_api::Value::String("Waiting for you to finish in the browser.".to_string()),
     );
     assert!(
-        !offered_ops(services, &in_flight).contains(&"begin_oauth".to_string()),
+        !offered_ops(services, &in_flight)
+            .iter()
+            .any(|i| i == "begin_oauth"),
         "a second click would start a second browser hop and a second loopback listener"
     );
 }
@@ -233,12 +241,16 @@ async fn rendered(runtime: Arc<tokio::runtime::Runtime>) {
     }
 
     assert!(
-        found.contains(&"begin_oauth@integration:gcal".to_string()),
+        found
+            .iter()
+            .any(|i: &String| i == "begin_oauth@integration:gcal"),
         "gcal's row must RENDER the operation `ops_of` offers it; the rendered tree carried: \
          {found:?}"
     );
     assert!(
-        !found.contains(&"begin_oauth@integration:todoist".to_string()),
+        !found
+            .iter()
+            .any(|i: &String| i == "begin_oauth@integration:todoist"),
         "todoist has no consent flow, so its row must render none: {found:?}"
     );
 }

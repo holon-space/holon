@@ -415,7 +415,9 @@ async fn a_damaged_write_ahead_log_is_moved_aside_and_disclosed() {
         "the main file was kept, not rebuilt from the vault: {rendered}"
     );
     assert!(
-        !raised_kinds(&booted).contains(&"database-moved-aside".to_string()),
+        !raised_kinds(&booted)
+            .iter()
+            .any(|i| i == "database-moved-aside"),
         "the intact database must not be moved aside"
     );
 }
@@ -462,8 +464,8 @@ async fn a_damaged_coordination_file_is_moved_aside_and_disclosed() {
     );
     let kinds = raised_kinds(&booted);
     assert!(
-        !kinds.contains(&"database-moved-aside".to_string())
-            && !kinds.contains(&"database-log-moved-aside".to_string()),
+        !kinds.iter().any(|i| i == "database-moved-aside")
+            && !kinds.iter().any(|i| i == "database-log-moved-aside"),
         "the intact database and its log must stay: {kinds:?}"
     );
 }

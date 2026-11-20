@@ -2347,7 +2347,7 @@ mod tests {
             "pragma_table_info must answer the real column set, got none"
         );
         assert!(
-            !columns.contains(&"depth".to_string()),
+            !columns.iter().any(|i| i == "depth"),
             "block_raw must have no depth column; got {columns:?}"
         );
 

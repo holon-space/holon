@@ -6007,7 +6007,8 @@ mod tag_op_tests {
         assert!(
             tags_of(&db, "block:parent")
                 .await
-                .contains(&PAGE_TAG.to_string())
+                .iter()
+                .any(|i: &String| i == PAGE_TAG)
         );
 
         // Now the parent IS a page → tagging the child Page is allowed.
@@ -6015,7 +6016,8 @@ mod tag_op_tests {
         assert!(
             tags_of(&db, "block:child")
                 .await
-                .contains(&PAGE_TAG.to_string())
+                .iter()
+                .any(|i: &String| i == PAGE_TAG)
         );
     }
 

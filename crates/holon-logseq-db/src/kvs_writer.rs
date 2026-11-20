@@ -1828,6 +1828,202 @@ pub async fn write_graph(graph: &KvsGraph, dest: &Path) -> Result<WriteReport, R
     Ok(report)
 }
 
+/// What a tail flush did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FlushReport {
+    /// Transactions moved out of the tail and into the trees.
+    pub transactions: usize,
+    pub datoms_asserted: usize,
+    pub datoms_retracted: usize,
+    /// Rows created for nodes a split produced.
+    pub rows_added: usize,
+    /// Existing rows rewritten in place.
+    pub rows_modified: usize,
+    /// Rows no tree references, before and after. Never shrinks: LogSeq
+    /// discards its delete list, so a merged-away node stays as garbage.
+    pub orphans_before: usize,
+    pub orphans_after: usize,
+    /// The `:max-tx` addr 0 now carries.
+    pub max_tx: i64,
+}
+
+/// Whether the root schema indexes `attribute`, i.e. whether avet carries it.
+fn is_indexed(schema: &TransitNode, attribute: &str) -> bool {
+    let TransitNode::Map(attrs) = schema else {
+        return false;
+    };
+    attrs
+        .iter()
+        .find(|(k, _)| keyword(k) == Some(attribute))
+        .is_some_and(|(_, definition)| match definition {
+            TransitNode::Map(fields) => fields.iter().any(|(k, v)| {
+                matches!(keyword(k), Some("db/index")) && matches!(v, TransitNode::Bool(true))
+                    || matches!(keyword(k), Some("db/unique"))
+            }),
+            _ => false,
+        })
+}
+
+/// How many rows no tree references.
+fn orphan_count(graph: &KvsGraph, reachable: &BTreeSet<i64>) -> usize {
+    graph
+        .rows
+        .iter()
+        .filter(|r| r.addr > TAIL_ADDR && !reachable.contains(&r.addr))
+        .count()
+}
+
+fn reachable_addrs(graph: &KvsGraph) -> Result<BTreeSet<i64>, RowError> {
+    let mut out = BTreeSet::new();
+    for index in [Index::Eavt, Index::Aevt, Index::Avet] {
+        let tree = EditableTree::load(graph, index)?;
+        for node in tree.serialize(graph.root.max_addr)?.nodes {
+            out.insert(node.addr);
+        }
+    }
+    Ok(out)
+}
+
+/// Move every transaction in the tail into the three index trees.
+///
+/// This is what LogSeq's storage layer does when a transaction would push the
+/// tail past the branching factor, and the shape is copied from a measured
+/// flush: modified nodes are upserted AT THEIR EXISTING ADDRESSES, only
+/// split-new nodes take addresses above `:max-addr`, merged-away nodes are
+/// abandoned rather than deleted, addr 1 is reset to `[]`, and addr 0 is
+/// rewritten last with the new roots, counts, depths, `:max-addr` and
+/// `:max-tx`.
+///
+/// `:max-tx` becomes the highest `|tx|` among the transactions ACTUALLY
+/// FLUSHED. For LogSeq that includes the transaction that triggered the
+/// overflow, which is why its root ends one past the tail it had a moment
+/// earlier; here the tail is the whole of what is being flushed, so it is the
+/// tail's own highest.
+pub fn flush_tail(graph: &mut KvsGraph) -> Result<FlushReport, RowError> {
+    assert_pinned_schema_version(&graph.rows)?;
+    let tail = graph.tail()?;
+    let orphans_before = orphan_count(graph, &reachable_addrs(graph)?);
+
+    if tail.datom_count() == 0 {
+        // Nothing to flush, and the report must SAY nothing happened rather
+        // than leave its counters at their defaults: an `orphans_after` of 0
+        // beside a real `orphans_before` reads as a graph that just lost every
+        // unreferenced row, which is both false and the opposite of the
+        // "never shrinks" contract this type documents.
+        return Ok(FlushReport {
+            transactions: 0,
+            max_tx: graph.root.max_tx,
+            orphans_before,
+            orphans_after: orphans_before,
+            ..FlushReport::default()
+        });
+    }
+
+    let mut report = FlushReport {
+        transactions: tail.transactions().len(),
+        max_tx: graph.root.max_tx,
+        orphans_before,
+        ..FlushReport::default()
+    };
+
+    let mut trees = Vec::new();
+    for index in [Index::Eavt, Index::Aevt, Index::Avet] {
+        trees.push((index, EditableTree::load(graph, index)?));
+    }
+
+    for transaction in tail.transactions() {
+        for entry in transaction {
+            // Invariant (1): a value this build cannot ORDER must not be
+            // written, asserted or retracted — a retraction has to be located,
+            // which is an ordering operation too.
+            let datom = crate::tree::TreeDatom {
+                e: entry.entity,
+                a: entry.attribute.clone(),
+                v: entry.value.clone(),
+                tx: entry.tx.get(),
+            };
+            report.max_tx = report.max_tx.max(entry.tx.get());
+            match entry.op {
+                DatomOp::Assert => report.datoms_asserted += 1,
+                DatomOp::Retract => report.datoms_retracted += 1,
+            }
+            for (index, tree) in &mut trees {
+                if *index == Index::Avet && !is_indexed(&graph.root.schema, &entry.attribute) {
+                    continue;
+                }
+                match entry.op {
+                    DatomOp::Assert => {
+                        tree.insert(&datom)?;
+                    }
+                    // By (e, a, v): the retraction carries the NEW transaction
+                    // id while the stored datom still carries the one that
+                    // asserted it, so matching the full key would retract
+                    // nothing at all.
+                    DatomOp::Retract => {
+                        if let Some(stored) = tree.find_ignoring_tx(&datom)? {
+                            tree.remove(&stored)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Serialize all three before touching the graph, so a failure part-way
+    // leaves the caller's graph as it was.
+    let mut max_addr = graph.root.max_addr;
+    let mut written = Vec::new();
+    for (index, tree) in &trees {
+        tree.check_invariants()?;
+        let out = tree.serialize(max_addr)?;
+        max_addr = out.max_addr;
+        written.push((*index, out, tree.datoms().len(), tree.depth()?));
+    }
+
+    let mut reachable = BTreeSet::new();
+    for (index, out, count, depth) in written {
+        for node in out.nodes {
+            reachable.insert(node.addr);
+            let content = crate::transit::encode_document(&node.node);
+            match graph.rows.iter_mut().find(|r| r.addr == node.addr) {
+                Some(row) => {
+                    if row.original_content != content || row.addresses != node.addresses {
+                        report.rows_modified += 1;
+                    }
+                    row.node = node.node;
+                    row.addresses = node.addresses;
+                    row.original_content = content;
+                }
+                None => {
+                    report.rows_added += 1;
+                    graph.rows.push(KvsRow {
+                        addr: node.addr,
+                        node: node.node,
+                        addresses: node.addresses,
+                        original_content: content,
+                    });
+                }
+            }
+        }
+        let meta = IndexMeta {
+            count: count as i64,
+            shift: depth as i64 - 1,
+        };
+        match index {
+            Index::Eavt => (graph.root.eavt, graph.root.eavt_metadata) = (out.root_addr, meta),
+            Index::Aevt => (graph.root.aevt, graph.root.aevt_metadata) = (out.root_addr, meta),
+            Index::Avet => (graph.root.avet, graph.root.avet_metadata) = (out.root_addr, meta),
+        }
+    }
+
+    graph.root.max_addr = max_addr;
+    graph.root.max_tx = report.max_tx;
+    graph.set_tail(&Tail::default())?;
+    graph.rows.sort_by_key(|r| r.addr);
+    report.orphans_after = orphan_count(graph, &reachable);
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2203,200 +2399,4 @@ mod tests {
         let without = decode_document(r#"["^ ","~:keys",[]]"#).expect("decodes");
         assert!(!carries_addresses(&without));
     }
-}
-
-/// What a tail flush did.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct FlushReport {
-    /// Transactions moved out of the tail and into the trees.
-    pub transactions: usize,
-    pub datoms_asserted: usize,
-    pub datoms_retracted: usize,
-    /// Rows created for nodes a split produced.
-    pub rows_added: usize,
-    /// Existing rows rewritten in place.
-    pub rows_modified: usize,
-    /// Rows no tree references, before and after. Never shrinks: LogSeq
-    /// discards its delete list, so a merged-away node stays as garbage.
-    pub orphans_before: usize,
-    pub orphans_after: usize,
-    /// The `:max-tx` addr 0 now carries.
-    pub max_tx: i64,
-}
-
-/// Whether the root schema indexes `attribute`, i.e. whether avet carries it.
-fn is_indexed(schema: &TransitNode, attribute: &str) -> bool {
-    let TransitNode::Map(attrs) = schema else {
-        return false;
-    };
-    attrs
-        .iter()
-        .find(|(k, _)| keyword(k) == Some(attribute))
-        .is_some_and(|(_, definition)| match definition {
-            TransitNode::Map(fields) => fields.iter().any(|(k, v)| {
-                matches!(keyword(k), Some("db/index")) && matches!(v, TransitNode::Bool(true))
-                    || matches!(keyword(k), Some("db/unique"))
-            }),
-            _ => false,
-        })
-}
-
-/// How many rows no tree references.
-fn orphan_count(graph: &KvsGraph, reachable: &BTreeSet<i64>) -> usize {
-    graph
-        .rows
-        .iter()
-        .filter(|r| r.addr > TAIL_ADDR && !reachable.contains(&r.addr))
-        .count()
-}
-
-fn reachable_addrs(graph: &KvsGraph) -> Result<BTreeSet<i64>, RowError> {
-    let mut out = BTreeSet::new();
-    for index in [Index::Eavt, Index::Aevt, Index::Avet] {
-        let tree = EditableTree::load(graph, index)?;
-        for node in tree.serialize(graph.root.max_addr)?.nodes {
-            out.insert(node.addr);
-        }
-    }
-    Ok(out)
-}
-
-/// Move every transaction in the tail into the three index trees.
-///
-/// This is what LogSeq's storage layer does when a transaction would push the
-/// tail past the branching factor, and the shape is copied from a measured
-/// flush: modified nodes are upserted AT THEIR EXISTING ADDRESSES, only
-/// split-new nodes take addresses above `:max-addr`, merged-away nodes are
-/// abandoned rather than deleted, addr 1 is reset to `[]`, and addr 0 is
-/// rewritten last with the new roots, counts, depths, `:max-addr` and
-/// `:max-tx`.
-///
-/// `:max-tx` becomes the highest `|tx|` among the transactions ACTUALLY
-/// FLUSHED. For LogSeq that includes the transaction that triggered the
-/// overflow, which is why its root ends one past the tail it had a moment
-/// earlier; here the tail is the whole of what is being flushed, so it is the
-/// tail's own highest.
-pub fn flush_tail(graph: &mut KvsGraph) -> Result<FlushReport, RowError> {
-    assert_pinned_schema_version(&graph.rows)?;
-    let tail = graph.tail()?;
-    let orphans_before = orphan_count(graph, &reachable_addrs(graph)?);
-
-    if tail.datom_count() == 0 {
-        // Nothing to flush, and the report must SAY nothing happened rather
-        // than leave its counters at their defaults: an `orphans_after` of 0
-        // beside a real `orphans_before` reads as a graph that just lost every
-        // unreferenced row, which is both false and the opposite of the
-        // "never shrinks" contract this type documents.
-        return Ok(FlushReport {
-            transactions: 0,
-            max_tx: graph.root.max_tx,
-            orphans_before,
-            orphans_after: orphans_before,
-            ..FlushReport::default()
-        });
-    }
-
-    let mut report = FlushReport {
-        transactions: tail.transactions().len(),
-        max_tx: graph.root.max_tx,
-        orphans_before,
-        ..FlushReport::default()
-    };
-
-    let mut trees = Vec::new();
-    for index in [Index::Eavt, Index::Aevt, Index::Avet] {
-        trees.push((index, EditableTree::load(graph, index)?));
-    }
-
-    for transaction in tail.transactions() {
-        for entry in transaction {
-            // Invariant (1): a value this build cannot ORDER must not be
-            // written, asserted or retracted — a retraction has to be located,
-            // which is an ordering operation too.
-            let datom = crate::tree::TreeDatom {
-                e: entry.entity,
-                a: entry.attribute.clone(),
-                v: entry.value.clone(),
-                tx: entry.tx.get(),
-            };
-            report.max_tx = report.max_tx.max(entry.tx.get());
-            match entry.op {
-                DatomOp::Assert => report.datoms_asserted += 1,
-                DatomOp::Retract => report.datoms_retracted += 1,
-            }
-            for (index, tree) in &mut trees {
-                if *index == Index::Avet && !is_indexed(&graph.root.schema, &entry.attribute) {
-                    continue;
-                }
-                match entry.op {
-                    DatomOp::Assert => {
-                        tree.insert(&datom)?;
-                    }
-                    // By (e, a, v): the retraction carries the NEW transaction
-                    // id while the stored datom still carries the one that
-                    // asserted it, so matching the full key would retract
-                    // nothing at all.
-                    DatomOp::Retract => {
-                        if let Some(stored) = tree.find_ignoring_tx(&datom)? {
-                            tree.remove(&stored)?;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Serialize all three before touching the graph, so a failure part-way
-    // leaves the caller's graph as it was.
-    let mut max_addr = graph.root.max_addr;
-    let mut written = Vec::new();
-    for (index, tree) in &trees {
-        tree.check_invariants()?;
-        let out = tree.serialize(max_addr)?;
-        max_addr = out.max_addr;
-        written.push((*index, out, tree.datoms().len(), tree.depth()?));
-    }
-
-    let mut reachable = BTreeSet::new();
-    for (index, out, count, depth) in written {
-        for node in out.nodes {
-            reachable.insert(node.addr);
-            let content = crate::transit::encode_document(&node.node);
-            match graph.rows.iter_mut().find(|r| r.addr == node.addr) {
-                Some(row) => {
-                    if row.original_content != content || row.addresses != node.addresses {
-                        report.rows_modified += 1;
-                    }
-                    row.node = node.node;
-                    row.addresses = node.addresses;
-                    row.original_content = content;
-                }
-                None => {
-                    report.rows_added += 1;
-                    graph.rows.push(KvsRow {
-                        addr: node.addr,
-                        node: node.node,
-                        addresses: node.addresses,
-                        original_content: content,
-                    });
-                }
-            }
-        }
-        let meta = IndexMeta {
-            count: count as i64,
-            shift: depth as i64 - 1,
-        };
-        match index {
-            Index::Eavt => (graph.root.eavt, graph.root.eavt_metadata) = (out.root_addr, meta),
-            Index::Aevt => (graph.root.aevt, graph.root.aevt_metadata) = (out.root_addr, meta),
-            Index::Avet => (graph.root.avet, graph.root.avet_metadata) = (out.root_addr, meta),
-        }
-    }
-
-    graph.root.max_addr = max_addr;
-    graph.root.max_tx = report.max_tx;
-    graph.set_tail(&Tail::default())?;
-    graph.rows.sort_by_key(|r| r.addr);
-    report.orphans_after = orphan_count(graph, &reachable);
-    Ok(report)
 }

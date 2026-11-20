@@ -636,7 +636,7 @@ mod poc {
         }
         let waker = unsafe { Waker::from_raw(raw()) };
         let mut cx = Context::from_waker(&waker);
-        let mut fut = Box::pin(fut);
+        let mut fut = std::pin::pin!(fut);
         loop {
             if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
                 return v;

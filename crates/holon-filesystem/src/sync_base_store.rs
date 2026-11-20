@@ -372,8 +372,8 @@ mod tests {
 
         let snap = &decoded[&BaseKey::global().encode()]["block:a"];
         let tags = snap.block.tags.to_vec();
-        assert!(tags.contains(&"Page".to_string()), "tags: {tags:?}");
-        assert!(tags.contains(&"Inbox".to_string()), "tags: {tags:?}");
+        assert!(tags.iter().any(|i| i == "Page"), "tags: {tags:?}");
+        assert!(tags.iter().any(|i| i == "Inbox"), "tags: {tags:?}");
         assert_eq!(
             snap.block.requires,
             vec![EntityUri::block("dep1"), EntityUri::block("dep2")]

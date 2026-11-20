@@ -90,7 +90,7 @@ async fn an_armed_unsettled_pass_owes_the_delete_it_withheld() -> Result<()> {
         "the withheld delete is owed to the sink, so the pass did not converge"
     );
     assert!(
-        sink.row_ids().contains(&"block:gone-id".to_string()),
+        sink.row_ids().iter().any(|i| i == "block:gone-id"),
         "the delete really was withheld — the row is still there: {:?}",
         sink.row_ids()
     );

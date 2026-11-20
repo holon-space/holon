@@ -934,7 +934,7 @@ impl OrgDocumentExt for Block {
 
     fn is_done(&self, keyword: &str) -> bool {
         let (_, done_keywords) = self.parse_todo_keywords();
-        done_keywords.contains(&keyword.to_string())
+        done_keywords.iter().any(|i: &String| i == keyword)
     }
 }
 

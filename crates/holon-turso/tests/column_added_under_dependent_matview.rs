@@ -84,7 +84,8 @@ async fn block_raw_gains_property_kinds_under_the_block_matview() {
     assert!(
         columns(&handle, "block_raw")
             .await
-            .contains(&"property_kinds".to_string())
+            .iter()
+            .any(|i: &String| i == "property_kinds")
     );
     assert_eq!(
         count(&handle, "block_raw").await,
@@ -109,7 +110,8 @@ async fn file_gains_read_only_blocks_under_a_stored_matview() {
     assert!(
         columns(&handle, "file")
             .await
-            .contains(&"read_only_blocks".to_string())
+            .iter()
+            .any(|i: &String| i == "read_only_blocks")
     );
     assert_eq!(count(&handle, "file").await, 1);
 }
@@ -160,7 +162,7 @@ async fn integration_state_gains_its_presentation_columns_under_the_sidebar_matv
     let present = columns(&handle, "integration_state").await;
     for column in ["display_name", "icon", "default_view", "origin", "hosts"] {
         assert!(
-            present.contains(&column.to_string()),
+            present.iter().any(|i: &String| i == column),
             "{column} missing: {present:?}"
         );
     }

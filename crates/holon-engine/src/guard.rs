@@ -178,7 +178,7 @@ impl RhaiEvaluator {
     ) -> Result<Vec<TokenMatch>, String> {
         let mut matches = Vec::new();
         for token in marking.tokens_of_type(&arc.token_type) {
-            if already_bound.contains(&token.id().to_string()) {
+            if already_bound.iter().any(|i| i == token.id()) {
                 continue;
             }
             if let Some(placeholders) = self.check_precond(token, arc, existing_placeholders)? {

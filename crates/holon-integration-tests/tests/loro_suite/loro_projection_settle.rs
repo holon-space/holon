@@ -155,7 +155,8 @@ async fn a_layout_create_is_not_settled_before_its_row_lands() -> Result<()> {
     assert!(
         fx.sink
             .row_ids()
-            .contains(&"block:panel-child-id".to_string()),
+            .iter()
+            .any(|i: &String| i == "block:panel-child-id"),
         "the create reached the sink: {:?}",
         fx.sink.row_ids()
     );
@@ -335,7 +336,8 @@ async fn a_commit_to_one_doc_while_the_pass_reads_the_other_settles_in_that_pass
     assert!(
         fx.sink
             .row_ids()
-            .contains(&"block:panel-child-id".to_string()),
+            .iter()
+            .any(|i: &String| i == "block:panel-child-id"),
         "the layout read took the commit's facts: {:?}",
         fx.sink.row_ids()
     );

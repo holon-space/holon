@@ -992,282 +992,6 @@ pub trait BlockMatchStrategy: Send + Sync {
     async fn match_blocks(&self, ctx: MatchContext<'_>) -> Result<Vec<MatchVerdict>>;
 }
 
-#[cfg(test)]
-mod name_chain_tests {
-    //! Red-first coverage for the no-pages-under-non-pages ruling
-    //! (`docs/Proposals/PageHierarchy-2026-07-13.md`, Fork B B1, §3/§5 item 1).
-    //!
-    //! Before the fix, `name_chain` SILENTLY dropped a non-page ancestor from
-    //! the path (`if doc.is_page() { push }` with no `else`), so
-    //! `A(page) > b1(non-page) > P(page)` returned `Ok(["A","P"])` — a
-    //! plausible-looking path that collides with any sibling of `b1`. These
-    //! tests pin the fail-loud replacement.
-
-    use std::collections::HashMap;
-
-    use super::*;
-
-    /// Minimal in-memory `DocumentManager` whose only real method is
-    /// `get_by_id` — the sole method `name_chain`'s default impl calls.
-    struct MockDocManager {
-        by_id: HashMap<EntityUri, Block>,
-    }
-
-    impl MockDocManager {
-        fn new(blocks: Vec<Block>) -> Self {
-            Self {
-                by_id: blocks.into_iter().map(|b| (b.id.clone(), b)).collect(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl DocumentManager for MockDocManager {
-        async fn find_by_parent_and_name(&self, _: &EntityUri, _: &str) -> Result<Option<Block>> {
-            unimplemented!("not exercised by name_chain")
-        }
-
-        async fn create(&self, _: Block) -> Result<Block> {
-            unimplemented!("not exercised by name_chain")
-        }
-
-        async fn get_by_id(&self, id: &EntityUri) -> Result<Option<Block>> {
-            Ok(self.by_id.get(id).cloned())
-        }
-
-        async fn update_metadata(&self, _: &Block) -> Result<()> {
-            unimplemented!("not exercised by name_chain")
-        }
-    }
-
-    fn page(id: &str, parent: EntityUri, title: &str) -> Block {
-        let mut b = Block::new_text(EntityUri::block(id), parent, title.to_string());
-        b.set_page(true);
-        b
-    }
-
-    fn non_page(id: &str, parent: EntityUri, title: &str) -> Block {
-        Block::new_text(EntityUri::block(id), parent, title.to_string())
-    }
-
-    /// A well-formed chain of pages rooted at `no_parent()` resolves normally.
-    #[tokio::test]
-    async fn well_formed_page_chain_resolves() {
-        let a = page("A", EntityUri::no_parent(), "projects");
-        let p = page("P", a.id.clone(), "todo");
-        let mgr = MockDocManager::new(vec![a, p.clone()]);
-        let chain = mgr
-            .name_chain(&p.id)
-            .await
-            .expect("well-formed chain resolves");
-        assert_eq!(chain, vec!["projects".to_string(), "todo".to_string()]);
-    }
-
-    /// `A(page) > b1(non-page) > P(page)` — the refused topology. Before the
-    /// fix this returned `Ok(["A","P"])`; now it fails loud naming `b1`.
-    ///
-    /// **This guards a DELIBERATE contract, not an incidental limitation**
-    /// (Martin ruled Option A, 2026-08-09 — keep the refusal; see
-    /// `docs/Architecture/Model.md` § Page identity). A future change must not
-    /// silently legalize a page under a non-page: the error must (i) name the
-    /// offending non-page ancestor, (ii) name the topology (pages nest only
-    /// under pages), and (iii) tell the author how to fix it. It must NOT read
-    /// as a data-loss / truncated-ingest message, and it must NOT return `Ok`.
-    #[tokio::test]
-    async fn non_page_ancestor_fails_loud() {
-        let a = page("A", EntityUri::no_parent(), "projects");
-        let b1 = non_page("b1", a.id.clone(), "a plain heading");
-        let p = page("P", b1.id.clone(), "todo");
-        let mgr = MockDocManager::new(vec![a, b1.clone(), p.clone()]);
-
-        let err = mgr
-            .name_chain(&p.id)
-            .await
-            .expect_err("a page under a non-page ancestor must fail loud, not coerce a path");
-        let msg = format!("{err:#}");
-        // (i) names the offending non-page ancestor.
-        assert!(
-            msg.contains("non-page ancestor") && msg.contains(b1.id.as_str()),
-            "error must name the offending non-page ancestor '{}'; got: {msg}",
-            b1.id
-        );
-        // (ii) names the topology contract, (iii) tells the fix — so the author
-        // is not left guessing and a reader cannot mistake it for data loss.
-        assert!(
-            msg.contains("pages may nest only under pages"),
-            "error must name the topology contract (pages nest only under pages); got: {msg}"
-        );
-        assert!(
-            msg.contains(":Page:") && msg.contains("unnest"),
-            "error must tell the author how to fix it (tag `:Page:` or unnest); got: {msg}"
-        );
-    }
-
-    /// PROD-FAITHFUL (BugFunnel row 23/29): the page store (e.g.
-    /// `LiveDocumentManager`'s `WHERE tag='Page'` matview) contains ONLY pages,
-    /// so `get_by_id` on a NON-page content block returns `None`. `name_chain`
-    /// of such a block must resolve to an EMPTY chain ("not a page → owns no
-    /// file"), NOT fail loud: a non-page content heading is a legitimate benign
-    /// input (the folder-companion de-inline storm where the nested non-page
-    /// content of a de-inlined child page is absent from the companion's
-    /// projection), and `doc_id_to_path` maps the empty chain to `Ok(None)`
-    /// (skip). Before the fix this hit the ancestor-not-found `bail` and
-    /// produced the 749-error `Projects.org` UNRESOLVABLE storm.
-    #[tokio::test]
-    async fn non_page_self_absent_from_page_store_resolves_empty() {
-        // The store holds ONLY the page root; the content heading is not a page
-        // and is therefore absent from the page store (get_by_id → None).
-        let root = page("Projects", EntityUri::no_parent(), "Projects");
-        let mgr = MockDocManager::new(vec![root]);
-        let content_id = EntityUri::block("content-heading");
-        let chain = mgr.name_chain(&content_id).await.expect(
-            "a non-page block absent from the page store must resolve to an empty chain, not fail \
-             loud",
-        );
-        assert!(chain.is_empty(), "expected empty chain, got {chain:?}");
-    }
-
-    /// A chain rooted at a NON-`no_parent` sentinel (a synthetic root that is
-    /// still `is_sentinel()`) is a valid root stop — it must NOT be mistaken
-    /// for a non-page ancestor (Finding B: the root check matches both
-    /// predicates).
-    #[tokio::test]
-    async fn sentinel_rooted_chain_is_a_valid_root() {
-        let synthetic_root = EntityUri::new("sentinel", "synthetic_root");
-        assert!(synthetic_root.is_sentinel() && synthetic_root != EntityUri::no_parent());
-        // The page's parent is the synthetic sentinel directly — the loop
-        // breaks at the sentinel before ever trying to read it as a (non-page)
-        // block.
-        let p = page("P", synthetic_root, "todo");
-        let mgr = MockDocManager::new(vec![p.clone()]);
-        let chain = mgr
-            .name_chain(&p.id)
-            .await
-            .expect("a sentinel-rooted chain resolves without a false non-page-ancestor bail");
-        assert_eq!(chain, vec!["todo".to_string()]);
-    }
-
-    /// An in-memory page store answering every method the name-chain defaults
-    /// call.
-    struct PageStore {
-        by_id: std::sync::Mutex<HashMap<EntityUri, Block>>,
-    }
-
-    #[async_trait]
-    impl DocumentManager for PageStore {
-        async fn find_by_parent_and_name(
-            &self,
-            parent_id: &EntityUri,
-            title: &str,
-        ) -> Result<Option<Block>> {
-            page_at_position(self.by_id.lock().unwrap().values(), parent_id, title)
-        }
-
-        async fn create(&self, doc: Block) -> Result<Block> {
-            let mut by_id = self.by_id.lock().unwrap();
-            assert!(
-                !by_id.contains_key(&doc.id),
-                "create at {} would overwrite the page titled {:?}",
-                doc.id,
-                by_id[&doc.id].title()
-            );
-            by_id.insert(doc.id.clone(), doc.clone());
-            Ok(doc)
-        }
-
-        async fn get_by_id(&self, id: &EntityUri) -> Result<Option<Block>> {
-            Ok(self.by_id.lock().unwrap().get(id).cloned())
-        }
-
-        async fn update_metadata(&self, _: &Block) -> Result<()> {
-            unimplemented!("not exercised by get_or_create_by_name_chain")
-        }
-    }
-
-    /// A page renamed from `doc_904` to `doc_905` keeps
-    /// `PageId::for_path("doc_904")`; a page created later under `doc_904`
-    /// is a different page with its own id.
-    #[tokio::test]
-    async fn get_or_create_by_name_chain_beside_a_renamed_page_creates_a_new_page() {
-        let held = holon_api::link_parser::PageId::for_path("doc_904")
-            .unwrap()
-            .into_entity_uri();
-        let mut renamed = Block::new_text(held.clone(), EntityUri::no_parent(), "doc_905");
-        renamed.set_page(true);
-        let store = PageStore {
-            by_id: std::sync::Mutex::new(HashMap::from([(held.clone(), renamed)])),
-        };
-
-        let created = store
-            .get_or_create_by_name_chain(&["doc_904"])
-            .await
-            .expect("create doc_904");
-
-        assert_ne!(
-            created.id, held,
-            "the new doc_904 took the renamed page's id"
-        );
-        assert_eq!(created.title(), "doc_904");
-        assert_eq!(
-            store.get_by_id(&held).await.unwrap().map(|b| b.title()),
-            Some("doc_905".to_string()),
-            "the renamed page must keep its id and title"
-        );
-    }
-
-    fn store_holding(id: &EntityUri, parent: EntityUri, title: &str) -> PageStore {
-        let mut holder = Block::new_text(id.clone(), parent, title);
-        holder.set_page(true);
-        PageStore {
-            by_id: std::sync::Mutex::new(HashMap::from([(id.clone(), holder)])),
-        }
-    }
-
-    /// A root page `doc_904` is not the page `doc_904` that was moved under
-    /// another page, although the moved page kept the id the root path derives.
-    #[tokio::test]
-    async fn a_root_page_does_not_bind_to_a_moved_page_of_its_title() {
-        let held = holon_api::link_parser::PageId::for_path("doc_904")
-            .unwrap()
-            .into_entity_uri();
-        let store = store_holding(&held, EntityUri::block("61133fe7"), "doc_904");
-
-        let page = store
-            .get_or_create_by_name_chain(&["doc_904"])
-            .await
-            .expect("create root doc_904");
-
-        assert_eq!(
-            page.parent_id,
-            EntityUri::no_parent(),
-            "asked for a ROOT page, got {} under {}",
-            page.id,
-            page.parent_id
-        );
-        assert_ne!(page.id, held, "the root page took the moved page's id");
-    }
-
-    /// `My  Notes` and `My Notes` are one page at one position: the first
-    /// spelling stays the stored title.
-    #[tokio::test]
-    async fn a_page_binds_to_a_page_whose_title_differs_only_in_case_or_spacing() {
-        let held = holon_api::link_parser::PageId::for_path("My Notes")
-            .unwrap()
-            .into_entity_uri();
-        for spelling in ["My  Notes", "my notes"] {
-            let store = store_holding(&held, EntityUri::no_parent(), spelling);
-
-            let page = store
-                .get_or_create_by_name_chain(&["My Notes"])
-                .await
-                .expect("create My Notes");
-
-            assert_eq!(page.id, held, "holder {spelling:?}");
-            assert_eq!(page.title(), spelling);
-        }
-    }
-}
-
 /// Depth bound on a parent-chain walk. A backstop only — the walk terminates
 /// on its own at the root, at an absent block, or on a revisited id.
 const MAX_PAGE_WALK: usize = 50;
@@ -1622,4 +1346,280 @@ pub async fn nearest_page_ancestor(
          this walk cannot name its owning page"
     );
     Ok(PageAncestor::Broken(PageWalkBreak::DepthBound))
+}
+
+#[cfg(test)]
+mod name_chain_tests {
+    //! Red-first coverage for the no-pages-under-non-pages ruling
+    //! (`docs/Proposals/PageHierarchy-2026-07-13.md`, Fork B B1, §3/§5 item 1).
+    //!
+    //! Before the fix, `name_chain` SILENTLY dropped a non-page ancestor from
+    //! the path (`if doc.is_page() { push }` with no `else`), so
+    //! `A(page) > b1(non-page) > P(page)` returned `Ok(["A","P"])` — a
+    //! plausible-looking path that collides with any sibling of `b1`. These
+    //! tests pin the fail-loud replacement.
+
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// Minimal in-memory `DocumentManager` whose only real method is
+    /// `get_by_id` — the sole method `name_chain`'s default impl calls.
+    struct MockDocManager {
+        by_id: HashMap<EntityUri, Block>,
+    }
+
+    impl MockDocManager {
+        fn new(blocks: Vec<Block>) -> Self {
+            Self {
+                by_id: blocks.into_iter().map(|b| (b.id.clone(), b)).collect(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DocumentManager for MockDocManager {
+        async fn find_by_parent_and_name(&self, _: &EntityUri, _: &str) -> Result<Option<Block>> {
+            unimplemented!("not exercised by name_chain")
+        }
+
+        async fn create(&self, _: Block) -> Result<Block> {
+            unimplemented!("not exercised by name_chain")
+        }
+
+        async fn get_by_id(&self, id: &EntityUri) -> Result<Option<Block>> {
+            Ok(self.by_id.get(id).cloned())
+        }
+
+        async fn update_metadata(&self, _: &Block) -> Result<()> {
+            unimplemented!("not exercised by name_chain")
+        }
+    }
+
+    fn page(id: &str, parent: EntityUri, title: &str) -> Block {
+        let mut b = Block::new_text(EntityUri::block(id), parent, title.to_string());
+        b.set_page(true);
+        b
+    }
+
+    fn non_page(id: &str, parent: EntityUri, title: &str) -> Block {
+        Block::new_text(EntityUri::block(id), parent, title.to_string())
+    }
+
+    /// A well-formed chain of pages rooted at `no_parent()` resolves normally.
+    #[tokio::test]
+    async fn well_formed_page_chain_resolves() {
+        let a = page("A", EntityUri::no_parent(), "projects");
+        let p = page("P", a.id.clone(), "todo");
+        let mgr = MockDocManager::new(vec![a, p.clone()]);
+        let chain = mgr
+            .name_chain(&p.id)
+            .await
+            .expect("well-formed chain resolves");
+        assert_eq!(chain, vec!["projects".to_string(), "todo".to_string()]);
+    }
+
+    /// `A(page) > b1(non-page) > P(page)` — the refused topology. Before the
+    /// fix this returned `Ok(["A","P"])`; now it fails loud naming `b1`.
+    ///
+    /// **This guards a DELIBERATE contract, not an incidental limitation**
+    /// (Martin ruled Option A, 2026-08-09 — keep the refusal; see
+    /// `docs/Architecture/Model.md` § Page identity). A future change must not
+    /// silently legalize a page under a non-page: the error must (i) name the
+    /// offending non-page ancestor, (ii) name the topology (pages nest only
+    /// under pages), and (iii) tell the author how to fix it. It must NOT read
+    /// as a data-loss / truncated-ingest message, and it must NOT return `Ok`.
+    #[tokio::test]
+    async fn non_page_ancestor_fails_loud() {
+        let a = page("A", EntityUri::no_parent(), "projects");
+        let b1 = non_page("b1", a.id.clone(), "a plain heading");
+        let p = page("P", b1.id.clone(), "todo");
+        let mgr = MockDocManager::new(vec![a, b1.clone(), p.clone()]);
+
+        let err = mgr
+            .name_chain(&p.id)
+            .await
+            .expect_err("a page under a non-page ancestor must fail loud, not coerce a path");
+        let msg = format!("{err:#}");
+        // (i) names the offending non-page ancestor.
+        assert!(
+            msg.contains("non-page ancestor") && msg.contains(b1.id.as_str()),
+            "error must name the offending non-page ancestor '{}'; got: {msg}",
+            b1.id
+        );
+        // (ii) names the topology contract, (iii) tells the fix — so the author
+        // is not left guessing and a reader cannot mistake it for data loss.
+        assert!(
+            msg.contains("pages may nest only under pages"),
+            "error must name the topology contract (pages nest only under pages); got: {msg}"
+        );
+        assert!(
+            msg.contains(":Page:") && msg.contains("unnest"),
+            "error must tell the author how to fix it (tag `:Page:` or unnest); got: {msg}"
+        );
+    }
+
+    /// PROD-FAITHFUL (BugFunnel row 23/29): the page store (e.g.
+    /// `LiveDocumentManager`'s `WHERE tag='Page'` matview) contains ONLY pages,
+    /// so `get_by_id` on a NON-page content block returns `None`. `name_chain`
+    /// of such a block must resolve to an EMPTY chain ("not a page → owns no
+    /// file"), NOT fail loud: a non-page content heading is a legitimate benign
+    /// input (the folder-companion de-inline storm where the nested non-page
+    /// content of a de-inlined child page is absent from the companion's
+    /// projection), and `doc_id_to_path` maps the empty chain to `Ok(None)`
+    /// (skip). Before the fix this hit the ancestor-not-found `bail` and
+    /// produced the 749-error `Projects.org` UNRESOLVABLE storm.
+    #[tokio::test]
+    async fn non_page_self_absent_from_page_store_resolves_empty() {
+        // The store holds ONLY the page root; the content heading is not a page
+        // and is therefore absent from the page store (get_by_id → None).
+        let root = page("Projects", EntityUri::no_parent(), "Projects");
+        let mgr = MockDocManager::new(vec![root]);
+        let content_id = EntityUri::block("content-heading");
+        let chain = mgr.name_chain(&content_id).await.expect(
+            "a non-page block absent from the page store must resolve to an empty chain, not fail \
+             loud",
+        );
+        assert!(chain.is_empty(), "expected empty chain, got {chain:?}");
+    }
+
+    /// A chain rooted at a NON-`no_parent` sentinel (a synthetic root that is
+    /// still `is_sentinel()`) is a valid root stop — it must NOT be mistaken
+    /// for a non-page ancestor (Finding B: the root check matches both
+    /// predicates).
+    #[tokio::test]
+    async fn sentinel_rooted_chain_is_a_valid_root() {
+        let synthetic_root = EntityUri::new("sentinel", "synthetic_root");
+        assert!(synthetic_root.is_sentinel() && synthetic_root != EntityUri::no_parent());
+        // The page's parent is the synthetic sentinel directly — the loop
+        // breaks at the sentinel before ever trying to read it as a (non-page)
+        // block.
+        let p = page("P", synthetic_root, "todo");
+        let mgr = MockDocManager::new(vec![p.clone()]);
+        let chain = mgr
+            .name_chain(&p.id)
+            .await
+            .expect("a sentinel-rooted chain resolves without a false non-page-ancestor bail");
+        assert_eq!(chain, vec!["todo".to_string()]);
+    }
+
+    /// An in-memory page store answering every method the name-chain defaults
+    /// call.
+    struct PageStore {
+        by_id: std::sync::Mutex<HashMap<EntityUri, Block>>,
+    }
+
+    #[async_trait]
+    impl DocumentManager for PageStore {
+        async fn find_by_parent_and_name(
+            &self,
+            parent_id: &EntityUri,
+            title: &str,
+        ) -> Result<Option<Block>> {
+            page_at_position(self.by_id.lock().unwrap().values(), parent_id, title)
+        }
+
+        async fn create(&self, doc: Block) -> Result<Block> {
+            let mut by_id = self.by_id.lock().unwrap();
+            assert!(
+                !by_id.contains_key(&doc.id),
+                "create at {} would overwrite the page titled {:?}",
+                doc.id,
+                by_id[&doc.id].title()
+            );
+            by_id.insert(doc.id.clone(), doc.clone());
+            Ok(doc)
+        }
+
+        async fn get_by_id(&self, id: &EntityUri) -> Result<Option<Block>> {
+            Ok(self.by_id.lock().unwrap().get(id).cloned())
+        }
+
+        async fn update_metadata(&self, _: &Block) -> Result<()> {
+            unimplemented!("not exercised by get_or_create_by_name_chain")
+        }
+    }
+
+    /// A page renamed from `doc_904` to `doc_905` keeps
+    /// `PageId::for_path("doc_904")`; a page created later under `doc_904`
+    /// is a different page with its own id.
+    #[tokio::test]
+    async fn get_or_create_by_name_chain_beside_a_renamed_page_creates_a_new_page() {
+        let held = holon_api::link_parser::PageId::for_path("doc_904")
+            .unwrap()
+            .into_entity_uri();
+        let mut renamed = Block::new_text(held.clone(), EntityUri::no_parent(), "doc_905");
+        renamed.set_page(true);
+        let store = PageStore {
+            by_id: std::sync::Mutex::new(HashMap::from([(held.clone(), renamed)])),
+        };
+
+        let created = store
+            .get_or_create_by_name_chain(&["doc_904"])
+            .await
+            .expect("create doc_904");
+
+        assert_ne!(
+            created.id, held,
+            "the new doc_904 took the renamed page's id"
+        );
+        assert_eq!(created.title(), "doc_904");
+        assert_eq!(
+            store.get_by_id(&held).await.unwrap().map(|b| b.title()),
+            Some("doc_905".to_string()),
+            "the renamed page must keep its id and title"
+        );
+    }
+
+    fn store_holding(id: &EntityUri, parent: EntityUri, title: &str) -> PageStore {
+        let mut holder = Block::new_text(id.clone(), parent, title);
+        holder.set_page(true);
+        PageStore {
+            by_id: std::sync::Mutex::new(HashMap::from([(id.clone(), holder)])),
+        }
+    }
+
+    /// A root page `doc_904` is not the page `doc_904` that was moved under
+    /// another page, although the moved page kept the id the root path derives.
+    #[tokio::test]
+    async fn a_root_page_does_not_bind_to_a_moved_page_of_its_title() {
+        let held = holon_api::link_parser::PageId::for_path("doc_904")
+            .unwrap()
+            .into_entity_uri();
+        let store = store_holding(&held, EntityUri::block("61133fe7"), "doc_904");
+
+        let page = store
+            .get_or_create_by_name_chain(&["doc_904"])
+            .await
+            .expect("create root doc_904");
+
+        assert_eq!(
+            page.parent_id,
+            EntityUri::no_parent(),
+            "asked for a ROOT page, got {} under {}",
+            page.id,
+            page.parent_id
+        );
+        assert_ne!(page.id, held, "the root page took the moved page's id");
+    }
+
+    /// `My  Notes` and `My Notes` are one page at one position: the first
+    /// spelling stays the stored title.
+    #[tokio::test]
+    async fn a_page_binds_to_a_page_whose_title_differs_only_in_case_or_spacing() {
+        let held = holon_api::link_parser::PageId::for_path("My Notes")
+            .unwrap()
+            .into_entity_uri();
+        for spelling in ["My  Notes", "my notes"] {
+            let store = store_holding(&held, EntityUri::no_parent(), spelling);
+
+            let page = store
+                .get_or_create_by_name_chain(&["My Notes"])
+                .await
+                .expect("create My Notes");
+
+            assert_eq!(page.id, held, "holder {spelling:?}");
+            assert_eq!(page.title(), spelling);
+        }
+    }
 }

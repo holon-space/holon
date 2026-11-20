@@ -218,13 +218,13 @@ fn an_excluded_place_is_not_resurrected_by_the_delta_half() {
         .map(|p| p.to_string())
         .collect();
     assert!(
-        written.contains(&"block.content".to_string()),
+        written.iter().any(|i| i == "block.content"),
         "the subtraction must remove only the excluded places; set_field still writes \
          block.content: {written:?}"
     );
     for place in ["block.parent_id", "block.sort_key"] {
         assert!(
-            !written.contains(&place.to_string()),
+            !written.iter().any(|i| i == place),
             "set_field declares private {place} EXCLUDED, yet the compiled net lists it as \
              a write: {written:?}"
         );
@@ -304,7 +304,7 @@ fn an_exclusion_removes_that_write_and_only_that_write() {
         .collect();
 
     assert!(
-        !written.contains(&"block.sort_key".to_string()),
+        !written.iter().any(|i| i == "block.sort_key"),
         "the excluded place must not be a write: {written:?}"
     );
     assert_eq!(
@@ -336,12 +336,12 @@ fn an_exclusion_leaves_the_read_half_of_every_reading_flow() {
             .collect();
 
         assert!(
-            read.contains(&"block.sort_key".to_string()),
+            read.iter().any(|i| i == "block.sort_key"),
             "excluding a write must not silently drop the read {structural:?} carries: \
              {read:?}"
         );
         assert!(
-            read.contains(&"block.id".to_string()),
+            read.iter().any(|i| i == "block.id"),
             "a delta-derived READ on an unexcluded place must survive untouched: {read:?}"
         );
     }

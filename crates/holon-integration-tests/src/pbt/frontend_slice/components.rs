@@ -8598,7 +8598,7 @@ mod tests {
             .collect();
         eprintln!("[unpin-probe] focus_roots(right_sidebar) after unpin = {roots:?}");
         assert!(
-            !roots.contains(&"block:ref-block-0".to_string()),
+            !roots.iter().any(|i| i == "block:ref-block-0"),
             "[unpin-probe] close(history_id={pin_hid}) must remove the pin from \
              focus_roots(right_sidebar); still present: {roots:?}"
         );

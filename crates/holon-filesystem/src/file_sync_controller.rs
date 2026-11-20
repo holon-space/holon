@@ -13033,7 +13033,7 @@ mod holder_order_tests {
         ]);
         let rendered = ids(&doc.document_order(&uri("doc")));
         assert_eq!(rendered.len(), 2, "no block may be lost to a cycle");
-        assert!(rendered.contains(&"a".to_string()) && rendered.contains(&"b".to_string()));
+        assert!(rendered.iter().any(|i| i == "a") && rendered.iter().any(|i| i == "b"));
     }
 }
 

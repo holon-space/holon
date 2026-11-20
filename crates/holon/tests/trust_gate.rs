@@ -316,7 +316,7 @@ async fn untrusted_create_coerces_to_proposal() {
     assert_eq!(response_field(&response, "status"), "proposed");
     // Canonical target never created; only the proposals root + the proposal.
     assert!(
-        !fx.store.ids().contains(&"block:x".to_string()),
+        !fx.store.ids().iter().any(|i| i == "block:x"),
         "canonical create must not reach the store: {:?}",
         fx.store.ids()
     );
@@ -429,7 +429,7 @@ async fn reject_retracts_without_executing() {
 
     assert_eq!(response_field(&response, "status"), "rejected");
     assert!(
-        !fx.store.ids().contains(&"block:x".to_string()),
+        !fx.store.ids().iter().any(|i| i == "block:x"),
         "rejected op never executes"
     );
     let record = proposal_record(&fx.store, &proposal_id);
@@ -459,7 +459,7 @@ async fn resolving_a_non_pending_proposal_fails_loud() {
         .await
         .expect_err("terminal proposal must not promote");
     assert!(err.to_string().contains("already rejected"), "got: {err:#}");
-    assert!(!fx.store.ids().contains(&"block:x".to_string()));
+    assert!(!fx.store.ids().iter().any(|i| i == "block:x"));
 }
 
 #[tokio::test]
@@ -551,7 +551,7 @@ async fn untrusted_accept_is_itself_coerced() {
         "an untrusted origin cannot self-accept — the accept becomes a proposal"
     );
     assert!(
-        !fx.store.ids().contains(&"block:x".to_string()),
+        !fx.store.ids().iter().any(|i| i == "block:x"),
         "wrapped op still not executed"
     );
     assert_eq!(

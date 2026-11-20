@@ -1166,7 +1166,9 @@ fn real_rehomes_subtree_when_ancestor_becomes_a_page() {
              teeth for the ancestor-page-toggle class"
     );
     assert_eq!(
-        straw.get("p0").map(|v| v.contains(&"b2".to_string())),
+        straw
+            .get("p0")
+            .map(|v| v.iter().any(|i: &String| i == "b2")),
         Some(true),
         "strawman should leave b2 homed to the OLD document p0"
     );

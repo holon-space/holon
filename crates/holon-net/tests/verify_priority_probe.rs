@@ -133,8 +133,8 @@ fn fired(ts: &[T], subjects: usize) -> BTreeMap<String, Vec<String>> {
     let net = net_def("nets/priority.yaml", &yaml(ts), logic).expect("loads");
     let mut exec = Executor::new(net).expect("accepted");
     for (i, t) in ts.iter().enumerate() {
-        for s in 0..subjects {
-            if t.enabled[s] {
+        for (s, &enabled) in t.enabled.iter().enumerate().take(subjects) {
+            if enabled {
                 let _q = exec
                     .write(
                         &format!("In{i}"),

@@ -3068,11 +3068,11 @@ mod advice_dismiss_tests {
         .expect("dismiss l2");
         let got = read_suppressed(&ops, &anchor).await;
         assert!(
-            got.contains(&"block:l1".to_string()),
+            got.iter().any(|i: &String| i == "block:l1"),
             "l1 preserved: {got:?}"
         );
         assert!(
-            got.contains(&"block:l2".to_string()),
+            got.iter().any(|i: &String| i == "block:l2"),
             "l2 appended: {got:?}"
         );
         assert_eq!(got.len(), 2);
@@ -3496,13 +3496,15 @@ mod tag_op_tests {
         assert!(
             tags_of(&backend, "block:parent")
                 .await
-                .contains(&PAGE_TAG.to_string())
+                .iter()
+                .any(|i: &String| i == PAGE_TAG)
         );
         run(&ops, "add_tag", "block:child", PAGE_TAG).await;
         assert!(
             tags_of(&backend, "block:child")
                 .await
-                .contains(&PAGE_TAG.to_string())
+                .iter()
+                .any(|i: &String| i == PAGE_TAG)
         );
     }
 

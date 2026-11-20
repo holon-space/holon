@@ -798,8 +798,8 @@ mod tests {
         // child).
         assert_eq!(ids.first().map(String::as_str), Some(root.id.as_str()));
         assert!(
-            ids.contains(&first.id.as_str().to_string())
-                && ids.contains(&second.id.as_str().to_string()),
+            ids.iter().any(|i| i == first.id.as_str())
+                && ids.iter().any(|i| i == second.id.as_str()),
             "Data rows must include the block's direct children; got {ids:?}"
         );
 
