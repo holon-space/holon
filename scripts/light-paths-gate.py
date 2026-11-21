@@ -3,11 +3,12 @@
 the landing gate selects work for.
 
 Run from the workspace root with the variables flow sets: FLOW_ISSUE, FLOW_TO (must be `verify`) and FLOW_PR_HEADS
-(`owner/name#N@sha`, space separated). The PRs' changed files come from the REST pull-request files list, old and new
+(`owner/name#N@sha`, space separated; flow leaves it unset for a card with no linked PR). Only heads of HOLON_REPO are
+judged; heads of other repos are named as skipped and never fetched. The PRs' changed files come from the REST pull-request files list, old and new
 path of a rename alike; what counts as gate-relevant is decided by `gate_selection` of scripts/select-tests.py: a full
 run, or any step outside its TREE_STEPS.
 
-Exit 0: every head is gate-free. Any other exit refuses; flow shows only stderr, so the paths, their reasons and the
+Exit 0: no holon head, or every holon head is gate-free. Any other exit refuses; flow shows only stderr, so the paths, their reasons and the
 repair command are printed there.
 """
 import contextlib
@@ -23,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GATE = "integrate"
+HOLON_REPO = "holon-space/holon"
 HEAD = re.compile(r"^(?P<repo>[^/#@\s]+/[^/#@\s]+)#(?P<number>\d+)@(?P<sha>[0-9a-f]+)$")
 
 
@@ -101,7 +103,17 @@ def run(environ):
     if environ["FLOW_TO"] != "verify":
         sys.exit(f"FLOW_TO is {environ['FLOW_TO']!r}: this gate belongs on the move into verify")
     issue = environ["FLOW_ISSUE"]
+    if "FLOW_PR_HEADS" not in environ:
+        print(f"light card #{issue}: no linked PR, no holon path to judge", file=sys.stderr)
+        return 0
     heads = parse_heads(environ["FLOW_PR_HEADS"])
+    for h in heads:
+        if h.repo != HOLON_REPO:
+            print(f"skipped head of {h.repo}, not {HOLON_REPO}: {h.repo}#{h.number}@{h.sha}", file=sys.stderr)
+    heads = [h for h in heads if h.repo == HOLON_REPO]
+    if not heads:
+        print(f"light card #{issue}: no linked PR, no holon path to judge", file=sys.stderr)
+        return 0
     paths = sorted({p for h in heads for p in pr_files(h, environ)})
     meta = ST.load_metadata()
     ST.assert_workspace_root(meta, ROOT)

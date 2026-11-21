@@ -11,8 +11,10 @@ plus near-miss and deleted paths and renames, in 1 to 3 heads. Properties:
 - P3 adding a path to a refused set keeps it refused;
 - P4 every path the refusal names selects a relevant step on its own;
 - P5 from a passing run, each missing or malformed input makes the script exit non-zero, never 0, also under
-  PYTHONOPTIMIZE=1.
-Fixed cases run first. Each failing case is printed as its explicit path lists.
+  PYTHONOPTIMIZE=1; the one absent input that passes is FLOW_PR_HEADS (flow's "no linked PR" state), and a present
+  but empty value is still refused;
+- P6 only heads of the holon repo are judged: a head of another repo is named as skipped and never fetched.
+Fixed cases run first; P6 uses fixed cases only, because its inputs are a few environment shapes, not a space to draw from. Each failing case is printed as its explicit path lists.
 """
 import contextlib
 import importlib.util
@@ -65,10 +67,13 @@ case "$last" in
   */files) file="$GH_STUB_DIR/$number.files.json" ;;
   *) file="$GH_STUB_DIR/$number.json" ;;
 esac
+echo "$*" >> "$GH_STUB_DIR/calls.log"
 [ -f "$file" ] || { echo "stub gh: no PR $number" >&2; exit 1; }
 cat "$file"
 """
 FLOW = {"FLOW_ISSUE": "7", "FLOW_TO": "verify"}
+HOLON = "holon-space/holon"
+FOREIGN = "elsewhere/foreign-repo"
 
 
 class World:
@@ -90,7 +95,7 @@ class World:
         (self.dir / f"{number}.json").write_text(json.dumps({"changed_files": len(files) if changed is None else changed}))
 
     def env(self, numbers, **override):
-        heads = " ".join(f"o/r#{n}@{n:040x}" for n in numbers)
+        heads = " ".join(f"{HOLON}#{n}@{n:040x}" for n in numbers)
         env = {**os.environ, **FLOW, "FLOW_PR_HEADS": heads, "GH_STUB_DIR": str(self.dir),
                "PATH": f"{self.dir / 'bin'}:{os.environ['PATH']}", "HOLON_CARGO_RECORD": str(self.dir / "cargo-calls.jsonl")}
         env.update(override)
@@ -170,11 +175,10 @@ def missing_input_problems(paths):
     WORLD.pr(3, [])
     WORLD.pr(4, paths, changed=len(paths) + 1)
     for name, env in [
-        ("FLOW_PR_HEADS unset", WORLD.env([1], FLOW_PR_HEADS=None)),
         ("FLOW_PR_HEADS empty", WORLD.env([1], FLOW_PR_HEADS="")),
         ("FLOW_PR_HEADS blank", WORLD.env([1], FLOW_PR_HEADS="  ")),
-        ("head without sha", WORLD.env([1], FLOW_PR_HEADS="o/r#1")),
-        ("head with a bad number", WORLD.env([1], FLOW_PR_HEADS="o/r#x@abc")),
+        ("head without sha", WORLD.env([1], FLOW_PR_HEADS=f"{HOLON}#1")),
+        ("head with a bad number", WORLD.env([1], FLOW_PR_HEADS=f"{HOLON}#x@abc")),
         ("FLOW_TO landed", WORLD.env([1], FLOW_TO="landed")),
         ("FLOW_TO build", WORLD.env([1], FLOW_TO="build")),
         ("FLOW_TO empty", WORLD.env([1], FLOW_TO="")),
@@ -199,8 +203,9 @@ def explicit_input_problems(paths):
     WORLD.pr(4, paths, changed=len(paths) + 1)
     good = f"o/r#1@{1:040x}"
     for name, env, message in [
-        ("head without sha", WORLD.env([1], FLOW_PR_HEADS=f"{good} o/r#1"), "is not owner/name#N@sha"),
+        ("head without sha", WORLD.env([1], FLOW_PR_HEADS=f"{good} {HOLON}#1"), "is not owner/name#N@sha"),
         ("FLOW_PR_HEADS blank", WORLD.env([1], FLOW_PR_HEADS="  "), "no linked PR head"),
+        ("FLOW_PR_HEADS empty", WORLD.env([1], FLOW_PR_HEADS=""), "no linked PR head"),
         ("a PR with no file", WORLD.env([1, 3]), "lists no changed file"),
         ("a short file list", WORLD.env([1, 4]), "changed files"),
         ("FLOW_TO landed", WORLD.env([1], FLOW_TO="landed"), "'landed': this gate belongs on the move into verify"),
@@ -223,6 +228,40 @@ def check_line_commands():
 def runnable_problems():
     return [f"{cmd} is run by a justfile check line but is not executable" for cmd in check_line_commands()
             if not os.access(REPO / cmd, os.X_OK)]
+
+
+def foreign_calls():
+    log = WORLD.dir / "calls.log"
+    return [l for l in log.read_text().splitlines() if FOREIGN in l] if log.exists() else []
+
+
+def repo_scope_problems():
+    """P6, from the armed state (a holon head with a relevant path refuses): the absent variable, foreign-only heads and
+    foreign heads beside a holon head. Each case also asserts that the script ran to its verdict line."""
+    found = []
+    WORLD.pr(1, CRATE_TEST_PR)
+    WORLD.pr(2, [DOC])
+    WORLD.pr(9, CRATE_TEST_PR)
+    foreign = f"{FOREIGN}#9@{9:040x}"
+    holon = lambda n: f"{HOLON}#{n}@{n:040x}"
+    no_pr = f"light card #{FLOW['FLOW_ISSUE']}: no linked PR, no holon path to judge"
+    cases = [
+        ("armed: a holon head with a relevant path", holon(1), 1, "gate-relevant", None),
+        ("FLOW_PR_HEADS absent", None, 0, no_pr, None),
+        ("a foreign head only", foreign, 0, no_pr, foreign),
+        ("a foreign head beside a gate-free holon head", f"{foreign} {holon(2)}", 0, "PR heads are gate-free", foreign),
+        ("a foreign head beside a relevant holon head", f"{foreign} {holon(1)}", 1, "gate-relevant", foreign),
+    ]
+    for name, heads, want_code, want_text, skipped in cases:
+        (WORLD.dir / "calls.log").unlink(missing_ok=True)
+        code, err = subprocess_verdict(WORLD.env([1], FLOW_PR_HEADS=heads))
+        if code != want_code or want_text not in err:
+            found.append(f"P6: {name}: exit {code} without {want_text!r}, stderr {err!r}")
+        if skipped is not None and skipped not in err:
+            found.append(f"P6: {name}: the skipped head {skipped} is not named: {err!r}")
+        if foreign_calls():
+            found.append(f"P6: {name}: gh was called for the foreign repo: {foreign_calls()}")
+    return found
 
 
 FLOW_SKILL = Path.home() / ".claude/skills/gh-kanban"
@@ -324,6 +363,7 @@ def main():
     failures += runnable_problems()
     failures += config_load_problems()
     failures += explicit_input_problems([DOC])
+    failures += repo_scope_problems()
     print(f"refused draws: {Counter(verdict(s)[0] != 0 for s in drawn)}")
     for f in failures:
         print(f"FAIL: {f}")
