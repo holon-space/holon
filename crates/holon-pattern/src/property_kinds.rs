@@ -102,8 +102,7 @@ impl PropertyKinds {
     }
 
     /// Parse a stored `property_kinds` column. A missing column and a stored
-    /// NULL both mean "no key carries a non-evident kind" — the reading a
-    /// pre-NV-1 row deserves.
+    /// NULL both mean "no key carries a non-evident kind".
     pub fn parse_column(stored: Option<&Value>) -> Result<Self, PropertyKindsError> {
         let map = match stored {
             None | Some(Value::Null) => return Ok(Self::default()),
@@ -123,7 +122,7 @@ impl PropertyKinds {
                     }
                 })?;
                 serde_json::from_value(json).map_err(|source| PropertyKindsError::Malformed {
-                    raw: object_debug(object),
+                    raw: format!("{object:?}"),
                     source,
                 })?
             }
@@ -199,10 +198,6 @@ impl PropertyKinds {
 
 fn is_rfc3339(text: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(text).is_ok()
-}
-
-fn object_debug(value: &Value) -> String {
-    format!("{value:?}")
 }
 
 #[cfg(test)]

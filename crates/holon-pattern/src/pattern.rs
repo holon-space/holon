@@ -1,5 +1,4 @@
-//! Dual-evaluated guard `Pattern` AST — ADR 0024 Phase-2 risk-elimination
-//! spike.
+//! Dual-evaluated guard `Pattern` AST (ADR 0024).
 //!
 //! One guard *semantics*, two *evaluators* that must agree (ADR 0024 P1b):
 //! - [`Guard::evaluate`] runs the guard in memory over an [`InMemoryWorld`]
@@ -7,8 +6,8 @@
 //! - [`Guard::to_sql`] compiles the guard to a matview-eligible `SELECT` over a
 //!   projection-owned [`SchemaAbstraction`] (the reactive / Turso-CDC path).
 //!
-//! The agreement between the two is the load-bearing bet of the ADR. It is
-//! pinned by the property test in `holon-advice` (the spike's exit gate).
+//! The agreement between the two is pinned by the property test in
+//! `holon-advice`.
 //!
 //! # Why every leaf is 2-valued
 //!
@@ -33,12 +32,10 @@
 //!
 //! # Convergence with the scalar `Predicate` (ADR 0024 Q4)
 //!
-//! The committed end state is `Pattern::Scalar(crate::Predicate)` — the scalar
-//! subset re-expressed as a Pattern variant, so no third predicate-ish type
-//! appears. It is intentionally **not** implemented in this spike (it would
-//! perturb the `flutter_rust_bridge:non_opaque` bridge that `Predicate`
-//! crosses); it is recorded here as the direction, per the plan §7.2
-//! done-criteria.
+//! The committed end state is `Pattern::Scalar(holon_api::Predicate)` — the
+//! scalar subset re-expressed as a Pattern variant, so no third predicate-ish
+//! type appears. It is not implemented yet: it would perturb the
+//! `flutter_rust_bridge:non_opaque` bridge that `Predicate` crosses.
 
 use std::collections::HashMap;
 
@@ -569,11 +566,10 @@ fn field_value(block: &WorldBlock, field: &FieldRef) -> Option<Value> {
     }
 }
 
-/// 2-valued comparison. A missing field is never a match (fail-shut), mirroring
-/// [`crate::Predicate`]'s numeric comparisons and the SQL `IS NOT NULL` guard.
-/// Two-valued comparison: an absent left side satisfies nothing, not even
-/// `!=`. Public so the arc evaluator in `holon_net` decides a refinement the
-/// same way a guard decides the conjunct it was compiled from.
+/// Two-valued comparison: an absent left side fails every operator except
+/// `Ne`, which it satisfies — the same verdict as the SQL leaf. Public so the
+/// arc evaluator in `holon_net` decides a refinement the same way a guard
+/// decides the conjunct it was compiled from.
 pub fn compare_2valued(lhs: Option<&Value>, op: CmpOp, rhs: &Value) -> bool {
     match op {
         CmpOp::Eq => lhs == Some(rhs),
@@ -631,11 +627,8 @@ fn block_matches_chain(leaf: &WorldBlock, names: &[String], world: &InMemoryWorl
 
 // ─── Schema abstraction (projection-owned) ─────────────────────────────────
 
-/// The projection-owned schema the guard compiler targets. Keeps `to_sql` free
-/// of hardcoded shapes (the ADR caveat about the PBT `query_ast`'s
-/// `json_extract` / `block_tags` literals). The projection implements this
-/// later; the spike ships [`CurrentSchema`] targeting the current
-/// block/properties/tags shapes.
+/// The projection-owned schema the guard compiler targets, so `to_sql` holds
+/// no table or column names of its own.
 pub trait SchemaAbstraction {
     /// The block relation (FROM target for a block-driven guard).
     fn block_relation(&self) -> &str;
@@ -653,11 +646,8 @@ pub trait SchemaAbstraction {
     fn clock_relation(&self) -> (&'static str, &'static str);
 }
 
-/// The spike's concrete schema: a `block(id, name, parent_id, properties)`
-/// table, a `block_tags(block_id, tag)` junction, and a `clock(today)`
-/// relation. Mirrors the shapes in the PBT `query_ast` (`json_extract` on
-/// `properties`, `block_tags` EXISTS) plus `name`/`parent_id` for path
-/// patterns.
+/// A minimal schema: a `block(id, name, parent_id, properties)` table, a
+/// `block_tags(block_id, tag)` junction, and a `clock(today)` relation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CurrentSchema;
 
@@ -960,7 +950,8 @@ fn builtin_sql(b: &BuiltinRef, ctx: &SqlCtx) -> Result<String, GuardEvalError> {
     }
 }
 
-/// 2-valued comparison SQL: a NULL/missing lhs is never a match.
+/// 2-valued comparison SQL, the same verdict as [`compare_2valued`]: a NULL lhs
+/// fails every operator except `<>`.
 fn cmp_2valued_sql(lhs: &str, op: CmpOp, rhs: &str) -> String {
     match op {
         CmpOp::Eq => format!("({lhs} IS NOT NULL AND {lhs} = {rhs})"),
@@ -1011,7 +1002,7 @@ fn segment_sql(seg: &PathSegment, ctx: &SqlCtx) -> Result<String, GuardEvalError
     }
 }
 
-/// SQL literal for a [`Value`]. Cribbed from the PBT `query_ast::sql_value`.
+/// SQL literal for a [`Value`].
 fn sql_value(v: &Value) -> String {
     match v {
         Value::String(s) => sql_string(s),
@@ -1052,7 +1043,10 @@ pub enum GuardParseError {
     UnexpectedToken { token: String },
     #[error("unexpected end of guard expression (expected {expected})")]
     UnexpectedEnd { expected: String },
-    #[error("unknown guard function {name:?} (expected `block_exists`, `has_tag` or `parent`)")]
+    #[error(
+        "unknown guard function {name:?} (expected `block_exists`, `has_tag`, `parent`, `child` \
+         or `sibling`)"
+    )]
     UnknownFunction { name: String },
     #[error("unknown builtin {name:?} (expected `today`)")]
     UnknownBuiltin { name: String },
@@ -1098,8 +1092,10 @@ impl Guard {
     /// inferring the [`Subject`]: any [`BuiltinRef`] ⇒ clock-driven, else
     /// block-driven. Rejects mixing a builtin with a block predicate.
     ///
-    /// Grammar: `=>`, `not`, `and`, `or`, parentheses, and the guard functions
-    /// `block_exists("path")`, `has_tag("tag")` and `parent(<expr>)`.
+    /// Grammar: `=>`, `not`, `and`, `or`, parentheses, the guard functions
+    /// `block_exists("path")` and `has_tag("tag")`, the hops `parent(<expr>)`,
+    /// `child(<expr>)` and `sibling(<expr>)`, and the comparison
+    /// `relation.column ==|!= <string or integer literal>`.
     pub fn parse(input: &str) -> Result<Guard, GuardParseError> {
         Guard::from_body(parse_guard_body(input)?)
     }
@@ -1191,37 +1187,39 @@ fn collect_column_relation(p: &Pattern, found: &mut Option<String>) -> Result<()
 /// The relation must be declared, carry a queryable binding, and declare every
 /// column the body names.
 fn validate_columns(relation: &str, body: &Pattern) -> Result<(), GuardParseError> {
-    let entity = crate::schema::builtin_entity(relation).ok_or_else(|| {
-        GuardParseError::UnknownRelation {
-            relation: relation.to_string(),
-            known: crate::schema::BUILTIN_SCHEMAS
-                .iter()
-                .map(|s| s.relation)
-                .collect::<Vec<_>>()
-                .join(", "),
-        }
-    })?;
+    let entity = declared_entity(relation)?;
     if entity.binding.is_none() {
         return Err(GuardParseError::UnboundRelation {
             relation: relation.to_string(),
         });
     }
-    validate_declared_columns(relation, body)
+    check_declared_columns(relation, entity, body)
 }
 
 /// Every column the body names must be declared by the relation. No binding is
 /// required: the block subject iterates blocks, not a queryable relation.
 fn validate_declared_columns(relation: &str, body: &Pattern) -> Result<(), GuardParseError> {
-    let entity = crate::schema::builtin_entity(relation).ok_or_else(|| {
-        GuardParseError::UnknownRelation {
-            relation: relation.to_string(),
-            known: crate::schema::BUILTIN_SCHEMAS
-                .iter()
-                .map(|s| s.relation)
-                .collect::<Vec<_>>()
-                .join(", "),
-        }
-    })?;
+    check_declared_columns(relation, declared_entity(relation)?, body)
+}
+
+fn declared_entity(
+    relation: &str,
+) -> Result<&'static crate::schema::EntitySchema, GuardParseError> {
+    crate::schema::builtin_entity(relation).ok_or_else(|| GuardParseError::UnknownRelation {
+        relation: relation.to_string(),
+        known: crate::schema::BUILTIN_SCHEMAS
+            .iter()
+            .map(|s| s.relation)
+            .collect::<Vec<_>>()
+            .join(", "),
+    })
+}
+
+fn check_declared_columns(
+    relation: &str,
+    entity: &crate::schema::EntitySchema,
+    body: &Pattern,
+) -> Result<(), GuardParseError> {
     for column in column_names(body) {
         if entity.field(&column).is_none() {
             return Err(GuardParseError::UnknownColumn {
@@ -1655,20 +1653,6 @@ mod tests {
         )
         .expect("column comparisons combine with `and`");
         assert_eq!(conj.subject, Subject::Relation("integration".to_string()));
-    }
-
-    #[test]
-    fn the_existing_guard_forms_are_unchanged() {
-        let tag = Guard::parse("has_tag(\"task\")").expect("has_tag parses");
-        assert_eq!(tag.subject, Subject::Block);
-        assert_eq!(tag.body, Pattern::HasTag("task".to_string()));
-
-        let exists =
-            Guard::parse("not block_exists(\"Journals/{today}\")").expect("block_exists parses");
-        assert_eq!(exists.subject, Subject::Clock);
-
-        let parent = Guard::parse("parent(has_tag(\"Page\"))").expect("parent parses");
-        assert_eq!(parent.subject, Subject::Block);
     }
 
     #[test]

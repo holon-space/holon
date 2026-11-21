@@ -10,11 +10,8 @@
 //! lets both kinds answer the same question, so a place check never has to
 //! know which kind it is looking at.
 //!
-//! Intended future callers (they generalize on this same source rather than
-//! growing a second one): `crate::pattern::Subject`, whose variants are the
-//! same relation vocabulary, and the guard compiler's `SchemaAbstraction`,
-//! whose column map is already spelled with the [`block`] / [`clock`] name
-//! constants below.
+//! The guard parser in [`crate::pattern`] checks a `relation.column` comparison
+//! against this same source ([`builtin_entity`]).
 
 /// Where a field's data lives. Only [`FieldStorage::Column`] fields are columns
 /// of the entity's own table, which is what the DDL lock compares.
@@ -509,11 +506,14 @@ mod tests {
     /// unable to declare a write it can perform.
     #[test]
     fn every_intent_writable_field_is_an_arc_place() {
-        for name in BLOCK.intent_writable() {
-            assert!(
-                BLOCK.field(name).expect("declared").arc_place,
-                "block.{name} is intent-writable but not an arc place"
-            );
+        for schema in BUILTIN_SCHEMAS {
+            for name in schema.intent_writable() {
+                assert!(
+                    schema.field(name).expect("declared").arc_place,
+                    "{}.{name} is intent-writable but not an arc place",
+                    schema.relation
+                );
+            }
         }
     }
 
