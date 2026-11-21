@@ -130,7 +130,6 @@ impl Engine {
             .transition(&binding.transition_id)
             .ok_or_else(|| format!("unknown transition: {}", binding.transition_id))?;
 
-        // Build Rhai maps for bound tokens
         let mut rhai_maps: BTreeMap<String, rhai::Map> = BTreeMap::new();
         for (bind_name, token_id) in &binding.token_bindings {
             let token = marking
@@ -139,7 +138,6 @@ impl Engine {
             rhai_maps.insert(bind_name.clone(), RhaiEvaluator::token_to_map(token));
         }
 
-        // Collect changes
         let mut changes = Vec::new();
         let time = marking.clock();
 
@@ -153,7 +151,6 @@ impl Engine {
                 .token(token_id)
                 .ok_or_else(|| format!("token '{token_id}' not found"))?;
 
-            // Apply postconditions
             for (attr, expr) in &output.postcond {
                 let old_val = token.get(attr).cloned().unwrap_or(Value::Null);
                 let new_val =
@@ -174,8 +171,7 @@ impl Engine {
             marking.set_attr(&change.token, &change.attr, change.to.clone());
         }
 
-        // Handle create arcs — inject `step` so id_expr can produce unique IDs
-        // per firing
+        // `step` lets an id_expr produce a unique id per firing.
         let mut create_maps = rhai_maps.clone();
         let mut step_map = rhai::Map::new();
         step_map.insert("n".into(), rhai::Dynamic::from(step as i64));
@@ -206,7 +202,6 @@ impl Engine {
             });
         }
 
-        // Handle consume arcs
         let mut removed = Vec::new();
         for input in transition.inputs() {
             if input.consume {
@@ -219,10 +214,8 @@ impl Engine {
             }
         }
 
-        // Advance clock. `duration` ultimately comes from stored task data /
-        // YAML nets, so BOTH chrono steps must be checked: `Duration::minutes`
-        // panics beyond ~1.5e14 minutes and `DateTime + TimeDelta` panics on
-        // date overflow long before that. Out-of-range values return `Err`.
+        // `duration` comes from stored data, and both chrono steps panic when
+        // unchecked: the minute count and the date addition can overflow.
         let duration = transition.duration_minutes();
         let delta = chrono::Duration::try_minutes(duration as i64).ok_or_else(|| {
             format!(

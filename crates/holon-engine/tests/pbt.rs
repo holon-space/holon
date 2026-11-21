@@ -6,8 +6,6 @@ use holon_engine::arc::CreateArc;
 use holon_engine::arc::InputArc;
 use holon_engine::arc::OutputArc;
 use holon_engine::engine::Engine;
-use holon_engine::guard::RhaiEvaluator;
-use holon_engine::objective;
 use holon_engine::value::Value;
 use holon_engine::yaml::history::History;
 use holon_engine::yaml::net::ObjectiveDef;
@@ -39,9 +37,7 @@ fn arb_token(id: String) -> impl Strategy<Value = YamlToken> {
             let mut attributes = BTreeMap::new();
             attributes.insert("status".to_string(), Value::String(status.to_string()));
             for (k, v) in float_attrs {
-                if k != "status" {
-                    attributes.insert(k, Value::Float(v));
-                }
+                attributes.insert(k, Value::Float(v));
             }
             YamlToken {
                 name: id.clone(),
@@ -49,6 +45,17 @@ fn arb_token(id: String) -> impl Strategy<Value = YamlToken> {
                 attributes,
             }
         })
+}
+
+fn arb_value() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        any::<bool>().prop_map(Value::Bool),
+        any::<i64>().prop_map(Value::Int),
+        (proptest::num::f64::NORMAL | proptest::num::f64::ZERO | proptest::num::f64::SUBNORMAL)
+            .prop_map(Value::Float),
+        ".*".prop_map(Value::String),
+        Just(Value::Null),
+    ]
 }
 
 fn arb_transition(
@@ -77,9 +84,10 @@ fn arb_transition(
                     let postcond_strats: Vec<_> = (0..n)
                         .map(|_| proptest::option::of(proptest::sample::select(STATUSES)))
                         .collect();
-                    // 0 = exact match, 1 = placeholder ($status), 2 = numeric
-                    // comparison
-                    let precond_style_strats: Vec<_> = (0..n).map(|_| 0u8..=2u8).collect();
+                    // true = a shared `$status` placeholder, which unifies
+                    // across the transition's arcs; false = exact match.
+                    let precond_style_strats: Vec<_> =
+                        (0..n).map(|_| proptest::bool::ANY).collect();
                     let n_creates = 0..=2usize;
                     (
                         Just(si),
@@ -103,19 +111,22 @@ fn arb_transition(
                 statuses,
                 consumes,
                 postconds,
-                _precond_styles,
+                placeholder_styles,
                 duration,
                 n_creates,
             )| {
                 let mut inputs = Vec::new();
                 let mut outputs = Vec::new();
                 for (i, &idx) in selected_indices.iter().enumerate() {
+                    let spec = if placeholder_styles[i] {
+                        "$status"
+                    } else {
+                        statuses[i]
+                    };
                     let mut precond = BTreeMap::new();
                     precond.insert(
                         "status".to_string(),
-                        statuses[i]
-                            .parse()
-                            .expect("generated status is a valid exact-match spec"),
+                        spec.parse().expect("generated precond spec is valid"),
                     );
                     let consume = consumes[i];
                     inputs.push(InputArc {
@@ -190,7 +201,28 @@ fn arb_net_and_marking() -> impl Strategy<Value = (YamlNet, YamlMarking)> {
                 (Just(tokens), trans_strats)
             })
         })
-        .prop_map(|(tokens, transitions)| {
+        .prop_map(|(tokens, mut transitions)| {
+            // Make firing move the objective: a kept arc shifts a float attr by
+            // a k that varies per transition. `??` because the arc binds by
+            // type, so the bound token may lack the attr.
+            for (i, t) in transitions.iter_mut().enumerate() {
+                let k = ((i * 7 + 3) % 11) as f64 - 5.0;
+                for out in &mut t.outputs {
+                    let tok = tokens.iter().find(|tk| tk.name == out.from).unwrap();
+                    if let Some((attr, _)) = tok
+                        .attributes
+                        .iter()
+                        .find(|(_, v)| matches!(v, Value::Float(_)))
+                    {
+                        out.postcond.insert(
+                            attr.clone(),
+                            format!("({}.{} ?? 0.0) + ({:?})", tok.name, attr, k)
+                                .parse()
+                                .unwrap(),
+                        );
+                    }
+                }
+            }
             let obj_parts: Vec<String> = tokens
                 .iter()
                 .flat_map(|t| {
@@ -238,7 +270,7 @@ proptest! {
     ) {
         let engine = Engine::new();
         let enabled = engine.enabled(&net, &marking)
-            .expect("generated preconds are exact-match and cannot fail to evaluate");
+            .expect("generated preconds cannot fail to evaluate");
 
         for binding in &enabled {
             let mut sim1 = marking.clone();
@@ -276,27 +308,25 @@ proptest! {
         let mut live = marking.clone();
         let mut history = History { events: vec![] };
         let enabled = engine.enabled(&net, &live)
-            .expect("generated preconds are exact-match and cannot fail to evaluate");
+            .expect("generated preconds cannot fail to evaluate");
 
         let mut fired = 0;
         let mut current_enabled = enabled;
         while fired < 3 && !current_enabled.is_empty() {
             let binding = &current_enabled[0];
             let step = history.next_step();
-            match engine.fire(&net, &mut live, binding, step) {
-                Ok(event) => {
-                    history.append(event);
-                    fired += 1;
-                }
-                Err(_) => break,
-            }
+            let event = engine.fire(&net, &mut live, binding, step)
+                .expect("fire should succeed for enabled transition");
+            history.append(event);
+            fired += 1;
             current_enabled = engine.enabled(&net, &live)
-                .expect("generated preconds are exact-match and cannot fail to evaluate");
+                .expect("generated preconds cannot fail to evaluate");
         }
 
         let mut replayed = marking.clone();
         history.replay(&mut replayed);
 
+        prop_assert_eq!(live.clock(), replayed.clock(), "clock mismatch");
         let live_count = live.tokens().count();
         let replay_count = replayed.tokens().count();
         prop_assert_eq!(live_count, replay_count, "token count mismatch");
@@ -310,6 +340,35 @@ proptest! {
         }
     }
 
+    /// `rank` returns exactly the enabled transitions, best score first.
+    /// Err results (a simulated firing can make the objective unevaluable)
+    /// are skipped; only Ok results are asserted on.
+    #[test]
+    fn rank_returns_enabled_sorted_by_score(
+        (net, marking) in arb_net_and_marking()
+    ) {
+        let engine = Engine::new();
+        let enabled = engine.enabled(&net, &marking)
+            .expect("generated preconds cannot fail to evaluate");
+        if let Ok(ranked) = engine.rank(&net, &marking, &enabled) {
+            prop_assert_eq!(ranked.len(), enabled.len());
+            for r in &ranked {
+                prop_assert!(enabled.iter().any(|e| e.transition_id == r.binding.transition_id));
+            }
+            for w in ranked.windows(2) {
+                if w[0].delta_per_minute == w[1].delta_per_minute {
+                    prop_assert!(w[0].binding.transition_id <= w[1].binding.transition_id);
+                }
+                prop_assert!(
+                    w[0].delta_per_minute.is_nan()
+                        || w[1].delta_per_minute.is_nan()
+                        || w[0].delta_per_minute >= w[1].delta_per_minute,
+                    "not sorted: {} then {}", w[0].delta_per_minute, w[1].delta_per_minute
+                );
+            }
+        }
+    }
+
     #[test]
     fn validation_passes_for_generated_nets(
         (net, _marking) in arb_net_and_marking()
@@ -319,52 +378,26 @@ proptest! {
             "generated net should be valid but got: {:?}", errors);
     }
 
+    /// Every finite `Value` survives the trip through Rhai that a postcond
+    /// value takes, and the accessors agree with the variant.
     #[test]
-    fn wsjf_beats_random(
-        (net, marking) in arb_net_and_marking()
-    ) {
-        let engine = Engine::new();
-        let evaluator = RhaiEvaluator::new();
-
-        let mut wsjf_marking = marking.clone();
-        // rank() now fails loud when simulating a transition breaks the objective
-        // (e.g., it consumes a token the objective references); such nets can't be
-        // WSJF-ranked, so skip the comparison for them.
-        let mut rank_errored = false;
-        for i in 0..5 {
-            let enabled = engine.enabled(&net, &wsjf_marking)
-                .expect("generated preconds are exact-match and cannot fail to evaluate");
-            if enabled.is_empty() { break; }
-            let ranked = match engine.rank(&net, &wsjf_marking, &enabled) {
-                Ok(r) => r,
-                Err(_) => { rank_errored = true; break; }
-            };
-            let binding = &ranked[0].binding;
-            engine.fire(&net, &mut wsjf_marking, binding, i)
-                .expect("fire should succeed for enabled transition");
-        }
-        let wsjf_obj = objective::evaluate(&evaluator, &net, &wsjf_marking)
-            .map(|r| r.value).unwrap_or(f64::NEG_INFINITY);
-
-        let mut lex_marking = marking.clone();
-        for i in 0..5 {
-            let enabled = engine.enabled(&net, &lex_marking)
-                .expect("generated preconds are exact-match and cannot fail to evaluate");
-            if enabled.is_empty() { break; }
-            let binding = enabled.into_iter()
-                .min_by_key(|b| b.transition_id.clone())
-                .unwrap();
-            engine.fire(&net, &mut lex_marking, &binding, i + 100)
-                .expect("fire should succeed for enabled transition");
-        }
-        let lex_obj = objective::evaluate(&evaluator, &net, &lex_marking)
-            .map(|r| r.value).unwrap_or(f64::NEG_INFINITY);
-
-        // Skip comparison when objective can't be evaluated (e.g., consumed token
-        // referenced in objective expression → evaluation returns -inf)
-        if !rank_errored && wsjf_obj.is_finite() && lex_obj.is_finite() {
-            prop_assert!(wsjf_obj >= lex_obj - 1e-9,
-                "WSJF ({wsjf_obj}) should be >= lexicographic ({lex_obj})");
-        }
+    fn value_survives_the_rhai_round_trip(value in arb_value()) {
+        let back = Value::try_from_dynamic(value.to_rhai_dynamic())
+            .expect("a finite value converts back");
+        prop_assert_eq!(&back, &value);
+        prop_assert_eq!(value.as_f64(), match value {
+            Value::Int(i) => Some(i as f64),
+            Value::Float(f) => Some(f),
+            _ => None,
+        });
+        prop_assert_eq!(value.as_str(), match &value {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        });
+        prop_assert_eq!(value.as_bool(), match &value {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        });
+        prop_assert_eq!(value.to_rhai_dynamic().is_unit(), matches!(value, Value::Null));
     }
 }

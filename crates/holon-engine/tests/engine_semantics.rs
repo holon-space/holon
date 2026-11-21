@@ -585,29 +585,6 @@ fn set_attr_targets_exactly_the_named_token() {
 }
 
 #[test]
-fn value_accessors() {
-    assert_eq!(Value::Float(2.5).as_f64(), Some(2.5));
-    assert_eq!(Value::Int(2).as_f64(), Some(2.0));
-    assert_eq!(Value::String("x".into()).as_f64(), None);
-
-    assert_eq!(Value::String("x".into()).as_str(), Some("x"));
-    assert_eq!(Value::Int(2).as_str(), None);
-
-    assert_eq!(Value::Bool(true).as_bool(), Some(true));
-    assert_eq!(Value::Bool(false).as_bool(), Some(false));
-    assert_eq!(Value::Int(1).as_bool(), None);
-
-    assert_eq!(Value::Float(2.5).to_rhai_dynamic().as_float(), Ok(2.5));
-    assert_eq!(Value::Int(3).to_rhai_dynamic().as_int(), Ok(3));
-    assert_eq!(Value::Bool(true).to_rhai_dynamic().as_bool(), Ok(true));
-    assert_eq!(
-        Value::String("s".into()).to_rhai_dynamic().into_string(),
-        Ok("s".to_string())
-    );
-    assert!(Value::Null.to_rhai_dynamic().is_unit());
-}
-
-#[test]
 fn evaluator_expr_and_bool() {
     let ev = RhaiEvaluator::new();
     let mut scope = rhai::Scope::new();
@@ -616,9 +593,8 @@ fn evaluator_expr_and_bool() {
     assert_eq!(ev.eval_bool("2 < 1", &mut scope), Ok(false));
 }
 
-/// F3.1 regression: a duration past chrono::Duration's minute range must be
-/// an `Err` from `fire()`, never a panic — `rank()` simulates `fire` on the
-/// live `rank_tasks` MCP path with vault-stored durations.
+/// A duration past chrono::Duration's minute range is an `Err` from `fire()`,
+/// never a panic: `rank()` simulates `fire` with vault-stored durations.
 #[test]
 fn fire_returns_err_on_duration_overflowing_chrono_duration() {
     let net = net_from_yaml(
