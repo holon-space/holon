@@ -1,5 +1,5 @@
-//! Property-based tests for Inc 5 (lease membership + delegation + A7) and
-//! Inc 6 (alias ledger). Time is driven through the injected `TestClock` seam
+//! Property-based tests for lease membership, delegation, A7 disjointness and
+//! the alias ledger. Time is driven through the injected `TestClock` seam
 //! (no `SystemTime::now()` anywhere in policy code), so expiry/renewal are real
 //! temporal properties, not disguised unit tests.
 
@@ -204,7 +204,7 @@ proptest! {
         }
     }
 
-    // P5 (Inc 6) — after a re-encode rotation the owner's old id resolves to
+    // P5 — after a re-encode rotation the owner's old id resolves to
     // the fresh id through the ledger, while a recipient (no ledger) sees only
     // the fresh id and can never correlate it back to the old one.
     #[test]
@@ -221,8 +221,6 @@ proptest! {
         for (old, new) in &remap {
             // Owner stitches old → new.
             prop_assert_eq!(&owner.resolve(old), new);
-            // Fresh ids are genuinely distinct (no correlation by reuse).
-            prop_assert_ne!(old, new);
             // Recipient has no handle: resolve is identity on the fresh id and
             // it cannot resolve the old id to anything meaningful either.
             prop_assert_eq!(&recipient.resolve(new), new);

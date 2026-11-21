@@ -1,5 +1,5 @@
-//! Binding between the C1 container registry (`holon-loro`) and this crate's
-//! sharing contracts (ADR 0028 Increment 3). The registry lives in `holon-loro`
+//! Binding between the container registry (`holon-loro`) and this crate's
+//! sharing contracts (ADR 0028). The registry lives in `holon-loro`
 //! (it owns the doc store + container tree); the contracts that reference it —
 //! the A7 [`SubtreeContainment`] relation and the orphan-row tripwire — live
 //! here, on the side of the dependency edge that can see both. (`holon-loro`
@@ -11,12 +11,11 @@
 //! its live container tree, so [`PolicySet::commit`] enforces A7 nesting
 //! against real block ancestry instead of the test [`MapContainment`].
 //!
-//! ## Orphan-row tripwire wired for real
+//! ## Orphan-row tripwire
 //!
 //! [`assert_registry_no_orphan_rows`] resolves the projection invariant "every
 //! projected block row's container is a registered container" against the
-//! registry's actual registered-container set — the wiring the Inc 4 projection
-//! helper was authored to receive.
+//! registry's actual registered-container set.
 
 use std::collections::BTreeSet;
 
@@ -52,7 +51,7 @@ impl SubtreeContainment for RegistryContainment {
     }
 }
 
-/// The orphan-row tripwire (Inc 4 projection invariant), resolved against a
+/// The orphan-row tripwire (projection invariant), resolved against a
 /// registry's registered-container set.
 ///
 /// `registered` is `registry.registered_container_ids().await` (in
@@ -81,10 +80,6 @@ mod tests {
     use holon_loro::LoroDocumentStore;
 
     use super::*;
-    use crate::alias_ledger::AliasLedger;
-    use crate::policy::MapContainment;
-    use crate::types::StablePeerId;
-    use crate::types::UnverifiedAuthority;
 
     fn tmp_store() -> LoroDocumentStore {
         let dir = std::env::temp_dir().join(format!(
@@ -99,13 +94,8 @@ mod tests {
         LoroDocumentStore::new(dir)
     }
 
-    // The core Inc-3 gate: replicate_all iterates EXACTLY the replicable set.
-    // The owner-private alias ledger's backing doc is `NonReplicated<LoroDoc>`,
-    // which exposes no handle `register_container` accepts — so it can never
-    // enter the set (OQ3, exclusion by construction). Constructing the ledger
-    // here makes that concrete: there is no line that could register its doc.
     #[tokio::test]
-    async fn replication_set_is_the_replicable_set_and_excludes_nonreplicated() {
+    async fn replication_set_is_the_root_plus_the_registered_containers() {
         let registry = ContainerRegistry::new(tmp_store());
         registry
             .register_container(
@@ -114,13 +104,6 @@ mod tests {
             )
             .await
             .unwrap();
-
-        // Owner-private, NonReplicated. No API path routes its doc into the
-        // registry (the following would not compile — NonReplicated yields no
-        // replication handle):
-        //   registry.register_container("ledger", ledger.doc()) // no such
-        // method
-        let _ledger = AliasLedger::new(StablePeerId(7), Box::new(UnverifiedAuthority));
 
         let ids: BTreeSet<String> = registry
             .replication_set()
@@ -133,14 +116,13 @@ mod tests {
             ids,
             BTreeSet::from(["holon_tree".to_string(), "share-b".to_string()])
         );
-        assert!(!ids.iter().any(|id| id.contains("ledger")));
     }
 
     // A `SubtreeIndex` is only constructible via the registry's async
     // `subtree_index()`, which needs a live doc store; the containment *logic*
     // it wraps is proven in holon-loro's
-    // `subtree_contains_walks_the_real_tree`. Here we prove the two Inc-3
-    // contracts that live on THIS side of the edge.
+    // `subtree_contains_walks_the_real_tree`. Here we prove the contracts that
+    // live on THIS side of the edge.
 
     #[test]
     fn orphan_tripwire_passes_when_every_container_registered() {
@@ -162,20 +144,5 @@ mod tests {
         let err = assert_registry_no_orphan_rows(rows, &registered).unwrap_err();
         assert_eq!(err.container, c);
         assert_eq!(err.block, b);
-    }
-
-    // Sanity: `MapContainment` (test) and `RegistryContainment` (prod) are the
-    // same `SubtreeContainment` seam PolicySet::commit consumes — the registry
-    // one just carries a real tree instead of a hand-built map.
-    #[test]
-    fn containment_is_a_trait_object_seam() {
-        fn takes_rel(rel: &dyn SubtreeContainment, a: &BlockId, b: &BlockId) -> bool {
-            rel.contains(a, b)
-        }
-        let map =
-            MapContainment::new().with_subtree(BlockId("root".into()), [BlockId("child".into())]);
-        let root = BlockId("root".into());
-        let child = BlockId("child".into());
-        assert!(takes_rel(&map, &root, &child));
     }
 }

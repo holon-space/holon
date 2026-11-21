@@ -5,16 +5,16 @@
 //! its selector binds a **stable block id, never a page name** (H6 — a rename
 //! is an ordinary edit; a selector bound to a mutable name would silently move
 //! content between audiences). Committing a policy enters a `PolicyEdit` in the
-//! Inc-4 [`crate::log::CrossingLog`] (one log, one arbitration rule — review
+//! [`crate::log::CrossingLog`] (one log, one arbitration rule — review
 //! A1) and enforces the **A7 disjointness invariant** (nested/overlapping
 //! shares are forbidden in v1) as a fail-loud check *at commit*, not a runtime
 //! scramble.
 //!
-//! ## Signing/verifying seam (OQ4) — DISCLOSED not-yet-verifiable
+//! ## Signing/verifying seam
 //! Signing rides [`crate::types::SigningAuthority`]; verifying rides
-//! [`VerifyingAuthority`] here. Both are TRAITS — the REAL owner-identity key
-//! backing is built by the parallel enrollment-ceremony lane. This module never
-//! names a concrete authority. The [`UnverifiedVerifier`] stand-in mirrors
+//! [`VerifyingAuthority`] here. This module never names a concrete authority,
+//! and this crate has no owner-key [`VerifyingAuthority`] yet. The
+//! [`UnverifiedVerifier`] stand-in mirrors
 //! [`crate::types::UnverifiedAuthority`]'s blake3 hash so the policy/lease
 //! LOGIC is exercisable end-to-end; it proves NO owner identity and MUST NOT be
 //! treated as authorization.
@@ -58,20 +58,15 @@ impl std::fmt::Display for Principal {
 pub use holon_api::sharing::Capabilities;
 pub use holon_api::sharing::Capability;
 
-/// Verification counterpart of [`crate::types::SigningAuthority`] (OQ4). The
-/// REAL owner-identity key backing is built by the enrollment-ceremony lane;
-/// this crate codes against the TRAIT so swapping in the real verifier needs no
-/// change here.
+/// Verification counterpart of [`crate::types::SigningAuthority`].
 pub trait VerifyingAuthority {
     /// True iff `sig` is a valid owner-identity signature over `payload`.
     fn verify(&self, payload: &[u8], sig: &OwnerSig) -> bool;
 }
 
-/// DISCLOSED stand-in mirroring [`crate::types::UnverifiedAuthority`]:
-/// recompute the blake3 stand-in and compare. This does **not** prove owner
-/// identity — any party can recompute the same hash — it only lets the
-/// policy/lease LOGIC be exercised end-to-end until the real verifier lands.
-/// MUST NOT be treated as authorization.
+/// Stand-in mirroring [`crate::types::UnverifiedAuthority`]: recompute the
+/// blake3 hash and compare. Any party can recompute it, so it proves no owner
+/// identity and MUST NOT be treated as authorization.
 pub struct UnverifiedVerifier;
 
 impl VerifyingAuthority for UnverifiedVerifier {
@@ -126,8 +121,8 @@ impl SignedPolicy {
 /// selector is the root block id of a shared subtree; two selectors **overlap**
 /// iff one subtree contains the other's root (nesting — which includes
 /// equality). The policy layer does not own the block tree, so the caller
-/// supplies this relation (the container registry, Inc 3, will provide the real
-/// one; tests use [`MapContainment`]).
+/// supplies this relation ([`crate::RegistryContainment`] in production wiring,
+/// [`MapContainment`] in tests).
 pub trait SubtreeContainment {
     /// Does the subtree rooted at `selector` contain `block` (reflexive:
     /// `contains(x, x)` is always true)?

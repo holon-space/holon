@@ -2,9 +2,7 @@
 //!
 //! Both **boundary crossings and policy edits** enter the ONE log (review A1 —
 //! one arbitration rule, one code path). The log is backed by its own dedicated
-//! `LoroDoc` with its own Lamport clock (Inc 0(b) clock-domain decision:
-//! candidate (i), the log is its own doc/sequence — one clock, not
-//! per-container).
+//! `LoroDoc` with its own Lamport clock — one clock, not per-container.
 //!
 //! Each entry is stamped at append time with `(lamport_height(log_doc) read
 //! immediately before the push, stable_peer_id)` — the FROZEN ordering tuple —
@@ -78,7 +76,7 @@ impl CrossingLog {
 
     fn append(&self, body: LogEntryBody) -> CrossingKey {
         // Lamport read IMMEDIATELY before the push = the lamport the new op
-        // will receive (Inc 0(b)). Concurrent appends from a shared base read
+        // will receive. Concurrent appends from a shared base read
         // the same height => equal lamport => the peer tiebreak decides.
         let lamport = holon_loro::loro_backend::doc_lamport_height(&self.doc);
         let key = CrossingKey {
@@ -108,7 +106,7 @@ impl CrossingLog {
         self.append(body)
     }
 
-    /// Source-side authoring of a crossing (SOURCE guard, verifier fix):
+    /// Source-side authoring of a crossing:
     /// rejects a malformed `supersedes` witness LOUDLY before it ever
     /// enters the log, so a migration-driver bug minting a wrong
     /// `CrossingId` fails at its origin rather than silently corrupting

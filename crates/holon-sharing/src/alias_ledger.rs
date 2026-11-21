@@ -16,13 +16,12 @@
 //! and the existing renderer shows a loud unresolved ref, never a silent drop
 //! (fail-loud).
 //!
-//! ## OQ3 — non-replicated storage
-//! The ledger is a **dedicated `LoroDoc` excluded from the C1 replication
-//! set**. Since the C1 registry doesn't exist yet (Inc 3), the exclusion is
-//! encoded as the [`NonReplicated`] typed marker: the registry (Inc 3) will
-//! honor it by never enumerating a `NonReplicated` doc in its replicate-all
-//! iteration. Wrapping the doc in the marker makes "this never leaves the
-//! owner's device" a property of the TYPE, not a convention.
+//! ## Non-replicated storage
+//! The ledger is a **dedicated `LoroDoc` excluded from the replication set**,
+//! encoded as the [`NonReplicated`] typed marker: it yields no handle the
+//! container registry's `register_container` accepts. Wrapping the doc in the
+//! marker makes "this never leaves the owner's device" a property of the TYPE,
+//! not a convention.
 
 use loro::LoroDoc;
 
@@ -36,9 +35,8 @@ const ALIAS_MAP: &str = "block_aliases";
 const SUCCESSION_LIST: &str = "container_successions";
 
 /// A typed marker: the wrapped handle is **owner-private** and MUST be excluded
-/// from the C1 replication set (OQ3). The container registry (Inc 3, pending)
-/// honors this by never enumerating a `NonReplicated` doc in its replicate-all
-/// iteration.
+/// from the replication set: it yields no handle the container registry
+/// accepts.
 ///
 /// CONTRACT: there is deliberately NO API returning the inner handle to a
 /// *replication* caller — only [`owner_local`](Self::owner_local) /
@@ -99,7 +97,7 @@ pub struct AliasLedger {
 
 impl AliasLedger {
     /// Open a fresh ledger owned by `peer`. The backing doc is
-    /// [`NonReplicated`] — the C1 registry (Inc 3) will never replicate it.
+    /// [`NonReplicated`], so the registry never replicates it.
     pub fn new(peer: StablePeerId, authority: Box<dyn SigningAuthority>) -> Self {
         let doc = LoroDoc::new();
         doc.set_peer_id(peer.0)
@@ -226,9 +224,8 @@ impl AliasLedger {
     /// SQL statements that rewrite the **owner's** `block_links` backlinks from
     /// rotated-out ids to their current ids, resolved through the ledger.
     ///
-    /// Integration point (Inc 3 / registry wiring): holon's SQL layer applies
-    /// these in the SAME transaction as the rotation, alongside the existing
-    /// `block_links` writers in
+    /// Holon's SQL layer must apply these in the SAME transaction as the
+    /// rotation, alongside the existing `block_links` writers in
     /// `crates/holon/src/core/sql_operation_provider.rs` (the junction whose
     /// `resolved_id` column these `UPDATE`s target). No signature of an
     /// existing writer changes — the ledger only *emits* statements.
@@ -242,10 +239,8 @@ impl AliasLedger {
         // SAFETY of string interpolation here: block/container ids are H6
         // mint-once stable ids (never user free-text) and `''`-escaped below,
         // mirroring the existing `sql_operation_provider.rs` block_links
-        // writers. FOLLOW-UP (registry wiring, Inc 3): switch these to bound
-        // parameters when the ledger executes through holon's SQL layer rather
-        // than emitting statement strings, so the safety no longer rests on the
-        // id-shape invariant.
+        // writers. Bound parameters would remove the reliance on the id-shape
+        // invariant.
         self.block_aliases()
             .into_iter()
             .filter(|(old, new)| old != new)

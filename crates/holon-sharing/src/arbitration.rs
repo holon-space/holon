@@ -23,16 +23,14 @@
 //!   divergent crossings: the **max-key** one wins, the rest are loud-rejected
 //!   losers with keepable copies (D2).
 //!
-//! ## Trust model + fail-loud witness validation (verifier fix)
+//! ## Trust model + fail-loud witness validation
 //!
 //! `supersedes` is **owner-scope-trusted input**: it is set by the owner's own
 //! migration drivers, and the whole log lives inside one owner's vault. A
 //! lying or buggy owner device can therefore only corrupt *its own* vault's
 //! arbitration — never another owner's. But "trusted" must not mean "honored
-//! blindly": a malformed witness (a migration-driver bug minting a wrong
-//! `CrossingId`) previously superseded a crossing on a DIFFERENT block,
-//! silently dropping it. That is exactly the fail-open-in-disguise the repo
-//! forbids.
+//! blindly": honoring a malformed witness (a migration-driver bug minting a
+//! wrong `CrossingId`) would silently drop a crossing on a DIFFERENT block.
 //!
 //! So a witness is honored ONLY if it is well-formed, and a malformed one is
 //! **rejected loudly**, never silently honored and never silently dropped:

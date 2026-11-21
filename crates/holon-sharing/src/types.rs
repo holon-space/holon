@@ -36,16 +36,15 @@ impl std::fmt::Display for CrossingId {
 pub struct PolicyEditId(pub String);
 
 /// Stable per-device peer id — second component of the frozen ordering tuple
-/// (Inc 0(b)) AND the sender identity on every transport envelope. Defined once
+/// AND the sender identity on every transport envelope. Defined once
 /// in `holon-loro` so the transport seam and this crate's arbitration name the
 /// SAME type.
 pub use holon_loro::sync_transport::StablePeerId;
 
-/// FROZEN ordering tuple (Inc 0(b), ratified):
+/// FROZEN ordering tuple:
 /// `(lamport_height(owner_log_doc) at append, stable_peer_id)`, ascending,
 /// **max = latest crossing wins**. `(lamport, peer)` is a strict total order
-/// over concurrent crossings (proven 100/100 on real substrate at Inc 0; the
-/// peer tiebreak was load-bearing in 50/100), so no third component is needed.
+/// over concurrent crossings, so no third component is needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CrossingKey {
     pub lamport: u32,
@@ -56,10 +55,8 @@ pub struct CrossingKey {
 /// loser (D2) can be returned as a *keepable divergent copy* — a real value the
 /// caller can materialize, not merely an error string.
 ///
-/// DISCLOSED: this is the Inc-4 stand-in shape. The real block model (marks,
-/// children, edge fields) binds when the container registry lands (Inc 3);
-/// the crossing carries whatever the migration needs to re-create the block in
-/// the target container.
+/// A stand-in shape: text and string props only, not the full block model
+/// (marks, children, edge fields).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockContent {
     pub text: String,
@@ -154,10 +151,9 @@ pub enum LogEntryBody {
 
 /// Owner-identity signature over a log entry's canonical bytes.
 ///
-/// As of the W4 enrollment-ceremony work this is a **real, verifiable** Ed25519
-/// signature when produced by [`OwnerKeyAuthority`] (backed by
-/// [`holon_loro::owner_identity::OwnerIdentityKey`]). The `UnverifiedAuthority`
-/// stand-in remains ONLY as a test double. Verify with [`OwnerSig::verify`].
+/// A real, verifiable Ed25519 signature when produced by [`OwnerKeyAuthority`]
+/// (backed by [`holon_loro::owner_identity::OwnerIdentityKey`]).
+/// [`UnverifiedAuthority`] is a test double. Verify with [`OwnerSig::verify`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerSig(pub Vec<u8>);
 
@@ -183,16 +179,15 @@ impl OwnerSig {
     }
 }
 
-/// Seam for the owner-identity key (OQ4). Device keys are transport/session
+/// Seam for the owner-identity key. Device keys are transport/session
 /// identity only; this trait signs durable authority objects (crossings,
-/// policy edits). Non-owner devices will sign via D4 short-lived
-/// owner-delegation certs — wired at Inc 5.
+/// policy edits).
 pub trait SigningAuthority {
     /// Sign the canonical bytes of a log entry.
     fn sign(&self, payload: &[u8]) -> OwnerSig;
 }
 
-/// The REAL owner-identity authority (OQ4): signs with the durable Ed25519
+/// The REAL owner-identity authority: signs with the durable Ed25519
 /// owner key. This is the production authority — its signatures verify under
 /// the owner's [`holon_loro::owner_identity::OwnerPublicKey`] via
 /// [`OwnerSig::verify`], unlike the [`UnverifiedAuthority`] stand-in.
@@ -220,7 +215,7 @@ impl SigningAuthority for OwnerKeyAuthority {
 /// TEST-ONLY placeholder authority: blake3-hashes the payload as a stand-in
 /// signature.
 ///
-/// DISCLOSED: this does **not** verify owner identity — it only makes entries
+/// This does **not** verify owner identity — it only makes entries
 /// signed-*shaped*, and [`OwnerSig::verify`] REJECTS its output (wrong length /
 /// not an Ed25519 signature). Production code MUST use [`OwnerKeyAuthority`];
 /// this exists so tests can drive the log without provisioning an owner key.

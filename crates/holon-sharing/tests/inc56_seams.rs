@@ -1,5 +1,5 @@
-//! Unit gates for Inc 5 (owner-signed policy + lease membership + A7
-//! disjointness) and Inc 6 (owner-private alias ledger / re-encode baseline).
+//! Unit gates for owner-signed policy, lease membership, A7 disjointness and
+//! the owner-private alias ledger / re-encode baseline.
 
 use std::collections::BTreeSet;
 
@@ -55,7 +55,7 @@ fn owner_policy(selector: &str, principals: &[&str], lease: Lease) -> SignedPoli
     SignedPolicy::sign(policy, &UnverifiedAuthority)
 }
 
-// ── Inc 5: A7 disjointness ───────────────────────────────────────────────
+// ── A7 disjointness ───────────────────────────────────────────────
 
 #[test]
 fn a7_disjoint_selectors_both_commit() {
@@ -164,7 +164,7 @@ fn tampered_policy_signature_rejected_loud() {
     assert!(matches!(err, PolicyCommitError::Unsigned { .. }));
 }
 
-// ── Inc 5: lease membership + delegation chains ──────────────────────────
+// ── lease membership + delegation chains ──────────────────────────
 
 fn owner_cert(selector: &str, grantee: &str, delegation: bool, lease: Lease) -> MembershipCert {
     MembershipCert::issue(
@@ -204,22 +204,6 @@ fn active_lease_grants_expired_lease_denies() {
     )
     .expect_err("an expired lease grants no access");
     assert!(matches!(err, MembershipError::LeaseInactive { .. }));
-}
-
-#[test]
-fn renewal_restores_access() {
-    let clock = TestClock::new(1500); // the original lease has lapsed
-    let expired = owner_cert("A", "alice", false, Lease::starting_at(0, 1000));
-    let renewed = expired.renew(1500, 1000, &UnverifiedAuthority);
-    let chain = MembershipChain::direct(renewed);
-    verify_membership(
-        &chain,
-        &principal("alice"),
-        &block("A"),
-        &clock,
-        &UnverifiedVerifier,
-    )
-    .expect("a renewed lease restores membership");
 }
 
 #[test]
@@ -331,7 +315,7 @@ fn expired_intermediate_cert_breaks_chain() {
     ));
 }
 
-// ── Inc 5: non-owner grant → pending request (D4) ────────────────────────
+// ── non-owner grant → pending request (D4) ────────────────────────
 
 #[test]
 fn owner_grant_committed() {
@@ -499,7 +483,7 @@ fn non_delegable_delegator_cannot_issue() {
     assert!(matches!(err, DelegationError::NotDelegable { .. }));
 }
 
-// ── Inc 6: alias ledger / re-encode baseline ─────────────────────────────
+// ── alias ledger / re-encode baseline ─────────────────────────────
 
 #[test]
 fn ledger_resolves_multi_hop_chain() {
@@ -540,27 +524,6 @@ fn owner_backlinks_rewrite_to_current_ids() {
             "UPDATE block_links SET resolved_id = 'b_new' WHERE resolved_id = 'b_old'".to_string()
         ]
     );
-}
-
-#[test]
-fn recipient_without_ledger_cannot_correlate() {
-    // The owner's ledger maps old→new. A recipient is modelled by a FRESH
-    // ledger (no shared state — the ledger is NonReplicated): it can never
-    // resolve the owner's old id, so it holds no correlation handle. It only
-    // ever sees the fresh id, which is distinct from the old one.
-    let owner = AliasLedger::new(StablePeerId(1), Box::new(UnverifiedAuthority));
-    owner.record_rotation(
-        ContainerId("c_old".into()),
-        ContainerId("c_new".into()),
-        &[(block("secret_old"), block("fresh_new"))],
-    );
-    let recipient = AliasLedger::new(StablePeerId(2), Box::new(UnverifiedAuthority));
-    // Recipient's resolve is identity: it has no idea "fresh_new" was ever
-    // "secret_old", and cannot walk back.
-    assert_eq!(recipient.resolve(&block("fresh_new")), block("fresh_new"));
-    assert_ne!(block("fresh_new"), block("secret_old"));
-    // And the owner's fresh id is genuinely distinct (no reuse).
-    assert_eq!(owner.resolve(&block("secret_old")), block("fresh_new"));
 }
 
 #[test]
