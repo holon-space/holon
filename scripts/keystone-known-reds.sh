@@ -790,16 +790,25 @@ for log in "$@"; do
             for (i = 1; i <= nrows; i++) if (key[i] == k) return i
             return 0
         }
-        # Matches the violations of `norm` at `loc` against the rows: sets HIT[1..nhits],
+        # Whether row `i` covers the test instance `inst`: a row without tests covers
+        # every test, a row with tests only a proven owner whose unit it names. A
+        # hand-authored replay case names its row itself.
+        function covers(i, inst,    u) {
+            if (ntests[i] == 0 || replay_case != "") return 1
+            u = inst
+            sub(/^[0-9]+\/(\[[0-9]+\/[0-9]+\] )?/, "", u)
+            return inst != "" && (i SUBSEP u) in test_of
+        }
+        # Matches the violations of `norm` at `loc` in instance `inst` against the rows: sets HIT[1..nhits],
         # cross_hit, and novel_pieces (the violations neither a row nor a companion knows).
-        function match_rows(norm, loc,    n, i, j, h, g, ng, hit, wrong_site, nunmatched, invariant, at, cut, claimed, globs) {
+        function match_rows(norm, loc, inst,    n, i, j, h, g, ng, hit, wrong_site, nunmatched, invariant, at, cut, claimed, globs) {
             n = split_violations(norm)
             nhits = 0; cross_hit = 0; nunmatched = 0
             split("", is_hit)
             for (j = 1; j <= n; j++) {
                 hit = 0; wrong_site = 0
                 for (i = 1; i <= nrows; i++) {
-                    if (!(PIECE[j] ~ pat[i]) || (replay_case == "" && (key[i] in bound))) continue
+                    if (!(PIECE[j] ~ pat[i]) || (replay_case == "" && (key[i] in bound)) || !covers(i, inst)) continue
                     if (site[i] == "" || loc ~ site[i]) { hit = i; break }
                     if (!wrong_site) wrong_site = i
                 }
@@ -853,7 +862,9 @@ for log in "$@"; do
         FILENAME == rows_path {
             if ($1 != "") {
                 key[++nrows] = $1; pat[nrows] = $2; site[nrows] = $3; comp[nrows] = $4
-                for (f = 5; f < NF; f += 2) { npairs[nrows]++; pair_msg[nrows, npairs[nrows]] = $f; pair_site[nrows, npairs[nrows]] = $(f + 1) }
+                ntests[nrows] = $5 == "" ? 0 : split($5, scoped, ",")
+                for (t = 1; t <= ntests[nrows]; t++) test_of[nrows, scoped[t]] = 1
+                for (f = 6; f < NF; f += 2) { npairs[nrows]++; pair_msg[nrows, npairs[nrows]] = $f; pair_site[nrows, npairs[nrows]] = $(f + 1) }
             }
             next
         }
@@ -867,7 +878,7 @@ for log in "$@"; do
             if (index(SIG, "\037")) { unclean[INST] = 1; next }
             if (index(SIG, "Any { .. }") || LOC ~ /tracing-subscriber-.*sharded\.rs/) next
             if (fork_wrapper(normalize(SIG), LOC)) next
-            match_rows(normalize(SIG), LOC)
+            match_rows(normalize(SIG), LOC, INST)
             if (cross_hit || novel_pieces != "") { unknown_of[INST] = unknown_of[INST] LOC "\t" normalize(SIG) "\n" }
             for (h = 1; h <= nhits; h++) { inst_hit[INST, HIT[h]] = 1; inst_known[INST] = 1 }
             next
@@ -922,7 +933,7 @@ for log in "$@"; do
                 class = "collateral:fork-wrapper"
                 collateral++
             } else {
-                match_rows(norm, loc)
+                match_rows(norm, loc, INST)
                 if (cross_hit) {
                     print "[known-reds] FAIL: cross-family match: " key[cross_hit] " at " loc
                     print "             The row" q "s wording matched, but it asserts from"
