@@ -200,17 +200,23 @@ impl CompiledListSync {
             for column in columns {
                 anyhow::ensure!(
                     declared_columns.contains(column),
-                    "connection '{connection}' lists '{column}' under `list_sync.{policy}`, but                      the type '{}' declares no such column; a policy on a column that does not                      exist would never match and the column would silently not sync",
+                    "connection '{connection}' lists '{column}' under `list_sync.{policy}`, but \
+                     the type '{}' declares no such column; a policy on a column that does not \
+                     exist would never match and the column would silently not sync",
                     spec.entity
                 );
                 anyhow::ensure!(
                     column.as_str() != soft_delete.tombstone_field.as_str()
                         && *column != spec.watermark_column,
-                    "connection '{connection}' lists '{column}' under `list_sync.{policy}`, but                      that column carries this connection's own tombstone or watermark bookkeeping                      and cannot also take the peer's value"
+                    "connection '{connection}' lists '{column}' under `list_sync.{policy}`, but \
+                     that column carries this connection's own tombstone or watermark bookkeeping \
+                     and cannot also take the peer's value"
                 );
                 anyhow::ensure!(
                     policies.insert(column),
-                    "connection '{connection}' lists '{column}' under both `list_sync.merge_columns`                      and `list_sync.latch_columns`; one column cannot be both peer-authoritative                      and peer-truthy-only"
+                    "connection '{connection}' lists '{column}' under both `list_sync.merge_columns` \
+                     and `list_sync.latch_columns`; one column cannot be both peer-authoritative \
+                     and peer-truthy-only"
                 );
             }
         }

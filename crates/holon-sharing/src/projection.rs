@@ -1,5 +1,4 @@
-//! SQL projection semantics across the migration window (senior-review
-//! amendment — this is part of Inc 4, not an afterthought).
+//! SQL projection semantics across the migration window.
 //!
 //! A crossing is delete+create across two container docs, but the SQL
 //! projection (blocks table, matviews, consolidator) is **global**. This module
@@ -13,17 +12,15 @@
 //! - `DeleteFromSource` **retracts** the block's rows from the source
 //!   container.
 //!
-//! There is never a moment where BOTH sides project the same block under
-//! *different* containers — the two ops touch disjoint (container, block) rows,
-//! and the leak-direction ordering (see [`crate::journal`]) fixes which side is
-//! momentarily authoritative:
+//! The two ops touch disjoint (container, block) rows, and the leak-direction
+//! ordering (see [`crate::journal`]) fixes what the window looks like:
 //! - **widen**: create-in-target first ⇒ during the window the block is
 //!   projected under BOTH containers (union = the wider, intended target). No
 //!   leak: the extra visibility is exactly the audience the widen grants.
 //! - **narrow**: delete-from-source first ⇒ during the window the block is
-//!   projected under NEITHER container = **disclosed transient invisibility**
-//!   (Inc 2 narrowing contract). It is NOT a silent orphan: the row is
-//!   *absent*, not present-with-a-dangling-container.
+//!   projected under NEITHER container = **disclosed transient invisibility**.
+//!   It is NOT a silent orphan: the row is *absent*, not
+//!   present-with-a-dangling-container.
 //!
 //! ## Crash between the two projection steps
 //!
@@ -40,8 +37,8 @@
 //! whose container is not a registered container (a silently orphaned row —
 //! e.g. create-in-target projected under a container the registry never knew,
 //! or a delete-from-source that half-applied). [`assert_no_orphan_rows`] is the
-//! projection-side assertion; its WIRING into the consolidator lands with Inc 3
-//! (the container registry), but the helper ships now so Inc 3 only calls it.
+//! projection-side assertion; [`crate::registry_binding`] resolves it against
+//! the container registry.
 
 use std::collections::BTreeSet;
 
@@ -52,7 +49,7 @@ use crate::types::ContainerId;
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error(
     "orphan block row: block `{}` is projected under container `{}`, which is \
-     not a registered container (ADR 0028 Inc 4 projection invariant — every \
+     not a registered container (ADR 0028 projection invariant — every \
      block row's container MUST be registered; a crossing left this behind)",
     block.0,
     container.0
@@ -69,7 +66,7 @@ pub struct OrphanRowError {
 ///
 /// Fails loudly on the FIRST orphan (parse-don't-validate: the projection is
 /// either wholly consistent or the migration is broken — no partial "warn and
-/// continue"). Wiring lands with Inc 3.
+/// continue").
 pub fn assert_no_orphan_rows<'a, I>(
     projected: I,
     registered: &BTreeSet<ContainerId>,

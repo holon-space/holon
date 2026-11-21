@@ -1,5 +1,5 @@
 //! A profile expression that reads a name no row of its entity can carry is
-//! refused when the profile loads (ruling D171.a), naming the expression, the
+//! refused when the profile loads, naming the expression, the
 //! name and the key the author most likely meant.
 
 use common::admit_one;

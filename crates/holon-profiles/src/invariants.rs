@@ -1,4 +1,4 @@
-//! Invariants declared in a type profile (ruling P-home.a), each with the
+//! Invariants declared in a type profile, each with the
 //! policy that applies when the converged state violates it.
 
 use std::collections::BTreeMap;

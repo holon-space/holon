@@ -5,11 +5,9 @@
 //! certifier, so it could never gate anything — the marker has to be DATA. A
 //! profile therefore declares `not_yet_certified: [..]` as a real list, and the
 //! certifier FAILS on any clause that is neither probed by the format's impl
-//! nor named there.
-//!
-//! What this prevents is the exact defect 2b.1 shipped: six clauses whose
-//! citations read like guarantees, which no case exercised, and which a
-//! reviewer could make false without turning the suite red.
+//! nor named there. A clause whose citation reads like a guarantee, but which
+//! no case exercises, could otherwise be made false without turning the suite
+//! red.
 
 use std::collections::BTreeSet;
 
@@ -146,18 +144,15 @@ pub const ALL_CLAUSES: &[ClauseId] = &[
 
 /// WHO enforces a clause.
 ///
-/// The vocabulary was missing this dimension until a `hierarchy.constraints`
-/// probe reported a real rule as unenforced: the rule lives in
-/// `DocumentManager::name_chain` (`crates/holon-filesystem`), one layer above
-/// the format crate a certifier can reach. Without a layer, a reader cannot
-/// tell a FORMAT LIE from a LAYER GAP — and hiding the second under
-/// "not yet certified" would reproduce exactly the defect that made the
-/// coverage law necessary.
+/// Some real rules live one layer above the format crate a certifier can
+/// reach. Without a layer, a reader cannot tell a FORMAT LIE from a LAYER GAP,
+/// and hiding the second under "not yet certified" would defeat the coverage
+/// law.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnforcementLayer {
     /// The parse/render code of the format crate itself. Driveable by a
-    /// format-crate certification harness — the only layer 2b.2 covers.
+    /// format-crate certification harness.
     Format,
     /// The sync controller / consolidator: renames, merges, conflict
     /// surfacing, structural refusals that need vault context.
@@ -165,21 +160,13 @@ pub enum EnforcementLayer {
     /// The OPERATION layer — `BlockOperations` and the block-op catalog, which
     /// refuse an edit BEFORE it reaches a file. Distinct from `Sync`: a
     /// pre-flight refusal leaves the tree untouched and never observes a
-    /// resolution. It exists because `hierarchy_reparent` was labelled `sync`
-    /// with a note admitting the label was approximate, and a label the
-    /// coverage law reads must not be approximate.
+    /// resolution.
     Operation,
     /// Type declaration: refused when the type is declared, not when a value
     /// is written (`declare_type`).
     Declaration,
 }
 
-/// Which layer's harness may certify a clause, for every clause.
-///
-/// Stored grouped by layer rather than as 39 per-clause lines: the parser
-/// asserts the union is EXACTLY `ALL_CLAUSES`, so the completeness the ruling
-/// demands is enforced without the verbosity that would make authors
-/// copy-paste it wrong.
 /// A deferral must NAME the code that enforces it.
 ///
 /// A deferral without a site is indistinguishable from a clause nobody has
@@ -225,6 +212,11 @@ pub struct Provisional {
     pub certified_against: String,
 }
 
+/// Which layer's harness may certify a clause, for every clause.
+///
+/// Stored grouped by layer rather than as one line per clause: the parser
+/// asserts the union is EXACTLY `ALL_CLAUSES`, so completeness is enforced
+/// without the verbosity that would make authors copy-paste it wrong.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnforcementMap {
@@ -348,7 +340,7 @@ pub enum GapReason {
     /// launder every other: the clause reads certified while most of what it
     /// declares was never touched.
     MembersUndriven(Vec<String>),
-    /// Stated, unprobed, and not marked — the F1 defect.
+    /// Stated, unprobed, and not marked.
     UnmarkedAndUndriven,
     /// Listed under `not_yet_certified` although it is NOT a format-layer
     /// clause. "Not yet" and "not here" are different statements; blurring
@@ -402,12 +394,12 @@ impl std::fmt::Display for CoverageGap {
     }
 }
 
-/// Compare what the profile excuses against what the run actually drove.
 /// What a set-valued clause DECLARES, against what a run actually drove.
 ///
 /// Keyed by clause; the strings are member names as the report prints them.
 pub type MemberCoverage = std::collections::BTreeMap<ClauseId, BTreeSet<String>>;
 
+/// Compare what the profile excuses against what the run actually drove.
 pub fn coverage_gaps(
     enforced_by: &EnforcementMap,
     not_yet_certified: &BTreeSet<ClauseId>,

@@ -4,8 +4,8 @@ use crate::condition_bus::ConditionKind;
 
 /// The row's `id` column reaches the render binding, which classifies it.
 /// The bus's mirror key joins subject and kind with `\u{1F}` and so forms
-/// no URI: reusing it as the id cost every conditions row its identity in
-/// the bounds registry (`named_source_rows_windowed`, D142.a fallout).
+/// no URI: as the id it would cost every conditions row its identity in the
+/// bounds registry (`named_source_rows_windowed`).
 #[test]
 fn a_conditions_row_id_names_an_entity() {
     let row = condition_row(&Condition {

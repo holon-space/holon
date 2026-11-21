@@ -1,5 +1,5 @@
 //! A vault profile that declares a computed field under the name of a TYPED
-//! computed field of its entity is refused at load (ruling D66.a): the typed
+//! computed field of its entity is refused at load: the typed
 //! field's one semantics (eval, planted SQL, live seat) would be replaced by a
 //! Rhai script on the live seat alone.
 

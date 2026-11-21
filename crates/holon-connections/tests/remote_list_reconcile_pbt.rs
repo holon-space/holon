@@ -286,16 +286,17 @@ fn remote_row(conn: &Conn, n: u8, count: i64, checked: bool) -> holon_api::entit
     row
 }
 
-fn snapshot_of(
+/// The mapped stream of one pull: the version envelope and the list's rows.
+fn row_sets(
     conn: &Conn,
     remote: Vec<holon_api::entity::StorageEntity>,
     version: i64,
-) -> ListSnapshot {
+) -> Vec<TypedRowSet> {
     let spec = conn.compiled.spec();
     let mut cursor: holon_api::entity::StorageEntity = Default::default();
     cursor.insert("id".into(), Value::String("cursor".into()));
     cursor.insert(spec.version_column.as_str().into(), Value::Integer(version));
-    let sets = vec![
+    vec![
         TypedRowSet {
             type_name: spec.list_row_type.clone(),
             owner_column: "id".into(),
@@ -308,8 +309,25 @@ fn snapshot_of(
             owner_value: "list".into(),
             rows: remote,
         },
-    ];
-    ListSnapshot::from_rows(&conn.compiled, &sets, FETCHED_AT).expect("the snapshot maps in full")
+    ]
+}
+
+fn snapshot_of(
+    conn: &Conn,
+    remote: Vec<holon_api::entity::StorageEntity>,
+    version: i64,
+) -> ListSnapshot {
+    ListSnapshot::from_rows(&conn.compiled, &row_sets(conn, remote, version), FETCHED_AT)
+        .expect("the snapshot maps in full")
+}
+
+/// Merge value `v` as the peer's JSON carries it, for a recorded base.
+fn served_json(conn: &Conn, v: i64) -> serde_json::Value {
+    match (conn.remote_merge)(v) {
+        Value::String(text) => serde_json::Value::String(text),
+        Value::Integer(number) => serde_json::Value::from(number),
+        other => panic!("no JSON spelling for the merge value {other:?}"),
+    }
 }
 
 /// The scenario as the two sides the reconciler reads.
@@ -559,11 +577,7 @@ proptest! {
         for conn in connections() {
             let mut row = local_row(&conn, 0, 1, mine, Tombstone::None, true);
             if let Some(checked) = base {
-                let served = match (conn.remote_merge)(1) {
-                    Value::String(text) => serde_json::Value::String(text),
-                    Value::Integer(number) => serde_json::Value::from(number),
-                    other => panic!("no JSON spelling for the merge value {other:?}"),
-                };
+                let served = served_json(&conn, 1);
                 let mut recorded = serde_json::json!({ conn.merge_column: served });
                 if let Some(checked) = checked {
                     recorded["checked"] = serde_json::Value::from(i64::from(checked));
@@ -653,11 +667,7 @@ proptest! {
             );
             let (mut local, snapshot) = sides(&conn, &scenario);
             for (row, count) in local.iter_mut().zip(&counts) {
-                let served = match (conn.remote_merge)(*count) {
-                    Value::String(text) => serde_json::Value::String(text),
-                    Value::Integer(number) => serde_json::Value::from(number),
-                    other => panic!("no JSON spelling for the merge value {other:?}"),
-                };
+                let served = served_json(&conn, *count);
                 let base = serde_json::json!({ conn.merge_column: served, "checked": 1 });
                 row.columns.insert(
                     conn.compiled.spec().base_column.clone(),
@@ -690,11 +700,7 @@ proptest! {
         for conn in connections() {
             let mut row = local_row(&conn, 0, mine, false, Tombstone::None, true);
             if let Some(base) = base {
-                let served = match (conn.remote_merge)(base) {
-                    Value::String(text) => serde_json::Value::String(text),
-                    Value::Integer(number) => serde_json::Value::from(number),
-                    other => panic!("no JSON spelling for the merge value {other:?}"),
-                };
+                let served = served_json(&conn, base);
                 row.columns.insert(
                     conn.compiled.spec().base_column.clone(),
                     Value::String(serde_json::json!({ conn.merge_column: served }).to_string()),
@@ -747,63 +753,62 @@ proptest! {
 // a deletion of the other.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn two_remote_rows_sharing_a_key_are_refused() {
-    for conn in connections() {
-        let spec = conn.compiled.spec();
-        let mut cursor: holon_api::entity::StorageEntity = Default::default();
-        cursor.insert("id".into(), Value::String("cursor".into()));
-        cursor.insert(spec.version_column.as_str().into(), Value::Integer(1));
-        // Two DISTINCT rows that the connection's key expression collapses:
-        // the same content pair under the content key, the same id under the
-        // server key.
-        let mut twin = remote_row(&conn, 3, 2, false);
-        twin.insert("id".into(), Value::String((conn.row_id)(3)));
-        let sets = vec![
-            TypedRowSet {
-                type_name: spec.list_row_type.clone(),
-                owner_column: "id".into(),
-                owner_value: "cursor".into(),
-                rows: vec![cursor],
-            },
-            TypedRowSet {
-                type_name: spec.entity.clone(),
-                owner_column: "id".into(),
-                owner_value: "list".into(),
-                rows: vec![remote_row(&conn, 3, 1, false), twin],
-            },
-        ];
-        let refused = ListSnapshot::from_rows(&conn.compiled, &sets, FETCHED_AT);
-        let message = refused
-            .expect_err(&format!("{}: a folded key was accepted", conn.label))
-            .to_string();
-        assert!(
-            message.contains("share the key"),
-            "{}: the refusal does not name the collision: {message}",
-            conn.label
-        );
-    }
-}
+proptest! {
+    #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
 
-#[test]
-fn two_local_rows_sharing_a_key_are_refused() {
-    for conn in connections() {
-        // Two mirror rows under different primary keys that the connection's
-        // key expression collapses. The key columns stay identical — that is
-        // what makes them one identity — and only the primary key differs.
-        let mut twin = local_row(&conn, 5, 1, false, Tombstone::None, true);
-        twin.id = format!("{}-duplicate", twin.id);
-        let local = vec![local_row(&conn, 5, 1, false, Tombstone::None, true), twin];
-        let snapshot = snapshot_of(&conn, vec![], 1);
-        let message = RemoteListReconciler::new(conn.compiled.clone())
-            .reconcile(&local, &snapshot)
-            .expect_err(&format!("{}: a folded local key was accepted", conn.label))
-            .to_string();
-        assert!(
-            message.contains("share the key"),
-            "{}: the refusal does not name the collision: {message}",
-            conn.label
-        );
+    /// Two DISTINCT peer rows the key expression collapses — the same content
+    /// pair under the content key, the same id under the server key — are
+    /// refused, whatever else the list holds.
+    #[test]
+    fn two_remote_rows_sharing_a_key_are_refused(
+        counts in prop::collection::vec(0i64..4, 1..6),
+        pick in any::<prop::sample::Index>(),
+        twin_count in 0i64..4,
+    ) {
+        for conn in connections() {
+            let mut remote: Vec<_> = counts
+                .iter()
+                .enumerate()
+                .map(|(n, count)| remote_row(&conn, n as u8, *count, false))
+                .collect();
+            let twin = pick.index(counts.len()) as u8;
+            remote.push(remote_row(&conn, twin, twin_count, true));
+            let message = ListSnapshot::from_rows(&conn.compiled, &row_sets(&conn, remote, 1), FETCHED_AT)
+                .expect_err(&format!("{}: a folded key was accepted", conn.label))
+                .to_string();
+            prop_assert!(
+                message.contains("share the key"),
+                "{}: the refusal does not name the collision: {message}",
+                conn.label
+            );
+        }
+    }
+
+    /// Two mirror rows under different primary keys that the key expression
+    /// collapses are refused, whatever else the mirror and the peer hold. The
+    /// key columns stay identical — that is what makes them one identity — and
+    /// only the primary key differs.
+    #[test]
+    fn two_local_rows_sharing_a_key_are_refused(
+        scenario in scenario(),
+        pick in any::<prop::sample::Index>(),
+    ) {
+        for conn in connections() {
+            let (mut local, snapshot) = sides(&conn, &scenario);
+            prop_assume!(!local.is_empty());
+            let mut twin = pick.get(&local).clone();
+            twin.id = format!("{}-duplicate", twin.id);
+            local.push(twin);
+            let message = RemoteListReconciler::new(conn.compiled.clone())
+                .reconcile(&local, &snapshot)
+                .expect_err(&format!("{}: a folded local key was accepted", conn.label))
+                .to_string();
+            prop_assert!(
+                message.contains("share the key"),
+                "{}: the refusal does not name the collision: {message}",
+                conn.label
+            );
+        }
     }
 }
 
@@ -1087,31 +1092,14 @@ fn every_built_row_id_is_a_reference_to_the_declared_type() {
 #[test]
 fn a_row_id_under_a_foreign_scheme_is_refused() {
     let conn = shopping();
-    let spec = conn.compiled.spec();
-    let mut cursor: holon_api::entity::StorageEntity = Default::default();
-    cursor.insert("id".into(), Value::String("cursor".into()));
-    cursor.insert(spec.version_column.as_str().into(), Value::Integer(1));
     let mut row = remote_row(&conn, 1, 1, false);
     // `shopping:` names the LIST, which the row already carries in its own
     // column; it does not name the entity.
     row.insert("id".into(), Value::String("shopping:staples:item1".into()));
-    let sets = vec![
-        TypedRowSet {
-            type_name: spec.list_row_type.clone(),
-            owner_column: "id".into(),
-            owner_value: "cursor".into(),
-            rows: vec![cursor],
-        },
-        TypedRowSet {
-            type_name: spec.entity.clone(),
-            owner_column: "id".into(),
-            owner_value: "list".into(),
-            rows: vec![row],
-        },
-    ];
-    let message = ListSnapshot::from_rows(&conn.compiled, &sets, FETCHED_AT)
-        .expect_err("a foreign-scheme id was accepted")
-        .to_string();
+    let message =
+        ListSnapshot::from_rows(&conn.compiled, &row_sets(&conn, vec![row], 1), FETCHED_AT)
+            .expect_err("a foreign-scheme id was accepted")
+            .to_string();
     assert!(
         message.contains("shopping-item"),
         "the refusal does not name the scheme the row must carry: {message}"

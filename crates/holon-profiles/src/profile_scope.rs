@@ -1,5 +1,5 @@
 //! Load-time refusal of profile expressions that read a name no row of the
-//! profile's entity can carry (ruling D171.a).
+//! profile's entity can carry.
 //!
 //! At eval time such a name is simply absent from the Rhai scope, so the
 //! expression is structurally unbound on every row: a variant never matches

@@ -103,8 +103,7 @@ struct ProfileDocument {
     /// Clauses this profile STATES that nothing drives yet.
     ///
     /// DATA, not a `#`-comment, because the certifier gates on it: a clause
-    /// that is neither probed nor listed here is itself a finding. A comment
-    /// could never do that job, and 2b.1 proved a comment does not.
+    /// that is neither probed nor listed here is itself a finding.
     /// Each entry carries the REASON nothing drives it — a bare marker is the
     /// same defect as a deferral with no site.
     #[serde(default)]
@@ -156,10 +155,8 @@ impl CapabilityProfile {
     /// That is a weaker guarantee than it looks, and the difference matters. It
     /// stops a profile naming an axis nothing understands; it does NOT stop a
     /// profile making a false claim within a modelled axis whose clause the
-    /// certifier does not drive. In 2b.1 only three clauses are driven
-    /// (`reserved_prefixes`, `types`, `empty_string`) — the rest are marked
-    /// `# NOT YET CERTIFIED (2b.2)` in the yaml and are documentation until
-    /// then.
+    /// certifier does not drive; [`crate::certify`] reports those as
+    /// coverage gaps unless `not_yet_certified` names them.
     pub fn from_yaml(yaml: &str) -> Result<Self> {
         let doc: ProfileDocument =
             serde_yaml::from_str(yaml).context("invalid capability-profile yaml")?;

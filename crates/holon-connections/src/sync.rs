@@ -110,9 +110,7 @@ impl CommitBatch {
     /// re-pull did not show the first commit — re-sends the same logical
     /// command, and the id is the peer's only means of recognising it. A
     /// positional or attempt-seeded id changes between the two sends and
-    /// defeats exactly the deduplication it exists for, adding the row twice
-    /// (`docs/Testing/bugfunnel/entries/
-    /// 2026-09-01-shopping-retry-remints-idempotency-key.md`).
+    /// defeats exactly the deduplication it exists for, adding the row twice.
     pub fn from_push_intents(
         push: &[PushIntent],
         snapshot: &ListSnapshot,
@@ -346,20 +344,19 @@ fn unsent_names(compiled: &CompiledListSync, push: &[PushIntent]) -> Result<Stri
 async fn pull_at_least(peer: &dyn RemoteListPeer, floor: i64) -> Result<ListSnapshot> {
     const MAX_PULL_ATTEMPTS: usize = 3;
 
-    let mut last_seen = None;
-    for _ in 0..MAX_PULL_ATTEMPTS {
-        let snapshot = peer.pull().await?;
+    let mut snapshot = peer.pull().await?;
+    for _ in 1..MAX_PULL_ATTEMPTS {
         if snapshot.version() >= floor {
             return Ok(snapshot);
         }
-        last_seen = Some(snapshot.version());
+        snapshot = peer.pull().await?;
     }
-    anyhow::bail!(
+    anyhow::ensure!(
+        snapshot.version() >= floor,
         "remote list sync: after a commit the peer answered version {floor}, but \
          {MAX_PULL_ATTEMPTS} reads still returned version {}; the list this round would decide \
          against is older than a write it just made, and acting on it would re-send that write",
-        last_seen
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "?".to_string())
-    )
+        snapshot.version()
+    );
+    Ok(snapshot)
 }

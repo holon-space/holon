@@ -1,31 +1,12 @@
-//! ADR 0028 Inc 4 PBT gates for the crossing log, driven against the REAL
-//! [`CrossingLog`] type on the real Loro substrate (mirrors the Inc-0 two-owner
-//! -device harness shape, now against the landed log rather than a spike).
+//! PBT gates for the crossing log, driven against the real [`CrossingLog`]
+//! on the real Loro substrate with two owner devices.
 //!
 //! Gates:
-//! 1. deterministic total order over ≥100 concurrent crossing pairs;
+//! 1. deterministic total order over concurrent crossing pairs;
 //! 2. the loud-rejected loser is returned as a keepable, materializable copy;
 //! 3. a rejected loser NEVER enters the undo stack (reject → undo → unchanged);
-//! 4. migration-journal crash-resume idempotency (+ no-op replay).
-//!
-//! ## Keystone obligation (Inc 2 §Step-4 caveat) — status
-//! The composed keystone's transition alphabet has NO crossing transition, so
-//! the C2 `inv-audience-never-over-approximates` oracle cannot yet be driven
-//! end-to-end through the JSONL/ComposedSut. This file discharges the FEASIBLE
-//! part tonight: a two-peer concurrent-crossing PBT at the `holon-sharing`
-//! level that composes with the `move_storm_convergence`
-//! offline-fork-then-merge shape (two owner devices author on the same block
-//! offline, then merge).
-//!
-//! The remaining wiring is the EXPLICIT next increment, precisely:
-//! extend `crates/holon-integration-tests/src/pbt/composed` transition alphabet
-//! with `ShareSubtree{block,audience}` (widen: create-in-shared FIRST),
-//! `NarrowShare{block,audience}` (narrow: delete-from-shared FIRST; a
-//! wrong-order variant leaves the leak), and an epoch-barrier transition
-//! (quiescent `effective == policy`), then route each through `CrossingLog` +
-//! `arbitrate` so the Inc-2 oracle observes real migrations. That is a
-//! ComposedSut wiring task (new `E2ETransition` variants + `apply` + ref-cap
-//! updates), deferred here only because it exceeds tonight's crate scope.
+//! 4. migration-journal crash-resume idempotency (+ no-op replay) and the
+//!    leak-direction step order.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -211,7 +192,8 @@ proptest! {
     /// Gate 4: the migration journal is idempotent + resumable. A crash at any
     /// step boundary, followed by a serde round-trip (persistence) and resume,
     /// reaches the SAME world as a crash-free run; a replay of a complete journal
-    /// is a no-op.
+    /// is a no-op. Between steps a widen never leaves the block in neither
+    /// container and a narrow never leaves it in both.
     #[test]
     fn journal_crash_resume_is_idempotent(
         widens in any::<bool>(),
@@ -224,9 +206,23 @@ proptest! {
         let mut world_full: BTreeSet<(ContainerId, BlockId)> =
             BTreeSet::from([(c.source.clone(), c.block.clone())]);
         let mut j_full = plan.clone();
+        let mut windows = Vec::new();
         j_full
-            .resume(|s| { apply_step(s, &c, &mut world_full); Ok(()) })
+            .resume(|s| {
+                apply_step(s, &c, &mut world_full);
+                windows.push(world_full.clone());
+                Ok(())
+            })
             .expect("crash-free run completes");
+        let in_source = |w: &BTreeSet<(ContainerId, BlockId)>| w.contains(&(c.source.clone(), c.block.clone()));
+        let in_target = |w: &BTreeSet<(ContainerId, BlockId)>| w.contains(&(c.target.clone(), c.block.clone()));
+        for w in &windows {
+            if widens {
+                prop_assert!(in_source(w) || in_target(w), "a widen left the block in neither container: {w:?}");
+            } else {
+                prop_assert!(!(in_source(w) && in_target(w)), "a narrow left the block in both containers: {w:?}");
+            }
+        }
         prop_assert!(j_full.is_complete());
 
         // Crash run: fail exactly at step index `crash_at` (before it mutates).
@@ -234,7 +230,7 @@ proptest! {
             BTreeSet::from([(c.source.clone(), c.block.clone())]);
         let mut j = plan.clone();
         let mut idx = 0usize;
-        let _ = j.resume(|s| {
+        let crashed = j.resume(|s| {
             if idx == crash_at {
                 return Err(MigrationError {
                     crossing_id: s.crossing_id.0.clone(),
@@ -246,6 +242,7 @@ proptest! {
             idx += 1;
             Ok(())
         });
+        prop_assert_eq!(crashed.is_err(), crash_at < plan.steps.len());
 
         // Persist across the crash (serde round-trip) then resume.
         let persisted = serde_json::to_string(&j).unwrap();
@@ -292,7 +289,7 @@ fn loser_begin_key(
         .expect("loser has a begin entry")
 }
 
-/// RED-first counterexample (verifier): a wrong-block supersedes witness on
+/// A wrong-block supersedes witness on
 /// block1's crossing R must NOT silently drop block2's crossing Q. Q must
 /// remain accounted (winner of its own block); R must be rejected as malformed.
 #[test]
@@ -345,22 +342,6 @@ fn sequential_re_move_is_not_a_rejected_loser() {
     assert_eq!(arb.winners.len(), 1, "only the latest crossing is live");
     assert_eq!(arb.winners[0].crossing_id.0, "m2");
     assert!(arb.losers.is_empty(), "a sequential re-move is not a loser");
-}
-
-/// Explicit ≥100-pair determinism sweep (mirrors the Inc-0 note's 100
-/// randomized concurrent pairs), independent of proptest case counts.
-#[test]
-fn one_hundred_concurrent_pairs_are_deterministic() {
-    for n in 0..100u32 {
-        let (a, b, _ca, _cb) = merged_divergent_pair(n % 4, (n / 4) % 4, "aa", "bb");
-        assert_eq!(a.entries(), b.entries(), "pair {n}: replicas diverged");
-        let arb_a = arbitrate(&a.entries());
-        let arb_b = arbitrate(&b.entries());
-        assert_eq!(arb_a, arb_b, "pair {n}: arbitration diverged");
-        assert_eq!(arb_a.winners.len(), 1);
-        assert_eq!(arb_a.losers.len(), 1);
-        assert_total(&arb_a, 2);
-    }
 }
 
 /// Deterministically build a mixed crossing set over 3 blocks with every

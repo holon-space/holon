@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use chrono::Timelike;
 pub use holon_expr::CompiledExpr;
 use rhai::Engine;
 use rhai::Scope;
@@ -49,16 +50,12 @@ impl RhaiEvaluator {
             .eval_ast_with_scope::<rhai::Dynamic>(scope, &compiled.ast)
             .map_err(|e| format!("eval error for '{}': {e}", compiled.source))
             .and_then(|d| {
-                if let Ok(f) = d.as_float() {
-                    Ok(f)
-                } else if let Ok(i) = d.as_int() {
-                    Ok(i as f64)
-                } else {
-                    Err(format!(
+                as_number(&d).ok_or_else(|| {
+                    format!(
                         "expression '{}' did not return a number: {d:?}",
                         compiled.source
-                    ))
-                }
+                    )
+                })
             })
     }
 
@@ -209,10 +206,6 @@ impl RhaiEvaluator {
         for (name, map) in bound_tokens {
             scope.push(name.clone(), rhai::Dynamic::from(map.clone()));
         }
-        for (k, v) in placeholders {
-            scope.push(k.clone(), v.to_rhai_dynamic());
-        }
-
         self.eval_compiled_dynamic(compiled, &mut scope)
     }
 
@@ -226,16 +219,7 @@ impl RhaiEvaluator {
 
         let clock = marking.clock();
         let mut clock_map = rhai::Map::new();
-        clock_map.insert(
-            "hour".into(),
-            rhai::Dynamic::from(
-                clock
-                    .format("%H")
-                    .to_string()
-                    .parse::<i64>()
-                    .expect("clock.format(\"%H\") always yields a valid hour integer"),
-            ),
-        );
+        clock_map.insert("hour".into(), rhai::Dynamic::from(i64::from(clock.hour())));
         clock_map.insert(
             "weekday".into(),
             rhai::Dynamic::from(clock.format("%A").to_string()),
@@ -250,13 +234,7 @@ impl RhaiEvaluator {
             .eval_with_scope::<rhai::Dynamic>(scope, expr)
             .map_err(|e| format!("eval error: {e}"))
             .and_then(|d| {
-                if let Ok(f) = d.as_float() {
-                    Ok(f)
-                } else if let Ok(i) = d.as_int() {
-                    Ok(i as f64)
-                } else {
-                    Err(format!("expression did not return a number: {d:?}"))
-                }
+                as_number(&d).ok_or_else(|| format!("expression did not return a number: {d:?}"))
             })
     }
 
@@ -264,5 +242,15 @@ impl RhaiEvaluator {
         self.engine
             .eval_with_scope::<bool>(scope, expr)
             .map_err(|e| format!("constraint eval error: {e}"))
+    }
+}
+
+fn as_number(d: &rhai::Dynamic) -> Option<f64> {
+    if let Ok(f) = d.as_float() {
+        Some(f)
+    } else if let Ok(i) = d.as_int() {
+        Some(i as f64)
+    } else {
+        None
     }
 }

@@ -1,8 +1,7 @@
-//! A declared invariant's repair policy is judged where the profile is loaded
-//! (ruling P-conv.a): only a constant delta on the subject itself, or
-//! `disclose`, is accepted. Every other policy is refused with its reason,
-//! because two replicas that each repair a merged violation must write the
-//! same thing.
+//! A declared invariant's repair policy is judged where the profile is loaded:
+//! only a constant delta on the subject itself, or `disclose`, is accepted.
+//! Every other policy is refused with its reason, because two replicas that
+//! each repair a merged violation must write the same thing.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

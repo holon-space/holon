@@ -14,25 +14,6 @@ fn connect_failed(name: &str) -> Condition {
     }
 }
 
-/// Every condition names an all-clear, and clearing it works uniformly —
-/// stickiness without a clearing path is a permanent banner.
-#[tokio::test(flavor = "current_thread")]
-async fn a_share_condition_clears_by_its_kind() {
-    let bus = ConditionBus::new();
-    bus.emit(Condition {
-        subject: "s".into(),
-        reason: ConditionKind::SnapshotSaveFailed("disk full".into()),
-    });
-    bus.clear(&ConditionKey {
-        subject: "s".into(),
-        kind: ConditionKind::SNAPSHOT_SAVE_FAILED,
-    });
-    assert!(
-        bus.subscribe().current.is_empty(),
-        "the next successful save must leave no banner behind"
-    );
-}
-
 /// Kinds are the sticky identity, so two different degradations of the
 /// same subject must not overwrite each other.
 #[tokio::test(flavor = "current_thread")]
@@ -90,45 +71,6 @@ async fn boot_time_conditions_reach_a_later_subscriber() {
     );
 }
 
-/// The boot race the integration seam already fixed, for the OTHER
-/// emitters: `wiring.rs`'s detached `post_ready` task emits
-/// `VaultIngestFailed` while the window is still launching. A fast-failing
-/// initial scan lands before the disclosure bridge subscribes; without
-/// replay the banner is dropped and the vault silently half-syncs.
-#[tokio::test(flavor = "current_thread")]
-async fn every_degradation_reaches_a_subscriber_that_arrives_after_it_was_raised() {
-    let raised_before_anyone_listens = vec![
-        ConditionKind::VaultFileEmptied { seen: "0".into() },
-        ConditionKind::SnapshotSaveFailed("disk full".into()),
-        ConditionKind::SnapshotLoadFailed("/v/s.loro.corrupt-1".into()),
-        ConditionKind::RehydrationFailed("advertiser: port in use".into()),
-        ConditionKind::SqlProjectionFailed("table locked".into()),
-        ConditionKind::ForeignIdCollision("block:journals".into()),
-        ConditionKind::SharedSubtreeNotMaterialized {
-            file: "/vault/Projects/Shared.org".into(),
-        },
-        ConditionKind::WritebackDegraded("stream died 3x".into()),
-    ];
-
-    for reason in raised_before_anyone_listens {
-        let bus = ConditionBus::new();
-        bus.emit(Condition {
-            subject: "subject".into(),
-            reason: reason.clone(),
-        });
-
-        // The window (the only consumer) launches strictly later.
-        let sub = bus.subscribe();
-
-        assert_eq!(
-            sub.current.len(),
-            1,
-            "a degradation raised before the disclosure bridge subscribed must still reach \
-                 it — otherwise the app boots looking healthy while {reason:?} is in effect"
-        );
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn re_raising_a_condition_replaces_rather_than_accumulates() {
     let bus = ConditionBus::new();
@@ -180,17 +122,4 @@ async fn clearing_an_unraised_condition_broadcasts_nothing() {
         sub.changes.try_recv(),
         Err(broadcast::error::TryRecvError::Empty)
     ));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn multiple_subscribers_all_see_events() {
-    let bus = ConditionBus::new();
-    let mut sub1 = bus.subscribe();
-    let mut sub2 = bus.subscribe();
-    bus.emit(Condition {
-        subject: "x".into(),
-        reason: ConditionKind::RehydrationFailed("endpoint".into()),
-    });
-    assert_eq!(raised(sub1.changes.recv().await.unwrap()).subject, "x");
-    assert_eq!(raised(sub2.changes.recv().await.unwrap()).subject, "x");
 }

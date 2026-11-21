@@ -181,11 +181,6 @@ pub struct InputArc {
 ///   bindings captured by the input arcs (no Rhai involved).
 /// - anything else  — a Rhai expression compiled once at load and evaluated
 ///   against the bound-token scope on each firing.
-///
-/// Compiling at load (instead of re-parsing on every firing — `rank()` fires
-/// every enabled transition once per pass) removes the per-fire parse cost and
-/// moves malformed-expression errors to the load boundary, just like the
-/// precondition side.
 #[derive(Clone)]
 pub enum PostcondExpr {
     /// Full spec including the `$` prefix — used verbatim as the placeholder

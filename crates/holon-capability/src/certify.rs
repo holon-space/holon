@@ -307,8 +307,8 @@ pub trait CertifiableFormat {
     ///
     /// Splitting is the only place a `separator` is observable and ORDER is the
     /// only place `semantics` is: an ordinary property never splits under
-    /// `edge_fields_only`, so probing one certified every separator and both
-    /// semantics alike (silent flips S1 and S2).
+    /// `edge_fields_only`, so probing one would certify every separator and
+    /// both semantics alike.
     fn round_trip_multi_value(
         &self,
         _: &[&str],
@@ -376,8 +376,7 @@ pub enum WriteAttempt {
     ///
     /// Carrying the leg is what makes `write_leg` answer "which", not merely
     /// "whether" — the clause is named for the mechanism, and a probe that
-    /// reports only success certifies `file`, `api` and `in_process` alike
-    /// (silent flip S6).
+    /// reports only success certifies `file`, `api` and `in_process` alike.
     Wrote { leg: WriteLeg },
     /// The format refused the write, loudly.
     Refused { reason: String },
@@ -576,13 +575,8 @@ pub(crate) enum Judgement {
     /// Declared-but-broken — RED.
     Broken(Outcome),
     /// Works-but-undeclared — a tightening prompt, never a failure (CV-C).
-    ///
-    /// The payload is unread today: every caller writes a clause-specific note
-    /// instead of the generic one, because a prompt a human must act on should
-    /// name the clause rather than the law. Kept as documentation of what the
-    /// judgement MEANS.
-    #[allow(dead_code)]
-    UnderClaimed(String),
+    /// Each caller writes a clause-specific note.
+    UnderClaimed,
 }
 
 /// Judge a round trip against a declaration that the value IS carried intact.
@@ -603,11 +597,7 @@ pub(crate) fn judge(carried: bool, sent: &Value, readback: &Readback) -> Judgeme
         // which is the law's other legal branch and strictly better than a
         // silent drop.
         (false, _) if !intact => Judgement::Confirmed,
-        (false, _) => Judgement::UnderClaimed(
-            "declared not carried, but this leg carried it intact — the profile is narrower \
-             than the format"
-                .to_string(),
-        ),
+        (false, _) => Judgement::UnderClaimed,
     }
 }
 
@@ -641,7 +631,7 @@ const ALL_KINDS: &[ValueKind] = &[
     ValueKind::Null,
 ];
 
-/// Certify a format against its own profile, for axes 3 and 4.
+/// Certify a format against its own profile, every axis.
 pub fn certify(format: &dyn CertifiableFormat) -> anyhow::Result<CertificationReport> {
     let profile = format.profile();
     let mut report = CertificationReport::default();
@@ -663,8 +653,6 @@ pub fn certify(format: &dyn CertifiableFormat) -> anyhow::Result<CertificationRe
 
     // LAST, and it reads only what the run recorded: a clause the profile
     // states must be either driven above or named in `not_yet_certified`.
-    // Anything else is the F1 defect — a citation that reads like a guarantee
-    // and gates nothing.
     // What each SET clause declares, so the law can demand every member.
     let mut declared: MemberCoverage = MemberCoverage::new();
     declared.insert(
@@ -755,9 +743,6 @@ pub fn certify(format: &dyn CertifiableFormat) -> anyhow::Result<CertificationRe
     Ok(report)
 }
 
-/// Axis 3 — a key the profile does NOT reserve must survive with its value; a
-/// key it DOES reserve is expected not to, and its loss is honest rather than
-/// a violation.
 /// Is this carrier's property boundary closed to ORDINARY writes?
 ///
 /// A format whose write path refuses every property change (LogSeq-DB's push
@@ -781,6 +766,9 @@ fn boundary_is_closed(
     })
 }
 
+/// Axis 3 — a key the profile does NOT reserve must survive with its value; a
+/// key it DOES reserve is expected not to, and its loss is honest rather than
+/// a violation.
 fn certify_property_keys(
     format: &dyn CertifiableFormat,
     profile: &CapabilityProfile,
@@ -823,7 +811,7 @@ fn certify_property_keys(
                 sent: carried.clone(),
                 outcome,
             }),
-            Judgement::UnderClaimed(_) => report.prompts.push(TighteningPrompt {
+            Judgement::UnderClaimed => report.prompts.push(TighteningPrompt {
                 profile: profile.id().clone(),
                 axis: Axis::PropertyKeys,
                 leg: carrier.leg,
@@ -867,7 +855,7 @@ fn certify_engine_owned_keys(
         // declaration names a LEG, and a leg refused on one route and open on
         // another is a declaration the format does not keep.
         let mut routes = vec![RouteReadback {
-            route: "create",
+            route: CREATE_ROUTE,
             readback: format.round_trip_property(carrier, key.as_str(), carried)?,
         }];
         routes.extend(
@@ -983,7 +971,7 @@ fn certify_property_values(
                     sent: sent.clone(),
                     outcome,
                 }),
-                Judgement::UnderClaimed(_) => report.prompts.push(TighteningPrompt {
+                Judgement::UnderClaimed => report.prompts.push(TighteningPrompt {
                     profile: profile.id().clone(),
                     axis: Axis::PropertyValues,
                     leg: carrier.leg,
@@ -1031,7 +1019,7 @@ fn certify_property_values(
             match judge(carried, &empty, &readback) {
                 Judgement::Confirmed => report.confirmed += 1,
                 Judgement::Broken(outcome) => report.violations.push(violation(outcome)),
-                Judgement::UnderClaimed(_) => report.prompts.push(TighteningPrompt {
+                Judgement::UnderClaimed => report.prompts.push(TighteningPrompt {
                     profile: profile.id().clone(),
                     axis: Axis::PropertyValues,
                     leg: carrier.leg,
@@ -1109,9 +1097,8 @@ fn certify_ordering(
         })),
         // `unspecified` claims nothing about order — so if the AUTHORED order
         // comes back exactly, the format preserves more than the profile
-        // admits. Confirming this arm unconditionally (as before) made
-        // `unspecified` the one declaration that could never be wrong: silent
-        // flip S5, and the same shape already fixed for sibling_order.
+        // admits; confirming it unconditionally would make `unspecified` the
+        // one declaration that could never be wrong.
         PropertyOrder::Unspecified if !preserved => report.confirmed += 1,
         PropertyOrder::Unspecified => report.prompts.push(TighteningPrompt {
             profile: profile.id().clone(),
@@ -1247,10 +1234,8 @@ fn certify_key_shape(
                 .violations
                 .push(broken(Clause::KeyCase, "effort/Effort", Outcome::Dropped))
         }
-        // A folding format claims the two spellings COLLAPSE into one slot.
-        // Confirming this arm unconditionally (as the first version did) made
-        // `folded_upper` unfalsifiable: the declaration could be wrong and
-        // nothing would say so.
+        // A folding format claims the two spellings COLLAPSE into one slot,
+        // so two kept spellings falsify it.
         KeyCase::FoldedUpper | KeyCase::FoldedLower if !both_kept => report.confirmed += 1,
         KeyCase::FoldedUpper | KeyCase::FoldedLower => report.violations.push(broken(
             Clause::KeyCase,
@@ -1335,8 +1320,8 @@ fn certify_value_shape(
     // turn one authored string into a list.
     // The SEPARATOR and the SEMANTICS are only observable where the format
     // actually splits — an ordinary property never splits under
-    // `edge_fields_only`, so probing one certified every separator and both
-    // semantics alike (silent flips S1, S2).
+    // `edge_fields_only`, so probing one would certify every separator and
+    // both semantics alike.
     if let MultiValue::Delimited {
         separators,
         semantics,
@@ -1481,10 +1466,10 @@ const ID_SHAPED: &str = "certify-target";
 /// MEASURED, and the answer bounds the clause: only `none` is discriminable
 /// here. `by_id` versus `by_name` is not, because the wire form is the same
 /// bare slug for both and every name shape that DIFFERS from an id shape
-/// contains a separator, which the `multi_value` axis consumes first — the
-/// first version of this probe sent "Some Page Title" and read back
-/// `Refs(["Page", "Some", "Title"])`, i.e. it measured the split, not the
-/// naming. A profile declaring a naming mode therefore carries a
+/// contains a separator, which the `multi_value` axis consumes first: "Some
+/// Page Title" reads back as `Refs(["Page", "Some", "Title"])`, which measures
+/// the split, not the naming. A profile declaring a naming mode therefore
+/// carries a
 /// `not_yet_certified` marker WITH that reason.
 fn certify_reference_values(
     format: &dyn CertifiableFormat,
@@ -1581,11 +1566,8 @@ fn certify_misc(
     // axis 7 — id_origin. `authored` means the id the author wrote SURVIVES;
     // a minted id would silently detach every inbound link.
     // OBSERVE which origin the format has, then compare to the declared one.
-    // The previous version confirmed `derived_from_position` unconditionally
-    // (silent flip S7): it asked only whether the authored id survived, which
-    // cannot tell a position-derived id from a freshly minted one. Running the
-    // SAME fixture twice discriminates them — a position-derived id is stable
-    // across runs, a minted one is not.
+    // Running the SAME fixture twice tells a position-derived id (stable
+    // across runs) from a freshly minted one.
     let authored = "authored-identity";
     if let Some(first) = format.id_after_ingest(authored)? {
         report.probed.insert(ClauseId::IdentityIdOrigin);
@@ -1630,8 +1612,7 @@ fn certify_misc(
     let mut drove_carriers = false;
     // Ranges over the CLOSED vocabulary, never the declared subset: a law over
     // what a profile declares is satisfied by DELETING a member, so a real
-    // carrier could be dropped to clear a gap and the suite would stay green
-    // (silent flip S8).
+    // carrier could be dropped to clear a gap and the suite would stay green.
     for &carrier in crate::axes::ALL_ID_CARRIERS {
         let Some(works) = format.identity_via(carrier)? else {
             continue;
@@ -1652,7 +1633,7 @@ fn certify_misc(
                 Outcome::Dropped,
             )),
             // Carries identity but is not declared — the profile is hiding a
-            // carrier, which is how a deletion used to pass.
+            // carrier.
             (false, true) => report.prompts.push(TighteningPrompt {
                 profile: profile.id().clone(),
                 axis: Axis::Identity,
@@ -1671,10 +1652,7 @@ fn certify_misc(
 
     // axis 5 — sibling_order. MAPS the observation onto one value.
     //
-    // The previous version asked only "did the order come back?" and confirmed
-    // every key-based value on the true side, so declaring org — which has NO
-    // order key on disk — `fractional_index` certified happily (silent flip
-    // S4). Order returning WITHOUT a key on disk means the order IS the file
+    // Order returning WITHOUT a key on disk means the order IS the file
     // position; a key-based mechanism requires a key to exist.
     let siblings = ["First", "Second", "Third"];
     if let Some(back) = format.round_trip_sibling_order(&siblings)? {
@@ -1700,8 +1678,7 @@ fn certify_misc(
                 // `unordered` claims order is NOT modelled. If the authored
                 // order comes back exactly, the format models MORE than
                 // declared — an under-claim, and a prompt rather than silent
-                // confirmation, which is what the first version did and what
-                // made this arm unfalsifiable.
+                // confirmation, which would make this arm unfalsifiable.
                 (SiblingOrder::Unordered, true) => report.prompts.push(TighteningPrompt {
                     profile: profile.id().clone(),
                     axis: Axis::Ordering,
@@ -1874,9 +1851,7 @@ fn certify_remainder(
 
     // axis 7 — id_space, JUDGED rather than merely attested. `opaque_string`
     // claims an arbitrary id that is neither a uuid nor path-shaped still
-    // round-trips; a `uuid` space claims the opposite. The previous version
-    // inserted this clause into `probed` and then read it nowhere, which is an
-    // attestation with no measurement behind it.
+    // round-trips; a `uuid` space claims the opposite.
     let opaque = "not-a-uuid-just-text";
     if let Some(got) = format.id_after_ingest(opaque)? {
         report.probed.insert(ClauseId::IdentityIdSpace);
@@ -1984,8 +1959,7 @@ fn certify_remainder(
 /// Driving the undeclared ones is the point: a construct the profile omits
 /// because nobody looked will round-trip and raise a prompt, which is how the
 /// draft's UNKNOWNs (org `table`, `logbook`) get RESOLVED rather than
-/// inherited. 2b.5 may not refuse content on the strength of a clause nobody
-/// drove.
+/// inherited.
 fn certify_content(
     format: &dyn CertifiableFormat,
     profile: &CapabilityProfile,
@@ -2099,9 +2073,6 @@ fn judge_construct(
     }
 }
 
-/// Extensions probed alongside whatever a profile declares — common enough
-/// that carrying one silently is a real under-declaration, and varied enough
-/// that a format carrying ALL of them is saying something too.
 /// Delimiters the negative arm tries against `multi_value.separators`.
 ///
 /// The delimiters an author would plausibly reach for. Every one the profile
@@ -2115,6 +2086,9 @@ fn judge_construct(
 /// present and it earns its place: it splits.
 pub(crate) const DELIMITER_CANDIDATES: &[&str] = &[" ", ",", ";", "|", "/", "+", "\t", "\u{a0}"];
 
+/// Extensions probed alongside whatever a profile declares — common enough
+/// that carrying one silently is a real under-declaration, and varied enough
+/// that a format carrying ALL of them is saying something too.
 pub(crate) const NEIGHBOUR_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif", "pdf", "mp4", "exe",
 ];
@@ -2250,12 +2224,9 @@ fn certify_hierarchy(
     Ok(())
 }
 
-/// Axis 9 — `write_leg`, asked of the FORMAT.
-///
-/// The previous version compared `write_leg == Absent` against
-/// `supports(Mutate)`, and `supports` answers FROM `write_leg` — a tautology
-/// that passed for any declaration, including declaring a writable format
-/// read-only. The probe now ATTEMPTS A WRITE.
+/// Axis 9 — `write_leg`, asked of the FORMAT: the probe ATTEMPTS A WRITE,
+/// because `supports(Mutate)` answers FROM `write_leg` and comparing the two
+/// would be a tautology.
 ///
 /// A declared `absent` on a format that CAN write is a violation, not a
 /// tightening prompt: under-claiming is usually harmless, but "this home is
@@ -2471,10 +2442,8 @@ mod tests {
     /// A format that carries EVERYTHING back unchanged.
     ///
     /// Exists to drive the under-claim arms against a profile that says a
-    /// value is lost. No real format in 2b.1 carries the empty value on any
-    /// leg, so without this stub the `dropped`-but-survives branch would ship
-    /// unexercised — which is the exact defect (a clause nothing drives) that
-    /// this symmetry was added to fix.
+    /// value is lost: without it the `dropped`-but-survives branch would ship
+    /// unexercised.
     struct LosslessStub {
         profile: CapabilityProfile,
     }
@@ -2557,12 +2526,10 @@ mod tests {
         );
     }
 
-    /// A format whose boundary REFUSES everything, loudly.
+    /// A format whose boundary refuses a VALUE, loudly — but not the operation.
     ///
     /// Drives the `Representability::Error` arm and the declared-but-refused
-    /// violation. Without it those branches would ship unexercised — the F1
-    /// defect, repeated.
-    /// A format whose boundary refuses a VALUE, loudly — but not the operation.
+    /// violation.
     ///
     /// The control key must survive: a stub that refused everything would have
     /// a CLOSED boundary, and `boundary_is_closed` correctly drives nothing
@@ -2717,8 +2684,7 @@ mod tests {
         // The leading newline ANCHORS the match to a 2-space
         // `not_yet_certified` entry. Without it, `"  - x"` is a substring of
         // the 4-space `enforced_by` entry `"    - x"` and the strip silently
-        // corrupts the enforcement map instead — which is exactly what it did
-        // on the first attempt, and the loud parse error is what caught it.
+        // corrupts the enforcement map instead.
         let yaml = crate::fixture::MINIMAL
             .replace("\n  - ordering_property_order\n", "\n")
             .replace("\n  - identity_carrier_disagreement\n", "\n");
@@ -2830,12 +2796,9 @@ mod tests {
         }
     }
 
-    /// A sibling-order violation must not abort the rest of its pass.
-    ///
-    /// The arm used to `return Ok(())`, so a wrong `sibling_order` skipped the
-    /// `hosted_kinds` probe further down and the run reported a coverage GAP
-    /// against a clause the format does drive — a false accusation produced by
-    /// an unrelated red.
+    /// A sibling-order violation must not abort the rest of its pass: an
+    /// early return would skip the `hosted_kinds` probe and report a coverage
+    /// GAP against a clause the format does drive.
     #[test]
     fn a_sibling_order_violation_still_leaves_the_later_clauses_probed() {
         let yaml = crate::fixture::MINIMAL

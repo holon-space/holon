@@ -5,7 +5,7 @@
 //! classification and the source/target containers it would touch, it returns
 //! whether the op is allowed (and, if so, whether it generates a crossing that
 //! must enter the H2 log) or must be **rejected loudly**. This is where the
-//! `Unclassified` fail-closed contract (Inc 1) becomes runtime behavior.
+//! `Unclassified` fail-closed contract becomes runtime behavior.
 //!
 //! ## Descriptor-less ops (create_document / delete_document / drag_drop_block)
 //!
@@ -27,10 +27,6 @@
 //!   `widens_audience` computed by the drag layer from the source vs. target
 //!   container audiences (conservative upper bound). Routed to the drag layer,
 //!   which resolves source/target containers and calls [`check_boundary`].
-//!
-//! Implementation of these three call sites lands with the document-lifecycle /
-//! drag layers (Inc 3+); this module fixes the classification contract they
-//! must satisfy.
 
 use holon_api::BoundaryBehavior;
 

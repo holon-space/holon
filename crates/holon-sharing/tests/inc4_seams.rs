@@ -1,5 +1,5 @@
 //! Unit gates for the boundary-enforcement seam and the SQL-projection
-//! orphan-row tripwire (ADR 0028 Inc 4).
+//! orphan-row tripwire (ADR 0028).
 
 use std::collections::BTreeSet;
 
@@ -14,138 +14,88 @@ fn c(s: &str) -> ContainerId {
     ContainerId(s.to_string())
 }
 
-#[test]
-fn private_only_rejects_a_crossing_but_allows_in_place() {
-    let src = c("a");
-    let tgt = c("b");
-    assert!(matches!(
-        check_boundary(
-            "set_field",
-            &BoundaryBehavior::PrivateOnly,
-            &src,
-            false,
-            &tgt,
-            false
-        ),
-        BoundaryDecision::RejectLoud { .. }
-    ));
-    // In-place (same container), even a shared one, is fine.
-    assert_eq!(
-        check_boundary(
-            "set_field",
-            &BoundaryBehavior::PrivateOnly,
-            &src,
-            true,
-            &src,
-            true
-        ),
-        BoundaryDecision::AllowPrivate
-    );
-}
-
-#[test]
-fn crossing_widen_requires_confirm() {
-    let src = c("a");
-    let tgt = c("b");
-    let d = check_boundary(
-        "drag_drop_block",
-        &BoundaryBehavior::Crossing {
-            widens_audience: true,
-        },
-        &src,
-        false,
-        &tgt,
-        true,
-    );
-    assert_eq!(
-        d,
-        BoundaryDecision::AllowCrossing {
-            widens_audience: true,
-            requires_confirm: true
+/// The decision table `check_boundary` must implement, `None` = reject loud.
+fn expected_decision(
+    behavior: &BoundaryBehavior,
+    crosses: bool,
+    touches_shared: bool,
+) -> Option<BoundaryDecision> {
+    let in_place_or = |crossing: Option<BoundaryDecision>| {
+        if crosses {
+            crossing
+        } else {
+            Some(BoundaryDecision::AllowPrivate)
         }
-    );
-}
-
-#[test]
-fn crossing_narrow_does_not_require_confirm() {
-    let src = c("a");
-    let tgt = c("b");
-    let d = check_boundary(
-        "drag_drop_block",
-        &BoundaryBehavior::Crossing {
-            widens_audience: false,
-        },
-        &src,
-        true,
-        &tgt,
-        false,
-    );
-    assert_eq!(
-        d,
-        BoundaryDecision::AllowCrossing {
-            widens_audience: false,
-            requires_confirm: false
+    };
+    match behavior {
+        BoundaryBehavior::PrivateOnly | BoundaryBehavior::ForbiddenAtPageBoundary => {
+            in_place_or(None)
         }
-    );
-}
-
-#[test]
-fn unclassified_is_fail_closed_at_any_boundary() {
-    let src = c("a");
-    let tgt = c("b");
-    // Crossing → reject loud, op name present.
-    match check_boundary(
-        "mystery_op",
-        &BoundaryBehavior::Unclassified,
-        &src,
-        false,
-        &tgt,
-        false,
-    ) {
-        BoundaryDecision::RejectLoud { reason } => assert!(reason.contains("mystery_op")),
-        other => panic!("expected loud reject, got {other:?}"),
+        BoundaryBehavior::Crossing { widens_audience } => {
+            in_place_or(Some(BoundaryDecision::AllowCrossing {
+                widens_audience: *widens_audience,
+                requires_confirm: *widens_audience,
+            }))
+        }
+        BoundaryBehavior::PolicyEdit => Some(BoundaryDecision::AllowPolicyEdit),
+        BoundaryBehavior::IdentityOp => in_place_or(Some(BoundaryDecision::AllowCrossing {
+            widens_audience: true,
+            requires_confirm: true,
+        })),
+        BoundaryBehavior::Unclassified if crosses || touches_shared => None,
+        BoundaryBehavior::Unclassified => Some(BoundaryDecision::AllowPrivate),
     }
-    // Touching a shared container (even without crossing) → reject loud.
-    assert!(matches!(
-        check_boundary(
-            "mystery_op",
-            &BoundaryBehavior::Unclassified,
-            &src,
-            true,
-            &src,
-            true
-        ),
-        BoundaryDecision::RejectLoud { .. }
-    ));
-    // Purely private, same container → allowed.
-    assert_eq!(
-        check_boundary(
-            "mystery_op",
-            &BoundaryBehavior::Unclassified,
-            &src,
-            false,
-            &src,
-            false
-        ),
-        BoundaryDecision::AllowPrivate
-    );
 }
 
+/// Every (classification, crosses, source shared, target shared) input against
+/// the decision table. The domain has 56 points, so it is enumerated instead of
+/// sampled.
 #[test]
-fn forbidden_at_page_boundary_rejects_crossing() {
-    let src = c("page");
-    let tgt = c("other");
-    assert!(matches!(
-        check_boundary(
-            "outdent",
-            &BoundaryBehavior::ForbiddenAtPageBoundary,
-            &src,
-            false,
-            &tgt,
-            false
-        ),
-        BoundaryDecision::RejectLoud { .. }
-    ));
+fn check_boundary_follows_the_decision_table_on_every_input() {
+    let behaviors = [
+        BoundaryBehavior::PrivateOnly,
+        BoundaryBehavior::Crossing {
+            widens_audience: false,
+        },
+        BoundaryBehavior::Crossing {
+            widens_audience: true,
+        },
+        BoundaryBehavior::ForbiddenAtPageBoundary,
+        BoundaryBehavior::PolicyEdit,
+        BoundaryBehavior::IdentityOp,
+        BoundaryBehavior::Unclassified,
+    ];
+    let source = c("a");
+    for behavior in &behaviors {
+        for crosses in [false, true] {
+            let target = if crosses { c("b") } else { source.clone() };
+            for (source_is_shared, target_is_shared) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let decision = check_boundary(
+                    "op_under_test",
+                    behavior,
+                    &source,
+                    source_is_shared,
+                    &target,
+                    target_is_shared,
+                );
+                let case = format!(
+                    "{behavior:?} crosses={crosses} shared=({source_is_shared}, {target_is_shared})"
+                );
+                match expected_decision(behavior, crosses, source_is_shared || target_is_shared) {
+                    Some(expected) => assert_eq!(decision, expected, "{case}"),
+                    None => match decision {
+                        BoundaryDecision::RejectLoud { reason } => assert!(
+                            reason.contains("op_under_test"),
+                            "{case}: the rejection must name the op, got `{reason}`"
+                        ),
+                        other => panic!("{case}: expected a loud rejection, got {other:?}"),
+                    },
+                }
+            }
+        }
+    }
 }
 
 #[test]

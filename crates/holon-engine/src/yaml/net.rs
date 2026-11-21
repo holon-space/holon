@@ -32,12 +32,8 @@ pub struct ObjectiveDef {
     pub expr: String,
     #[serde(default)]
     pub constraints: Vec<String>,
-    #[serde(default = "default_discount")]
+    #[serde(default)]
     pub discount_rate: f64,
-}
-
-fn default_discount() -> f64 {
-    0.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,22 +87,7 @@ impl YamlNet {
                 t
             })
             .collect();
-
-        let engine = rhai::Engine::new();
-        let compiled_objective = CompiledExpr::compile(&engine, &file.objective.expr)?;
-        let compiled_constraints = file
-            .objective
-            .constraints
-            .iter()
-            .map(|c| CompiledExpr::compile(&engine, c))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(YamlNet {
-            transitions,
-            objective_def: file.objective,
-            compiled_objective,
-            compiled_constraints,
-        })
+        Ok(Self::new(transitions, file.objective)?)
     }
 
     pub fn validate(&self) -> Vec<String> {

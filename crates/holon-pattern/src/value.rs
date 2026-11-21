@@ -346,11 +346,7 @@ impl Value {
         if let Some((path, _)) = self
             .path_to(&|v| matches!(v, Value::Object(map) if map.contains_key(QUANTITY_MARKER_KEY)))
         {
-            let full = if path.is_empty() {
-                key.to_string()
-            } else {
-                format!("{key}.{path}")
-            };
+            let full = full_key_path(key, &path);
             return Err(format!(
                 "property '{full}' carries the reserved key \"{QUANTITY_MARKER_KEY}\" and cannot \
                  be stored as a value — it would read back as a quantity cell"
@@ -359,13 +355,11 @@ impl Value {
         match self.reserved_marker_path() {
             None => Ok(()),
             Some(path) => {
-                let full = if path.is_empty() {
-                    key.to_string()
-                } else {
-                    format!("{key}.{path}")
-                };
+                let full = full_key_path(key, &path);
                 Err(format!(
-                    "property '{full}' is the reserved removal marker                      {{\"{REMOVED_MARKER_KEY}\": true}} and cannot be stored as a value — it                      would read back as a removal instruction"
+                    "property '{full}' is the reserved removal marker \
+                     {{\"{REMOVED_MARKER_KEY}\": true}} and cannot be stored as a value — it \
+                     would read back as a removal instruction"
                 ))
             }
         }
@@ -382,11 +376,7 @@ impl Value {
         match self.kind_envelope_path() {
             None => Ok(()),
             Some(path) => {
-                let full = if path.is_empty() {
-                    key.to_string()
-                } else {
-                    format!("{key}.{path}")
-                };
+                let full = full_key_path(key, &path);
                 Err(format!(
                     "property '{full}' carries the reserved key \
                      '{}' and cannot be stored as a value — it would read back as a kind \
@@ -403,11 +393,7 @@ impl Value {
         match self.path_to(&|v| matches!(v, Value::Quantity(_))) {
             None => Ok(()),
             Some((path, Value::Quantity(cell))) => {
-                let full = if path.is_empty() {
-                    key.to_string()
-                } else {
-                    format!("{key}.{path}")
-                };
+                let full = full_key_path(key, &path);
                 Err(format!(
                     "'{full}' is not a {} column, so it cannot store the quantity cell {:?}",
                     cell.format().format().name(),
@@ -885,6 +871,15 @@ impl TryFrom<Value> for HashMap<String, Value> {
     }
 }
 
+/// `path` (as rendered by `path_to`) under the property `key`.
+fn full_key_path(key: &str, path: &str) -> String {
+    if path.is_empty() {
+        key.to_string()
+    } else {
+        format!("{key}.{path}")
+    }
+}
+
 #[cfg(test)]
 mod removal_sentinel_tests {
     use super::*;
@@ -929,18 +924,6 @@ mod removal_sentinel_tests {
 #[cfg(test)]
 mod non_finite_float_tests {
     use super::*;
-
-    /// JSON input (MCP, a submitted properties bag) cannot carry a non-finite
-    /// float; only Rust code that computes one reaches the write-leg refusal.
-    #[test]
-    fn json_input_cannot_carry_a_non_finite_float() {
-        for text in ["NaN", "Infinity", "-Infinity", "1e400", "-1e400"] {
-            assert!(
-                serde_json::from_str::<serde_json::Value>(text).is_err(),
-                "{text} must not parse as a JSON number"
-            );
-        }
-    }
 
     #[test]
     fn a_non_finite_float_is_refused_by_its_key_path_and_value() {

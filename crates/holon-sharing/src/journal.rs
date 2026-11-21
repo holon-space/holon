@@ -5,7 +5,7 @@
 //! and it is **idempotent and resumable**. Replays of already-applied steps are
 //! no-ops; a crash mid-window resumes from the persisted journal and completes.
 //!
-//! ## Leak-direction contract (Inc 2)
+//! ## Leak-direction contract
 //! The step order is fixed by `widens_audience` so the container audience is
 //! never, at any instant, wider than the policy audience:
 //! - **widen** (`widens_audience = true`): **create-in-target (shared) FIRST**,

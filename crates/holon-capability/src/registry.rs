@@ -1,7 +1,7 @@
 //! The known profiles, and the questions that need MORE THAN ONE of them.
 //!
-//! `CapabilityProfile::supports` stays a pure two-variant read of one profile
-//! (2b.2). "Your home cannot do this, but that one can" is a different
+//! `CapabilityProfile::supports` stays a pure two-variant read of one profile.
+//! "Your home cannot do this, but that one can" is a different
 //! question: it ranges over a SET of profiles, and a profile that knew its
 //! peers would be a profile that changes meaning when a new format is added.
 //! So re-homing lives here, on the registry, and nowhere else.

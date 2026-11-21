@@ -44,14 +44,14 @@ struct Frontmatter {
     lists: Vec<(String, Vec<String>)>,
 }
 
-fn parse_frontmatter(content: &str) -> (Frontmatter, usize) {
+fn parse_frontmatter(content: &str) -> Frontmatter {
     let mut fm = Frontmatter {
         scalars: Vec::new(),
         lists: Vec::new(),
     };
     let lines: Vec<&str> = content.lines().collect();
     if lines.first().map(|l| l.trim_end()) != Some("---") {
-        return (fm, 0);
+        return fm;
     }
     let mut i = 1;
     let mut cur_list_key: Option<String> = None;
@@ -59,7 +59,6 @@ fn parse_frontmatter(content: &str) -> (Frontmatter, usize) {
     while i < lines.len() {
         let l = lines[i];
         if l.trim_end() == "---" {
-            i += 1;
             break;
         }
         let list_item = l.trim_start();
@@ -95,14 +94,7 @@ fn parse_frontmatter(content: &str) -> (Frontmatter, usize) {
     if let Some(k) = cur_list_key.take() {
         fm.lists.push((k, cur_list));
     }
-    // byte offset where the body begins
-    let body_start_line = i;
-    let offset = lines
-        .iter()
-        .take(body_start_line)
-        .map(|l| l.len() + 1)
-        .sum();
-    (fm, offset)
+    fm
 }
 
 fn strip_quotes(s: &str) -> String {
@@ -140,7 +132,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
         parent_dir_id: &EntityUri,
         root: &Path,
     ) -> Result<FileFormatParseResult> {
-        let (fm, _body_offset) = parse_frontmatter(content);
+        let fm = parse_frontmatter(content);
 
         let stem = path
             .file_stem()
@@ -298,10 +290,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                 let (text, task) = checkbox_state(rest);
                 let (text, anchor) = split_block_anchor(&text);
                 let id = mint(&mut seq, &file_id, anchor)?;
-                let mut block = text_block(id, parent, &prefix_task(task, &text));
-                // checkbox already encoded as TODO/DONE marker in prefix_task
-                let _ = &mut block;
-                blocks.push(block);
+                blocks.push(text_block(id, parent, &prefix_task(task, &text)));
                 i += 1;
                 continue;
             }
@@ -382,8 +371,8 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
     }
 
     fn doc_id_from_content(&self, _: &str) -> anyhow::Result<Option<EntityUri>> {
-        Ok(None) // Obsidian identity is path/basename; no embedded stable id by
-        // default.
+        // Obsidian identity is the path; a note embeds no stable id.
+        Ok(None)
     }
 
     fn build_block_params(

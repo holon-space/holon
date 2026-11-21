@@ -5,17 +5,14 @@
 //! instance-level counterpart: the sentence that names the file, the peer, the
 //! integration or the count this particular raise carries.
 //!
-//! It lives here rather than in a frontend because it was the last thing left
-//! in the GPUI layer's 320-line per-kind match, and a second frontend would
-//! have had to write all of it again — differently. It is also what lets the
-//! `conditions` row source grow a `detail` column without minting a second,
+//! It lives here rather than in a frontend so every frontend shows the same
+//! sentence, and so the `conditions` row source can carry it without a second,
 //! divergent copy of the same prose.
 //!
 //! **Headline and body are not interchangeable.** The toast render caps the
 //! headline, so anything the user must reproduce CHARACTER-EXACT — a path, a
 //! command to run, a URL to open, the query that finds the conflict copies —
-//! belongs in `body`, where it is never truncated. Several of these were once
-//! one long headline and the cap ate the actionable half.
+//! belongs in `body`, where it is never truncated.
 
 use crate::condition_bus::ConditionKind;
 use crate::condition_bus::HolonChange;
@@ -238,8 +235,7 @@ impl ConditionKind {
             // Headline, then the two payloads that must reach the user
             // CHARACTER-EXACT and so never see the cap: the command to run (a
             // remedy cut in half reads as complete and does not work) and the
-            // file it writes. The cap ate both when all three shared one
-            // string.
+            // file it writes.
             Self::IntegrationNotEnabled {
                 integration,
                 state_path,
@@ -265,8 +261,8 @@ impl ConditionKind {
             ),
 
             // The file and the REASON are both body lines. The reason ends in
-            // the remedy — the clause saying what to change — and it was the
-            // half the cap ate.
+            // the remedy — the clause saying what to change — which the cap
+            // would cut.
             Self::IntegrationSidecarUnusable {
                 provider,
                 installed_path,

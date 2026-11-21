@@ -1,5 +1,5 @@
-//! Load-time refusal of a vault profile that redeclares a typed computed field
-//! (ruling D66.a).
+//! Load-time refusal of a vault profile that redeclares a typed computed
+//! field.
 //!
 //! A typed field has one semantics on every seat (`Computation::eval`, the
 //! planted SQL column, the live read seat). A vault profile's Rhai script under

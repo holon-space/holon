@@ -1,16 +1,12 @@
 //! The conditions in effect, as a named row source.
 //!
-//! The first registration on the [`row_source`](holon_api::row_source) seam,
-//! and the reason the seam exists: "what is currently degraded" is state no
-//! query produces, so before this every surface that wanted to show it kept its
-//! own mirror — which is how a provider's status glyph and its banner came to
-//! disagree.
+//! A [`row_source`](holon_api::row_source) because "what is currently
+//! degraded" is state no query produces, and every surface that shows it must
+//! read the same set.
 //!
-//! The columns are the kind-level facts plus the instance's identity. There is
-//! deliberately no prose column: the per-kind message text still lives in the
-//! GPUI toast layer, and minting a second copy of it here would recreate the
-//! divergence this source removes. Inc 3 moves that text down beside the
-//! remedies, and it becomes a column then.
+//! The columns are the kind-level facts plus the instance's identity. The
+//! instance's prose is not a column: a reader renders it with
+//! [`ConditionKind::detail`](crate::ConditionKind::detail).
 
 use std::sync::Arc;
 
@@ -27,8 +23,8 @@ use crate::condition_profile::ConditionSeverity;
 
 /// What a row of the `conditions` source carries.
 ///
-/// `subject` is filterable because that is the join D120.a asks for: a
-/// provider row showing its own conditions beside it. The mirror keys on
+/// `subject` is filterable so a provider row can show its own conditions
+/// beside it. The mirror keys on
 /// subject first, so a filtered view reads one contiguous run of the holder.
 pub const CONDITIONS: NamedSourceDef = NamedSourceDef {
     name: "conditions",

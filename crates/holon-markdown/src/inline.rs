@@ -84,19 +84,19 @@ impl Scanner {
     }
 }
 
-/// Delimiter pairs for symmetric inline emphasis, longest-first so `**` wins
-/// over `*` and `~~` over a lone `~`.
 /// One symmetric emphasis delimiter and the mark it opens.
-type EmphasisPair = (&'static str, fn() -> InlineMark);
+type EmphasisPair = (&'static [char], fn() -> InlineMark);
 
+/// Longest-first, so `**` wins over `*`.
 const EMPHASIS: &[EmphasisPair] = &[
-    ("**", || InlineMark::Bold),
-    ("__", || InlineMark::Bold),
-    ("~~", || InlineMark::Strike),
-    ("==", || InlineMark::Underline), // highlight → Underline (spike; O3 open question)
-    ("*", || InlineMark::Italic),
-    ("_", || InlineMark::Italic),
-    ("`", || InlineMark::Code),
+    (&['*', '*'], || InlineMark::Bold),
+    (&['_', '_'], || InlineMark::Bold),
+    (&['~', '~'], || InlineMark::Strike),
+    // No highlight mark exists, so `==` maps to the nearest one.
+    (&['=', '='], || InlineMark::Underline),
+    (&['*'], || InlineMark::Italic),
+    (&['_'], || InlineMark::Italic),
+    (&['`'], || InlineMark::Code),
 ];
 
 /// Scan one block's inline text.
@@ -111,9 +111,8 @@ pub fn scan_inline(text: &str) -> InlineParse {
     };
 
     while s.i < s.src.len() {
-        // --- Embed `![[...]]` / `![alt](url)` : keep verbatim, no mark. The
-        //     whole-block opaque path handles standalone embeds; inline we
-        //     preserve the exact source so nothing is lost.
+        // --- Inline embed `![[`: copied verbatim, so its `[[` is not read as a
+        //     wikilink. `![alt](url)` falls through to the link arm.
         if s.starts_with(&['!', '[', '[']) {
             s.push_str("![[");
             s.i += 3;
@@ -214,10 +213,9 @@ pub fn scan_inline(text: &str) -> InlineParse {
 
         // --- Emphasis / code
         let mut matched = false;
-        for (delim, mk) in EMPHASIS {
-            let dch: Vec<char> = delim.chars().collect();
-            if s.starts_with(&dch) {
-                if let Some(close) = s.find(&dch, s.i + dch.len()) {
+        for &(dch, mk) in EMPHASIS {
+            if s.starts_with(dch) {
+                if let Some(close) = s.find(dch, s.i + dch.len()) {
                     let inner: String = s.src[s.i + dch.len()..close].iter().collect();
                     if !inner.is_empty() {
                         s.emit_marked(&inner, mk());
