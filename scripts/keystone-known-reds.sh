@@ -61,8 +61,10 @@
 # names each test.
 #
 # The registry is the single source of truth for the patterns; this script holds
-# none of its own. Apart from that, it knows exactly one panic: the keystone's
-# injected boot fault (`INJECTED_SITE` below), which is no failure at all.
+# none of its own. Apart from that, it knows two kinds of panic: the keystone's
+# injected boot fault (`INJECTED_SITE` below), which is no failure at all, and
+# proptest's fork-mode wrappers (`fork_wrapper` below), which follow the verdict
+# of the primary panic of their own test instance.
 set -eEuo pipefail
 export LC_ALL=C
 
@@ -692,7 +694,9 @@ for log in "$@"; do
     # collateral when it matches a collateral pair of a row that another panic
     # of its proven test instance matched, and no other signature of that
     # instance is novel or cross-family; the first pass over the signatures
-    # finds those instances. Collateral
+    # finds those instances. A fork wrapper is collateral in an instance whose
+    # other signatures are all known and at least one matched a row; without
+    # such a primary in its instance it is novel. Collateral
     # is reported but never counts toward novel/matched or the verdict. The
     # keystone's own sample-floor panic is reported through the sample verdict
     # below, and the hand-authored replay's closing report lists cases that
@@ -830,6 +834,11 @@ for log in "$@"; do
                         if (norm ~ pair_msg[i, k] && loc ~ pair_site[i, k]) return i
             return 0
         }
+        # Whether the signature is one of the fork-mode wrappers of proptest, which
+        # re-report the failure of the primary panic of their test and say nothing of their own.
+        function fork_wrapper(norm, loc) {
+            return (norm ~ "^Test failed normally in child process\\.$" && loc ~ "/proptest-[0-9.]+/src/test_runner/runner\\.rs:[0-9]+:[0-9]+$") || norm == "failed in other process"
+        }
         # Splits a signature line into INST, LOC and SIG.
         function read_sig(line,    d, tab) {
             d = index(line, "\035")
@@ -857,9 +866,10 @@ for log in "$@"; do
             sub(/^\t+/, "", SIG); sub(/\t+$/, "", SIG)
             if (index(SIG, "\037")) { unclean[INST] = 1; next }
             if (index(SIG, "Any { .. }") || LOC ~ /tracing-subscriber-.*sharded\.rs/) next
+            if (fork_wrapper(normalize(SIG), LOC)) next
             match_rows(normalize(SIG), LOC)
             if (cross_hit || novel_pieces != "") { unknown_of[INST] = unknown_of[INST] LOC "\t" normalize(SIG) "\n" }
-            for (h = 1; h <= nhits; h++) inst_hit[INST, HIT[h]] = 1
+            for (h = 1; h <= nhits; h++) { inst_hit[INST, HIT[h]] = 1; inst_known[INST] = 1 }
             next
         }
         # An instance is clean when each of its unknown signatures is a collateral
@@ -907,6 +917,9 @@ for log in "$@"; do
                 collateral++
             } else if (replay_case == "" && (crow = collateral_row(INST, norm, loc))) {
                 class = "collateral:" key[crow]
+                collateral++
+            } else if (replay_case == "" && fork_wrapper(norm, loc) && INST != "" && (INST in inst_known) && !(INST in unclean)) {
+                class = "collateral:fork-wrapper"
                 collateral++
             } else {
                 match_rows(norm, loc)

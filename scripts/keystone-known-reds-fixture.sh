@@ -1287,6 +1287,56 @@ expect_outcome injected-panic/other-payload 1 "^PRIMARY: \[novel\] .*$injected_s
 injected_log injected-longer-payload "$injected_site:22:5" "$injected_payload and the store is gone" green
 expect_outcome injected-panic/longer-payload 1 "^PRIMARY: \[novel\] .*$injected_site:22:5: $injected_payload and the store is gone\$" \
     "$work/injected-longer-payload.log"
+# A forked proptest test prints its primary panic, then a child and a parent
+# wrapper that carry no message of their own. The wrappers take the verdict of
+# the primary of their own test instance.
+fork_block() {
+    local test="$1" primary_loc="$2" primary_msg="$3" wrappers="$4"
+    printf '        FAIL [   9.000s] (1/2) holon::main %s\n  stderr ───\n\n' "$test"
+    [ -z "$primary_loc" ] || printf "    thread '%s' (1) panicked at %s:\n    %s\n" "$test" "$primary_loc" "$primary_msg"
+    if [ "$wrappers" = wrapped ]; then
+        printf "    thread '%s' (2) panicked at /cargo/registry/src/proptest-1.11.0/src/test_runner/runner.rs:490:31:\n    Test failed normally in child process.\n" "$test"
+        printf "    thread '%s' (3) panicked at crates/holon/tests/x_pbt.rs:790:5:\n    Test failed: failed in other process.\n" "$test"
+    fi
+    printf '\n'
+}
+fork_log() {
+    local name="$1"
+    shift
+    { while [ "$#" -gt 0 ]; do fork_block "$1" "$2" "$3" "$4"; shift 4; done
+      printf '     Summary [  18.000s] 2 tests run: 0 passed, 2 failed, 0 skipped\n'; } >"$work/$name.log"
+}
+loro_test=api_pbt::loro_backend_pbt::test_loro_backend_state_machine
+loro_loc=crates/holon/tests/api_pbt/loro_backend_pbt.rs:534:9
+loro_msg='assertion `left == right` failed: Reference and SUT should receive same number of change notifications.'
+fork_log fork-wrapper-loro "$loro_test" "$loro_loc" "$loro_msg" wrapped
+expect_outcome fork-wrapper/known-primary-loro 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel, 2 collateral' \
+    "$work/fork-wrapper-loro.log"
+zstd -dq -o "$work/fork-wrapper-w88.log" "$repo_root/docs/Testing/known-red-evidence/iroh-accept-drain-recv-stream/gate88-extra-iroh-excerpt.log.zst"
+expect_outcome fork-wrapper/known-primary-iroh-evidence 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel, 2 collateral' \
+    "$work/fork-wrapper-w88.log"
+# A novel primary stays the failure, and its wrappers are not covered by it.
+sed 's/called `Result::unwrap()` on an `Err` value: \[accept\] drain recv stream/an unregistered message/' \
+    "$work/fork-wrapper-w88.log" >"$work/fork-wrapper-novel-primary.log"
+expect_outcome fork-wrapper/novel-primary 1 '^PRIMARY: \[novel\] .* @ crates/holon-loro/src/multi_peer.rs:644:30: an unregistered message$' \
+    "$work/fork-wrapper-novel-primary.log"
+fork_log fork-wrapper-novel-primary-loro "$loro_test" "$loro_loc" 'an unregistered message' wrapped
+expect_outcome fork-wrapper/novel-primary-loro 1 '^\[known-reds\] FAIL: 3 novel panic(s), 0 known-red panic(s), 0 collateral' \
+    "$work/fork-wrapper-novel-primary-loro.log"
+# A wrapper whose instance holds no primary is novel, whether the instance holds
+# nothing else or another test's known primary stands next to it.
+fork_log fork-wrapper-alone "$loro_test" '' '' wrapped
+expect_outcome fork-wrapper/alone 1 '^\[known-reds\] FAIL: 2 novel panic(s), 0 known-red panic(s), 0 collateral' \
+    "$work/fork-wrapper-alone.log"
+fork_log fork-wrapper-other-test other_pbt::the_other_test '' '' wrapped "$loro_test" "$loro_loc" "$loro_msg" plain
+expect_outcome fork-wrapper/primary-in-another-test 1 '^\[known-reds\] FAIL: 2 novel panic(s), 1 known-red panic(s), 0 collateral' \
+    "$work/fork-wrapper-other-test.log"
+# A known primary does not cover a second, unknown panic of its instance or the wrappers beside it.
+{ fork_block "$loro_test" "$loro_loc" "$loro_msg" wrapped
+  printf "    thread '%s' (4) panicked at crates/holon/tests/x_pbt.rs:12:5:\n    an unregistered message\n\n" "$loro_test"
+  printf '     Summary [  18.000s] 1 test run: 0 passed, 1 failed, 0 skipped\n'; } >"$work/fork-wrapper-beside-novel.log"
+expect_outcome fork-wrapper/beside-another-novel-panic 1 '^\[known-reds\] FAIL: 3 novel panic(s), 1 known-red panic(s), 0 collateral' \
+    "$work/fork-wrapper-beside-novel.log"
 # The fixed examples of the drawn-log property check; its random draws run in
 # scripts/test-known-reds-classifier.py.
 mkdir "$work/examples"

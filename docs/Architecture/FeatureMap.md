@@ -390,9 +390,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `iroh-accept-peer-never-closed`
 - `iroh-init-drain-recv-stream`
 - `iroh-nat-traversal-address-set`
-- `iroh-proptest-fork-child-wrapper`
 - `iroh-proptest-fork-parent-aborted-before-first-case-load`
-- `iroh-proptest-fork-parent-wrapper`
 - `iroh-reverse-leg-imports-nothing-at-owner`
 - `join-then-stale-second-join`
 - `journal-feed-main-panel-still-loading`

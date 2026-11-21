@@ -25,8 +25,6 @@ EXEMPT = {
     "join-then-stale-second-join": 'no evidence folder',
     "editor-text-mirror": 'no evidence folder',
     "bad-render-quick-open": 'no evidence folder',
-    "iroh-proptest-fork-child-wrapper": 'no evidence folder',
-    "iroh-proptest-fork-parent-wrapper": 'no evidence folder',
     "deleted-page-rewritten-from-stale-page-mirror-pin": 'no evidence folder',
     "cmd-click-open-tab-integration-state-write": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
     "hand-authored-renamed-recipe-refusal-not-disclosed-load": 'its evidence is a hand-authored case or an excerpt the classifier reads no panic location from',
