@@ -2402,6 +2402,7 @@ impl ReferenceState {
         let old_parent = self.domain.block_state.blocks.get(&old_parent_id).unwrap();
         let grandparent_id = old_parent.parent_id.clone();
         let old_parent_seq = old_parent.sequence();
+        self.assert_write_tier_accepts(&grandparent_id, "outdent under");
 
         let target_seq = old_parent_seq + 1;
         for sibling in self.domain.block_state.blocks.values_mut() {
@@ -3355,6 +3356,7 @@ impl ReferenceState {
             None => block.parent_id.clone(),
         };
         let into_parent = prev_id.is_none();
+        self.assert_write_tier_accepts(&target_id, "join into");
 
         // Capture original contents.
         let target = self.domain.block_state.blocks.get(&target_id).unwrap();
@@ -4562,6 +4564,178 @@ mod remote_list_tests {
         assert!(
             !state.admits(&over_ticked),
             "the row is active and ticked at once, so it is not ticked alone"
+        );
+    }
+}
+
+#[cfg(test)]
+mod write_tier_assertion_tests {
+    use std::panic::AssertUnwindSafe;
+    use std::panic::catch_unwind;
+
+    use holon_orgmode::models::OrgBlockExt;
+    use holon_pbt_core::capabilities::RefReadOnlyHomes;
+    use proptest::prelude::*;
+    use proptest::test_runner::Config;
+    use proptest::test_runner::TestRunner;
+
+    use super::*;
+    use crate::pbt::composed::wide_e2e::wide_e2e_ref_for;
+
+    #[derive(Debug, Clone, Copy)]
+    enum Writer {
+        MoveBlock,
+        SplitBlock,
+        InsertUnder,
+        ApplyBlockToPageOrigin,
+        ApplyBlockToPageDestination,
+        OutdentBlock,
+        JoinBlockIntoParent,
+        JoinBlockAfterProtectedSibling,
+    }
+
+    const WRITERS: [Writer; 8] = [
+        Writer::MoveBlock,
+        Writer::SplitBlock,
+        Writer::InsertUnder,
+        Writer::ApplyBlockToPageOrigin,
+        Writer::ApplyBlockToPageDestination,
+        Writer::OutdentBlock,
+        Writer::JoinBlockIntoParent,
+        Writer::JoinBlockAfterProtectedSibling,
+    ];
+
+    fn seeded_with_recipe() -> ReferenceState {
+        let ui = serde_json::from_str(
+            r#"{"storage_adapters": ["Turso"], "sync_adapters": [], "actors": ["UI"]}"#,
+        )
+        .expect("a valid wiring manifest");
+        wide_e2e_ref_for(&ui)
+    }
+
+    fn protected_blocks(state: &ReferenceState) -> Vec<EntityUri> {
+        let mut blocks = state.read_only_homed_blocks();
+        blocks.extend(state.read_only_page_titles().into_keys());
+        blocks.into_iter().collect()
+    }
+
+    fn add_text_block(state: &mut ReferenceState, id: &str, parent: &EntityUri) -> EntityUri {
+        let id = EntityUri::block(id);
+        state.domain.block_state.blocks.insert(
+            id.clone(),
+            Block::new_text(id.clone(), parent.clone(), id.to_string()),
+        );
+        id
+    }
+
+    /// Each case violates only the write tier: every other block it names is an
+    /// ordinary one, and the protected block is the writer's touched parent or
+    /// target. Returns the panic text, or `None` if the writer did not panic.
+    fn writer_panic(
+        base: &ReferenceState,
+        writer: Writer,
+        protected: &EntityUri,
+    ) -> Option<String> {
+        let mut state = base.clone();
+        let root = state
+            .rendered_focus_root(Region::Main)
+            .into_iter()
+            .next()
+            .expect("the default layout gives Main a focus root");
+        let probe = add_text_block(&mut state, "tier-probe", &root);
+        let page_id = EntityUri::block("tier-probe-page");
+        let outcome = catch_unwind(AssertUnwindSafe(|| match writer {
+            Writer::MoveBlock => state.move_block(&probe, protected.clone(), None),
+            Writer::SplitBlock => {
+                state.split_block(protected, 0);
+            }
+            Writer::InsertUnder => state.insert_block_under_no_snapshot(
+                protected,
+                "probe",
+                EntityUri::block("tier-probe-new"),
+            ),
+            Writer::ApplyBlockToPageOrigin => state.apply_block_to_page(protected, page_id, &root),
+            Writer::ApplyBlockToPageDestination => {
+                state.apply_block_to_page(&probe, page_id, protected)
+            }
+            Writer::OutdentBlock => {
+                let child = add_text_block(&mut state, "tier-probe-child", &probe);
+                state
+                    .domain
+                    .block_state
+                    .blocks
+                    .get_mut(&probe)
+                    .unwrap()
+                    .parent_id = protected.clone();
+                state.outdent_block(&child)
+            }
+            Writer::JoinBlockIntoParent => {
+                state
+                    .domain
+                    .block_state
+                    .blocks
+                    .get_mut(&probe)
+                    .unwrap()
+                    .parent_id = protected.clone();
+                state
+                    .domain
+                    .block_state
+                    .blocks
+                    .get_mut(&probe)
+                    .unwrap()
+                    .set_sequence(-1);
+                state.join_block(&probe);
+            }
+            Writer::JoinBlockAfterProtectedSibling => {
+                let container = add_text_block(&mut state, "tier-probe-container", &root);
+                for (id, seq) in [(protected, 0), (&probe, 1)] {
+                    let block = state.domain.block_state.blocks.get_mut(id).unwrap();
+                    block.parent_id = container.clone();
+                    block.set_sequence(seq);
+                }
+                state.join_block(&probe);
+            }
+        }));
+        outcome.err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "<non-string panic payload>".to_string())
+        })
+    }
+
+    /// Finite domain (writers x protected blocks), enumerated through the
+    /// proptest strategy; one runner per writer so a failing run names every
+    /// writer that accepted a protected block, not only the first shrunk one.
+    #[test]
+    fn every_model_writer_refuses_a_protected_block() {
+        let base = seeded_with_recipe();
+        let protected = protected_blocks(&base);
+        assert!(!protected.is_empty(), "the recipe seed protects no block");
+        println!("protected blocks: {}", protected.len());
+        let failures: Vec<String> = WRITERS
+            .into_iter()
+            .filter_map(|writer| {
+                TestRunner::new(Config::with_cases(32))
+                    .run(&prop::sample::select(protected.clone()), |block| {
+                        let text = writer_panic(&base, writer, &block).ok_or_else(|| {
+                            TestCaseError::fail(format!("accepted protected block {block}"))
+                        })?;
+                        prop_assert!(
+                            text.starts_with("model writer: cannot"),
+                            "panicked elsewhere on {block}: {text}"
+                        );
+                        Ok(())
+                    })
+                    .err()
+                    .map(|e| format!("{writer:?}: {e}"))
+            })
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "writers without the tier check:\n{}",
+            failures.join("\n")
         );
     }
 }
