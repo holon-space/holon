@@ -22,6 +22,8 @@ mod transient_text_merge_pbt;
 mod typed_entity_block_projection;
 mod typed_entity_convergence_pbt;
 mod typed_entity_purge_recreate;
+mod typed_entity_read_scale;
+mod typed_entity_replace_scope_equivalence;
 mod typed_entity_scale;
 mod typed_entity_shape;
 mod typed_reads_register_no_root;

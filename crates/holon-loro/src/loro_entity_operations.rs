@@ -296,19 +296,23 @@ impl LoroEntityOperations {
     fn replace_scope(&self, params: &StorageEntity) -> Result<OperationResult> {
         let scope = ScopeReplacement::parse(params)?;
         let root = self.store();
-        let live: HashMap<String, StorageEntity> = self.doc.with_read(|doc| {
-            let keys: Vec<String> = held_root(doc, &root)
-                .map(|store| store.keys().map(|k| k.to_string()).collect())
-                .unwrap_or_default();
-            Ok(keys
-                .into_iter()
-                .filter_map(|key| {
-                    read_entity(doc, &root, &self.entity, &key)
-                        .filter(|stored| stored.live)
-                        .map(|stored| (key, stored.fields))
+        let live: HashMap<String, StorageEntity> =
+            tracing::info_span!("loro.replace_scope.read_hold").in_scope(|| {
+                self.doc.with_read(|doc| {
+                    let Some(store) = held_root(doc, &root) else {
+                        return Ok(HashMap::new());
+                    };
+                    let keys: Vec<String> = store.keys().map(|k| k.to_string()).collect();
+                    Ok(keys
+                        .into_iter()
+                        .filter_map(|key| {
+                            read_entity_in(&store, &root, &self.entity, &key)
+                                .filter(|stored| stored.live)
+                                .map(|stored| (key, stored.fields))
+                        })
+                        .collect())
                 })
-                .collect())
-        })?;
+            })?;
         let mut writes = Vec::with_capacity(scope.rows.len());
         for row in &scope.rows {
             let id = ScopeReplacement::id_of(row)?;
@@ -471,14 +475,25 @@ fn held_root(doc: &LoroDoc, root: &str) -> Option<LoroMap> {
 }
 
 /// Read one entity of the type whose root map is `root`, or `None` when the
-/// key holds nothing.
+/// key holds nothing. Resolves the root map per call: a loop over many keys
+/// resolves it once and uses [`read_entity_in`].
 pub fn read_entity(
     doc: &LoroDoc,
     root: &str,
     entity: &EntityName,
     key: &str,
 ) -> Option<StoredEntity> {
-    let map = match held_root(doc, root)?.get(key)? {
+    read_entity_in(&held_root(doc, root)?, root, entity, key)
+}
+
+/// [`read_entity`] against the already-resolved root map `store`.
+pub fn read_entity_in(
+    store: &LoroMap,
+    root: &str,
+    entity: &EntityName,
+    key: &str,
+) -> Option<StoredEntity> {
+    let map = match store.get(key)? {
         ValueOrContainer::Container(loro::Container::Map(m)) => m,
         other => panic!("{root}: entity key {key:?} holds {other:?}, not a map"),
     };
@@ -635,17 +650,20 @@ impl holon_core::TypeWriteAuthority for LoroTypeWriteAuthority {
         }
         let entity = EntityName::new(type_def.name.clone());
         let root = entity_root_name(&entity);
-        Ok(self.doc.with_read(|doc| {
-            let mut keys = Vec::new();
-            if let Some(store) = held_root(doc, &root) {
+        Ok(tracing::info_span!("loro.read_all.read_hold").in_scope(|| {
+            self.doc.with_read(|doc| {
+                let Some(store) = held_root(doc, &root) else {
+                    return Ok(Vec::new());
+                };
+                let mut keys = Vec::new();
                 store.for_each(|key, _| keys.push(key.to_string()));
-            }
-            Ok(keys
-                .iter()
-                .filter_map(|key| read_entity(doc, &root, &entity, key))
-                .filter(|stored| stored.live)
-                .map(|stored| stored.fields)
-                .collect())
+                Ok(keys
+                    .iter()
+                    .filter_map(|key| read_entity_in(&store, &root, &entity, key))
+                    .filter(|stored| stored.live)
+                    .map(|stored| stored.fields)
+                    .collect())
+            })
         })?)
     }
 
@@ -738,13 +756,19 @@ pub fn read_changed_rows(
     changed: &BTreeSet<(String, String)>,
 ) -> anyhow::Result<ChangedRows> {
     let mut out = ChangedRows::new();
+    let mut stores: HashMap<&str, Option<LoroMap>> = HashMap::new();
     for (root, key) in changed {
         let raw = root
             .strip_prefix(ENTITY_ROOT_PREFIX)
             .expect("changed_entities yields type roots only");
         let entity = EntityName::parse_named(raw)
             .map_err(|e| anyhow::anyhow!("typed-entity root `{root}`: {e}"))?;
-        let row = read_entity(doc, root, &entity, key)
+        let store = stores
+            .entry(root.as_str())
+            .or_insert_with(|| held_root(doc, root));
+        let row = store
+            .as_ref()
+            .and_then(|store| read_entity_in(store, root, &entity, key))
             .filter(|stored| stored.live)
             .map(|stored| stored.fields);
         let uri = format!("{}:{key}", entity.as_str());
