@@ -4,21 +4,15 @@
 //! payload of whatever went wrong. Everything a frontend needs in order to
 //! DRAW that instance — how bad it is, where it belongs, when it goes away and
 //! what the user may do about it — is a property of the kind, and lives here in
-//! the one table [`ConditionKind::profile`].
+//! the one table [`ConditionKind::profile`], so no frontend re-invents them.
 //!
-//! Before this table each of those four facts was re-invented per frontend: a
-//! 22-arm colour match, a 300-line placement match and a mirrored kind enum in
-//! the GPUI layer alone. A second frontend would have re-invented all three.
-//!
-//! Ratified in D121.a (2026-09-14); the reasoning is ADR 0035.
+//! The reasoning is ADR 0035.
 
 use std::time::Duration;
 
 use crate::condition_bus::ConditionKind;
 
-/// How loudly a condition is drawn. One value per kind, never per instance:
-/// per-instance severity is what turned the frontend's colour lookup into a
-/// 22-arm match in the first place (D121.a, question 3).
+/// How loudly a condition is drawn. One value per kind, never per instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConditionSeverity {
     /// Not a degradation. Feedback about something that already resolved
@@ -48,7 +42,7 @@ impl SettingsSection {
 
 /// Where the condition is drawn. Declared here rather than chosen by each
 /// frontend, so a second frontend inherits the boot banner instead of
-/// re-deriving it (D121.a, question 4). A frontend with no surface for the
+/// re-deriving it. A frontend with no surface for the
 /// declared placement falls back to `Toast` and says so in its log; it never
 /// drops the disclosure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,9 +55,6 @@ pub enum ConditionPlacement {
 
 /// An operation a remedy can dispatch, as a closed vocabulary rather than an
 /// op-name string, so an unknown op cannot be written into a profile.
-///
-/// One entry today, because one remedy button exists today. Inc 3 maps these
-/// onto `OperationIntent` and grows the list as remedies are declared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpId {
     PairRetryReimport,
@@ -98,9 +89,9 @@ impl OpId {
 /// these are legal, so an illegal remedy is unrepresentable rather than
 /// rejected at runtime.
 ///
-/// `SetSetting` is deliberately absent: it needs `PrefKey`, which still lives
-/// in `holon-frontend` and moves down in Inc 3. A stringly-typed placeholder
-/// would defeat the point of this enum.
+/// There is no `SetSetting`: it needs `PrefKey`, which lives in
+/// `holon-frontend`, above this crate. A stringly-typed placeholder would
+/// defeat the point of this enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemedySlot {
     Retry(OpId),
@@ -116,8 +107,8 @@ pub enum RemedySlot {
 /// Not [`OpId`]: these are not dispatcher operations. A snapshot save, a SQL
 /// projection and a rehydration are internal moments with no `OperationIntent`
 /// behind them, so typing them as ops would claim a dispatch path that does
-/// not exist. Inc 3 teaches the holder to observe these and clear on a subject
-/// match; today each success site calls `clear` itself.
+/// not exist. Each success site calls
+/// [`ConditionBus::clear`](crate::ConditionBus::clear) itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClearingEvent {
     SnapshotSave,
@@ -138,8 +129,7 @@ pub enum ClearingEvent {
 /// The named moment that clears a condition.
 ///
 /// Every kind names one. A kind that cannot name one does not belong on the
-/// bus — that rule predates this type, but until now it was prose in a doc
-/// comment and nothing could check it.
+/// bus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AllClear {
     NextSuccessOf(ClearingEvent),
@@ -252,8 +242,7 @@ impl ConditionProfile {
     /// Both rules protect the same thing: a condition that stops being shown
     /// while it is still true. `Elapsed` hides a live degradation on a timer,
     /// and `Dismiss` hides one on a click — acceptable for `Info`, which is
-    /// feedback rather than degradation, and never for `Warning` or `Error`
-    /// (D121.a, questions 6 and 7).
+    /// feedback rather than degradation, and never for `Warning` or `Error`.
     ///
     /// Every profile below is a `const`, so a violation is a compile error
     /// rather than a panic the first time that condition is raised.
@@ -296,11 +285,6 @@ impl ConditionProfile {
         }
     }
 }
-
-// One profile per kind. Each `label` and `severity` is the value the GPUI
-// frontend paints today, so Inc 2 can delete its colour match without changing
-// a pixel; each `all_clear` is the moment that variant's doc comment already
-// promised on `ConditionKind`.
 
 const SNAPSHOT_SAVE_FAILED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
@@ -680,9 +664,6 @@ const PAIRING_REIMPORTED_LOCAL_CONTENT: ConditionProfile = ConditionProfile::new
     &[],
 );
 
-/// The one condition that offers the user an action today. Its banner's Retry
-/// button is hand-wired in the GPUI layer; Inc 3 renders it from this slot and
-/// deletes that wiring.
 const PAIRING_REIMPORT_DEFERRED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Some blocks could not be re-imported",

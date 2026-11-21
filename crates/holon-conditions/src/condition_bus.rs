@@ -257,12 +257,11 @@ pub enum ConditionKind {
     },
     /// An installed sidecar for a provider this build ships enabled NOTHING,
     /// because enablement is the integration state's decision and that state
-    /// does not say `enabled`. Before the state store existed the file itself
-    /// was the switch, so this is the shape a pre-cutover setup arrives in: the
-    /// user believes the integration is on and every page it feeds is blank.
-    /// Carries the state file to write; the full content to put in it goes to
-    /// the log, which has room for it. `subject` carries the integration
-    /// name.
+    /// does not say `enabled`. A setup that treated the file itself as the
+    /// switch arrives in this shape: the user believes the integration is on
+    /// and every page it feeds is blank. Carries the state file to write; the
+    /// full content to put in it goes to the log, which has room for it.
+    /// `subject` carries the integration name.
     ///
     /// All-clear: none within a session — enablement is read once at boot. The
     /// condition ends when the state file is written and the app restarts.
@@ -299,8 +298,8 @@ pub enum ConditionKind {
         why: String,
         seed_path: Option<String>,
     },
-    /// The undo history from the previous session was discarded at boot
-    /// (D116.a): undo deliberately does NOT survive a restart, because the
+    /// The undo history from the previous session was discarded at boot:
+    /// undo deliberately does NOT survive a restart, because the
     /// CRDT's text-undo manager is rebuilt empty and a journal entry standing
     /// for typing it no longer holds could not be honoured. Cleared rather
     /// than half-kept, and disclosed rather than silently absent — a person
@@ -388,8 +387,8 @@ pub enum ConditionKind {
     /// This device was paired to an owner AFTER it had been used on its own, so
     /// the store it now shows is the owner's plus the `blocks` it wrote here,
     /// re-imported under their own ids. Informational rather than a fault, and
-    /// deliberately not a choice: the ruling (D78.d) is that content written on
-    /// this device is kept. `conflict_copies` of those blocks held an id the
+    /// deliberately not a choice: content written on this device is kept.
+    /// `conflict_copies` of those blocks held an id the
     /// owner also had, with different content, and are kept as a child of the
     /// owner's block. `archive` holds the pre-pair document and is the handle
     /// on anything the re-import could not carry. `subject` carries the
@@ -1298,9 +1297,8 @@ pub struct ConditionBus {
     /// The conditions in effect, as the sanctioned holder rather than a
     /// private `Vec`. Being a [`LiveData`] is what lets a collection widget
     /// render the set directly (the `conditions` row source) instead of every
-    /// frontend keeping its own mirror of it — which is what let a glyph and a
-    /// banner disagree. Nothing in it touches storage, so the bus is the
-    /// authority in every configuration.
+    /// frontend keeping its own mirror of it. Nothing in it touches storage, so
+    /// the bus is the authority in every configuration.
     conditions: holon_api::live_data::AuthoredLiveData<Condition>,
     /// When each condition in effect was first raised.
     ///
@@ -1310,9 +1308,8 @@ pub struct ConditionBus {
     /// opens is not the order anything happened in — so the raise order is
     /// kept here and [`subscribe`](Self::subscribe) sorts by it.
     ///
-    /// Re-raising an existing condition KEEPS its original position, matching
-    /// the in-place replacement this bus has always done: a repeated failure
-    /// must not make its toast jump the queue.
+    /// Re-raising an existing condition KEEPS its original position: a
+    /// repeated failure must not make its toast jump the queue.
     raised_at: std::sync::Mutex<HashMap<String, u64>>,
     next_raise: std::sync::atomic::AtomicU64,
     /// Format -> refused path -> reason. The `VaultIngestFailed` condition of
