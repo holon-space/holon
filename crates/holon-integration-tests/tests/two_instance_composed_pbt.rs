@@ -658,7 +658,15 @@ async fn drive_to_sync_fixpoint(
         holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
     >,
 ) {
-    for _ in 0..6 {
+    // Stop when neither side's oplog version vector moved over one full
+    // two-way round. The witnesses' pushed/imported counts cannot be the stop
+    // rule: the relay hands the same envelope over every round. Pending
+    // (dependency-blocked) imports are not exposed to the harness, so a stable
+    // but stuck pair is judged by the convergence assert that follows.
+    const ROUNDS: usize = 6;
+    let mut per_round = Vec::new();
+    for round in 1..=ROUNDS {
+        let before = (handle.oplog_vvs(true).await, handle.oplog_vvs(false).await);
         let a = two.sync_now(true).await;
         holon_integration_tests::pbt::composed::wide_e2e::converge_handle(
             handle.receiver(),
@@ -671,10 +679,21 @@ async fn drive_to_sync_fixpoint(
             PAIR_SETTLE,
         )
         .await;
-        if a.imported == 0 && b.imported == 0 && a.pushed == 0 && b.pushed == 0 {
+        let after = (handle.oplog_vvs(true).await, handle.oplog_vvs(false).await);
+        per_round.push(format!(
+            "round {round}: owner->receiver pushed {} imported {}; receiver->owner pushed {} imported {}; vv moved: {}",
+            a.pushed, a.imported, b.pushed, b.imported, before != after
+        ));
+        if before == after {
             return;
         }
     }
+    panic!(
+        "FIXPOINT-NOT-REACHED: version vectors still moved in round {ROUNDS} (write-back churn).\n  {}\n  owner vv:    {}\n  receiver vv: {}",
+        per_round.join("\n  "),
+        handle.oplog_vvs(true).await,
+        handle.oplog_vvs(false).await,
+    );
 }
 
 /// Run one generated script and return the two peers' final tree states.
@@ -686,7 +705,7 @@ type TreeState = std::collections::BTreeMap<String, holon_loro::loro_backend::Sn
 async fn run_pair_script(
     ref_state: &holon_integration_tests::pbt::reference_state::ReferenceState,
     script: &[PairStep],
-) -> (TreeState, TreeState, usize, Vec<String>) {
+) -> (TreeState, TreeState, usize, Vec<String>, String) {
     let resolver = IdResolver::default();
     let (owner_caps, receiver_caps, handle, _) =
         boot_two_instances_with_receiver_caps(&resolver, ref_state).await;
@@ -753,14 +772,71 @@ async fn run_pair_script(
 
     drive_to_sync_fixpoint(&two, &handle).await;
 
+    let vvs = format!(
+        "owner vv: {}; receiver vv: {}",
+        handle.oplog_vvs(true).await,
+        handle.oplog_vvs(false).await
+    );
     let mut projection_lag = handle.sql_projection_lag(true, &exclude).await;
     projection_lag.extend(handle.sql_projection_lag(false, &exclude).await);
-    (
-        handle.loro_tree_state(true, &exclude).await,
-        handle.loro_tree_state(false, &exclude).await,
-        writes,
-        projection_lag,
-    )
+    let owner_state = handle.loro_tree_state(true, &exclude).await;
+    let receiver_state = handle.loro_tree_state(false, &exclude).await;
+    if owner_state != receiver_state {
+        let ids: Vec<String> = owner_state
+            .keys()
+            .chain(receiver_state.keys())
+            .filter(|id| owner_state.get(*id) != receiver_state.get(*id))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        eprintln!("DIVERGENCE-EVIDENCE ids: {ids:?}");
+        eprintln!(
+            "DIVERGENCE-EVIDENCE owner vv: {}",
+            handle.oplog_vvs(true).await
+        );
+        eprintln!(
+            "DIVERGENCE-EVIDENCE receiver vv: {}",
+            handle.oplog_vvs(false).await
+        );
+        for owner in [true, false] {
+            let side = if owner { "owner" } else { "receiver" };
+            let nodes = handle.live_node_counts(owner).await;
+            for id in &ids {
+                eprintln!(
+                    "DIVERGENCE-EVIDENCE {side} live Loro nodes for {id}: {:?}",
+                    nodes.get(id)
+                );
+            }
+            for line in handle
+                .authorship_dump(owner)
+                .await
+                .iter()
+                .filter(|l| ids.iter().any(|i| l.starts_with(i.as_str())))
+            {
+                eprintln!("DIVERGENCE-EVIDENCE {side} authorship: {line}");
+            }
+            for line in handle.block_raw_rows(owner, &ids).await {
+                eprintln!("DIVERGENCE-EVIDENCE {side} {line}");
+            }
+        }
+        let a = two.sync_now(true).await;
+        let b = two.sync_now(false).await;
+        eprintln!(
+            "DIVERGENCE-EVIDENCE extra round witnesses: owner->receiver {a:?}; receiver->owner {b:?}"
+        );
+        let again_owner = handle.loro_tree_state(true, &exclude).await;
+        let again_receiver = handle.loro_tree_state(false, &exclude).await;
+        eprintln!(
+            "DIVERGENCE-EVIDENCE after one extra round each way the trees {}",
+            if again_owner == again_receiver {
+                "AGREE (late)"
+            } else {
+                "still DIFFER (missing)"
+            }
+        );
+    }
+    (owner_state, receiver_state, writes, projection_lag, vvs)
 }
 
 fn caps_two(caps: &holon_pbt_core::composition::CapMap) -> std::sync::Arc<dyn SutTwoInstance> {
@@ -772,6 +848,7 @@ fn assert_converged(
     receiver: &TreeState,
     writes: usize,
     projection_lag: &[String],
+    vvs: &str,
     label: &str,
 ) {
     // Peer-to-peer agreement is only half the claim. Both peers can hold the
@@ -811,7 +888,7 @@ fn assert_converged(
         .collect();
     panic!(
         "{label}: the two peers did NOT converge after {writes} write(s) and a sync fixed point. \
-         {} block(s) differ:\n{}",
+         Oplog version vectors: {vvs}. {} block(s) differ:\n{}",
         divergent.len(),
         divergent.join("\n")
     );
@@ -830,6 +907,7 @@ fn a_draw_that_exercised_nothing_still_judges_the_projection_lag() {
         &empty,
         0,
         &["receiver block:c2: held in Loro, ABSENT from block_raw".to_string()],
+        "",
         "every precondition unsatisfiable",
     );
 }
@@ -854,8 +932,8 @@ proptest! {
     ) {
         let rt = rt();
         let ref_state = wide_e2e_ref();
-        let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
-        assert_converged(&owner, &receiver, writes, &lag, &format!("script {script:?}"));
+        let (owner, receiver, writes, lag, vvs) = rt.block_on(run_pair_script(&ref_state, &script));
+        assert_converged(&owner, &receiver, writes, &lag, &vvs, &format!("script {script:?}"));
     }
 }
 
@@ -887,9 +965,9 @@ fn edit_on_receiver_concurrent_with_create_on_owner_converges() {
     ];
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
+    let (owner, receiver, writes, lag, vvs) = rt.block_on(run_pair_script(&ref_state, &script));
     assert!(writes == 2, "worst shape: expected 2 writes, got {writes}");
-    assert_converged(&owner, &receiver, writes, &lag, "worst shape");
+    assert_converged(&owner, &receiver, writes, &lag, &vvs, "worst shape");
 
     // Teeth: convergence on two peers that both lost the receiver's edit would
     // also be "equal". Require the phone-side text to be present on BOTH.
@@ -945,12 +1023,12 @@ fn concurrent_structural_moves_on_both_peers_converge() {
     ];
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
+    let (owner, receiver, writes, lag, vvs) = rt.block_on(run_pair_script(&ref_state, &script));
     assert!(
         writes == 4,
         "concurrent moves: expected 4 writes, got {writes}"
     );
-    assert_converged(&owner, &receiver, writes, &lag, "concurrent moves");
+    assert_converged(&owner, &receiver, writes, &lag, &vvs, "concurrent moves");
 }
 
 /// **Regression pin — the cross-peer indent+join CLASS.**
@@ -992,9 +1070,9 @@ fn cross_peer_indent_then_join_stalls_the_receiver_projection() {
     ];
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
+    let (owner, receiver, writes, lag, vvs) = rt.block_on(run_pair_script(&ref_state, &script));
     assert_eq!(writes, 2);
-    assert_converged(&owner, &receiver, writes, &lag, "indent+join");
+    assert_converged(&owner, &receiver, writes, &lag, &vvs, "indent+join");
 }
 
 /// The same class, owner-heavy: the shrunk counterexample the lane's verifier
@@ -1038,9 +1116,16 @@ fn owner_heavy_indent_then_join_stalls_the_receiver_projection() {
     ];
     let rt = rt();
     let ref_state = wide_e2e_ref();
-    let (owner, receiver, writes, lag) = rt.block_on(run_pair_script(&ref_state, &script));
+    let (owner, receiver, writes, lag, vvs) = rt.block_on(run_pair_script(&ref_state, &script));
     assert_eq!(writes, 5);
-    assert_converged(&owner, &receiver, writes, &lag, "owner-heavy indent+join");
+    assert_converged(
+        &owner,
+        &receiver,
+        writes,
+        &lag,
+        &vvs,
+        "owner-heavy indent+join",
+    );
 }
 
 /// The REVERSE leg, which the generator never draws (`SyncNow` always draws
