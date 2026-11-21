@@ -2170,7 +2170,7 @@ mod tests {
         assert_rhai_compiles(&source);
         let data: Vec<&str> = mix
             .iter()
-            .filter_map(|c| c.ok().map(|d| DATA_CONJUNCTS[d]))
+            .flat_map(|c| c.iter().map(|d| DATA_CONJUNCTS[*d]))
             .collect();
         let mut ui: Vec<Predicate> = mix
             .iter()
