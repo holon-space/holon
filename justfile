@@ -1614,6 +1614,7 @@ gate-arch:
     # Reads `cargo metadata`, so it cannot sit among the cargo-free checks.
     check select-tests-registry-data target/gate-logs/gate-arch-select-tests-registry-data.log ./scripts/test-select-tests-registry-data.py
     check select-tests-dev-edges target/gate-logs/gate-arch-select-tests-dev-edges.log ./scripts/test-select-tests-dev-edges.py
+    check light-paths-gate target/gate-logs/gate-arch-light-paths-gate.log ./scripts/test-light-paths-gate.py
     # Each case is a whole integrate run under the real build slot script: too slow for the cargo-free checks.
     check gate-integrate-tmpdir target/gate-logs/gate-arch-gate-integrate-tmpdir.log ./scripts/test-gate-integrate-tmpdir.py
     # Asks jj for the tree id, so it cannot run in the cargo-free checks' copied tree.

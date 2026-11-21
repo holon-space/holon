@@ -25,6 +25,7 @@ CHECKS = [
     ("select-tests-registry-data", "scripts/test-select-tests-registry-data.py",
      "gate-arch-select-tests-registry-data.log"),
     ("select-tests-dev-edges", "scripts/test-select-tests-dev-edges.py", "gate-arch-select-tests-dev-edges.log"),
+    ("light-paths-gate", "scripts/test-light-paths-gate.py", "gate-arch-light-paths-gate.log"),
     ("gate-integrate-tmpdir", "scripts/test-gate-integrate-tmpdir.py", "gate-arch-gate-integrate-tmpdir.log"),
     ("windowed-gate-logs", "scripts/flow-checks/test-windowed-gate-logs.py", "gate-arch-windowed-gate-logs.log"),
     ("windowed-gate-unit-logs", "scripts/test-windowed-gate-unit-logs.py", "gate-arch-windowed-gate-unit-logs.log"),
