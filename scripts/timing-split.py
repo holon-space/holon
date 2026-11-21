@@ -11,12 +11,12 @@ nextest's JUnit output, and checks the latency rung's coverage of the budgeted
 transition-kind alphabet.
 
   timing-split.py generate            # rewrite the generated nextest blocks
-  timing-split.py check               # gate: generated blocks, caps, rows
+  timing-split.py check               # gate: generated blocks, caps, rows; reads the tree only
   timing-split.py record <junit.xml> <load_start> <load_max>   # -> the ledger
   timing-split.py seed <results.csv>  # an A/B run's per-test seconds -> the ledger
   timing-split.py resolve             # ask nextest what each filter selects
   timing-split.py coverage <log...>   # the latency rung's kind coverage
-  timing-split.py p95 <test>          # what the ledger says about one test
+  timing-split.py p95 [<test>]        # what the ledger says about one capped test, or all; advice only
 
 nextest has no reusable named filter set, so the timing filter string appears in
 three places (the test group, `[profile.timing]`, `[profile.load-tolerant]`).
@@ -289,6 +289,14 @@ def profile_filter():
 # ── the cap rule ─────────────────────────────────────────────────────
 
 
+MAX_TEST_SECONDS = 7 * 24 * 3600
+
+
+def is_duration(x):
+    """The one range every seconds value must be in; nan and inf fail the comparison."""
+    return 0 <= x <= MAX_TEST_SECONDS
+
+
 def cap_for(p95_low_s):
     lo, hi = CAP_FLOOR_S, CAP_CEILING_MULTIPLE * p95_low_s
     return max(lo, min(math.ceil(K * p95_low_s), hi))
@@ -423,8 +431,9 @@ def cmd_record(junit_path, load_start, load_max):
                 if "error" in tag or "failure" in tag:
                     msg = (child.get("message") or "") + (child.text or "")
                     verdict = "timeout" if "timeout" in msg.lower() else "red"
-            fh.write("\t".join([today, commit, name, f"{float(secs):.3f}",
-                                f"{load_start:.2f}", f"{load_max:.2f}",
+            fh.write("\t".join([today, commit, name, f"{finite(secs, 'time'):.3f}",
+                                f"{finite(load_start, 'load_start'):.2f}",
+                                f"{finite(load_max, 'load_max'):.2f}",
                                 verdict]) + "\n")
             n += 1
     print(f"timing-split: recorded {n} test durations to {LEDGER} at load "
@@ -432,6 +441,13 @@ def cmd_record(junit_path, load_start, load_max):
           + (f" (above the {QUIET_LOAD:.0f} quiet bar, so they feed no p95_low)"
              if max(load_start, load_max) >= QUIET_LOAD else ""))
     return 0
+
+
+def finite(text, what):
+    value = float(text)
+    if not is_duration(value):
+        die(f"{what} is {text!r}, not a usable number; it would poison the ledger")
+    return value
 
 
 def cmd_seed(csv_path):
@@ -467,9 +483,9 @@ def cmd_seed(csv_path):
                 datetime.date.today().isoformat(),
                 f"ab44-{row['pass']}-{row['leg']}",
                 row["test"],
-                f"{float(row['secs']):.3f}",
-                f"{float(row['load_start']):.2f}",
-                f"{float(row['load_end']):.2f}",
+                f"{finite(row['secs'], 'secs'):.3f}",
+                f"{finite(row['load_start'], 'load_start'):.2f}",
+                f"{finite(row['load_end'], 'load_end'):.2f}",
                 verdict,
             ])
             if line in seen:
@@ -590,31 +606,44 @@ def cmd_resolve(cargo_args):
 
 
 def ledger_rows():
+    """(rows inside the window, problems to disclose). A missing ledger is the fresh state, not a problem."""
+    if not LEDGER.exists() and not LEDGER.is_symlink():
+        return [], []
     if not LEDGER.is_file():
-        return []
+        return [], [f"{LEDGER} is not a file"]
+    try:
+        text = LEDGER.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        return [], [f"{LEDGER} is unreadable: {e}"]
     cutoff = (datetime.date.today()
               - datetime.timedelta(days=LEDGER_WINDOW_DAYS)).isoformat()
-    out = []
-    for line in LEDGER.read_text().splitlines():
+    out, dropped = [], 0
+    for line in text.splitlines():
         parts = line.split("\t")
-        if len(parts) != 7 or parts[0] < cutoff:
-            continue
-        date, commit, test, secs, lo, hi, verdict = parts
         try:
-            out.append((date, test, float(secs), float(lo), float(hi), verdict))
+            if len(parts) != 7:
+                raise ValueError(line)
+            date, commit, test, secs, lo, hi, verdict = parts
+            row = (date, test, float(secs), float(lo), float(hi), verdict)
+            if not all(map(is_duration, row[2:5])):
+                raise ValueError(line)
         except ValueError:
+            dropped += 1
             continue
-    return out
+        if date >= cutoff:
+            out.append(row)
+    problems = [f"{LEDGER}: dropped {dropped} malformed row(s)"] if dropped else []
+    return out, problems
 
 
-def p95_low(test):
-    """The p95 over COMPLETED quiet runs, or None when the test has no p95.
+def p95_low(test, rows):
+    """The p95 over COMPLETED quiet runs of `rows`, or None when the test has no p95.
 
     A test that only ever timed out has no p95 — a censored measurement buys no
     headroom. So does one with too few runs to percentile.
     """
     secs = sorted(
-        s for _, t, s, lo, hi, v in ledger_rows()
+        s for _, t, s, lo, hi, v in rows
         if t == test and v != "timeout" and max(lo, hi) < QUIET_LOAD
     )
     if len(secs) < MIN_RUNS_FOR_P95:
@@ -623,13 +652,23 @@ def p95_low(test):
 
 
 def cmd_p95(test):
-    p = p95_low(test)
-    if p is None:
-        print(f"{test}: NO p95 — fewer than {MIN_RUNS_FOR_P95} completed quiet "
-              f"runs in the last {LEDGER_WINDOW_DAYS} days, so no cap raise")
-        return 0
-    print(f"{test}: p95_low {p:.1f}s -> cap {cap_for(p)}s "
-          f"(K={K}, clamp {CAP_FLOOR_S}s..{CAP_CEILING_MULTIPLE}x)")
+    """Report what the ledger says, for one test or for every capped test. Never fails."""
+    caps = {t: cap for t, _p, cap, _e in cap_rows()}
+    rows, problems = ledger_rows()
+    for problem in problems:
+        print(f"timing-split: ledger problem: {problem}", file=sys.stderr)
+    for name in [test] if test else caps:
+        p = p95_low(name, rows)
+        if p is None:
+            print(f"{name}: NO p95 — fewer than {MIN_RUNS_FOR_P95} completed quiet "
+                  f"runs in the last {LEDGER_WINDOW_DAYS} days, so no cap raise")
+            continue
+        print(f"{name}: p95_low {p:.1f}s -> cap {cap_for(p)}s "
+              f"(K={K}, clamp {CAP_FLOOR_S}s..{CAP_CEILING_MULTIPLE}x)")
+        if name in caps and not in_clamp(caps[name], p):
+            print(f"  its cap {caps[name]:.0f}s has left the clamp; re-derive it as "
+                  f"{cap_for(p)}s. A cap must not creep, and a test that got faster "
+                  "gives its headroom back.")
     return 0
 
 
@@ -953,26 +992,15 @@ def cmd_check():
         else:
             print(f"ok: {files} machinery file(s) of {len(rows)} gate-owned row(s) each select a lane-run recipe")
 
-    # Caps: within the clamp, and consistent with what the ledger now says.
+    # Caps: within the clamp of their cited p95_low. The ledger only advises (`p95`).
     for test, p95, cap, _ in cap_rows():
         if not in_clamp(cap, p95):
             print(f"FAIL: {test} cap {cap:.0f}s is outside the clamp "
                   f"[{CAP_FLOOR_S}s, {CAP_CEILING_MULTIPLE}x{p95:.0f}s]")
             fail = 1
-        measured = p95_low(test)
-        if measured is None:
-            print(f"ok (no fresh ledger data): {test} keeps its cited "
-                  f"p95_low {p95:.0f}s")
-            continue
-        if not in_clamp(cap, measured):
-            print(f"FAIL: {test} now measures p95_low {measured:.1f}s, and its "
-                  f"cap {cap:.0f}s has left the clamp. Re-derive it: "
-                  f"cap = {cap_for(measured)}s. A cap must not creep, and a test "
-                  "that got faster gives its headroom back.")
-            fail = 1
-            continue
-        print(f"ok: {test} cap {cap:.0f}s, ledger p95_low {measured:.1f}s "
-              f"(cited {p95:.0f}s), within {CAP_CEILING_MULTIPLE}x")
+        else:
+            print(f"ok: {test} cap {cap:.0f}s, cited p95_low {p95:.0f}s, "
+                  f"within {CAP_CEILING_MULTIPLE}x")
 
     print()
     if fail:
@@ -1177,9 +1205,9 @@ def main(argv):
     if cmd == "assertions":
         return cmd_assertions(update="--update" in args)
     if cmd == "p95":
-        if len(args) != 1:
-            die("p95 takes one test name")
-        return cmd_p95(args[0])
+        if len(args) > 1:
+            die("p95 takes at most one test name")
+        return cmd_p95(args[0] if args else None)
     print(__doc__)
     return 2
 
