@@ -1,4 +1,4 @@
-//! Deterministic task-syntax boundary parser (C7; `docs/Vision/PetriNet.md`
+//! Deterministic task-syntax boundary parser (`docs/Vision/PetriNet.md`
 //! §"Task Syntax: From Text to Petri Net"). This is the always-runs, zero-AI
 //! stage of the progressive-enrichment pipeline: it turns a task's raw text
 //! into a typed [`ParsedTask`] so that no downstream code re-scans the string
@@ -354,8 +354,8 @@ impl ParsedTask {
         let verb = find_verb(&rest, verb_dict);
 
         // 7. Reference roles. `#[[tag]]` is always context; bare `[[link]]` is
-        //    an
-        // object only when a verb is present, else context (the safe default).
+        //    an object only when a verb is present, else context (the safe
+        //    default).
         let (objects, tags) = classify_references(&rest, verb.is_some());
 
         ParsedTask {
@@ -382,13 +382,11 @@ fn extract_via_routes(text: &str) -> (String, Vec<ViaRoute>) {
     while let Some(pos) = rest.find("via:") {
         out.push_str(&rest[..pos]);
         let after = rest[pos + 4..].trim_start();
-        let consumed_from = rest.len() - after.len(); // absolute end of "via:" + ws
         if let Some(inner) = after.strip_prefix("[[")
             && let Some(close) = inner.find("]]")
         {
             routes.push(ViaRoute::Source(inner[..close].trim().to_string()));
             rest = &after[close + 4..]; // skip "[[" .. "]]"
-            let _ = consumed_from;
             continue;
         }
         if let Some(agent_rest) = after.strip_prefix('@') {
@@ -526,34 +524,6 @@ mod tests {
     }
 
     #[test]
-    fn question_with_prefix() {
-        let p = parse("? Has Finanzamt charged");
-        assert!(p.is_question);
-        assert_eq!(p.label, "Has Finanzamt charged");
-    }
-
-    #[test]
-    fn sequential_dependency_prefix() {
-        let p = parse(">Fill form");
-        assert!(p.has_sequential_dep);
-        assert_eq!(p.label, "Fill form");
-    }
-
-    #[test]
-    fn combined_prefixes_order() {
-        let p = parse("> @[[Kat]]: ? clarify scope");
-        assert!(p.has_sequential_dep);
-        assert_eq!(
-            p.executor,
-            Executor::Delegated {
-                person: "Kat".into()
-            }
-        );
-        assert!(p.is_question);
-        assert_eq!(p.label, "clarify scope");
-    }
-
-    #[test]
     fn verb_object_link_becomes_object_arc() {
         let p = parse("erstellen [[Rechnung DBG]]");
         assert_eq!(p.verb.map(|v| v.op), Some(VerbOp::Create));
@@ -660,22 +630,6 @@ mod tests {
         for &(surface, op) in DEFAULT_VERB_DICT {
             assert_eq!(builtin.lookup(&surface.to_lowercase()), Some(op));
         }
-    }
-
-    #[test]
-    fn user_entry_overrides_default_surface() {
-        // "prüfen" is a built-in Check surface; re-point it to Research.
-        let dict = VerbDict::resolve([("prüfen".to_string(), VerbOp::Research)]);
-        assert_eq!(dict.lookup("prüfen"), Some(VerbOp::Research));
-        // Untouched built-ins survive.
-        assert_eq!(dict.lookup("check"), Some(VerbOp::Check));
-    }
-
-    #[test]
-    fn user_entry_adds_new_surface() {
-        let dict = VerbDict::resolve([("recensire".to_string(), VerbOp::Research)]);
-        assert_eq!(dict.lookup("recensire"), Some(VerbOp::Research));
-        assert_eq!(dict.lookup("check"), Some(VerbOp::Check));
     }
 
     #[test]

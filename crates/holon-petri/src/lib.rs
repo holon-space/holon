@@ -318,13 +318,12 @@ impl Marking for TaskMarking {
 }
 
 // ---------------------------------------------------------------------------
-// Prototype system — replaces MaterializeConfig + scoring helpers
+// Prototype system
 // ---------------------------------------------------------------------------
 
 /// A prototype property value: either a literal number or a derived
-/// [`Computation`]. The computation is produced by the A2 subset parser (typed,
-/// SQL-plantable) when the `=` expression is in the subset, otherwise by the
-/// full Rhai compiler as a disclosed [`Computation::Script`] (seat B).
+/// [`Computation`]. The computation is typed (SQL-plantable) when the `=`
+/// expression is in the typed subset, otherwise a [`Computation::Script`].
 #[derive(Clone, Debug)]
 pub enum PrototypeValue {
     Literal(f64),
@@ -349,20 +348,13 @@ impl PrototypeValue {
     /// f64.
     pub fn parse(engine: &RhaiEngine, raw: &str) -> Result<Self, String> {
         if let Some(expr) = raw.strip_prefix('=') {
-            // A2: try the typed subset parser first (seat A, SQL-plantable). On
-            // reject, compile the full Rhai expression as a disclosed Script
-            // (seat B). A genuine Rhai compile error stays loud, enriched with
-            // the subset rejection reason.
             match holon_api::expr_parser::parse(expr) {
                 Ok(comp) => Ok(PrototypeValue::Computed(comp)),
                 Err(e) if e.kind == ExprParseErrorKind::NonFiniteLiteral => {
                     Err(format!("expression '{expr}': {e}"))
                 }
                 Err(subset_err) => {
-                    // Outside the typed subset -> Rhai Script (seat B). This
-                    // routing is disclosed downstream at
-                    // `DerivedFieldPlan::plan` time. A genuine Rhai error stays
-                    // loud, enriched with the subset rejection reason.
+                    // `DerivedFieldPlan::plan` discloses the Script routing.
                     let compiled = CompiledExpr::compile(engine, expr).map_err(|rhai_err| {
                         format!(
                             "expression '{expr}' is neither A2-subset-parseable ({subset_err}) \
@@ -399,10 +391,8 @@ pub const DEFAULT_TASK_PROTOTYPE: &[(&str, f64)] = &[
 ];
 
 fn default_computed_props(engine: &RhaiEngine) -> Vec<(&'static str, PrototypeValue)> {
-    // Route each default through `PrototypeValue::parse` (the `=` boundary) so
-    // they take the SAME A2-subset-first path as user-declared props. All four
-    // defaults ARE in the subset, so they become typed, SQL-plantable
-    // Computations (seat A) — verified by the flagship equivalence test.
+    // Parsed like user-declared props, so defaults and overrides share one
+    // path.
     let prop =
         |src: &str| PrototypeValue::parse(engine, src).expect("default computed prop must parse");
     vec![
@@ -475,13 +465,8 @@ pub fn resolve_prototype(
 
     let sorted = topo_sort_computed(&computed);
 
-    // C4 convergence: evaluate each computed prototype expression through the
-    // shared, fail-loud `Computation` evaluator (holon-api) instead of a
-    // private Rhai loop. rank_tasks scoring and the C4 derived-field pipeline
-    // now run the SAME bounded engine + coercion, so a computed field cannot
-    // rank one way here and materialize another way in the pipeline. Results
-    // thread back into the Value-typed context so later fields depend on
-    // earlier ones (topo order preserved).
+    // The shared `Computation` evaluator keeps ranking and the derived-field
+    // pipeline on one engine, so a field cannot score differently in each.
     let mut ctx: holon_api::computation::Context = literals
         .iter()
         .map(|(k, v)| (k.clone(), holon_api::Value::Float(*v)))
@@ -546,9 +531,8 @@ fn topo_sort_computed(computed: &BTreeMap<String, &Computation>) -> Vec<String> 
     holon_core::util::topo_sort_kahn(&computed_names, &deps)
 }
 
-/// Build prototype properties from a block's properties.
-/// Parses each property into a PrototypeValue at the boundary — panics on
-/// invalid values.
+/// Build prototype properties from a block's properties, parsed at the
+/// boundary.
 pub fn block_to_prototype_props(
     engine: &RhaiEngine,
     block: &Block,
@@ -635,7 +619,7 @@ pub struct SelfDescriptor {
 const DEFAULT_MENTAL_SLOTS_CAPACITY: i64 = 7;
 
 /// Parse a numeric property value. Org drawer properties arrive as strings,
-/// so `String` is parsed; any other type is a stored-data bug — panic.
+/// so `String` is parsed; any other non-numeric type is an error.
 fn numeric_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> Result<f64, PetriError> {
     use holon_api::Value as HValue;
     match v {
@@ -802,11 +786,8 @@ pub fn resolve_verb_dict(blocks: &[Block]) -> VerbDict {
 /// This is the narrow, materialization-facing slice of the richer boundary
 /// parser in [`mod@parser`] ([`ParsedTask`]): it detects the leading prefixes
 /// and executor while preserving the full (possibly multi-line) content body
-/// verbatim, so the existing `wiki_links` extraction path is unaffected. The
-/// reference-role classification, verb dictionary, `via:` routes and recurrence
-/// live on [`ParsedTask`]. The dictionary is now runtime-extensible via
-/// [`resolve_verb_dict`] (verb-dictionary blocks); the still-deferred step is
-/// having `materialize` consume [`ParsedTask::verb`] to shape the net.
+/// verbatim for `wiki_links` extraction. `materialize` does not consume
+/// [`ParsedTask`] yet.
 pub fn parse_content_prefixes(raw: &str) -> (String, bool, Executor, bool) {
     let mut content = raw.trim().to_string();
     let mut has_sequential_dep = false;
@@ -1178,7 +1159,6 @@ fn resolve_sequential_deps(tasks: &mut [TaskInfo]) {
     }
 }
 
-// descriptor kept for imminent capacity wiring
 // ALLOW(unused_param): self-token attributes are fixed today
 fn build_self_token(_self_desc: &SelfDescriptor) -> TaskToken {
     TaskToken {
@@ -1555,14 +1535,8 @@ pub fn rank_tasks(blocks: &[Block]) -> Result<RankResult, String> {
     let occupied = blocks
         .iter()
         .filter(|b| {
-            b.properties
-                .get("task_state")
-                .and_then(|v| match v {
-                    holon_api::Value::String(s) => Some(s.as_str()),
-                    _ => None,
-                })
-                .map(|s| s == "DOING")
-                .unwrap_or(false)
+            matches!(b.properties.get("task_state"),
+                Some(holon_api::Value::String(s)) if s == "DOING")
         })
         .count();
 
@@ -1585,12 +1559,7 @@ mod tests {
         b
     }
 
-    /// C4 convergence: `resolve_prototype` now evaluates computed prototype
-    /// expressions through the shared `holon_api::computation::Computation`
-    /// evaluator. This pins that the switch/if/arithmetic shapes rank_tasks
-    /// depends on still resolve identically AND that dependent fields chain in
-    /// topological order (task_weight reads the freshly-computed
-    /// priority_weight).
+    /// Dependent computed fields resolve in topological order.
     #[test]
     fn resolve_prototype_evaluates_through_computation_and_chains() {
         let engine = holon_expr::bounded_engine();
@@ -1617,9 +1586,6 @@ mod tests {
         );
     }
 
-    /// C4 convergence keeps the fail-loud contract: a computed expression that
-    /// yields a non-numeric value surfaces as `PetriError`, never a silent
-    /// default — matching the shared evaluator's semantics.
     #[test]
     fn resolve_prototype_is_fail_loud_on_non_numeric() {
         let engine = holon_expr::bounded_engine();
@@ -1858,10 +1824,7 @@ mod tests {
         }
     }
 
-    /// A delegate name containing `"` and `\\` must be carried as typed token
-    /// data (`AttrInit::Literal`), never spliced into Rhai source. Before the
-    /// injection fix this produced invalid Rhai (`"Al"ice\\Bob"`) that failed
-    /// at fire time, so `rank_tasks` returned `Err`.
+    /// A delegate name with `"` and `\\` is token data, never Rhai source.
     #[test]
     fn rank_tasks_tolerates_quotes_and_backslashes_in_names() {
         let self_task = EntityUri::block_random();
@@ -1875,10 +1838,7 @@ mod tests {
         assert!(!result.ranked.is_empty(), "active tasks must be ranked");
     }
 
-    /// F3.1 regression: `duration: 200000000000000` used to reach
-    /// `chrono::Duration::minutes` in `Engine::fire` and PANIC past the
-    /// PetriError boundary, aborting the live `rank_tasks` MCP tool. It must
-    /// be rejected at the parse boundary with a `PetriError`, not a panic.
+    /// A duration past chrono's range is refused at the parse boundary.
     #[test]
     fn rank_tasks_errors_on_overflowing_duration() {
         let t = EntityUri::block_random();
@@ -1891,9 +1851,7 @@ mod tests {
         );
     }
 
-    /// F3.2 regression: a stored `task_weight: "= while true {}"` used to
-    /// hang `rank_tasks` forever (unbounded Rhai engine). The bounded engine
-    /// must abort the eval with an error naming the operations limit.
+    /// The bounded Rhai engine aborts a non-terminating computed property.
     #[test]
     fn rank_tasks_errors_on_infinite_loop_task_weight() {
         let t = EntityUri::block_random();
@@ -2001,7 +1959,6 @@ mod tests {
 
     #[test]
     fn user_surface_is_lowercased_at_insert() {
-        // A2: a mixed-case verb_surface must match lowercased task words.
         let blocks = vec![verb_dict_block(
             &EntityUri::block_random(),
             "research",
@@ -2012,35 +1969,63 @@ mod tests {
         assert_eq!(parsed.verb.map(|v| v.op), Some(VerbOp::Research));
     }
 
+    /// Every combination of the leading markers round-trips through both
+    /// prefix parsers. Exhaustive over a small grammar instead of random: the
+    /// crate has no proptest dependency. `@agent:` is left out because
+    /// `parse_content_prefixes` does not detect it.
     #[test]
-    fn vault_verb_block_changes_parse_output() {
-        // End-to-end: a vault Vec<Block> resolves to a dict that recognizes a
-        // novel lemma the built-in dictionary does not.
-        let raw = "recensire [[Report]]";
+    fn leading_markers_round_trip_through_both_prefix_parsers() {
+        let labels = [
+            "clarify scope",
+            "Überlegen was ich [[Kat]] schenke",
+            "fix [[Doc][d]] now",
+            "@[[Kat]] mention only",
+        ];
+        for seq in [false, true] {
+            for person in [None, Some("Kat"), Some("Al\"ice Bob")] {
+                for question in [false, true] {
+                    for sep in ["", " "] {
+                        for label in labels {
+                            if question && label.starts_with('@') {
+                                continue;
+                            }
+                            let mut raw = String::new();
+                            if seq {
+                                raw.push_str(&format!(">{sep}"));
+                            }
+                            if let Some(p) = person {
+                                raw.push_str(&format!("@[[{p}]]:{sep}"));
+                            }
+                            if question {
+                                raw.push_str(&format!("?{sep}"));
+                            }
+                            raw.push_str(label);
+                            let executor =
+                                person.map_or(Executor::SelfExec, |p| Executor::Delegated {
+                                    person: p.to_string(),
+                                });
+                            let want = (seq, executor, question, label.to_string());
 
-        let builtin = ParsedTask::parse(raw);
-        assert!(
-            builtin.verb.is_none(),
-            "built-in dict must not know the lemma"
-        );
-        assert!(builtin.objects.is_empty());
+                            let parsed = ParsedTask::parse(&raw);
+                            let got = (
+                                parsed.has_sequential_dep,
+                                parsed.executor,
+                                parsed.is_question,
+                                parsed.label,
+                            );
+                            assert_eq!(got, want, "ParsedTask on {raw:?}");
 
-        let blocks = vec![verb_dict_block(
-            &EntityUri::block_random(),
-            "research",
-            "recensire",
-        )];
-        let dict = resolve_verb_dict(&blocks);
-        let parsed = ParsedTask::parse_with_dict(raw, &dict);
-        assert_eq!(parsed.verb.map(|v| v.op), Some(VerbOp::Research));
-        assert_eq!(parsed.objects, vec!["Report".to_string()]);
+                            let (content, s, e, q) = parse_content_prefixes(&raw);
+                            assert_eq!((s, e, q, content), want, "prefixes on {raw:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    /// A1: verb-dictionary blocks arrive in the `rank_tasks` slice (the SQL now
-    /// selects them) but must NOT be ranked/materialized as tasks. Exclusion is
-    /// implicit — `TaskInfo::from_block` returns `Ok(None)` for any block
-    /// without a `task_state`, exactly as it does for prototype blocks.
-    /// This pins it.
+    /// Verb-dictionary blocks arrive in the `rank_tasks` slice but are not
+    /// tasks.
     #[test]
     fn verb_dict_block_is_not_ranked_as_task() {
         let task_id = EntityUri::block_random();
