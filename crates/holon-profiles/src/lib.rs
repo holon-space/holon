@@ -84,9 +84,8 @@ const UI_STATE_VARIABLES: &[&str] = &[
     "available_height_px",
     "available_width_physical_px",
     "available_height_physical_px",
-    // Global viewport default: emitted by UiState::context_for when no //
-    // ALLOW(fallback): comment describes default-context emission refinement
-    // has reached this block.
+    // Global viewport: emitted by `UiState::context_for` for a block that no
+    // container-query refinement has reached.
     "viewport_width_px",
     "viewport_height_px",
     "viewport_width_physical_px",
@@ -198,9 +197,9 @@ impl LiveEntitySpec {
 }
 
 // ---------------------------------------------------------------------------
-// Core types — moved to holon-api (storage de-leak Stage 10); re-exported so
-// `holon::entity_profile::*` paths keep working. holon keeps the profile
-// *sources*: YAML/org parsing below and the LiveData-backed ProfileResolver.
+// Core types live in holon-api and are re-exported here. This crate holds the
+// profile sources: YAML/org parsing below and the LiveData-backed
+// ProfileResolver.
 // ---------------------------------------------------------------------------
 
 pub use holon_api::ComputedTier;
@@ -375,8 +374,8 @@ impl ParsedProfile {
 /// Build a render profile for a VALUE-shaped row — a row that carries no
 /// entity-shaped `id`, so there is no entity to resolve a profile by.
 ///
-/// Value rows are a LEGITIMATE display case (Martin ruling 2026-07-11), not an
-/// error and not "degraded": they arise from aggregate queries
+/// Value rows are a LEGITIMATE display case, not an error and not "degraded":
+/// they arise from aggregate queries
 /// (`SELECT date('now') AS name`), rule-trigger results, and future table
 /// rows. They render as a plain value row — their columns, shown directly —
 /// with no warning marker. Loudness is reserved for a genuine CONTRACT
@@ -408,7 +407,7 @@ fn value_row_profile(row: &HashMap<String, Value>) -> RenderProfile {
     }
 }
 
-/// Compact one-line display of a cell value for the degraded-row marker.
+/// Compact one-line display of a cell value in a value row.
 fn value_display(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -648,19 +647,8 @@ fn has_non_ui_references(conjunct: &str) -> bool {
     let mut i = 0;
     let bytes = conjunct.as_bytes();
     while i < bytes.len() {
-        // Skip quoted strings
         if bytes[i] == b'"' || bytes[i] == b'\'' {
-            let quote = bytes[i];
-            i += 1;
-            while i < bytes.len() && bytes[i] != quote {
-                if bytes[i] == b'\\' {
-                    i += 1; // skip escaped char
-                }
-                i += 1;
-            }
-            if i < bytes.len() {
-                i += 1; // skip closing quote
-            }
+            i = skip_quoted(bytes, i);
             continue;
         }
         if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
@@ -683,6 +671,20 @@ fn has_non_ui_references(conjunct: &str) -> bool {
         }
     }
     false
+}
+
+/// Index after the `"` or `'` literal starting at `i`, or the end of `bytes`
+/// when it is unterminated; `\\` escapes the next byte.
+fn skip_quoted(bytes: &[u8], i: usize) -> usize {
+    let quote = bytes[i];
+    let mut i = i + 1;
+    while i < bytes.len() && bytes[i] != quote {
+        if bytes[i] == b'\\' {
+            i += 1;
+        }
+        i += 1;
+    }
+    (i + 1).min(bytes.len())
 }
 
 /// Parse a simple conjunct into a Predicate.
@@ -749,17 +751,7 @@ fn find_comparison_operator(s: &str) -> Option<(&'static str, usize)> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'"' || bytes[i] == b'\'' {
-            let quote = bytes[i];
-            i += 1;
-            while i < bytes.len() && bytes[i] != quote {
-                if bytes[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            if i < bytes.len() {
-                i += 1;
-            }
+            i = skip_quoted(bytes, i);
             continue;
         }
         for op in ["==", "!=", "<=", ">=", "<", ">"] {
@@ -929,10 +921,7 @@ pub fn profile_from_type_def(
     //
     // NOTE: `#[edge_field]` columns (e.g. block `tags`/`requires`) are marked
     // skip-serialization by the Entity derive, so they are NOT in `fields` and
-    // are therefore currently classified as optional (silent). This is a known
-    // v1 narrowing (see BugFunnel). The persistent columns present here
-    // (e.g. `source_language`, `content_type`) already surface the real
-    // projection gaps observed at boot.
+    // are classified as optional (silent).
     let declared_columns: BTreeSet<String> = type_def
         .persistent_fields()
         .iter()
@@ -956,67 +945,50 @@ pub fn profile_from_type_def(
 // Computed field parsing + topo-sort
 // ---------------------------------------------------------------------------
 
-struct RawComputedField {
-    name: String,
-    source: String,
-}
-
 fn parse_and_sort_computed_fields(
     engine: &RhaiEngine,
     raw: &BTreeMap<String, String>,
 ) -> Result<Vec<CompiledComputedField>> {
-    let mut fields = Vec::new();
+    let mut sources = BTreeMap::new();
+    let mut compiled = HashMap::new();
     for (name, value) in raw {
         let source = strip_rhai_prefix(value);
-        let compiled = CompiledExpr::compile(engine, &source)
+        let expr = CompiledExpr::compile(engine, &source)
             .map_err(|e| anyhow::anyhow!("Failed to compile computed field '{name}': {e}"))?;
-        fields.push((
-            RawComputedField {
-                name: name.clone(),
-                source,
-            },
-            compiled,
-        ));
+        sources.insert(name.as_str(), source);
+        compiled.insert(name.as_str(), expr);
     }
-    Ok(topo_sort_computed_fields(fields))
-}
-
-fn topo_sort_computed_fields(
-    fields: Vec<(RawComputedField, CompiledExpr)>,
-) -> Vec<CompiledComputedField> {
-    if fields.is_empty() {
-        return vec![];
-    }
-
-    let names: HashSet<&str> = fields.iter().map(|(f, _)| f.name.as_str()).collect();
-    let mut deps: HashMap<&str, Vec<&str>> = HashMap::new();
-
-    for (field, _) in &fields {
-        let mut field_deps = Vec::new();
-        for other in &names {
-            if *other != field.name.as_str()
-                && holon_core::util::expr_references(&field.source, other)
-            {
-                field_deps.push(*other);
-            }
-        }
-        deps.insert(field.name.as_str(), field_deps);
-    }
-
-    let order = holon_core::util::topo_sort_kahn(&names, &deps);
-
-    let mut field_map: HashMap<String, (RawComputedField, CompiledExpr)> = fields
-        .into_iter()
-        .map(|(f, c)| (f.name.clone(), (f, c)))
-        .collect();
-
-    order
+    let order = computed_dependency_order(sources.iter().map(|(n, s)| (*n, s.as_str())));
+    Ok(order
         .into_iter()
         .map(|name| {
-            let (_raw, compiled) = field_map.remove(&name).unwrap();
-            CompiledComputedField::script(name, compiled)
+            let expr = compiled
+                .remove(name.as_str())
+                .expect("the order holds exactly the compiled names");
+            CompiledComputedField::script(name, expr)
         })
-        .collect()
+        .collect())
+}
+
+/// The names of the computed fields `(name, source)`, ordered so that each
+/// comes after every field its source references.
+fn computed_dependency_order<'a>(
+    fields: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<String> {
+    let fields: Vec<(&str, &str)> = fields.into_iter().collect();
+    let names: HashSet<&str> = fields.iter().map(|(name, _)| *name).collect();
+    let deps: HashMap<&str, Vec<&str>> = fields
+        .iter()
+        .map(|(name, source)| {
+            let referenced = names
+                .iter()
+                .copied()
+                .filter(|other| other != name && holon_core::util::expr_references(source, other))
+                .collect();
+            (*name, referenced)
+        })
+        .collect();
+    holon_core::util::topo_sort_kahn(&names, &deps)
 }
 
 // ---------------------------------------------------------------------------
@@ -1346,7 +1318,7 @@ impl ProfileResolver {
                 .await;
         });
 
-        let rhai_engine = Arc::new(Self::build_rhai_engine(&live_entities));
+        let rhai_engine = Arc::new(build_lookup_engine(&live_entities));
 
         ProfileResolver {
             source,
@@ -1356,11 +1328,6 @@ impl ProfileResolver {
             live_entities: std::sync::RwLock::new(live_entities),
             computed_disclosure: ComputedFieldDisclosure::new(conditions),
         }
-    }
-
-    /// Build a Rhai engine with entity lookup functions pre-registered.
-    fn build_rhai_engine(live_entities: &LiveEntities) -> RhaiEngine {
-        build_lookup_engine(live_entities)
     }
 
     /// The entity collections the lookups currently read.
@@ -1378,7 +1345,7 @@ impl ProfileResolver {
             entities.len(),
             entities.keys().map(|k| k.as_str()).collect::<Vec<_>>()
         );
-        let new_engine = Arc::new(Self::build_rhai_engine(&entities));
+        let new_engine = Arc::new(build_lookup_engine(&entities));
         *self.rhai_engine.write().unwrap() = new_engine;
         *self.live_entities.write().unwrap() = entities;
     }
@@ -1409,6 +1376,52 @@ impl ProfileResolver {
             .get(&EntityName::new(entity_name))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The row's entity id and the profile it resolves against, or, when there
+    /// is none, the render profile the row gets without variant resolution.
+    fn entity_profile_of(
+        &self,
+        row: &HashMap<String, holon_api::Value>,
+    ) -> std::result::Result<(holon_api::EntityUri, EntityProfile), Arc<RenderProfile>> {
+        // A row without an entity `id` (an aggregate or rule-trigger result)
+        // is a legal value row, so it is logged at debug, not warn.
+        let entity_uri = match row_id(row) {
+            Ok(uri) => uri,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "profile resolver: value-shaped row (no entity `id`) — rendering as a \
+                     plain value row (aggregate / rule-trigger result); entity resolution \
+                     not attempted"
+                );
+                return Err(Arc::new(value_row_profile(row)));
+            }
+        };
+        let entity_name_str = entity_uri.scheme();
+        match self
+            .cache_signal
+            .get_cloned()
+            .get(&EntityName::new(entity_name_str))
+        {
+            Some(profile) => Ok((entity_uri, profile.clone())),
+            None => {
+                tracing::trace!(
+                    "No profile registered for entity '{entity_name_str}' — using default",
+                );
+                Err(Arc::new(RenderProfile {
+                    name: "default".to_string(),
+                    render: holon_api::RenderExpr::Literal {
+                        value: holon_api::Value::String("".to_string()),
+                    },
+                    // An entity with no render profile can still have
+                    // operations (`navigation` is dispatched, never drawn), and
+                    // `ops_of` and the action bar must see them.
+                    operations: self.lookup_operations(entity_name_str),
+                    variants: vec![],
+                }))
+            }
+        }
     }
 
     /// Combine a StoredProfile with entity operations to produce a
@@ -1456,8 +1469,7 @@ impl ProfileResolver {
     ) -> ProfileCache {
         let mut profiles = HashMap::new();
 
-        // Seed with type-defined profiles (baseline layer) // ALLOW(fallback):
-        // describes profile layering, not error swallowing
+        // Seed with the type-defined profiles: the baseline layer.
         for profile in type_profiles {
             let name = profile.entity_name.clone();
             profiles.insert(name, profile.clone());
@@ -1554,60 +1566,11 @@ impl ProfileResolving for ProfileResolver {
         &self,
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
-        let cache = self.cache_signal.get_cloned();
-
-        // A row either carries an entity-shaped `id` or it does not — BOTH are
-        // representable, legal inputs. Id-less rows arise legitimately from
-        // rule-trigger / aggregate queries (e.g. `SELECT date('now') AS name`,
-        // dogfood 2026-07-10) that are pointed at the enriched watch path.
-        // A value row (no entity `id`) is a LEGITIMATE display case — an
-        // aggregate / rule-trigger result — NOT an error. It cannot be resolved
-        // to an entity profile, so it renders plainly as a value row. Logged at
-        // debug (not warn): this is an expected shape, not a degradation. The
-        // loud path is `resolve_entity_required`, taken by callers that DECLARE
-        // they need an entity row. (Historically this `panic!`ed and killed the
-        // render/resolve worker, blanking the page with a silent -32603.)
-        let entity_uri = match row_id(row) {
-            Ok(uri) => uri,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "profile resolver: value-shaped row (no entity `id`) — rendering as a \
-                     plain value row (aggregate / rule-trigger result); entity resolution \
-                     not attempted"
-                );
-                return (Arc::new(value_row_profile(row)), HashMap::new());
-            }
+        let (entity_uri, entity_profile) = match self.entity_profile_of(row) {
+            Ok(found) => found,
+            Err(settled) => return (settled, HashMap::new()),
         };
         let entity_name_str = entity_uri.scheme();
-        let entity_name = EntityName::new(entity_name_str);
-
-        let entity_profile = match cache.get(&entity_name) {
-            Some(profile) => profile.clone(),
-            None => {
-                tracing::trace!(
-                    "No profile registered for entity '{entity_name_str}' — using default",
-                );
-                return (
-                    Arc::new(RenderProfile {
-                        name: "default".to_string(),
-                        render: holon_api::RenderExpr::Literal {
-                            value: holon_api::Value::String("".to_string()),
-                        },
-                        // Having no RENDER profile does not mean having no
-                        // OPERATIONS: `navigation` is dispatcher-registered and
-                        // never drawn, so it reaches here with a real op set
-                        // that the surfaces asking "what can I do to this?"
-                        // (`ops_of`, the action bar, an op_button's tap) must
-                        // still see. Dropping them made those ops unreachable
-                        // and undispatchable rather than merely unrendered.
-                        operations: self.lookup_operations(entity_name_str),
-                        variants: vec![],
-                    }),
-                    HashMap::new(),
-                );
-            }
-        };
 
         let engine = self.rhai_engine.read().unwrap().clone();
         let (stored, computed) = entity_profile.resolve_with_computed(row, &engine);
@@ -1669,68 +1632,18 @@ impl ProfileResolving for ProfileResolver {
         &self,
         row: &HashMap<String, holon_api::Value>,
     ) -> (Arc<RenderProfile>, HashMap<String, holon_api::Value>) {
-        let cache = self.cache_signal.get_cloned();
-        // A row either carries an entity-shaped `id` or it does not — BOTH are
-        // representable, legal inputs. Id-less rows arise legitimately from
-        // rule-trigger / aggregate queries (e.g. `SELECT date('now') AS name`,
-        // dogfood 2026-07-10) that are pointed at the enriched watch path.
-        // A value row (no entity `id`) is a LEGITIMATE display case — an
-        // aggregate / rule-trigger result — NOT an error. It cannot be resolved
-        // to an entity profile, so it renders plainly as a value row. Logged at
-        // debug (not warn): this is an expected shape, not a degradation. The
-        // loud path is `resolve_entity_required`, taken by callers that DECLARE
-        // they need an entity row. (Historically this `panic!`ed and killed the
-        // render/resolve worker, blanking the page with a silent -32603.)
-        let entity_uri = match row_id(row) {
-            Ok(uri) => uri,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "profile resolver: value-shaped row (no entity `id`) — rendering as a \
-                     plain value row (aggregate / rule-trigger result); entity resolution \
-                     not attempted"
-                );
-                return (Arc::new(value_row_profile(row)), HashMap::new());
-            }
+        let (entity_uri, entity_profile) = match self.entity_profile_of(row) {
+            Ok(found) => found,
+            Err(settled) => return (settled, HashMap::new()),
         };
         let entity_name_str = entity_uri.scheme();
-        let entity_name = EntityName::new(entity_name_str);
-
-        let entity_profile = match cache.get(&entity_name) {
-            Some(profile) => profile.clone(),
-            None => {
-                tracing::trace!(
-                    "No profile registered for entity '{entity_name_str}' — using default",
-                );
-                return (
-                    Arc::new(RenderProfile {
-                        name: "default".to_string(),
-                        render: holon_api::RenderExpr::Literal {
-                            value: holon_api::Value::String("".to_string()),
-                        },
-                        // Having no RENDER profile does not mean having no
-                        // OPERATIONS: `navigation` is dispatcher-registered and
-                        // never drawn, so it reaches here with a real op set
-                        // that the surfaces asking "what can I do to this?"
-                        // (`ops_of`, the action bar, an op_button's tap) must
-                        // still see. Dropping them made those ops unreachable
-                        // and undispatchable rather than merely unrendered.
-                        operations: self.lookup_operations(entity_name_str),
-                        variants: vec![],
-                    }),
-                    HashMap::new(),
-                );
-            }
-        };
 
         let engine = self.rhai_engine.read().unwrap().clone();
         let (candidates, computed) = entity_profile.resolve_candidates(row, &engine);
         self.computed_disclosure
             .report(entity_uri.as_str(), &computed.outcomes);
 
-        let ops = row_id(row)
-            .map(|id| self.lookup_operations(id.scheme()))
-            .unwrap_or_default();
+        let ops = self.lookup_operations(entity_name_str);
 
         let render_variants: Vec<RenderVariant> = candidates
             .iter()
@@ -1905,13 +1818,9 @@ mod tests {
         }
     }
 
-    /// Bug-4 (PERCEPTION): the `rule_card` variant used a literal em-dash
-    /// (`—`, U+2014) as the "last fired" placeholder. The DSL parse preserves
-    /// it intact, but the live GPUI render/capture path surfaced only its
-    /// first UTF-8 byte (0xE2 → `â`) — mojibake. The placeholders are now
-    /// plain ASCII; guard that the real `rule_card` render carries no byte
-    /// that would re-open the mojibake (0xE2 is the lead byte of the
-    /// em/en-dash family that regressed).
+    /// The live GPUI render path shows only the first UTF-8 byte of a
+    /// multibyte character (0xE2 of an em-dash renders as `â`), so the real
+    /// `rule_card` render must stay ASCII.
     #[test]
     fn rule_card_render_has_no_mojibake_bytes() {
         let profile = parse_entity_profile(BLOCK_PROFILE_YAML).unwrap();
@@ -1932,18 +1841,6 @@ mod tests {
                 "rule_card text node contains a multibyte char (0xE2 lead byte) that mangles on \
                  the live render path — keep placeholders ASCII: {s:?}"
             );
-        }
-    }
-
-    #[test]
-    fn test_parse_render_text_simple() {
-        let expr = parse_render_text(r#"row(text(#{content: col("content")}))"#).unwrap();
-        match &expr {
-            RenderExpr::FunctionCall { name, args, .. } => {
-                assert_eq!(name, "row");
-                assert_eq!(args.len(), 1);
-            }
-            other => panic!("Expected FunctionCall, got {other:?}"),
         }
     }
 
@@ -2024,8 +1921,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Top-level-only `&&` splitting — bugfunnel
-    // 2026-10-11-split-condition-splits-inside-quotes-and-parens.
+    // Top-level-only `&&` splitting.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2203,6 +2099,105 @@ mod tests {
         }
     }
 
+    /// Data-side conjuncts, several hiding a `&&` inside a literal or a
+    /// bracket.
+    const DATA_CONJUNCTS: &[&str] = &[
+        "task_state == \"DONE\"",
+        "tags != ()",
+        "priority > 2",
+        "(is_task || is_source)",
+        "name == \"a&&b\"",
+        "x == 'y'",
+        "x == `a && b`",
+        "x == `${ `&&` }`",
+        "[1, 2].contains(priority)",
+        "is_def_var(\"option\") && option != ()",
+    ];
+
+    fn ui_conjunct(index: usize) -> (&'static str, Predicate) {
+        let var = |name: &str| Predicate::Var(name.into());
+        match index {
+            0 => ("is_focused", var("is_focused")),
+            1 => ("!is_expanded", Predicate::Not(Box::new(var("is_expanded")))),
+            2 => (
+                "view_mode == \"table\"",
+                Predicate::Eq {
+                    field: "view_mode".into(),
+                    value: Value::String("table".into()),
+                },
+            ),
+            3 => (
+                "available_width_px < 600",
+                Predicate::Lt {
+                    field: "available_width_px".into(),
+                    value: Value::Integer(600),
+                },
+            ),
+            4 => (
+                "scale_factor >= 1.5",
+                Predicate::Gte {
+                    field: "scale_factor".into(),
+                    value: Value::Float(1.5),
+                },
+            ),
+            _ => unreachable!("ui conjunct {index}"),
+        }
+    }
+
+    /// A conjunct is either `Ok(data index)` or `Err(ui index)`.
+    fn conjunct_mix() -> impl proptest::strategy::Strategy<Value = Vec<Result<usize, usize>>> {
+        use proptest::prelude::*;
+        proptest::collection::vec(
+            prop_oneof![
+                (0..DATA_CONJUNCTS.len()).prop_map(Ok),
+                (0usize..5).prop_map(Err),
+            ],
+            1..6,
+        )
+    }
+
+    /// Joining conjuncts with top-level `&&` splits back into the data
+    /// conjuncts (in order, rejoined) and the UI predicates (in order).
+    fn assert_splits_back(mix: &[Result<usize, usize>]) {
+        let parts: Vec<&str> = mix
+            .iter()
+            .map(|c| match c {
+                Ok(d) => DATA_CONJUNCTS[*d],
+                Err(u) => ui_conjunct(*u).0,
+            })
+            .collect();
+        let source = parts.join(" && ");
+        assert_rhai_compiles(&source);
+        let data: Vec<&str> = mix
+            .iter()
+            .filter_map(|c| c.ok().map(|d| DATA_CONJUNCTS[d]))
+            .collect();
+        let mut ui: Vec<Predicate> = mix
+            .iter()
+            .filter_map(|c| c.err().map(|u| ui_conjunct(u).1))
+            .collect();
+        let expected_ui = match ui.len() {
+            0 => Predicate::Always,
+            1 => ui.remove(0),
+            _ => Predicate::And(ui),
+        };
+        let expected_data = (!data.is_empty()).then(|| data.join(" && "));
+        assert_eq!(
+            split_condition(&source).unwrap(),
+            (expected_data, expected_ui),
+            "for `{source}`"
+        );
+    }
+
+    #[test]
+    fn a_conjunction_splits_into_its_data_and_ui_conjuncts() {
+        let fixed: [&[Result<usize, usize>]; 3] = [&[Err(0)], &[Ok(4), Err(0)], &[Ok(0), Err(3)]];
+        for mix in fixed {
+            assert_splits_back(mix);
+        }
+        proptest::proptest!(|(mix in conjunct_mix())| assert_splits_back(&mix));
+    }
+
     #[test]
     fn a_top_level_or_beside_a_split_ampersand_pair_is_refused() {
         // `a && b || c` is `(a && b) || c`; splitting on the `&&` would give
@@ -2338,34 +2333,74 @@ mod tests {
         assert!(expr_references("a + is_task + b", "is_task"));
     }
 
-    #[test]
-    fn test_topo_sort_empty() {
-        let result = topo_sort_computed_fields(vec![]);
-        assert!(result.is_empty());
+    /// DAG node `i` references a random subset of the nodes before it, so every
+    /// set is acyclic; nodes get randomly permuted names, so name order says
+    /// nothing about dependency order, and the order handed in is shuffled.
+    fn acyclic_computed_fields() -> impl proptest::strategy::Strategy<Value = Vec<(String, String)>>
+    {
+        use proptest::prelude::*;
+        (
+            proptest::collection::vec(proptest::collection::vec(any::<bool>(), 8), 0..8),
+            Just((0..8usize).collect::<Vec<_>>()).prop_shuffle(),
+        )
+            .prop_map(|(edges, names)| {
+                edges
+                    .iter()
+                    .enumerate()
+                    .map(|(i, row)| {
+                        let deps: Vec<String> = (0..i)
+                            .filter(|&j| row[j])
+                            .map(|j| format!("f{}", names[j]))
+                            .collect();
+                        let source = if deps.is_empty() {
+                            "1".to_string()
+                        } else {
+                            deps.join(" + ")
+                        };
+                        (format!("f{}", names[i]), source)
+                    })
+                    .collect()
+            })
+            .prop_shuffle()
+    }
+
+    fn assert_dependency_order(fields: &[(String, String)]) {
+        let order = computed_dependency_order(fields.iter().map(|(n, s)| (n.as_str(), s.as_str())));
+        let mut ordered = order.clone();
+        ordered.sort();
+        let mut names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+        names.sort();
+        assert_eq!(ordered, names, "each field exactly once");
+        let position = |name: &str| order.iter().position(|n| n == name).unwrap();
+        for (name, source) in fields {
+            for (other, _) in fields {
+                if other != name && holon_core::util::expr_references(source, other) {
+                    assert!(
+                        position(other) < position(name),
+                        "`{other}` must precede `{name}`: {order:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
-    fn test_topo_sort_with_dependencies() {
-        let engine = RhaiEngine::new();
-        let fields = vec![
-            (
-                RawComputedField {
-                    name: "b".to_string(),
-                    source: "a + 1".to_string(),
-                },
-                CompiledExpr::compile(&engine, "a + 1").unwrap(),
-            ),
-            (
-                RawComputedField {
-                    name: "a".to_string(),
-                    source: "42".to_string(),
-                },
-                CompiledExpr::compile(&engine, "42").unwrap(),
-            ),
+    fn computed_fields_follow_their_dependencies() {
+        let fixed: [&[(&str, &str)]; 3] = [
+            &[],
+            &[("b", "a + 1"), ("a", "42")],
+            &[("a", "b + 1"), ("b", "42")],
         ];
-        let sorted = topo_sort_computed_fields(fields);
-        assert_eq!(sorted[0].name(), "a");
-        assert_eq!(sorted[1].name(), "b");
+        for fields in fixed {
+            let fields: Vec<(String, String)> = fields
+                .iter()
+                .map(|(n, s)| (n.to_string(), s.to_string()))
+                .collect();
+            assert_dependency_order(&fields);
+        }
+        proptest::proptest!(|(fields in acyclic_computed_fields())| {
+            assert_dependency_order(&fields);
+        });
     }
 
     #[test]
@@ -2710,10 +2745,9 @@ variants:
     }
 
     // -----------------------------------------------------------------------
-    // ADR 0024 WP3 — program marking / rule-card render variant.
-    //
-    // These resolve the REAL block_profile.yaml (not a hand-built fixture) so a
-    // regression in `is_program` / the variant precedence fails here.
+    // Program marking / rule-card render variant. These resolve the REAL
+    // block_profile.yaml, so a change to `is_program` or the variant precedence
+    // fails here.
     // -----------------------------------------------------------------------
 
     const BLOCK_PROFILE_YAML: &str =
@@ -2725,7 +2759,7 @@ variants:
 
     /// Every lookup function a SHIPPED computed field calls must be one the
     /// engine registers — otherwise the field errors at eval and silently
-    /// degrades to () at WARN (the gap #44's verifier named). This is the same
+    /// degrades to () at WARN. This is the same
     /// check the boot path runs; a red here means a bundled profile references
     /// an unregistered lookup.
     #[test]
@@ -2769,11 +2803,10 @@ variants:
         validate_lookups_registered(&profile).expect("registered lookups + builtins are accepted");
     }
 
-    /// Regression pin (do not narrow `RHAI_STDLIB_FREE_FNS`): a computed field
-    /// using the two most natural Rhai stdlib forms — the `in` operator, which
-    /// lowers to a `contains` call, and free-form `len(tags)` — must NOT be
-    /// flagged as an unregistered lookup. A narrowing that re-bricked boot on
-    /// `x in tags` reds here.
+    /// A computed field using the two most natural Rhai stdlib forms — the
+    /// `in` operator, which lowers to a `contains` call, and free-form
+    /// `len(tags)` — must NOT be flagged as an unregistered lookup, or boot
+    /// refuses the profile.
     #[test]
     fn validate_does_not_flag_rhai_stdlib_free_functions() {
         let profile: ParsedProfile = serde_yaml::from_str(
@@ -2800,7 +2833,7 @@ variants:
     /// Rhai engine with the DB-backed lookups the block profile's computed
     /// fields call. `rule_sibling(parent_id)` returns a non-unit row iff
     /// `parent_id` names a headline that owns a rule head — i.e. the caller
-    /// is that rule's trigger sibling (WP3 clause b). `query_source` is
+    /// is that rule's trigger sibling. `query_source` is
     /// stubbed empty (no block in these rows has query-source children).
     fn engine_with_rule_parent(rule_parent: &'static str) -> RhaiEngine {
         let mut engine = RhaiEngine::new();
@@ -2874,8 +2907,7 @@ variants:
     #[test]
     fn plain_source_block_still_renders_query_result() {
         // A non-holon source block (not machinery, not a rule) still renders as
-        // a query result — the `source` variant, gated on `!is_program`. No
-        // regression.
+        // a query result — the `source` variant, gated on `!is_program`.
         let engine = engine_with_rule_parent("block:journal-auto-create");
         let row = source_row("block:py", "block:page", "python");
         assert_eq!(variant_for(&row, &engine), "source");
@@ -2902,13 +2934,10 @@ variants:
         );
     }
 
-    /// Regression (dogfood 2026-07-10, Martin ruling 2026-07-11): a
-    /// rule-trigger / aggregate query row that carries NO entity-shaped
-    /// `id` (e.g. `SELECT date('now','localtime') AS name`) used to panic
-    /// the profile resolver and blank the whole page with a silent -32603.
-    /// It must now render as a plain VALUE row (its columns, shown
-    /// directly) — NOT a "⚠ unresolved" warning, since a value row is a
-    /// legitimate display case.
+    /// A rule-trigger / aggregate query row that carries NO entity-shaped
+    /// `id` (e.g. `SELECT date('now','localtime') AS name`) renders as a plain
+    /// VALUE row (its columns, shown directly) — NOT a "⚠ unresolved"
+    /// warning, since a value row is a legitimate display case.
     #[test]
     fn value_row_renders_plainly_instead_of_panicking() {
         let mut row: HashMap<String, Value> = HashMap::new();
@@ -2997,7 +3026,7 @@ variants:
     }
 
     // -----------------------------------------------------------------------
-    // Type-aware binding — the boot-flood fix. These use the REAL block
+    // Type-aware binding. These use the REAL block
     // EntityProfile built from the TypeDefinition (so `declared_columns` is
     // populated), exercising the classification that silences the
     // task_state-class flood while surfacing declared-column projection gaps.
@@ -3125,7 +3154,7 @@ variants:
 
     #[test]
     fn heterogeneous_plain_block_row_produces_no_error_and_typed_nulls() {
-        // The boot-flood row shape: a plain block missing task_state AND tags.
+        // A plain block missing task_state AND tags.
         // Type-aware binding must yield is_task=Null / is_page_row=Null WITHOUT
         // any Rhai "Variable not found", and the dependent embedded_page
         // condition must NOT type-error (the Seat-B cascade) — it just resolves

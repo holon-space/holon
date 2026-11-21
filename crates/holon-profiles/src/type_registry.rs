@@ -2,7 +2,7 @@
 //!
 //! THE authority for all entity schema metadata in Holon. Populated at startup
 //! from built-in types (Block), MCP sidecar configs, entity profile
-//! computed fields, and (future) user-defined YAML type definitions.
+//! computed fields, and user-defined YAML type definitions.
 //!
 //! Computed field expressions are compiled at registration time (parse
 //! boundary). If an expression doesn't compile, `register()` returns an error
@@ -29,8 +29,6 @@ pub use holon_api::entity_profile::CompiledComputedField;
 use holon_api::link_parser::LinkScheme;
 use holon_api::link_parser::LinkSchemeRegistry;
 use holon_api::link_parser::LinkTargetClassifier;
-use holon_core::util::expr_references;
-use holon_core::util::topo_sort_kahn;
 use rhai::Engine as RhaiEngine;
 
 use crate::ComputedFieldDecl;
@@ -887,8 +885,6 @@ fn sql_type_for(spec: &ComputedSpec) -> Result<String> {
 /// dependents. Non-computed fields keep their original order; computed fields
 /// are topo-sorted and placed after all non-computed fields.
 fn topo_sort_fields(type_def: &mut TypeDefinition) {
-    use std::collections::HashSet;
-
     let computed_sources: Vec<(String, String)> = type_def
         .fields
         .iter()
@@ -902,19 +898,11 @@ fn topo_sort_fields(type_def: &mut TypeDefinition) {
         return;
     }
 
-    let names: HashSet<&str> = computed_sources.iter().map(|(n, _)| n.as_str()).collect();
-    let mut deps: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (name, expr) in &computed_sources {
-        let mut name_deps = Vec::new();
-        for other in &names {
-            if *other != name.as_str() && expr_references(expr, other) {
-                name_deps.push(*other);
-            }
-        }
-        deps.insert(name.as_str(), name_deps);
-    }
-
-    let sorted_names = topo_sort_kahn(&names, &deps);
+    let sorted_names = crate::computed_dependency_order(
+        computed_sources
+            .iter()
+            .map(|(name, expr)| (name.as_str(), expr.as_str())),
+    );
 
     let all_fields = std::mem::take(&mut type_def.fields);
     let (non_computed, computed): (Vec<_>, Vec<_>) = all_fields
@@ -983,8 +971,7 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
         (COLLECTION_PROFILE_YAML, true),  // standalone, needs its own TypeDefinition
         (INTEGRATION_PROFILE_YAML, true), // standalone: its rows live in `integration_state`
     ] {
-        let profile = parse_profile_yaml(yaml)
-            .with_context(|| "Failed to parse bundled profile YAML".to_string())?;
+        let profile = parse_profile_yaml(yaml).context("Failed to parse bundled profile YAML")?;
         // Fail LOUD at boot if a bundled computed field calls a lookup the
         // engine never registers — otherwise it errors at eval and silently
         // degrades to () at WARN, inverting every condition it feeds.
@@ -1235,10 +1222,9 @@ mod tests {
         );
     }
 
-    /// Double-chevron fix (ruling 2026-07-21): both embedded-page variants must
-    /// opt their expand_toggle into the trailing hover-reveal chevron so it no
-    /// longer sits adjacent to the tree collapse chevron in the left gutter.
-    /// Guards the YAML wiring the GPUI builder relies on.
+    /// Both embedded-page variants opt their expand_toggle into the trailing
+    /// hover-reveal chevron, so it does not sit beside the tree collapse
+    /// chevron in the left gutter.
     #[test]
     fn embedded_page_variants_use_hover_reveal_toggle() {
         let registry = create_default_registry().unwrap();
@@ -1251,8 +1237,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("block profile missing `{name}` variant"));
             assert!(
                 variant.render.contains("hover_reveal_toggle: true"),
-                "`{name}` must set hover_reveal_toggle on its expand_toggle \
-                 (double-chevron fix); render was:\n{}",
+                "`{name}` must set hover_reveal_toggle on its expand_toggle; \
+                 render was:\n{}",
                 variant.render
             );
         }
@@ -1295,7 +1281,7 @@ mod tests {
             .expect("person.yaml not found");
         let td: TypeDefinition = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(td.name, "person");
-        // Free-standing (BG-1): person owns its identity, so it declares no
+        // Free-standing: person owns its identity, so it declares no
         // id_references and its raw table carries no FK to block.
         assert_eq!(td.id_references, None);
         assert_eq!(td.graph_label.as_deref(), Some("Person"));
@@ -1305,15 +1291,6 @@ mod tests {
 
         let registry = TypeRegistry::new();
         registry.register(td).unwrap();
-    }
-
-    #[test]
-    fn parse_organization_yaml() {
-        let yaml = std::fs::read_to_string("../../assets/default/types/organization.yaml")
-            .expect("organization.yaml not found");
-        let td: TypeDefinition = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(td.name, "organization");
-        assert!(td.fields.iter().any(|f| f.name == "domain"));
     }
 
     #[test]

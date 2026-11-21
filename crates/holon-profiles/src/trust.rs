@@ -1,8 +1,8 @@
-//! Trust-policy configuration (VisionGapAnalysis C5 — autonomy/trust
-//! enforcement at the intent boundary).
+//! Trust-policy configuration: autonomy/trust enforcement at the intent
+//! boundary.
 //!
 //! Policy/fact separation: the *facts* the gate reads are provenance —
-//! [`OpOrigin`] at dispatch time, the `_provenance` stamp on blocks (C2a). The
+//! [`OpOrigin`] at dispatch time, the `_provenance` stamp on blocks. The
 //! *policy* is this profile-level configuration: which origin classes are
 //! trusted for which entities/operations. A sub-threshold `(origin, entity,
 //! op)` is never executed against canonical state; the dispatch-boundary gate

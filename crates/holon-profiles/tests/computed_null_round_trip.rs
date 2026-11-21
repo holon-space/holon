@@ -209,11 +209,9 @@ fn page_row_still_selects_embedded_page_after_a_round_trip() {
 type RowShape = (&'static str, Vec<(&'static str, Value)>, Vec<&'static str>);
 
 /// The class sweep: EVERY shipped block variant condition, over every row shape
-/// the projection produces. The realistic shape that produced the reported
-/// sighting degraded THREE of them (`is_page_row && …` and both
-/// `has_query_source && …`); drop `content_type` as well and FIVE degrade. The
-/// defect is the round trip, not any single condition — so the sweep is by row
-/// shape, and a newly added condition of the class reds here without an edit.
+/// the projection produces. The hazard is the round trip, not any single
+/// condition — so the sweep is by row shape, and a newly added condition of
+/// the class reds here without an edit.
 #[test]
 fn no_shipped_block_condition_degrades_on_any_enriched_row_shape() {
     let profile = block_profile();
@@ -256,12 +254,10 @@ fn no_shipped_block_condition_degrades_on_any_enriched_row_shape() {
             vec![],
         ),
         ("collapsed", vec![("collapsed", Value::Integer(1))], vec![]),
-        // The reported sighting's shape: the block owns a query source, and
-        // `widget_only` is absent so `is_widget_only` is unbound — pre-fix this
-        // degrades THREE conditions at once.
+        // The block owns a query source, and `widget_only` is absent so
+        // `is_widget_only` is unbound: three conditions read unbound fields.
         ("query-owner", vec![], vec![]),
-        // The whole-class shape: `content_type` genuinely absent unbinds
-        // is_source/is_image too, so five conditions degrade pre-fix.
+        // `content_type` genuinely absent unbinds is_source/is_image too.
         ("no-content-type", vec![], vec!["content_type"]),
         // Every column present but NULL — the shape a SQL row with no
         // properties actually has. Each computed field resolves to a real bool.
