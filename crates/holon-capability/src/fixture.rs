@@ -112,11 +112,9 @@ enforced_by:
   # Each deferral NAMES the code that enforces it. A deferral without a site is
   # indistinguishable from a clause nobody looked at, so the loader refuses one.
   sync:
-    # MEASURED, and it CORRECTS my earlier citation: the refusal is real but it
-    # is not where I said. `name_chain` bails when an ANCESTOR of a page is
-    # absent from the page store — i.e. a page whose ancestor is not a page —
-    # which IS "a :Page: under a non-page is refused", at resolution time
-    # rather than at the moment of the edit.
+    # `name_chain` bails when an ANCESTOR of a page is absent from the page
+    # store — a page whose ancestor is not a page — which IS "a :Page: under a
+    # non-page is refused", at resolution time rather than at the edit.
     - clause: hierarchy_constraints
       site: "crates/holon-filesystem/src/sync_ports.rs:277-285 (name_chain ancestor-miss bail)"
     # A rename is a filesystem event; the controller derives the new path from
@@ -136,9 +134,9 @@ enforced_by:
   operation:
     - clause: hierarchy_reparent
       site: "crates/holon-core/src/traits.rs:2429-2440 (move_block page-under-non-page refusal; shared predicate block_op_catalog::page_under_non_page_prohibited; pinned by block_operations_tests.rs:1290, which asserts the tree is UNTOUCHED after the refusal)"
-  # Refused when the TYPE is declared, not when a value is written.
     - clause: hosted_entity_kinds
       site: "crates/holon-app/src/move_guard.rs:destination_hosts_kind (net-guard destination-capability refusal, ADR 0032 §3)"
+  # Refused when the TYPE is declared, not when a value is written.
   declaration:
     - clause: computed_live
       site: "crates/holon/src/core/type_declaration.rs:45-81 (declare_type)"

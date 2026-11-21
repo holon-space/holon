@@ -15,12 +15,8 @@
 //! restriction the format does not actually need.
 //!
 //! **Every CERTIFIED clause is falsifiable; uncertified clauses are marked as
-//! such in the yaml.** Increment 2b.1 certifies three:
-//! `property_keys.reserved_prefixes`, `property_values.types` and
-//! `property_values.empty_string`. The rest of axes 3 and 4 are declared with a
-//! `file:line` citation and carry `# NOT YET CERTIFIED (2b.2)` — a citation is
-//! EVIDENCE, not a gate, and a reader must not mistake one for the other. A
-//! profile is only as trustworthy as the clauses the certifier actually drives.
+//! such in the yaml** (`not_yet_certified`, each with a reason). A profile is
+//! only as trustworthy as the clauses the certifier actually drives.
 //!
 //! ## Dependency direction, both ways
 //!

@@ -1,9 +1,8 @@
 //! The fidelity axes a capability profile declares.
 //!
-//! Increment 2b.1 carries axes 3 (`property_keys`) and 4 (`property_values`)
-//! only. The other eight arrive in 2b.2; `deny_unknown_fields` means a yaml
-//! naming one of them is a LOAD ERROR today rather than a silently ignored
-//! section, so a profile can never claim more than the code checks.
+//! `deny_unknown_fields` makes a yaml section the code does not know a LOAD
+//! ERROR rather than a silently ignored section, so a profile can never claim
+//! more than the code checks.
 
 use std::collections::BTreeSet;
 
@@ -119,8 +118,7 @@ impl PropertyKeysAxis {
     /// An owned key is not an ordinary property and is not claimed to vanish
     /// — `ID` both survives and means something. What it round-trips THROUGH
     /// is the format's own machinery, so the ordinary-property law says
-    /// nothing about it; axis 7 (`identity`) is what certifies it, and that
-    /// axis arrives in 2b.2.
+    /// nothing about it; axis 7 (`identity`) is what certifies it.
     pub fn is_owned(&self, key: &str) -> bool {
         self.reserved_keys.iter().any(|k| k.as_str() == key)
     }
@@ -133,7 +131,7 @@ impl PropertyKeysAxis {
 
 /// The `Value` variants, as a value space a profile can name.
 ///
-/// Mirrors `holon_pattern::Value` (`crates/holon-pattern/src/value.rs:21-37`).
+/// Mirrors `holon_api::Value`.
 /// A separate enum rather than `Value` itself because a profile names KINDS,
 /// never inhabitants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -165,12 +163,12 @@ impl ValueKind {
             // `Removed` is write-leg intent, not an inhabitant of the value
             // space this axis describes, so it has no kind to report.
             holon_api::Value::Removed(_) => {
-                panic!("ValueKind::from: Value::REMOVED is a removal sentinel, not a value kind")
+                panic!("ValueKind::of: Value::REMOVED is a removal sentinel, not a value kind")
             }
             // A quantity cell lives in its formatted column, never in a
             // property bag, which is what this axis describes.
             holon_api::Value::Quantity(cell) => {
-                panic!("ValueKind::from: a quantity cell ({cell:?}) never reaches a property bag")
+                panic!("ValueKind::of: a quantity cell ({cell:?}) never reaches a property bag")
             }
         }
     }
@@ -577,8 +575,7 @@ pub enum IdCarrier {
 ///
 /// The carriers law ranges over THIS, not over what a profile declares:
 /// ranging over the declared set makes a DELETION always satisfy the law, so a
-/// profile could drop a real carrier and stay green — measured as silent flip
-/// S8.
+/// profile could drop a real carrier and stay green.
 pub const ALL_ID_CARRIERS: &[IdCarrier] = &[
     IdCarrier::DrawerId,
     IdCarrier::FileKeywordId,
