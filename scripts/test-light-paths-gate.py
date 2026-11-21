@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Property check of scripts/light-paths-gate.py, the refusal of a light card's move into `landed`.
+"""Property check of scripts/light-paths-gate.py, the refusal of a light card's move into `verify`.
 
 Run from the workspace root: `python3 scripts/test-light-paths-gate.py` (SEED=<n>, CASES=<n>, default 30).
 A stub `gh` on PATH answers the REST pull-request calls with the drawn file list of each PR head (a rename carries
@@ -68,7 +68,7 @@ esac
 [ -f "$file" ] || { echo "stub gh: no PR $number" >&2; exit 1; }
 cat "$file"
 """
-FLOW = {"FLOW_ISSUE": "7", "FLOW_TO": "landed"}
+FLOW = {"FLOW_ISSUE": "7", "FLOW_TO": "verify"}
 
 
 class World:
@@ -175,7 +175,9 @@ def missing_input_problems(paths):
         ("FLOW_PR_HEADS blank", WORLD.env([1], FLOW_PR_HEADS="  ")),
         ("head without sha", WORLD.env([1], FLOW_PR_HEADS="o/r#1")),
         ("head with a bad number", WORLD.env([1], FLOW_PR_HEADS="o/r#x@abc")),
-        ("FLOW_TO verify", WORLD.env([1], FLOW_TO="verify")),
+        ("FLOW_TO landed", WORLD.env([1], FLOW_TO="landed")),
+        ("FLOW_TO build", WORLD.env([1], FLOW_TO="build")),
+        ("FLOW_TO empty", WORLD.env([1], FLOW_TO="")),
         ("FLOW_TO unset", WORLD.env([1], FLOW_TO=None)),
         ("gh fails", WORLD.env([2])),
         ("one head fails, one passes", WORLD.env([1, 2])),
@@ -201,7 +203,7 @@ def explicit_input_problems(paths):
         ("FLOW_PR_HEADS blank", WORLD.env([1], FLOW_PR_HEADS="  "), "no linked PR head"),
         ("a PR with no file", WORLD.env([1, 3]), "lists no changed file"),
         ("a short file list", WORLD.env([1, 4]), "changed files"),
-        ("FLOW_TO verify", WORLD.env([1], FLOW_TO="verify"), "belongs on the move into landed"),
+        ("FLOW_TO landed", WORLD.env([1], FLOW_TO="landed"), "'landed': this gate belongs on the move into verify"),
     ]:
         for optimize in (None, "1"):
             code, err = subprocess_verdict({**env, **({"PYTHONOPTIMIZE": optimize} if optimize else {})})
@@ -221,6 +223,45 @@ def check_line_commands():
 def runnable_problems():
     return [f"{cmd} is run by a justfile check line but is not executable" for cmd in check_line_commands()
             if not os.access(REPO / cmd, os.X_OK)]
+
+
+FLOW_SKILL = Path.home() / ".claude/skills/gh-kanban"
+GATE_COMMAND = f"""
+[gates.commands.light-paths]
+run = ["python3", "{SCRIPT}"]
+cwd = "{REPO}"
+timeout = "120s"
+"""
+
+
+def flow_config_error(stage):
+    """The ConfigError text of flow's own config loader (the one `flow check` uses) for a light card gated on `stage`;
+    None when it loads. A fixed pair of configs: the stage is the only input."""
+    sys.path.insert(0, str(FLOW_SKILL))
+    from flow import model
+
+    base = (FLOW_SKILL / "flow/fixtures/holon-flow.toml").read_text()
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "flow.toml"
+        path.write_text(f'{base}{GATE_COMMAND}\n[child.light.gates]\n{stage} = ["command:light-paths"]\n')
+        try:
+            model.load_config(path)
+        except model.ConfigError as e:
+            return str(e)
+    return None
+
+
+def config_load_problems():
+    """The gate line on `verify` loads; the same line on the terminal stage `landed` is refused by flow."""
+    found = []
+    if (err := flow_config_error("verify")) is not None:
+        found.append(f"flow refuses the light-paths gate on verify: {err}")
+    err = flow_config_error("landed")
+    if err is None:
+        found.append("flow accepts the light-paths gate on the terminal stage landed")
+    elif "terminal stage" not in err:
+        found.append(f"flow refuses the gate on landed for another reason: {err}")
+    return found
 
 
 RELEVANT_POOLS = ["scripts", "crate src", "crate tests", "root", "machinery", "near miss", "docs testing"]
@@ -281,6 +322,7 @@ def main():
         failures.append(f"the crate-test PR refusal does not name its test path: {err!r}")
     failures += missing_input_problems([DOC])
     failures += runnable_problems()
+    failures += config_load_problems()
     failures += explicit_input_problems([DOC])
     print(f"refused draws: {Counter(verdict(s)[0] != 0 for s in drawn)}")
     for f in failures:

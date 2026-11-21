@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Flow command gate for the move of a `light` card into `landed`: refuse when a linked PR changes a path that
+"""Flow command gate for the move of a `light` card into `verify`: refuse when a linked PR changes a path that
 the landing gate selects work for.
 
-Run from the workspace root with the variables flow sets: FLOW_ISSUE, FLOW_TO (must be `landed`) and FLOW_PR_HEADS
+Run from the workspace root with the variables flow sets: FLOW_ISSUE, FLOW_TO (must be `verify`) and FLOW_PR_HEADS
 (`owner/name#N@sha`, space separated). The PRs' changed files come from the REST pull-request files list, old and new
 path of a rename alike; what counts as gate-relevant is decided by `gate_selection` of scripts/select-tests.py: a full
 run, or any step outside its TREE_STEPS.
@@ -98,8 +98,8 @@ def tree_id():
 
 
 def run(environ):
-    if environ["FLOW_TO"] != "landed":
-        sys.exit(f"FLOW_TO is {environ['FLOW_TO']!r}: this gate belongs on the move into landed")
+    if environ["FLOW_TO"] != "verify":
+        sys.exit(f"FLOW_TO is {environ['FLOW_TO']!r}: this gate belongs on the move into verify")
     issue = environ["FLOW_ISSUE"]
     heads = parse_heads(environ["FLOW_PR_HEADS"])
     paths = sorted({p for h in heads for p in pr_files(h, environ)})
