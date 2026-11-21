@@ -4,33 +4,17 @@
 //! `build_block_params` with the previous parse. The file is authoritative, so
 //! the op must carry the file's new value — or the removal sentinel when the
 //! file dropped it.
-//!
-//! Entry `2026-09-26-markdown-ingest-never-updates-planning-or-property-changes`.
+
+use std::path::Path;
 
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
 use holon_api::Value;
-use holon_api::block::Block;
 use holon_core::file_format::FileFormatAdapter;
 use holon_markdown::LogseqMarkdownAdapter;
 use holon_markdown::ObsidianMarkdownAdapter;
 
-fn parse_one(adapter: &dyn FileFormatAdapter, source: &str) -> (Block, EntityUri) {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(tmp.path()).unwrap();
-    let path = root.join("Groceries.md");
-    std::fs::write(&path, source).unwrap();
-    let parsed = adapter
-        .parse(&path, source, &EntityUri::no_parent(), &root)
-        .unwrap();
-    let block = parsed
-        .blocks
-        .iter()
-        .find(|b| b.content.contains("milk"))
-        .unwrap_or_else(|| panic!("no milk block in {:?}", parsed.blocks))
-        .clone();
-    (block, parsed.document.id.clone())
-}
+use crate::reingest_support::parse_one;
 
 /// The update op the controller emits for the milk block when the file goes
 /// from `before` to `after`; panics when the gate says nothing changed.
@@ -207,12 +191,14 @@ fn logseq_removed_edge_property_clears_the_edge() {
 #[test]
 fn an_unparseable_edge_value_refuses_the_file() {
     let adapter = LogseqMarkdownAdapter::new();
-    let tmp = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(tmp.path()).unwrap();
-    let path = root.join("Groceries.md");
+    let root = Path::new("/vault");
     let source = "- buy milk\n  contributes-to:: {{aisle}}\n";
-    std::fs::write(&path, source).unwrap();
-    let Err(err) = adapter.parse(&path, source, &EntityUri::no_parent(), &root) else {
+    let Err(err) = adapter.parse(
+        &root.join("Groceries.md"),
+        source,
+        &EntityUri::no_parent(),
+        root,
+    ) else {
         panic!("a slot outside a template names no block, yet the file parsed");
     };
     assert!(
