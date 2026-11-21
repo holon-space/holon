@@ -58,6 +58,8 @@
 //! so "this process" is "this test's run".
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -255,11 +257,55 @@ pub fn note_drawn(name: &'static str) {
 /// process: nothing resolves a [`CoveredBy::SelfAttestingSuite`] entry from
 /// outside, so this call is where the claim lives or dies.
 pub fn attest_drew(kind: &str) {
+    attest_drew_into(gate_attest_dir().as_deref(), kind);
+}
+
+fn attest_drew_into(record_dir: Option<&Path>, kind: &str) {
     let drawn = counters().get(kind).map_or(0, |counts| counts.drawn);
     if let Err(refusal) = attested(drawn, kind) {
         panic!("{refusal}");
     }
     eprintln!("[alphabet coverage] attested: this suite drew {kind} {drawn}x");
+    if EXPECTED_ABSENT
+        .iter()
+        .any(|(claimed, site)| *claimed == kind && matches!(site, CoveredBy::SelfAttestingSuite))
+    {
+        write_gate_record(record_dir, "attested", kind, &format!("{drawn}\n"));
+    }
+}
+
+/// Where the landing gate collects what this process claims and attests (only
+/// kinds claimed as self-attesting, so a suite exercising `attest_drew` itself
+/// leaves no record):
+/// `claimed/<kind>` from the keystone run, `attested/<kind>` from the suite
+/// that vouches for the kind. Unset outside a gate.
+fn gate_attest_dir() -> Option<PathBuf> {
+    std::env::var_os("GATE_ATTEST_DIR").map(PathBuf::from)
+}
+
+fn write_gate_record(record_dir: Option<&Path>, sub: &str, kind: &str, body: &str) {
+    let Some(root) = record_dir else { return };
+    let dir = root.join(sub);
+    let path = dir.join(kind);
+    std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(&path, body))
+        .unwrap_or_else(|e| panic!("cannot write the gate record {}: {e}", path.display()));
+}
+
+/// One `claimed/<kind>` record per self-attesting kind, holding where the kind
+/// is reported.
+fn record_claims(record_dir: Option<&Path>, expected_absent: &[(&str, CoveredBy)]) {
+    for (kind, _) in expected_absent
+        .iter()
+        .filter(|(_, site)| matches!(site, CoveredBy::SelfAttestingSuite))
+    {
+        write_gate_record(
+            record_dir,
+            "claimed",
+            kind,
+            &format!("{}\n", reported_at(kind)),
+        );
+    }
 }
 
 /// The verdict on a suite's claim to cover `kind`, given how often its run
@@ -397,6 +443,7 @@ pub fn assert_no_kind_left_the_alphabet() {
     let counts = counters().clone();
     let expected_absent = expected_absent();
     disclose(&counts, &expected_absent);
+    record_claims(gate_attest_dir().as_deref(), &expected_absent);
     if let Some(spec) = std::env::var_os("HOLON_PBT_WEIGHTS") {
         eprintln!(
             "[alphabet coverage] NOT judged: HOLON_PBT_WEIGHTS={spec:?} may remove arms on purpose"
@@ -718,5 +765,35 @@ mod tests {
             .join()
             .expect("the drawing thread must not panic");
         attest_drew("WorkerThreadDraw");
+    }
+
+    /// Two fixed writes, no input space: an armed run leaves one record per
+    /// claimed kind and per attested claimed kind; an unarmed run adds none.
+    #[test]
+    fn claims_and_attestations_are_recorded_only_when_the_gate_arms_a_dir() {
+        note_drawn("StructuralKeyBurst");
+        let armed = tempfile::tempdir().expect("tempdir");
+        let listed = |sub: &str| -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(armed.path().join(sub))
+                .unwrap_or_else(|e| panic!("{sub}/ missing: {e}"))
+                .map(|e| e.expect("entry").file_name().into_string().expect("utf8"))
+                .collect();
+            names.sort();
+            names
+        };
+        record_claims(Some(armed.path()), &all_declared_absent());
+        attest_drew_into(Some(armed.path()), "StructuralKeyBurst");
+        note_drawn("UnclaimedKind");
+        attest_drew_into(Some(armed.path()), "UnclaimedKind");
+        assert_eq!(
+            listed("claimed"),
+            ["DeliverBlockContent", "StructuralKeyBurst"]
+        );
+        assert_eq!(listed("attested"), ["StructuralKeyBurst"]);
+
+        std::fs::remove_dir_all(armed.path().join("attested")).expect("clear attested");
+        record_claims(None, &all_declared_absent());
+        attest_drew_into(None, "StructuralKeyBurst");
+        assert!(!armed.path().join("attested").exists());
     }
 }

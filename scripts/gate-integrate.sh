@@ -106,32 +106,42 @@ track_selected() {
 # A step sees neither the record file of gate-step.sh's runner nor its temp folder.
 # Its row names the gate's job, also in a track that holds a slot under a job id of its own.
 # Returns the step's exit, which `step` under the runner only writes to the record.
+# The step writes its attestation records (GATE_ATTEST_DIR) into a folder of its own; they are
+# stored under the step's job and name, and a reused or narrowed step copies its stored records in.
 gate_step() {
-  local n=$1 name=$2 how=run from="" log="" verdict
+  local n=$1 name=$2 how=run from="" log="" verdict rc=0
+  local -x GATE_ATTEST_DIR=$GATE_ATTEST_ROOT/steps/$name
+  mkdir -p "$GATE_ATTEST_DIR"
   shift 2
   if [ "${GATE_REUSE:-}" = 1 ]; then
     verdict=$(reuse "$n" "$name") || return
     read -r how from log <<<"$verdict"
   fi
   case $how in
-    reused) printf '== landing [%s]: %s reused ==\nreused %s %s\n' "$n" "$name" "$from" "$log"; return 0 ;;
-    gone) echo "reuse: the job log $log of $from is gone, so $name runs" ;;
+    reused) cp -R "$ATTEST_STORE/$from/$name/." "$GATE_ATTEST_DIR/"
+      printf '== landing [%s]: %s reused ==\nreused %s %s\n' "$n" "$name" "$from" "$log"; return 0 ;;
+    gone) echo "reuse: the job log or attestation record $log of $from is gone, so $name runs" ;;
     narrow)
+      cp -R "$ATTEST_STORE/$from/$name/." "$GATE_ATTEST_DIR/"
       local -x GATE_ONLY_IDS
       GATE_ONLY_IDS=$(python3 ~/.claude/skills/orchestrator/scripts/gate-rerun.py "$ROWS" "$from" "$name") || return
       echo "reuse: $name runs only the failed tests of $from"
       [ "$name" != windowed-gate ] || set -- env WINDOWED_GATE_UNITS="$GATE_ONLY_IDS" "$@" ;;
   esac
-  FLOW_JOB_ID=${GATE_JOB_ID:-${FLOW_JOB_ID:-}} step "$n" "$name" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED HOLON_JUST_RECORD_ARMED=1 TMPDIR="$GATE_STEP_TMP" "$@" || return
+  FLOW_JOB_ID=${GATE_JOB_ID:-${FLOW_JOB_ID:-}} step "$n" "$name" env -u GATE_RECORD -u GATE_SELECTED -u GATE_CHANGED HOLON_JUST_RECORD_ARMED=1 TMPDIR="$GATE_STEP_TMP" "$@" || rc=$?
+  mkdir -p "$ATTEST_STORE/${GATE_JOB_ID:-$GATE}"
+  rm -rf "$ATTEST_STORE/${GATE_JOB_ID:-$GATE}/$name"
+  cp -R "$GATE_ATTEST_DIR" "$ATTEST_STORE/${GATE_JOB_ID:-$GATE}/$name"
+  [ "$rc" = 0 ] || return "$rc"
   [ -z "${GATE_RECORD:-}" ] || return "$(awk -v l="red [$n] $name (exit " 'index($0, l) == 1 { rc = substr($0, length(l) + 1) + 0 } END { print rc + 0 }' "$GATE_RECORD")"
 }
 # How step $1 ($2) runs, from its last row on this tip that ran in full and was not skipped:
 # `reused <job> <log>` (and its reuse row written; with $3 = peek only `reused`), `gone <job> <log>`, `narrow <job>` or `run`.
 # Only a full commit id equals GATE_TIP, so rows of `@` or a change id never count.
 reuse() {
-  python3 - "$ROWS" "$GATE_TIP" "$1" "$2" "${GATE_JOB_LOG%/*}" "$GATE" "$GATE_CARDS" "$GATE_JOB_ID" "${3:-}" <<'PY'
+  python3 - "$ROWS" "$GATE_TIP" "$1" "$2" "${GATE_JOB_LOG%/*}" "$GATE" "$GATE_CARDS" "$GATE_JOB_ID" "${3:-}" "$ATTEST_STORE" <<'PY'
 import datetime, json, os, sys
-rows_path, tip, n, name, jobs, gate, cards, job, peek = sys.argv[1:]
+rows_path, tip, n, name, jobs, gate, cards, job, peek, store = sys.argv[1:]
 rows = [json.loads(l) for l in open(rows_path) if l.strip()] if os.path.exists(rows_path) else []
 full = [r for r in rows if r.get("tip") == tip and r["name"] == name and r.get("full") and not r.get("skipped") and "only" not in r]
 last = full[-1] if full else {}
@@ -142,6 +152,10 @@ elif last["exit"] == 0:
     if not os.path.exists(log):
         print("gone", last["job"], log)
         sys.exit()
+    kept = f"{store}/{last['job']}/{name}"
+    if not os.path.isdir(kept):
+        print("gone", last["job"], kept)
+        sys.exit()
     if peek:
         print("reused")
         sys.exit()
@@ -150,7 +164,7 @@ elif last["exit"] == 0:
            "reason": "reused", "reused_from": last["job"], "log": log, "job": job, "tip": tip}
     open(rows_path, "a").write(json.dumps(row) + "\n")
     print("reused", last["job"], log)
-elif last.get("failed") and name in ("keystone-smoke", "hand-authored", "extra-nextest", "keystone-tour", "windowed-gate"):
+elif last.get("failed") and os.path.isdir(f"{store}/{last['job']}/{name}") and name in ("keystone-smoke", "hand-authored", "extra-nextest", "keystone-tour", "windowed-gate"):
     print("narrow", last["job"])
 else:
     print("run")
@@ -176,6 +190,7 @@ track() {
 # shellcheck source=/dev/null
 source ~/.claude/skills/orchestrator/scripts/gate-step.sh
 ROWS="$(dirname "${HOLON_BUILD_HOLD_LOG:-$HOME/.cache/holon-build/holds.jsonl}")/gate-steps.jsonl"
+ATTEST_STORE="$(dirname "$ROWS")/gate-attest"
 # shellcheck disable=SC2046
 gate_steps $(step_names)
 [ "${1:-}" != --track ] || { track "$2"; exit; }
@@ -255,6 +270,8 @@ else echo "step reuse: off (GATE_FULL=1, GATE_SELECT=1 or no flow job log)"; fi
 
 python3 "$(dirname "$0")/target-gc.py" target --mark
 GATE_STEP_TMP=$(mktemp -d); export GATE_STEP_TMP
+GATE_ATTEST_ROOT=$PWD/target/gate-logs/$GATE-attest; export GATE_ATTEST_ROOT
+rm -rf "$GATE_ATTEST_ROOT"
 trap 'rm -rf "$GATE_STEP_TMP"' EXIT
 # These always run: gate-compile writes the cargo record that gate-timing.sh checks.
 GATE_REUSE= gate_step 1 fmt cargo fmt --all -- --check
@@ -297,5 +314,7 @@ if [ -n "$red$extra_red" ]; then
   [ "${GATE_FULL:-}" != 1 ] && [ "${GATE_SELECT:-}" != 1 ] || exit 0
   exit "${red:-$extra_red}"
 fi
+echo "== attestation check =="
+bash "$(dirname "$0")/gate-attest-check.sh" "$GATE_ATTEST_ROOT" || { echo "RED: a claimed attestation did not happen in this gate"; exit 1; }
 echo "INTEGRATE GREEN"
 echo "candidate tip: $tip"
