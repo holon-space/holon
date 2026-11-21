@@ -692,85 +692,114 @@ mod watchdog {
         }
     }
 
-    static REGISTRY: Registry = Registry::new();
-    /// The watchdog thread, `None` when it did not start.
-    static STARTED: OnceLock<Option<std::thread::Thread>> = OnceLock::new();
+    /// A registry and the thread that watches it. The process has one
+    /// (`PROCESS`); a test that kills or disturbs the watchdog builds its own.
+    pub(super) struct Watchdog {
+        registry: Registry,
+        /// The watchdog thread, `None` when it did not start.
+        started: OnceLock<Option<std::thread::Thread>>,
+        thread_name: &'static str,
+    }
+
+    impl Watchdog {
+        pub(super) const fn new(thread_name: &'static str) -> Self {
+            Self {
+                registry: Registry::new(),
+                started: OnceLock::new(),
+                thread_name,
+            }
+        }
+
+        pub(super) fn watch(&'static self, watch: &Arc<ActorWatch>) {
+            self.registry.add(watch);
+            let started = self.started.get_or_init(|| {
+                match std::thread::Builder::new()
+                    .name(self.thread_name.into())
+                    .spawn(move || self.run())
+                {
+                    Ok(thread) => Some(thread.thread().clone()),
+                    Err(e) => {
+                        self.registry
+                            .stop(format!("the watchdog thread did not start ({e})"));
+                        None
+                    }
+                }
+            });
+            // A new watch can have a shorter tick than the one the thread
+            // sleeps.
+            if let Some(thread) = started {
+                thread.unpark();
+            }
+            self.registry.fail_if_stopped(watch);
+        }
+
+        #[cfg(test)]
+        pub(super) fn poison_registry(&self) {
+            std::thread::scope(|s| {
+                let poisoner = s.spawn(|| {
+                    let _held = self.registry.watched.lock().expect("not yet poisoned");
+                    panic!("poisoning the watchdog registry");
+                });
+                assert!(poisoner.join().is_err(), "the poisoning thread panics");
+            });
+        }
+
+        /// Stops the registry after the unwind ends, so no failure is disclosed
+        /// while the thread unwinds.
+        fn run(&self) {
+            let Err(panic) =
+                std::panic::catch_unwind(AssertUnwindSafe(|| self.watch_until_a_panic()));
+            self.registry.stop(format!(
+                "the watchdog thread stopped on a panic ({})",
+                crate::turso::panic_message(&*panic)
+            ));
+        }
+
+        fn watch_until_a_panic(&self) -> Infallible {
+            loop {
+                let live: Vec<Arc<ActorWatch>> = {
+                    let mut watched = self
+                        .registry
+                        .watched
+                        .lock()
+                        .expect("watched actors poisoned");
+                    watched.retain(|w| w.strong_count() > 0);
+                    watched.iter().filter_map(Weak::upgrade).collect()
+                };
+                for watch in &live {
+                    if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| watch.check()))
+                    {
+                        watch.fail(not_disclosed(&format!(
+                            "its watchdog check panicked ({})",
+                            crate::turso::panic_message(&*panic)
+                        )));
+                        self.registry
+                            .watched
+                            .lock()
+                            .expect("watched actors poisoned")
+                            .retain(|w| !std::ptr::eq(w.as_ptr(), Arc::as_ptr(watch)));
+                    }
+                }
+                let tick = live
+                    .iter()
+                    .map(|w| w.bound / 5)
+                    .min()
+                    .unwrap_or(Duration::from_secs(1))
+                    .clamp(Duration::from_millis(20), Duration::from_secs(1));
+                drop(live);
+                std::thread::park_timeout(tick);
+            }
+        }
+    }
+
+    static PROCESS: Watchdog = Watchdog::new("sql-actor-watchdog");
 
     pub(super) fn watch(watch: &Arc<ActorWatch>) {
-        REGISTRY.add(watch);
-        let started = STARTED.get_or_init(|| {
-            match std::thread::Builder::new()
-                .name("sql-actor-watchdog".into())
-                .spawn(run)
-            {
-                Ok(thread) => Some(thread.thread().clone()),
-                Err(e) => {
-                    REGISTRY.stop(format!("the watchdog thread did not start ({e})"));
-                    None
-                }
-            }
-        });
-        // A new watch can have a shorter tick than the one the thread sleeps.
-        if let Some(thread) = started {
-            thread.unpark();
-        }
-        REGISTRY.fail_if_stopped(watch);
+        PROCESS.watch(watch);
     }
 
     fn not_disclosed(cause: &str) -> String {
         format!("{cause}, so a stuck SQL command is not disclosed")
-    }
-
-    #[cfg(test)]
-    pub(super) fn poison_registry() {
-        std::thread::scope(|s| {
-            let poisoner = s.spawn(|| {
-                let _held = REGISTRY.watched.lock().expect("not yet poisoned");
-                panic!("poisoning the watchdog registry");
-            });
-            assert!(poisoner.join().is_err(), "the poisoning thread panics");
-        });
-    }
-
-    /// Stops the registry after the unwind ends, so no failure is disclosed
-    /// while the thread unwinds.
-    fn run() {
-        let Err(panic) = std::panic::catch_unwind(watch_until_a_panic);
-        REGISTRY.stop(format!(
-            "the watchdog thread stopped on a panic ({})",
-            crate::turso::panic_message(&*panic)
-        ));
-    }
-
-    fn watch_until_a_panic() -> Infallible {
-        loop {
-            let live: Vec<Arc<ActorWatch>> = {
-                let mut watched = REGISTRY.watched.lock().expect("watched actors poisoned");
-                watched.retain(|w| w.strong_count() > 0);
-                watched.iter().filter_map(Weak::upgrade).collect()
-            };
-            for watch in &live {
-                if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| watch.check())) {
-                    watch.fail(not_disclosed(&format!(
-                        "its watchdog check panicked ({})",
-                        crate::turso::panic_message(&*panic)
-                    )));
-                    REGISTRY
-                        .watched
-                        .lock()
-                        .expect("watched actors poisoned")
-                        .retain(|w| !std::ptr::eq(w.as_ptr(), Arc::as_ptr(watch)));
-                }
-            }
-            let tick = live
-                .iter()
-                .map(|w| w.bound / 5)
-                .min()
-                .unwrap_or(Duration::from_secs(1))
-                .clamp(Duration::from_millis(20), Duration::from_secs(1));
-            drop(live);
-            std::thread::park_timeout(tick);
-        }
     }
 }
 
@@ -1027,55 +1056,47 @@ mod tests {
         );
     }
 
-    static PANIC_ON_WATCHDOG_EVENT: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
+    /// A watchdog of its own, so a test can kill or disturb it without
+    /// touching the process one. The thread outlives the test.
+    fn own_watchdog(thread_name: &'static str) -> &'static watchdog::Watchdog {
+        Box::leak(Box::new(watchdog::Watchdog::new(thread_name)))
+    }
+
+    const LOGGING_PANICS_THREAD: &str = "sql-actor-watchdog-logging-panics";
 
     struct PanicOnWatchdogEvent;
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicOnWatchdogEvent {
         fn on_event(&self, _: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-            if PANIC_ON_WATCHDOG_EVENT.load(std::sync::atomic::Ordering::SeqCst)
-                && std::thread::current().name() == Some("sql-actor-watchdog")
-            {
+            if std::thread::current().name() == Some(LOGGING_PANICS_THREAD) {
                 panic!("the subscriber panics on a watchdog event");
             }
         }
     }
 
     /// The watchdog thread logs, so the subscriber must be global; it panics
-    /// only while this guard lives.
-    struct WatchdogLoggingPanics;
-
-    impl WatchdogLoggingPanics {
-        fn arm() -> Self {
-            use tracing_subscriber::layer::SubscriberExt;
-            static INSTALLED: std::sync::Once = std::sync::Once::new();
-            INSTALLED.call_once(|| {
-                tracing::subscriber::set_global_default(
-                    tracing_subscriber::registry().with(PanicOnWatchdogEvent),
-                )
-                .expect("no other test of this binary installs a global subscriber");
-            });
-            PANIC_ON_WATCHDOG_EVENT.store(true, std::sync::atomic::Ordering::SeqCst);
-            Self
-        }
-    }
-
-    impl Drop for WatchdogLoggingPanics {
-        fn drop(&mut self) {
-            PANIC_ON_WATCHDOG_EVENT.store(false, std::sync::atomic::Ordering::SeqCst);
-        }
+    /// only on the thread of the watchdog built for this test.
+    fn install_panicking_subscriber() {
+        use tracing_subscriber::layer::SubscriberExt;
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(PanicOnWatchdogEvent),
+            )
+            .expect("no other test of this binary installs a global subscriber");
+        });
     }
 
     #[test]
     fn a_watchdog_whose_logging_panics_still_raises_every_condition() {
-        let _armed = WatchdogLoggingPanics::arm();
+        install_panicking_subscriber();
+        let watchdog = own_watchdog(LOGGING_PANICS_THREAD);
         let bus = Arc::new(ConditionBus::new());
         let (broken, _broken_tx) = watched_on(&bus);
         let (healthy, _healthy_tx) = watched_on(&bus);
         after_read(&broken, |_| panic!("a watchdog check panics"));
-        watchdog::watch(&broken);
-        watchdog::watch(&healthy);
+        watchdog.watch(&broken);
+        watchdog.watch(&healthy);
 
         healthy.begin(&envelope("SELECT 1 AS stuck_command"));
 
@@ -1095,16 +1116,17 @@ mod tests {
     #[test]
     fn a_watchdog_thread_that_panics_fails_every_watch_with_the_panic_and_those_added_later() {
         let bus = Arc::new(ConditionBus::new());
+        let watchdog = own_watchdog("sql-actor-watchdog-poisoned");
         let (held, _held_tx) = watched_on(&bus);
-        watchdog::watch(&held);
+        watchdog.watch(&held);
 
-        watchdog::poison_registry();
+        watchdog.poison_registry();
 
         wait_until("the held watch fails", &bus, || {
             watch_failures(&bus).len() == 1
         });
         let (later, _later_tx) = watched_on(&bus);
-        watchdog::watch(&later);
+        watchdog.watch(&later);
         let failures = watch_failures(&bus);
         assert_eq!(failures.len(), 2, "{:#?}", bus.current());
         assert!(

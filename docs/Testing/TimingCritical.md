@@ -192,10 +192,12 @@ only work on an honest stamp. Re-stamped at its real load, the same 8391 rows
 feed no `p95_low` at all and serve their actual purpose: the first uncensored
 high-load durations, which is what calibrates K.
 
-`scripts/timing-split.py check` recomputes `p95_low` from the ledger's last
-30 days and fails when a committed cap leaves the clamp **in either direction**,
-so a cap cannot creep and a test that got faster gives its headroom back. The
-hang detector tightens as the tree improves.
+`scripts/timing-split.py check` reads only the tree: it fails when a committed cap
+leaves the clamp of its cited `p95_low`, so one tree gets one verdict on every machine
+and day. `scripts/timing-split.py p95` recomputes `p95_low` from the ledger's last 30
+days and prints the re-derived cap for every capped test. It is advice and never
+fails: a cap must not creep, and a test that got faster gives its headroom back, so
+re-derive the table row when it says so.
 
 ### Why K = 4, and how it gets calibrated
 

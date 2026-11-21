@@ -427,6 +427,47 @@ impl TwoInstanceHandle {
             .collect()
     }
 
+    /// One side's Loro oplog version vectors, one per document scope, rendered
+    /// for comparison across a sync round and for failure reports. Equal text
+    /// means no op was added on that side.
+    pub async fn oplog_vvs(&self, owner: bool) -> String {
+        let side = if owner { "owner" } else { "receiver" };
+        let handle = if owner { &self.owner } else { &self.receiver };
+        let registry = Self::registry(handle, side);
+        let store = registry.store();
+        let mut out = Vec::new();
+        for scope in [DocScope::Global, DocScope::Layout] {
+            let doc = store
+                .get_doc(scope)
+                .await
+                .unwrap_or_else(|e| panic!("the {side} instance has no {scope:?} Loro doc: {e:#}"));
+            let vv = doc
+                .with_read(|d| Ok(format!("{:?}", d.oplog_vv())))
+                .unwrap_or_else(|e| {
+                    panic!("reading the {side} {scope:?} version vector failed: {e:#}")
+                });
+            out.push(format!("{scope:?}={vv}"));
+        }
+        out.join(" ")
+    }
+
+    /// One side's `block_raw` rows for the given ids, rendered for a failure
+    /// report: the SQL half of a Loro-vs-SQL comparison of a divergent block.
+    pub async fn block_raw_rows(&self, owner: bool, ids: &[String]) -> Vec<String> {
+        let backend = if owner {
+            &self.owner_backend
+        } else {
+            &self.receiver_backend
+        };
+        let rows = backend.block_raw_snapshot().await;
+        ids.iter()
+            .map(|id| match rows.iter().find(|b| b.id.as_str() == id) {
+                Some(b) => format!("{id}: block_raw parent {}", b.parent_id),
+                None => format!("{id}: ABSENT from block_raw"),
+            })
+            .collect()
+    }
+
     /// Author one block on the RECEIVER through its own production create
     /// path, under a parent id the receiver already holds. `peer_create_block`
     /// resolves the parent through the OWNER's oracle id map, which a
